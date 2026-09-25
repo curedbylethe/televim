@@ -1,0 +1,8 @@
+[alias]
+t = "test --all"
+l = "clippy --all-targets --all-features -- -D warnings"
+f = "fmt --all"
+
+# Keep cross-platform safe; tune per-machine via `RUSTFLAGS` if desired.
+[build]
+# rustflags = ["-C", "target-cpu=native"]

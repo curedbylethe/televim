@@ -1,0 +1,6 @@
+msrv = "1.85.0" # Minimum Supported Rust Version
+# Disallow panics in production code
+disallowed-methods = [
+    { path = "std::option::Option::unwrap", reason = "Use expect() or handle the None case" },
+    { path = "std::result::Result::unwrap", reason = "Use expect() or propagate the error" },
+]

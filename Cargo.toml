@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/telegram-framework",
+    "crates/proto",
+    "crates/domain",
+    "crates/tui",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Core
+tokio = { version = "1.53.1", features = ["full"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+
+# Telegram (git-sourced from Codeberg, pinned to the v0.8.0 tag).
+grammers-client = { git = "https://codeberg.org/Lonami/grammers.git", tag = "v0.8.0", default-features = false }
+grammers-tl-types = { git = "https://codeberg.org/Lonami/grammers.git", tag = "v0.8.0", default-features = false, features = ["tl-mtproto"] }
+grammers-mtproto = { git = "https://codeberg.org/Lonami/grammers.git", tag = "v0.8.0" }
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.28"
+vim-line = "7.7"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI / config
+clap = { version = "4", features = ["derive"] }
+config = "0.15"
+
+# Utils
+keyring = "3"
+tikv-jemallocator = "0.6"
+
+# Internal crates
+domain = { path = "crates/domain" }
+proto = { path = "crates/proto" }
+tui = { path = "crates/tui" }
+telegram-framework = { path = "crates/telegram-framework" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = 10 }
+pedantic = { level = "warn", priority = 3 }
