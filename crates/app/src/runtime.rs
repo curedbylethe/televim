@@ -61,14 +61,9 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     // simplest way to bridge blocking crossterm reads into async code.
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
-        while let Ok(_ev) = crossterm::event::read() {
-            match crossterm::event::read() {
-                Ok(ev) => {
-                    if tx.send(ev).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(ev) = crossterm::event::read() {
+            if tx.send(ev).is_err() {
+                break;
             }
         }
     });
@@ -81,7 +76,9 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
         }
 
         match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
-            Ok(Some(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+            Ok(Some(Event::Key(key)))
+                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+            {
                 app.handle_key(key);
             }
             Ok(Some(_)) | Err(_) => {}

@@ -349,3 +349,68 @@ fn mock_messages() -> Vec<Message> {
         })
         .collect()
 }
+
+// ---- tests -------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.handle_key(press(KeyCode::Char(ch)));
+        }
+    }
+
+    /// Regression: every keystroke must be applied exactly once. Previously
+    /// the reader thread in `runtime.rs` dropped every other event, so typing
+    /// `s` then `q` produced only `q`.
+    #[test]
+    fn entering_insert_mode_then_typing_records_every_key() {
+        let mut app = App::new();
+        app.handle_key(press(KeyCode::Char('i')));
+        assert_eq!(app.mode, Mode::Insert);
+
+        type_text(&mut app, "hello");
+        assert_eq!(app.input, "hello");
+    }
+
+    #[test]
+    fn escape_returns_to_normal_and_clears_input() {
+        let mut app = App::new();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "hi");
+        app.handle_key(press(KeyCode::Esc));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn backspace_removes_exactly_one_char_per_press() {
+        let mut app = App::new();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "abc");
+        app.handle_key(press(KeyCode::Backspace));
+
+        assert_eq!(app.input, "ab");
+    }
+
+    #[test]
+    fn enter_submits_the_typed_message() {
+        let mut app = App::new();
+        let before = app.messages.len();
+
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "ping");
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(app.messages.len(), before + 1);
+        assert_eq!(app.messages[before].text, "ping");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+}
