@@ -1,0 +1,27 @@
+[package]
+name = "telegram-framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enable the real grammers-backed implementation.
+live = [
+    "dep:grammers-client",
+    "dep:grammers-tl-types",
+    "dep:grammers-mtproto",
+]
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true }
+
+grammers-client = { workspace = true, optional = true }
+grammers-tl-types = { workspace = true, optional = true }
+grammers-mtproto = { workspace = true, optional = true }
+
+[lints]
+workspace = true
