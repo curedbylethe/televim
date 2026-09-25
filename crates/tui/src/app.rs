@@ -214,10 +214,10 @@ impl App {
         match cmd {
             "q" | "quit" => self.should_quit = true,
             _ if cmd.starts_with("chat ") => {
-                if let Ok(id) = cmd[5..].trim().parse::<i64>() {
-                    if let Some(pos) = self.chats.iter().position(|c| c.id == id) {
-                        self.selected_chat = pos;
-                    }
+                if let Ok(id) = cmd[5..].trim().parse::<i64>()
+                    && let Some(pos) = self.chats.iter().position(|c| c.id == id)
+                {
+                    self.selected_chat = pos;
                 }
             }
             _ => self.status = format!("unknown command: :{cmd}"),
@@ -411,6 +411,48 @@ mod tests {
 
         assert_eq!(app.messages.len(), before + 1);
         assert_eq!(app.messages[before].text, "ping");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    fn run_command_line(app: &mut App, command: &str) {
+        app.handle_key(press(KeyCode::Char(':')));
+        type_text(app, command);
+        app.handle_key(press(KeyCode::Enter));
+    }
+
+    #[test]
+    fn chat_command_selects_the_matching_chat() {
+        let mut app = App::new();
+        run_command_line(&mut app, "chat 2");
+
+        let expected = app
+            .chats
+            .iter()
+            .position(|c| c.id == 2)
+            .expect("chat 2 is part of the mock data");
+        assert_eq!(app.selected_chat, expected);
+    }
+
+    /// Both halves of the `chat <id>` guard must hold: a malformed id and a
+    /// well-formed-but-unknown id must both leave the selection untouched.
+    #[test]
+    fn chat_command_ignores_unparseable_or_unknown_ids() {
+        let mut app = App::new();
+        let before = app.selected_chat;
+
+        run_command_line(&mut app, "chat not-a-number");
+        assert_eq!(app.selected_chat, before);
+
+        run_command_line(&mut app, "chat 999");
+        assert_eq!(app.selected_chat, before);
+    }
+
+    #[test]
+    fn unknown_command_sets_the_status_line() {
+        let mut app = App::new();
+        run_command_line(&mut app, "frobnicate");
+
+        assert!(app.status.contains("unknown command"));
         assert_eq!(app.mode, Mode::Normal);
     }
 }
