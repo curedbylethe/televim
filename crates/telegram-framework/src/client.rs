@@ -113,12 +113,18 @@ impl ClientBuilder {
         let pool = SenderPool::new(Arc::clone(&session), self.api_id);
         let inner = grammers_client::Client::new(&pool);
 
-        // The pool owns the sockets. It opens a connection on demand and has to
-        // keep running for as long as the client does. Its update receiver goes
-        // with `pool`, which is fine here: this crate does not surface the
-        // update stream yet, and a dropped receiver only means updates are
-        // discarded rather than buffered.
-        tokio::spawn(pool.runner.run());
+        // `grammers` keeps the request half of the pool alive through a handle
+        // it clones into the client, so what is left here is the runner itself
+        // and the update channel. The runner owns the sockets: it opens a
+        // connection on demand and has to keep running for as long as the
+        // client does.
+        let SenderPool {
+            runner,
+            handle: _,
+            updates,
+        } = pool;
+        tokio::spawn(runner.run());
+        tokio::spawn(discard_updates(updates));
 
         Ok(Client {
             inner,
@@ -127,6 +133,25 @@ impl ClientBuilder {
             code_requests: CodeRequestLog::default(),
         })
     }
+}
+
+/// Drains the pool's update stream, counting what it throws away.
+///
+/// This crate does not surface updates yet — wiring them into `proto` is the
+/// next step — but the receiver cannot simply be dropped: `grammers` treats a
+/// dropped receiver as "stop delivering", and an unread channel would grow
+/// without bound. Draining keeps the queue empty and makes the discard
+/// observable instead of silent, which is what the next step needs to build on.
+async fn discard_updates<T>(mut updates: tokio::sync::mpsc::UnboundedReceiver<T>) {
+    let mut discarded: u64 = 0;
+    while updates.recv().await.is_some() {
+        if discarded == 0 {
+            tracing::warn!("discarding the update stream: this build does not consume updates yet");
+        }
+        discarded += 1;
+    }
+
+    tracing::debug!(discarded, "the update stream ended");
 }
 
 impl fmt::Debug for ClientBuilder {

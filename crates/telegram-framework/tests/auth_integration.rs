@@ -25,7 +25,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use telegram_framework::session::FileStore;
-use telegram_framework::{Client, ClientBuilder, SignInResult, tl};
+use telegram_framework::{AuthError, Client, ClientBuilder, LoginToken, SignInResult, tl};
 
 /// Credentials and configuration for the opt-in tests.
 struct TestDc {
@@ -76,7 +76,12 @@ fn session_path() -> (tempfile::TempDir, PathBuf) {
 }
 
 /// Logs in and leaves the account signed in, whichever branch the account takes.
-async fn log_in(client: &Client, dc: &TestDc) {
+///
+/// Returns the login token so a caller can prove it cannot be redeemed twice.
+/// `None` means Telegram answered with a step this build does not know: the
+/// result enum is `#[non_exhaustive]`, so a future Telegram may add one, and the
+/// caller should skip rather than fail on a step it was never written for.
+async fn log_in(client: &Client, dc: &TestDc) -> Option<LoginToken> {
     let (phone, code) = dc
         .login_credentials()
         .expect("TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE are set");
@@ -102,8 +107,13 @@ async fn log_in(client: &Client, dc: &TestDc) {
                 .await
                 .expect("the two-factor password is accepted");
         }
-        _ => panic!("telegram answered with a sign-in result this build does not know"),
+        _ => {
+            eprintln!("skipped: telegram answered with a sign-in step this build does not know");
+            return None;
+        }
     }
+
+    Some(token)
 }
 
 #[tokio::test]
@@ -120,13 +130,28 @@ async fn login_round_trip_persists_the_session() {
     let (_dir, path) = session_path();
 
     let client = build_client(&dc, &path).await;
-    log_in(&client, &dc).await;
+    let Some(token) = log_in(&client, &dc).await else {
+        return;
+    };
     assert!(
         client
             .is_authorized()
             .await
             .expect("authorization is checked"),
         "the client should be authorized after logging in"
+    );
+
+    // The token is single use, and the refusal has to happen locally. The
+    // deliberately wrong code is the proof: if the guard ever moved behind the
+    // request, Telegram would answer `InvalidCode` instead, and this would fail
+    // rather than pass for the wrong reason.
+    let error = client
+        .sign_in(&token, "00000")
+        .await
+        .expect_err("a spent login token must be refused");
+    assert!(
+        matches!(error, AuthError::TokenAlreadyUsed),
+        "expected the spent token to be refused, got {error:?}"
     );
 
     // Persist explicitly, then drop the client and rebuild from the same file:
