@@ -13,7 +13,7 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use crate::app::{App, FetchDirection};
+use crate::app::{App, FetchDirection, JUMP_LABEL};
 
 /// How many columns the messages keep for themselves before a scrollbar is
 /// worth showing beside them.
@@ -38,11 +38,15 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 
     let older = app.is_fetching(FetchDirection::Older);
     let newer = app.is_fetching(FetchDirection::Newer);
+    let jumping = app.pending_jump().is_some();
     // A page that replaces an empty window has no edge to be announced at, so
     // it is announced in place of the messages: there is nothing else to say
     // while a conversation is being opened.
     let opening = app.is_fetching(FetchDirection::Latest) && app.conversation.window.is_empty();
-    let reserved = usize::from(older) + usize::from(newer);
+    // Every row above the messages, which is what the cursor's own row has to
+    // be counted past.
+    let above = usize::from(older) + usize::from(jumping);
+    let reserved = above + usize::from(newer);
     let budget = usize::from(body.height).saturating_sub(reserved);
 
     let window = &app.conversation.window;
@@ -50,10 +54,16 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 
     let mut items: Vec<ListItem> = Vec::with_capacity(budget + reserved);
     if older {
-        items.push(loading(app, FetchDirection::Older));
+        items.push(loading(app, FetchDirection::Older.label()));
+    }
+    if jumping {
+        // A jump replaces the window rather than extending it, so it is said
+        // where the messages are: the page it is waiting for has no edge of the
+        // window on show to sit at.
+        items.push(loading(app, JUMP_LABEL));
     }
     if opening {
-        items.push(loading(app, FetchDirection::Latest));
+        items.push(loading(app, FetchDirection::Latest.label()));
     }
     items.extend(
         window
@@ -63,15 +73,13 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
             .map(|message| message_line(app, message)),
     );
     if newer {
-        items.push(loading(app, FetchDirection::Newer));
+        items.push(loading(app, FetchDirection::Newer.label()));
     }
 
     // Only a message can be the selection, so an empty window has none — the
     // indicator rows are not places the cursor can be.
     let mut state = ListState::default();
-    state.select(
-        (!window.is_empty()).then(|| app.vim.cursor().saturating_sub(start) + usize::from(older)),
-    );
+    state.select((!window.is_empty()).then(|| app.vim.cursor().saturating_sub(start) + above));
 
     let list = List::new(items).highlight_style(app.theme.selection);
     frame.render_stateful_widget(list, body, &mut state);
@@ -105,12 +113,12 @@ fn message_line(app: &App, message: &domain::message::Message) -> ListItem<'stat
     ]))
 }
 
-/// A row saying which way a page is being fetched.
-fn loading(app: &App, direction: FetchDirection) -> ListItem<'static> {
-    ListItem::new(Line::from(Span::styled(
-        direction.label(),
-        app.theme.text_dim,
-    )))
+/// A row saying what is being fetched.
+///
+/// The label is a `&'static str` rather than a borrow of anything: the row
+/// outlives the frame's own borrows, and every label here is a constant.
+fn loading(app: &App, label: &'static str) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(label, app.theme.text_dim)))
 }
 
 /// Splits the panel's inside into the messages and a column for the scrollbar.
@@ -230,6 +238,53 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
         }
+    }
+
+    /// An application whose conversation has unread messages in front of what is
+    /// loaded, with a jump asked for.
+    ///
+    /// Built through the application's own interface rather than by reaching into
+    /// it, because what is under test is what a reader's keystroke puts on the
+    /// screen.
+    fn jumping() -> App {
+        use std::borrow::Cow;
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use domain::chat::{Chat, ChatKind};
+        use domain::message::{Message, MessageStatus};
+
+        const CHAT: i64 = 7;
+
+        let mut app = App::new();
+        app.set_chats(vec![Chat {
+            id: CHAT,
+            title: "Ada Lovelace".into(),
+            kind: ChatKind::Private,
+            last_message: Some("See you at the demo.".into()),
+            unread_count: 2,
+            // The conversation runs to 20; the page below stops well short of it.
+            last_message_id: Some(20),
+            last_timestamp: Some(1_730_000_000),
+        }]);
+        app.select_chat(0);
+        app.apply_latest(
+            (1..=5)
+                .map(|id| Message {
+                    id,
+                    chat_id: CHAT,
+                    text: Cow::Borrowed("text"),
+                    timestamp: 1_730_000_000 + id,
+                    status: MessageStatus::Received,
+                    is_outgoing: false,
+                })
+                .collect(),
+        );
+
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+
+        app
     }
 
     // ---- the panel's own geometry ---------------------------------------
@@ -364,6 +419,31 @@ mod tests {
         assert!(
             !screen.content.iter().any(|cell| cell.symbol() == "["),
             "and no message rows, because there are none"
+        );
+    }
+
+    /// A jump replaces the window rather than extending it, so there is no edge
+    /// of the window on show for its row to sit at: it is said where the messages
+    /// are, and the messages follow it.
+    #[test]
+    fn a_jump_in_flight_is_announced_where_the_messages_would_be() {
+        let app = jumping();
+        assert!(
+            app.pending_jump().is_some(),
+            "the fixture has asked for a jump"
+        );
+
+        let screen = screen(&app, 80, 10);
+
+        assert!(
+            row(&screen, 1).contains("Jumping"),
+            "the panel's first row: {}",
+            row(&screen, 1)
+        );
+        assert!(
+            row(&screen, 2).contains("text"),
+            "and the messages start behind it: {}",
+            row(&screen, 2)
         );
     }
 

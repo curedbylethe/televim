@@ -17,7 +17,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let line = Line::from(vec![
         Span::styled(format!(" {label} "), style),
         Span::raw(" "),
-        Span::styled(app.status.clone(), app.theme.text_dim),
+        Span::styled(app.status_text().to_owned(), app.theme.text_dim),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);

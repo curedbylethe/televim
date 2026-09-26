@@ -5,7 +5,7 @@ use std::cell::Cell;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
-use domain::history::ConversationView;
+use domain::history::{ConversationView, unread_target};
 use domain::message::{Message, MessageStatus};
 use domain::updates::{ChatList, UpdateEvent};
 use domain::vim::{Motion, VimState};
@@ -64,6 +64,28 @@ impl FetchDirection {
             Self::Newer => "Loading newer…",
         }
     }
+}
+
+/// What the panel and the status line say while a jump is on its way.
+///
+/// A jump replaces the window rather than extending it, so there is no edge for
+/// it to be announced at: it is said where the messages are, and again on the
+/// status line, because it is the one fetch the reader asked for by name.
+pub const JUMP_LABEL: &str = "Jumping to first unread…";
+
+/// A place in a conversation the reader asked to be taken to.
+///
+/// `gg` means the first unread message, and that message is only sometimes
+/// loaded. When it is not, the request cannot be answered from the window and
+/// has to travel: this is what it travels as — the conversation, and the message
+/// the page should be centred on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Jump {
+    /// The conversation to fetch from.
+    pub peer_id: i64,
+
+    /// The message to centre the page on.
+    pub target_id: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +187,15 @@ pub struct App {
     /// The pages on their way from the network.
     fetching: Fetching,
 
+    /// The jump the reader has asked for and no page has answered yet.
+    ///
+    /// Set when `gg` cannot be answered from what is loaded, and cleared when the
+    /// page arrives — or fails, or comes back empty, because a jump that went
+    /// wrong must not wedge the key. It is what makes the key idempotent: a
+    /// second `gg` produces the same intent, which the caller recognises as one
+    /// already on its way.
+    pending_jump: Option<Jump>,
+
     /// How many message rows the conversation panel had room for as of the last
     /// frame.
     ///
@@ -202,6 +233,7 @@ impl App {
             should_quit: false,
             search_query: None,
             fetching: Fetching::default(),
+            pending_jump: None,
             rows: Cell::new(ASSUMED_ROWS),
         }
     }
@@ -227,6 +259,16 @@ impl App {
     #[must_use]
     pub fn chats(&self) -> &[Chat] {
         &self.list.chats
+    }
+
+    /// The jump the reader is waiting on, if any.
+    ///
+    /// What the caller fetches: a jump the window cannot answer is recorded here
+    /// rather than acted on, because nothing on this side of the boundary can
+    /// reach the network.
+    #[must_use]
+    pub fn pending_jump(&self) -> Option<Jump> {
+        self.pending_jump
     }
 
     /// Installs a freshly fetched chat list.
@@ -255,6 +297,7 @@ impl App {
         self.conversation = ConversationView::new(0);
         self.vim = VimState::new(0);
         self.fetching.clear();
+        self.pending_jump = None;
         self.search_query = None;
     }
 
@@ -286,6 +329,51 @@ impl App {
     #[must_use]
     fn has_conversation(&self) -> bool {
         self.conversation.window.chat_id != 0
+    }
+
+    /// The conversation on show, as the chat list holds it.
+    ///
+    /// Looked up by the window's own identifier rather than by the selected
+    /// index: the two agree, and the window is what every question here is about.
+    fn open_chat(&self) -> Option<&Chat> {
+        let chat_id = self.conversation.window.chat_id;
+        self.list.chats.iter().find(|chat| chat.id == chat_id)
+    }
+
+    /// Where the open conversation's unread messages start, as far as its
+    /// numbering can say.
+    ///
+    /// Counted from the message the conversation last showed, which the chat list
+    /// has held since it was fetched — no round trip. A conversation the list has
+    /// no preview for falls back on the newest message loaded, which is the same
+    /// message whenever anything has arrived while the conversation was open.
+    fn first_unread(&self) -> Option<i64> {
+        let chat = self.open_chat()?;
+        let last = chat
+            .last_message_id
+            .or_else(|| self.conversation.window.newest_id());
+
+        unread_target(last, chat.unread_count)
+    }
+
+    /// Whether the window ends where the conversation does.
+    ///
+    /// Two ways to know, and the second is the one that covers a conversation
+    /// that was just opened — its newest page *is* the end, whatever a fetch
+    /// behind it has or has not said. An arrival updates the preview, so this
+    /// stays true as the conversation grows.
+    fn holds_newest_edge(&self) -> bool {
+        let window = &self.conversation.window;
+        if window.is_empty() {
+            return false;
+        }
+        if window.exhausted_newer {
+            return true;
+        }
+
+        self.open_chat()
+            .and_then(|chat| chat.last_message_id)
+            .is_some_and(|last| window.newest_id() == Some(last))
     }
 
     /// The message the cursor is on, if the window holds anything.
@@ -321,6 +409,8 @@ impl App {
 
         self.conversation.window.replace(page);
         self.vim.set_total(self.conversation.window.len());
+        // Search matches are positions in the window that was just replaced.
+        self.vim.set_matches(Vec::new());
         self.conversation.follow();
         self.vim.apply_motion(Motion::Last);
 
@@ -364,6 +454,123 @@ impl App {
 
         true
     }
+
+    // ---- jumping to the unread messages ---------------------------------
+
+    /// Takes the reader to where the conversation's unread messages start.
+    ///
+    /// `gg` is Vim's top-of-buffer, and that is what it stays when there is
+    /// nothing unread to be taken to. When there is, the reader means the first
+    /// unread message, and this answers it from what is loaded wherever it can:
+    /// the cursor moves and nothing is returned.
+    ///
+    /// What comes back is a jump the window cannot answer — the target is
+    /// somewhere the client has not fetched, and only the caller can go and get
+    /// it. Returning the intent rather than recording it keeps the two in step
+    /// at the one call site: the reader asked for *this*, and anything they had
+    /// asked for before is replaced by it, whether or not there is one.
+    ///
+    /// The estimate is arithmetic on identifiers, and identifiers have gaps
+    /// wherever messages were deleted, so it can land in front of the true first
+    /// unread. A window that ends where the conversation does is the exception,
+    /// and it is the common case — see [`App::landing_position`].
+    #[must_use]
+    pub fn jump_to_unread(&mut self) -> Option<Jump> {
+        if !self.has_conversation() {
+            return None;
+        }
+
+        let target = self.first_unread()?;
+
+        // Counted from the end when the window reaches the end of the
+        // conversation: the unread messages are the newest ones there are, so
+        // their number says exactly where they start however the messages are
+        // numbered.
+        if self.holds_newest_edge()
+            && let Some(index) = landing_position(self.conversation.window.len(), self.unread())
+        {
+            self.vim.set_cursor(index);
+            return None;
+        }
+
+        // Or found by identifier, when the window holds the target but not the
+        // end of the conversation.
+        if let Some(index) = self.conversation.window.position_of(target) {
+            self.vim.set_cursor(index);
+            return None;
+        }
+
+        Some(Jump {
+            peer_id: self.conversation.window.chat_id,
+            target_id: target,
+        })
+    }
+
+    /// Replaces the window with a page fetched around a message the reader asked
+    /// to be taken to, and puts them on it.
+    ///
+    /// Reports whether the window took the page. A page nobody is waiting for any
+    /// more is refused — the reader has opened another conversation, or told the
+    /// client to take them to the end instead — and the jump is over either way,
+    /// so that a fetch which failed or came back empty cannot leave the key
+    /// wedged.
+    ///
+    /// The cursor lands on the target, or on the first message after it when the
+    /// page does not hold it: the page is centred on the target, so that is the
+    /// nearest the fetch came to where the reader was going.
+    pub fn apply_jump(&mut self, page: &[Message], target_id: i64) -> bool {
+        if self.pending_jump.map(|jump| jump.target_id) != Some(target_id) {
+            return false;
+        }
+
+        self.pending_jump = None;
+
+        if !self.page_belongs_to_open_chat(page) {
+            return false;
+        }
+
+        // Copied into the window rather than moved: a page that replaces a
+        // window is the caller's to report to the cursor it keeps, and that
+        // cursor is counted from the same messages.
+        self.conversation.window.replace(page.iter().cloned());
+
+        // A window that jumped is surrounded by the unknown on both sides,
+        // whatever the one before it had run out of.
+        self.conversation.window.exhausted_older = false;
+        self.conversation.window.exhausted_newer = false;
+
+        self.vim.set_total(self.conversation.window.len());
+        // Search matches are positions in the window that was just replaced.
+        self.vim.set_matches(Vec::new());
+
+        let landing = self.landing_index(target_id);
+        self.vim.set_cursor(landing);
+        self.settle_follow();
+
+        true
+    }
+
+    /// Where the reader is put in a window that was replaced around `target`.
+    ///
+    /// The target itself when the page holds it; otherwise the first message
+    /// after it, which is the nearest the page came; and the newest message in
+    /// the window when the target is past every one of them — an estimate that
+    /// outran the conversation, which the nearest survivor answers honestly.
+    fn landing_index(&self, target: i64) -> usize {
+        let window = &self.conversation.window;
+
+        window
+            .position_of(target)
+            .or_else(|| window.iter().position(|message| message.id >= target))
+            .unwrap_or_else(|| window.len().saturating_sub(1))
+    }
+
+    /// How many messages the open conversation has unread.
+    fn unread(&self) -> u32 {
+        self.open_chat().map_or(0, |chat| chat.unread_count)
+    }
+
+    // ---- events from the feed -------------------------------------------
 
     /// Applies an event from the feed to everything it touches.
     ///
@@ -530,7 +737,25 @@ impl App {
 
         match key.code {
             KeyCode::Char(c) if matches!(c, 'j' | 'k' | 'g' | 'G' | 'n' | 'N') => {
-                self.vim.handle_char(c);
+                let motion = self.vim.handle_char(c);
+
+                match motion {
+                    // `gg` is where the unread messages start when there are
+                    // any, and the top of what is loaded when there are not. A
+                    // jump the window can answer is taken here; one it cannot is
+                    // left for the caller to fetch. Either way the reader has
+                    // asked for something, so whatever they asked for before is
+                    // replaced by it.
+                    Some(Motion::First) => self.pending_jump = self.jump_to_unread(),
+
+                    // `G` is the reader overriding a jump with "take me to the
+                    // end". The page on its way is for a place they no longer
+                    // want to be, and it is dropped when it lands.
+                    Some(Motion::Last) => self.pending_jump = None,
+
+                    _ => {}
+                }
+
                 self.settle_follow();
             }
             KeyCode::Char('i' | 'a') => {
@@ -779,6 +1004,47 @@ impl App {
             PromptKind::Search => "/",
         }
     }
+
+    /// What the status line shows.
+    ///
+    /// A jump outranks whatever the status line was last told: it is what the
+    /// reader has just asked for, and it is over as soon as its page lands.
+    /// Derived from the jump rather than written into the status, so that the two
+    /// cannot come apart — a status that outlived its fetch would be a line
+    /// saying "jumping" over a reader who had already arrived.
+    #[must_use]
+    pub fn status_text(&self) -> &str {
+        if self.pending_jump.is_some() {
+            JUMP_LABEL
+        } else {
+            &self.status
+        }
+    }
+}
+
+// ---- helpers -----------------------------------------------------------
+
+/// Where the unread messages start in a window that ends where the conversation
+/// does.
+///
+/// Counted back from the end rather than looked up by identifier, which is what
+/// makes the answer exact where the numbering has gaps: the unread messages are
+/// the newest ones there are, so they are the last `unread` positions of the
+/// window.
+///
+/// `None` when there is nothing unread, and when the unread messages reach past
+/// the window — they start somewhere the client has not loaded, and counting
+/// them from the end would land on a message that is not one of them.
+fn landing_position(len: usize, unread: u32) -> Option<usize> {
+    if unread == 0 {
+        return None;
+    }
+
+    // A count that does not fit an index is far larger than any window, which
+    // the comparison below settles without the conversion mattering.
+    let unread = usize::try_from(unread).unwrap_or(usize::MAX);
+
+    (unread <= len).then(|| len - unread)
 }
 
 // ---- sample data -------------------------------------------------------
@@ -808,7 +1074,10 @@ fn mock_chats() -> Vec<Chat> {
             title: "Ada Lovelace".into(),
             kind: ChatKind::Private,
             last_message: Some("See you at the demo.".into()),
-            unread_count: 2,
+            // The conversation the sample data opens, so nothing in it is
+            // waiting to be read: `gg` means the top of it, and the tests that
+            // are about where unread messages start say how many there are.
+            unread_count: 0,
             // Matches the last of `mock_messages`, which is where the preview
             // text came from.
             last_message_id: Some(10),
@@ -947,6 +1216,34 @@ mod tests {
     fn go_to_top(app: &mut App) {
         app.handle_key(press(KeyCode::Char('g')));
         app.handle_key(press(KeyCode::Char('g')));
+    }
+
+    /// The sample conversation, with `unread` messages waiting in it and its
+    /// newest message numbered `last`.
+    ///
+    /// The sample conversation has nothing unread — it is the one the reader is
+    /// in — so the tests that are about where the unread messages start say how
+    /// many there are, and how the conversation is numbered.
+    fn with_unread(unread: u32, last: i64) -> App {
+        let mut app = App::mock();
+        let chat = app
+            .list
+            .chats
+            .iter_mut()
+            .find(|chat| chat.id == MOCK_CHAT)
+            .expect("the sample conversation is in the list");
+        chat.unread_count = unread;
+        chat.last_message_id = Some(last);
+
+        app
+    }
+
+    /// The sample conversation with its unread messages in front of what is
+    /// loaded: the conversation runs to 20, and the window stops at 8.
+    fn with_unread_out_of_reach(unread: u32) -> App {
+        let mut app = with_unread(unread, 20);
+        app.apply_latest(page(&[1, 2, 3, 4, 5, 6, 7, 8]));
+        app
     }
 
     // ---- the frame -----------------------------------------------------
@@ -1565,5 +1862,264 @@ mod tests {
 
         app.exhaust(FetchDirection::Newer);
         assert!(!app.wants_newer(), "nor behind the newest one");
+    }
+
+    // ---- `gg` and the unread messages ----------------------------------
+
+    /// `gg` is Vim's top-of-buffer when there is nothing unread to be taken to,
+    /// which is the conversation the reader is already in.
+    #[test]
+    fn gg_with_nothing_unread_is_the_top_of_the_window() {
+        let mut app = App::mock();
+
+        go_to_top(&mut app);
+
+        assert_eq!(app.vim.cursor(), 0);
+        assert_eq!(app.pending_jump(), None, "there is nowhere to be taken to");
+        assert!(!app.conversation.auto_follow());
+    }
+
+    #[test]
+    fn gg_with_no_conversation_open_moves_nothing() {
+        let mut app = App::new();
+
+        go_to_top(&mut app);
+
+        assert_eq!(app.vim.cursor(), 0);
+        assert_eq!(app.pending_jump(), None);
+    }
+
+    /// The unread messages are the newest ones there are, so a window that ends
+    /// where the conversation does holds them: `gg` lands on the first of them
+    /// without a round trip.
+    #[test]
+    fn gg_with_unread_loaded_lands_on_the_first_of_them() {
+        let mut app = with_unread(2, 10);
+
+        go_to_top(&mut app);
+
+        assert_eq!(
+            reading(&app),
+            Some(9),
+            "the newest message is 10, and two of them are unread"
+        );
+        assert_eq!(app.pending_jump(), None, "so no page was needed");
+        assert!(
+            !app.conversation.auto_follow(),
+            "the reader moved off the end"
+        );
+    }
+
+    /// Identifiers have gaps wherever messages were deleted, so counting back
+    /// from the newest by number can name a message that does not exist. A window
+    /// that ends where the conversation does is the exception: the unread
+    /// messages are the newest ones there are, so they are counted back by
+    /// position and land exactly.
+    #[test]
+    fn a_window_that_ends_the_conversation_lands_where_the_numbers_do_not() {
+        let mut app = with_unread(3, 20);
+        app.apply_latest(page(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 20]));
+
+        go_to_top(&mut app);
+
+        assert_eq!(
+            reading(&app),
+            Some(8),
+            "the third from the end — counting back three from 20 would name 18, \
+             which is not a message this conversation has"
+        );
+        assert_eq!(app.pending_jump(), None);
+    }
+
+    /// Counting from the end is only an answer when the window reaches the end,
+    /// and only when the unread messages fit inside it.
+    #[test]
+    fn counting_from_the_end_needs_a_window_that_holds_the_unread_ones() {
+        assert_eq!(landing_position(10, 0), None, "nothing unread");
+        assert_eq!(landing_position(10, 3), Some(7));
+        assert_eq!(landing_position(3, 3), Some(0), "the whole window");
+        assert_eq!(
+            landing_position(3, 4),
+            None,
+            "they reach past the window, so counting them from the end would land \
+             on a message that is not one of them"
+        );
+        assert_eq!(landing_position(0, 1), None, "and an empty window");
+    }
+
+    /// A target the window does not hold is handed to the caller, and asking
+    /// again while it is on its way produces the same intent rather than another
+    /// one: holding the key must not stack requests.
+    #[test]
+    fn a_jump_the_window_cannot_answer_is_asked_for_once() {
+        let mut app = with_unread_out_of_reach(2);
+
+        go_to_top(&mut app);
+
+        let expected = Jump {
+            peer_id: MOCK_CHAT,
+            target_id: 19,
+        };
+        assert_eq!(
+            app.pending_jump(),
+            Some(expected),
+            "counting back two from 20"
+        );
+
+        go_to_top(&mut app);
+        assert_eq!(app.pending_jump(), Some(expected), "the same place, once");
+    }
+
+    /// The completion puts the reader on the message they jumped to, and the
+    /// window it landed in is surrounded by the unknown on both sides.
+    #[test]
+    fn a_jump_lands_the_reader_on_the_message_it_was_for() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+        assert!(app.pending_jump().is_some());
+
+        assert!(app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
+
+        assert_eq!(reading(&app), Some(19));
+        assert_eq!(app.pending_jump(), None, "the jump is over");
+        assert!(!app.conversation.auto_follow());
+        assert!(
+            !app.conversation.window.exhausted_older && !app.conversation.window.exhausted_newer,
+            "a window that jumped has no edge the one before it can vouch for"
+        );
+    }
+
+    /// A page that does not hold the target: the reader is put on the first
+    /// message after it, which is the nearest the page came.
+    #[test]
+    fn a_jump_that_missed_its_target_lands_on_the_nearest_message_after_it() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+
+        assert!(app.apply_jump(&page(&[16, 17, 20, 21]), 19));
+
+        assert_eq!(reading(&app), Some(20));
+    }
+
+    /// And an estimate past everything the page holds lands on the newest of it:
+    /// an estimate that outran the conversation, which the nearest survivor
+    /// answers honestly.
+    #[test]
+    fn a_jump_past_the_page_lands_on_its_newest_message() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+
+        assert!(app.apply_jump(&page(&[1, 2, 3]), 19));
+
+        assert_eq!(reading(&app), Some(3));
+    }
+
+    /// However it ended, the jump is over: an empty page leaves the reader where
+    /// they were rather than wedging the key.
+    #[test]
+    fn a_jump_that_came_back_empty_leaves_the_reader_where_they_were() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+        let before = app.conversation.window.len();
+
+        assert!(!app.apply_jump(&[], 19));
+
+        assert_eq!(app.pending_jump(), None, "the key is free again");
+        assert_eq!(
+            app.conversation.window.len(),
+            before,
+            "and the window is untouched"
+        );
+    }
+
+    /// A page for a jump the reader has abandoned: opening another conversation
+    /// is the reader saying they are no longer going there.
+    #[test]
+    fn a_jump_for_a_conversation_that_is_no_longer_open_is_dropped() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+        assert!(app.pending_jump().is_some());
+
+        app.select_chat(1);
+
+        assert!(!app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
+        assert_eq!(app.pending_jump(), None);
+        assert!(
+            app.conversation.window.is_empty(),
+            "the conversation that was opened kept its empty window"
+        );
+    }
+
+    /// A page naming another conversation is refused even when the target
+    /// matches: a window belongs to one conversation.
+    #[test]
+    fn a_jump_page_for_another_conversation_is_refused() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+        let before = app.conversation.window.len();
+
+        assert!(!app.apply_jump(&[stranger(19)], 19));
+
+        assert_eq!(app.conversation.window.len(), before);
+        assert_eq!(app.pending_jump(), None, "and the jump is over");
+    }
+
+    /// `G` is the reader overriding a jump with "take me to the end": the page on
+    /// its way is for a place they no longer want to be, and it is dropped when
+    /// it lands.
+    #[test]
+    fn the_end_of_the_conversation_cancels_a_jump() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+        assert!(app.pending_jump().is_some());
+
+        app.handle_key(press(KeyCode::Char('G')));
+
+        assert_eq!(app.pending_jump(), None);
+        assert!(
+            app.conversation.auto_follow(),
+            "and the view is pinned to the newest message"
+        );
+        assert!(
+            !app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19),
+            "the page that was on its way has nobody waiting for it"
+        );
+    }
+
+    /// A window that was replaced is one the search indices no longer describe:
+    /// they are positions, and the messages they pointed at are gone.
+    #[test]
+    fn a_jump_clears_the_search_matches() {
+        let mut app = with_unread_out_of_reach(2);
+        run_search_line(&mut app, "text");
+        go_to_top(&mut app);
+        assert!(app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
+
+        let landing = app.vim.cursor();
+        app.handle_key(press(KeyCode::Char('n')));
+
+        assert_eq!(
+            app.vim.cursor(),
+            landing,
+            "there is nothing to search for until the next `/`"
+        );
+    }
+
+    #[test]
+    fn a_jump_in_flight_is_what_the_status_line_says() {
+        let mut app = with_unread_out_of_reach(2);
+        app.status = "3 conversation(s)".to_string();
+
+        assert_eq!(app.status_text(), "3 conversation(s)");
+
+        go_to_top(&mut app);
+        assert_eq!(app.status_text(), JUMP_LABEL);
+
+        app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19);
+        assert_eq!(
+            app.status_text(),
+            "3 conversation(s)",
+            "the line goes back to what it was saying once the jump is over"
+        );
     }
 }
