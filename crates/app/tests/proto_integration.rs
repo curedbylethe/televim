@@ -22,6 +22,23 @@
 //! Each test requests its own login code, and Telegram throttles that hard, so
 //! run them sparingly.
 //!
+//! # What one account cannot check
+//!
+//! Two things this seam wants proven cannot be provoked with the single account
+//! these tests have. They are recorded here rather than left as a silent hole:
+//!
+//! - **An update arriving for real.** Nothing sends to the test account while a
+//!   run is in progress, so the feed is usually silent and the drain below
+//!   checks zero updates. Provoking one needs a second account, and a send API
+//!   the framework does not expose yet.
+//! - **The offline gap.** `catch_up` replays what arrived while the client was
+//!   not running, which again needs something to send to it in the meantime.
+//!
+//! Both are covered as far as one account allows. The fetched list's ordering
+//! is asserted directly, which is deterministic, and the number of updates
+//! actually checked — along with the number the framework discarded — is
+//! printed, so a run that proved little says so instead of looking like a pass.
+//!
 //! The whole file is compiled only under the crate's `live` feature, which is
 //! what turns on the framework's client and the `proto` wrapper it is built
 //! from.
@@ -131,22 +148,53 @@ async fn log_in(client: &Client, dc: &TestDc) -> bool {
     }
 }
 
-/// Awaits the next update, or gives up once `deadline` has passed.
-async fn next_before(
-    updates: &mut UpdateStream,
-    deadline: tokio::time::Instant,
-) -> Option<UpdateEvent> {
+/// What one turn of the feed produced.
+enum FeedStep {
+    /// An update arrived.
+    Update(UpdateEvent),
+
+    /// The feed reported a failure it can carry on from.
+    Failed(ProtoError),
+
+    /// The window closed, or the feed ended because the client is shutting
+    /// down. Neither is a failure.
+    Quiet,
+}
+
+/// Awaits the next turn of the feed, or gives up once `deadline` has passed.
+///
+/// A failure is reported rather than raised. Resolving a gap in the sequence is
+/// a request like any other, so a transient error says nothing about whether the
+/// two layers name conversations the same way — which is what this file is
+/// about — and the subscription stays usable afterwards. Counting it and
+/// carrying on keeps a flaky network from failing a test it has no bearing on.
+async fn next_before(updates: &mut UpdateStream, deadline: tokio::time::Instant) -> FeedStep {
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
-        return None;
+        return FeedStep::Quiet;
     }
 
     match tokio::time::timeout(remaining, updates.next()).await {
-        Ok(Some(Ok(event))) => Some(event),
-        Ok(Some(Err(error))) => panic!("the feed failed while it was being drained: {error}"),
-        // Either the window closed, or the feed ended because the client is
-        // shutting down. Neither is a failure.
-        _ => None,
+        Ok(Some(Ok(event))) => FeedStep::Update(event),
+        Ok(Some(Err(error))) => FeedStep::Failed(error),
+        Ok(None) | Err(_) => FeedStep::Quiet,
+    }
+}
+
+/// Asserts that a fetched list is ordered the way a chat list shows it.
+///
+/// This is the one property of the fetch that is worth checking without a second
+/// account: the framework sorts the dialogs and the sort has to survive the
+/// translation into `domain` types. `None` sorts below every timestamp, so a
+/// conversation with no messages at all belongs at the end.
+fn assert_newest_first(chats: &[Chat]) {
+    for pair in chats.windows(2) {
+        assert!(
+            pair[0].last_timestamp >= pair[1].last_timestamp,
+            "the fetch must return conversations newest first, but {:?} came before {:?}",
+            pair[0].last_timestamp,
+            pair[1].last_timestamp
+        );
     }
 }
 
@@ -155,8 +203,9 @@ async fn next_before(
 ///
 /// The login flow itself is the framework's, and it has its own tests. What is
 /// checked here is the seam the application sits on — that a session written by
-/// a login is enough to rebuild an authorised client, and that such a client
-/// can be handed to `ProtoClient` and produce a chat list.
+/// a login is enough to rebuild an authorised client, that such a client can be
+/// handed to `ProtoClient` and produce a chat list, and that the list arrives in
+/// the order a chat list is rendered in.
 #[tokio::test]
 async fn login_round_trip_yields_a_client_that_can_fetch_the_chat_list() {
     let Some(dc) = TestDc::from_env() else {
@@ -207,6 +256,7 @@ async fn login_round_trip_yields_a_client_that_can_fetch_the_chat_list() {
         chats.iter().all(Chat::is_private),
         "the fetch must return only the conversations televim displays"
     );
+    assert_newest_first(&chats);
 }
 
 /// Fetches the chat list, takes the feed, and checks that the two agree.
@@ -220,8 +270,11 @@ async fn login_round_trip_yields_a_client_that_can_fetch_the_chat_list() {
 /// show, and it would show as every event being silently dropped.
 ///
 /// Nothing is sent to the test account while this runs, so the feed usually
-/// yields nothing and the loop ends on its own. The count is reported either
-/// way, so a run that checked nothing says so rather than looking like a pass.
+/// yields nothing and the loop ends on its own. A recoverable failure while
+/// resolving a gap is counted rather than raised — it says nothing about the
+/// identifiers — and both that count and the number of updates the framework
+/// discarded are reported, so a run that checked nothing says so rather than
+/// looking like a pass.
 #[tokio::test]
 async fn the_feed_names_only_conversations_the_fetch_returned() {
     let Some(dc) = TestDc::from_env() else {
@@ -252,6 +305,7 @@ async fn the_feed_names_only_conversations_the_fetch_returned() {
         chats.iter().all(Chat::is_private),
         "the feed can only be checked against a list of the conversations televim displays"
     );
+    assert_newest_first(&chats);
 
     // Declared after `proto`, so it is dropped first: the subscription owns the
     // stream underneath and has to outlive nothing but its own polling.
@@ -276,31 +330,60 @@ async fn the_feed_names_only_conversations_the_fetch_returned() {
     let mut list = ChatList::with_chats(chats.clone());
     let deadline = tokio::time::Instant::now() + FEED_WINDOW;
     let mut seen = 0_usize;
+    let mut failed = 0_usize;
 
-    while let Some(event) = next_before(&mut updates, deadline).await {
-        // An arrival is the one event whose outcome is predictable in advance:
-        // it changes the list exactly when it belongs to a conversation the
-        // fetch returned. Every other event depends on messages this client
-        // may never have held.
-        let arrival = match &event {
-            UpdateEvent::NewMessage(message) => Some(message.chat_id),
-            _ => None,
-        };
+    loop {
+        match next_before(&mut updates, deadline).await {
+            FeedStep::Update(event) => {
+                // An arrival is the one event whose outcome is predictable in
+                // advance: it changes the list exactly when it belongs to a
+                // conversation the fetch returned. Every other event depends on
+                // messages this client may never have held.
+                let arrival = match &event {
+                    UpdateEvent::NewMessage(message) => Some(message.chat_id),
+                    _ => None,
+                };
 
-        let landed = list.apply_update(event);
+                let landed = list.apply_update(event);
 
-        if let Some(chat_id) = arrival {
-            let held = chats.iter().any(|chat| chat.id == chat_id);
-            assert_eq!(
-                landed, held,
-                "an arrival for conversation {chat_id} must land exactly when the fetch \
-                 returned that conversation; a mismatch means the two layers name \
-                 conversations by different identifiers"
-            );
+                if let Some(chat_id) = arrival {
+                    let held = chats.iter().any(|chat| chat.id == chat_id);
+                    assert_eq!(
+                        landed, held,
+                        "an arrival for conversation {chat_id} must land exactly when the \
+                         fetch returned that conversation; a mismatch means the two layers \
+                         name conversations by different identifiers"
+                    );
+                }
+
+                seen += 1;
+            }
+            FeedStep::Failed(error) => {
+                eprintln!("the feed reported a failure it can recover from: {error}");
+                failed += 1;
+            }
+            FeedStep::Quiet => break,
         }
-
-        seen += 1;
     }
 
-    eprintln!("checked {seen} update(s) over {FEED_WINDOW:?}");
+    eprintln!(
+        "checked {seen} update(s) over {FEED_WINDOW:?} with {failed} recoverable failure(s); \
+         the framework discarded {}",
+        updates.dropped()
+    );
+
+    // The per-arrival check above is the sharp one, but it only fires when
+    // something arrives. These look at the state the drain left behind, so the
+    // run asserts something about the identifier space either way.
+    assert_eq!(
+        list.chats.len(),
+        chats.len(),
+        "the feed folds messages into conversations; it never adds or removes one"
+    );
+    assert!(
+        list.messages
+            .iter()
+            .all(|message| chats.iter().any(|chat| chat.id == message.chat_id)),
+        "every message in the window must belong to a conversation the fetch returned"
+    );
 }
