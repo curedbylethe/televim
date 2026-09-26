@@ -45,5 +45,5 @@ pub enum ProtoError {
     #[error("not implemented")]
     NotImplemented,
     #[error("framework error: {0}")]
-    Framework(#[from] telegram_framework::Error),
+    Framework(#[from] telegram_framework::FrameworkError),
 }
