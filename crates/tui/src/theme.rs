@@ -12,6 +12,7 @@ pub struct Theme {
     pub mode_normal: Style,
     pub mode_insert: Style,
     pub mode_visual: Style,
+    pub mode_confirm: Style,
 }
 
 impl Default for Theme {
@@ -25,6 +26,7 @@ impl Default for Theme {
             mode_normal: Style::default().bg(Color::Blue).fg(Color::White),
             mode_insert: Style::default().bg(Color::Green).fg(Color::Black),
             mode_visual: Style::default().bg(Color::Yellow).fg(Color::Black),
+            mode_confirm: Style::default().bg(Color::Red).fg(Color::White),
         }
     }
 }

@@ -12,6 +12,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         Mode::Normal => (Mode::Normal.label(), app.theme.mode_normal),
         Mode::Insert => (Mode::Insert.label(), app.theme.mode_insert),
         Mode::Visual => (Mode::Visual.label(), app.theme.mode_visual),
+        Mode::Confirm => (Mode::Confirm.label(), app.theme.mode_confirm),
     };
 
     let line = Line::from(vec![
