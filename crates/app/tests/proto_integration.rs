@@ -38,6 +38,11 @@
 //!   through whichever conversation the account has, so it cannot say in advance
 //!   how many pages it will walk or whether it will reach the beginning of one.
 //!   What it can say is what came back, and it prints that.
+//! - **Which message a reader stopped at.** Nothing in the wire format says it,
+//!   so the first unread is arithmetic over the count and the newest identifier —
+//!   approximate wherever deletions left gaps in the numbering. The history test
+//!   fetches a page around the estimate and prints whether it was a message at
+//!   all; the unit tests carry the cases that can be settled exactly.
 //!
 //! Each is covered as far as one account allows. The fetched list's ordering and
 //! the history's are asserted directly, which is deterministic, and the counts —
@@ -50,6 +55,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use domain::chat::Chat;
+use domain::history::unread_target;
 use domain::message::Message;
 use domain::updates::{ChatList, UpdateEvent};
 use proto::{HistoryCursor, ProtoClient, ProtoError, UpdateStream};
@@ -552,6 +558,47 @@ async fn page_around(proto: &ProtoClient, chat_id: i64, target: i64) -> Vec<Mess
     around
 }
 
+/// Fetches a page around where a conversation's unread messages are estimated to
+/// start, and reports what came back.
+///
+/// This is the other thing a page *around* a message is for, and the estimate it
+/// is given is the one the client works from. What a datacenter can confirm is
+/// not that the page begins at the first unread — nothing says which message a
+/// reader stopped at — but that the arithmetic produces a usable anchor:
+/// Telegram accepts it, and a page of that conversation comes back like any
+/// other. The unit tests carry the cases that can be settled exactly.
+///
+/// `None` when the conversation has nothing unread to jump to.
+async fn page_around_the_unread(proto: &ProtoClient, chat: &Chat) -> Option<Vec<Message>> {
+    let target = unread_target(chat.last_message_id, chat.unread_count)?;
+
+    let around = proto
+        .fetch_around(chat.id, target, PAGE)
+        .await
+        .expect("a page around the unread estimate is fetched");
+
+    assert_ascending(&around);
+    assert!(
+        around.iter().all(|message| message.chat_id == chat.id),
+        "a page is fetched for one conversation, and every message in it names that one"
+    );
+
+    eprintln!(
+        "conversation {} has {} unread message(s), which puts the first of them at \
+         {target}; a page around it held {} message(s), and {}",
+        chat.id,
+        chat.unread_count,
+        around.len(),
+        if around.iter().any(|message| message.id == target) {
+            "the estimate is one of them"
+        } else {
+            "the estimate is not, so the numbering has gaps there"
+        },
+    );
+
+    Some(around)
+}
+
 /// Pages through a conversation, in both directions, and checks what the pages
 /// say about themselves.
 ///
@@ -626,6 +673,15 @@ async fn history_pages_through_a_conversation_without_gaps_or_repeats() {
     );
     assert_eq!(cursor.oldest_loaded_id(), around.first().map(|m| m.id));
     assert_eq!(cursor.newest_loaded_id(), around.last().map(|m| m.id));
+
+    // The other thing a page around a message is for: taking a reader to the
+    // first of their unread messages, which the client places by arithmetic.
+    if page_around_the_unread(&proto, &chat).await.is_none() {
+        eprintln!(
+            "skipped: conversation {} has nothing unread to jump to",
+            chat.id
+        );
+    }
 
     eprintln!(
         "paged {} page(s) through conversation {} ({} message(s), {} to the start); \
