@@ -47,7 +47,12 @@ lint: ## Run clippy to catch common mistakes and improve code
 boundary: ## Assert that only telegram-framework can reach grammers
 	@fail=0; \
 	for crate in domain proto tui telegram-framework; do \
-		if $(CARGO) tree -p $$crate 2>/dev/null | grep -q grammers; then \
+		if ! tree=$$($(CARGO) tree -p $$crate 2>&1); then \
+			echo "error: could not resolve $$crate, so the boundary is unverified"; \
+			fail=1; \
+			continue; \
+		fi; \
+		if echo "$$tree" | grep -q grammers; then \
 			echo "error: $$crate must not depend on grammers; see crates/proto/src/lib.rs"; \
 			fail=1; \
 		fi; \
