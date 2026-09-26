@@ -10,6 +10,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod chat;
+pub mod history;
 pub mod message;
 pub mod session;
 pub mod updates;
