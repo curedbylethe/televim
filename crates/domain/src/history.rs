@@ -1,10 +1,10 @@
 //! The messages of the conversation on show.
 //!
-//! [`ChatList`] holds what the client has seen across every conversation, in one
-//! flat, newest-first window, so that an edit or a deletion can be matched
-//! against a message wherever it lives. That shape is right for applying
-//! updates and wrong for reading a conversation: it is interleaved, and it runs
-//! backwards.
+//! [`ChatList`](crate::updates::ChatList) holds what the client has seen across
+//! every conversation, in one flat, newest-first window, so that an edit or a
+//! deletion can be matched against a message wherever it lives. That shape is
+//! right for applying updates and wrong for reading a conversation: it is
+//! interleaved, and it runs backwards.
 //!
 //! This module is the view over the same messages for the one conversation the
 //! user has open: oldest first — the order a conversation is read in — and
