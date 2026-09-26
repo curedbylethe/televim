@@ -3,6 +3,10 @@
 //! These are gated on `termlens`, which is not yet wired up. Once it is,
 //! remove the `#[ignore]`s and add `termlens` as a dev-dependency of this
 //! crate.
+//!
+//! Sending, editing and deleting are covered by unit tests and by the
+//! `TestBackend` assertions in `tui`'s conversation panel; their keystroke
+//! flows through a real terminal wait on `termlens` like the rest.
 
 #[test]
 #[ignore = "requires termlens"]
