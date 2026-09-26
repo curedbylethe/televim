@@ -1,6 +1,7 @@
 //! Top-level TUI state.
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -51,6 +52,14 @@ const FLASH_FOR: Duration = Duration::from_secs(5);
 /// growing the buffer without bound. The framework checks the same number before
 /// the request, so the two cannot disagree about what is sendable.
 const MESSAGE_LIMIT: usize = 4096;
+
+/// How many operations the reader may have queued at once.
+///
+/// The queue exists because a second request must not replace one that has not
+/// gone out yet: sending and then pressing `/` inside one tick would otherwise
+/// drop the send, silently. It is drained on every pass, so the bound is only
+/// reached by a burst — it is a ceiling on memory rather than a schedule.
+const ACTION_QUEUE: usize = 4;
 
 /// The prompt the status line shows when a deletion of the reader's own message
 /// is waiting to be confirmed.
@@ -307,11 +316,14 @@ pub struct App {
     /// The deletion waiting to be confirmed, if one is.
     pub confirm: Option<ConfirmKind>,
 
-    /// The operation the reader asked for, waiting to be taken by the caller.
+    /// The operations the reader asked for, waiting to be taken by the caller.
     ///
     /// The outbound half of the [`Jump`] pattern: recorded here because `tui`
-    /// cannot reach the network, and taken once by the caller that can.
-    action: Option<Action>,
+    /// cannot reach the network, and taken once by the caller that can. A queue
+    /// rather than a single slot, because two requests made inside one tick are
+    /// two requests — a send followed by `/` has to perform both, not lose the
+    /// send to the key that came after it.
+    actions: VecDeque<Action>,
 
     /// When a transient status stops applying, if it is transient.
     status_until: Option<Instant>,
@@ -369,7 +381,7 @@ impl App {
             pending_d: false,
             sending: None,
             confirm: None,
-            action: None,
+            actions: VecDeque::new(),
             status_until: None,
             fetching: Fetching::default(),
             pending_jump: None,
@@ -880,7 +892,22 @@ impl App {
     /// cleared, and a caller that asks twice gets one action. The request is
     /// handed over rather than made here because the network is the caller's.
     pub fn take_action(&mut self) -> Option<Action> {
-        self.action.take()
+        self.actions.pop_front()
+    }
+
+    /// Adds an operation to the queue the caller drains.
+    ///
+    /// The queue is bounded so that a burst cannot grow without limit. It is
+    /// drained every pass, so reaching the bound means [`ACTION_QUEUE`]
+    /// operations were queued between two ticks; the oldest is refused to make
+    /// room, and the refusal is said out loud rather than that operation
+    /// vanishing.
+    fn queue_action(&mut self, action: Action) {
+        if self.actions.len() >= ACTION_QUEUE {
+            self.actions.pop_front();
+            self.flash("too many requests at once — the oldest was dropped");
+        }
+        self.actions.push_back(action);
     }
 
     /// Records that a send for `temp_id` is in flight.
@@ -1180,7 +1207,7 @@ impl App {
             KeyCode::Char('y') => {
                 if let Some(ConfirmKind::DeleteMessage { id, .. }) = self.confirm {
                     let chat_id = self.conversation.window.chat_id;
-                    self.action = Some(Action::Delete {
+                    self.queue_action(Action::Delete {
                         chat_id,
                         message_ids: vec![id],
                     });
@@ -1315,7 +1342,7 @@ impl App {
         let text = std::mem::take(&mut self.input);
         let temp_id = self.conversation.queue_send(&text, self.reply_to);
         self.begin_send(temp_id);
-        self.action = Some(Action::Send {
+        self.queue_action(Action::Send {
             chat_id,
             temp_id,
             text,
@@ -1339,7 +1366,7 @@ impl App {
 
         let chat_id = self.conversation.window.chat_id;
         let text = std::mem::take(&mut self.input);
-        self.action = Some(Action::Edit {
+        self.queue_action(Action::Edit {
             chat_id,
             message_id,
             text,
@@ -1882,6 +1909,34 @@ mod tests {
             "a refusal has to say so: {:?}",
             app.status
         );
+    }
+
+    /// Two requests made between two ticks are two requests. A single slot
+    /// would let the second replace the first, and the first would never be
+    /// sent — the bug this queue exists to prevent.
+    #[test]
+    fn two_actions_queued_together_are_taken_in_order() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(reading(&app), Some(9), "an outgoing message");
+
+        // First edit.
+        app.handle_key(press(KeyCode::Char('e')));
+        type_text(&mut app, " one");
+        app.handle_key(press(KeyCode::Enter));
+        // Second edit, before the caller has taken the first.
+        app.handle_key(press(KeyCode::Char('e')));
+        type_text(&mut app, " two");
+        app.handle_key(press(KeyCode::Enter));
+
+        let first = app.take_action().expect("the first edit is queued");
+        let second = app.take_action().expect("the second edit is queued");
+
+        assert!(
+            first != second,
+            "the two edits must be distinct operations, not one twice"
+        );
+        assert_eq!(app.take_action(), None, "and the queue is drained");
     }
 
     // ---- dd and the confirm --------------------------------------------
