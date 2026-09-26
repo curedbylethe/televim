@@ -48,7 +48,7 @@ use telegram_framework::{
     SignInResult,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tui::app::{App, FetchDirection, Jump};
+use tui::app::{Action, App, FetchDirection, Jump};
 
 use crate::config::Config;
 use crate::runtime::AppEvent;
@@ -119,6 +119,44 @@ pub enum Event {
 
         /// The page, oldest first, or why there is not one.
         result: Result<Vec<Message>, ProtoError>,
+    },
+
+    /// A send came back, or the request failed.
+    Sent {
+        /// The conversation it was sent to, so a result the reader has left can
+        /// be dropped.
+        chat_id: i64,
+
+        /// The placeholder the message was rendered as.
+        temp_id: i64,
+
+        /// The message the server accepted, or why there is not one.
+        result: Result<Message, ProtoError>,
+    },
+
+    /// An edit came back, or the request failed.
+    Edited {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message that was edited.
+        message_id: i64,
+
+        /// Nothing on success: the new text arrives as an update.
+        result: Result<(), ProtoError>,
+    },
+
+    /// A deletion came back, or the request failed.
+    Deleted {
+        /// The conversation the messages belonged to. Used only to decide
+        /// whether to surface a failure, never to scope the removal.
+        chat_id: i64,
+
+        /// The messages that were asked for.
+        message_ids: Vec<i64>,
+
+        /// Nothing on success: the messages leave as an update.
+        result: Result<(), ProtoError>,
     },
 
     /// An update arrived for a conversation televim displays.
@@ -308,6 +346,11 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
 /// be idempotent: what it decides is [`wanted`]'s, and what it does is start one
 /// fetch and record that it did.
 pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
+    // A transient status is the one thing here that expires on its own, and a
+    // frame cannot expire it: `status_text` is read from a shared reference.
+    // This runs every pass, so it is the natural clock.
+    app.expire_status(Instant::now());
+
     // Nothing is open, so there is no conversation for a cursor to describe —
     // nor a jump to be waiting on, because closing a conversation forgets one.
     if app.conversation.window.chat_id == 0 {
@@ -318,6 +361,14 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     let Some(client) = state.client.clone() else {
         return;
     };
+
+    // The reader's outbound requests are drained before `wanted`, which returns
+    // early while a history page backs off and while nothing is open: a send
+    // must not be held up by either. An action is left in place while there is
+    // no client, because a message typed offline must not be thrown away.
+    while let Some(action) = app.take_action() {
+        request_action(&client, action, tx);
+    }
 
     match wanted(app, state.history, Instant::now()) {
         Wanted::Nothing => {}
@@ -459,6 +510,58 @@ fn request_jump(
     });
 }
 
+/// Performs the operation the reader asked for, and hands the answer back.
+///
+/// The same shape as the two above, and for the same reason: a round trip in the
+/// event loop would stop the reader's keystrokes from being read while it runs.
+fn request_action(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender<AppEvent>) {
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+
+    tokio::spawn(async move {
+        match action {
+            Action::Send {
+                chat_id,
+                temp_id,
+                text,
+                reply_to,
+            } => {
+                let result = client.send_message(chat_id, &text, reply_to).await;
+                let _ = tx.send(AppEvent::Net(Event::Sent {
+                    chat_id,
+                    temp_id,
+                    result,
+                }));
+            }
+
+            Action::Edit {
+                chat_id,
+                message_id,
+                text,
+            } => {
+                let result = client.edit_message(chat_id, message_id, &text).await;
+                let _ = tx.send(AppEvent::Net(Event::Edited {
+                    chat_id,
+                    message_id,
+                    result,
+                }));
+            }
+
+            Action::Delete {
+                chat_id,
+                message_ids,
+            } => {
+                let result = client.delete_messages(chat_id, &message_ids).await;
+                let _ = tx.send(AppEvent::Net(Event::Deleted {
+                    chat_id,
+                    message_ids,
+                    result,
+                }));
+            }
+        }
+    });
+}
+
 /// Folds something that arrived from the network into the screen's state.
 pub fn apply(app: &mut App, state: &mut State, event: Event) {
     match event {
@@ -474,6 +577,24 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
         }
+
+        Event::Sent {
+            chat_id,
+            temp_id,
+            result,
+        } => apply_sent(app, chat_id, temp_id, result),
+
+        Event::Edited {
+            chat_id,
+            message_id,
+            result,
+        } => apply_edited(app, chat_id, message_id, result),
+
+        Event::Deleted {
+            chat_id,
+            message_ids,
+            result,
+        } => apply_deleted(app, chat_id, &message_ids, result),
 
         Event::History {
             direction,
@@ -564,6 +685,76 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
     }
 }
 
+/// Folds a send's answer into the conversation it was for.
+///
+/// The in-flight gate is freed before the conversation is checked: a result for
+/// a conversation the reader has left still has to free the send key, or it
+/// would stay wedged for every conversation they open after, with no visible
+/// symptom to explain it.
+fn apply_sent(app: &mut App, chat_id: i64, temp_id: i64, result: Result<Message, ProtoError>) {
+    app.end_send(temp_id);
+
+    if app.conversation.window.chat_id != chat_id {
+        return;
+    }
+
+    match result {
+        Ok(message) => {
+            app.confirm_sent(temp_id, message);
+        }
+        Err(error) => {
+            let reason = failure_reason(&error);
+            tracing::debug!(chat_id, temp_id, %error, "a send failed");
+            app.fail_send(temp_id, reason.clone());
+            app.flash(reason);
+        }
+    }
+}
+
+/// Folds an edit's answer in.
+///
+/// An edit is gated per message rather than globally, so there is no key to free
+/// here. Nothing is applied on success: the new text is the edit's
+/// `MessageEdited` update and nothing else, because `grammers` discards the
+/// updates the request answers with.
+fn apply_edited(app: &mut App, chat_id: i64, message_id: i64, result: Result<(), ProtoError>) {
+    if app.conversation.window.chat_id != chat_id {
+        return;
+    }
+
+    match result {
+        Ok(()) => tracing::debug!(chat_id, message_id, "an edit was accepted"),
+        Err(error) => {
+            tracing::debug!(chat_id, message_id, %error, "an edit failed");
+            app.flash(format!("edit: {}", failure_reason(&error)));
+        }
+    }
+}
+
+/// Folds a deletion's answer in.
+///
+/// The removal itself is the feed's, and the update that does it names no
+/// conversation — so `chat_id` decides only whether the reader is told about a
+/// failure. A failure for a conversation they have left is not worth a line they
+/// cannot act on.
+fn apply_deleted(app: &mut App, chat_id: i64, message_ids: &[i64], result: Result<(), ProtoError>) {
+    match result {
+        Ok(()) => {
+            tracing::debug!(
+                chat_id,
+                deleted = message_ids.len(),
+                "a deletion was accepted"
+            );
+        }
+        Err(error) => {
+            tracing::debug!(chat_id, %error, "a deletion failed");
+            if app.conversation.window.chat_id == chat_id {
+                app.flash(format!("delete: {}", failure_reason(&error)));
+            }
+        }
+    }
+}
+
 /// Puts a fetched chat list on screen, and the reader into it.
 ///
 /// The list is newest first, so the first entry is the conversation that last
@@ -623,6 +814,30 @@ fn backoff(error: &ProtoError) -> Duration {
             value.map_or(RETRY, |seconds| Duration::from_secs(u64::from(seconds)))
         }
         _ => RETRY,
+    }
+}
+
+/// Whether a failure is Telegram asking the client to wait before trying again.
+fn is_flood_wait(error: &ProtoError) -> bool {
+    matches!(
+        error,
+        ProtoError::Framework(FrameworkError::Request(RequestError::Rpc { name, .. }))
+            if name.contains("FLOOD")
+    )
+}
+
+/// A short description of a failed operation, for a row and the status line.
+///
+/// A flood wait is labelled with the wait it asks for, because that is the one
+/// part of it the reader can act on; everything else is the error's own
+/// description. The wait is reported rather than slept through: holding the
+/// in-flight gate for up to a minute would freeze the key with no way out — the
+/// gate is freed as soon as the answer arrives, so a re-Enter is possible.
+fn failure_reason(error: &ProtoError) -> String {
+    if is_flood_wait(error) {
+        format!("flood wait, retry in {}s", backoff(error).as_secs())
+    } else {
+        error.to_string()
     }
 }
 
@@ -1200,5 +1415,145 @@ mod tests {
         );
 
         assert_eq!(app.conversation.window.newest_id(), Some(4));
+    }
+
+    // ---- what a send answers --------------------------------------------
+
+    /// A result for a conversation the reader has left must still free the send
+    /// key: the gate is released before the conversation is checked, because a
+    /// return that happened first would wedge it with no visible symptom.
+    #[test]
+    fn a_send_result_frees_the_key_even_for_a_conversation_that_was_left() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let temp_id = app.conversation.queue_send("hi", None);
+        app.begin_send(temp_id);
+
+        // The reader opens another conversation while the send is on its way.
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(1);
+        assert_eq!(app.sending, Some(temp_id), "the send is still in flight");
+
+        let mut state = State::default();
+        apply(
+            &mut app,
+            &mut state,
+            Event::Sent {
+                chat_id: CHAT,
+                temp_id,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert!(
+            app.sending.is_none(),
+            "a dropped result must not leave the send key wedged"
+        );
+    }
+
+    /// The other half: the result changes nothing in the conversation the reader
+    /// opened, because it was not for that one.
+    #[test]
+    fn a_send_result_for_a_conversation_that_is_no_longer_open_changes_nothing() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let temp_id = app.conversation.queue_send("hi", None);
+        app.begin_send(temp_id);
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(1);
+
+        let mut state = State::default();
+        apply(
+            &mut app,
+            &mut state,
+            Event::Sent {
+                chat_id: CHAT,
+                temp_id,
+                result: Ok(messages(CHAT, 99..=99).remove(0)),
+            },
+        );
+
+        assert!(
+            app.conversation.window.is_empty(),
+            "the conversation the reader opened is still empty"
+        );
+    }
+
+    #[test]
+    fn a_send_result_replaces_the_placeholder_the_reader_was_shown() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let temp_id = app.conversation.queue_send("hi", None);
+        app.begin_send(temp_id);
+
+        let mut state = State::default();
+        apply(
+            &mut app,
+            &mut state,
+            Event::Sent {
+                chat_id: CHAT,
+                temp_id,
+                result: Ok(messages(CHAT, 4..=4).remove(0)),
+            },
+        );
+
+        assert!(
+            app.conversation.message(temp_id).is_none(),
+            "the placeholder left"
+        );
+        assert_eq!(app.conversation.window.newest_id(), Some(4));
+        assert!(app.sending.is_none(), "the key is free again");
+    }
+
+    #[test]
+    fn a_failed_send_keeps_the_message_and_says_why() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let temp_id = app.conversation.queue_send("hi", None);
+        app.begin_send(temp_id);
+
+        let mut state = State::default();
+        apply(
+            &mut app,
+            &mut state,
+            Event::Sent {
+                chat_id: CHAT,
+                temp_id,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert_eq!(
+            app.conversation
+                .message(temp_id)
+                .map(|message| message.status),
+            Some(MessageStatus::Failed),
+            "the reader's message stays, marked as failed"
+        );
+        assert!(
+            app.conversation.failure(temp_id).is_some(),
+            "and it carries a reason"
+        );
+        assert!(app.sending.is_none(), "the key is free to try again");
+    }
+
+    /// A flood wait is a delay, not a freeze: it is labelled with the wait it
+    /// asks for, and the key is freed at once rather than for the whole wait.
+    #[test]
+    fn a_flood_wait_is_labelled_with_the_wait_it_asks_for() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(42),
+        }));
+
+        assert_eq!(failure_reason(&error), "flood wait, retry in 42s");
+    }
+
+    #[test]
+    fn anything_else_is_labelled_with_its_own_description() {
+        let error = ProtoError::Framework(FrameworkError::UnknownPeer(CHAT));
+
+        assert!(
+            failure_reason(&error).contains("peer cache"),
+            "got {:?}",
+            failure_reason(&error)
+        );
     }
 }
