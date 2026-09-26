@@ -9,9 +9,10 @@
 //!   mentions `grammers`, so they are always compiled.
 //! * **The client** — [`ClientBuilder`], the phone → code → 2FA login flow, the
 //!   [`Client::fetch_dialogs`] chat list, the `fetch_history` message history,
-//!   the [`Client::subscribe_updates`] feed, and [`Client::invoke`] as a raw
-//!   escape hatch. These need `grammers`, so they sit behind the `live`
-//!   feature.
+//!   [`Client::send_message`], [`Client::edit_message`] and
+//!   [`Client::delete_messages`], the [`Client::subscribe_updates`] feed, and
+//!   [`Client::invoke`] as a raw escape hatch. These need `grammers`, so they sit
+//!   behind the `live` feature.
 //!
 //! # Why `live` is off by default
 //!
@@ -78,6 +79,8 @@ pub mod dialogs;
 #[cfg(feature = "live")]
 pub mod history;
 #[cfg(feature = "live")]
+pub mod messages;
+#[cfg(feature = "live")]
 pub mod raw;
 #[cfg(feature = "live")]
 pub mod updates;
@@ -100,6 +103,8 @@ pub use client::{Client, ClientBuilder};
 pub use dialogs::{DialogInfo, DialogKind};
 #[cfg(feature = "live")]
 pub use history::{HISTORY_LIMIT, HistoryArgs};
+#[cfg(feature = "live")]
+pub use messages::{TEXT_LIMIT, validate_text};
 #[cfg(feature = "live")]
 pub use updates::{MessageInfo, UpdateKind, UpdateSubscription};
 

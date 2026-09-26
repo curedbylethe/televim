@@ -555,6 +555,7 @@ mod live_tests {
             text: format!("message {id}"),
             timestamp: 1_700_000_000 + id,
             is_outgoing,
+            reply_to_msg_id: None,
         }
     }
 

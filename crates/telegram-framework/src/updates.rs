@@ -85,6 +85,12 @@ pub struct MessageInfo {
 
     /// Whether the logged-in account sent it.
     pub is_outgoing: bool,
+
+    /// Identifier of the message this one replies to, if it is a reply.
+    ///
+    /// Telegram numbers a reply's target within the same conversation, so this
+    /// names a message by the same identifier space [`MessageInfo::id`] does.
+    pub reply_to_msg_id: Option<i32>,
 }
 
 /// Something that happened to a conversation televim displays.
@@ -442,6 +448,7 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
         message.text(),
         message.date().timestamp(),
         message.outgoing(),
+        message.reply_to_message_id(),
     ))
 }
 
@@ -503,6 +510,7 @@ pub(crate) fn message_info(
     text: &str,
     timestamp: i64,
     is_outgoing: bool,
+    reply_to_msg_id: Option<i32>,
 ) -> MessageInfo {
     MessageInfo {
         id: i64::from(id),
@@ -510,6 +518,7 @@ pub(crate) fn message_info(
         text: text.to_owned(),
         timestamp,
         is_outgoing,
+        reply_to_msg_id,
     }
 }
 
@@ -611,18 +620,23 @@ mod tests {
 
     #[test]
     fn a_message_is_described_field_for_field() {
-        let info = message_info(7, 42, "hello", 1_700_000_000, true);
+        let info = message_info(7, 42, "hello", 1_700_000_000, true, Some(5));
 
         assert_eq!(info.id, 7);
         assert_eq!(info.chat_peer_id, 42);
         assert_eq!(info.text, "hello");
         assert_eq!(info.timestamp, 1_700_000_000);
         assert!(info.is_outgoing);
+        assert_eq!(
+            info.reply_to_msg_id,
+            Some(5),
+            "a reply names the message it answers, or the reply context is lost"
+        );
     }
 
     #[test]
     fn a_message_without_text_is_still_described() {
-        let info = message_info(7, 42, "", 0, false);
+        let info = message_info(7, 42, "", 0, false, None);
 
         assert!(info.text.is_empty(), "a photo and a sticker have no text");
         assert_eq!(
@@ -630,5 +644,9 @@ mod tests {
             "zero is grammers' 'no date', and the domain counts from the same epoch"
         );
         assert!(!info.is_outgoing);
+        assert_eq!(
+            info.reply_to_msg_id, None,
+            "a message that answers nothing carries no reply target"
+        );
     }
 }

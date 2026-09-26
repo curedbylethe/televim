@@ -167,6 +167,27 @@ pub enum FrameworkError {
     /// request Telegram would reject for a peer this client cannot name.
     #[error("conversation {0} is not in the session's peer cache; fetch the chat list first")]
     UnknownPeer(i64),
+
+    /// The message text is empty, or nothing but whitespace.
+    ///
+    /// Telegram does not accept a message with no content, and this is checked
+    /// before the request rather than discovered as a rejection: it is a fact
+    /// about the argument, not about the account or the connection.
+    #[error("cannot send an empty message")]
+    TextEmpty,
+
+    /// The message text is longer than Telegram accepts.
+    ///
+    /// The count is in **characters**, which is the unit Telegram limits on, so
+    /// a message of emoji is measured the same way the server measures it.
+    #[error("the message is {chars} character(s) long; the limit is {limit}")]
+    TextTooLong {
+        /// How many characters the text has.
+        chars: usize,
+
+        /// The most characters a message may have.
+        limit: usize,
+    },
 }
 
 #[cfg(feature = "live")]

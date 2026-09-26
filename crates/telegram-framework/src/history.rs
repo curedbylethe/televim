@@ -233,6 +233,7 @@ impl Client {
                     message.text(),
                     message.date().timestamp(),
                     message.outgoing(),
+                    message.reply_to_message_id(),
                 )
             })
             .collect();
