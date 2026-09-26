@@ -15,7 +15,11 @@ Cargo.lock
 *.pdb
 
 .DS_Store
+
+# Local configuration and the log the client writes beside it, under the same
+# name with a `.log` extension: run artifacts, never source.
 televim.toml
+*.log
 
 # ai
 AGENTS.md

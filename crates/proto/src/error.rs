@@ -42,8 +42,17 @@ pub enum ProtoError {
     /// reports its own identifiers without a width, and this crate is where the
     /// two spaces meet — which is why the failure is defined here rather than
     /// there.
-    #[error("message {id} is outside the range telegram numbers messages in")]
+    ///
+    /// Both the conversation and the identifier travel with the error: an
+    /// identifier that cannot exist is only actionable together with the peer it
+    /// was addressed to, which is the same pairing
+    /// [`FrameworkError::UnknownPeer`](telegram_framework::FrameworkError::UnknownPeer)
+    /// makes.
+    #[error("message {id} in conversation {peer_id} is outside telegram's range")]
     MessageIdOutOfRange {
+        /// Bare identifier of the conversation the message was addressed to.
+        peer_id: i64,
+
         /// The identifier that could not be narrowed.
         id: i64,
     },

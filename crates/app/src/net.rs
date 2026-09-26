@@ -1477,6 +1477,84 @@ mod tests {
         );
     }
 
+    /// One of the two things the temp-id reset in `App::select_chat` relies on:
+    /// a send in flight in the conversation the reader left holds the key, so the
+    /// next conversation cannot be handed the same placeholder id while the old
+    /// result is outstanding.
+    #[test]
+    fn a_send_in_flight_holds_the_key_across_a_conversation_change() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let temp_id = app.conversation.queue_send("first", None);
+        app.begin_send(temp_id);
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        for character in "second".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(
+            app.conversation.window.is_empty(),
+            "the in-flight send holds the key, so the new conversation is not given the id"
+        );
+        assert!(
+            app.status.contains("already on its way"),
+            "and the refusal is visible: {:?}",
+            app.status
+        );
+    }
+
+    /// The other thing: a result for a conversation the reader left is dropped by
+    /// `chat_id`, even when the open conversation has been handed the same
+    /// placeholder id.
+    ///
+    /// The state here is not reachable through the interface — the test above is
+    /// what keeps it unreachable — so this pins the rule rather than describing
+    /// behaviour. It is the only test that fails if the `chat_id` check is
+    /// removed as apparent dead code, which is the point of writing it at all.
+    #[test]
+    fn a_stale_result_does_not_confirm_a_placeholder_reissued_the_same_id() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let old_temp = app.conversation.queue_send("first", None);
+        app.begin_send(old_temp);
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(1);
+
+        // Reaching past the gate is deliberate: without it, this is the
+        // collision the `chat_id` check has to survive.
+        let new_temp = app.conversation.queue_send("second", None);
+        app.begin_send(new_temp);
+        assert_eq!(
+            new_temp, old_temp,
+            "the re-created view reissues the placeholder id"
+        );
+
+        let mut state = State::default();
+        apply(
+            &mut app,
+            &mut state,
+            Event::Sent {
+                chat_id: CHAT,
+                temp_id: old_temp,
+                result: Ok(messages(CHAT, 99..=99).remove(0)),
+            },
+        );
+
+        assert_eq!(
+            app.conversation
+                .message(new_temp)
+                .map(|message| message.status),
+            Some(MessageStatus::Sending),
+            "a result for another conversation must not confirm this one's message"
+        );
+        assert!(
+            app.conversation.window.newest_id().is_none(),
+            "and the real message did not land here"
+        );
+    }
+
     #[test]
     fn a_send_result_replaces_the_placeholder_the_reader_was_shown() {
         let mut app = app_with_a_conversation(CHAT, 3);
