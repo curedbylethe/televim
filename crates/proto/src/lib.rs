@@ -65,6 +65,7 @@
 pub mod auth;
 pub mod error;
 pub mod history;
+pub mod messages;
 mod types;
 
 #[cfg(feature = "live")]
