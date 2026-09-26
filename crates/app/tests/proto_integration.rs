@@ -43,6 +43,10 @@
 //!   case that proves a short page settles a direction; a longer one is walked
 //!   back a few pages and then forwards again, which is the case that proves the
 //!   two directions agree about the messages between them.
+//! - **A search's ranking.** A search is sent one token that only the message
+//!   just sent can hold, so the match is checkable; what cannot be checked with
+//!   one account is how Telegram ranks several genuine matches, which is a
+//!   property of its index rather than of this seam.
 //! - **Which message a reader stopped at.** Nothing in the wire format says it,
 //!   so the first unread is arithmetic over the count and the newest identifier —
 //!   approximate wherever deletions left gaps in the numbering. The history test
@@ -939,6 +943,123 @@ async fn self_user_id(client: &Client) -> Option<i64> {
         telegram_framework::tl::enums::User::User(user) => Some(user.id),
         telegram_framework::tl::enums::User::Empty(_) => None,
     })
+}
+
+/// Sends a message carrying a unique token, finds it by that token, and lands on
+/// it.
+///
+/// A search returns **places**, so the only way to prove one is complete is to
+/// go to a place it named: the token is sent, the conversation is searched for
+/// it, and the identifier is then asserted to be in the results and to be
+/// contained by a page fetched around it. That last step is the point — a
+/// search that returned identifiers a page could not be fetched at would be a
+/// list of nowhere.
+///
+/// Saved Messages is the only conversation a single account can write to safely,
+/// and it is a self-chat on the private side of Telegram's taxonomy, which is why
+/// it reaches this seam at all.
+///
+/// The caveats this file already records apply here: the search is fuzzy, so the
+/// token may come back among other messages, and every message in a self-chat is
+/// outgoing, so this proves the round trip rather than which way the message
+/// went.
+#[tokio::test]
+async fn a_sent_message_is_found_by_its_text_and_landed_on() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+
+    let Some(self_id) = self_user_id(&client).await else {
+        eprintln!("skipped: telegram did not report the account's own identifier");
+        return;
+    };
+
+    let proto = ProtoClient::new(client);
+    let chats = proto
+        .fetch_private_chats()
+        .await
+        .expect("the chat list is fetched");
+    let Some(chat) = chats.iter().find(|chat| chat.id == self_id) else {
+        eprintln!(
+            "skipped: Saved Messages is not among the {} private conversation(s)",
+            chats.len()
+        );
+        return;
+    };
+
+    // A token no other message is likely to hold, so the match is this send's
+    // rather than one the fuzziness happened to pull in.
+    let token = format!("televimsearch{}", std::process::id());
+    let text = format!("a message carrying {token}");
+
+    let sent = proto
+        .send_message(chat.id, &text, None)
+        .await
+        .expect("the message is sent to Saved Messages");
+
+    let found = proto
+        .search(chat.id, &token, PAGE)
+        .await
+        .expect("the conversation is searched");
+
+    assert!(
+        found.total >= 1,
+        "a message holding the token has to be among the matches"
+    );
+    assert!(
+        found.ids.contains(&sent.id),
+        "the identifier of the message just sent ({} of {}) has to be in the results",
+        sent.id,
+        found.total
+    );
+    assert_ascending_ids(&found.ids);
+
+    // The place a search named has to be somewhere a page can be fetched: that
+    // is the whole reason it returns identifiers and not messages.
+    let around = proto
+        .fetch_around(chat.id, sent.id, PAGE)
+        .await
+        .expect("a page around the match is fetched");
+    assert!(
+        around.iter().any(|message| message.id == sent.id),
+        "a page around the matched identifier has to contain it"
+    );
+
+    eprintln!(
+        "sent message {} in Saved Messages; the search for {token} found {} of {}, \
+         and a page around the match held {} message(s)",
+        sent.id,
+        found.ids.len(),
+        found.total,
+        around.len()
+    );
+}
+
+/// Asserts that a match list is ordered the way a walk reads it.
+///
+/// Telegram answers newest first and `proto` turns the list around, so this is
+/// the one property of a search a datacenter can confirm and a fixture cannot:
+/// a fixture is written in whichever order the test author had in mind.
+fn assert_ascending_ids(ids: &[i64]) {
+    for pair in ids.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "a match list must come out oldest first, but {} came before {}",
+            pair[0],
+            pair[1]
+        );
+    }
 }
 
 /// What the feed reported during a round trip.
