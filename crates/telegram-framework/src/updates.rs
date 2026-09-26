@@ -493,7 +493,11 @@ fn peer_kind_from_id(kind: PeerKind) -> DialogKind {
 ///
 /// The identifier is widened here: Telegram numbers messages within a
 /// conversation using an `i32`, and the rest of the workspace counts in `i64`.
-fn message_info(
+///
+/// Reused by the history fetch, so that a message read out of a conversation
+/// and the same message arriving over the feed are described identically —
+/// which is what lets the two be deduplicated against each other.
+pub(crate) fn message_info(
     id: i32,
     chat_peer_id: i64,
     text: &str,

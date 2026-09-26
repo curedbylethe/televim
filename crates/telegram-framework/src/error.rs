@@ -156,6 +156,17 @@ pub enum FrameworkError {
     /// view without buffering for whichever consumer is slower.
     #[error("this client is already subscribed to its updates")]
     UpdatesAlreadySubscribed,
+
+    /// The conversation is not in the session's peer cache.
+    ///
+    /// Addressing a peer takes the `access_hash` Telegram handed out for it, and
+    /// only the chat list discloses those — see
+    /// [`Client::fetch_dialogs`](crate::Client::fetch_dialogs). Asking for the
+    /// history of a conversation this client has never fetched is therefore
+    /// unanswerable rather than merely slow, and reporting it beats sending a
+    /// request Telegram would reject for a peer this client cannot name.
+    #[error("conversation {0} is not in the session's peer cache; fetch the chat list first")]
+    UnknownPeer(i64),
 }
 
 #[cfg(feature = "live")]

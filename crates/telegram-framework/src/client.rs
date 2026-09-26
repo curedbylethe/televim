@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use grammers_client::session::defs::PeerRef;
 use grammers_mtsender::SenderPool;
 use tokio::task::JoinHandle;
 
@@ -334,6 +335,18 @@ impl Client {
     /// Borrows the update pipeline, for [`Client::subscribe_updates`].
     pub(crate) fn updates(&self) -> &UpdateRelay {
         &self.updates
+    }
+
+    /// The cached peer for a conversation, if the session has one.
+    ///
+    /// Telegram hands out an `access_hash` for every peer and addressing one
+    /// takes it, so a conversation this client has never fetched cannot be
+    /// named at all — only [`Client::fetch_dialogs`] puts it in the cache.
+    /// `None` here is what a caller turns into
+    /// [`FrameworkError::UnknownPeer`] rather than a request Telegram would
+    /// reject.
+    pub(crate) fn peer_ref(&self, peer_id: i64) -> Option<PeerRef> {
+        self.session.cached_peer(peer_id).map(PeerRef::from)
     }
 
     /// Takes a share of the session, for the update feed.

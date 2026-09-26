@@ -545,6 +545,23 @@ mod bridge {
             }
         }
 
+        /// The cached peer with this bare identifier, if there is one.
+        ///
+        /// `grammers` keys its cache by [`PeerId`], which packs the peer's kind
+        /// into the identifier, so a *bare* identifier — the only kind this
+        /// crate hands out — is not enough to look one up directly. Scanning is
+        /// what avoids reconstructing the kind, which would mean guessing
+        /// between three constructors that panic on a value outside their range.
+        /// The cache holds one entry per conversation the account has, so the
+        /// scan is short and it only runs when a request is being built.
+        pub(crate) fn cached_peer(&self, bare_id: i64) -> Option<PeerInfo> {
+            self.lock()
+                .peer_infos
+                .values()
+                .find(|info| info.id().bare_id() == bare_id)
+                .cloned()
+        }
+
         /// Writes the current state to the backing store.
         pub(crate) fn persist(&self) -> Result<(), SessionError> {
             // Cleared *before* the snapshot, not after. A mutation that lands
@@ -1142,6 +1159,39 @@ mod tests {
                 is_self: None,
             }],
             "only the in-range peer should survive"
+        );
+    }
+
+    /// A peer is looked up by the bare identifier this crate hands out, which is
+    /// not the identifier `grammers` keys its cache by — the cache packs the
+    /// peer's kind into the same integer.
+    #[cfg(feature = "live")]
+    #[test]
+    fn bridge_finds_a_cached_peer_by_its_bare_identifier() {
+        use grammers_client::session::defs::PeerInfo;
+
+        let session = bridge_session(&sample_session());
+
+        let peer = session
+            .cached_peer(42)
+            .expect("user 42 is part of the sample session");
+        let PeerInfo::User { id, auth, .. } = peer else {
+            panic!("42 is a user, got {peer:?}");
+        };
+        assert_eq!(id, 42);
+        assert_eq!(
+            auth.map(|auth| auth.hash()),
+            Some(-1_234_567_890),
+            "the access hash is what addressing the peer needs"
+        );
+
+        assert!(
+            matches!(session.cached_peer(7), Some(PeerInfo::Chat { id: 7 })),
+            "a small group is found by the same rule"
+        );
+        assert!(
+            session.cached_peer(404).is_none(),
+            "a peer the session has never seen has no access hash to give"
         );
     }
 
