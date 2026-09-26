@@ -1,13 +1,11 @@
 //! The client, wrapping `telegram_framework::Client`. No `grammers` types leak
 //! out.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use domain::chat::Chat;
 
 use crate::error::ProtoError;
 use crate::stream::UpdateStream;
-use crate::types::ProtoChat;
+use crate::types::{ProtoChat, chat_kind};
 
 /// A Telegram client, as the rest of the workspace sees one.
 ///
@@ -26,28 +24,29 @@ use crate::types::ProtoChat;
 /// error — a client resumed from a warm session store is legitimately already
 /// in that state — but it is logged, because on a client that has just logged
 /// in it means the gap is resolved against an empty cache.
+///
+/// The framework records which side of that line a client is on, so the two
+/// wrappers cannot disagree about it and the warning needs no state of its own.
 #[derive(Debug)]
 pub struct ProtoClient {
     inner: telegram_framework::Client,
-    warm: Warmup,
 }
 
 impl ProtoClient {
     /// Wraps an authenticated framework client.
     #[must_use]
     pub fn new(inner: telegram_framework::Client) -> Self {
-        Self {
-            inner,
-            warm: Warmup::default(),
-        }
+        Self { inner }
     }
 
     /// Fetches the private conversations, newest first.
     ///
-    /// Only people: groups, channels and bots are fetched and then dropped. The
-    /// framework deliberately does not filter them, and this does not either —
-    /// it hands the whole list to [`domain::chat::filter_private`], so the
-    /// question of what televim displays has one answer in one place.
+    /// Only people: groups, channels and bots are dropped, and dropped before
+    /// anything is built for them. The framework classifies every dialog
+    /// faithfully — Telegram is the only thing that knows a peer's kind — and
+    /// the decision about what televim displays stays the domain's, applied
+    /// here through [`ChatKind::is_private`](domain::chat::ChatKind::is_private)
+    /// so that the fetch and the rule cannot drift apart.
     ///
     /// # Errors
     ///
@@ -56,15 +55,11 @@ impl ProtoClient {
     pub async fn fetch_private_chats(&self) -> Result<Vec<Chat>, ProtoError> {
         let dialogs = self.inner.fetch_dialogs().await?;
 
-        // Only a fetch that got all the way through warms the session, which is
-        // why this is recorded after the await and not before it.
-        self.warm.note_fetched();
-
-        Ok(domain::chat::filter_private(
-            dialogs
-                .into_iter()
-                .map(|dialog| Chat::from(ProtoChat::from(dialog))),
-        ))
+        Ok(dialogs
+            .into_iter()
+            .filter(|dialog| chat_kind(dialog.kind).is_private())
+            .map(|dialog| Chat::from(ProtoChat::from(dialog)))
+            .collect())
     }
 
     /// Subscribes to the updates Telegram sends for this account.
@@ -78,7 +73,7 @@ impl ProtoClient {
     ///
     /// Returns [`ProtoError::Framework`] if the feed has already been taken.
     pub fn subscribe_updates(&self) -> Result<UpdateStream, ProtoError> {
-        if !self.warm.is_warm() {
+        if !self.inner.has_fetched_dialogs() {
             tracing::warn!(
                 "subscribing to updates before the chat list was fetched; messages \
                  that arrived while offline may be missing"
@@ -86,66 +81,5 @@ impl ProtoClient {
         }
 
         Ok(UpdateStream::new(self.inner.subscribe_updates()?))
-    }
-}
-
-/// Whether the chat list has been fetched since this client was built.
-///
-/// The framework resolves a gap in the feed out of the session, and iterating
-/// the chat list is what writes the peer access hashes that resolution reads.
-/// A client resumed from a warm session store is already in that state; one
-/// that has just logged in is not. This tracks which of the two this client is,
-/// so that subscribing in the wrong order is visible in the log rather than
-/// silently losing events.
-///
-/// A latch rather than a lock: it carries no data, and there is nothing that
-/// could poison it. Relaxed ordering is enough for the same reason — the flag
-/// only ever goes one way, and the fetch that sets it is the only thing that
-/// can. A read that misses the store prints a warning that need not have been
-/// printed; it cannot suppress one that should have been.
-#[derive(Debug, Default)]
-struct Warmup(AtomicBool);
-
-impl Warmup {
-    /// Records that the chat list was fetched.
-    fn note_fetched(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    /// Whether the chat list has been fetched.
-    fn is_warm(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_client_is_cold_until_the_chat_list_is_fetched() {
-        let warm = Warmup::default();
-
-        assert!(
-            !warm.is_warm(),
-            "nothing has been fetched, so the session holds no peers"
-        );
-
-        warm.note_fetched();
-
-        assert!(warm.is_warm());
-    }
-
-    #[test]
-    fn fetching_again_leaves_a_client_warm() {
-        let warm = Warmup::default();
-
-        warm.note_fetched();
-        warm.note_fetched();
-
-        assert!(
-            warm.is_warm(),
-            "the flag is a latch; a second fetch has nothing left to change"
-        );
     }
 }

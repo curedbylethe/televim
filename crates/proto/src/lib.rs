@@ -64,7 +64,7 @@
 
 pub mod auth;
 pub mod error;
-pub mod types;
+mod types;
 
 #[cfg(feature = "live")]
 pub mod client;
@@ -72,7 +72,6 @@ pub mod client;
 pub mod stream;
 
 pub use error::ProtoError;
-pub use types::{ProtoChat, ProtoMessage};
 
 #[cfg(feature = "live")]
 pub use client::ProtoClient;

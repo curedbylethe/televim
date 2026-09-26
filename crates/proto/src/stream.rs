@@ -47,6 +47,18 @@ impl UpdateStream {
             Err(error) => Some(Err(error.into())),
         }
     }
+
+    /// How many updates the framework has discarded so far.
+    ///
+    /// Everything Telegram sends that is not a message in a private
+    /// conversation lands there, so a count that climbs while the account is
+    /// quiet is the filter doing its job — and a count that stays where it was
+    /// while something is known to be arriving says the filter is not running.
+    /// It is the only thing here that reports on what the feed threw away
+    /// rather than on what it kept.
+    pub fn dropped(&self) -> u64 {
+        self.inner.dropped()
+    }
 }
 
 /// Translates an event the framework described into the domain's vocabulary.

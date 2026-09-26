@@ -1,5 +1,13 @@
 //! Internal DTOs. Never expose `grammers` types from here.
 //!
+//! "Internal" is enforced rather than merely intended: this module is private
+//! to the crate and neither DTO is re-exported, so everything `proto` hands out
+//! is a `domain` type or this crate's own error.
+//!
+//! A DTO exists because a conversion between the framework's description and a
+//! `domain` type cannot be written in one step — both sides are foreign to this
+//! crate — so the DTO is the one place the two can meet.
+//!
 //! Each DTO has two conversions: one from the description `telegram-framework`
 //! produced, and one into the `domain` type. The first can only be compiled
 //! when the framework's client is — it is `live`-gated — while the second needs
@@ -20,7 +28,7 @@ use telegram_framework::{DialogInfo, DialogKind, MessageInfo};
 /// it from; `Chat` takes a `Cow` so that a caller building one from its own
 /// constant can still avoid the copy.
 #[derive(Debug, Clone)]
-pub struct ProtoChat {
+pub(crate) struct ProtoChat {
     pub id: i64,
     pub title: String,
 
@@ -54,7 +62,7 @@ pub struct ProtoChat {
 /// [`is_outgoing`](ProtoMessage::is_outgoing), and [`Message::status`] is
 /// derived from it.
 #[derive(Debug, Clone)]
-pub struct ProtoMessage {
+pub(crate) struct ProtoMessage {
     pub id: i64,
     pub chat_id: i64,
     pub text: String,
