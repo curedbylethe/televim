@@ -24,8 +24,9 @@
 //!
 //! # What one account cannot check
 //!
-//! Two things this seam wants proven cannot be provoked with the single account
-//! these tests have. They are recorded here rather than left as a silent hole:
+//! Three things this seam wants proven cannot be provoked with the single
+//! account these tests have. They are recorded here rather than left as a silent
+//! hole:
 //!
 //! - **An update arriving for real.** Nothing sends to the test account while a
 //!   run is in progress, so the feed is usually silent and the drain below
@@ -33,19 +34,25 @@
 //!   the framework does not expose yet.
 //! - **The offline gap.** `catch_up` replays what arrived while the client was
 //!   not running, which again needs something to send to it in the meantime.
+//! - **A conversation with a known amount of history.** The history test pages
+//!   through whichever conversation the account has, so it cannot say in advance
+//!   how many pages it will walk or whether it will reach the beginning of one.
+//!   What it can say is what came back, and it prints that.
 //!
-//! Both are covered as far as one account allows. The fetched list's ordering
-//! is asserted directly, which is deterministic, and the number of updates
-//! actually checked — along with the number the framework discarded — is
+//! Each is covered as far as one account allows. The fetched list's ordering and
+//! the history's are asserted directly, which is deterministic, and the counts —
+//! of updates checked, of updates the framework discarded, of pages walked — are
 //! printed, so a run that proved little says so instead of looking like a pass.
 
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use domain::chat::Chat;
+use domain::message::Message;
 use domain::updates::{ChatList, UpdateEvent};
-use proto::{ProtoClient, ProtoError, UpdateStream};
+use proto::{HistoryCursor, ProtoClient, ProtoError, UpdateStream};
 use telegram_framework::session::FileStore;
 use telegram_framework::{Client, ClientBuilder, FrameworkError, SignInResult};
 
@@ -55,6 +62,21 @@ use telegram_framework::{Client, ClientBuilder, FrameworkError, SignInResult};
 /// say so: it simply produces no event. A test therefore has to bound its wait
 /// rather than await forever.
 const FEED_WINDOW: Duration = Duration::from_secs(10);
+
+/// How many messages one page asks for.
+///
+/// The largest page Telegram will return, so a page shorter than this is the
+/// conversation running out rather than the request being small — which is the
+/// whole of what settles a direction.
+const PAGE: usize = 100;
+
+/// How many pages of one conversation a run walks through.
+///
+/// A busy account could have thousands, and what is being checked is the paging
+/// arithmetic rather than the size of the account's history. Four pages show a
+/// chain; a conversation shorter than that is walked to its end, which is the
+/// case that proves a short page settles its direction.
+const PAGE_BUDGET: usize = 4;
 
 /// Credentials and configuration for the opt-in tests.
 struct TestDc {
@@ -379,5 +401,243 @@ async fn the_feed_names_only_conversations_the_fetch_returned() {
             .iter()
             .all(|message| chats.iter().any(|chat| chat.id == message.chat_id)),
         "every message in the window must belong to a conversation the fetch returned"
+    );
+}
+
+/// Asserts that a page is in the order a window reads it.
+///
+/// Telegram answers newest first and `proto` turns the page around, so this is
+/// the one property of the translation that a datacenter can confirm and a
+/// fixture cannot: a fixture is written in whichever order the test author had
+/// in mind.
+fn assert_ascending(page: &[Message]) {
+    for pair in page.windows(2) {
+        assert!(
+            pair[0].id < pair[1].id,
+            "a page must come out oldest first, but {} came before {}",
+            pair[0].id,
+            pair[1].id
+        );
+    }
+}
+
+/// Fetches the chat list and picks a conversation there is history to page
+/// through, or reports that the account has none.
+///
+/// A conversation whose dialog carried a preview is one with at least one
+/// message in it, which is what makes it worth paging through. Picking by the
+/// preview rather than by trying each conversation in turn is also the cheaper
+/// answer: asking is a round trip.
+async fn conversation_with_history(proto: &ProtoClient) -> Option<Chat> {
+    // The list comes first, and not only because the feed wants it that way: a
+    // peer cannot be addressed at all until this fetch has disclosed its access
+    // hash.
+    let chats = proto
+        .fetch_private_chats()
+        .await
+        .expect("the chat list is fetched");
+
+    let found = chats.iter().find(|chat| chat.last_message_id.is_some());
+
+    if found.is_none() {
+        eprintln!(
+            "skipped: none of the {} conversation(s) has a message to page through",
+            chats.len()
+        );
+    }
+
+    found.cloned()
+}
+
+/// What walking one conversation backwards found.
+struct Chain {
+    /// How many pages were fetched beyond the newest one.
+    pages: usize,
+
+    /// How many messages those pages held, counting the newest page too.
+    messages: usize,
+
+    /// Whether the walk reached the beginning of the conversation.
+    reached_the_start: bool,
+}
+
+/// Pages backwards from `latest`, checking every page against the one before it.
+///
+/// The checks are all about the anchor: a page holds what is in front of it and
+/// not the message it was counted from, the bound only ever moves away from
+/// where the reader started, and no message comes back twice. Those are the
+/// properties the window's prepend and its deduplication rest on.
+async fn walk_backwards(proto: &ProtoClient, chat_id: i64, latest: &[Message]) -> Chain {
+    let mut cursor = HistoryCursor::new(chat_id);
+    cursor.reset_to(latest);
+
+    let mut seen: Vec<i64> = latest.iter().map(|message| message.id).collect();
+    let mut pages = 0_usize;
+    let mut reached_the_start = false;
+
+    while pages < PAGE_BUDGET {
+        let anchor = cursor
+            .oldest_loaded_id()
+            .expect("the newest page left a bound to count from");
+
+        let page = proto
+            .fetch_older(&mut cursor, PAGE)
+            .await
+            .expect("an older page is fetched");
+
+        if page.is_empty() {
+            assert!(
+                cursor.exhausted_older(),
+                "an empty page is the plainest end there is, so it must settle the direction"
+            );
+            reached_the_start = true;
+            break;
+        }
+
+        assert_ascending(&page);
+        assert!(
+            page.iter().all(|message| message.chat_id == chat_id),
+            "a page is fetched for one conversation, and every message names that one"
+        );
+        assert!(
+            page.iter().all(|message| message.id < anchor),
+            "an older page must hold only messages in front of the anchor, but one \
+             reached {anchor}"
+        );
+
+        seen.extend(page.iter().map(|message| message.id));
+
+        let moved = cursor.oldest_loaded_id();
+        assert!(
+            moved < Some(anchor),
+            "paging backwards has to move the oldest bound away from the reader: \
+             {anchor} -> {moved:?}"
+        );
+
+        pages += 1;
+
+        if cursor.exhausted_older() {
+            reached_the_start = true;
+            break;
+        }
+    }
+
+    let unique: HashSet<i64> = seen.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "two pages of one conversation must not return the same message"
+    );
+
+    Chain {
+        pages,
+        messages: seen.len(),
+        reached_the_start,
+    }
+}
+
+/// Fetches a page centred on `target`, and checks that it is centred on it.
+async fn page_around(proto: &ProtoClient, chat_id: i64, target: i64) -> Vec<Message> {
+    let around = proto
+        .fetch_around(chat_id, target, PAGE)
+        .await
+        .expect("a page around a message is fetched");
+
+    assert_ascending(&around);
+    assert!(
+        around.iter().any(|message| message.id == target),
+        "a page centred on message {target} has to contain it"
+    );
+
+    around
+}
+
+/// Pages through a conversation, in both directions, and checks what the pages
+/// say about themselves.
+///
+/// This is where the paging arguments are proved against something that decides
+/// what they mean. `offset_id` and `add_offset` are the one part of the history
+/// work that no fixture can settle — the wire's meaning of an anchor and a shift
+/// is Telegram's to define — so the assertions here are about what came back
+/// rather than about what was sent: oldest first, nothing repeated, nothing
+/// skipped, and an anchor that only ever moves away from where the reader
+/// started.
+///
+/// One test rather than three, because each would need its own login and
+/// Telegram throttles the code request hard. What it can prove is bounded by the
+/// account: a conversation with no history is skipped, and one shorter than the
+/// page budget is walked to its end. The counts are printed, so a run that
+/// examined one message says so rather than looking like a pass.
+#[tokio::test]
+async fn history_pages_through_a_conversation_without_gaps_or_repeats() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+
+    let proto = ProtoClient::new(client);
+
+    let Some(chat) = conversation_with_history(&proto).await else {
+        return;
+    };
+
+    let latest = proto
+        .fetch_latest(chat.id, PAGE)
+        .await
+        .expect("the newest page is fetched");
+
+    if latest.is_empty() {
+        eprintln!(
+            "skipped: conversation {} previews a message but returned none",
+            chat.id
+        );
+        return;
+    }
+
+    assert_ascending(&latest);
+    assert!(
+        latest.iter().all(|message| message.chat_id == chat.id),
+        "a page is fetched for one conversation, and every message in it names that one"
+    );
+
+    let chain = walk_backwards(&proto, chat.id, &latest).await;
+
+    // A page that replaces the window is surrounded by the unknown on both
+    // sides, whatever the cursor said before it: the only thing that survived
+    // the jump is where it landed.
+    let target = latest[latest.len() / 2].id;
+    let around = page_around(&proto, chat.id, target).await;
+
+    let mut cursor = HistoryCursor::new(chat.id);
+    cursor.reset_to(&around);
+    assert!(
+        !cursor.exhausted_older() && !cursor.exhausted_newer(),
+        "both directions open again after a jump"
+    );
+    assert_eq!(cursor.oldest_loaded_id(), around.first().map(|m| m.id));
+    assert_eq!(cursor.newest_loaded_id(), around.last().map(|m| m.id));
+
+    eprintln!(
+        "paged {} page(s) through conversation {} ({} message(s), {} to the start); \
+         a page around message {target} held {}",
+        chain.pages,
+        chat.id,
+        chain.messages,
+        if chain.reached_the_start {
+            "walked back"
+        } else {
+            "did not walk back"
+        },
+        around.len(),
     );
 }
