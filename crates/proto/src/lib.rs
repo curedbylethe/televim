@@ -50,8 +50,10 @@
 
 pub mod auth;
 pub mod client;
+pub mod error;
 pub mod stream;
 pub mod types;
 
 pub use client::ProtoClient;
+pub use error::ProtoError;
 pub use types::{ProtoChat, ProtoMessage};

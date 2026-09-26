@@ -3,6 +3,7 @@
 use domain::chat::Chat;
 use domain::message::Message;
 
+use crate::error::ProtoError;
 use crate::types::{ProtoChat, ProtoMessage};
 
 #[derive(Debug)]
@@ -38,12 +39,4 @@ impl Default for ProtoClient {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ProtoError {
-    #[error("not implemented")]
-    NotImplemented,
-    #[error("framework error: {0}")]
-    Framework(#[from] telegram_framework::FrameworkError),
 }
