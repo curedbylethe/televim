@@ -74,6 +74,10 @@ pub mod client;
 #[cfg(feature = "live")]
 pub mod raw;
 
+// Fixtures shared by the unit tests. Compiled only under `cargo test`.
+#[cfg(all(test, feature = "live"))]
+mod testing;
+
 pub use error::{AuthError, FrameworkError, RequestError, SessionError};
 pub use session::{
     AuthKey, ChannelKind, ChannelState, DcOption, FileStore, KeyringStore, MemoryStore, Peer,

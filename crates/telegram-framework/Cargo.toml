@@ -33,6 +33,9 @@ grammers-mtsender = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Compile-time assertions. Used to lock the "a login token cannot be cloned or
+# reused" guarantee with the compiler rather than with a convention.
+static_assertions = "1.1"
 
 [lints]
 workspace = true

@@ -17,6 +17,31 @@ use crate::session::{KeyringStore, SessionStore, StoreSession};
 /// rather than a rule the wrapper enforces.
 const CODE_REQUEST_COOLDOWN: Duration = Duration::from_secs(60);
 
+/// Remembers when a login code was last requested.
+///
+/// It lives in its own type so the cooldown decision can be tested without a
+/// client or a datacenter: the `warn!` is one line, and the comparison is the
+/// part that can be wrong.
+#[derive(Debug, Default)]
+struct CodeRequestLog {
+    last: Mutex<Option<Instant>>,
+}
+
+impl CodeRequestLog {
+    /// Records a request made at `now`, reporting whether it followed closely
+    /// enough on the previous one to be worth warning about.
+    fn record(&self, now: Instant) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+
+        let is_repeat = last.is_some_and(|previous| {
+            now.saturating_duration_since(previous) < CODE_REQUEST_COOLDOWN
+        });
+        *last = Some(now);
+
+        is_repeat
+    }
+}
+
 /// Builds a [`Client`].
 ///
 /// ```no_run
@@ -99,7 +124,7 @@ impl ClientBuilder {
             inner,
             api_hash: self.api_hash,
             session,
-            last_code_request: Mutex::new(None),
+            code_requests: CodeRequestLog::default(),
         })
     }
 }
@@ -128,7 +153,7 @@ pub struct Client {
     inner: grammers_client::Client,
     api_hash: String,
     session: Arc<StoreSession>,
-    last_code_request: Mutex<Option<Instant>>,
+    code_requests: CodeRequestLog,
 }
 
 impl fmt::Debug for Client {
@@ -183,9 +208,10 @@ impl Client {
     /// The token is consumed by the attempt, whether it succeeds or not; call
     /// [`Client::request_login_code`] again to retry.
     pub async fn sign_in(&self, token: &LoginToken, code: &str) -> Result<SignInResult, AuthError> {
-        if token.claim() {
-            return Err(AuthError::TokenAlreadyUsed);
-        }
+        // Claims the token before anything else: a second attempt has to fail
+        // here, where the reason is obvious, rather than against Telegram with
+        // a hash it has already burned.
+        token.claim()?;
         // Deliberately logs neither the phone number nor the code.
         tracing::debug!("submitting the telegram login code");
 
@@ -242,21 +268,12 @@ impl Client {
 
     /// Records a code request, warning when it follows closely on another.
     fn note_code_request(&self) {
-        let mut last = self
-            .last_code_request
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-
-        if let Some(previous) = *last
-            && previous.elapsed() < CODE_REQUEST_COOLDOWN
-        {
+        if self.code_requests.record(Instant::now()) {
             tracing::warn!(
                 cooldown_secs = CODE_REQUEST_COOLDOWN.as_secs(),
                 "a login code was requested very recently; telegram may throttle this one"
             );
         }
-
-        *last = Some(Instant::now());
     }
 
     /// Persists the session after a successful login, reporting a failure
@@ -268,5 +285,43 @@ impl Client {
                 "signed in, but the session could not be saved; the next launch will need a new login"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_code_request_is_not_flagged() {
+        let log = CodeRequestLog::default();
+        assert!(
+            !log.record(Instant::now()),
+            "there is nothing to compare a first request against"
+        );
+    }
+
+    #[test]
+    fn a_quick_second_code_request_is_flagged() {
+        let log = CodeRequestLog::default();
+        let start = Instant::now();
+
+        assert!(!log.record(start), "the first request is unremarkable");
+        assert!(
+            log.record(start + Duration::from_secs(1)),
+            "a request one second later is the retry the warning is for"
+        );
+    }
+
+    #[test]
+    fn a_code_request_after_the_cooldown_is_not_flagged() {
+        let log = CodeRequestLog::default();
+        let start = Instant::now();
+
+        assert!(!log.record(start));
+        assert!(
+            !log.record(start + CODE_REQUEST_COOLDOWN),
+            "exactly one cooldown later is no longer a retry"
+        );
     }
 }

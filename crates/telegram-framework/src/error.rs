@@ -206,3 +206,188 @@ impl AuthError {
         }
     }
 }
+
+/// The mapping from `grammers` errors onto this crate's own.
+///
+/// These are the only paths that run exclusively against a live datacenter, so
+/// without these tests the whole translation layer would be unverified on CI.
+#[cfg(all(test, feature = "live"))]
+mod tests {
+    use std::io;
+
+    use grammers_mtproto::authentication;
+    use grammers_mtproto::mtp::DeserializeError;
+    use grammers_mtproto::transport;
+
+    use super::*;
+    use crate::testing;
+
+    #[test]
+    fn an_rpc_error_keeps_its_code_name_and_value() {
+        let error = RequestError::from_invocation(&testing::rpc(420, "FLOOD_WAIT", Some(31)));
+
+        let RequestError::Rpc { code, name, value } = &error else {
+            panic!("expected an rpc error, got {error:?}");
+        };
+        assert_eq!(*code, 420);
+        assert_eq!(name, "FLOOD_WAIT");
+        assert_eq!(*value, Some(31));
+    }
+
+    #[test]
+    fn an_io_failure_is_reported_as_a_network_error() {
+        let error = RequestError::from_invocation(&InvocationError::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "reset by peer",
+        )));
+        assert!(matches!(error, RequestError::Network(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn a_deserialisation_failure_is_reported_as_such() {
+        let error = RequestError::from_invocation(&InvocationError::Deserialize(
+            DeserializeError::MessageBufferTooSmall,
+        ));
+        assert!(
+            matches!(error, RequestError::Deserialize(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_transport_failure_is_reported_as_a_network_error() {
+        let error = RequestError::from_invocation(&InvocationError::Transport(
+            transport::Error::MissingBytes,
+        ));
+        assert!(matches!(error, RequestError::Network(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn a_failed_key_exchange_is_reported_as_a_network_error() {
+        let error = RequestError::from_invocation(&InvocationError::Authentication(
+            authentication::Error::DhParamsFail,
+        ));
+        assert!(matches!(error, RequestError::Network(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn a_dropped_request_is_reported_as_dropped() {
+        assert!(matches!(
+            RequestError::from_invocation(&InvocationError::Dropped),
+            RequestError::Dropped
+        ));
+    }
+
+    #[test]
+    fn an_unknown_datacenter_is_reported_as_such() {
+        assert!(matches!(
+            RequestError::from_invocation(&InvocationError::InvalidDc),
+            RequestError::UnknownDatacenter
+        ));
+    }
+
+    #[test]
+    fn a_flood_wait_becomes_a_rate_limit_with_its_retry_delay() {
+        let error = AuthError::from_invocation(&testing::rpc(420, "FLOOD_WAIT", Some(31)));
+        assert!(
+            matches!(
+                error,
+                AuthError::RateLimited {
+                    retry_after: Some(31)
+                }
+            ),
+            "got {error:?}"
+        );
+    }
+
+    /// Telegram does not always use code 420; the name is the reliable signal.
+    #[test]
+    fn a_flood_named_error_is_rate_limited_without_code_420() {
+        let error = AuthError::from_invocation(&testing::rpc(400, "FLOOD_PREMIUM_WAIT", None));
+        assert!(
+            matches!(error, AuthError::RateLimited { retry_after: None }),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_rejected_phone_number_is_reported_as_invalid() {
+        for name in [
+            "PHONE_NUMBER_INVALID",
+            "PHONE_NUMBER_BANNED",
+            "PHONE_NUMBER_UNOCCUPIED",
+        ] {
+            let error = AuthError::from_invocation(&testing::rpc(400, name, None));
+            assert!(
+                matches!(error, AuthError::InvalidPhone),
+                "{name} gave {error:?}"
+            );
+        }
+    }
+
+    /// Anything that is not about credentials, throttling or the phone number
+    /// stays a network error, with the RPC details still reachable.
+    #[test]
+    fn anything_else_keeps_its_rpc_details() {
+        let error = AuthError::from_invocation(&testing::rpc(500, "INTERNAL", None));
+
+        let AuthError::NetworkError(RequestError::Rpc { code, name, .. }) = &error else {
+            panic!("expected the rpc error to pass through, got {error:?}");
+        };
+        assert_eq!(*code, 500);
+        assert_eq!(name, "INTERNAL");
+    }
+
+    #[test]
+    fn a_non_rpc_invocation_failure_still_becomes_a_network_error() {
+        let error = AuthError::from_invocation(&InvocationError::Dropped);
+        assert!(
+            matches!(error, AuthError::NetworkError(RequestError::Dropped)),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn every_sign_in_failure_maps_onto_its_own_error() {
+        assert!(matches!(
+            AuthError::from_sign_in(SignInError::InvalidCode),
+            AuthError::InvalidCode
+        ));
+        assert!(matches!(
+            AuthError::from_sign_in(SignInError::InvalidPassword),
+            AuthError::InvalidPassword
+        ));
+        assert!(matches!(
+            AuthError::from_sign_in(SignInError::SignUpRequired {
+                terms_of_service: None
+            }),
+            AuthError::SignUpRequired
+        ));
+    }
+
+    #[test]
+    fn a_password_challenge_maps_onto_password_required() {
+        let error = AuthError::from_sign_in(SignInError::PasswordRequired(
+            testing::password_token(Some("hint")),
+        ));
+        assert!(
+            matches!(error, AuthError::PasswordRequired),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_sign_in_failure_wrapping_an_rpc_error_is_mapped_through() {
+        let error =
+            AuthError::from_sign_in(SignInError::Other(testing::rpc(420, "FLOOD_WAIT", Some(5))));
+        assert!(
+            matches!(
+                error,
+                AuthError::RateLimited {
+                    retry_after: Some(5)
+                }
+            ),
+            "got {error:?}"
+        );
+    }
+}
