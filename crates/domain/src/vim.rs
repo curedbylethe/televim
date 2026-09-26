@@ -59,6 +59,17 @@ impl VimState {
         self.clamp();
     }
 
+    /// Move the cursor to `cursor`, clamped to the buffer.
+    ///
+    /// Every other movement here is relative, because a keystroke is. This one
+    /// is for a position that has to be *restored* rather than stepped to: a
+    /// window that moved underneath the reader keeps its place by message, and
+    /// looking that message up again yields an index.
+    pub fn set_cursor(&mut self, cursor: usize) {
+        self.cursor = cursor;
+        self.clamp();
+    }
+
     /// Replace the search-match list. Does not move the cursor.
     pub fn set_matches(&mut self, matches: Vec<usize>) {
         self.matches = matches;
@@ -249,6 +260,23 @@ mod tests {
         v.handle_char('j');
         v.handle_char('j');
         v.set_total(0);
+        assert_eq!(v.cursor(), 0);
+    }
+
+    #[test]
+    fn set_cursor_clamps_to_the_buffer() {
+        let mut v = VimState::new(3);
+        v.set_cursor(2);
+        assert_eq!(v.cursor(), 2);
+
+        v.set_cursor(99);
+        assert_eq!(v.cursor(), 2, "the cursor cannot leave the buffer");
+    }
+
+    #[test]
+    fn set_cursor_on_an_empty_buffer_stays_at_zero() {
+        let mut v = VimState::new(0);
+        v.set_cursor(5);
         assert_eq!(v.cursor(), 0);
     }
 }
