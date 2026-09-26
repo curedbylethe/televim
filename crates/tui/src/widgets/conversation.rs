@@ -98,18 +98,32 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     }
 }
 
-/// The panel's title: where in what is loaded the reader is.
+/// The panel's title: where in what is loaded the reader is, and what a search
+/// found there.
 ///
 /// Counted in messages rather than in lines, because that is the only measure
 /// the client has — how many lines a message wraps onto is a question about the
 /// width of a terminal.
 fn conversation_title(app: &App) -> String {
+    let search = search_note(app);
     let total = app.conversation.window.len();
     if total == 0 {
-        return " Conversation ".to_string();
+        return format!(" Conversation{search} ");
     }
 
-    format!(" Conversation ({}/{total}) ", app.vim.cursor() + 1)
+    format!(" Conversation ({}/{total}){search} ", app.vim.cursor() + 1)
+}
+
+/// What the title says about a search, if one is running.
+///
+/// The count is how many matches are held, which is the number of rows that can
+/// be marked; how many there are in all is the status line's to say.
+fn search_note(app: &App) -> String {
+    if !app.search().is_active() {
+        return String::new();
+    }
+
+    format!(" · {} match(es)", app.search().len())
 }
 
 /// One message as a row.
@@ -118,6 +132,11 @@ fn conversation_title(app: &App) -> String {
 /// their own: the panel's geometry assumes one message is one row, and a second
 /// line would revisit that. A reply reads as a prefix, before the body it
 /// answers; a pending or failed send reads as a suffix, after it.
+///
+/// A message a search matched has its spans patched with
+/// [`Theme::match_style`](crate::theme::Theme::match_style) rather than given a
+/// style of their own, so that the cursor's `REVERSED` selection composes on top
+/// of it instead of replacing it.
 fn message_line(app: &App, message: &Message, width: u16) -> ListItem<'static> {
     let who = if message.is_outgoing { "you" } else { "them" };
     let mut spans = vec![Span::styled(format!("[{who}] "), app.theme.text_dim)];
@@ -133,6 +152,12 @@ fn message_line(app: &App, message: &Message, width: u16) -> ListItem<'static> {
 
     if let Some(suffix) = status_suffix(app, message) {
         spans.push(suffix);
+    }
+
+    if app.search().is_match(message.id) {
+        for span in &mut spans {
+            span.style = span.style.patch(app.theme.match_style);
+        }
     }
 
     ListItem::new(Line::from(spans))
@@ -293,6 +318,13 @@ mod tests {
             .iter()
             .map(Cell::symbol)
             .collect()
+    }
+
+    /// One cell of the screen.
+    fn cell(buffer: &Buffer, x: u16, y: u16) -> &Cell {
+        let width = usize::from(buffer.area.width);
+
+        &buffer.content()[usize::from(y) * width + usize::from(x)]
     }
 
     /// One column of the screen, over the rows the messages are drawn on.
@@ -666,6 +698,75 @@ mod tests {
             row(&incoming, 23).contains("Delete their message from both sides? (y/n)"),
             "{}",
             row(&incoming, 23)
+        );
+    }
+
+    // ---- what a search marks -------------------------------------------
+
+    /// The sample conversation's seventh message is the only one containing
+    /// "benchmarks"; the panel draws the whole window, so it is the seventh
+    /// message row.
+    const MATCH_ROW: u16 = 7;
+
+    /// An application with a search whose match is on screen.
+    fn searched() -> App {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "benchmarks");
+        press(&mut app, KeyCode::Enter);
+        app
+    }
+
+    /// The first column of the conversation panel's body.
+    ///
+    /// The panel is the right two-thirds of the frame, so its border is at a
+    /// fixed column and the body starts one past it.
+    const BODY_X: u16 = 25;
+
+    #[test]
+    fn a_matched_message_row_is_marked_and_an_unmatched_one_is_not() {
+        use ratatui::style::Color;
+
+        let screen = screen(&searched(), 80, 24);
+
+        assert_eq!(
+            cell(&screen, BODY_X, MATCH_ROW).fg,
+            Color::Yellow,
+            "the matched row carries the match colour"
+        );
+        assert_ne!(
+            cell(&screen, BODY_X, 1).fg,
+            Color::Yellow,
+            "and an ordinary row does not: {}",
+            row(&screen, 1)
+        );
+    }
+
+    /// The cursor can stand on a match, so the two styles have to compose: the
+    /// row is both marked and selected, not one instead of the other.
+    #[test]
+    fn the_cursor_row_on_a_match_still_reads_as_the_cursor() {
+        use ratatui::style::{Color, Modifier};
+
+        let screen = screen(&searched(), 80, 24);
+        let cursor = cell(&screen, BODY_X, MATCH_ROW);
+
+        assert_eq!(cursor.fg, Color::Yellow, "the match marking is still there");
+        assert!(
+            cursor.modifier.contains(Modifier::REVERSED),
+            "and so is the selection: {:?}",
+            cursor.modifier
+        );
+    }
+
+    #[test]
+    fn the_match_count_is_in_the_panel_title() {
+        let screen = screen(&searched(), 80, 24);
+
+        assert!(
+            row(&screen, 0).contains("1 match(es)"),
+            "the title carries what the search found: {}",
+            row(&screen, 0)
         );
     }
 }
