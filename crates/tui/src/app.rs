@@ -1460,11 +1460,6 @@ mod tests {
         let app = App::mock();
 
         assert!(app.conversation.auto_follow());
-        assert_eq!(
-            app.conversation.anchor_id(),
-            None,
-            "a pinned view has no place to keep"
-        );
         assert_eq!(reading(&app), Some(10));
     }
 

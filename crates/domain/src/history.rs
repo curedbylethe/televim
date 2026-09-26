@@ -24,9 +24,16 @@
 //!
 //! A window moves under the reader: loading an older page puts messages in
 //! front of the one on screen, and a bounded window eventually drops the one
-//! behind. The position is therefore remembered by **message identifier**, never
-//! by line offset — how many lines a message wraps onto is a question about the
-//! width of a terminal, which nothing here knows or should.
+//! behind. Something therefore has to say where the reader was, and it is said by
+//! **message identifier**, never by line offset — how many lines a message wraps
+//! onto is a question about the width of a terminal, which nothing here knows or
+//! should, and an index means a different message on either side of a page.
+//!
+//! The identifier itself is not stored here. [`ConversationWindow::position_of`]
+//! is how one is looked up again, and the reader's place is held by whatever is
+//! already moving it — the cursor, on the side that draws. This module's part is
+//! the window it is looked up in and the one fact that says whether an arrival
+//! may move the reader at all.
 
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
@@ -291,22 +298,21 @@ impl ConversationWindow {
     }
 }
 
-/// The conversation on show, and where the reader is in it.
+/// The conversation on show, and whether the reader is following it.
 ///
-/// Two facts sit beside the window, both about position and neither about
-/// rendering. The anchor is which message the top of the viewport is on, so that
-/// a window that moved can put the reader back. Auto-follow is whether the view
-/// is pinned to the newest message, which is where a conversation opens and
-/// where `G` leaves it — and it is the reason an arrival can move the reader at
-/// all.
+/// One fact sits beside the window, and it is about position rather than
+/// rendering: whether the view is pinned to the newest message, which is where a
+/// conversation opens and where `G` leaves it — and it is the reason an arrival
+/// can move the reader at all.
+///
+/// Where in the window the reader is, is not kept here. It is the cursor's
+/// business, and [`ConversationWindow::position_of`] is how a cursor that has
+/// moved with the window is put back: the two halves are joined by a message
+/// identifier, which survives a page in a way an index does not.
 #[derive(Debug, Clone)]
 pub struct ConversationView {
     /// The messages of the open conversation.
     pub window: ConversationWindow,
-
-    /// The message the viewport is showing at its top edge, when the view is not
-    /// pinned to the bottom.
-    anchor_id: Option<i64>,
 
     /// Whether the view is pinned to the newest message.
     auto_follow: bool,
@@ -322,35 +328,14 @@ impl ConversationView {
     pub fn new(chat_id: i64) -> Self {
         Self {
             window: ConversationWindow::new(chat_id),
-            anchor_id: None,
             auto_follow: true,
         }
-    }
-
-    /// The message the viewport is showing at its top edge, if any.
-    #[must_use]
-    pub fn anchor_id(&self) -> Option<i64> {
-        self.anchor_id
     }
 
     /// Whether the view is pinned to the newest message.
     #[must_use]
     pub fn auto_follow(&self) -> bool {
         self.auto_follow
-    }
-
-    /// Records which message the viewport is showing at its top edge.
-    ///
-    /// Ignored while the view is pinned to the bottom, because a pinned view has
-    /// no position to preserve: it is *defined* by being at the end. That is
-    /// also what keeps the two facts from disagreeing — a following view is
-    /// never carrying an anchor for a window it has already moved past.
-    pub fn set_anchor(&mut self, message_id: Option<i64>) {
-        if self.auto_follow {
-            return;
-        }
-
-        self.anchor_id = message_id;
     }
 
     /// Pins the view to the newest message.
@@ -360,14 +345,13 @@ impl ConversationView {
     /// following means.
     pub fn follow(&mut self) {
         self.auto_follow = true;
-        self.anchor_id = None;
     }
 
     /// Unpins the view, so an arrival no longer moves the reader.
     ///
-    /// What scrolling up does. It does not set an anchor: the reader's position
-    /// is the cursor until the window moves under it, and only then does
-    /// something have to be remembered.
+    /// What scrolling up does. The reader's place in the window is not touched
+    /// here: they are where they were, and an arrival is simply no longer
+    /// entitled to move them off it.
     pub fn unfollow(&mut self) {
         self.auto_follow = false;
     }
@@ -737,10 +721,12 @@ mod tests {
         assert_eq!(ids(&window), vec![10, 11, 12]);
     }
 
-    // ---- anchor and following ------------------------------------------
+    // ---- where the reader is --------------------------------------------
 
     /// How a reader's position survives a window that moved: the identifier is
-    /// looked up again once it has.
+    /// looked up again once it has. The window is the half of that which lives
+    /// here; the cursor holding the identifier is the half on the other side of
+    /// the crate boundary.
     #[test]
     fn an_anchor_is_found_again_after_the_window_moves() {
         let mut window = window_with(&[10, 11, 12]);
@@ -775,6 +761,8 @@ mod tests {
         );
     }
 
+    // ---- following ------------------------------------------------------
+
     #[test]
     fn a_view_opens_pinned_to_the_bottom() {
         let view = ConversationView::new(42);
@@ -783,46 +771,47 @@ mod tests {
             view.auto_follow(),
             "a conversation opens where a reader expects to find it"
         );
-        assert_eq!(view.anchor_id(), None);
         assert!(view.window.is_empty());
     }
 
-    /// The invariant that keeps the two facts from disagreeing: a view that is
-    /// pinned to the end is not also remembering a position in the middle.
+    /// Following is the whole of the position this type holds, so the two
+    /// transitions are the whole of its surface: a reader who moves away from
+    /// the end is not moved back by an arrival, and one who returns is.
     #[test]
-    fn a_following_view_takes_no_anchor() {
+    fn moving_away_from_the_end_and_back_are_the_two_transitions() {
         let mut view = ConversationView::new(42);
 
-        view.set_anchor(Some(7));
-        assert_eq!(
-            view.anchor_id(),
-            None,
-            "a pinned view has no position to preserve"
+        view.unfollow();
+        assert!(
+            !view.auto_follow(),
+            "an arrival no longer has the right to move the reader"
         );
 
-        view.unfollow();
-        view.set_anchor(Some(7));
-        assert_eq!(view.anchor_id(), Some(7));
-
         view.follow();
-        assert_eq!(
-            view.anchor_id(),
-            None,
-            "pinning it again drops the position it was keeping"
+        assert!(
+            view.auto_follow(),
+            "and returning to the newest message takes that right back"
         );
     }
 
+    /// Unfollowing is a claim about arrivals, not a move: the reader is left
+    /// exactly where they were, and the window is not touched.
     #[test]
-    fn unfollowing_leaves_the_reader_where_they_were() {
+    fn unfollowing_moves_nothing() {
         let mut view = ConversationView::new(42);
+        view.window
+            .replace([message(42, 10, "text"), message(42, 11, "text")]);
 
         view.unfollow();
 
         assert!(!view.auto_follow());
         assert_eq!(
-            view.anchor_id(),
-            None,
-            "the cursor is the position until the window moves under it"
+            view.window
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![10, 11],
+            "the reader stays where they were, with the window they were reading"
         );
     }
 
