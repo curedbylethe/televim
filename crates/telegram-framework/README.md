@@ -47,7 +47,8 @@ crates/telegram-framework/
 │   ├── session.rs    # SessionData, SessionStore, and the three backends
 │   ├── client.rs     # ClientBuilder, Client, and the login flow  (`live`)
 │   ├── auth.rs       # LoginToken, PasswordToken, SignInResult     (`live`)
-│   └── raw.rs        # Client::invoke                              (`live`)
+│   ├── raw.rs        # Client::invoke                              (`live`)
+│   └── testing.rs    # Fixtures shared by the unit tests   (`test` + `live`)
 └── tests/
     └── auth_integration.rs   # Opt-in tests against a real datacenter
 ```
@@ -106,9 +107,13 @@ if !client.is_authorized().await? {
 
 `LoginToken` is **single use**. The flag is set the first time the token reaches
 `sign_in`, so a second attempt fails with `AuthError::TokenAlreadyUsed` instead
-of misbehaving against Telegram. If the code never arrives, or is mistyped,
-request a fresh one — `request_login_code` is rate limited per phone number, and
-a second call within a minute is logged at `warn`.
+of misbehaving against Telegram. That check runs before any request, which is
+what the integration test pins down with a deliberately wrong code. The token is
+also deliberately not `Clone` — a copy would be a second handle to a hash
+Telegram only redeems once — and a compile-time assertion keeps it that way. If
+the code never arrives, or is mistyped, request a fresh one — `request_login_code`
+is rate limited per phone number, and a second call within a minute is logged at
+`warn`.
 
 ## Session storage
 
@@ -136,6 +141,25 @@ if let Some(session) = store.load()? {
 
 store.clear()?;
 ```
+
+### Writing the session back
+
+The login methods write the session on success. Between logins, a few requests
+change it too — a datacenter migration, a peer learned from a response, a moved
+update counter — and those are what `StoreSession` tracks with a dirty flag:
+
+- `set_home_dc_id`, `set_dc_option`, `cache_peer` and `set_update_state` raise
+  the flag.
+- `Client::invoke` and `Client::is_authorized` flush it once the request that
+  raised it has finished, logging a failed write at `warn` rather than reporting
+  it as a failed request — the request itself succeeded.
+- `Client::persist_session` forces a write when a caller knows something changed.
+
+Flushing on a flag rather than on every mutation is deliberate: `grammers`
+consults the session on every request, and mirroring each of those to the OS
+credential store would put a keyring write in the request path. What this
+prevents is a mystery logout — a session that migrated datacenters but was never
+written back has no authorisation key for the datacenter it moved to.
 
 ### Security
 
@@ -187,36 +211,55 @@ method, because a hand-written wrapper per method is the surface this avoids.
 
 Unit tests cover the three backends, the snapshot encoding, the error `Display`
 implementations, the hex codec, and — most importantly — a full round trip
-through the `grammers` session adapter, which is what actually has to hold a
-real authorisation key. They run everywhere, including CI, and need nothing but
-`cargo test`.
+through the `grammers` session adapter, which is what actually has to hold a real
+authorisation key. They also cover the parts that would otherwise only ever run
+against a live datacenter: the single-use compare-and-swap on `LoginToken`
+(including under concurrent claims), the cooldown decision behind the login-code
+warning, and the whole `grammers` error mapping. They run everywhere, including
+CI, and need nothing but `cargo test`. The fixtures that stand in for what
+`grammers` would have built live in `src/testing.rs`.
 
-The keyring round-trip is `#[ignore]`d, because a headless machine has no
-credential store:
+The architectural rule this crate exists to enforce is asserted, not assumed:
+
+```console
+$ make boundary
+```
+
+It fails if `domain`, `proto`, `tui` or a default-featured `telegram-framework`
+picks up a `grammers` crate, and CI runs it on every change.
+
+Two checks need hardware CI does not have, so they live in the manual
+`Desktop checks` workflow. To run them by hand:
 
 ```console
 $ cargo test -p telegram-framework --all-features -- --ignored
-```
 
-The integration tests in `tests/auth_integration.rs` talk to a real datacenter
-and are opt-in:
-
-```console
 $ TELEVIM_TEST_DC=1 \
   TELEVIM_API_ID=… TELEVIM_API_HASH=… \
   TELEVIM_TEST_PHONE=+15551234567 TELEVIM_TEST_CODE=12345 \
   cargo test -p telegram-framework --all-features --test auth_integration
 ```
 
-Without `TELEVIM_TEST_DC=1` each test reports that it was skipped and returns,
-so CI stays green without credentials. Add `TELEVIM_TEST_PASSWORD` to exercise
-the two-factor branch. Note that each login test requests its own code and
-Telegram throttles that aggressively.
+The first is the keyring round trip, `#[ignore]`d because a headless machine has
+no credential store. The second is the opt-in datacenter run: without
+`TELEVIM_TEST_DC=1` each test reports that it was skipped and returns, so CI
+stays green without credentials. Add `TELEVIM_TEST_PASSWORD` to exercise the
+two-factor branch. Note that each login test requests its own code and Telegram
+throttles that aggressively.
 
 ## Not here yet
 
 This crate stops at the authentication boundary. Fetching chats and messages,
-sending and editing, resolving `InputPeer`s, filtering the update stream, and
-the `bumpalo`/`jemalloc` memory work all live outside it — as does writing the
-session back after a datacenter migration, which currently needs an explicit
-`Client::persist_session`.
+sending and editing, resolving `InputPeer`s, filtering the update stream, and the
+`bumpalo`/`jemalloc` memory work all live outside it.
+
+Two things are known gaps rather than deliberate scope cuts:
+
+- **The update stream is drained and counted, not consumed.** `ClientBuilder`
+  captures the pool's update receiver and a task discards what arrives, warning
+  once so the discard is never silent. The channel cannot grow without bound,
+  but nothing acts on an update yet; wiring it into `proto` is the next step.
+- **`check_password` takes the password as `&str`.** Its bytes stay in memory for
+  as long as the caller's buffer does. Zeroising our own copy would not help —
+  `grammers` holds the value across the SRP exchange — so this needs a decision
+  about who owns the buffer, not a one-line `zeroize`.
