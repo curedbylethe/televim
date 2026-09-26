@@ -77,23 +77,41 @@ impl VimState {
     }
 
     /// Feed a single character as if typed in Normal mode.
-    pub fn handle_char(&mut self, c: char) {
+    ///
+    /// Returns the motion the character applied, if it applied one: a character
+    /// that opens a sequence, and one this state has no meaning for, both move
+    /// nothing at all.
+    ///
+    /// The caller is told which, because two of these are more than motions to a
+    /// screen. `gg` is where a reader's unread messages start rather than the top
+    /// of what happens to be loaded, and `G` is the end of the conversation —
+    /// neither of which this state can know about, and both of which it would
+    /// otherwise hide behind an unchanged cursor.
+    pub fn handle_char(&mut self, c: char) -> Option<Motion> {
         if self.pending_g {
             self.pending_g = false;
             if c == 'g' {
                 self.apply_motion(Motion::First);
+                return Some(Motion::First);
             }
-            return;
+            return None;
         }
-        match c {
-            'j' => self.apply_motion(Motion::Down),
-            'k' => self.apply_motion(Motion::Up),
-            'g' => self.pending_g = true,
-            'G' => self.apply_motion(Motion::Last),
-            'n' => self.apply_motion(Motion::NextMatch),
-            'N' => self.apply_motion(Motion::PrevMatch),
-            _ => {}
-        }
+
+        let motion = match c {
+            'j' => Motion::Down,
+            'k' => Motion::Up,
+            'g' => {
+                self.pending_g = true;
+                return None;
+            }
+            'G' => Motion::Last,
+            'n' => Motion::NextMatch,
+            'N' => Motion::PrevMatch,
+            _ => return None,
+        };
+
+        self.apply_motion(motion);
+        Some(motion)
     }
 
     pub fn apply_motion(&mut self, motion: Motion) {
@@ -278,5 +296,28 @@ mod tests {
         let mut v = VimState::new(0);
         v.set_cursor(5);
         assert_eq!(v.cursor(), 0);
+    }
+
+    /// A cursor that did not move says nothing about why, so the motion is what
+    /// the caller is told: `gg` from the top and a lone `g` at the top leave the
+    /// cursor in the same place and mean different things.
+    #[test]
+    fn the_motion_a_character_applied_is_reported() {
+        let mut v = VimState::new(10);
+
+        assert_eq!(v.handle_char('g'), None, "the first `g` moves nothing yet");
+        assert_eq!(v.handle_char('g'), Some(Motion::First));
+
+        assert_eq!(v.handle_char('g'), None, "and the sequence starts over");
+        assert_eq!(
+            v.handle_char('x'),
+            None,
+            "a character that ends the sequence moves nothing"
+        );
+
+        assert_eq!(v.handle_char('G'), Some(Motion::Last));
+        assert_eq!(v.handle_char('j'), Some(Motion::Down));
+        assert_eq!(v.handle_char('n'), Some(Motion::NextMatch));
+        assert_eq!(v.handle_char('q'), None, "and a character with no meaning");
     }
 }

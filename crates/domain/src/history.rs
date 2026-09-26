@@ -381,6 +381,38 @@ impl ConversationView {
     }
 }
 
+/// The message a conversation's unread messages start at, as far as its
+/// numbering can say.
+///
+/// Telegram numbers messages within a conversation from one and reports how many
+/// of them are unread, so the first unread is the newest one counted back by the
+/// rest of them. That is arithmetic over two facts rather than a fact the client
+/// holds: nothing in the wire format says *which* message a reader stopped at.
+///
+/// Deletions leave gaps in the numbering, so this can land in front of the true
+/// first unread. That is what it is for. A message the client cannot name is a
+/// message no page can be fetched around, whereas a page *around* an estimate
+/// holds the real one whenever the estimate is close.
+///
+/// `None` when there is nothing unread, and when the conversation has no message
+/// to count back from.
+#[must_use]
+pub fn unread_target(last_message_id: Option<i64>, unread_count: u32) -> Option<i64> {
+    if unread_count == 0 {
+        return None;
+    }
+
+    let last = last_message_id?;
+    let unread = i64::from(unread_count);
+
+    // Counted back from the newest rather than forward to it, and floored at
+    // one: a message identifier below the first a conversation can have would
+    // name something that does not exist. A conversation whose count is larger
+    // than its numbering — every message deleted and the count left behind —
+    // saturates here rather than running off the end of the type.
+    Some(last.saturating_sub(unread.saturating_sub(1)).max(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,6 +839,56 @@ mod tests {
                 .map(|message| message.id)
                 .collect::<Vec<_>>(),
             vec![10, 11]
+        );
+    }
+
+    // ---- where the unread messages start --------------------------------
+
+    #[test]
+    fn nothing_unread_is_nothing_to_count_back_from() {
+        assert_eq!(unread_target(Some(112), 0), None);
+        assert_eq!(
+            unread_target(None, 0),
+            None,
+            "and a conversation with no message has nothing either way"
+        );
+    }
+
+    /// A count without a message to count from is a conversation whose preview
+    /// the client has not been given: there is nothing to subtract from.
+    #[test]
+    fn a_conversation_with_no_preview_has_no_first_unread() {
+        assert_eq!(unread_target(None, 3), None);
+    }
+
+    #[test]
+    fn the_first_unread_is_counted_back_from_the_newest() {
+        assert_eq!(
+            unread_target(Some(112), 3),
+            Some(110),
+            "the newest is 112, so three of them start at 110"
+        );
+        assert_eq!(
+            unread_target(Some(112), 1),
+            Some(112),
+            "one unread message is the newest one"
+        );
+    }
+
+    /// Identifiers start at one, so an estimate that would run off the front of
+    /// the numbering names the first message rather than one that cannot exist.
+    #[test]
+    fn an_estimate_never_reaches_before_the_first_message() {
+        assert_eq!(unread_target(Some(2), 5), Some(1));
+        assert_eq!(
+            unread_target(Some(3), u32::MAX),
+            Some(1),
+            "and a count larger than the conversation saturates rather than wrapping"
+        );
+        assert_eq!(
+            unread_target(Some(i64::MIN), 2),
+            Some(1),
+            "as does a newest identifier with nothing to count back into"
         );
     }
 }
