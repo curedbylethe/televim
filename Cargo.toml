@@ -50,6 +50,9 @@ tikv-jemallocator = "0.6"
 
 # Dev-only
 tempfile = "3"
+# Compile-time assertions. Used to lock the "a login token cannot be cloned or
+# reused" guarantee with the compiler rather than with a convention.
+static_assertions = "1.1"
 
 # Internal crates
 domain = { path = "crates/domain" }
