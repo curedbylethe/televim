@@ -374,6 +374,7 @@ mod tests {
             timestamp: 1_700_000_000,
             status: domain::message::MessageStatus::Received,
             is_outgoing: false,
+            reply_to: None,
         }
     }
 

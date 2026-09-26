@@ -237,6 +237,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Received,
             is_outgoing: false,
+            reply_to: None,
         }
     }
 
@@ -276,6 +277,7 @@ mod tests {
                     timestamp: 1_730_000_000 + id,
                     status: MessageStatus::Received,
                     is_outgoing: false,
+                    reply_to: None,
                 })
                 .collect(),
         );

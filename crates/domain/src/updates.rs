@@ -271,6 +271,7 @@ mod tests {
                 MessageStatus::Received
             },
             is_outgoing,
+            reply_to: None,
         }
     }
 

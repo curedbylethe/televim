@@ -660,6 +660,7 @@ mod tests {
                 timestamp: id,
                 status: MessageStatus::Received,
                 is_outgoing: false,
+                reply_to: None,
             })
             .collect()
     }

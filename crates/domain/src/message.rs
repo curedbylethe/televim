@@ -22,6 +22,14 @@ pub struct Message {
     pub timestamp: i64,
     pub status: MessageStatus,
     pub is_outgoing: bool,
+
+    /// Identifier of the message this one replies to, if it is a reply.
+    ///
+    /// The target is another message of the same conversation, named by the
+    /// same identifier space as [`Message::id`]. A locally composed reply
+    /// carries this from the moment it is written, before the server has
+    /// assigned the message an identifier of its own.
+    pub reply_to: Option<i64>,
 }
 
 impl Message {
@@ -44,6 +52,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Sent,
             is_outgoing: true,
+            reply_to: None,
         };
         assert!(m.is_from_self());
     }

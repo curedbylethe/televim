@@ -868,6 +868,7 @@ impl App {
                         timestamp: 0,
                         status: MessageStatus::Sent,
                         is_outgoing: true,
+                        reply_to: None,
                     };
                     self.apply_newer(vec![message]);
                 }
@@ -1143,6 +1144,7 @@ fn mock_messages() -> Vec<Message> {
             timestamp: 1_730_000_000 + to_id(i) * 60,
             status: MessageStatus::Received,
             is_outgoing: i % 2 == 0,
+            reply_to: None,
         })
         .collect()
 }
@@ -1162,6 +1164,7 @@ mod tests {
             timestamp: 1_730_000_000 + id,
             status: MessageStatus::Received,
             is_outgoing: false,
+            reply_to: None,
         }
     }
 
