@@ -506,6 +506,22 @@ impl App {
         })
     }
 
+    /// Ends the reader's wait for a jump, reporting whether it was still the one
+    /// being waited on.
+    ///
+    /// A page that failed, or came back empty, has to end it exactly as a page
+    /// that landed does. The reader stays where they were either way; what this
+    /// is for is that the key is free again — a jump nothing releases is a key
+    /// that never works again.
+    pub fn clear_jump(&mut self, target_id: i64) -> bool {
+        if self.pending_jump.map(|jump| jump.target_id) != Some(target_id) {
+            return false;
+        }
+
+        self.pending_jump = None;
+        true
+    }
+
     /// Replaces the window with a page fetched around a message the reader asked
     /// to be taken to, and puts them on it.
     ///
@@ -519,11 +535,9 @@ impl App {
     /// page does not hold it: the page is centred on the target, so that is the
     /// nearest the fetch came to where the reader was going.
     pub fn apply_jump(&mut self, page: &[Message], target_id: i64) -> bool {
-        if self.pending_jump.map(|jump| jump.target_id) != Some(target_id) {
+        if !self.clear_jump(target_id) {
             return false;
         }
-
-        self.pending_jump = None;
 
         if !self.page_belongs_to_open_chat(page) {
             return false;
@@ -2062,6 +2076,27 @@ mod tests {
 
         assert_eq!(app.conversation.window.len(), before);
         assert_eq!(app.pending_jump(), None, "and the jump is over");
+    }
+
+    /// A page for a target nobody is waiting for: the reader asked for one
+    /// place, and the fetch that comes back is for another.
+    #[test]
+    fn a_jump_page_for_another_target_is_refused() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+        let before = app.conversation.window.len();
+
+        assert!(!app.apply_jump(&page(&[16, 17, 18, 19, 20]), 18));
+
+        assert_eq!(app.conversation.window.len(), before);
+        assert_eq!(
+            app.pending_jump(),
+            Some(Jump {
+                peer_id: MOCK_CHAT,
+                target_id: 19,
+            }),
+            "the jump the reader did ask for is still the one being waited on"
+        );
     }
 
     /// `G` is the reader overriding a jump with "take me to the end": the page on
