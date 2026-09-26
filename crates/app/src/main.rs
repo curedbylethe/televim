@@ -16,6 +16,8 @@ use clap::Parser;
 #[command(name = "televim", version, about = "A Vim-style Telegram client")]
 struct Cli {
     /// Path to a TOML config file. Missing file -> defaults.
+    ///
+    /// The log goes beside it, under the same name with a `.log` extension.
     #[arg(long, default_value = "televim.toml")]
     config: std::path::PathBuf,
 }
@@ -23,5 +25,5 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = config::Config::load(&cli.config)?;
-    runtime::run(&cfg)
+    runtime::run(&cfg, &cli.config)
 }

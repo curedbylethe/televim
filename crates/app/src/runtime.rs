@@ -6,8 +6,11 @@
 //! and every pass through the loop ends by asking the network what the screen is
 //! about to need.
 
+use std::fs::File;
 use std::io::Stdout;
 use std::io::stdout;
+use std::path::Path;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -39,8 +42,11 @@ pub(crate) enum AppEvent {
 }
 
 /// Build a current-thread runtime (memory budget) and run the TUI.
-pub fn run(cfg: &Config) -> Result<()> {
-    init_tracing(cfg);
+///
+/// `config_path` is only where the log goes, and it is passed rather than
+/// derived so that the two cannot disagree about which run they belong to.
+pub fn run(cfg: &Config, config_path: &Path) -> Result<()> {
+    init_tracing(cfg, config_path);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -48,12 +54,33 @@ pub fn run(cfg: &Config) -> Result<()> {
     rt.block_on(run_async(cfg))
 }
 
-fn init_tracing(cfg: &Config) {
+/// Sends the diagnostics to a file beside the configuration.
+///
+/// Never the terminal. This program draws on it, and a `tracing` line written
+/// mid-frame lands on top of the screen — which a client that reaches the
+/// network produces as a matter of course, since `grammers` reports salts and
+/// re-sends at `info`. A log that shares the screen with the display is a
+/// display that comes apart on the first connection.
+///
+/// The destination is derived rather than configured, because a file beside the
+/// configuration is one whose whereabouts the reader already knows. A directory
+/// that cannot be written leaves the run with no log at all: worse than a log,
+/// and better than a screen nothing can be read from — and saying so would go
+/// to the one place the log cannot.
+fn init_tracing(cfg: &Config, config_path: &Path) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cfg.log_level));
+
+    let Ok(file) = File::create(config_path.with_extension("log")) else {
+        return;
+    };
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        // A file is not a terminal, so escape sequences would be read as text.
+        .with_ansi(false)
+        .with_writer(Mutex::new(file))
         .try_init();
 }
 
