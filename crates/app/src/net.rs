@@ -48,7 +48,7 @@ use telegram_framework::{
     SignInResult,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tui::app::{App, FetchDirection};
+use tui::app::{App, FetchDirection, Jump};
 
 use crate::config::Config;
 use crate::runtime::AppEvent;
@@ -100,6 +100,27 @@ pub enum Event {
         result: Result<Vec<Message>, ProtoError>,
     },
 
+    /// A page came back around a message the reader jumped to, or the fetch that
+    /// asked for it failed.
+    ///
+    /// Its own event rather than another direction, because what it replaces is
+    /// not an end of the window: the page lands somewhere the reader named, and
+    /// the only thing that says whether it is still wanted is the target.
+    Jumped {
+        /// What was asked for.
+        jump: Jump,
+
+        /// The cursor for the conversation the page belongs to.
+        ///
+        /// A page that replaces the window is the caller's to report, so the
+        /// cursor travels with the answer rather than being updated where the
+        /// fetch ran.
+        cursor: HistoryCursor,
+
+        /// The page, oldest first, or why there is not one.
+        result: Result<Vec<Message>, ProtoError>,
+    },
+
     /// An update arrived for a conversation televim displays.
     Update(UpdateEvent),
 }
@@ -125,6 +146,14 @@ struct History {
     /// open, or after a first page failed and there is nothing to count from.
     cursor: Option<HistoryCursor>,
 
+    /// The jump a page is on its way for, if one is.
+    ///
+    /// Kept beside the cursor rather than on the window for the same reason the
+    /// cursor is: it is about what has been *asked for*, and the window only
+    /// ever sees what came back. Without it the driver would ask again on the
+    /// next pass, which is a quarter of a second later.
+    jump: Option<Jump>,
+
     /// The earliest instant a page may be asked for again.
     retry_at: Option<Instant>,
 }
@@ -141,6 +170,9 @@ enum Wanted {
 
     /// A page from an end of what is loaded.
     Page(FetchDirection, HistoryCursor),
+
+    /// A page around a message the reader asked to be taken to.
+    Jump(Jump),
 }
 
 /// Starts the client, and reports to the loop once the screen can be filled.
@@ -276,9 +308,11 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
 /// be idempotent: what it decides is [`wanted`]'s, and what it does is start one
 /// fetch and record that it did.
 pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
-    // Nothing is open, so there is no conversation for a cursor to describe.
+    // Nothing is open, so there is no conversation for a cursor to describe —
+    // nor a jump to be waiting on, because closing a conversation forgets one.
     if app.conversation.window.chat_id == 0 {
         state.history.cursor = None;
+        state.history.jump = None;
     }
 
     let Some(client) = state.client.clone() else {
@@ -302,6 +336,21 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             app.begin_fetch(direction);
             request(&client, direction, cursor, tx);
         }
+
+        Wanted::Jump(jump) => {
+            // `wanted` only names a jump once the conversation has a cursor, so
+            // this is the same guard it read: a page that replaces a window has
+            // to be reported to the cursor that describes it.
+            let Some(cursor) = state.history.cursor else {
+                return;
+            };
+
+            // Recorded before the request, like the cursor above, and for the
+            // same reason: the reader holding the key must not turn into a
+            // request per pass.
+            state.history.jump = Some(jump);
+            request_jump(&client, jump, cursor, tx);
+        }
     }
 }
 
@@ -321,10 +370,22 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
 
     // A conversation the cursor does not name has just been opened, and the page
     // it needs is the newest one: there is nothing loaded to page from either
-    // end of.
+    // end of. A jump waits behind this rather than beside it, because its answer
+    // is reported to the same cursor and there is not one yet.
     let Some(cursor) = history.cursor.filter(|cursor| cursor.peer_id() == open) else {
         return Wanted::Latest(open);
     };
+
+    // A jump outranks paging: the window it is going to be answered in has not
+    // been fetched, so a page from an end of the one on show is work the
+    // replacement would throw away.
+    if let Some(jump) = app.pending_jump() {
+        return if history.jump == Some(jump) {
+            Wanted::Nothing
+        } else {
+            Wanted::Jump(jump)
+        };
+    }
 
     // Older first: a window shorter than the margin is near both of its ends at
     // once, and the reader is more often looking for what came before.
@@ -365,6 +426,33 @@ fn request(
         // The loop may have gone; there is then nothing to report the page to.
         let _ = tx.send(AppEvent::Net(Event::History {
             direction,
+            cursor,
+            result,
+        }));
+    });
+}
+
+/// Asks for a page around the message the reader jumped to, and hands the answer
+/// back to the loop.
+///
+/// The same shape as [`request`], and for the same reason: the round trip is its
+/// own task so that a jump does not stop the reader's keystrokes from being read.
+fn request_jump(
+    client: &Arc<ProtoClient>,
+    jump: Jump,
+    cursor: HistoryCursor,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+
+    tokio::spawn(async move {
+        let result = client
+            .fetch_around(jump.peer_id, jump.target_id, PAGE)
+            .await;
+
+        let _ = tx.send(AppEvent::Net(Event::Jumped {
+            jump,
             cursor,
             result,
         }));
@@ -424,6 +512,52 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                     if direction == FetchDirection::Latest {
                         state.history.cursor = None;
                     }
+                }
+            }
+        }
+
+        Event::Jumped {
+            jump,
+            mut cursor,
+            result,
+        } => {
+            // However it ended, the jump is over — unless a later one has taken
+            // its place, in which case that one is still on its way and must not
+            // be asked for again.
+            if state.history.jump == Some(jump) {
+                state.history.jump = None;
+            }
+
+            // A page was fetched for one conversation, and the reader can open
+            // another while it is in flight. The window refuses a page that is
+            // not its own; the cursor has to be refused here too, or it would
+            // start describing a conversation that is no longer on screen.
+            if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
+                return;
+            }
+
+            match result {
+                Ok(page) => {
+                    // Only a page the window took is worth telling the cursor
+                    // about: a jump the reader abandoned leaves it describing
+                    // what is still on screen.
+                    if app.apply_jump(&page, jump.target_id) {
+                        cursor.reset_to(&page);
+                        settle(app, cursor);
+                        state.history.cursor = Some(cursor);
+                    }
+                }
+
+                // The reader is left where they were, with the reason on the
+                // status line — and the wait is over, or the key would be wedged
+                // by one bad request. No backoff is set, unlike a paging fetch:
+                // this one was asked for by a keystroke rather than by the
+                // driver, so nothing is going to ask again on its own, and
+                // holding every direction would stall the paging the reader did
+                // not interrupt.
+                Err(error) => {
+                    app.clear_jump(jump.target_id);
+                    app.status = format!("history: {error}");
                 }
             }
         }
@@ -539,6 +673,31 @@ mod tests {
         app
     }
 
+    /// An application whose open conversation has unread messages in front of
+    /// what is loaded: the list says the conversation runs to 20, and the window
+    /// stops at 8.
+    ///
+    /// A second conversation is in the list so that opening another one is
+    /// something these tests can do — which is how a page in flight comes to be
+    /// one nobody is waiting for.
+    fn app_with_unread_out_of_reach(unread: u32) -> App {
+        let mut app = App::new();
+        let mut conversation = chat(CHAT);
+        conversation.unread_count = unread;
+        conversation.last_message_id = Some(20);
+        app.set_chats(vec![conversation, chat(CHAT + 1)]);
+        app.select_chat(0);
+        app.apply_latest(messages(CHAT, 1..=8));
+        app
+    }
+
+    /// Asks to be taken to the unread messages the way a reader does: `gg`.
+    fn ask_to_jump(app: &mut App) {
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+    }
+
     /// Moves the reader up, which is what disengages following.
     fn scroll_up(app: &mut App, times: usize) {
         for _ in 0..times {
@@ -550,6 +709,7 @@ mod tests {
     fn opened(peer_id: i64) -> History {
         History {
             cursor: Some(HistoryCursor::new(peer_id)),
+            jump: None,
             retry_at: None,
         }
     }
@@ -626,6 +786,48 @@ mod tests {
         );
     }
 
+    /// A jump the reader asked for is answered before paging — and asked for
+    /// once, however long the key is held.
+    #[test]
+    fn a_jump_the_reader_asked_for_outranks_paging() {
+        let mut app = app_with_unread_out_of_reach(2);
+        ask_to_jump(&mut app);
+
+        let jump = Jump {
+            peer_id: CHAT,
+            target_id: 19,
+        };
+        assert_eq!(app.pending_jump(), Some(jump), "counting back two from 20");
+        assert_eq!(
+            wanted(&app, opened(CHAT), Instant::now()),
+            Wanted::Jump(jump),
+            "and the page it lands in has not been fetched, so paging can wait"
+        );
+
+        let on_its_way = History {
+            jump: Some(jump),
+            ..opened(CHAT)
+        };
+        assert_eq!(
+            wanted(&app, on_its_way, Instant::now()),
+            Wanted::Nothing,
+            "one jump at a time"
+        );
+    }
+
+    /// A jump's answer is reported to the cursor the conversation is described
+    /// by, so it waits behind the first page rather than beside it.
+    #[test]
+    fn a_jump_waits_until_the_conversation_has_a_cursor() {
+        let mut app = app_with_unread_out_of_reach(2);
+        ask_to_jump(&mut app);
+
+        assert_eq!(
+            wanted(&app, History::default(), Instant::now()),
+            Wanted::Latest(CHAT)
+        );
+    }
+
     #[test]
     fn a_fetch_that_failed_holds_every_direction_until_its_backoff_passes() {
         let mut app = app_with_a_conversation(CHAT, 40);
@@ -634,6 +836,7 @@ mod tests {
 
         let holding = History {
             cursor: Some(HistoryCursor::new(CHAT)),
+            jump: None,
             retry_at: Some(now + RETRY),
         };
         assert_eq!(wanted(&app, holding, now), Wanted::Nothing);
@@ -732,6 +935,177 @@ mod tests {
         assert!(
             !app.is_fetching(FetchDirection::Older),
             "the direction is open again"
+        );
+    }
+
+    /// A page around a message the reader asked for replaces the window rather
+    /// than extending it, and the cursor is told so: it now describes the window
+    /// that is on screen, not the one that was.
+    #[test]
+    fn a_page_around_a_jump_replaces_the_window() {
+        let mut app = app_with_unread_out_of_reach(2);
+        ask_to_jump(&mut app);
+        let jump = app
+            .pending_jump()
+            .expect("the reader asked to be taken to the unread messages");
+        let mut state = State {
+            client: None,
+            history: opened(CHAT),
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        assert_eq!(app.conversation.window.len(), 5);
+        assert_eq!(
+            app.conversation
+                .window
+                .get(app.vim.cursor())
+                .map(|message| message.id),
+            Some(19),
+            "the reader is on the message the jump was for"
+        );
+        assert_eq!(app.pending_jump(), None, "and the jump is over");
+        assert!(
+            !app.conversation.window.exhausted_older && !app.conversation.window.exhausted_newer,
+            "a window that jumped is surrounded by the unknown on both sides"
+        );
+        assert_eq!(
+            state
+                .history
+                .cursor
+                .and_then(|cursor| cursor.oldest_loaded_id()),
+            Some(16),
+            "the cursor counts from the window that replaced the old one"
+        );
+    }
+
+    /// However a jump ended, it is over: a failure must not leave the key wedged,
+    /// and it must not hold up the paging the reader did not interrupt.
+    #[test]
+    fn a_failed_jump_says_so_and_leaves_the_key_free() {
+        let mut app = app_with_unread_out_of_reach(2);
+        ask_to_jump(&mut app);
+        let jump = app
+            .pending_jump()
+            .expect("the reader asked to be taken to the unread messages");
+        let mut state = State {
+            client: None,
+            history: opened(CHAT),
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert!(app.status.contains("history:"), "got {:?}", app.status);
+        assert_eq!(
+            app.pending_jump(),
+            None,
+            "asking again is one keystroke away, and a wedged key is not"
+        );
+        assert!(state.history.jump.is_none());
+        assert!(
+            state.history.retry_at.is_none(),
+            "nothing asks again on its own, so holding every direction would stall \
+             the paging the reader did not interrupt"
+        );
+        assert_eq!(
+            app.conversation.window.len(),
+            8,
+            "and the reader stayed where they were"
+        );
+    }
+
+    /// A page for a conversation the reader has left: the window refuses it, and
+    /// the cursor is not told about a page that did not land.
+    #[test]
+    fn a_jump_for_a_conversation_that_is_no_longer_open_is_dropped() {
+        let mut app = app_with_unread_out_of_reach(2);
+        ask_to_jump(&mut app);
+        let jump = app
+            .pending_jump()
+            .expect("the reader asked to be taken to the unread messages");
+        app.select_chat(1);
+
+        let mut state = State {
+            client: None,
+            history: opened(CHAT),
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        assert_eq!(
+            state
+                .history
+                .cursor
+                .and_then(|cursor| cursor.oldest_loaded_id()),
+            None,
+            "the cursor kept describing the conversation it was for"
+        );
+    }
+
+    /// A jump the reader overrode — `G`, take me to the end instead — leaves the
+    /// cursor describing what is still on screen.
+    #[test]
+    fn an_abandoned_jump_leaves_the_cursor_alone() {
+        let mut app = app_with_unread_out_of_reach(2);
+        ask_to_jump(&mut app);
+        let jump = app
+            .pending_jump()
+            .expect("the reader asked to be taken to the unread messages");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert_eq!(app.pending_jump(), None);
+
+        let mut state = State {
+            client: None,
+            history: opened(CHAT),
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        assert_eq!(
+            app.conversation.window.len(),
+            8,
+            "the window kept what it had"
+        );
+        assert_eq!(
+            state
+                .history
+                .cursor
+                .and_then(|cursor| cursor.oldest_loaded_id()),
+            None,
+            "and the cursor was not told about a window that was never replaced"
         );
     }
 
