@@ -33,6 +33,12 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # The `live` feature is what turns "only telegram-framework touches
+      # grammers" into something a machine can check, so the rule is asserted
+      # rather than assumed. See crates/proto/src/lib.rs for what may name `tl`.
+      - name: boundary
+        run: make boundary
+
       # `--all-features` enables `telegram-framework/live`; without it the
       # grammers-backed client is not even compiled. The tests that need a real
       # datacenter skip themselves unless `TELEVIM_TEST_DC` is set.

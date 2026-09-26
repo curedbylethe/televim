@@ -1,0 +1,68 @@
+name: Desktop checks
+
+# The checks that a hosted runner cannot do.
+#
+# Two of the safeguards around `telegram-framework` need something CI does not
+# have: a real OS credential store, and a Telegram account to log into. Both are
+# therefore manual, and both expect a self-hosted desktop runner carrying the
+# `desktop` label, with a keyring and — for the datacenter job — the `TELEVIM_*`
+# secrets configured.
+#
+# Run this before merging a change to `telegram-framework`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      login_code:
+        description: "The login code Telegram delivered to the test account"
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  keyring:
+    name: keyring round trip
+    runs-on: [self-hosted, desktop]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The keyring round trip is `#[ignore]`d everywhere else, because a
+      # headless machine has no credential store to round trip through. This is
+      # the run that actually proves the production backend works.
+      - name: ignored tests
+        run: cargo test -p telegram-framework --all-features -- --ignored
+
+  live-datacenter:
+    name: login / 2FA / pong against a real datacenter
+    runs-on: [self-hosted, desktop]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Opt-in integration tests. They spend a rate-limited login code per login
+      # test, which is why this is manual rather than on every push. Without a
+      # `login_code` input the login tests skip themselves and only the `pong`
+      # check runs.
+      - name: integration tests
+        run: cargo test -p telegram-framework --all-features --test auth_integration
+        env:
+          TELEVIM_TEST_DC: "1"
+          TELEVIM_API_ID: ${{ secrets.TELEVIM_API_ID }}
+          TELEVIM_API_HASH: ${{ secrets.TELEVIM_API_HASH }}
+          TELEVIM_TEST_PHONE: ${{ secrets.TELEVIM_TEST_PHONE }}
+          TELEVIM_TEST_CODE: ${{ inputs.login_code }}
+          TELEVIM_TEST_PASSWORD: ${{ secrets.TELEVIM_TEST_PASSWORD }}

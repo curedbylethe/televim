@@ -43,6 +43,18 @@ fmt-check: ## Check code formatting without modifying files (for CI)
 lint: ## Run clippy to catch common mistakes and improve code
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
 
+.PHONY: boundary
+boundary: ## Assert that only telegram-framework can reach grammers
+	@fail=0; \
+	for crate in domain proto tui telegram-framework; do \
+		if $(CARGO) tree -p $$crate 2>/dev/null | grep -q grammers; then \
+			echo "error: $$crate must not depend on grammers; see crates/proto/src/lib.rs"; \
+			fail=1; \
+		fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then exit 1; fi; \
+	echo "✅ no grammers outside telegram-framework's live feature"
+
 .PHONY: check
 check: ## Type-check the entire workspace (faster than a full build)
 	$(CARGO) check --all-targets
@@ -57,7 +69,7 @@ audit: ## Audit dependencies for security vulnerabilities (requires cargo-audit)
 
 # --- CI / Pre-commit ---
 .PHONY: ci
-ci: fmt-check lint test build-release ## Run all checks required for CI
+ci: fmt-check lint boundary test build-release ## Run all checks required for CI
 	@echo "✅ CI checks passed!"
 
 .PHONY: clean
