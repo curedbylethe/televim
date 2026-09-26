@@ -41,8 +41,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use domain::chat::Chat;
 use domain::message::Message;
+use domain::search::SEARCH_MATCHES;
 use domain::updates::UpdateEvent;
-use proto::{HistoryCursor, ProtoClient, ProtoError, UpdateStream};
+use proto::{HistoryCursor, ProtoClient, ProtoError, SearchResults, UpdateStream};
 use telegram_framework::{
     Client, ClientBuilder, FileStore, FrameworkError, KeyringStore, RequestError, SessionStore,
     SignInResult,
@@ -161,6 +162,28 @@ pub enum Event {
 
     /// An update arrived for a conversation televim displays.
     Update(UpdateEvent),
+
+    /// A search came back, or the request failed.
+    ///
+    /// Its own event rather than another direction: a search asks a different
+    /// question from "which page does this window need", and its answer writes
+    /// only the match list, never the window. The two cannot collide.
+    Searched {
+        /// The conversation it was for, so a result the reader has left can be
+        /// dropped.
+        chat_id: i64,
+
+        /// The query, echoed back.
+        ///
+        /// `chat_id` alone is not the whole identity of an answer: `/foo` and
+        /// then `/bar` inside one round trip means foo's answer would otherwise
+        /// land on bar's list and the label would name the wrong query. The
+        /// reader still wanting the answer is checked against this.
+        query: String,
+
+        /// The matching identifiers, oldest first, or why there are none.
+        result: Result<SearchResults, ProtoError>,
+    },
 }
 
 /// What the loop knows about the network between events.
@@ -558,6 +581,19 @@ fn request_action(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSende
                     result,
                 }));
             }
+
+            // A search is not an operation on the conversation's messages: it
+            // asks a question and returns places. It shares this task's shape
+            // for the same reason as the three above — a round trip here would
+            // stop the reader's keystrokes being read.
+            Action::Search { chat_id, query } => {
+                let result = client.search(chat_id, &query, SEARCH_MATCHES).await;
+                let _ = tx.send(AppEvent::Net(Event::Searched {
+                    chat_id,
+                    query,
+                    result,
+                }));
+            }
         }
     });
 }
@@ -577,6 +613,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
         }
+
+        Event::Searched {
+            chat_id,
+            query,
+            result,
+        } => apply_searched(app, chat_id, &query, result),
 
         Event::Sent {
             chat_id,
@@ -751,6 +793,43 @@ fn apply_deleted(app: &mut App, chat_id: i64, message_ids: &[i64], result: Resul
             if app.conversation.window.chat_id == chat_id {
                 app.flash(format!("delete: {}", failure_reason(&error)));
             }
+        }
+    }
+}
+
+/// Folds a search's answer in, or says why there is not one.
+///
+/// A failure never empties the local list: the reader asked a question and the
+/// window answered it, and a failed request says nothing about that answer. The
+/// reason travels with the search so the label can say the list is local.
+///
+/// It deliberately does **not** touch [`History::retry_at`]. That gate holds
+/// history *paging*, and a search that was throttled must not stall the
+/// conversation the reader is standing in — the wrong wiring here would be
+/// invisible until a reader noticed they could not scroll.
+fn apply_searched(
+    app: &mut App,
+    chat_id: i64,
+    query: &str,
+    result: Result<SearchResults, ProtoError>,
+) {
+    match result {
+        Ok(results) => {
+            tracing::debug!(
+                chat_id,
+                query,
+                found = results.ids.len(),
+                total = results.total,
+                "a search landed"
+            );
+            // Whether it landed is not acted on: a result for a conversation
+            // the reader has left, or for a query they have replaced, is
+            // refused by the screen and owes no redraw of its own.
+            app.apply_searched(chat_id, query, results.ids, results.total);
+        }
+        Err(error) => {
+            tracing::debug!(chat_id, query, %error, "a search failed");
+            app.search_failed(query, failure_reason(&error));
         }
     }
 }
@@ -1633,5 +1712,232 @@ mod tests {
             "got {:?}",
             failure_reason(&error)
         );
+    }
+
+    // ---- what a search answers ------------------------------------------
+
+    /// A search whose matches are the given places.
+    ///
+    /// The local pass is skipped: these tests are about matching an *answer* to
+    /// the question it was asked for, and a real window would only give the
+    /// fixture a list it then has to be reasoned about. The query is left as
+    /// *answering an unrelated search* would.
+    fn awaiting(query: &str) -> App {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        for c in query.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.take_action();
+        app
+    }
+
+    #[test]
+    fn a_search_result_lands_on_the_match_list() {
+        let mut app = awaiting("text");
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Searched {
+                chat_id: CHAT,
+                query: "text".to_owned(),
+                result: Ok(SearchResults {
+                    ids: vec![1, 3],
+                    total: 2,
+                }),
+            },
+        );
+
+        assert_eq!(app.search_query(), Some("text"));
+        assert_eq!(app.search().ids().to_vec(), vec![1, 3]);
+        assert_eq!(app.search().total(), 2);
+    }
+
+    #[test]
+    fn a_search_result_for_another_conversation_is_dropped() {
+        let mut app = awaiting("text");
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Searched {
+                chat_id: CHAT + 1,
+                query: "text".to_owned(),
+                result: Ok(SearchResults {
+                    ids: vec![9],
+                    total: 1,
+                }),
+            },
+        );
+
+        assert_eq!(
+            app.search().source(),
+            domain::search::SearchSource::Local,
+            "the local list is still the one on screen"
+        );
+        assert_eq!(app.search().total(), 3, "and not the dropped answer's");
+    }
+
+    #[test]
+    fn a_search_result_for_a_replaced_query_is_dropped() {
+        let mut app = awaiting("first");
+        let mut state = State::default();
+        // The first search is answered, and the reader then types another.
+        apply(
+            &mut app,
+            &mut state,
+            Event::Searched {
+                chat_id: CHAT,
+                query: "first".to_owned(),
+                result: Ok(SearchResults {
+                    ids: vec![2],
+                    total: 1,
+                }),
+            },
+        );
+        let _ = app.take_action();
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        for c in "second".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.take_action();
+
+        // The answer to the first search arrives while the second is being
+        // asked for: it must not overwrite what the reader is looking at.
+        apply(
+            &mut app,
+            &mut state,
+            Event::Searched {
+                chat_id: CHAT,
+                query: "first".to_owned(),
+                result: Ok(SearchResults {
+                    ids: vec![3],
+                    total: 1,
+                }),
+            },
+        );
+
+        assert_eq!(
+            app.search_query(),
+            Some("second"),
+            "the query the reader is asking still stands"
+        );
+        assert_eq!(
+            app.search().total(),
+            0,
+            "and the second search's own local list is untouched"
+        );
+    }
+
+    /// A failed search leaves the local list alone, and — the natural wrong
+    /// wiring — must not hold up history paging.
+    #[test]
+    fn a_failed_search_keeps_the_local_list_and_does_not_stall_paging() {
+        let mut app = awaiting("text");
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Searched {
+                chat_id: CHAT,
+                query: "text".to_owned(),
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert_eq!(
+            app.search().ids().to_vec(),
+            vec![1, 2, 3],
+            "the reader asked a question and the window answered it"
+        );
+        assert!(
+            state.history.retry_at.is_none(),
+            "search failure must not hold every direction of history paging"
+        );
+    }
+
+    #[test]
+    fn a_flood_wait_on_a_search_is_labelled_with_the_wait_it_asks_for() {
+        let mut app = awaiting("text");
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Searched {
+                chat_id: CHAT,
+                query: "text".to_owned(),
+                result: Err(ProtoError::Framework(FrameworkError::Request(
+                    RequestError::Rpc {
+                        code: 420,
+                        name: "FLOOD_WAIT".to_owned(),
+                        value: Some(42),
+                    },
+                ))),
+            },
+        );
+
+        assert!(
+            app.search().label().contains("flood wait, retry in 42s"),
+            "got {:?}",
+            app.search().label()
+        );
+    }
+
+    /// The old `gg` jump path is untouched by search, and a jump landing keeps
+    /// the match list so the next `n` works.
+    #[test]
+    fn a_search_survives_a_jump_page() {
+        let mut app = app_with_unread_out_of_reach(2);
+        let mut state = State {
+            client: None,
+            history: opened(CHAT),
+        };
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        for c in "text".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.take_action();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Searched {
+                chat_id: CHAT,
+                query: "text".to_owned(),
+                result: Ok(SearchResults {
+                    ids: vec![3, 19],
+                    total: 2,
+                }),
+            },
+        );
+
+        ask_to_jump(&mut app);
+        let jump = app
+            .pending_jump()
+            .expect("the reader asked to be taken to the unread messages");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        assert!(
+            app.search().is_active(),
+            "the landed page keeps the match list, so the next n works"
+        );
+        assert!(app.search().is_match(19));
     }
 }

@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
-use domain::history::{ConversationView, unread_target};
+use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
 use domain::message::{Message, MessageStatus};
 use domain::search::{SearchState, word_prefix_match};
 use domain::updates::{ChatList, UpdateEvent};
@@ -222,6 +222,19 @@ pub enum Action {
 
         /// The messages to delete.
         message_ids: Vec<i64>,
+    },
+
+    /// Search `chat_id` for `query`.
+    ///
+    /// A question rather than a fetch: it does not touch the window or the
+    /// cursor, and its answer is a list of identifiers matched back to the query
+    /// it was asked for.
+    Search {
+        /// The conversation to search.
+        chat_id: i64,
+
+        /// What to look for.
+        query: String,
     },
 }
 
@@ -1424,6 +1437,7 @@ impl App {
             return;
         };
 
+        let chat_id = self.conversation.window.chat_id;
         let ids: Vec<i64> = self
             .conversation
             .window
@@ -1434,10 +1448,16 @@ impl App {
 
         self.search.begin_local(&query, ids);
         self.land_on_match();
-        // The window's own answer is the only one this side can produce; the
-        // request for a better one is handed to the caller, which can reach the
-        // network, and lands through [`App::apply_searched`].
-        self.search.finish_local();
+
+        // A conversation the window holds in full cannot be searched better, so
+        // the round trip would be pure latency. Otherwise the request is handed
+        // to the caller, which can reach the network, and the answer arrives at
+        // [`App::apply_searched`].
+        if holds_everything(&self.conversation.window) {
+            self.search.finish_local();
+        } else {
+            self.queue_action(Action::Search { chat_id, query });
+        }
     }
 
     /// The query a search should run, resolving an empty one to the last search.
@@ -1688,6 +1708,22 @@ fn landing_position(len: usize, unread: u32) -> Option<usize> {
     let unread = usize::try_from(unread).unwrap_or(usize::MAX);
 
     (unread <= len).then(|| len - unread)
+}
+
+/// Whether the window holds the whole conversation.
+///
+/// The broad reading — "both ends exhausted means the window holds the whole
+/// conversation" — is false, because the window keeps its **newest**
+/// [`CONVERSATION_WINDOW`] messages and drops the rest from the front: a
+/// conversation whose ends have both been reached still holds no more than the
+/// cap. Only both-ended **and** shorter than the cap means nothing was ever
+/// dropped, which is precisely the conversation a full scan is cheapest in and a
+/// round trip would only delay.
+///
+/// A conversation exactly at the cap is excluded conservatively: that is a
+/// missed optimisation, not a wrong answer.
+fn holds_everything(window: &ConversationWindow) -> bool {
+    window.exhausted_older && window.exhausted_newer && window.len() < CONVERSATION_WINDOW
 }
 
 /// Whether a walk wrapped from one end of the match list to the other.
@@ -2452,25 +2488,74 @@ mod tests {
         );
     }
 
-    /// The local pass answers from the window, and the label says what the
-    /// answer is: a list of loaded matches rather than a final count.
+    /// The local pass is provisional: it can only see what is loaded, so the
+    /// label says so and a request is queued for the authoritative answer.
     #[test]
-    fn a_search_answers_from_the_window() {
+    fn a_search_is_provisional_until_the_server_answers() {
         let mut app = App::mock();
         run_search_line(&mut app, "benchmarks");
 
         assert_eq!(
             app.search().label(),
-            "/benchmarks — 1 loaded",
-            "the local list is all this side can produce"
+            "/benchmarks — 1 loaded — searching…",
+            "a count from the loaded window is not an answer"
         );
-        assert_eq!(app.search().source(), domain::search::SearchSource::Local);
+        assert_eq!(
+            app.take_action(),
+            Some(Action::Search {
+                chat_id: MOCK_CHAT,
+                query: "benchmarks".to_owned(),
+            }),
+            "so the server is asked"
+        );
+    }
+
+    /// A conversation the window holds in full cannot be searched better, so no
+    /// round trip is spent asking.
+    #[test]
+    fn a_search_over_a_complete_window_asks_nothing() {
+        let mut app = App::mock();
+        app.exhaust(FetchDirection::Older);
+        app.exhaust(FetchDirection::Newer);
+
+        run_search_line(&mut app, "benchmarks");
+
+        assert_eq!(app.take_action(), None, "there is nobody to ask");
+        assert_eq!(
+            app.search().label(),
+            "/benchmarks — 1 loaded",
+            "and the local list stands as the answer"
+        );
+    }
+
+    /// The broad reading of "the window holds everything" is wrong: the cap
+    /// drops the oldest messages, so both ends being reached says nothing.
+    #[test]
+    fn a_window_at_the_cap_is_not_the_whole_conversation() {
+        let mut window = ConversationWindow::new(MOCK_CHAT);
+        let over = i64::try_from(CONVERSATION_WINDOW).expect("the cap fits an identifier") + 5;
+        window.replace((1..=over).map(|id| message(id, "text")).collect::<Vec<_>>());
+        window.exhausted_older = true;
+        window.exhausted_newer = true;
+
+        assert_eq!(window.len(), CONVERSATION_WINDOW);
+        assert!(
+            !holds_everything(&window),
+            "the cap is the only thing that drops messages, and here it did"
+        );
+
+        let mut small = ConversationWindow::new(MOCK_CHAT);
+        small.replace(page(&[1, 2, 3]));
+        small.exhausted_older = true;
+        small.exhausted_newer = true;
+        assert!(holds_everything(&small), "nothing was ever dropped");
     }
 
     #[test]
     fn an_empty_query_repeats_the_last_search() {
         let mut app = App::mock();
         run_search_line(&mut app, "benchmarks");
+        let _ = app.take_action();
 
         run_search_line(&mut app, "");
 
@@ -2479,7 +2564,32 @@ mod tests {
             Some("benchmarks"),
             "as in Vim, an empty `/` runs the last search again"
         );
-        assert_eq!(app.search().label(), "/benchmarks — 1 loaded");
+        assert_eq!(
+            app.take_action(),
+            Some(Action::Search {
+                chat_id: MOCK_CHAT,
+                query: "benchmarks".to_owned(),
+            }),
+            "and asks again, because the answer may have changed"
+        );
+    }
+
+    /// The regression the bounded queue exists for: a search made inside the
+    /// tick a send was made in must not replace the send.
+    #[test]
+    fn sending_and_searching_in_one_tick_both_happen() {
+        let mut app = App::mock();
+
+        submit(&mut app, "ping");
+        run_search_line(&mut app, "benchmarks");
+
+        let first = app.take_action().expect("the send is still queued");
+        let second = app.take_action().expect("and so is the search");
+        assert!(
+            matches!(first, Action::Send { .. }),
+            "the send goes out first"
+        );
+        assert!(matches!(second, Action::Search { .. }));
     }
 
     #[test]
