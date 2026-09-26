@@ -7,9 +7,9 @@
 //! * **Session storage** — [`SessionData`], the [`SessionStore`] trait, and its
 //!   [`MemoryStore`], [`FileStore`] and [`KeyringStore`] backends. None of them
 //!   mentions `grammers`, so they are always compiled.
-//! * **The client** — [`ClientBuilder`], the phone → code → 2FA login flow, and
-//!   [`Client::invoke`] as a raw escape hatch. These need `grammers`, so they
-//!   sit behind the `live` feature.
+//! * **The client** — [`ClientBuilder`], the phone → code → 2FA login flow, the
+//!   [`Client::fetch_dialogs`] chat list, and [`Client::invoke`] as a raw escape
+//!   hatch. These need `grammers`, so they sit behind the `live` feature.
 //!
 //! # Why `live` is off by default
 //!
@@ -72,6 +72,8 @@ pub mod auth;
 #[cfg(feature = "live")]
 pub mod client;
 #[cfg(feature = "live")]
+pub mod dialogs;
+#[cfg(feature = "live")]
 pub mod raw;
 
 // Fixtures shared by the unit tests. Compiled only under `cargo test`.
@@ -88,6 +90,8 @@ pub use session::{
 pub use auth::{LoginToken, PasswordToken, SignInResult};
 #[cfg(feature = "live")]
 pub use client::{Client, ClientBuilder};
+#[cfg(feature = "live")]
+pub use dialogs::{DialogInfo, DialogKind};
 
 /// The `grammers` request and response types accepted by [`Client::invoke`].
 ///
