@@ -473,7 +473,8 @@ impl App {
     /// The estimate is arithmetic on identifiers, and identifiers have gaps
     /// wherever messages were deleted, so it can land in front of the true first
     /// unread. A window that ends where the conversation does is the exception,
-    /// and it is the common case — see [`App::landing_position`].
+    /// and it is the common case: the unread messages are then the newest ones
+    /// there are, so they are counted back from the end and land exactly.
     #[must_use]
     pub fn jump_to_unread(&mut self) -> Option<Jump> {
         if !self.has_conversation() {
