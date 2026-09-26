@@ -462,6 +462,12 @@ impl App {
 
         self.selected_chat = index;
         self.select_chat_none();
+        // The new view starts its placeholder ids at the bottom again, so an
+        // identifier the old view handed out can be handed out once more. That is
+        // safe only because a result for the old view cannot reach this one —
+        // whatever else changes here, that has to stay true. The counter is not
+        // carried across on purpose; `net`'s drop test is the executable form of
+        // this sentence.
         self.conversation = ConversationView::new(chat_id);
     }
 

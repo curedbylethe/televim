@@ -43,9 +43,10 @@ use domain::message::Message;
 /// rather than converted: saturating would turn it into a request for a message
 /// that does not exist, which is a worse answer than no answer at all.
 ///
-/// `peer_id` is only there for the log line: which conversation the impossible
-/// identifier was addressed to is the part a reader of the log wants, and it
-/// costs nothing to pass.
+/// `peer_id` travels with the error as well as into the log line: which
+/// conversation the impossible identifier was addressed to is the part that
+/// makes the failure actionable, and an error that named only the identifier
+/// would send the reader back to the log to find the peer.
 ///
 /// # Errors
 ///
@@ -58,7 +59,7 @@ pub(crate) fn narrow_id(id: i64, peer_id: i64) -> Result<i32, ProtoError> {
             message_id = id,
             "a message identifier outside telegram's range cannot be named in a request"
         );
-        ProtoError::MessageIdOutOfRange { id }
+        ProtoError::MessageIdOutOfRange { peer_id, id }
     })
 }
 
@@ -174,9 +175,12 @@ mod tests {
             assert!(
                 matches!(
                     narrow_id(id, 42),
-                    Err(ProtoError::MessageIdOutOfRange { id: got }) if got == id
+                    Err(ProtoError::MessageIdOutOfRange {
+                        peer_id: 42,
+                        id: got,
+                    }) if got == id
                 ),
-                "{id} cannot name a message"
+                "{id} cannot name a message, and the error has to name the peer it was for"
             );
         }
     }

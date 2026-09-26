@@ -72,6 +72,11 @@ pub const TEXT_LIMIT: usize = 4096;
 /// round trip, so a caller finds out that the text cannot be sent without
 /// spending a request to be told.
 ///
+/// Emptiness is checked first, and the order is load-bearing rather than
+/// incidental: whitespace-only text is comfortably inside the length limit yet
+/// trims to nothing, so reordering the two checks would report it as too long
+/// instead of as empty.
+///
 /// # Errors
 ///
 /// Returns [`FrameworkError::TextEmpty`] when `text` is empty or only
