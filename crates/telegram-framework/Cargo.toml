@@ -7,21 +7,32 @@ license.workspace = true
 
 [features]
 default = []
-# Enable the real grammers-backed implementation.
+# Compiles the `grammers`-backed client: `ClientBuilder`, the login/2FA flow and
+# the raw API escape hatch. It is off by default so that `proto`, `domain` and
+# `tui` can be proven, with `cargo tree`, to pull in no `grammers` crate at all.
+# Session storage and its backends are always available.
 live = [
     "dep:grammers-client",
     "dep:grammers-tl-types",
     "dep:grammers-mtproto",
+    "dep:grammers-mtsender",
 ]
 
 [dependencies]
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+keyring.workspace = true
 
 grammers-client = { workspace = true, optional = true }
 grammers-tl-types = { workspace = true, optional = true }
 grammers-mtproto = { workspace = true, optional = true }
+grammers-mtsender = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

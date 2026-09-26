@@ -20,11 +20,13 @@ tokio = { version = "1.53.1", features = ["full"] }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Telegram (git-sourced from Codeberg, pinned to the v0.8.0 tag).
 grammers-client = { git = "https://codeberg.org/Lonami/grammers.git", tag = "v0.8.0", default-features = false }
 grammers-tl-types = { git = "https://codeberg.org/Lonami/grammers.git", tag = "v0.8.0", default-features = false, features = ["tl-mtproto"] }
 grammers-mtproto = { git = "https://codeberg.org/Lonami/grammers.git", tag = "v0.8.0" }
+grammers-mtsender = { git = "https://codeberg.org/Lonami/grammers.git", tag = "v0.8.0" }
 
 # TUI
 ratatui = "0.30"
@@ -40,8 +42,14 @@ clap = { version = "4", features = ["derive"] }
 config = "0.15"
 
 # Utils
-keyring = "3"
+# `keyring` ships no default backend, so each supported platform store is
+# requested explicitly. They are target-gated, so enabling all of them is safe
+# on every platform; on Linux the Secret Service backend needs `libdbus`.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 tikv-jemallocator = "0.6"
+
+# Dev-only
+tempfile = "3"
 
 # Internal crates
 domain = { path = "crates/domain" }
