@@ -9,10 +9,10 @@
 //!   mentions `grammers`, so they are always compiled.
 //! * **The client** — [`ClientBuilder`], the phone → code → 2FA login flow, the
 //!   [`Client::fetch_dialogs`] chat list, the `fetch_history` message history,
-//!   [`Client::send_message`], [`Client::edit_message`] and
-//!   [`Client::delete_messages`], the [`Client::subscribe_updates`] feed, and
-//!   [`Client::invoke`] as a raw escape hatch. These need `grammers`, so they sit
-//!   behind the `live` feature.
+//!   [`Client::search_messages`], [`Client::send_message`],
+//!   [`Client::edit_message`] and [`Client::delete_messages`], the
+//!   [`Client::subscribe_updates`] feed, and [`Client::invoke`] as a raw escape
+//!   hatch. These need `grammers`, so they sit behind the `live` feature.
 //!
 //! # Why `live` is off by default
 //!
@@ -83,6 +83,8 @@ pub mod messages;
 #[cfg(feature = "live")]
 pub mod raw;
 #[cfg(feature = "live")]
+pub mod search;
+#[cfg(feature = "live")]
 pub mod updates;
 
 // Fixtures shared by the unit tests. Compiled only under `cargo test`.
@@ -105,6 +107,8 @@ pub use dialogs::{DialogInfo, DialogKind};
 pub use history::{HISTORY_LIMIT, HistoryArgs};
 #[cfg(feature = "live")]
 pub use messages::{TEXT_LIMIT, validate_text};
+#[cfg(feature = "live")]
+pub use search::{SEARCH_LIMIT, SearchArgs, SearchResults};
 #[cfg(feature = "live")]
 pub use updates::{MessageInfo, UpdateKind, UpdateSubscription};
 

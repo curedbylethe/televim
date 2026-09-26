@@ -115,7 +115,10 @@ impl HistoryArgs {
 }
 
 /// Clamps a requested page size into what Telegram accepts.
-fn clamp_limit(limit: usize) -> i32 {
+///
+/// Shared with the search module: a search page has the same wire bound as a
+/// history page, and one clamp rule is one fewer place for the two to disagree.
+pub(crate) fn clamp_limit(limit: usize) -> i32 {
     // Narrowed first, then clamped: a `usize` that does not fit the wire's
     // `i32` is already far past the largest page Telegram will return, so it
     // saturates instead of being converted.
