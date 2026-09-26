@@ -5,20 +5,20 @@
 //! crate.
 
 #[test]
-#[ignore = "requires termlens (see PR 6)"]
+#[ignore = "requires termlens"]
 fn launches_to_chat_list_in_normal_mode() {
     // TODO: spawn target/release/televim in a PTY; assert screen contains
     // "Chats", "Conversation", and "NORMAL".
 }
 
 #[test]
-#[ignore = "requires termlens (see PR 6)"]
+#[ignore = "requires termlens"]
 fn insert_mode_echoes_typing() {
     // TODO: send `i`, `h`, `i`, `Esc`; assert screen contains "hi".
 }
 
 #[test]
-#[ignore = "requires termlens (see PR 6)"]
+#[ignore = "requires termlens"]
 fn command_prompt_quits() {
     // TODO: send `:`, `q`, `Enter`; assert process exits.
 }

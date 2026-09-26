@@ -1,4 +1,4 @@
-//! Update subscription. Wire this to `telegram_framework::Updates` later.
+//! Update subscription. Wire this to the framework client's update stream later.
 
 use domain::message::Message;
 

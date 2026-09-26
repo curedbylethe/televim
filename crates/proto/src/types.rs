@@ -30,7 +30,8 @@ impl From<ProtoChat> for Chat {
             kind: if p.is_private {
                 ChatKind::Private
             } else {
-                ChatKind::Group // placeholder; PR 3 will refine
+                // Placeholder: this crate only carries private chats for now.
+                ChatKind::Group
             },
             last_message: p.last_message.map(std::borrow::Cow::Owned),
             unread_count: p.unread_count,
