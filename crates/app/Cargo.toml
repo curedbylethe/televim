@@ -9,10 +9,26 @@ license.workspace = true
 name = "televim"
 path = "src/main.rs"
 
+[features]
+# The tests that assemble a real client and talk to Telegram.
+#
+# Off by default, and it has to stay that way. Enabling it turns on both halves
+# of the client — the framework's `grammers`-backed one and the `proto` wrapper
+# around it — and the binary needs neither: it renders from its own state and
+# does not reach the network yet. Leaving it off is also what keeps a default
+# build of this crate free of `grammers`, which is the same property
+# `make boundary` asserts for the crates it covers.
+live = ["proto/live", "telegram-framework/live"]
+
 [dependencies]
 domain.workspace = true
 proto.workspace = true
 tui.workspace = true
+
+# Named directly rather than reached through `proto`: the tests build a
+# framework `Client` themselves, because `ProtoClient::new` takes one and the
+# login flow belongs to the framework.
+telegram-framework.workspace = true
 
 tokio.workspace = true
 anyhow.workspace = true
@@ -24,6 +40,11 @@ tracing-subscriber.workspace = true
 
 crossterm.workspace = true
 ratatui.workspace = true
+
+[dev-dependencies]
+# The integration tests keep their session in a scratch file, so a run never
+# touches the developer's own.
+tempfile.workspace = true
 
 [lints]
 workspace = true
