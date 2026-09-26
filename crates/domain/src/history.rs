@@ -38,7 +38,7 @@
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 
-use crate::message::Message;
+use crate::message::{Message, MessageStatus};
 use crate::updates::UpdateEvent;
 
 /// How many messages the conversation on show holds before the far end is
@@ -52,6 +52,16 @@ use crate::updates::UpdateEvent;
 /// cannot scroll out of what the client holds — and it is the number the memory
 /// budget pays for, not a preference.
 pub const CONVERSATION_WINDOW: usize = 200;
+
+/// How many failed sends a conversation explains at once.
+///
+/// Each entry is the reason one pending message failed, and the bound is what
+/// keeps a run of failures from growing without limit. Reaching it is a
+/// deliberate act: the interface permits one send in flight at a time, so eight
+/// undismissed failures means eight refusals in a row were left on screen. The
+/// oldest is dropped to make room — and its message is dismissed with it, so a
+/// `Failed` message is never left without the reason that explains it.
+pub const FAILED_REASONS: usize = 8;
 
 /// The messages of one conversation, oldest first.
 ///
@@ -129,16 +139,33 @@ impl ConversationWindow {
             .position(|message| message.id == message_id)
     }
 
-    /// Identifier of the oldest message in the window.
+    /// Identifier of the oldest message in the window the server has numbered.
+    ///
+    /// Identifiers at or below zero are local placeholders for a send that has
+    /// not been acknowledged — see [`ConversationView::queue_send`] — so they
+    /// are skipped. What a bound is for is asking Telegram for what lies beyond
+    /// it, and Telegram has no message numbered zero.
     #[must_use]
     pub fn oldest_id(&self) -> Option<i64> {
-        self.messages.front().map(|message| message.id)
+        self.messages
+            .iter()
+            .find(|message| is_numbered(message.id))
+            .map(|message| message.id)
     }
 
-    /// Identifier of the newest message in the window.
+    /// Identifier of the newest message in the window the server has numbered.
+    ///
+    /// Skips placeholders exactly as [`ConversationWindow::oldest_id`] does. A
+    /// pending send sorts after every real identifier — it is negative — and
+    /// would otherwise become "the newest message", poisoning everything that
+    /// counts on from there.
     #[must_use]
     pub fn newest_id(&self) -> Option<i64> {
-        self.messages.back().map(|message| message.id)
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| is_numbered(message.id))
+            .map(|message| message.id)
     }
 
     /// Replaces everything the window holds with `messages`.
@@ -296,6 +323,44 @@ impl ConversationWindow {
 
         self.messages.len() != before
     }
+
+    /// Removes one message by identifier, reporting whether it was there.
+    ///
+    /// Used for the local placeholder a send is rendered as: confirming it or
+    /// dismissing it takes the placeholder out, and the message it became joins
+    /// on its own terms.
+    fn remove(&mut self, message_id: i64) -> bool {
+        let before = self.messages.len();
+
+        self.messages.retain(|message| message.id != message_id);
+
+        self.messages.len() != before
+    }
+
+    /// Marks one message with a new status, reporting whether it was there.
+    fn set_status(&mut self, message_id: i64, status: MessageStatus) -> bool {
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        else {
+            return false;
+        };
+
+        message.status = status;
+        true
+    }
+}
+
+/// Whether an identifier names a message the server has numbered.
+///
+/// Telegram numbers real messages from one, so an identifier at or below zero is
+/// a local placeholder rather than a message anyone else can be told about. The
+/// distinction is load-bearing for [`ConversationWindow::oldest_id`] and
+/// [`ConversationWindow::newest_id`]: a placeholder that sorts after every real
+/// identifier must not be mistaken for the newest one.
+fn is_numbered(id: i64) -> bool {
+    id > 0
 }
 
 /// The conversation on show, and whether the reader is following it.
@@ -316,6 +381,20 @@ pub struct ConversationView {
 
     /// Whether the view is pinned to the newest message.
     auto_follow: bool,
+
+    /// Why each failed send failed, keyed by the placeholder's identifier.
+    ///
+    /// The reason is not on [`Message`], because it is not a fact about the
+    /// message — it is the outcome of one attempt to send it. Bounded by
+    /// [`FAILED_REASONS`], and an evicted reason takes its message with it.
+    failures: Vec<(i64, String)>,
+
+    /// The next placeholder identifier to hand out.
+    ///
+    /// Starts at `-1` and counts down. Negative, always, so a placeholder can
+    /// never collide with a real identifier: Telegram numbers messages with
+    /// positive `i32` values.
+    next_temp_id: i64,
 }
 
 impl ConversationView {
@@ -329,6 +408,8 @@ impl ConversationView {
         Self {
             window: ConversationWindow::new(chat_id),
             auto_follow: true,
+            failures: Vec::new(),
+            next_temp_id: -1,
         }
     }
 
@@ -362,6 +443,121 @@ impl ConversationView {
     #[must_use]
     pub fn apply_event(&mut self, event: &UpdateEvent) -> bool {
         self.window.apply_event(event)
+    }
+
+    /// Records the reader's own message before the server has acknowledged it.
+    ///
+    /// Returns the placeholder's identifier, which is what the caller matches the
+    /// attempt's outcome against — [`ConversationView::confirm_sent`] or
+    /// [`ConversationView::fail_send`]. It is always negative, counting down from
+    /// `-1`, and Telegram numbers real messages with positive `i32` values, so a
+    /// placeholder can never collide with one.
+    ///
+    /// The text is cloned once, into the message the reader will see. That is the
+    /// whole of the copy this path makes, and it runs once per submit: a shared
+    /// string would cost more to keep in step than it saves.
+    ///
+    /// The timestamp is zero, deliberately. [`ChatList`](crate::updates::ChatList)
+    /// only lets a message become the conversation's preview when it is at least
+    /// as recent as the one on show, so a placeholder stamped with the current
+    /// time could suppress the real message's preview when it arrives. `domain`
+    /// has no clock, and this is not the place to grow one.
+    pub fn queue_send(&mut self, text: &str, reply_to: Option<i64>) -> i64 {
+        let id = self.next_temp_id;
+        self.next_temp_id -= 1;
+
+        let message = Message {
+            id,
+            chat_id: self.window.chat_id,
+            text: Cow::Owned(text.to_owned()),
+            timestamp: 0,
+            status: MessageStatus::Sending,
+            is_outgoing: true,
+            reply_to,
+        };
+        self.window.push_back(std::iter::once(message));
+
+        id
+    }
+
+    /// Replaces a send's placeholder with the message the server accepted.
+    ///
+    /// Reports whether anything changed. The real message may already be in the
+    /// window — the arrival and the send's result race, and the arrival can win —
+    /// in which case it is recognised by identifier and not added twice, and this
+    /// is only the placeholder leaving.
+    pub fn confirm_sent(&mut self, temp_id: i64, real: Message) -> bool {
+        let removed = self.window.remove(temp_id);
+        let added = self.window.push_back(std::iter::once(real));
+        self.forget_failure(temp_id);
+
+        removed || added
+    }
+
+    /// Marks the send whose placeholder is `temp_id` as failed, and records why.
+    ///
+    /// Reports whether the placeholder was there to mark. Only acts on a
+    /// negative identifier: the only messages [`ConversationView::queue_send`]
+    /// creates are placeholders, so a `Failed` message is always one, and a
+    /// message the server has numbered is refused rather than marked.
+    pub fn fail_send(&mut self, temp_id: i64, reason: String) -> bool {
+        if is_numbered(temp_id) || !self.window.set_status(temp_id, MessageStatus::Failed) {
+            return false;
+        }
+
+        // The reason is replaced rather than appended to: a second outcome for
+        // one attempt is the same attempt's answer, not another failure.
+        self.forget_failure(temp_id);
+        self.failures.push((temp_id, reason));
+        self.trim_failures();
+
+        true
+    }
+
+    /// Takes a failed message and its reason out of the conversation.
+    ///
+    /// Reports whether either was there. The two leave together: a reason without
+    /// its message explains nothing, and a `Failed` message whose reason is gone
+    /// is a dead end with nothing left to clear it.
+    pub fn dismiss_failed(&mut self, temp_id: i64) -> bool {
+        let removed_message = self.window.remove(temp_id);
+        let before = self.failures.len();
+        self.forget_failure(temp_id);
+
+        removed_message || self.failures.len() != before
+    }
+
+    /// The message with this identifier, if the window holds it.
+    ///
+    /// Any message, not only a pending one: the reply excerpt looks up the
+    /// message a reply names, which is usually an ordinary one the server
+    /// numbered long ago.
+    #[must_use]
+    pub fn message(&self, message_id: i64) -> Option<&Message> {
+        self.window.iter().find(|message| message.id == message_id)
+    }
+
+    /// Why the message with this identifier failed, if it did.
+    #[must_use]
+    pub fn failure(&self, message_id: i64) -> Option<&str> {
+        self.failures
+            .iter()
+            .find(|(id, _)| *id == message_id)
+            .map(|(_, reason)| reason.as_str())
+    }
+
+    /// Forgets any reason recorded for a message.
+    fn forget_failure(&mut self, message_id: i64) {
+        self.failures.retain(|(id, _)| *id != message_id);
+    }
+
+    /// Drops the oldest failures until the bound holds, dismissing their
+    /// messages with them.
+    fn trim_failures(&mut self) {
+        while self.failures.len() > FAILED_REASONS {
+            let (id, _) = self.failures.remove(0);
+            self.window.remove(id);
+        }
     }
 }
 
@@ -543,9 +739,14 @@ mod tests {
 
         assert_eq!(window.len(), CONVERSATION_WINDOW);
         assert_eq!(
-            window.oldest_id(),
+            window.get(0).map(|message| message.id),
             Some(0),
             "the page that just arrived is kept"
+        );
+        assert_eq!(
+            window.oldest_id(),
+            Some(1),
+            "a bound names only a message the server numbered, not a placeholder"
         );
         assert_eq!(
             window.newest_id(),
@@ -880,5 +1081,262 @@ mod tests {
             Some(1),
             "as does a newest identifier with nothing to count back into"
         );
+    }
+
+    // ---- sending, and waiting for the server ---------------------------
+
+    /// A conversation with one message the server has already numbered.
+    fn view_with_a_message() -> ConversationView {
+        let mut view = ConversationView::new(42);
+        view.window.replace([message(42, 5, "hello")]);
+        view
+    }
+
+    #[test]
+    fn only_positive_identifiers_are_numbered_messages() {
+        assert!(is_numbered(1));
+        assert!(is_numbered(i64::MAX));
+        assert!(
+            !is_numbered(0) && !is_numbered(-1) && !is_numbered(i64::MIN),
+            "a placeholder is never a message the server knows about"
+        );
+    }
+
+    #[test]
+    fn a_queued_send_is_a_negative_placeholder_at_the_bottom() {
+        let mut view = view_with_a_message();
+
+        let id = view.queue_send("on its way", None);
+
+        assert_eq!(id, -1, "the first placeholder is minus one");
+        let queued = view.message(id).expect("the placeholder is in the window");
+        assert_eq!(queued.text, "on its way");
+        assert!(queued.is_outgoing, "the reader wrote it");
+        assert!(matches!(queued.status, MessageStatus::Sending));
+        assert_eq!(
+            queued.timestamp, 0,
+            "a placeholder must not be stamped with a time, or it could suppress the real preview"
+        );
+        assert_eq!(queued.chat_id, 42);
+        assert_eq!(queued.reply_to, None);
+    }
+
+    #[test]
+    fn a_placeholder_carries_the_reply_it_was_composed_with() {
+        let mut view = view_with_a_message();
+
+        let id = view.queue_send("answering", Some(5));
+
+        assert_eq!(
+            view.message(id).and_then(|message| message.reply_to),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn placeholders_count_down_and_are_never_reissued() {
+        let mut view = ConversationView::new(42);
+
+        let ids: Vec<i64> = (0..1_000).map(|_| view.queue_send("x", None)).collect();
+
+        assert!(
+            ids.iter().all(|id| *id < 0),
+            "a placeholder is always negative, so it cannot collide with a real id"
+        );
+        assert!(
+            ids.windows(2).all(|pair| pair[1] < pair[0]),
+            "each is below the last, so a stale result cannot be taken for a fresh one"
+        );
+    }
+
+    #[test]
+    fn confirming_a_send_replaces_the_placeholder_with_the_real_message() {
+        let mut view = view_with_a_message();
+        let id = view.queue_send("hello", None);
+
+        assert!(view.confirm_sent(id, message(42, 6, "hello")));
+
+        assert!(view.message(id).is_none(), "the placeholder is gone");
+        assert_eq!(
+            view.window
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+        assert_eq!(
+            view.window.newest_id(),
+            Some(6),
+            "the real message is the newest"
+        );
+    }
+
+    /// The race the two windows are meant to survive: the feed's arrival wins,
+    /// so the real message is already in the window when the send's result
+    /// arrives. Confirming must not add it twice.
+    #[test]
+    fn confirming_a_send_the_arrival_already_delivered_does_not_duplicate_it() {
+        let mut view = view_with_a_message();
+        let id = view.queue_send("hello", None);
+        assert!(view.apply_event(&arrival(42, 6, "hello")));
+
+        assert!(view.confirm_sent(id, message(42, 6, "hello")));
+
+        assert_eq!(
+            view.window.iter().filter(|message| message.id == 6).count(),
+            1,
+            "the real message appears once, whichever path delivered it"
+        );
+        assert!(view.message(id).is_none(), "and the placeholder has gone");
+    }
+
+    #[test]
+    fn confirming_a_send_with_no_placeholder_still_accepts_the_real_message() {
+        let mut view = ConversationView::new(42);
+
+        assert!(view.confirm_sent(-1, message(42, 6, "hello")));
+
+        assert_eq!(view.window.newest_id(), Some(6));
+    }
+
+    #[test]
+    fn a_failed_send_keeps_its_message_and_records_the_reason() {
+        let mut view = view_with_a_message();
+        let id = view.queue_send("hello", None);
+
+        assert!(view.fail_send(id, "flood wait, retry in 42s".to_owned()));
+
+        assert_eq!(
+            view.message(id).map(|message| message.status),
+            Some(MessageStatus::Failed)
+        );
+        assert_eq!(view.failure(id), Some("flood wait, retry in 42s"));
+        assert_eq!(
+            view.window.len(),
+            2,
+            "a failed send is still the reader's message, not a thing to hide"
+        );
+    }
+
+    #[test]
+    fn failing_a_send_again_replaces_the_reason_rather_than_stacking_it() {
+        let mut view = view_with_a_message();
+        let id = view.queue_send("hello", None);
+
+        assert!(view.fail_send(id, "first".to_owned()));
+        assert!(view.fail_send(id, "second".to_owned()));
+
+        assert_eq!(view.failure(id), Some("second"));
+    }
+
+    #[test]
+    fn failing_a_message_that_was_never_queued_does_nothing() {
+        let mut view = view_with_a_message();
+
+        assert!(
+            !view.fail_send(6, "nope".to_owned()),
+            "there is no placeholder with that identifier"
+        );
+        assert!(
+            !view.fail_send(5, "nope".to_owned()),
+            "a message the server numbered is not a pending send"
+        );
+
+        assert_eq!(view.failure(5), None);
+        assert_eq!(
+            view.message(5).map(|message| message.status),
+            Some(MessageStatus::Received),
+            "and the real message keeps the status it arrived with"
+        );
+    }
+
+    #[test]
+    fn dismissing_a_failed_send_removes_the_message_and_the_reason_together() {
+        let mut view = view_with_a_message();
+        let id = view.queue_send("hello", None);
+        view.fail_send(id, "no route".to_owned());
+
+        assert!(view.dismiss_failed(id));
+
+        assert!(view.message(id).is_none());
+        assert_eq!(
+            view.failure(id),
+            None,
+            "a reason with no message explains nothing"
+        );
+        assert!(
+            !view.dismiss_failed(id),
+            "dismissing the same failure again is a no-op"
+        );
+    }
+
+    /// The bound is what keeps a reader who ignores failure after failure from
+    /// growing the reasons without limit. Eviction is one operation over the
+    /// reasons and the window: the oldest reason leaves with its message, so a
+    /// surviving `Failed` message is never left unexplained.
+    #[test]
+    fn the_reasons_a_conversation_gives_are_bounded() {
+        let mut view = ConversationView::new(42);
+
+        let held: Vec<i64> = (0..=FAILED_REASONS)
+            .map(|_| {
+                let id = view.queue_send("x", None);
+                view.fail_send(id, "reason".to_owned());
+                id
+            })
+            .collect();
+
+        assert_eq!(held.len(), FAILED_REASONS + 1, "one more than the bound");
+        assert_eq!(view.failure(held[0]), None, "the oldest reason was evicted");
+        assert!(
+            view.message(held[0]).is_none(),
+            "and its message was dismissed with it"
+        );
+        assert_eq!(view.window.len(), FAILED_REASONS, "the bound holds");
+        assert_eq!(
+            view.failure(held[FAILED_REASONS]),
+            Some("reason"),
+            "the newest failure is the one that stays"
+        );
+    }
+
+    /// The invariant whose failure is invisible on screen: a placeholder sorts
+    /// after every real identifier, so a bound that read it as the newest would
+    /// have the client paging from a message Telegram has never heard of.
+    #[test]
+    fn a_pending_message_does_not_become_a_bound_to_page_from() {
+        let mut view = ConversationView::new(42);
+        view.window.replace(messages(5));
+
+        let id = view.queue_send("on its way", None);
+
+        assert_eq!(id, -1, "the placeholder sorts after every real identifier");
+        assert_eq!(
+            view.window
+                .get(view.window.len() - 1)
+                .map(|message| message.id),
+            Some(-1),
+            "and it really is the last row"
+        );
+        assert_eq!(
+            view.window.newest_id(),
+            Some(5),
+            "but the newest numbered message is still the one the server sent"
+        );
+        assert_eq!(view.window.oldest_id(), Some(1));
+    }
+
+    /// A send the reader never confirms still cannot grow the window past its
+    /// ceiling: the placeholder goes in the bottom and the oldest real message
+    /// falls off, which is what a failing send costs.
+    #[test]
+    fn the_window_stays_capped_however_many_sends_are_left_unconfirmed() {
+        let mut view = ConversationView::new(42);
+
+        for _ in 0..500 {
+            view.queue_send("x", None);
+        }
+
+        assert_eq!(view.window.len(), CONVERSATION_WINDOW);
     }
 }
