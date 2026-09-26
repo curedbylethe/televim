@@ -48,6 +48,7 @@ crates/telegram-framework/
 │   ├── client.rs     # ClientBuilder, Client, and the login flow  (`live`)
 │   ├── auth.rs       # LoginToken, PasswordToken, SignInResult     (`live`)
 │   ├── raw.rs        # Client::invoke                              (`live`)
+│   ├── search.rs     # Client::search_messages                     (`live`)
 │   └── testing.rs    # Fixtures shared by the unit tests   (`test` + `live`)
 └── tests/
     └── auth_integration.rs   # Opt-in tests against a real datacenter
@@ -281,6 +282,51 @@ Two things are deliberately absent rather than half-present:
   delete already uses would make each delete silently "for both".
 - **Cancelling a send that is already on its way.** That needs task-abort
   machinery this crate does not have.
+
+## Searching
+
+`Client::search_messages(peer_id, SearchArgs)` searches one conversation and
+returns **places, not messages**: a `SearchResults` holding the matching message
+identifiers and how many matches there are in all. That shape is the point —
+a match is only ever used to be gone to, and the page is fetched there by
+`fetch_history` with `HistoryArgs::around`. Building a message for every match
+would allocate and immediately drop every one of their bodies, which is the copy
+a search does not need.
+
+```rust
+use telegram_framework::{HistoryArgs, SearchArgs};
+
+let found = client
+    .search_messages(dialog.peer_id, SearchArgs::first("televim", 100))
+    .await?;
+
+println!("{} of {} match(es)", found.ids.len(), found.total);
+
+// Go to one: a page centred on it, oldest first.
+if let Some(&id) = found.ids.first() {
+    let page = client
+        .fetch_history(dialog.peer_id, HistoryArgs::around(id, 50))
+        .await?;
+}
+```
+
+`SearchArgs::first` takes the newest page; `SearchArgs::after` anchors a later
+one at a match, for callers that page through results. The page size is clamped
+to `SEARCH_LIMIT`, which is the same wire bound as `HISTORY_LIMIT`.
+
+Two facts about the answer are load-bearing:
+
+- **It is newest first**, the same as a history page — Telegram's order, left as
+  it arrives. A caller that walks a match list oldest first reverses it once.
+- **`total` is a number for every response variant.** A sliced answer carries
+  `count`, the total number of matches; an unsliced one, returned when every
+  match fits one page, has no `count` field at all, so its total is the number
+  of messages it holds. Reading `count` unconditionally would report zero on
+  exactly the small conversations a search is most used in.
+
+This is the same reasoning as history's, and it is why the crate invokes
+`messages.search` itself: `grammers`' own `search_messages` builder cannot set
+`add_offset`, `min_id` or `max_id`, and it buffers whole messages.
 
 ## Not here yet
 
