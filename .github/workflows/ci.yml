@@ -20,6 +20,11 @@ jobs:
           toolchain: "1.98.1"
           components: rustfmt, clippy
 
+      # `keyring`'s Linux backend talks to the Secret Service over DBus, which
+      # `libdbus-sys` links against at build time.
+      - name: system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
       - uses: Swatinem/rust-cache@v2
 
       - name: fmt
@@ -28,8 +33,11 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # `--all-features` enables `telegram-framework/live`; without it the
+      # grammers-backed client is not even compiled. The tests that need a real
+      # datacenter skip themselves unless `TELEVIM_TEST_DC` is set.
       - name: test
-        run: cargo test --all
+        run: cargo test --all --all-features
 
       - name: build-release
         run: cargo build --release

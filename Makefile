@@ -48,8 +48,8 @@ check: ## Type-check the entire workspace (faster than a full build)
 	$(CARGO) check --all-targets
 
 .PHONY: test
-test: ## Run all tests
-	$(CARGO) test --all
+test: ## Run all tests (all features, so the grammers-backed code is covered)
+	$(CARGO) test --all --all-features
 
 .PHONY: audit
 audit: ## Audit dependencies for security vulnerabilities (requires cargo-audit)
