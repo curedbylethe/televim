@@ -15,9 +15,12 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     };
 
     let hint = match app.mode {
-        Mode::Normal => " i/a: insert  v: visual  /: search  :: command  q: quit",
+        Mode::Normal => {
+            " i/a: insert  r: reply  e: edit  dd: delete  D: dismiss  v: visual  /: search  :: cmd  q: quit"
+        }
         Mode::Insert => "",
         Mode::Visual => " d: delete  y: yank  r: reply  Esc: cancel",
+        Mode::Confirm => " y: delete  n/Esc: cancel",
     };
 
     let line = if app.mode == Mode::Insert {

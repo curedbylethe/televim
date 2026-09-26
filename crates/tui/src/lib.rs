@@ -15,4 +15,4 @@ pub mod event;
 pub mod theme;
 pub mod widgets;
 
-pub use app::{App, FetchDirection, Jump, Mode, PromptKind};
+pub use app::{Action, App, ConfirmKind, FetchDirection, Jump, Mode, PromptKind};

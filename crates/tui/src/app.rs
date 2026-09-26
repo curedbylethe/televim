@@ -1,7 +1,10 @@
 //! Top-level TUI state.
 
-use std::borrow::Cow;
 use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use std::borrow::Cow;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
@@ -33,6 +36,33 @@ const ASSUMED_ROWS: usize = 20;
 
 /// What the status line shows before anything has happened.
 const IDLE_STATUS: &str = "televim";
+
+/// How long a transient status stays on the line before it reverts.
+///
+/// Only things that expire on their own are transient — a send or edit failure,
+/// a refusal. State the reader must not lose is written straight to the status
+/// and never carries a deadline.
+const FLASH_FOR: Duration = Duration::from_secs(5);
+
+/// The most characters a composed message may hold.
+///
+/// Telegram's own limit. Repeated here rather than reached for: `tui` may not
+/// name `telegram-framework`, and the cap is what stops a key held down from
+/// growing the buffer without bound. The framework checks the same number before
+/// the request, so the two cannot disagree about what is sendable.
+const MESSAGE_LIMIT: usize = 4096;
+
+/// The prompt the status line shows when a deletion of the reader's own message
+/// is waiting to be confirmed.
+pub const DELETE_OUTGOING_PROMPT: &str = "Delete your message from both sides? (y/n)";
+
+/// The prompt the status line shows when a deletion of the other side's message
+/// is waiting to be confirmed.
+///
+/// "from" rather than "for" on purpose: the reader is removing something from a
+/// record they do not solely own, and that asymmetry is the thing the wording
+/// has to carry.
+pub const DELETE_INCOMING_PROMPT: &str = "Delete their message from both sides? (y/n)";
 
 /// Which page of a conversation a fetch is asking for.
 ///
@@ -93,6 +123,7 @@ pub enum Mode {
     Normal,
     Insert,
     Visual,
+    Confirm,
 }
 
 impl Mode {
@@ -102,6 +133,7 @@ impl Mode {
             Mode::Normal => "NORMAL",
             Mode::Insert => "INSERT",
             Mode::Visual => "VISUAL",
+            Mode::Confirm => "CONFIRM",
         }
     }
 }
@@ -112,6 +144,75 @@ pub enum PromptKind {
     Message,
     Command,
     Search,
+    Reply,
+    Edit,
+}
+
+/// A destructive action waiting for the reader's `y`.
+///
+/// The message's direction is captured here, when the prompt is raised, rather
+/// than looked up again when `y` arrives: an arrival can evict the message while
+/// the prompt is up, and the wording has to keep describing what was asked
+/// about even then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmKind {
+    /// Delete one message. `id` is the message and `is_outgoing` says whose it
+    /// is, which is what the prompt's wording turns on.
+    DeleteMessage {
+        /// Identifier of the message to delete.
+        id: i64,
+
+        /// Whether the reader's own account sent it.
+        is_outgoing: bool,
+    },
+}
+
+/// Something the reader asked the interface to do that only the network side can.
+///
+/// The same idempotent hand-over as [`Jump`]: `tui` may not name `proto`, so an
+/// operation that needs the network is recorded here and taken once by the
+/// caller that owns both halves. Taking it clears it, so a caller that takes
+/// twice gets one action, not two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Send `text` to `chat_id` as a reply to `reply_to`, if any.
+    ///
+    /// `temp_id` is the placeholder the message is already rendered as, and is
+    /// what the outcome is matched back to.
+    Send {
+        /// The conversation to send to.
+        chat_id: i64,
+
+        /// The placeholder the message is rendered as.
+        temp_id: i64,
+
+        /// The text to send.
+        text: String,
+
+        /// The message to reply to, if this is a reply.
+        reply_to: Option<i64>,
+    },
+
+    /// Replace the text of `message_id` in `chat_id`.
+    Edit {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message to edit.
+        message_id: i64,
+
+        /// The text to replace it with.
+        text: String,
+    },
+
+    /// Delete messages from `chat_id`.
+    Delete {
+        /// The conversation the messages belong to.
+        chat_id: i64,
+
+        /// The messages to delete.
+        message_ids: Vec<i64>,
+    },
 }
 
 /// Which pages are in flight.
@@ -184,6 +285,37 @@ pub struct App {
     /// Set by `/` search: the query text.
     pub search_query: Option<String>,
 
+    /// The message the next composed message answers, if it is a reply.
+    pub reply_to: Option<i64>,
+
+    /// The message the buffer is editing, if it is an edit.
+    pub editing: Option<i64>,
+
+    /// Whether a `d` was just pressed and a second one would delete.
+    ///
+    /// The latch is what makes `dd` two presses: any other key, and any motion,
+    /// clears it, so `jd` does not delete.
+    pub pending_d: bool,
+
+    /// The placeholder of the send in flight, if one is.
+    ///
+    /// An `Option` rather than a flag so that a result is matched to the send it
+    /// answers: releasing the gate for a send that is no longer in flight is a
+    /// no-op, and a duplicate result cannot release a later send's gate.
+    pub sending: Option<i64>,
+
+    /// The deletion waiting to be confirmed, if one is.
+    pub confirm: Option<ConfirmKind>,
+
+    /// The operation the reader asked for, waiting to be taken by the caller.
+    ///
+    /// The outbound half of the [`Jump`] pattern: recorded here because `tui`
+    /// cannot reach the network, and taken once by the caller that can.
+    action: Option<Action>,
+
+    /// When a transient status stops applying, if it is transient.
+    status_until: Option<Instant>,
+
     /// The pages on their way from the network.
     fetching: Fetching,
 
@@ -232,6 +364,13 @@ impl App {
             status: IDLE_STATUS.to_string(),
             should_quit: false,
             search_query: None,
+            reply_to: None,
+            editing: None,
+            pending_d: false,
+            sending: None,
+            confirm: None,
+            action: None,
+            status_until: None,
             fetching: Fetching::default(),
             pending_jump: None,
             rows: Cell::new(ASSUMED_ROWS),
@@ -299,6 +438,10 @@ impl App {
         self.fetching.clear();
         self.pending_jump = None;
         self.search_query = None;
+        self.reply_to = None;
+        self.editing = None;
+        self.pending_d = false;
+        self.confirm = None;
     }
 
     // ---- what is on show ------------------------------------------------
@@ -377,11 +520,13 @@ impl App {
     }
 
     /// The message the cursor is on, if the window holds anything.
+    fn cursor_message(&self) -> Option<&Message> {
+        self.conversation.window.get(self.vim.cursor())
+    }
+
+    /// Identifier of the message the cursor is on, if the window holds anything.
     fn cursor_message_id(&self) -> Option<i64> {
-        self.conversation
-            .window
-            .get(self.vim.cursor())
-            .map(|message| message.id)
+        self.cursor_message().map(|message| message.id)
     }
 
     /// Whether `page` holds anything for the conversation on show.
@@ -721,6 +866,94 @@ impl App {
         }
     }
 
+    // ---- what the reader asked for --------------------------------------
+
+    /// Takes the operation the reader asked for, if there is one.
+    ///
+    /// Idempotent in the same way [`App::pending_jump`] is: once taken it is
+    /// cleared, and a caller that asks twice gets one action. The request is
+    /// handed over rather than made here because the network is the caller's.
+    pub fn take_action(&mut self) -> Option<Action> {
+        self.action.take()
+    }
+
+    /// Records that a send for `temp_id` is in flight.
+    ///
+    /// The identifier rather than a flag, so releasing the gate can be matched
+    /// to the send it answers.
+    pub fn begin_send(&mut self, temp_id: i64) {
+        self.sending = Some(temp_id);
+    }
+
+    /// Releases the in-flight gate, if it is still held for `temp_id`.
+    ///
+    /// A no-op for a send that has already been released, so a duplicate result
+    /// cannot clear the gate of a later one.
+    pub fn end_send(&mut self, temp_id: i64) {
+        if self.sending == Some(temp_id) {
+            self.sending = None;
+        }
+    }
+
+    /// Replaces a send's placeholder with the message the server accepted.
+    ///
+    /// Reports whether anything changed, so the caller knows whether a redraw is
+    /// owed.
+    pub fn confirm_sent(&mut self, temp_id: i64, real: Message) -> bool {
+        let anchor = self.cursor_message_id();
+        let changed = self.conversation.confirm_sent(temp_id, real);
+        if changed {
+            self.after_window_change(anchor);
+        }
+        changed
+    }
+
+    /// Marks a send as failed, keeping the message and recording why.
+    ///
+    /// Reports whether the placeholder was there to mark.
+    pub fn fail_send(&mut self, temp_id: i64, reason: String) -> bool {
+        self.conversation.fail_send(temp_id, reason)
+    }
+
+    /// Removes a failed message and the reason recorded for it.
+    ///
+    /// Reports whether either was there.
+    pub fn dismiss_failed(&mut self, temp_id: i64) -> bool {
+        let anchor = self.cursor_message_id();
+        let changed = self.conversation.dismiss_failed(temp_id);
+        if changed {
+            self.after_window_change(anchor);
+        }
+        changed
+    }
+
+    // ---- transient status -----------------------------------------------
+
+    /// Shows `text` on the status line for a while, then reverts.
+    ///
+    /// For things that pass on their own: a send that failed, a refusal. State
+    /// the reader must not lose is written straight to [`App::status`], which
+    /// never carries a deadline.
+    pub fn flash(&mut self, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_until = Some(Instant::now() + FLASH_FOR);
+    }
+
+    /// Reverts a transient status once its time is up.
+    ///
+    /// Reports whether a redraw is owed. Called from the loop, which already
+    /// runs on a timer: a status cannot expire during a frame, because a frame
+    /// is drawn from a shared reference.
+    pub fn expire_status(&mut self, now: Instant) -> bool {
+        if self.status_until.is_none_or(|at| now < at) {
+            return false;
+        }
+
+        self.status_until = None;
+        IDLE_STATUS.clone_into(&mut self.status);
+        true
+    }
+
     // ---- key handling --------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -734,6 +967,7 @@ impl App {
             Mode::Normal => self.handle_normal(key),
             Mode::Insert => self.handle_insert(key),
             Mode::Visual => self.handle_visual(key),
+            Mode::Confirm => self.handle_confirm(key),
         }
     }
 
@@ -741,17 +975,22 @@ impl App {
         // A screenful at a time, which is what a terminal scrolls by. Bound here
         // rather than in the motion table because how much a page is depends on
         // how tall the panel turned out to be.
+        //
+        // A control key is not `d`, so the latch is cleared here rather than per
+        // arm: `Ctrl+d` is a page, not the first half of a deletion.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('d') => self.page(true),
                 KeyCode::Char('u') => self.page(false),
-                _ => {}
+                _ => self.pending_d = false,
             }
             return;
         }
 
         match key.code {
             KeyCode::Char(c) if matches!(c, 'j' | 'k' | 'g' | 'G' | 'n' | 'N') => {
+                // Any motion moves the cursor off whatever a first `d` was about.
+                self.pending_d = false;
                 let motion = self.vim.handle_char(c);
 
                 match motion {
@@ -774,25 +1013,179 @@ impl App {
                 self.settle_follow();
             }
             KeyCode::Char('i' | 'a') => {
-                self.mode = Mode::Insert;
-                self.prompt = PromptKind::Message;
-                self.input.clear();
+                self.pending_d = false;
+                self.start_compose();
+            }
+            KeyCode::Char('r') => {
+                self.pending_d = false;
+                self.start_reply();
+            }
+            KeyCode::Char('e') => {
+                self.pending_d = false;
+                self.start_edit();
+            }
+            KeyCode::Char('d') => self.pending_delete(),
+            KeyCode::Char('D') => {
+                self.pending_d = false;
+                self.dismiss_failed_at_cursor();
             }
             KeyCode::Char('v') => {
+                self.pending_d = false;
                 self.mode = Mode::Visual;
                 self.status = "VISUAL: d=delete y=yank r=reply (stubs)".into();
             }
             KeyCode::Char('/') => {
+                self.pending_d = false;
                 self.mode = Mode::Insert;
                 self.prompt = PromptKind::Search;
                 self.input.clear();
             }
             KeyCode::Char(':') => {
+                self.pending_d = false;
                 self.mode = Mode::Insert;
                 self.prompt = PromptKind::Command;
                 self.input.clear();
             }
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => {
+                self.pending_d = false;
+                self.should_quit = true;
+            }
+            // Any other key is not the second `d`, so it clears the latch.
+            _ => self.pending_d = false,
+        }
+    }
+
+    /// Opens the buffer for a new message, with no reply and no edit.
+    fn start_compose(&mut self) {
+        self.mode = Mode::Insert;
+        self.prompt = PromptKind::Message;
+        self.reply_to = None;
+        self.editing = None;
+        self.input.clear();
+    }
+
+    /// Opens the buffer to answer the message under the cursor.
+    ///
+    /// Replying needs a message to answer; with the window empty there is none,
+    /// and the key does nothing rather than opening a reply to nowhere.
+    fn start_reply(&mut self) {
+        let Some(id) = self.cursor_message_id() else {
+            return;
+        };
+
+        self.mode = Mode::Insert;
+        self.prompt = PromptKind::Reply;
+        self.reply_to = Some(id);
+        self.editing = None;
+        self.input.clear();
+    }
+
+    /// Opens the buffer with the cursor's own message in it, for editing.
+    ///
+    /// Both refusals are the same fact — there is nothing on the server to edit
+    /// yet — so they share one line. A key that does nothing and says nothing
+    /// reads as a hang, and this one is hit constantly now that `dd` accepts an
+    /// incoming message.
+    fn start_edit(&mut self) {
+        let Some(message) = self.cursor_message() else {
+            return;
+        };
+
+        if message.id <= 0 {
+            self.flash("it hasn't been sent yet");
+            return;
+        }
+        if !message.is_outgoing {
+            self.flash("you can only edit your own messages");
+            return;
+        }
+
+        let text = message.text.to_string();
+        let id = message.id;
+
+        self.mode = Mode::Insert;
+        self.prompt = PromptKind::Edit;
+        self.editing = Some(id);
+        self.reply_to = None;
+        self.input = text;
+    }
+
+    /// Handles a `d`: the first latches, the second asks to delete.
+    ///
+    /// Deletion is allowed on any real message, incoming included: Telegram
+    /// permits it, and a private chat does remove the other side's words. A
+    /// placeholder is refused because it has no identifier the server knows:
+    /// an in-flight one is still on its way, and a failed one is the reader's to
+    /// dismiss with `D` instead.
+    fn pending_delete(&mut self) {
+        let Some((id, is_outgoing, status)) = self
+            .cursor_message()
+            .map(|message| (message.id, message.is_outgoing, message.status))
+        else {
+            self.pending_d = false;
+            return;
+        };
+
+        if id <= 0 {
+            self.pending_d = false;
+            // The two refusals differ because a failed message has a `D` to
+            // offer and one still in flight does not: pointing at `D` for a
+            // message on its way would be wrong.
+            self.flash(if matches!(status, MessageStatus::Failed) {
+                "that message never left — D dismisses it"
+            } else {
+                "that message is still on its way"
+            });
+            return;
+        }
+
+        if !self.pending_d {
+            self.pending_d = true;
+            return;
+        }
+
+        self.pending_d = false;
+        self.mode = Mode::Confirm;
+        self.confirm = Some(ConfirmKind::DeleteMessage { id, is_outgoing });
+    }
+
+    /// Dismisses the failed message under the cursor, if that is what it is.
+    fn dismiss_failed_at_cursor(&mut self) {
+        let Some((id, status)) = self
+            .cursor_message()
+            .map(|message| (message.id, message.status))
+        else {
+            return;
+        };
+
+        if !matches!(status, MessageStatus::Failed) {
+            return;
+        }
+
+        let anchor = self.cursor_message_id();
+        if self.conversation.dismiss_failed(id) {
+            self.after_window_change(anchor);
+        }
+    }
+
+    /// Handles a key while a confirmation is up.
+    fn handle_confirm(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') => {
+                if let Some(ConfirmKind::DeleteMessage { id, .. }) = self.confirm {
+                    let chat_id = self.conversation.window.chat_id;
+                    self.action = Some(Action::Delete {
+                        chat_id,
+                        message_ids: vec![id],
+                    });
+                }
+                self.confirm = None;
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.confirm = None;
+                self.mode = Mode::Normal;
+            }
             _ => {}
         }
     }
@@ -802,7 +1195,11 @@ impl App {
     /// Landing on the newest message re-engages following and moving away from
     /// it disengages, on the same rule as `j` and `k`, so a page and a line
     /// cannot disagree about whether the view is pinned.
+    ///
+    /// A page is a motion, so a `d` waiting for its second press is forgotten
+    /// here as surely as it is by `j`.
     fn page(&mut self, down: bool) {
+        self.pending_d = false;
         let step = self.rows.get().max(1);
         let last = self.conversation.window.len().saturating_sub(1);
 
@@ -822,12 +1219,22 @@ impl App {
                 self.mode = Mode::Normal;
                 self.prompt = PromptKind::Message;
                 self.input.clear();
+                self.reply_to = None;
+                self.editing = None;
             }
             KeyCode::Backspace => {
                 self.input.pop();
             }
             KeyCode::Enter => self.submit(),
-            KeyCode::Char(c) => self.input.push(c),
+            KeyCode::Char(c) => {
+                // Capped in characters, which is the unit Telegram counts, so a
+                // key held down cannot grow the buffer past what can be sent.
+                if self.input.chars().count() < MESSAGE_LIMIT {
+                    self.input.push(c);
+                } else {
+                    self.flash("message is too long");
+                }
+            }
             _ => {}
         }
     }
@@ -854,25 +1261,15 @@ impl App {
         }
     }
 
+    /// Handles `Enter` in Insert mode.
+    ///
+    /// Which prompt it is decides what is handed over; the buffer and the reply
+    /// context are cleared either way, because the work leaves here rather than
+    /// happening here.
     fn submit(&mut self) {
         match self.prompt {
-            PromptKind::Message => {
-                // A message belongs to a conversation, so there has to be one
-                // open for it to belong to. Nothing is sent yet; the message is
-                // shown because the reader typed it.
-                if !self.input.is_empty() && self.has_conversation() {
-                    let message = Message {
-                        id: self.next_message_id(),
-                        chat_id: self.conversation.window.chat_id,
-                        text: Cow::Owned(std::mem::take(&mut self.input)),
-                        timestamp: 0,
-                        status: MessageStatus::Sent,
-                        is_outgoing: true,
-                        reply_to: None,
-                    };
-                    self.apply_newer(vec![message]);
-                }
-            }
+            PromptKind::Message | PromptKind::Reply => self.submit_message(),
+            PromptKind::Edit => self.submit_edit(),
             PromptKind::Command => {
                 let cmd = self.input.trim().to_owned();
                 self.input.clear();
@@ -884,20 +1281,63 @@ impl App {
                 self.run_search(&q);
             }
         }
+
         self.mode = Mode::Normal;
         self.prompt = PromptKind::Message;
+        self.reply_to = None;
+        self.editing = None;
     }
 
-    /// The identifier a locally composed message gets.
+    /// Queues the composed message as a send, and shows it immediately.
     ///
-    /// Counting on from the newest identifier the conversation holds keeps it
-    /// distinct from everything on screen, which is all the window needs of it
-    /// while nothing is sent.
-    fn next_message_id(&self) -> i64 {
-        self.conversation
-            .window
-            .newest_id()
-            .map_or(1, |id| id.saturating_add(1))
+    /// The placeholder is what the reader sees until the server answers, and its
+    /// identifier is what the answer is matched against. One send is in flight at
+    /// a time: Telegram throttles per conversation, and a second send would only
+    /// earn a `FLOOD_WAIT` — but a silent no-op reads as a hang, so the refusal
+    /// says so.
+    fn submit_message(&mut self) {
+        if self.sending.is_some() {
+            self.flash("a message is already on its way");
+            return;
+        }
+        if !self.has_conversation() || self.input.trim().is_empty() {
+            return;
+        }
+
+        let anchor = self.cursor_message_id();
+        let chat_id = self.conversation.window.chat_id;
+        let text = std::mem::take(&mut self.input);
+        let temp_id = self.conversation.queue_send(&text, self.reply_to);
+        self.begin_send(temp_id);
+        self.action = Some(Action::Send {
+            chat_id,
+            temp_id,
+            text,
+            reply_to: self.reply_to,
+        });
+        self.after_window_change(anchor);
+    }
+
+    /// Queues the edit of the message the buffer was opened with.
+    ///
+    /// Nothing is shown optimistically: an edit is reflected when the server's
+    /// `MessageEdited` arrives, which is the only path by which its new text
+    /// reaches the window.
+    fn submit_edit(&mut self) {
+        let Some(message_id) = self.editing else {
+            return;
+        };
+        if !self.has_conversation() || self.input.trim().is_empty() {
+            return;
+        }
+
+        let chat_id = self.conversation.window.chat_id;
+        let text = std::mem::take(&mut self.input);
+        self.action = Some(Action::Edit {
+            chat_id,
+            message_id,
+            text,
+        });
     }
 
     fn run_command(&mut self, cmd: &str) {
@@ -1015,7 +1455,7 @@ impl App {
     #[must_use]
     pub fn prompt_prefix(&self) -> &'static str {
         match self.prompt {
-            PromptKind::Message => "",
+            PromptKind::Message | PromptKind::Reply | PromptKind::Edit => "",
             PromptKind::Command => ":",
             PromptKind::Search => "/",
         }
@@ -1023,18 +1463,31 @@ impl App {
 
     /// What the status line shows.
     ///
-    /// A jump outranks whatever the status line was last told: it is what the
-    /// reader has just asked for, and it is over as soon as its page lands.
-    /// Derived from the jump rather than written into the status, so that the two
-    /// cannot come apart — a status that outlived its fetch would be a line
-    /// saying "jumping" over a reader who had already arrived.
+    /// A confirmation outranks everything: it is a question waiting for an
+    /// answer, and it is over as soon as one is given. A jump outranks the
+    /// status below it, for the same reason it always did: it is what the reader
+    /// has just asked for, and it is over as soon as its page lands. Below both,
+    /// the full reason a failed message failed is shown while the cursor is on
+    /// it — the row itself only has room for a short form.
     #[must_use]
     pub fn status_text(&self) -> &str {
-        if self.pending_jump.is_some() {
-            JUMP_LABEL
-        } else {
-            &self.status
+        if let Some(ConfirmKind::DeleteMessage { is_outgoing, .. }) = self.confirm {
+            return if is_outgoing {
+                DELETE_OUTGOING_PROMPT
+            } else {
+                DELETE_INCOMING_PROMPT
+            };
         }
+        if self.pending_jump.is_some() {
+            return JUMP_LABEL;
+        }
+        if let Some(message) = self.cursor_message()
+            && let Some(reason) = self.conversation.failure(message.id)
+        {
+            return reason;
+        }
+
+        &self.status
     }
 }
 
@@ -1358,23 +1811,41 @@ mod tests {
         assert_eq!(app.input, "ab");
     }
 
+    /// Types `text` and submits it, leaving a placeholder in flight.
+    fn submit(app: &mut App, text: &str) {
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(app, text);
+        app.handle_key(press(KeyCode::Enter));
+    }
+
     #[test]
-    fn enter_submits_the_typed_message() {
+    fn enter_shows_the_typed_message_while_it_is_on_its_way() {
         let mut app = App::mock();
         let before = app.conversation.window.len();
 
-        app.handle_key(press(KeyCode::Char('i')));
-        type_text(&mut app, "ping");
-        app.handle_key(press(KeyCode::Enter));
+        submit(&mut app, "ping");
 
         assert_eq!(app.conversation.window.len(), before + 1);
-        assert_eq!(text_of(&app, 11), Some("ping"));
+        let id = app.sending.expect("the send is in flight");
+        assert_eq!(id, -1, "the first placeholder is minus one");
+        assert_eq!(text_of(&app, id), Some("ping"));
         assert_eq!(
             reading(&app),
-            Some(11),
+            Some(id),
             "a message just typed is the one on screen"
         );
         assert_eq!(app.mode, Mode::Normal);
+
+        assert_eq!(
+            app.take_action(),
+            Some(Action::Send {
+                chat_id: MOCK_CHAT,
+                temp_id: id,
+                text: "ping".to_owned(),
+                reply_to: None,
+            })
+        );
+        assert_eq!(app.take_action(), None, "an action is taken once");
     }
 
     #[test]
@@ -1385,6 +1856,317 @@ mod tests {
         app.handle_key(press(KeyCode::Enter));
 
         assert!(app.conversation.window.is_empty());
+    }
+
+    #[test]
+    fn a_second_send_is_refused_while_one_is_on_its_way() {
+        let mut app = App::mock();
+        submit(&mut app, "first");
+        let before = app.conversation.window.len();
+
+        submit(&mut app, "second");
+
+        assert_eq!(
+            app.conversation.window.len(),
+            before,
+            "the second message is not shown, because it was not queued"
+        );
+        assert!(
+            app.status.contains("already on its way"),
+            "a refusal has to say so: {:?}",
+            app.status
+        );
+    }
+
+    // ---- dd and the confirm --------------------------------------------
+
+    #[test]
+    fn dd_asks_to_delete_the_message_under_the_cursor() {
+        let mut app = App::mock();
+        // The newest sample message is one of theirs.
+        assert_eq!(reading(&app), Some(10));
+
+        app.handle_key(press(KeyCode::Char('d')));
+        assert!(app.pending_d, "one d latches");
+        assert_eq!(app.mode, Mode::Normal);
+
+        app.handle_key(press(KeyCode::Char('d')));
+        assert!(!app.pending_d, "the second d spends the latch");
+        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(
+            app.confirm,
+            Some(ConfirmKind::DeleteMessage {
+                id: 10,
+                is_outgoing: false
+            })
+        );
+        assert_eq!(app.status_text(), DELETE_INCOMING_PROMPT);
+    }
+
+    /// The asymmetry the plan is built on: `dd` accepts the other side's
+    /// message, and the prompt says which side it is about.
+    #[test]
+    fn dd_accepts_an_outgoing_message_and_the_prompt_names_that_side() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(reading(&app), Some(9), "an outgoing message");
+
+        app.handle_key(press(KeyCode::Char('d')));
+        app.handle_key(press(KeyCode::Char('d')));
+
+        assert_eq!(
+            app.confirm,
+            Some(ConfirmKind::DeleteMessage {
+                id: 9,
+                is_outgoing: true
+            })
+        );
+        assert_eq!(app.status_text(), DELETE_OUTGOING_PROMPT);
+    }
+
+    /// The classic way a `dd` binding ships a bug: `j` and `d` must not add up
+    /// to a deletion.
+    #[test]
+    fn a_motion_between_the_ds_clears_the_latch() {
+        let mut app = App::mock();
+
+        app.handle_key(press(KeyCode::Char('d')));
+        assert!(app.pending_d);
+        app.handle_key(press(KeyCode::Char('k')));
+        assert!(!app.pending_d, "the motion moves off what the d was about");
+
+        app.handle_key(press(KeyCode::Char('d')));
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "the second d latches rather than deletes"
+        );
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn any_other_key_clears_the_latch() {
+        let mut app = App::mock();
+
+        app.handle_key(press(KeyCode::Char('d')));
+        app.handle_key(press(KeyCode::Char('x')));
+
+        assert!(!app.pending_d);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_page_clears_the_latch() {
+        let mut app = App::mock();
+
+        app.handle_key(press(KeyCode::Char('d')));
+        app.handle_key(press_ctrl('d'));
+
+        assert!(!app.pending_d);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    /// A send that has not been acknowledged has no identifier the server knows,
+    /// so neither deletion nor editing can touch it — and the two refusals for
+    /// deletion differ, because only a failed message has a `D`.
+    #[test]
+    fn deleting_a_pending_message_is_refused_until_it_has_failed() {
+        let mut app = App::mock();
+        submit(&mut app, "hi");
+        let id = app.sending.expect("the send is in flight");
+
+        app.handle_key(press(KeyCode::Char('d')));
+        app.handle_key(press(KeyCode::Char('d')));
+        assert_eq!(app.mode, Mode::Normal, "no confirm is raised");
+        assert!(
+            app.status.contains("still on its way"),
+            "got {:?}",
+            app.status
+        );
+
+        app.fail_send(id, "boom".to_owned());
+        app.handle_key(press(KeyCode::Char('d')));
+        app.handle_key(press(KeyCode::Char('d')));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.status.contains("D dismisses"),
+            "a failed message points at the key that clears it: {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn editing_a_message_that_has_not_been_sent_or_is_not_yours_is_refused() {
+        let mut app = App::mock();
+        submit(&mut app, "hi");
+        let id = app.sending.expect("the send is in flight");
+
+        app.handle_key(press(KeyCode::Char('e')));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.status.contains("hasn't been sent yet"),
+            "got {:?}",
+            app.status
+        );
+
+        app.fail_send(id, "boom".to_owned());
+        app.handle_key(press(KeyCode::Char('e')));
+        assert!(
+            app.status.contains("hasn't been sent yet"),
+            "a failed send is refused on the same fact: {:?}",
+            app.status
+        );
+
+        // Step back off the placeholder to a message that came from them.
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(
+            reading(&app),
+            Some(10),
+            "the newest sample message is incoming"
+        );
+        app.handle_key(press(KeyCode::Char('e')));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.status.contains("only edit your own"),
+            "got {:?}",
+            app.status
+        );
+    }
+
+    // ---- composing a reply and an edit ---------------------------------
+
+    #[test]
+    fn r_opens_a_reply_to_the_message_under_the_cursor() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(reading(&app), Some(9));
+
+        app.handle_key(press(KeyCode::Char('r')));
+        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(app.prompt, PromptKind::Reply);
+        assert_eq!(app.reply_to, Some(9));
+
+        type_text(&mut app, "sure");
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_action(),
+            Some(Action::Send {
+                chat_id: MOCK_CHAT,
+                temp_id: -1,
+                text: "sure".to_owned(),
+                reply_to: Some(9),
+            })
+        );
+    }
+
+    #[test]
+    fn e_opens_the_cursor_s_own_message_for_editing() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(reading(&app), Some(9), "an outgoing message");
+
+        app.handle_key(press(KeyCode::Char('e')));
+        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(app.prompt, PromptKind::Edit);
+        assert_eq!(app.editing, Some(9));
+        assert!(
+            app.input.starts_with("No pressure then :)"),
+            "the buffer opens with the message's text: {:?}",
+            app.input
+        );
+
+        type_text(&mut app, "!");
+        app.handle_key(press(KeyCode::Enter));
+
+        let Some(Action::Edit {
+            chat_id,
+            message_id,
+            text,
+        }) = app.take_action()
+        else {
+            panic!("an edit is handed to the caller");
+        };
+        assert_eq!(chat_id, MOCK_CHAT);
+        assert_eq!(message_id, 9);
+        assert!(text.starts_with("No pressure then :)"), "got {text:?}");
+    }
+
+    // ---- confirming, dismissing, and the status line -------------------
+
+    #[test]
+    fn confirming_a_delete_hands_the_captured_message_over() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('d')));
+        app.handle_key(press(KeyCode::Char('d')));
+
+        app.handle_key(press(KeyCode::Char('y')));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.confirm, None);
+        assert_eq!(
+            app.take_action(),
+            Some(Action::Delete {
+                chat_id: MOCK_CHAT,
+                message_ids: vec![10],
+            })
+        );
+    }
+
+    #[test]
+    fn cancelling_a_delete_leaves_no_side_effect() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('d')));
+        app.handle_key(press(KeyCode::Char('d')));
+
+        app.handle_key(press(KeyCode::Esc));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.confirm, None);
+        assert_eq!(app.take_action(), None);
+    }
+
+    #[test]
+    fn the_dismiss_key_clears_a_failed_message() {
+        let mut app = App::mock();
+        submit(&mut app, "hi");
+        let id = app.sending.expect("the send is in flight");
+        app.fail_send(id, "boom".to_owned());
+
+        app.handle_key(press(KeyCode::Char('D')));
+
+        assert_eq!(app.conversation.window.len(), 10);
+        assert!(app.conversation.message(id).is_none());
+    }
+
+    /// The row only has room for a short reason; the whole of it is on the
+    /// status line while the cursor is on the message.
+    #[test]
+    fn the_full_reason_a_send_failed_is_on_the_status_line() {
+        let mut app = App::mock();
+        submit(&mut app, "hi");
+        let id = app.sending.expect("the send is in flight");
+
+        app.fail_send(id, "flood wait, retry in 42s".to_owned());
+
+        assert_eq!(app.status_text(), "flood wait, retry in 42s");
+    }
+
+    #[test]
+    fn a_flash_reverts_once_its_time_is_up() {
+        let mut app = App::mock();
+
+        app.flash("something went wrong");
+        assert_eq!(app.status, "something went wrong");
+        assert!(
+            !app.expire_status(Instant::now()),
+            "the deadline has not passed"
+        );
+        assert_eq!(app.status, "something went wrong");
+
+        assert!(app.expire_status(Instant::now() + FLASH_FOR));
+        assert_eq!(app.status, IDLE_STATUS);
+        assert!(!app.expire_status(Instant::now() + FLASH_FOR), "only once");
     }
 
     fn run_command_line(app: &mut App, command: &str) {

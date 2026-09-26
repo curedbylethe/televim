@@ -13,6 +13,8 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
+use domain::message::{Message, MessageStatus};
+
 use crate::app::{App, FetchDirection, JUMP_LABEL};
 
 /// How many columns the messages keep for themselves before a scrollbar is
@@ -21,6 +23,13 @@ use crate::app::{App, FetchDirection, JUMP_LABEL};
 /// A narrow panel has no room to give: the bar would cost more than it tells
 /// the reader.
 const MIN_BODY_WIDTH: u16 = 8;
+
+/// How much of a failed send's reason fits at the end of its own row.
+///
+/// A row is one message, and the reason belongs to it rather than to a row of
+/// its own; the full text is on the status line when the cursor is on the
+/// message.
+const FAILED_REASON_WIDTH: usize = 24;
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let block = Block::default()
@@ -70,7 +79,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
             .iter()
             .skip(start)
             .take(budget)
-            .map(|message| message_line(app, message)),
+            .map(|message| message_line(app, message, body.width)),
     );
     if newer {
         items.push(loading(app, FetchDirection::Newer.label()));
@@ -104,13 +113,81 @@ fn conversation_title(app: &App) -> String {
 }
 
 /// One message as a row.
-fn message_line(app: &App, message: &domain::message::Message) -> ListItem<'static> {
+///
+/// The reply and the state of a send are same-line additions rather than rows of
+/// their own: the panel's geometry assumes one message is one row, and a second
+/// line would revisit that. A reply reads as a prefix, before the body it
+/// answers; a pending or failed send reads as a suffix, after it.
+fn message_line(app: &App, message: &Message, width: u16) -> ListItem<'static> {
     let who = if message.is_outgoing { "you" } else { "them" };
+    let mut spans = vec![Span::styled(format!("[{who}] "), app.theme.text_dim)];
 
-    ListItem::new(Line::from(vec![
-        Span::styled(format!("[{who}] "), app.theme.text_dim),
-        Span::styled(message.text.to_string(), app.theme.text),
-    ]))
+    if let Some(reply_to) = message.reply_to {
+        spans.push(Span::styled(
+            format!("> {} ‖ ", reply_excerpt(app, reply_to, width)),
+            app.theme.text_dim,
+        ));
+    }
+
+    spans.push(Span::styled(message.text.to_string(), app.theme.text));
+
+    if let Some(suffix) = status_suffix(app, message) {
+        spans.push(suffix);
+    }
+
+    ListItem::new(Line::from(spans))
+}
+
+/// The short form of the message a reply answers.
+///
+/// At most half the panel, so the body the reply carries still has room: a
+/// prefix that filled the row would hide the thing it is a prefix to. A target
+/// that is not in the window says so rather than leaving the reply looking
+/// unanchored, and a target that is itself still on its way says that instead of
+/// quoting a message that has not arrived.
+fn reply_excerpt(app: &App, reply_to: i64, width: u16) -> String {
+    let text = match app.conversation.message(reply_to) {
+        Some(message) if matches!(message.status, MessageStatus::Sending) => {
+            return "[sending…]".to_owned();
+        }
+        Some(message) => message.text.to_string(),
+        None => return "[message not loaded]".to_owned(),
+    };
+
+    truncate(&text, (usize::from(width) / 2).max(8))
+}
+
+/// The short form of what a send is doing, for the end of its own row.
+///
+/// The full reason a send failed is longer than a row has room for, and lives on
+/// the status line while the cursor is on the message; this is only enough to
+/// say that there is one.
+fn status_suffix(app: &App, message: &Message) -> Option<Span<'static>> {
+    match message.status {
+        MessageStatus::Sending => Some(Span::styled("  [sending…]", app.theme.text_dim)),
+        MessageStatus::Failed => {
+            let reason = app.conversation.failure(message.id).unwrap_or("failed");
+            Some(Span::styled(
+                format!("  [failed: {}]", truncate(reason, FAILED_REASON_WIDTH)),
+                app.theme.text_dim,
+            ))
+        }
+        MessageStatus::Sent | MessageStatus::Received => None,
+    }
+}
+
+/// Truncates `text` to `budget` characters, marking the cut.
+///
+/// Characters rather than bytes, because a multibyte character cut in half is
+/// not text at all.
+fn truncate(text: &str, budget: usize) -> String {
+    if text.chars().count() <= budget {
+        return text.to_owned();
+    }
+
+    let mut shortened: String = text.chars().take(budget.saturating_sub(1)).collect();
+    shortened.push('…');
+    shortened
 }
 
 /// A row saying what is being fetched.
@@ -166,6 +243,7 @@ fn render_scrollbar(app: &App, area: Rect, frame: &mut Frame<'_>, start: usize, 
 mod tests {
     use super::*;
     use crate::app::App;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
@@ -192,6 +270,18 @@ mod tests {
             .expect("the frame draws");
 
         terminal.backend().buffer().clone()
+    }
+
+    /// Sends one keystroke to the application, as the reader would.
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    /// Types `text` one character at a time.
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            press(app, KeyCode::Char(character));
+        }
     }
 
     /// One row of the screen, as the text on it.
@@ -250,7 +340,6 @@ mod tests {
     fn jumping() -> App {
         use std::borrow::Cow;
 
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use domain::chat::{Chat, ChatKind};
         use domain::message::{Message, MessageStatus};
 
@@ -488,6 +577,95 @@ mod tests {
             gutter_content(&screen).trim().is_empty(),
             "and stop there: {:?}",
             gutter_content(&screen)
+        );
+    }
+
+    // ---- sending, replying and confirming ------------------------------
+
+    /// A reply is drawn as a prefix on the message's own row, never as a row of
+    /// its own: the panel's geometry assumes one message is one row.
+    #[test]
+    fn a_reply_is_drawn_as_a_prefix_on_the_message_s_row() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('r'));
+        type_text(&mut app, "sure");
+        press(&mut app, KeyCode::Enter);
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            row(&screen, 11).contains("> No pressure then :) ‖ sure"),
+            "the reply quotes its target before its own body: {}",
+            row(&screen, 11)
+        );
+    }
+
+    /// A reply whose target the window does not hold says so rather than looking
+    /// unanchored.
+    #[test]
+    fn a_reply_to_a_message_that_is_not_loaded_says_so() {
+        let mut app = App::mock();
+        app.conversation.queue_send("orphan", Some(999));
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            row(&screen, 11).contains("> [message not loaded] ‖ orphan"),
+            "{}",
+            row(&screen, 11)
+        );
+    }
+
+    #[test]
+    fn a_send_on_its_way_and_a_failed_one_say_so_on_their_row() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "hello");
+        press(&mut app, KeyCode::Enter);
+        let id = app.sending.expect("the send is in flight");
+
+        let sending = screen(&app, 80, 24);
+        assert!(
+            row(&sending, 11).contains("[sending…]"),
+            "{}",
+            row(&sending, 11)
+        );
+
+        app.fail_send(id, "no route".to_owned());
+        let failed = screen(&app, 80, 24);
+        assert!(
+            row(&failed, 11).contains("[failed: no route]"),
+            "{}",
+            row(&failed, 11)
+        );
+    }
+
+    /// The two wordings are the whole of what the confirm says about scope, so
+    /// both are checked on the screen the reader sees.
+    #[test]
+    fn the_confirm_prompt_names_the_side_it_is_about() {
+        // Outgoing: the message before the newest, which is one of theirs.
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('d'));
+        let outgoing = screen(&app, 80, 24);
+        assert!(
+            row(&outgoing, 23).contains("Delete your message from both sides? (y/n)"),
+            "{}",
+            row(&outgoing, 23)
+        );
+
+        // Incoming: the newest sample message.
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('d'));
+        let incoming = screen(&app, 80, 24);
+        assert!(
+            row(&incoming, 23).contains("Delete their message from both sides? (y/n)"),
+            "{}",
+            row(&incoming, 23)
         );
     }
 }
