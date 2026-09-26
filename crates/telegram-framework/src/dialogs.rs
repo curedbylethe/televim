@@ -10,11 +10,11 @@
 //! A `grammers::Dialog` can only be built from a raw response and a peer map,
 //! so nothing that consumes one can be tested without a datacenter. That makes
 //! the handful of functions which read a `grammers` value — `dialog_to_info`,
-//! `peer_kind`, `peer_title` and `raw_unread_count` — untestable here. They are
-//! therefore kept as thin as possible, and every decision inside them is pulled
-//! out into a free function over primitives: `classify_user`, `join_title`,
-//! `unread_count`, `message_timestamp`, `last_text` and `newest_first`. Those
-//! are the parts that can be wrong, and they run on every CI job.
+//! `peer_kind` and `peer_title` — untestable here. They are therefore kept as
+//! thin as possible, and every decision inside them is pulled out into a free
+//! function over primitives: `classify_user`, `join_title`, `unread_count`,
+//! `message_timestamp`, `last_text` and `newest_first`. Those are the parts that
+//! can be wrong, and they run on every CI job.
 
 use std::cmp::Ordering;
 
@@ -88,6 +88,8 @@ impl Client {
     /// state, so the session is written back before this returns — and a caller
     /// that intends to subscribe to updates should fetch first, because the
     /// stream resolves what it missed while offline out of that same state.
+    /// This is what marks the client as fetched; see
+    /// [`Client::has_fetched_dialogs`].
     ///
     /// # Errors
     ///
@@ -133,6 +135,11 @@ impl Client {
         // Nothing else writes the peers and per-channel timestamps that dialog
         // iteration just learned, and the update stream reads them from the
         // store rather than from memory.
+        //
+        // The fetch is recorded on the client as well: a feed started before
+        // this point has no peers to resolve a gap against, and the client is
+        // where that question gets one answer for every caller.
+        self.note_dialogs_fetched();
         self.flush_session();
 
         tracing::debug!(
@@ -149,12 +156,15 @@ impl Client {
 ///
 /// `None` means the entry is a folder. Telegram returns folders next to
 /// conversations and `grammers` models both as a `Dialog`, but a folder is a
-/// navigation container: it has no peer to talk to and no single unread count,
-/// so it is not a conversation and does not belong in a chat list.
+/// navigation container: it has no peer to talk to and no single unread count —
+/// Telegram splits one across its muted and unmuted halves — so it is not a
+/// conversation and does not belong in a chat list. Matching on the raw variant
+/// once, here, is what rules folders out and what makes the unread count below
+/// total: there is no second place left for a folder to be handled wrongly.
 fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
-    if matches!(dialog.raw, tl::enums::Dialog::Folder(_)) {
+    let tl::enums::Dialog::Dialog(raw) = &dialog.raw else {
         return None;
-    }
+    };
 
     let peer = dialog.peer();
     let peer_id = peer.id().bare_id();
@@ -164,7 +174,7 @@ fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
         peer_id,
         title: peer_title(peer_id, peer),
         kind: peer_kind(peer),
-        unread_count: raw_unread_count(dialog),
+        unread_count: unread_count(raw.unread_count),
         last_timestamp: last_message
             .and_then(|message| message_timestamp(message.date().timestamp())),
         last_text: last_message.and_then(|message| last_text(message.text())),
@@ -198,38 +208,32 @@ fn classify_user(is_bot: bool) -> DialogKind {
 ///
 /// Telegram discloses a name in pieces and any of them can be missing: a deleted
 /// account has neither a name nor a username, and a user who never set a
-/// username has only the two halves of their name. `placeholder` is what a
-/// nameless peer falls back to, so that a conversation is never rendered as an
-/// empty row; callers build it from the peer identifier, which is the one thing
-/// always present.
+/// username has only the two halves of their name. `join_title` is what falls
+/// back to the peer identifier, so that a conversation is never rendered as an
+/// empty row.
 fn peer_title(peer_id: i64, peer: &Peer) -> String {
-    let placeholder = format!("chat {peer_id}");
-
-    match peer {
-        Peer::User(user) => join_title(
-            user.first_name(),
-            user.last_name(),
-            peer.username(),
-            &placeholder,
-        ),
+    let (first, last) = match peer {
+        Peer::User(user) => (user.first_name(), user.last_name()),
         // A group's and a channel's whole name is a single field, so it takes
         // the first half of the chain and the same username fallback.
-        Peer::Group(_) | Peer::Channel(_) => {
-            join_title(peer.name(), None, peer.username(), &placeholder)
-        }
-    }
+        Peer::Group(_) | Peer::Channel(_) => (peer.name(), None),
+    };
+
+    join_title(first, last, peer.username(), peer_id)
 }
 
-/// Joins the pieces of a name, falling back to a username and then to
-/// `placeholder`.
+/// Joins the pieces of a name, falling back to a username and then to a
+/// placeholder built from the peer identifier.
 ///
 /// Blank and whitespace-only pieces count as missing, because Telegram sends
-/// them for accounts that have been emptied out.
+/// them for accounts that have been emptied out. The placeholder is built here
+/// rather than passed in so that the common case — a peer that has a name, and
+/// so never reaches the fallback — does not allocate a string it would discard.
 fn join_title(
     first: Option<&str>,
     last: Option<&str>,
     username: Option<&str>,
-    placeholder: &str,
+    peer_id: i64,
 ) -> String {
     let parts = [first, last]
         .into_iter()
@@ -250,20 +254,7 @@ fn join_title(
 
     match username.map(str::trim).filter(|name| !name.is_empty()) {
         Some(username) => format!("@{username}"),
-        None => placeholder.to_owned(),
-    }
-}
-
-/// The unread count of a dialog entry.
-///
-/// Only a conversation entry carries one. A folder is a navigation container
-/// with no single count — Telegram splits one across its muted and unmuted
-/// halves — and `dialog_to_info` has already discarded those, so this reports
-/// nothing unread rather than inventing a number.
-fn raw_unread_count(dialog: &Dialog) -> u32 {
-    match &dialog.raw {
-        tl::enums::Dialog::Dialog(inner) => unread_count(inner.unread_count),
-        tl::enums::Dialog::Folder(_) => 0,
+        None => format!("chat {peer_id}"),
     }
 }
 
@@ -349,7 +340,7 @@ mod tests {
 
         for (first, last, username, expected) in cases {
             assert_eq!(
-                join_title(first, last, username, "chat 1"),
+                join_title(first, last, username, 1),
                 expected,
                 "first={first:?} last={last:?} username={username:?}"
             );
@@ -362,7 +353,7 @@ mod tests {
 
         for (first, last) in cases {
             assert_eq!(
-                join_title(first, last, Some("ada"), "chat 1"),
+                join_title(first, last, Some("ada"), 1),
                 "@ada",
                 "first={first:?} last={last:?}"
             );
@@ -378,9 +369,13 @@ mod tests {
         ];
 
         for (first, last, username) in cases {
-            let title = join_title(first, last, username, "chat 42");
-            assert_eq!(title, "chat 42", "a row must never be nameless");
-            assert!(!title.is_empty());
+            let title = join_title(first, last, username, 42);
+            assert_eq!(
+                title, "chat 42",
+                "the fallback is built from the peer identifier, the one thing \
+                 always present"
+            );
+            assert!(!title.is_empty(), "a row must never be nameless");
         }
     }
 

@@ -1,10 +1,12 @@
 //! The `grammers`-backed client: [`ClientBuilder`] and [`Client`].
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use grammers_mtsender::SenderPool;
+use tokio::task::JoinHandle;
 
 use crate::auth::{LoginToken, PasswordToken, SignInResult};
 use crate::error::{AuthError, FrameworkError, RequestError};
@@ -124,7 +126,10 @@ impl ClientBuilder {
             handle: _,
             updates,
         } = pool;
-        tokio::spawn(runner.run());
+        // The runner is kept rather than detached. It owns the sockets, so a
+        // client that has been dropped must be able to stop it; a detached one
+        // would keep the connection open until the process ended.
+        let runner = tokio::spawn(runner.run());
 
         Ok(Client {
             inner,
@@ -132,6 +137,8 @@ impl ClientBuilder {
             session,
             code_requests: CodeRequestLog::default(),
             updates: UpdateRelay::start(updates),
+            dialogs_fetched: AtomicBool::new(false),
+            runner,
         })
     }
 }
@@ -166,18 +173,49 @@ impl fmt::Debug for ClientBuilder {
 /// once a feed is running, and `catch_up` replays from wherever it stopped.
 /// There is no implicit drain, and no warning for the discarded events beyond
 /// a periodic debug log.
+///
+/// Resolving what was missed while offline reads peer access hashes back out of
+/// the session, and only [`Client::fetch_dialogs`] writes them, so a feed
+/// started before the first fetch has nothing to resolve against.
+/// [`Client::has_fetched_dialogs`] reports which side of that line the client is
+/// on, and [`Client::subscribe_updates`] logs the cold case at `debug`.
 pub struct Client {
     inner: grammers_client::Client,
     api_hash: String,
     session: Arc<StoreSession>,
     code_requests: CodeRequestLog,
     updates: UpdateRelay,
+
+    /// Whether [`Client::fetch_dialogs`] has run. A latch: it only ever goes
+    /// one way, and relaxed ordering is enough for that.
+    dialogs_fetched: AtomicBool,
+
+    /// The connection pool's task, stopped when the client is dropped.
+    runner: JoinHandle<()>,
 }
 
 impl fmt::Debug for Client {
     /// Renders the client without exposing the API hash or the session.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Client").finish_non_exhaustive()
+        f.debug_struct("Client")
+            .field(
+                "dialogs_fetched",
+                &self.dialogs_fetched.load(Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Client {
+    /// Stops the connection pool.
+    ///
+    /// The pool's runner holds the sockets and its relay holds the channel the
+    /// pool feeds. Neither has anything left to do once the client is gone —
+    /// the runner would keep a connection open, and the relay would keep
+    /// draining a feed no one can read — so both are stopped here rather than
+    /// left to the process exiting. The relay stops itself; see its own `Drop`.
+    fn drop(&mut self) {
+        self.runner.abort();
     }
 }
 
@@ -305,6 +343,29 @@ impl Client {
     /// so it needs a handle of its own rather than a reference.
     pub(crate) fn session_handle(&self) -> Arc<StoreSession> {
         Arc::clone(&self.session)
+    }
+
+    /// Whether the chat list has been fetched since this client was built.
+    ///
+    /// Iterating the dialog list is what makes Telegram disclose a peer's
+    /// `access_hash`, and resolving a gap in the update feed reads it back out
+    /// of the session — so a feed started before the first fetch has nothing to
+    /// resolve against. See [`Client::subscribe_updates`]. The answer is kept
+    /// here rather than by each caller so that every caller gets the same one
+    /// for the same client.
+    ///
+    /// A client resumed from a session store that already holds peers is
+    /// reported as cold until it fetches again: the flag records what this
+    /// client has done, not what the store holds, because the store cannot say
+    /// which peers a gap would need.
+    #[must_use]
+    pub fn has_fetched_dialogs(&self) -> bool {
+        self.dialogs_fetched.load(Ordering::Relaxed)
+    }
+
+    /// Records that the chat list was fetched.
+    pub(crate) fn note_dialogs_fetched(&self) {
+        self.dialogs_fetched.store(true, Ordering::Relaxed);
     }
 
     /// Records a code request, warning when it follows closely on another.

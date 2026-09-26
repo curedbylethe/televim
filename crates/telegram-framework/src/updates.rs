@@ -28,9 +28,15 @@
 //! so nothing that consumes one can be tested without a datacenter. That makes
 //! `update_to_kind` and everything it calls untestable here, so they are kept
 //! as thin as possible, and every decision inside them is pulled out into a
-//! free function over primitives: `is_private_conversation`,
+//! free function over primitives: `is_displayed_conversation`,
 //! `peer_kind_from_id`, `message_info` and `deleted_ids`. Those are the parts
 //! that can be wrong, and they run on every CI job.
+//!
+//! One lookup cannot be pulled out that way. Whether a peer is a bot is not in
+//! its identifier — the flag lives on the account object — so it can only come
+//! from the peer map the update arrived with, and that map is a `grammers`
+//! value. `bot_flag` is therefore as thin as it can be: it reads the flag and
+//! nothing else, and `is_displayed_conversation` decides what it means.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,9 +45,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use grammers_client::client::updates::UpdateStream;
 use grammers_client::session::defs::PeerKind;
 use grammers_client::session::updates::UpdatesLike;
+use grammers_client::types::Peer;
 use grammers_client::types::update::Message;
 use grammers_client::{InvocationError, Update, UpdatesConfiguration};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::task::JoinHandle;
 
 use crate::client::Client;
 use crate::dialogs::DialogKind;
@@ -95,12 +103,15 @@ pub enum UpdateKind {
 
     /// Messages were deleted.
     ///
-    /// Telegram does not say which conversation these belonged to. A deletion
-    /// from a channel names the channel, and those are discarded; the other
-    /// form covers private chats and small groups, whose messages share one
-    /// account-wide numbering, so it carries identifiers and nothing else. A
-    /// caller holding several conversations has to look for the identifiers in
-    /// each of them.
+    /// The event names no conversation, and cannot: the update it comes from —
+    /// `updateDeleteMessages` — carries only the identifiers, a `pts` and a
+    /// `pts_count`. There is no peer field to scope it by. Deletions from a
+    /// channel arrive as a different update that does name its channel, and
+    /// those are discarded because a channel is not displayed.
+    ///
+    /// The identifiers are therefore from the one sequence that private chats
+    /// and small groups share, so a caller holding several conversations has to
+    /// look for each identifier in all of them.
     MessagesDeleted {
         /// Identifiers of the deleted messages.
         message_ids: Vec<i64>,
@@ -129,8 +140,10 @@ impl Client {
     /// the last login, because iterating dialogs is what makes Telegram
     /// disclose a peer's `access_hash` and a channel's persistent timestamp,
     /// and resolving what was missed while offline reads both back out of the
-    /// session. A client resumed from a warm session store is already warmed;
-    /// a freshly logged-in one is not.
+    /// session. Whether that has happened is reported by
+    /// [`Client::has_fetched_dialogs`], and subscribing anyway is logged at
+    /// `debug` — it is not an error, but on a client that has just logged in it
+    /// means the gap is resolved against a cache holding no peers.
     ///
     /// # Draining
     ///
@@ -172,6 +185,13 @@ impl Client {
     /// # }
     /// ```
     pub fn subscribe_updates(&self) -> Result<UpdateSubscription, FrameworkError> {
+        if !self.has_fetched_dialogs() {
+            tracing::debug!(
+                "subscribing to updates before the chat list was fetched; a gap \
+                 would be resolved against a session holding no peers yet"
+            );
+        }
+
         let receiver = self.updates().take()?;
 
         let stream = self.inner().stream_updates(
@@ -301,6 +321,9 @@ pub(crate) struct UpdateRelay {
 
     /// Whether a subscriber has taken it, which is what opens the relay.
     open: Arc<AtomicBool>,
+
+    /// The relaying task, stopped when the client is dropped.
+    task: JoinHandle<()>,
 }
 
 impl UpdateRelay {
@@ -311,11 +334,12 @@ impl UpdateRelay {
         let (sink, receiver) = mpsc::unbounded_channel();
         let open = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(relay(source, sink, Arc::clone(&open)));
+        let task = tokio::spawn(relay(source, sink, Arc::clone(&open)));
 
         Self {
             receiver: Mutex::new(Some(receiver)),
             open,
+            task,
         }
     }
 
@@ -340,6 +364,19 @@ impl UpdateRelay {
         self.open.store(true, Ordering::Relaxed);
 
         Ok(receiver)
+    }
+}
+
+impl Drop for UpdateRelay {
+    /// Stops relaying, and with it the pool's delivery.
+    ///
+    /// The task owns the pool's receiving end, so aborting it drops that end
+    /// and the pool stops feeding a channel nothing will read. A subscriber
+    /// still holding the other side sees the feed end, which is what a client
+    /// that no longer exists should look like — rather than a feed that stays
+    /// open for as long as the process runs.
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -388,13 +425,14 @@ fn update_to_kind(update: &Update) -> Option<UpdateKind> {
 
 /// Describes a message, if it belongs to a conversation televim displays.
 ///
-/// The peer is taken from the identifier rather than from the peer map,
-/// because the map only holds the peers Telegram has disclosed so far and an
-/// identifier is enough to tell a user from a group.
+/// The peer is taken from the identifier rather than from the peer map, because
+/// the map only holds the peers Telegram has disclosed so far and an identifier
+/// is enough to tell a user from a group. The bot flag is the one thing an
+/// identifier cannot answer, so it comes from the map — see [`bot_flag`].
 fn private_message(message: &Message) -> Option<MessageInfo> {
     let peer_id = message.peer_id();
 
-    if !is_private_conversation(peer_kind_from_id(peer_id.kind())) {
+    if !is_displayed_conversation(peer_kind_from_id(peer_id.kind()), bot_flag(message)) {
         return None;
     }
 
@@ -407,20 +445,42 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
     ))
 }
 
+/// Whether the conversation's peer is a bot, if the update disclosed it.
+///
+/// The flag lives on the account object, not on the peer identifier, so it can
+/// only be read out of the peer map the update arrived with. `None` means that
+/// map did not hold the peer — a cache miss, not an answer.
+fn bot_flag(message: &Message) -> Option<bool> {
+    match message.peer().ok()? {
+        Peer::User(user) => Some(user.is_bot()),
+        // A group and a channel are not users and carry no bot flag; they are
+        // already excluded by their kind.
+        Peer::Group(_) | Peer::Channel(_) => None,
+    }
+}
+
 /// Whether televim displays a conversation of this kind.
 ///
-/// Bots are kept alongside people: a bot is a user as far as Telegram's peer
-/// identifiers go, and a conversation with one is still one-to-one. Only groups
-/// and channels are dropped.
-fn is_private_conversation(kind: DialogKind) -> bool {
-    matches!(kind, DialogKind::PrivateUser | DialogKind::Bot)
+/// Only people. A group and a channel are not conversations this client
+/// renders, and neither is a bot: televim is a client for talking to people,
+/// and a bot's traffic would otherwise reach `domain` as an ordinary message
+/// and raise an unread count for a conversation that is never in the list.
+///
+/// `is_bot` is `None` when the peer was not in the update's peer map. That is
+/// treated as a person rather than as a bot, deliberately: dropping a real
+/// message because a cache missed would lose it for good, while a bot that
+/// slips through is dropped by the chat list's own filter and costs one
+/// `apply_update` that reports no change.
+fn is_displayed_conversation(kind: DialogKind, is_bot: Option<bool>) -> bool {
+    matches!(kind, DialogKind::PrivateUser) && is_bot != Some(true)
 }
 
 /// Maps the kind Telegram encodes in a peer identifier onto this crate's own.
 ///
 /// An identifier does not carry the bot flag — that only exists on the account
-/// object — so a person and a bot are indistinguishable here. Both are private
-/// conversations, which is all [`is_private_conversation`] needs to know.
+/// object — so a person and a bot are indistinguishable here. Both are users,
+/// which is what [`is_displayed_conversation`] is told; whether the user is a
+/// bot is a separate question, answered from the peer map.
 fn peer_kind_from_id(kind: PeerKind) -> DialogKind {
     match kind {
         PeerKind::User | PeerKind::UserSelf => DialogKind::PrivateUser,
@@ -476,14 +536,46 @@ mod tests {
     static_assertions::assert_impl_all!(UpdateSubscription: Send);
 
     #[test]
-    fn people_and_bots_are_displayed_but_groups_and_channels_are_not() {
-        assert!(is_private_conversation(DialogKind::PrivateUser));
+    fn only_conversations_with_people_are_displayed() {
+        assert!(is_displayed_conversation(
+            DialogKind::PrivateUser,
+            Some(false)
+        ));
         assert!(
-            is_private_conversation(DialogKind::Bot),
-            "a bot is a user to telegram, and the conversation is still one-to-one"
+            is_displayed_conversation(DialogKind::PrivateUser, None),
+            "a peer the update did not disclose is kept; a cache miss is not \
+             evidence of a bot, and dropping a real message would lose it"
         );
-        assert!(!is_private_conversation(DialogKind::Group));
-        assert!(!is_private_conversation(DialogKind::Channel));
+
+        assert!(
+            !is_displayed_conversation(DialogKind::PrivateUser, Some(true)),
+            "a bot is a user to telegram, and its conversation is not one televim renders"
+        );
+        assert!(!is_displayed_conversation(DialogKind::Bot, Some(true)));
+        assert!(
+            !is_displayed_conversation(DialogKind::Bot, None),
+            "a peer already classified as a bot is dropped even when the flag is missing"
+        );
+        assert!(!is_displayed_conversation(DialogKind::Group, None));
+        assert!(!is_displayed_conversation(DialogKind::Channel, None));
+    }
+
+    #[test]
+    fn a_peer_identifier_maps_onto_a_conversation_kind() {
+        let cases = [
+            (PeerKind::User, DialogKind::PrivateUser),
+            (PeerKind::UserSelf, DialogKind::PrivateUser),
+            (PeerKind::Chat, DialogKind::Group),
+            (PeerKind::Channel, DialogKind::Channel),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(
+                peer_kind_from_id(source),
+                expected,
+                "{source:?} was mistranslated"
+            );
+        }
     }
 
     #[test]
