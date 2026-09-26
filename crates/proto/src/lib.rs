@@ -66,6 +66,7 @@ pub mod auth;
 pub mod error;
 pub mod history;
 pub mod messages;
+pub mod search;
 mod types;
 
 #[cfg(feature = "live")]
@@ -75,6 +76,7 @@ pub mod stream;
 
 pub use error::ProtoError;
 pub use history::HistoryCursor;
+pub use search::SearchResults;
 
 #[cfg(feature = "live")]
 pub use client::ProtoClient;
