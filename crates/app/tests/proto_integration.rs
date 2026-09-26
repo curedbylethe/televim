@@ -36,8 +36,12 @@
 //!   not running, which again needs something to send to it in the meantime.
 //! - **A conversation with a known amount of history.** The history test pages
 //!   through whichever conversation the account has, so it cannot say in advance
-//!   how many pages it will walk or whether it will reach the beginning of one.
-//!   What it can say is what came back, and it prints that.
+//!   how many pages it will walk or whether it will reach either end of one.
+//!   What it can say is what came back, and it prints that. A conversation
+//!   shorter than the page budget is walked to both of its ends, which is the
+//!   case that proves a short page settles a direction; a longer one is walked
+//!   back a few pages and then forwards again, which is the case that proves the
+//!   two directions agree about the messages between them.
 //! - **Which message a reader stopped at.** Nothing in the wire format says it,
 //!   so the first unread is arithmetic over the count and the newest identifier —
 //!   approximate wherever deletions left gaps in the numbering. The history test
@@ -455,16 +459,98 @@ async fn conversation_with_history(proto: &ProtoClient) -> Option<Chat> {
     found.cloned()
 }
 
-/// What walking one conversation backwards found.
+/// Which side of its anchor a page in a walk is on.
+///
+/// Named rather than a `bool`, because the two are the same assertion read
+/// backwards and a boolean would leave every call site saying which it meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    /// Counting towards the past: the page holds what is in front of the anchor.
+    Older,
+
+    /// Counting towards the present: the page holds what is behind it.
+    Newer,
+}
+
+/// Asserts that a fetched page holds messages from one conversation, in the order
+/// a window reads them, and only messages on the side of `anchor` it was counted
+/// from.
+///
+/// The last of those is the one no fixture can settle. A shift with the wrong
+/// sign does not fail: Telegram answers with an entirely ordinary page from the
+/// other side of the anchor, and it is this assertion that says so.
+fn assert_page_beside(page: &[Message], chat_id: i64, anchor: i64, side: Side) {
+    assert_ascending(page);
+    assert!(
+        page.iter().all(|message| message.chat_id == chat_id),
+        "a page is fetched for one conversation, and every message names that one"
+    );
+
+    let (rule, comparison) = match side {
+        Side::Older => ("an older", "older than"),
+        Side::Newer => ("a newer", "newer than"),
+    };
+
+    for message in page {
+        let beside = match side {
+            Side::Older => message.id < anchor,
+            Side::Newer => message.id > anchor,
+        };
+        assert!(
+            beside,
+            "{rule} page must hold only messages {comparison} its anchor {anchor}, \
+             but it held message {}",
+            message.id
+        );
+    }
+}
+
+/// Asserts that a walk recovered every message an outward walk had already found.
+///
+/// Bounded by how far the recovering walk got: a shift wide enough to skip a
+/// message leaves a hole *inside* the range it covered, and running out of pages
+/// before reaching the far end is not the same thing as skipping one.
+fn assert_nothing_skipped(seen: &[i64], already_seen: &[i64], start: i64) {
+    let covered = seen.iter().copied().max().unwrap_or(start);
+
+    for id in already_seen
+        .iter()
+        .copied()
+        .filter(|id| *id > start && *id <= covered)
+    {
+        assert!(
+            seen.contains(&id),
+            "paging forwards skipped message {id}: every message the walk back found has \
+             to come back, and this one was inside the range this walk covered"
+        );
+    }
+}
+
+/// What walking one conversation found.
+///
+/// The identifiers are kept rather than a count of them, because the two walks
+/// are only interesting together: a message the walk towards the past saw and
+/// the walk back did not is one that was skipped on the way, and that is the
+/// mistake a wrong shift makes.
 struct Chain {
-    /// How many pages were fetched beyond the newest one.
+    /// How many pages this walk fetched.
     pages: usize,
 
-    /// How many messages those pages held, counting the newest page too.
-    messages: usize,
+    /// Every message the walk saw, in the order it saw them.
+    seen: Vec<i64>,
 
-    /// Whether the walk reached the beginning of the conversation.
-    reached_the_start: bool,
+    /// Whether the walk reached the end of the conversation it was heading for.
+    reached_the_end: bool,
+}
+
+/// Asserts that a walk saw each message once.
+fn assert_no_repeats(seen: &[i64]) {
+    let unique: HashSet<i64> = seen.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "two pages of one conversation must not return the same message"
+    );
 }
 
 /// Pages backwards from `latest`, checking every page against the one before it.
@@ -473,13 +559,23 @@ struct Chain {
 /// not the message it was counted from, the bound only ever moves away from
 /// where the reader started, and no message comes back twice. Those are the
 /// properties the window's prepend and its deduplication rest on.
-async fn walk_backwards(proto: &ProtoClient, chat_id: i64, latest: &[Message]) -> Chain {
-    let mut cursor = HistoryCursor::new(chat_id);
+///
+/// Leaves `cursor` describing the whole region the walk covered, and hands back
+/// the last page it fetched: that page is where a reader who had scrolled to the
+/// top of the conversation would be, and it is the only place a walk back
+/// towards the present can start from.
+async fn walk_backwards(
+    proto: &ProtoClient,
+    chat_id: i64,
+    cursor: &mut HistoryCursor,
+    latest: &[Message],
+) -> (Chain, Vec<Message>) {
     cursor.reset_to(latest);
 
     let mut seen: Vec<i64> = latest.iter().map(|message| message.id).collect();
     let mut pages = 0_usize;
-    let mut reached_the_start = false;
+    let mut reached_the_end = false;
+    let mut last_page = latest.to_vec();
 
     while pages < PAGE_BUDGET {
         let anchor = cursor
@@ -487,7 +583,7 @@ async fn walk_backwards(proto: &ProtoClient, chat_id: i64, latest: &[Message]) -
             .expect("the newest page left a bound to count from");
 
         let page = proto
-            .fetch_older(&mut cursor, PAGE)
+            .fetch_older(cursor, PAGE)
             .await
             .expect("an older page is fetched");
 
@@ -496,20 +592,11 @@ async fn walk_backwards(proto: &ProtoClient, chat_id: i64, latest: &[Message]) -
                 cursor.exhausted_older(),
                 "an empty page is the plainest end there is, so it must settle the direction"
             );
-            reached_the_start = true;
+            reached_the_end = true;
             break;
         }
 
-        assert_ascending(&page);
-        assert!(
-            page.iter().all(|message| message.chat_id == chat_id),
-            "a page is fetched for one conversation, and every message names that one"
-        );
-        assert!(
-            page.iter().all(|message| message.id < anchor),
-            "an older page must hold only messages in front of the anchor, but one \
-             reached {anchor}"
-        );
+        assert_page_beside(&page, chat_id, anchor, Side::Older);
 
         seen.extend(page.iter().map(|message| message.id));
 
@@ -521,24 +608,100 @@ async fn walk_backwards(proto: &ProtoClient, chat_id: i64, latest: &[Message]) -
         );
 
         pages += 1;
+        last_page = page;
 
         if cursor.exhausted_older() {
-            reached_the_start = true;
+            reached_the_end = true;
             break;
         }
     }
 
-    let unique: HashSet<i64> = seen.iter().copied().collect();
-    assert_eq!(
-        unique.len(),
-        seen.len(),
-        "two pages of one conversation must not return the same message"
-    );
+    assert_no_repeats(&seen);
+
+    (
+        Chain {
+            pages,
+            seen,
+            reached_the_end,
+        },
+        last_page,
+    )
+}
+
+/// Pages forwards from where `cursor` stands, checking every page against the
+/// one before it and against what a backward walk had already seen.
+///
+/// This is the direction nothing else in this file settles. It is the only
+/// paging fetch that sends a negative `add_offset`, and a shift that is wrong
+/// does not fail — Telegram answers with the messages in front of the anchor
+/// instead, which is a page that looks entirely ordinary right up until a reader
+/// scrolls down and finds they have gone the wrong way. The per-page checks
+/// catch that, because such a page holds nothing behind the anchor.
+///
+/// Completeness is checked against the backward walk, by
+/// [`assert_nothing_skipped`]: every message that walk saw beyond where this one
+/// starts has to come back. A shift that is too wide skips messages, and a walk
+/// that stopped short of them would otherwise look like a conversation that had
+/// simply run out.
+async fn walk_forwards(
+    proto: &ProtoClient,
+    chat_id: i64,
+    cursor: &mut HistoryCursor,
+    already_seen: &[i64],
+) -> Chain {
+    let start = cursor
+        .newest_loaded_id()
+        .expect("the page this walk starts from left a bound to count from");
+
+    let mut seen: Vec<i64> = Vec::new();
+    let mut pages = 0_usize;
+    let mut reached_the_end = false;
+
+    while pages < PAGE_BUDGET {
+        let anchor = cursor
+            .newest_loaded_id()
+            .expect("every page this walk fetched left a bound to count from");
+
+        let page = proto
+            .fetch_newer(cursor, PAGE)
+            .await
+            .expect("a newer page is fetched");
+
+        if page.is_empty() {
+            assert!(
+                cursor.exhausted_newer(),
+                "an empty page is the plainest end there is, so it must settle the direction"
+            );
+            reached_the_end = true;
+            break;
+        }
+
+        assert_page_beside(&page, chat_id, anchor, Side::Newer);
+
+        seen.extend(page.iter().map(|message| message.id));
+
+        let moved = cursor.newest_loaded_id();
+        assert!(
+            moved.is_some_and(|newest| newest > anchor),
+            "paging forwards has to move the newest bound towards the reader: \
+             {anchor} -> {moved:?}"
+        );
+
+        pages += 1;
+
+        if cursor.exhausted_newer() {
+            reached_the_end = true;
+            break;
+        }
+    }
+
+    assert_no_repeats(&seen);
+    assert_nothing_skipped(&seen, already_seen, start);
 
     Chain {
         pages,
-        messages: seen.len(),
-        reached_the_start,
+        seen,
+        reached_the_end,
     }
 }
 
@@ -610,6 +773,12 @@ async fn page_around_the_unread(proto: &ProtoClient, chat: &Chat) -> Option<Vec<
 /// skipped, and an anchor that only ever moves away from where the reader
 /// started.
 ///
+/// The walk goes back and then comes forwards again, which is the only way to say
+/// anything about the negative `add_offset` that a "newer" page is: a shift
+/// with the wrong sign does not fail, it answers with the messages behind the
+/// reader instead, and the only thing that notices is a walk checked against
+/// what the outward one found.
+///
 /// One test rather than three, because each would need its own login and
 /// Telegram throttles the code request hard. What it can prove is bounded by the
 /// account: a conversation with no history is skipped, and one shorter than the
@@ -657,7 +826,33 @@ async fn history_pages_through_a_conversation_without_gaps_or_repeats() {
         "a page is fetched for one conversation, and every message in it names that one"
     );
 
-    let chain = walk_backwards(&proto, chat.id, &latest).await;
+    let mut cursor = HistoryCursor::new(chat.id);
+    let (back, where_the_reader_is) = walk_backwards(&proto, chat.id, &mut cursor, &latest).await;
+
+    // Now back the other way, from where a reader who had scrolled to the top of
+    // the conversation would be standing.
+    let forward = if back.pages == 0 {
+        eprintln!(
+            "skipped: conversation {} is shorter than one page, so there is nothing to \
+             walk forwards from",
+            chat.id
+        );
+        None
+    } else {
+        // The cursor describes the whole region the walk covered, and a page
+        // counted from the newest of *that* is the end of the conversation
+        // again. What a reader at the top is looking at is the last page.
+        cursor.reset_to(&where_the_reader_is);
+        Some(walk_forwards(&proto, chat.id, &mut cursor, &back.seen).await)
+    };
+
+    let newest = latest.last().expect("the newest page is not empty").id;
+    if let Some(forward) = &forward {
+        assert!(
+            forward.pages > 0,
+            "a walk with messages to recover must fetch at least one page"
+        );
+    }
 
     // A page that replaces the window is surrounded by the unknown on both
     // sides, whatever the cursor said before it: the only thing that survived
@@ -665,14 +860,20 @@ async fn history_pages_through_a_conversation_without_gaps_or_repeats() {
     let target = latest[latest.len() / 2].id;
     let around = page_around(&proto, chat.id, target).await;
 
-    let mut cursor = HistoryCursor::new(chat.id);
-    cursor.reset_to(&around);
+    let mut around_cursor = HistoryCursor::new(chat.id);
+    around_cursor.reset_to(&around);
     assert!(
-        !cursor.exhausted_older() && !cursor.exhausted_newer(),
+        !around_cursor.exhausted_older() && !around_cursor.exhausted_newer(),
         "both directions open again after a jump"
     );
-    assert_eq!(cursor.oldest_loaded_id(), around.first().map(|m| m.id));
-    assert_eq!(cursor.newest_loaded_id(), around.last().map(|m| m.id));
+    assert_eq!(
+        around_cursor.oldest_loaded_id(),
+        around.first().map(|m| m.id)
+    );
+    assert_eq!(
+        around_cursor.newest_loaded_id(),
+        around.last().map(|m| m.id)
+    );
 
     // The other thing a page around a message is for: taking a reader to the
     // first of their unread messages, which the client places by arithmetic.
@@ -683,17 +884,126 @@ async fn history_pages_through_a_conversation_without_gaps_or_repeats() {
         );
     }
 
+    // Whether the round trip closed is reported rather than asserted: a
+    // conversation that ran out of pages before getting back to where it started
+    // has still been proved not to skip or repeat anything within the range it
+    // did cover.
     eprintln!(
-        "paged {} page(s) through conversation {} ({} message(s), {} to the start); \
+        "paged {} page(s) back through conversation {} ({} message(s), {}); \
+         {} page(s) forward again ({} message(s), {}, back to the newest: {}); \
          a page around message {target} held {}",
-        chain.pages,
+        back.pages,
         chat.id,
-        chain.messages,
-        if chain.reached_the_start {
-            "walked back"
+        back.seen.len(),
+        if back.reached_the_end {
+            "walked back to the start"
         } else {
-            "did not walk back"
+            "did not walk back to the start"
         },
+        forward.as_ref().map_or(0, |walk| walk.pages),
+        forward.as_ref().map_or(0, |walk| walk.seen.len()),
+        match &forward {
+            Some(walk) if walk.reached_the_end => "walked forward to the end",
+            Some(_) => "did not walk forward to the end",
+            None => "not walked forwards",
+        },
+        forward
+            .as_ref()
+            .is_some_and(|walk| walk.seen.contains(&newest)),
         around.len(),
     );
+}
+
+// ---- what the checks are worth --------------------------------------------
+//
+// Everything above needs a datacenter, so without one it proves nothing at all —
+// which is the whole reason these tests report what they examined. The
+// assertions inside the walks are the other half: they are what turns a run
+// against Telegram into a verdict, and a check that cannot fail is not one.
+//
+// So they are exercised here, against pages built to be wrong in each of the ways
+// a wrong `offset_id` or `add_offset` would make them wrong.
+
+/// A message in a conversation, as a page would carry it.
+fn message(chat_id: i64, id: i64) -> Message {
+    Message {
+        id,
+        chat_id,
+        text: "text".into(),
+        timestamp: 1_700_000_000,
+        status: domain::message::MessageStatus::Received,
+        is_outgoing: false,
+    }
+}
+
+/// A page of messages in one conversation, oldest first.
+fn page(chat_id: i64, ids: &[i64]) -> Vec<Message> {
+    ids.iter().map(|id| message(chat_id, *id)).collect()
+}
+
+/// A page beside its anchor is accepted, and it does not repeat the anchor: the
+/// wire counts from a message exclusively, so a page that came back with it
+/// would be a page the cursor has already accounted for.
+#[test]
+fn a_page_beside_its_anchor_is_accepted_in_both_directions() {
+    assert_page_beside(&page(7, &[3, 4, 5]), 7, 6, Side::Older);
+    assert_page_beside(&page(7, &[7, 8, 9]), 7, 6, Side::Newer);
+}
+
+/// The failure this whole walk exists to catch: a negative shift that Telegram
+/// answers by sending the messages *in front of* the anchor. Every one of them
+/// is on the wrong side, and an ordinary-looking page otherwise.
+#[test]
+#[should_panic(expected = "a newer page must hold only messages newer than its anchor")]
+fn a_newer_page_that_came_back_with_the_wrong_side_is_refused() {
+    assert_page_beside(&page(7, &[4, 5, 6]), 7, 6, Side::Newer);
+}
+
+#[test]
+#[should_panic(expected = "an older page must hold only messages older than its anchor")]
+fn an_older_page_that_reached_past_its_anchor_is_refused() {
+    assert_page_beside(&page(7, &[7, 8]), 7, 6, Side::Older);
+}
+
+/// A page is one conversation's, whatever else is wrong with it.
+#[test]
+#[should_panic(expected = "every message names that one")]
+fn a_page_naming_another_conversation_is_refused() {
+    assert_page_beside(&page(9, &[8, 10]), 7, 6, Side::Newer);
+}
+
+#[test]
+#[should_panic(expected = "a page must come out oldest first")]
+fn a_page_that_is_not_oldest_first_is_refused() {
+    assert_page_beside(&page(7, &[10, 8, 9]), 7, 6, Side::Newer);
+}
+
+#[test]
+#[should_panic(expected = "must not return the same message")]
+fn a_walk_that_saw_a_message_twice_is_refused() {
+    assert_no_repeats(&[8, 9, 9, 10]);
+}
+
+/// The failure a shift that is too wide makes: a hole inside the range the walk
+/// covered. The messages on either side of it came back, so nothing looks wrong
+/// except what is missing.
+#[test]
+#[should_panic(expected = "paging forwards skipped message 9")]
+fn a_walk_that_skipped_a_message_it_had_room_to_reach_is_refused() {
+    assert_nothing_skipped(&[8, 10, 11], &[8, 9, 10, 11], 6);
+}
+
+/// The other side of that bound: a walk that ran out of pages before reaching
+/// messages the outward walk had seen has not skipped anything, and saying so
+/// would fail a run for being inconclusive.
+#[test]
+fn a_walk_that_ran_out_of_pages_is_not_accused_of_skipping() {
+    assert_nothing_skipped(&[8, 9], &[8, 9, 10, 11, 12, 13], 6);
+}
+
+/// And the messages at or behind where the walk started are none of its
+/// business — they were already loaded.
+#[test]
+fn a_walk_is_not_asked_for_what_was_loaded_before_it_started() {
+    assert_nothing_skipped(&[8, 9], &[1, 2, 3, 8, 9], 6);
 }
