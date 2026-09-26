@@ -24,14 +24,15 @@
 //!
 //! # What one account cannot check
 //!
-//! Three things this seam wants proven cannot be provoked with the single
+//! A few things this seam wants proven cannot be provoked with the single
 //! account these tests have. They are recorded here rather than left as a silent
 //! hole:
 //!
 //! - **An update arriving for real.** Nothing sends to the test account while a
 //!   run is in progress, so the feed is usually silent and the drain below
-//!   checks zero updates. Provoking one needs a second account, and a send API
-//!   the framework does not expose yet.
+//!   checks zero updates. The one exception is the self-chat round trip at the
+//!   end of this file, which sends to the account's own Saved Messages and
+//!   therefore does provoke an arrival.
 //! - **The offline gap.** `catch_up` replays what arrived while the client was
 //!   not running, which again needs something to send to it in the meantime.
 //! - **A conversation with a known amount of history.** The history test pages
@@ -47,6 +48,11 @@
 //!   approximate wherever deletions left gaps in the numbering. The history test
 //!   fetches a page around the estimate and prints whether it was a message at
 //!   all; the unit tests carry the cases that can be settled exactly.
+//! - **Which way a message went.** Every message in the self-chat is outgoing,
+//!   so the round trip cannot tell a correct direction from a misattributed one,
+//!   and it proves an edit landed without proving it landed on the named
+//!   message. A second account, with a message each way, is what would settle
+//!   both.
 //!
 //! Each is covered as far as one account allows. The fetched list's ordering and
 //! the history's are asserted directly, which is deterministic, and the counts —
@@ -59,7 +65,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use domain::chat::Chat;
-use domain::history::unread_target;
+use domain::history::{ConversationWindow, unread_target};
 use domain::message::Message;
 use domain::updates::{ChatList, UpdateEvent};
 use proto::{HistoryCursor, ProtoClient, ProtoError, UpdateStream};
@@ -911,6 +917,197 @@ async fn history_pages_through_a_conversation_without_gaps_or_repeats() {
             .as_ref()
             .is_some_and(|walk| walk.seen.contains(&newest)),
         around.len(),
+    );
+}
+
+// ---- a round trip in the one conversation an account can write to ---------
+
+/// The account's own identifier: the peer its Saved Messages chat is with.
+///
+/// Nothing else in televim needs this, so the framework does not expose it. It
+/// comes through the escape hatch instead, with the same request `grammers`' own
+/// `get_me` makes.
+async fn self_user_id(client: &Client) -> Option<i64> {
+    let users = client
+        .invoke(&telegram_framework::tl::functions::users::GetUsers {
+            id: vec![telegram_framework::tl::enums::InputUser::UserSelf],
+        })
+        .await
+        .ok()?;
+
+    users.into_iter().find_map(|user| match user {
+        telegram_framework::tl::enums::User::User(user) => Some(user.id),
+        telegram_framework::tl::enums::User::Empty(_) => None,
+    })
+}
+
+/// What the feed reported during a round trip.
+struct RoundTrip {
+    /// Whether the sent message arrived.
+    arrived: bool,
+
+    /// Whether the edit arrived, with the text it was given.
+    edited: bool,
+
+    /// Whether the deletion arrived.
+    deleted: bool,
+}
+
+/// Watches the feed until the arrival, the edit and the deletion have all been
+/// seen, or the window closes, folding each event into `window`.
+async fn watch_round_trip(
+    updates: &mut UpdateStream,
+    window: &mut ConversationWindow,
+    message_id: i64,
+    edited_text: &str,
+) -> RoundTrip {
+    let mut trip = RoundTrip {
+        arrived: false,
+        edited: false,
+        deleted: false,
+    };
+    let deadline = tokio::time::Instant::now() + FEED_WINDOW;
+
+    while !(trip.arrived && trip.edited && trip.deleted) {
+        match next_before(updates, deadline).await {
+            FeedStep::Update(event) => {
+                let _ = window.apply_event(&event);
+                match &event {
+                    UpdateEvent::NewMessage(message) if message.id == message_id => {
+                        trip.arrived = true;
+                    }
+                    UpdateEvent::MessageEdited {
+                        message_id: edited_id,
+                        new_text,
+                        ..
+                    } if *edited_id == message_id && new_text.as_ref() == edited_text => {
+                        trip.edited = true;
+                    }
+                    UpdateEvent::MessagesDeleted { message_ids }
+                        if message_ids.contains(&message_id) =>
+                    {
+                        trip.deleted = true;
+                    }
+                    _ => {}
+                }
+            }
+            FeedStep::Failed(error) => {
+                eprintln!("the feed reported a failure it can recover from: {error}");
+            }
+            FeedStep::Quiet => break,
+        }
+    }
+
+    trip
+}
+
+/// Sends, edits and deletes one message in Saved Messages, and waits for each
+/// change to come back over the feed.
+///
+/// Saved Messages is the only conversation a single account can write to
+/// safely: it is with the account itself, so nothing is sent to anyone. It is a
+/// self-chat on the private side of Telegram's taxonomy — `UserSelf` maps to
+/// `PrivateUser` — which is why it reaches this seam at all.
+///
+/// The direction caveat at the top of this file applies: every message here is
+/// outgoing, so this proves the round trip rather than which way the message
+/// went. What it does prove is that a send is delivered and echoed, that an edit
+/// arrives as a `MessageEdited`, and that a deletion arrives as a
+/// `MessagesDeleted` and takes the message out of a window.
+#[tokio::test]
+async fn a_send_edit_and_delete_round_trip_through_saved_messages() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+
+    // Read before the client is wrapped: the wrapper deliberately exposes no
+    // raw request, and this is the one thing that needs one.
+    let Some(self_id) = self_user_id(&client).await else {
+        eprintln!("skipped: telegram did not report the account's own identifier");
+        return;
+    };
+
+    let proto = ProtoClient::new(client);
+    let chats = proto
+        .fetch_private_chats()
+        .await
+        .expect("the chat list is fetched");
+    let Some(chat) = chats.iter().find(|chat| chat.id == self_id) else {
+        eprintln!(
+            "skipped: Saved Messages is not among the {} private conversation(s)",
+            chats.len()
+        );
+        return;
+    };
+
+    // Taken before anything is sent, so the arrival cannot be missed.
+    let mut updates = proto
+        .subscribe_updates()
+        .expect("the feed is taken for the first time");
+
+    let marker = std::process::id();
+    let text = format!("televim round trip {marker}");
+    let edited_text = format!("televim round trip {marker} (edited)");
+
+    let sent = proto
+        .send_message(chat.id, &text, None)
+        .await
+        .expect("the message is sent to Saved Messages");
+    assert_eq!(
+        sent.chat_id, chat.id,
+        "the send names the conversation it went to"
+    );
+    assert_eq!(sent.text, text);
+    assert!(
+        sent.is_outgoing,
+        "the account wrote it, so it has to come back as outgoing"
+    );
+
+    proto
+        .edit_message(chat.id, sent.id, &edited_text)
+        .await
+        .expect("the message is edited");
+    proto
+        .delete_messages(chat.id, &[sent.id])
+        .await
+        .expect("the message is deleted");
+
+    // A window of its own, so the three feed events can be watched folding into
+    // one place. The deletion is what takes the message out at the end.
+    let mut window = ConversationWindow::new(chat.id);
+    window.replace([sent.clone()]);
+
+    let trip = watch_round_trip(&mut updates, &mut window, sent.id, &edited_text).await;
+
+    eprintln!(
+        "sent message {} in Saved Messages; the feed reported arrival: {}, \
+         edit: {}, deletion: {}",
+        sent.id, trip.arrived, trip.edited, trip.deleted
+    );
+
+    assert!(
+        trip.arrived,
+        "a message sent to Saved Messages has to arrive over the feed"
+    );
+    assert!(trip.edited, "an edit has to arrive as a MessageEdited");
+    assert!(
+        trip.deleted,
+        "a deletion has to arrive as a MessagesDeleted"
+    );
+    assert!(
+        window.position_of(sent.id).is_none(),
+        "the deletion has to take the message out of the window"
     );
 }
 
