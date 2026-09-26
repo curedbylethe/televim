@@ -11,6 +11,19 @@ pub enum ChatKind {
     Channel,
 }
 
+impl ChatKind {
+    /// Whether `televim` displays conversations of this kind.
+    ///
+    /// Only people. A bot, a group and a channel are all classified faithfully
+    /// on the way in and then dropped here, because this is the one place that
+    /// decides what the client renders — so the fetch and the filter agree by
+    /// construction rather than by both spelling the rule out.
+    #[must_use]
+    pub fn is_private(self) -> bool {
+        matches!(self, Self::Private)
+    }
+}
+
 /// A single chat as shown in the chat list.
 #[derive(Debug, Clone)]
 pub struct Chat {
@@ -19,6 +32,13 @@ pub struct Chat {
     pub kind: ChatKind,
     pub last_message: Option<Cow<'static, str>>,
     pub unread_count: u32,
+    /// Identifier of the message `last_message` was taken from, if any.
+    ///
+    /// The preview's text and timestamp say what the conversation last showed;
+    /// this says *which* message it was, so an edit can be matched to the
+    /// preview exactly. Two messages can share a second, and then the timestamp
+    /// alone cannot tell the one on show from its neighbour.
+    pub last_message_id: Option<i64>,
     /// Unix timestamp (seconds) of the most recent message, if any.
     pub last_timestamp: Option<i64>,
 }
@@ -26,7 +46,7 @@ pub struct Chat {
 impl Chat {
     #[must_use]
     pub fn is_private(&self) -> bool {
-        matches!(self.kind, ChatKind::Private)
+        self.kind.is_private()
     }
 
     #[must_use]
@@ -51,7 +71,31 @@ mod tests {
             kind,
             last_message: None,
             unread_count: 0,
+            last_message_id: None,
             last_timestamp: None,
+        }
+    }
+
+    #[test]
+    fn only_people_are_displayed() {
+        assert!(ChatKind::Private.is_private());
+        assert!(!ChatKind::Bot.is_private(), "a bot is not a person");
+        assert!(!ChatKind::Group.is_private());
+        assert!(!ChatKind::Channel.is_private());
+    }
+
+    /// The chat and its kind have to answer the same question the same way; the
+    /// filter is expressed through the kind, so a divergence would silently
+    /// display something the rest of the crate treats as hidden.
+    #[test]
+    fn a_chat_answers_about_itself_as_its_kind_does() {
+        for kind in [
+            ChatKind::Private,
+            ChatKind::Bot,
+            ChatKind::Group,
+            ChatKind::Channel,
+        ] {
+            assert_eq!(chat(1, kind).is_private(), kind.is_private(), "{kind:?}");
         }
     }
 

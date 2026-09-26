@@ -273,10 +273,7 @@ async fn the_feed_names_only_conversations_the_fetch_returned() {
         "expected the framework's refusal, got {error:?}"
     );
 
-    let mut list = ChatList {
-        chats: chats.clone(),
-        messages: Vec::new(),
-    };
+    let mut list = ChatList::with_chats(chats.clone());
     let deadline = tokio::time::Instant::now() + FEED_WINDOW;
     let mut seen = 0_usize;
 

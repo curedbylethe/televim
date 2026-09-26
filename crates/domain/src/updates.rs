@@ -14,7 +14,9 @@
 //! A new message joins the window, raises its conversation's unread count when
 //! it came from someone else, and becomes the preview when it is the most
 //! recent one. An edit replaces text, and reaches the preview when it is the
-//! message on show. A deletion removes messages from the window.
+//! message on show — the conversation records which message that is, so the
+//! match is exact rather than a guess. A deletion removes messages from the
+//! window.
 //!
 //! Two things are deliberately left alone. Deleting a message does not lower
 //! its conversation's unread count, because the window does not record whether
@@ -25,6 +27,7 @@
 //! again is what reconciles both.
 
 use std::borrow::Cow;
+use std::collections::{HashSet, VecDeque};
 
 use crate::chat::Chat;
 use crate::message::Message;
@@ -55,14 +58,33 @@ pub enum UpdateEvent {
 
     /// Messages were deleted.
     ///
-    /// Telegram does not say which conversations these belonged to: private
-    /// conversations share one account-wide message numbering, so a deletion
-    /// arrives as bare identifiers and every conversation has to be searched.
+    /// The event names no conversation, and the update it comes from has no
+    /// field that could: `updateDeleteMessages` carries the identifiers, a
+    /// `pts` and a `pts_count`, and nothing else. Deletions from a channel
+    /// arrive as a different update that does name its channel, and the
+    /// framework discards those because a channel is not displayed.
+    ///
+    /// The identifiers therefore come from the single sequence private
+    /// conversations share, which is what makes them usable with no
+    /// conversation attached — and what makes a flat window the right shape to
+    /// look them up in. That assumption is read off the wire format rather than
+    /// from a live account; if it ever stopped holding, a deletion would take
+    /// one conversation's message out of another's.
     MessagesDeleted {
         /// Identifiers of the deleted messages.
         message_ids: Vec<i64>,
     },
 }
+
+/// How many messages [`ChatList`] holds before the oldest is dropped.
+///
+/// The window exists so that an edit or a deletion can be matched against the
+/// messages this client has seen, and a few hundred covers far more than any
+/// screenful of conversation. The number matters because it is a ceiling on
+/// memory, not a preference: without one the window would grow with every
+/// message the account ever receives, which is the one thing this project's
+/// memory budget cannot absorb.
+pub const MESSAGE_WINDOW: usize = 500;
 
 /// The conversations the client holds, and the messages it has seen.
 ///
@@ -77,12 +99,24 @@ pub struct ChatList {
     ///
     /// Flat rather than one list per conversation, because every lookup here is
     /// a scan of a list that stays short in practice and a conversation's own
-    /// history is a view over it. Nothing trims it, so it grows with the
-    /// messages the client sees.
-    pub messages: Vec<Message>,
+    /// history is a view over it. It is a `VecDeque` so that the newest message
+    /// can be pushed onto the front without moving the rest, and it is capped
+    /// at [`MESSAGE_WINDOW`]: an edit or a deletion for a message that has
+    /// scrolled out is simply not applied, which is the same answer the list
+    /// gives for a conversation it does not hold.
+    pub messages: VecDeque<Message>,
 }
 
 impl ChatList {
+    /// A list holding `chats`, with nothing in the message window yet.
+    #[must_use]
+    pub fn with_chats(chats: Vec<Chat>) -> Self {
+        Self {
+            chats,
+            messages: VecDeque::new(),
+        }
+    }
+
     /// Applies an event, reporting whether it changed anything.
     ///
     /// `false` means the event named a conversation or a message this client
@@ -119,11 +153,16 @@ impl ChatList {
             .last_timestamp
             .is_none_or(|current| message.timestamp >= current)
         {
+            chat.last_message_id = Some(message.id);
             chat.last_timestamp = Some(message.timestamp);
             chat.last_message = Some(message.text.clone());
         }
 
-        self.messages.insert(0, message);
+        // Front first, then trimmed from the back: the window keeps the newest
+        // messages and cannot outgrow its ceiling however long the client runs.
+        self.messages.push_front(message);
+        self.messages.truncate(MESSAGE_WINDOW);
+
         true
     }
 
@@ -145,13 +184,12 @@ impl ChatList {
 
         // An edit to the message on show has to reach the preview, or the list
         // would keep quoting text the conversation no longer contains. The
-        // preview carries no identifier, so being the most recent message is
-        // what stands in for being the one on show.
-        let timestamp = self.messages[index].timestamp;
+        // conversation records which message the preview came from, so this is
+        // exact — a timestamp would not be, because two messages can share one.
         let text = self.messages[index].text.clone();
 
         if let Some(chat) = self.chat_mut(chat_id)
-            && chat.last_timestamp == Some(timestamp)
+            && chat.last_message_id == Some(message_id)
         {
             chat.last_message = Some(text);
         }
@@ -164,10 +202,18 @@ impl ChatList {
     /// Every conversation is searched, because the event names none: an
     /// identifier is enough to find the message wherever it lives.
     fn apply_deletion(&mut self, message_ids: &[i64]) -> bool {
+        if message_ids.is_empty() {
+            return false;
+        }
+
+        // A set rather than a scan of the slice per message: clearing a
+        // conversation's history sends every identifier it held, and looking
+        // each one up in turn would make that quadratic.
+        let deleted: HashSet<i64> = message_ids.iter().copied().collect();
         let before = self.messages.len();
 
         self.messages
-            .retain(|message| !message_ids.contains(&message.id));
+            .retain(|message| !deleted.contains(&message.id));
 
         self.messages.len() != before
     }
@@ -192,6 +238,7 @@ mod tests {
             kind: ChatKind::Private,
             last_message: Some(Cow::Borrowed("earlier")),
             unread_count: 0,
+            last_message_id: Some(9),
             last_timestamp: Some(1_000),
         }
     }
@@ -200,6 +247,7 @@ mod tests {
     fn empty_chat(id: i64) -> Chat {
         Chat {
             last_message: None,
+            last_message_id: None,
             last_timestamp: None,
             ..chat(id)
         }
@@ -227,10 +275,7 @@ mod tests {
     }
 
     fn list() -> ChatList {
-        ChatList {
-            chats: vec![chat(1), empty_chat(2)],
-            messages: Vec::new(),
-        }
+        ChatList::with_chats(vec![chat(1), empty_chat(2)])
     }
 
     fn arrival(chat_id: i64, id: i64, text: &'static str, timestamp: i64) -> UpdateEvent {
@@ -304,6 +349,52 @@ mod tests {
 
         assert_eq!(list.chats[0].last_timestamp, Some(2_000));
         assert_eq!(list.chats[0].last_message.as_deref(), Some("newest"));
+        assert_eq!(
+            list.chats[0].last_message_id,
+            Some(10),
+            "the preview has to record which message it came from"
+        );
+    }
+
+    #[test]
+    fn a_message_as_recent_as_the_preview_takes_its_place() {
+        let mut list = list();
+
+        applied(&mut list, arrival(1, 10, "first", 1_000));
+        // The same second as the message on show. Nothing else separates them,
+        // so the newer arrival has to win on its own.
+        applied(&mut list, arrival(1, 11, "second", 1_000));
+
+        assert_eq!(list.chats[0].last_timestamp, Some(1_000));
+        assert_eq!(list.chats[0].last_message.as_deref(), Some("second"));
+        assert_eq!(list.chats[0].last_message_id, Some(11));
+    }
+
+    #[test]
+    fn the_window_holds_only_the_newest_messages() {
+        let mut list = list();
+        let overflow = MESSAGE_WINDOW + 5;
+
+        for index in 0..overflow {
+            let id = i64::try_from(index).expect("the index fits in an identifier");
+            applied(&mut list, arrival(1, id, "text", 2_000 + id));
+        }
+
+        assert_eq!(
+            list.messages.len(),
+            MESSAGE_WINDOW,
+            "the window is a ceiling on memory, not a preference"
+        );
+        assert_eq!(
+            list.messages[0].id,
+            i64::try_from(overflow - 1).expect("the index fits"),
+            "the newest message is still at the front"
+        );
+        assert_eq!(
+            list.messages[MESSAGE_WINDOW - 1].id,
+            i64::try_from(overflow - MESSAGE_WINDOW).expect("the index fits"),
+            "the oldest arrivals are the ones that were dropped"
+        );
     }
 
     #[test]
@@ -371,6 +462,30 @@ mod tests {
 
         assert_eq!(list.messages[1].text, "old, edited");
         assert_eq!(list.chats[0].last_message.as_deref(), Some("new"));
+    }
+
+    /// The case a timestamp cannot decide: both messages are in the same
+    /// second, so "most recent" does not tell them apart. Only the identifier
+    /// does, and it has to do so in both directions.
+    #[test]
+    fn an_edit_in_the_preview_s_second_reaches_only_the_preview() {
+        let mut list = list();
+        applied(&mut list, arrival(1, 10, "older", 2_000));
+        applied(&mut list, arrival(1, 11, "newer", 2_000));
+        assert_eq!(list.chats[0].last_message_id, Some(11));
+
+        applied(&mut list, edit(1, 10, "older, edited"));
+
+        assert_eq!(list.messages[1].text, "older, edited");
+        assert_eq!(
+            list.chats[0].last_message.as_deref(),
+            Some("newer"),
+            "the edited message shares the preview's timestamp but is not the preview"
+        );
+
+        applied(&mut list, edit(1, 11, "newer, edited"));
+
+        assert_eq!(list.chats[0].last_message.as_deref(), Some("newer, edited"));
     }
 
     #[test]

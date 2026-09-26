@@ -34,6 +34,14 @@ pub struct ProtoChat {
     pub kind: ChatKind,
 
     pub unread_count: u32,
+
+    /// Identifier of the message the preview came from, if there is one.
+    ///
+    /// Carried through so that the domain can match an edit to the message the
+    /// conversation is actually showing, rather than inferring it from the
+    /// timestamp — which two messages can share.
+    pub last_message_id: Option<i64>,
+
     pub last_timestamp: Option<i64>,
     pub last_message: Option<String>,
 }
@@ -62,6 +70,7 @@ impl From<ProtoChat> for Chat {
             kind: chat.kind,
             last_message: chat.last_message.map(Cow::Owned),
             unread_count: chat.unread_count,
+            last_message_id: chat.last_message_id,
             last_timestamp: chat.last_timestamp,
         }
     }
@@ -110,6 +119,7 @@ impl From<DialogInfo> for ProtoChat {
             title: dialog.title,
             kind: chat_kind(dialog.kind),
             unread_count: dialog.unread_count,
+            last_message_id: dialog.last_message_id,
             last_timestamp: dialog.last_timestamp,
             last_message: dialog.last_text,
         }
@@ -140,8 +150,12 @@ impl From<MessageInfo> for ProtoMessage {
 /// at runtime. That is the guarantee a "this peer kind is unsupported" error
 /// would have stood in for, and it is the stronger of the two — a build that
 /// fails cannot be missed, and there is no branch left to leave untested.
+///
+/// Visible to the rest of the crate because the fetch uses it as its filter:
+/// the kind a dialog maps to is what decides whether a `Chat` is worth building
+/// at all, and that has to be the same mapping the conversion uses.
 #[cfg(feature = "live")]
-fn chat_kind(kind: DialogKind) -> ChatKind {
+pub(crate) fn chat_kind(kind: DialogKind) -> ChatKind {
     match kind {
         DialogKind::PrivateUser => ChatKind::Private,
         DialogKind::Bot => ChatKind::Bot,
@@ -161,6 +175,7 @@ mod tests {
             title: format!("chat {id}"),
             kind,
             unread_count: 0,
+            last_message_id: None,
             last_timestamp: None,
             last_message: None,
         }
@@ -209,18 +224,24 @@ mod tests {
     fn counts_and_timestamps_survive_the_trip() {
         let mut source = proto_chat(1, ChatKind::Private);
         source.unread_count = 3;
+        source.last_message_id = Some(7);
         source.last_timestamp = Some(1_700_000_000);
 
         let chat: Chat = source.into();
         assert_eq!(chat.id, 1);
         assert_eq!(chat.title, "chat 1");
         assert_eq!(chat.unread_count, 3);
+        assert_eq!(chat.last_message_id, Some(7));
         assert_eq!(chat.last_timestamp, Some(1_700_000_000));
 
         let dateless: Chat = proto_chat(2, ChatKind::Private).into();
         assert_eq!(
             dateless.last_timestamp, None,
             "a conversation with no messages has no timestamp, not the epoch"
+        );
+        assert_eq!(
+            dateless.last_message_id, None,
+            "and nothing to point a preview at"
         );
     }
 
@@ -289,6 +310,7 @@ mod live_tests {
             title: format!("chat {peer_id}"),
             kind,
             unread_count: 0,
+            last_message_id: None,
             last_timestamp: None,
             last_text: None,
         }
@@ -325,6 +347,7 @@ mod live_tests {
         let mut source = dialog(42, DialogKind::PrivateUser);
         source.title = "Ada".to_owned();
         source.unread_count = 3;
+        source.last_message_id = Some(7);
         source.last_timestamp = Some(1_700_000_000);
         source.last_text = Some("see you at six".to_owned());
 
@@ -336,6 +359,11 @@ mod live_tests {
         );
         assert_eq!(chat.title, "Ada");
         assert_eq!(chat.unread_count, 3);
+        assert_eq!(
+            chat.last_message_id,
+            Some(7),
+            "the preview's identifier has to survive, or an edit cannot reach it"
+        );
         assert_eq!(chat.last_timestamp, Some(1_700_000_000));
         assert_eq!(
             chat.last_message.as_deref(),
@@ -348,6 +376,7 @@ mod live_tests {
     fn a_dialog_with_no_messages_has_neither_a_preview_nor_a_timestamp() {
         let chat: Chat = ProtoChat::from(dialog(42, DialogKind::PrivateUser)).into();
 
+        assert_eq!(chat.last_message_id, None);
         assert_eq!(chat.last_timestamp, None);
         assert_eq!(chat.last_message, None);
     }

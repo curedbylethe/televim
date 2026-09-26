@@ -12,11 +12,12 @@ use crate::widgets;
 
 /// Converts a `usize` (e.g. a length or index) into the `i64` id space.
 ///
-/// Panics if the value exceeds `i64::MAX`. In practice `Vec`/`slice`
-/// lengths and indices can never approach this on any real machine,
-/// so a panic here would indicate a genuine bug.
+/// Saturates rather than panicking. The release profile sets `panic = "abort"`,
+/// so an identifier derived from a length must not be able to take the process
+/// down, and no real machine holds anywhere near `i64::MAX` elements — the
+/// saturated value is unreachable rather than merely unlikely.
 fn to_id(n: usize) -> i64 {
-    i64::try_from(n).expect("usize value does not fit in i64")
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +303,9 @@ fn mock_chats() -> Vec<Chat> {
             kind: ChatKind::Private,
             last_message: Some("See you at the demo.".into()),
             unread_count: 2,
+            // Matches the last of `mock_messages`, which is where the preview
+            // text came from.
+            last_message_id: Some(10),
             last_timestamp: Some(1_730_000_000),
         },
         Chat {
@@ -310,6 +314,7 @@ fn mock_chats() -> Vec<Chat> {
             kind: ChatKind::Private,
             last_message: Some("The compiler is ready.".into()),
             unread_count: 0,
+            last_message_id: None,
             last_timestamp: Some(1_729_999_000),
         },
         Chat {
@@ -318,6 +323,7 @@ fn mock_chats() -> Vec<Chat> {
             kind: ChatKind::Private,
             last_message: Some("Halting problem again…".into()),
             unread_count: 1,
+            last_message_id: None,
             last_timestamp: Some(1_729_998_000),
         },
     ]

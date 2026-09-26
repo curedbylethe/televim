@@ -66,6 +66,13 @@ pub struct DialogInfo {
     /// How many messages are unread.
     pub unread_count: u32,
 
+    /// Identifier of the most recent message, if there is one.
+    ///
+    /// The timestamp and the text say what a conversation last showed; this
+    /// says *which* message that was, which is what lets an edit be matched to
+    /// the preview exactly rather than by guessing from the timestamp.
+    pub last_message_id: Option<i64>,
+
     /// Unix timestamp in seconds of the most recent message, if there is one.
     pub last_timestamp: Option<i64>,
 
@@ -175,6 +182,7 @@ fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
         title: peer_title(peer_id, peer),
         kind: peer_kind(peer),
         unread_count: unread_count(raw.unread_count),
+        last_message_id: last_message.map(|message| i64::from(message.id())),
         last_timestamp: last_message
             .and_then(|message| message_timestamp(message.date().timestamp())),
         last_text: last_message.and_then(|message| last_text(message.text())),
@@ -308,6 +316,7 @@ mod tests {
             title: format!("chat {peer_id}"),
             kind: DialogKind::PrivateUser,
             unread_count: 0,
+            last_message_id: None,
             last_timestamp,
             last_text: None,
         }
