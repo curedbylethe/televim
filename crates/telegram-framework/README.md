@@ -247,18 +247,66 @@ stays green without credentials. Add `TELEVIM_TEST_PASSWORD` to exercise the
 two-factor branch. Note that each login test requests its own code and Telegram
 throttles that aggressively.
 
+## Sending, editing and deleting
+
+`Client::send_message(peer_id, text, reply_to)` sends text, optionally as a reply
+to another message of the same conversation, and returns the message as the
+server now has it — the identifier is the one Telegram assigned, not a local
+placeholder. `Client::edit_message(peer_id, message_id, text)` replaces the text
+of a message the account wrote; Telegram enforces the direction, so an attempt to
+edit another account's message is refused by the server rather than by a check
+here. It returns nothing: `grammers` discards the `Updates` an edit answers with,
+so the new text reaches a caller as a `UpdateKind::MessageEdited` event and
+nowhere else. `Client::delete_messages(peer_id, ids)` deletes for both sides.
+
+All three take the peer's *bare* identifier, resolve it through the session's
+peer cache, and report `FrameworkError::UnknownPeer` when it is not there — the
+same rule `fetch_history` follows.
+
+Text is checked before the request, so no round trip is spent on a message
+Telegram would reject. `validate_text` is that check, and its two refusals are
+the whole of the contract:
+
+- `FrameworkError::TextEmpty` — the text is empty or nothing but whitespace.
+- `FrameworkError::TextTooLong { chars, limit }` — the text is longer than
+  `TEXT_LIMIT` characters. The count is in characters, not bytes, because that is
+  the unit Telegram limits on: a message of emoji is measured the same way the
+  server measures it.
+
+Two things are deliberately absent rather than half-present:
+
+- **Deleting for this side alone.** `grammers` hard-codes `revoke: true`, and the
+  other scope would need a raw request together with a way to ask the reader
+  which they meant. Shipping the capability under the one confirmation every
+  delete already uses would make each delete silently "for both".
+- **Cancelling a send that is already on its way.** That needs task-abort
+  machinery this crate does not have.
+
 ## Not here yet
 
-This crate stops at the authentication boundary. Fetching chats and messages,
-sending and editing, resolving `InputPeer`s, filtering the update stream, and the
-`bumpalo`/`jemalloc` memory work all live outside it.
+Three things stay outside the crate on purpose, and are worth knowing before
+reaching for it:
+
+- **The chat list is unfiltered.** `fetch_dialogs` returns groups, channels and
+  bots alongside people. Classifying them is the framework's job — Telegram is
+  the only source of the answer — and deciding what to display is the caller's;
+  `proto` makes that decision through the domain's own rule.
+- **Paging is expressed, not performed.** `fetch_history` sends the page it is
+  given and hands it back. Where the loaded part of a conversation ends, and
+  therefore what the next request should ask for, is the caller's to keep.
+- **`bumpalo`/`jemalloc` tuning lives at the composition root.** This crate
+  allocates like any other; the arena and allocator choices belong to the binary.
 
 Two things are known gaps rather than deliberate scope cuts:
 
-- **The update stream is drained and counted, not consumed.** `ClientBuilder`
-  captures the pool's update receiver and a task discards what arrives, warning
-  once so the discard is never silent. The channel cannot grow without bound,
-  but nothing acts on an update yet; wiring it into `proto` is the next step.
+- **The update stream is drained and counted until it is taken, not buffered.**
+  `ClientBuilder` captures the pool's update receiver and a task discards what
+  arrives until `subscribe_updates` hands the feed to a caller, warning once so
+  the discard is never silent. The channel therefore cannot grow without bound,
+  and nothing is lost either: the session's update position only advances while a
+  feed is running, so `catch_up` replays from wherever it stopped. What the feed
+  does not model — reactions, pins, typing indicators, read receipts — is
+  discarded by the same filter.
 - **`check_password` takes the password as `&str`.** Its bytes stay in memory for
   as long as the caller's buffer does. Zeroising our own copy would not help —
   `grammers` holds the value across the SRP exchange — so this needs a decision
