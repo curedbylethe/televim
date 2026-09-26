@@ -466,6 +466,7 @@ pub(crate) use bridge::StoreSession;
 mod bridge {
     use std::fmt;
     use std::net::SocketAddrV4;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
     use grammers_client::session::defs::{
@@ -495,11 +496,23 @@ mod bridge {
     /// `grammers` consults the session on every single request and its
     /// [`Session`] methods are infallible, so the decoded state is held in
     /// memory and mirrored back to the store on demand — via
-    /// [`StoreSession::persist`] — rather than on every mutation. That keeps a
-    /// credential-store write off the hot path.
+    /// [`StoreSession::persist_if_dirty`] — rather than on every mutation. That
+    /// keeps a credential-store write off the hot path.
     pub struct StoreSession {
         store: Arc<dyn SessionStore>,
         state: Mutex<TlSessionData>,
+
+        /// Set whenever the transport mutates the session.
+        ///
+        /// A handful of requests change the session without any of the login
+        /// methods being involved: a datacenter migration, a peer learned from
+        /// a response, a moved update counter. Those changes are worth keeping —
+        /// losing a migration means the next launch cannot address the
+        /// datacenter it was moved to — but writing the whole snapshot on every
+        /// one of them would put a keyring write in the request path. So the
+        /// mutation only raises this flag, and the write happens once the
+        /// request that caused it is finished.
+        dirty: AtomicBool,
     }
 
     impl StoreSession {
@@ -516,6 +529,7 @@ mod bridge {
             Ok(Self {
                 store,
                 state: Mutex::new(state),
+                dirty: AtomicBool::new(false),
             })
         }
 
@@ -533,7 +547,40 @@ mod bridge {
 
         /// Writes the current state to the backing store.
         pub(crate) fn persist(&self) -> Result<(), SessionError> {
-            self.store.save(&self.snapshot())
+            // Cleared *before* the snapshot, not after. A mutation that lands
+            // while the write is in flight re-raises the flag, so the worst case
+            // is one redundant write; clearing it afterwards would instead drop
+            // that mutation, which is the failure this whole mechanism exists to
+            // prevent.
+            self.dirty.store(false, Ordering::Release);
+
+            if let Err(error) = self.store.save(&self.snapshot()) {
+                // Put the flag back, so the next flush retries the change
+                // instead of giving up on it.
+                self.mark_dirty();
+                return Err(error);
+            }
+
+            Ok(())
+        }
+
+        /// Writes the current state back, but only if something changed it.
+        ///
+        /// Returns whether a write happened. The check is a plain load, so two
+        /// threads racing here can both decide to write; a snapshot is written
+        /// whole, so the worst case is a duplicated write rather than a torn
+        /// one.
+        pub(crate) fn persist_if_dirty(&self) -> Result<bool, SessionError> {
+            if !self.dirty.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            self.persist()?;
+            Ok(true)
+        }
+
+        /// Raises the flag [`StoreSession::persist_if_dirty`] reads.
+        fn mark_dirty(&self) {
+            self.dirty.store(true, Ordering::Release);
         }
 
         /// Locks the in-memory mirror, recovering from a poisoned mutex.
@@ -555,6 +602,7 @@ mod bridge {
 
         fn set_home_dc_id(&self, dc_id: i32) {
             self.lock().home_dc = dc_id;
+            self.mark_dirty();
         }
 
         fn dc_option(&self, dc_id: i32) -> Option<TlDcOption> {
@@ -565,6 +613,7 @@ mod bridge {
             self.lock()
                 .dc_options
                 .insert(dc_option.id, dc_option.clone());
+            self.mark_dirty();
         }
 
         fn peer(&self, peer: PeerId) -> Option<PeerInfo> {
@@ -574,6 +623,7 @@ mod bridge {
         fn cache_peer(&self, peer: &PeerInfo) {
             let id = peer.id();
             self.lock().peer_infos.insert(id, peer.clone());
+            self.mark_dirty();
         }
 
         fn updates_state(&self) -> TlUpdatesState {
@@ -601,6 +651,8 @@ mod bridge {
                         .push(TlChannelState { id, pts });
                 }
             }
+            drop(state);
+            self.mark_dirty();
         }
     }
 
@@ -1090,6 +1142,137 @@ mod tests {
                 is_self: None,
             }],
             "only the in-range peer should survive"
+        );
+    }
+
+    /// The point of the dirty flag: a mutation the transport makes between
+    /// logins has to survive a restart, and the store must not be written when
+    /// nothing changed.
+    #[cfg(feature = "live")]
+    #[test]
+    fn bridge_writes_a_datacenter_migration_back_to_the_store() {
+        use std::sync::Arc;
+
+        use grammers_client::session::Session as _;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let session =
+            super::bridge::StoreSession::new(Arc::clone(&store)).expect("a fresh session loads");
+
+        assert!(
+            !session.persist_if_dirty().expect("the check succeeds"),
+            "a session nothing has touched is not worth writing"
+        );
+
+        session.set_home_dc_id(4);
+        assert!(
+            session.persist_if_dirty().expect("the write succeeds"),
+            "a migration has to be written back"
+        );
+        assert!(
+            !session.persist_if_dirty().expect("the check succeeds"),
+            "the flag has to clear once the write succeeded"
+        );
+
+        drop(session);
+
+        let restored = super::bridge::StoreSession::new(store).expect("the stored session loads");
+        assert_eq!(
+            restored.home_dc_id(),
+            4,
+            "a rebuilt session must come back on the datacenter it migrated to"
+        );
+    }
+
+    /// A cached peer and a moved update counter are the other two mutations that
+    /// happen outside the login flow, and they have to raise the flag too.
+    #[cfg(feature = "live")]
+    #[test]
+    fn bridge_marks_a_cached_peer_and_a_moved_counter_dirty() {
+        use std::sync::Arc;
+
+        use grammers_client::session::Session as _;
+        use grammers_client::session::defs::{PeerInfo, UpdateState as TlUpdateState};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let session = super::bridge::StoreSession::new(store).expect("a fresh session loads");
+
+        session.cache_peer(&PeerInfo::User {
+            id: 42,
+            auth: None,
+            bot: None,
+            is_self: None,
+        });
+        assert!(
+            session.persist_if_dirty().expect("the write succeeds"),
+            "a cached peer is a change worth keeping"
+        );
+
+        session.set_update_state(TlUpdateState::Primary {
+            pts: 7,
+            date: 0,
+            seq: 1,
+        });
+        assert!(
+            session.persist_if_dirty().expect("the write succeeds"),
+            "a moved update counter is a change worth keeping"
+        );
+    }
+
+    /// A store that refuses every write, so the retry path can be exercised.
+    #[cfg(feature = "live")]
+    #[derive(Default)]
+    struct FailingStore {
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "live")]
+    impl SessionStore for FailingStore {
+        fn load(&self) -> Result<Option<SessionData>, SessionError> {
+            Ok(None)
+        }
+
+        fn save(&self, _session: &SessionData) -> Result<(), SessionError> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(SessionError::Save(
+                "the credential store is locked".to_owned(),
+            ))
+        }
+
+        fn clear(&self) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
+    /// A write that fails has to leave the flag raised, or the change would be
+    /// dropped as soon as the store has a bad day.
+    #[cfg(feature = "live")]
+    #[test]
+    fn bridge_retries_a_write_the_store_refused() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        use grammers_client::session::Session as _;
+
+        let store = Arc::new(FailingStore::default());
+        let session = super::bridge::StoreSession::new(Arc::clone(&store) as Arc<dyn SessionStore>)
+            .expect("a fresh session loads");
+
+        session.set_home_dc_id(4);
+
+        assert!(
+            session.persist_if_dirty().is_err(),
+            "the store is supposed to refuse this write"
+        );
+        assert!(
+            session.persist_if_dirty().is_err(),
+            "a refused write has to be retried rather than quietly forgotten"
+        );
+        assert_eq!(
+            store.attempts.load(Ordering::SeqCst),
+            2,
+            "the second flush should have tried again"
         );
     }
 }

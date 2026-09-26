@@ -146,9 +146,9 @@ impl fmt::Debug for ClientBuilder {
 /// point of an escape hatch. Everything else — errors included — is defined
 /// here, so callers never have to add `grammers` to their own manifest.
 ///
-/// The session is persisted by the login methods, and on demand through
-/// [`Client::persist_session`]. State that changes afterwards — a datacenter
-/// migration, the peer cache, the update counters — is not written back yet.
+/// The session is persisted by the login methods, and flushed whenever a
+/// request changes it — a datacenter migration, a newly cached peer, a moved
+/// update counter. [`Client::persist_session`] forces a write on demand.
 pub struct Client {
     inner: grammers_client::Client,
     api_hash: String,
@@ -168,11 +168,18 @@ impl Client {
     ///
     /// A `false` here is not an error: it means the login flow has to be run.
     pub async fn is_authorized(&self) -> Result<bool, FrameworkError> {
-        self.inner
+        let authorized = self
+            .inner
             .is_authorized()
             .await
             .map_err(|error| RequestError::from_invocation(&error))
-            .map_err(FrameworkError::from)
+            .map_err(FrameworkError::from)?;
+
+        // Asking costs a round trip that can negotiate a datacenter or cache a
+        // peer, so the session may have moved even though nothing was sent.
+        self.flush_session();
+
+        Ok(authorized)
     }
 
     /// Asks Telegram to send a login code to `phone`.
@@ -256,7 +263,9 @@ impl Client {
     ///
     /// Worth calling after anything that changes the session materially — a
     /// datacenter migration, for instance — so that the next launch does not
-    /// have to renegotiate. The login methods already call it on success.
+    /// have to renegotiate. The login methods already write on success, and the
+    /// request paths flush automatically, so this is the escape hatch for
+    /// callers that know something changed and want the write now.
     pub fn persist_session(&self) -> Result<(), FrameworkError> {
         self.session.persist().map_err(FrameworkError::from)
     }
@@ -273,6 +282,25 @@ impl Client {
                 cooldown_secs = CODE_REQUEST_COOLDOWN.as_secs(),
                 "a login code was requested very recently; telegram may throttle this one"
             );
+        }
+    }
+
+    /// Writes the session back when a request changed it.
+    ///
+    /// A datacenter migration or a newly cached peer only reaches the store
+    /// through this call. Without it the next launch would silently renegotiate
+    /// — or, after a migration, find itself talking to a datacenter whose key
+    /// it no longer has and log the user out. The write is skipped unless
+    /// something actually changed, so a credential-store write stays off the
+    /// hot path.
+    pub(crate) fn flush_session(&self) {
+        match self.session.persist_if_dirty() {
+            Ok(false) => {}
+            Ok(true) => tracing::debug!("wrote the session back after it changed"),
+            Err(error) => tracing::warn!(
+                %error,
+                "the session changed but could not be saved; the next launch may renegotiate or need a new login"
+            ),
         }
     }
 

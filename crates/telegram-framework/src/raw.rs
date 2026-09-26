@@ -32,6 +32,11 @@ impl Client {
     /// `grammers` was generated for. A request built for a different layer may
     /// be rejected or answered with something this build cannot decode.
     ///
+    /// The request may also move the session — a datacenter migration, a peer
+    /// cached from the response — in which case the session is written back
+    /// before this returns. A failed write is logged at `warn` rather than
+    /// reported as a failed request, because the request itself succeeded.
+    ///
     /// # Examples
     ///
     /// Ping Telegram and read the `Pong` it answers with:
@@ -74,9 +79,16 @@ impl Client {
         &self,
         request: &R,
     ) -> Result<R::Return, FrameworkError> {
-        self.inner()
+        let response = self
+            .inner()
             .invoke(request)
             .await
-            .map_err(|error| RequestError::from_invocation(&error).into())
+            .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
+
+        // A successful call can migrate the datacenter or cache a peer, and
+        // that only reaches the store if it is written back here.
+        self.flush_session();
+
+        Ok(response)
     }
 }
