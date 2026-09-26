@@ -4,6 +4,19 @@
 //! - Must not expose any `grammers` or `telegram-framework` types to `domain` or `tui`.
 //! - Domain types only cross this boundary.
 //!
+//! # Features
+//!
+//! `live` turns on `ProtoClient` and `UpdateStream`, the two items that hold a
+//! `telegram_framework::Client`. It enables the framework's own `live` feature,
+//! and it is **off by default** — `make boundary` resolves this crate's
+//! dependencies with default features, so a `grammers` crate stays out of that
+//! graph only for as long as nothing here names a `live`-gated type
+//! unconditionally. Everything else in this crate — the DTOs and their
+//! conversions — compiles either way, so most of its tests run on every job.
+//!
+//! The two are named rather than linked because a link to them would dangle in
+//! a default-feature build; each is linked from the module that defines it.
+//!
 //! # Where `tl` may be named
 //!
 //! `telegram-framework` re-exports the `grammers` request and response types as
@@ -17,9 +30,10 @@
 //!   request enum the framework owns — and this crate calls that.
 //! - **`app` may.** It is the composition root, it is allowed to enable `live`,
 //!   and it already depends on every crate in the workspace.
-//! - **If the rule ever has to be relaxed, it is relaxed deliberately**: behind a
-//!   `live` feature on this crate, inside a module that names `tl`, translating
-//!   into domain types before anything leaves. It is not a drive-by import.
+//! - **If the rule ever has to be relaxed, it is relaxed deliberately**: behind
+//!   the `live` feature described above, inside a module that names `tl`,
+//!   translating into domain types before anything leaves. It is not a
+//!   drive-by import.
 //!
 //! ## Why not a type-erased `invoke_raw(bytes)`
 //!
@@ -49,11 +63,18 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod auth;
-pub mod client;
 pub mod error;
-pub mod stream;
 pub mod types;
 
-pub use client::ProtoClient;
+#[cfg(feature = "live")]
+pub mod client;
+#[cfg(feature = "live")]
+pub mod stream;
+
 pub use error::ProtoError;
 pub use types::{ProtoChat, ProtoMessage};
+
+#[cfg(feature = "live")]
+pub use client::ProtoClient;
+#[cfg(feature = "live")]
+pub use stream::UpdateStream;

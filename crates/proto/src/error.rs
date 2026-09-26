@@ -1,9 +1,12 @@
 //! Every error type this crate produces.
 //!
 //! It lives here rather than next to the code that raises it, so that every
-//! operation on [`ProtoClient`](crate::ProtoClient) can share one type without
-//! the modules having to know about each other. Nothing in it carries a
-//! `grammers` type: the boundary this crate maintains covers errors too.
+//! operation on `ProtoClient` can share one type without the modules having to
+//! know about each other. Nothing in it carries a `grammers` type: the boundary
+//! this crate maintains covers errors too.
+//!
+//! `ProtoClient` is named rather than linked because it only exists under the
+//! `live` feature, and a link to it would dangle in a default-feature build.
 
 use thiserror::Error;
 

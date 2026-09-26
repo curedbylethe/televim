@@ -1,9 +1,17 @@
 //! Internal DTOs. Never expose `grammers` types from here.
+//!
+//! Each DTO has two conversions: one from the description `telegram-framework`
+//! produced, and one into the `domain` type. The first can only be compiled
+//! when the framework's client is — it is `live`-gated — while the second needs
+//! nothing but `domain`, so it is always compiled and always tested.
 
 use std::borrow::Cow;
 
 use domain::chat::{Chat, ChatKind};
 use domain::message::{Message, MessageStatus};
+
+#[cfg(feature = "live")]
+use telegram_framework::{DialogInfo, DialogKind, MessageInfo};
 
 /// A conversation on its way from the framework into `domain`.
 ///
@@ -85,6 +93,60 @@ fn status_of(is_outgoing: bool) -> MessageStatus {
         MessageStatus::Sent
     } else {
         MessageStatus::Received
+    }
+}
+
+/// Turns a conversation the framework described into this crate's DTO.
+///
+/// Two fields are renamed on the way through — the framework says `peer_id`
+/// where `domain` says `id`, and `last_text` where it says `last_message` — so
+/// this is a conversion rather than a shared struct, and the renaming is the
+/// part worth a test.
+#[cfg(feature = "live")]
+impl From<DialogInfo> for ProtoChat {
+    fn from(dialog: DialogInfo) -> Self {
+        Self {
+            id: dialog.peer_id,
+            title: dialog.title,
+            kind: chat_kind(dialog.kind),
+            unread_count: dialog.unread_count,
+            last_timestamp: dialog.last_timestamp,
+            last_message: dialog.last_text,
+        }
+    }
+}
+
+/// Turns a message the framework described into this crate's DTO.
+///
+/// The conversation is the message's peer, which the framework calls
+/// `chat_peer_id`; everything else carries over unchanged.
+#[cfg(feature = "live")]
+impl From<MessageInfo> for ProtoMessage {
+    fn from(message: MessageInfo) -> Self {
+        Self {
+            id: message.id,
+            chat_id: message.chat_peer_id,
+            text: message.text,
+            timestamp: message.timestamp,
+            is_outgoing: message.is_outgoing,
+        }
+    }
+}
+
+/// Maps the framework's peer taxonomy onto the domain's.
+///
+/// The two line up one for one and the match says so: a kind added to the
+/// framework stops this compiling instead of falling through to a wrong answer
+/// at runtime. That is the guarantee a "this peer kind is unsupported" error
+/// would have stood in for, and it is the stronger of the two — a build that
+/// fails cannot be missed, and there is no branch left to leave untested.
+#[cfg(feature = "live")]
+fn chat_kind(kind: DialogKind) -> ChatKind {
+    match kind {
+        DialogKind::PrivateUser => ChatKind::Private,
+        DialogKind::Bot => ChatKind::Bot,
+        DialogKind::Group => ChatKind::Group,
+        DialogKind::Channel => ChatKind::Channel,
     }
 }
 
@@ -207,6 +269,130 @@ mod tests {
             visible.iter().map(|chat| chat.id).collect::<Vec<_>>(),
             vec![1, 5],
             "televim displays people and nobody else"
+        );
+    }
+}
+
+/// The conversions from the framework's descriptions.
+///
+/// Gated with the types they convert from. The rest of this module's tests need
+/// no datacenter and no feature, and run on every job; these run whenever the
+/// client does.
+#[cfg(all(test, feature = "live"))]
+mod live_tests {
+    use super::*;
+
+    /// A conversation as the framework describes it.
+    fn dialog(peer_id: i64, kind: DialogKind) -> DialogInfo {
+        DialogInfo {
+            peer_id,
+            title: format!("chat {peer_id}"),
+            kind,
+            unread_count: 0,
+            last_timestamp: None,
+            last_text: None,
+        }
+    }
+
+    /// A message as the framework describes it.
+    fn message_info(chat_peer_id: i64) -> MessageInfo {
+        MessageInfo {
+            id: 7,
+            chat_peer_id,
+            text: "hello".to_owned(),
+            timestamp: 1_700_000_000,
+            is_outgoing: false,
+        }
+    }
+
+    #[test]
+    fn every_dialog_kind_reaches_the_domain() {
+        let cases = [
+            (DialogKind::PrivateUser, ChatKind::Private),
+            (DialogKind::Bot, ChatKind::Bot),
+            (DialogKind::Group, ChatKind::Group),
+            (DialogKind::Channel, ChatKind::Channel),
+        ];
+
+        for (source, expected) in cases {
+            let chat: Chat = ProtoChat::from(dialog(1, source)).into();
+            assert_eq!(chat.kind, expected, "{source:?} was mistranslated");
+        }
+    }
+
+    #[test]
+    fn a_dialog_becomes_a_chat_without_losing_or_swapping_a_field() {
+        let mut source = dialog(42, DialogKind::PrivateUser);
+        source.title = "Ada".to_owned();
+        source.unread_count = 3;
+        source.last_timestamp = Some(1_700_000_000);
+        source.last_text = Some("see you at six".to_owned());
+
+        let chat: Chat = ProtoChat::from(source).into();
+
+        assert_eq!(
+            chat.id, 42,
+            "the peer identifier is the identifier of the conversation"
+        );
+        assert_eq!(chat.title, "Ada");
+        assert_eq!(chat.unread_count, 3);
+        assert_eq!(chat.last_timestamp, Some(1_700_000_000));
+        assert_eq!(
+            chat.last_message.as_deref(),
+            Some("see you at six"),
+            "the framework's last_text is the domain's last_message"
+        );
+    }
+
+    #[test]
+    fn a_dialog_with_no_messages_has_neither_a_preview_nor_a_timestamp() {
+        let chat: Chat = ProtoChat::from(dialog(42, DialogKind::PrivateUser)).into();
+
+        assert_eq!(chat.last_timestamp, None);
+        assert_eq!(chat.last_message, None);
+    }
+
+    #[test]
+    fn a_message_becomes_a_message_whose_conversation_is_its_peer() {
+        let mut source = message_info(42);
+        source.is_outgoing = true;
+
+        let message: Message = ProtoMessage::from(source).into();
+
+        assert_eq!(message.id, 7);
+        assert_eq!(
+            message.chat_id, 42,
+            "the framework's chat_peer_id is the domain's chat_id"
+        );
+        assert_eq!(message.text, "hello");
+        assert_eq!(message.timestamp, 1_700_000_000);
+        assert!(message.is_outgoing);
+        assert!(matches!(message.status, MessageStatus::Sent));
+    }
+
+    /// The whole path the chat list takes, on the framework's own shapes: an
+    /// unfiltered list, translated, then filtered down to what televim shows.
+    #[test]
+    fn only_people_survive_a_translated_dialog_list() {
+        let dialogs = vec![
+            dialog(1, DialogKind::PrivateUser),
+            dialog(2, DialogKind::Bot),
+            dialog(3, DialogKind::Group),
+            dialog(4, DialogKind::Channel),
+            dialog(5, DialogKind::PrivateUser),
+        ];
+
+        let chats: Vec<Chat> = dialogs
+            .into_iter()
+            .map(|dialog| ProtoChat::from(dialog).into())
+            .collect();
+
+        let visible = domain::chat::filter_private(chats);
+
+        assert_eq!(
+            visible.iter().map(|chat| chat.id).collect::<Vec<_>>(),
+            vec![1, 5],
+            "a bot and a channel are translated faithfully only to be dropped here"
         );
     }
 }

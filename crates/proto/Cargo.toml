@@ -5,6 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# The operations that talk to Telegram, and the update feed.
+#
+# Off by default, and it has to stay that way: `make boundary` resolves this
+# crate's dependencies with *default* features, and the only thing keeping a
+# `grammers` crate out of that graph is that nothing here names a
+# `live`-gated framework type unless this feature is on. Enabling it is what
+# turns the framework's client on, so `--all-features` — which CI uses — covers
+# both halves.
+live = ["telegram-framework/live"]
+
 [dependencies]
 domain.workspace = true
 telegram-framework.workspace = true
