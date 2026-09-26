@@ -39,6 +39,11 @@ impl ProtoClient {
         Self { inner }
     }
 
+    /// Borrows the framework client, for the operations that reach Telegram.
+    pub(crate) fn inner(&self) -> &telegram_framework::Client {
+        &self.inner
+    }
+
     /// Fetches the private conversations, newest first.
     ///
     /// Only people: groups, channels and bots are dropped, and dropped before
