@@ -68,6 +68,12 @@ pub(crate) struct ProtoMessage {
     pub text: String,
     pub timestamp: i64,
     pub is_outgoing: bool,
+
+    /// Identifier of the message this one replies to, if it is a reply.
+    ///
+    /// A reply's target is another message of the same conversation, so this is
+    /// already in the identifier space [`Message`] uses and needs no adjustment.
+    pub reply_to: Option<i64>,
 }
 
 impl From<ProtoChat> for Chat {
@@ -93,10 +99,7 @@ impl From<ProtoMessage> for Message {
             timestamp: message.timestamp,
             status: status_of(message.is_outgoing),
             is_outgoing: message.is_outgoing,
-            // Nothing translated off the wire carries a reply target yet, so
-            // every message the client holds describes a message that answers
-            // nothing.
-            reply_to: None,
+            reply_to: message.reply_to,
         }
     }
 }
@@ -151,6 +154,9 @@ impl From<MessageInfo> for ProtoMessage {
             text: message.text,
             timestamp: message.timestamp,
             is_outgoing: message.is_outgoing,
+            // Telegram reports a reply target as an `i32`; the domain counts in
+            // `i64`, and widening here is what keeps the two spaces joined.
+            reply_to: message.reply_to_msg_id.map(i64::from),
         }
     }
 }
@@ -201,6 +207,7 @@ mod tests {
             text: "hello".to_owned(),
             timestamp: 1_700_000_000,
             is_outgoing,
+            reply_to: None,
         }
     }
 
@@ -282,6 +289,22 @@ mod tests {
         assert_eq!(message.chat_id, 42);
         assert_eq!(message.text, "hello");
         assert_eq!(message.timestamp, 1_700_000_000);
+    }
+
+    #[test]
+    fn a_reply_target_survives_the_trip_intact() {
+        let mut source = proto_message(false);
+        source.reply_to = Some(9);
+
+        let message: Message = source.into();
+        assert_eq!(
+            message.reply_to,
+            Some(9),
+            "a reply names the message it answers, and the target is not renumbered"
+        );
+
+        let bare: Message = proto_message(true).into();
+        assert_eq!(bare.reply_to, None, "an ordinary message answers nothing");
     }
 
     /// The two halves have to compose: a kind that reaches `domain` intact is
@@ -398,6 +421,7 @@ mod live_tests {
     fn a_message_becomes_a_message_whose_conversation_is_its_peer() {
         let mut source = message_info(42);
         source.is_outgoing = true;
+        source.reply_to_msg_id = Some(5);
 
         let message: Message = ProtoMessage::from(source).into();
 
@@ -410,6 +434,11 @@ mod live_tests {
         assert_eq!(message.timestamp, 1_700_000_000);
         assert!(message.is_outgoing);
         assert!(matches!(message.status, MessageStatus::Sent));
+        assert_eq!(
+            message.reply_to,
+            Some(5),
+            "a reply target has to survive the widening, or the excerpt cannot find its message"
+        );
     }
 
     /// The whole path the chat list takes, on the framework's own shapes: an

@@ -16,12 +16,13 @@ use thiserror::Error;
 /// Every fallible operation in this crate returns this type, so a caller has
 /// one thing to handle rather than one per method.
 ///
-/// It carries a single variant, and that is the point: the framework already
-/// reports every way a request can fail as an error of its own, so this crate
-/// has nothing to add to it. A variant with no producer would be a guess at
-/// what a caller needs to match on, and a caller cannot act on a guess. The
-/// enum is `#[non_exhaustive]` so that it grows when a real failure mode
-/// appears rather than to reserve room for one.
+/// It adds almost nothing of its own, and that is the point: the framework
+/// already reports every way a request can fail as an error of its own, so a
+/// request failure is passed through as [`ProtoError::Framework`]. The one
+/// thing defined here is a fact about the two number spaces meeting in this
+/// crate — an identifier Telegram could not have numbered — rather than a
+/// request failure at all. The enum is `#[non_exhaustive]` so that it grows when
+/// a real failure mode appears rather than to reserve room for one.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ProtoError {
@@ -33,4 +34,17 @@ pub enum ProtoError {
     /// depending on `grammers`.
     #[error(transparent)]
     Framework(#[from] telegram_framework::FrameworkError),
+
+    /// A message identifier is outside the range Telegram numbers messages in.
+    ///
+    /// Telegram numbers messages with an `i32`, and the workspace counts in
+    /// `i64`, so a value outside that range cannot name a message. The framework
+    /// reports its own identifiers without a width, and this crate is where the
+    /// two spaces meet — which is why the failure is defined here rather than
+    /// there.
+    #[error("message {id} is outside the range telegram numbers messages in")]
+    MessageIdOutOfRange {
+        /// The identifier that could not be narrowed.
+        id: i64,
+    },
 }
