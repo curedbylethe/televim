@@ -9,13 +9,12 @@
 //!
 //! A `grammers::Dialog` can only be built from a raw response and a peer map,
 //! so nothing that consumes one can be tested without a datacenter. That makes
-//! the handful of functions which read a `grammers` value — [`dialog_to_info`],
-//! [`peer_kind`], [`peer_title`] and [`raw_unread_count`] — untestable here.
-//! They are therefore kept as thin as possible, and every decision inside them
-//! is pulled out into a free function over primitives: [`classify_user`],
-//! [`join_title`], [`unread_count`], [`message_timestamp`], [`last_text`] and
-//! [`newest_first`]. Those are the parts that can be wrong, and they run on
-//! every CI job.
+//! the handful of functions which read a `grammers` value — `dialog_to_info`,
+//! `peer_kind`, `peer_title` and `raw_unread_count` — untestable here. They are
+//! therefore kept as thin as possible, and every decision inside them is pulled
+//! out into a free function over primitives: `classify_user`, `join_title`,
+//! `unread_count`, `message_timestamp`, `last_text` and `newest_first`. Those
+//! are the parts that can be wrong, and they run on every CI job.
 
 use std::cmp::Ordering;
 
@@ -58,7 +57,7 @@ pub struct DialogInfo {
     /// Bare identifier of the peer the conversation is with.
     pub peer_id: i64,
 
-    /// Display name. Never empty: see [`join_title`].
+    /// Display name. Never empty: see `join_title`.
     pub title: String,
 
     /// What the peer is.
@@ -259,7 +258,7 @@ fn join_title(
 ///
 /// Only a conversation entry carries one. A folder is a navigation container
 /// with no single count — Telegram splits one across its muted and unmuted
-/// halves — and [`dialog_to_info`] has already discarded those, so this reports
+/// halves — and `dialog_to_info` has already discarded those, so this reports
 /// nothing unread rather than inventing a number.
 fn raw_unread_count(dialog: &Dialog) -> u32 {
     match &dialog.raw {

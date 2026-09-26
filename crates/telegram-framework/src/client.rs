@@ -9,6 +9,7 @@ use grammers_mtsender::SenderPool;
 use crate::auth::{LoginToken, PasswordToken, SignInResult};
 use crate::error::{AuthError, FrameworkError, RequestError};
 use crate::session::{KeyringStore, SessionStore, StoreSession};
+use crate::updates::UpdateRelay;
 
 /// How long after a login-code request a second one starts looking suspicious.
 ///
@@ -124,34 +125,15 @@ impl ClientBuilder {
             updates,
         } = pool;
         tokio::spawn(runner.run());
-        tokio::spawn(discard_updates(updates));
 
         Ok(Client {
             inner,
             api_hash: self.api_hash,
             session,
             code_requests: CodeRequestLog::default(),
+            updates: UpdateRelay::start(updates),
         })
     }
-}
-
-/// Drains the pool's update stream, counting what it throws away.
-///
-/// This crate does not surface updates yet — wiring them into `proto` is the
-/// next step — but the receiver cannot simply be dropped: `grammers` treats a
-/// dropped receiver as "stop delivering", and an unread channel would grow
-/// without bound. Draining keeps the queue empty and makes the discard
-/// observable instead of silent, which is what the next step needs to build on.
-async fn discard_updates<T>(mut updates: tokio::sync::mpsc::UnboundedReceiver<T>) {
-    let mut discarded: u64 = 0;
-    while updates.recv().await.is_some() {
-        if discarded == 0 {
-            tracing::warn!("discarding the update stream: this build does not consume updates yet");
-        }
-        discarded += 1;
-    }
-
-    tracing::debug!(discarded, "the update stream ended");
 }
 
 impl fmt::Debug for ClientBuilder {
@@ -174,11 +156,22 @@ impl fmt::Debug for ClientBuilder {
 /// The session is persisted by the login methods, and flushed whenever a
 /// request changes it — a datacenter migration, a newly cached peer, a moved
 /// update counter. [`Client::persist_session`] forces a write on demand.
+///
+/// # Updates
+///
+/// The connection pool starts producing updates as soon as a connection exists,
+/// but nothing reads them until [`Client::subscribe_updates`] is called. Until
+/// then they are discarded rather than held, so a client that never subscribes
+/// costs no memory and loses nothing: the session's update state only moves
+/// once a feed is running, and `catch_up` replays from wherever it stopped.
+/// There is no implicit drain, and no warning for the discarded events beyond
+/// a periodic debug log.
 pub struct Client {
     inner: grammers_client::Client,
     api_hash: String,
     session: Arc<StoreSession>,
     code_requests: CodeRequestLog,
+    updates: UpdateRelay,
 }
 
 impl fmt::Debug for Client {
@@ -298,6 +291,20 @@ impl Client {
     /// Borrows the wrapped client, for the escape hatch in [`crate::raw`].
     pub(crate) fn inner(&self) -> &grammers_client::Client {
         &self.inner
+    }
+
+    /// Borrows the update pipeline, for [`Client::subscribe_updates`].
+    pub(crate) fn updates(&self) -> &UpdateRelay {
+        &self.updates
+    }
+
+    /// Takes a share of the session, for the update feed.
+    ///
+    /// The feed outlives any single borrow of the client — it is held by
+    /// whatever drives it, and it writes the session back when it is dropped —
+    /// so it needs a handle of its own rather than a reference.
+    pub(crate) fn session_handle(&self) -> Arc<StoreSession> {
+        Arc::clone(&self.session)
     }
 
     /// Records a code request, warning when it follows closely on another.

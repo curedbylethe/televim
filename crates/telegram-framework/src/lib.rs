@@ -8,8 +8,9 @@
 //!   [`MemoryStore`], [`FileStore`] and [`KeyringStore`] backends. None of them
 //!   mentions `grammers`, so they are always compiled.
 //! * **The client** — [`ClientBuilder`], the phone → code → 2FA login flow, the
-//!   [`Client::fetch_dialogs`] chat list, and [`Client::invoke`] as a raw escape
-//!   hatch. These need `grammers`, so they sit behind the `live` feature.
+//!   [`Client::fetch_dialogs`] chat list, the [`Client::subscribe_updates`]
+//!   feed, and [`Client::invoke`] as a raw escape hatch. These need `grammers`,
+//!   so they sit behind the `live` feature.
 //!
 //! # Why `live` is off by default
 //!
@@ -75,6 +76,8 @@ pub mod client;
 pub mod dialogs;
 #[cfg(feature = "live")]
 pub mod raw;
+#[cfg(feature = "live")]
+pub mod updates;
 
 // Fixtures shared by the unit tests. Compiled only under `cargo test`.
 #[cfg(all(test, feature = "live"))]
@@ -92,6 +95,8 @@ pub use auth::{LoginToken, PasswordToken, SignInResult};
 pub use client::{Client, ClientBuilder};
 #[cfg(feature = "live")]
 pub use dialogs::{DialogInfo, DialogKind};
+#[cfg(feature = "live")]
+pub use updates::{MessageInfo, UpdateKind, UpdateSubscription};
 
 /// The `grammers` request and response types accepted by [`Client::invoke`].
 ///

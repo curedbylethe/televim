@@ -148,6 +148,14 @@ pub enum FrameworkError {
     /// A request to Telegram failed.
     #[error(transparent)]
     Request(#[from] RequestError),
+
+    /// The update feed had already been taken.
+    ///
+    /// An account's updates form one ordered sequence, so they are delivered to
+    /// exactly one subscriber. A second one could not be given a consistent
+    /// view without buffering for whichever consumer is slower.
+    #[error("this client is already subscribed to its updates")]
+    UpdatesAlreadySubscribed,
 }
 
 #[cfg(feature = "live")]
