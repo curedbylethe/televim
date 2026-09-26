@@ -38,12 +38,6 @@
 //! is asserted directly, which is deterministic, and the number of updates
 //! actually checked — along with the number the framework discarded — is
 //! printed, so a run that proved little says so instead of looking like a pass.
-//!
-//! The whole file is compiled only under the crate's `live` feature, which is
-//! what turns on the framework's client and the `proto` wrapper it is built
-//! from.
-
-#![cfg(feature = "live")]
 
 use std::env;
 use std::path::{Path, PathBuf};

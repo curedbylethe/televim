@@ -9,26 +9,21 @@ license.workspace = true
 name = "televim"
 path = "src/main.rs"
 
-[features]
-# The tests that assemble a real client and talk to Telegram.
-#
-# Off by default, and it has to stay that way. Enabling it turns on both halves
-# of the client — the framework's `grammers`-backed one and the `proto` wrapper
-# around it — and the binary needs neither: it renders from its own state and
-# does not reach the network yet. Leaving it off is also what keeps a default
-# build of this crate free of `grammers`, which is the same property
-# `make boundary` asserts for the crates it covers.
-live = ["proto/live", "telegram-framework/live"]
-
 [dependencies]
 domain.workspace = true
-proto.workspace = true
 tui.workspace = true
 
-# Named directly rather than reached through `proto`: the tests build a
-# framework `Client` themselves, because `ProtoClient::new` takes one and the
-# login flow belongs to the framework.
-telegram-framework.workspace = true
+# Both halves of the client, on: this is a Telegram client, and neither crate is
+# any use to it without its own `live` feature. That feature stays off inside
+# them so that `make boundary` can prove they pull in no `grammers` crate on
+# their own; asking for it here is the composition root saying it wants the
+# whole thing. `app` is deliberately not part of that check — it is the one
+# crate allowed to see everything.
+proto = { workspace = true, features = ["live"] }
+
+# Named directly rather than reached through `proto`: the login flow belongs to
+# the framework, and `ProtoClient::new` takes a framework `Client`.
+telegram-framework = { workspace = true, features = ["live"] }
 
 tokio.workspace = true
 anyhow.workspace = true

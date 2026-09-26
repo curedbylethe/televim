@@ -6,6 +6,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod config;
+mod net;
 mod runtime;
 
 use anyhow::Result;
