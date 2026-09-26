@@ -93,6 +93,10 @@ impl From<ProtoMessage> for Message {
             timestamp: message.timestamp,
             status: status_of(message.is_outgoing),
             is_outgoing: message.is_outgoing,
+            // Nothing translated off the wire carries a reply target yet, so
+            // every message the client holds describes a message that answers
+            // nothing.
+            reply_to: None,
         }
     }
 }
