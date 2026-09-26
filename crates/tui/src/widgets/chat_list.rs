@@ -10,7 +10,7 @@ use crate::app::App;
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let items: Vec<ListItem> = app
-        .chats
+        .chats()
         .iter()
         .map(|c| {
             let unread = if c.unread_count > 0 {
@@ -25,7 +25,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         })
         .collect();
 
-    let title = format!(" Chats ({}) ", app.chats.len());
+    let title = format!(" Chats ({}) ", app.chats().len());
     let list = List::new(items)
         .block(
             Block::default()

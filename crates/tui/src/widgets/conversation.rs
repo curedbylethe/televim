@@ -38,6 +38,10 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 
     let older = app.is_fetching(FetchDirection::Older);
     let newer = app.is_fetching(FetchDirection::Newer);
+    // A page that replaces an empty window has no edge to be announced at, so
+    // it is announced in place of the messages: there is nothing else to say
+    // while a conversation is being opened.
+    let opening = app.is_fetching(FetchDirection::Latest) && app.conversation.window.is_empty();
     let reserved = usize::from(older) + usize::from(newer);
     let budget = usize::from(body.height).saturating_sub(reserved);
 
@@ -47,6 +51,9 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let mut items: Vec<ListItem> = Vec::with_capacity(budget + reserved);
     if older {
         items.push(loading(app, FetchDirection::Older));
+    }
+    if opening {
+        items.push(loading(app, FetchDirection::Latest));
     }
     items.extend(
         window
@@ -335,6 +342,28 @@ mod tests {
             row(&with_newer, 4).contains("Loading newer…"),
             "the row behind them: {}",
             row(&with_newer, 4)
+        );
+    }
+
+    /// A page that replaces an empty window has no edge to sit at, so it is
+    /// announced where the messages would be: a conversation being opened says
+    /// something rather than showing nothing.
+    #[test]
+    fn a_conversation_being_opened_says_so() {
+        let mut app = App::mock();
+        app.select_chat(1);
+        app.begin_fetch(FetchDirection::Latest);
+
+        let screen = screen(&app, 80, 10);
+
+        assert!(
+            row(&screen, 1).contains("Loading…"),
+            "the panel's first row: {}",
+            row(&screen, 1)
+        );
+        assert!(
+            !screen.content.iter().any(|cell| cell.symbol() == "["),
+            "and no message rows, because there are none"
         );
     }
 

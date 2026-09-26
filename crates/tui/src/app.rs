@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
 use domain::history::ConversationView;
 use domain::message::{Message, MessageStatus};
-use domain::updates::UpdateEvent;
+use domain::updates::{ChatList, UpdateEvent};
 use domain::vim::{Motion, VimState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -31,13 +31,22 @@ const FETCH_MARGIN: usize = 20;
 /// size rather than a small one: a page that overshoots is clamped.
 const ASSUMED_ROWS: usize = 20;
 
-/// Which end of a conversation a fetch is asking for.
+/// What the status line shows before anything has happened.
+const IDLE_STATUS: &str = "televim";
+
+/// Which page of a conversation a fetch is asking for.
 ///
-/// Named rather than a `bool`, because the two differ in what they do to the
-/// window — one prepends and one appends — and a boolean would leave every call
-/// site saying which end it meant by convention.
+/// Named rather than a `bool`, because they differ in what they do to the
+/// window — one replaces it and two extend it from an end — and a boolean would
+/// leave every call site saying which one it meant by convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchDirection {
+    /// The newest page, which is what opening a conversation asks for.
+    ///
+    /// It replaces the window rather than extending it, and it is the only
+    /// fetch a conversation with nothing loaded can be given.
+    Latest,
+
     /// The page in front of the oldest message loaded.
     Older,
 
@@ -50,6 +59,7 @@ impl FetchDirection {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Latest => "Loading…",
             Self::Older => "Loading older…",
             Self::Newer => "Loading newer…",
         }
@@ -82,12 +92,59 @@ pub enum PromptKind {
     Search,
 }
 
+/// Which pages are in flight.
+///
+/// One flag per direction rather than a single "busy": the three are asked for
+/// independently, so a page arriving in one direction must not release another,
+/// and opening a conversation must release all three.
+#[derive(Debug, Default, Clone, Copy)]
+struct Fetching {
+    latest: bool,
+    older: bool,
+    newer: bool,
+}
+
+impl Fetching {
+    /// Whether a page in `direction` is on its way.
+    const fn is_in_flight(self, direction: FetchDirection) -> bool {
+        match direction {
+            FetchDirection::Latest => self.latest,
+            FetchDirection::Older => self.older,
+            FetchDirection::Newer => self.newer,
+        }
+    }
+
+    /// Records that a page in `direction` has been asked for, or that it is no
+    /// longer on its way.
+    fn set(&mut self, direction: FetchDirection, in_flight: bool) {
+        let slot = match direction {
+            FetchDirection::Latest => &mut self.latest,
+            FetchDirection::Older => &mut self.older,
+            FetchDirection::Newer => &mut self.newer,
+        };
+        *slot = in_flight;
+    }
+
+    /// Forgets every direction, which is what opening another conversation
+    /// does.
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub struct App {
     pub mode: Mode,
     pub prompt: PromptKind,
     pub theme: Theme,
 
-    pub chats: Vec<Chat>,
+    /// The conversations, and the messages the client has seen in them.
+    ///
+    /// One value rather than a list beside a window: an event from the feed
+    /// moves both, and keeping them apart would leave the preview and the
+    /// unread count somewhere the event never reached. [`App::apply_update`] is
+    /// the one place either is folded in.
+    list: ChatList,
+
     pub selected_chat: usize,
 
     /// The conversation on show, and where the reader is in it.
@@ -105,11 +162,8 @@ pub struct App {
     /// Set by `/` search: the query text.
     pub search_query: Option<String>,
 
-    /// Whether a page in front of the window is in flight.
-    fetching_older: bool,
-
-    /// Whether a page behind the window is in flight.
-    fetching_newer: bool,
+    /// The pages on their way from the network.
+    fetching: Fetching,
 
     /// How many message rows the conversation panel had room for as of the last
     /// frame.
@@ -139,16 +193,15 @@ impl App {
             mode: Mode::Normal,
             prompt: PromptKind::Message,
             theme: Theme::default(),
-            chats: Vec::new(),
+            list: ChatList::default(),
             selected_chat: 0,
             conversation: ConversationView::new(0),
             vim: VimState::new(0),
             input: String::new(),
-            status: "televim — skeleton (no network)".to_string(),
+            status: IDLE_STATUS.to_string(),
             should_quit: false,
             search_query: None,
-            fetching_older: false,
-            fetching_newer: false,
+            fetching: Fetching::default(),
             rows: Cell::new(ASSUMED_ROWS),
         }
     }
@@ -162,10 +215,47 @@ impl App {
     #[must_use]
     pub fn mock() -> Self {
         let mut app = Self::new();
-        app.chats = mock_chats();
+        app.set_chats(mock_chats());
         app.select_chat(0);
         app.apply_latest(mock_messages());
         app
+    }
+
+    // ---- the chat list --------------------------------------------------
+
+    /// The conversations, as they were last fetched.
+    #[must_use]
+    pub fn chats(&self) -> &[Chat] {
+        &self.list.chats
+    }
+
+    /// Installs a freshly fetched chat list.
+    ///
+    /// The window the messages were seen in goes with it: the list is replaced
+    /// wholesale, and a message kept from the one before would be matched
+    /// against conversations that are no longer on screen.
+    ///
+    /// The selection is clamped rather than reset, because the reader's place
+    /// is a position in a list that may have become shorter. An empty list
+    /// leaves nothing selected, which is what closes the conversation: there is
+    /// no chat for the window to belong to.
+    pub fn set_chats(&mut self, chats: Vec<Chat>) {
+        self.list = ChatList::with_chats(chats);
+
+        let last = self.list.chats.len().saturating_sub(1);
+        self.selected_chat = self.selected_chat.min(last);
+
+        if self.list.chats.is_empty() {
+            self.select_chat_none();
+        }
+    }
+
+    /// Closes the conversation on show.
+    fn select_chat_none(&mut self) {
+        self.conversation = ConversationView::new(0);
+        self.vim = VimState::new(0);
+        self.fetching.clear();
+        self.search_query = None;
     }
 
     // ---- what is on show ------------------------------------------------
@@ -179,17 +269,14 @@ impl App {
     ///
     /// An index outside the list leaves the screen as it was.
     pub fn select_chat(&mut self, index: usize) {
-        let Some(chat) = self.chats.get(index) else {
+        let Some(chat) = self.list.chats.get(index) else {
             return;
         };
         let chat_id = chat.id;
 
         self.selected_chat = index;
+        self.select_chat_none();
         self.conversation = ConversationView::new(chat_id);
-        self.vim = VimState::new(0);
-        self.fetching_older = false;
-        self.fetching_newer = false;
-        self.search_query = None;
     }
 
     /// Whether a conversation is open to put messages in.
@@ -278,23 +365,28 @@ impl App {
         true
     }
 
-    /// Applies an event from the feed to the open conversation.
+    /// Applies an event from the feed to everything it touches.
     ///
-    /// The same contract as the flat window's: `false` means nothing observable
-    /// moved, so the caller owes no redraw. Both windows are fed the same
-    /// events, and deduplicating by identifier is what makes the overlap
-    /// between them harmless.
+    /// One event, two places: the list keeps the preview and the unread count,
+    /// the open conversation keeps the messages. The same contract as the flat
+    /// window's — `false` means nothing observable moved, so the caller owes no
+    /// redraw. Deduplicating by identifier is what makes the overlap between
+    /// the two windows harmless.
+    ///
+    /// The event is copied rather than shared because the list moves an arrival
+    /// into its own window, so it needs one of its own. One copy per event is
+    /// the price of a single event reaching both.
     #[must_use]
     pub fn apply_update(&mut self, event: &UpdateEvent) -> bool {
-        let anchor = self.cursor_message_id();
+        let listed = self.list.apply_update(event.clone());
 
-        if !self.conversation.apply_event(event) {
-            return false;
+        let anchor = self.cursor_message_id();
+        let windowed = self.conversation.apply_event(event);
+        if windowed {
+            self.after_window_change(anchor);
         }
 
-        self.after_window_change(anchor);
-
-        true
+        listed || windowed
     }
 
     /// Puts the reader back where they were, now that the window has moved.
@@ -347,7 +439,7 @@ impl App {
     pub fn wants_older(&self) -> bool {
         let window = &self.conversation.window;
 
-        !self.fetching_older
+        !self.fetching.is_in_flight(FetchDirection::Older)
             && !window.is_empty()
             && !window.exhausted_older
             && self.vim.cursor() < FETCH_MARGIN
@@ -362,7 +454,7 @@ impl App {
     pub fn wants_newer(&self) -> bool {
         let window = &self.conversation.window;
 
-        !self.fetching_newer
+        !self.fetching.is_in_flight(FetchDirection::Newer)
             && !window.is_empty()
             && !window.exhausted_newer
             && !self.conversation.auto_follow()
@@ -374,10 +466,7 @@ impl App {
     /// One fetch per direction at a time: this is what a trigger checks before
     /// it fires, so holding a key down cannot turn into a stream of requests.
     pub fn begin_fetch(&mut self, direction: FetchDirection) {
-        match direction {
-            FetchDirection::Older => self.fetching_older = true,
-            FetchDirection::Newer => self.fetching_newer = true,
-        }
+        self.fetching.set(direction, true);
     }
 
     /// Records that the fetch for `direction` is over, however it ended.
@@ -386,18 +475,27 @@ impl App {
     /// alternative is a conversation that can never be paged again because one
     /// request went wrong.
     pub fn end_fetch(&mut self, direction: FetchDirection) {
-        match direction {
-            FetchDirection::Older => self.fetching_older = false,
-            FetchDirection::Newer => self.fetching_newer = false,
-        }
+        self.fetching.set(direction, false);
     }
 
     /// Whether a fetch for `direction` is in flight.
     #[must_use]
     pub const fn is_fetching(&self, direction: FetchDirection) -> bool {
+        self.fetching.is_in_flight(direction)
+    }
+
+    /// Records that a direction has run out.
+    ///
+    /// A page's own length cannot say this: a short page and the last full one
+    /// look the same once they are in the window. Only the cursor that asked
+    /// knows, and the trigger reads the window — so its answer has to arrive
+    /// here.
+    pub fn exhaust(&mut self, direction: FetchDirection) {
         match direction {
-            FetchDirection::Older => self.fetching_older,
-            FetchDirection::Newer => self.fetching_newer,
+            // Nothing is loaded, so there is no end to have run out of.
+            FetchDirection::Latest => {}
+            FetchDirection::Older => self.conversation.window.exhausted_older = true,
+            FetchDirection::Newer => self.conversation.window.exhausted_newer = true,
         }
     }
 
@@ -498,7 +596,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
-                self.status = "televim — skeleton (no network)".into();
+                self.status = IDLE_STATUS.into();
             }
             KeyCode::Char('d') => {
                 self.status = "visual: delete (not implemented)".into();
@@ -566,7 +664,7 @@ impl App {
             "q" | "quit" => self.should_quit = true,
             _ if cmd.starts_with("chat ") => {
                 if let Ok(id) = cmd[5..].trim().parse::<i64>()
-                    && let Some(pos) = self.chats.iter().position(|c| c.id == id)
+                    && let Some(pos) = self.list.chats.iter().position(|c| c.id == id)
                 {
                     self.select_chat(pos);
                 }
@@ -670,7 +768,7 @@ impl App {
 
     #[must_use]
     pub fn current_chat_id(&self) -> i64 {
-        self.chats.get(self.selected_chat).map_or(0, |c| c.id)
+        self.list.chats.get(self.selected_chat).map_or(0, |c| c.id)
     }
 
     #[must_use]
@@ -796,6 +894,24 @@ mod tests {
         }
     }
 
+    /// A message in a conversation the client holds nowhere at all.
+    fn unknown(id: i64) -> Message {
+        Message {
+            chat_id: 999,
+            ..message(id, "unknown")
+        }
+    }
+
+    /// How many unread messages the list holds for a conversation.
+    fn unread(app: &App, chat_id: i64) -> u32 {
+        app.list
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .expect("the chat is in the list")
+            .unread_count
+    }
+
     /// The identifier of the message the cursor is on.
     fn reading(app: &App) -> Option<i64> {
         app.conversation
@@ -839,7 +955,7 @@ mod tests {
     fn a_new_application_holds_nothing_it_has_not_fetched() {
         let app = App::new();
 
-        assert!(app.chats.is_empty());
+        assert!(app.chats().is_empty());
         assert!(app.conversation.window.is_empty());
         assert_eq!(app.current_chat_id(), 0);
         assert!(!app.has_conversation());
@@ -864,6 +980,33 @@ mod tests {
         );
         assert!(app.conversation.auto_follow());
         assert_eq!(app.vim.total(), 0);
+    }
+
+    /// The fetched list replaces whatever was there, and the reader's place
+    /// comes back inside it rather than pointing past the end of a shorter one.
+    #[test]
+    fn a_fetched_list_replaces_the_one_before_it() {
+        let mut app = App::mock();
+        app.select_chat(2);
+
+        app.set_chats(mock_chats().into_iter().take(2).collect());
+
+        assert_eq!(app.chats().len(), 2);
+        assert_eq!(app.selected_chat, 1, "clamped into the shorter list");
+        assert_eq!(app.current_chat_id(), 2);
+    }
+
+    /// A fetch that returns nobody leaves no conversation to be in: the window
+    /// belongs to a chat the list no longer holds.
+    #[test]
+    fn an_empty_fetch_closes_the_conversation() {
+        let mut app = App::mock();
+
+        app.set_chats(Vec::new());
+
+        assert!(app.chats().is_empty());
+        assert_eq!(app.current_chat_id(), 0);
+        assert!(app.conversation.window.is_empty());
     }
 
     /// Regression: every keystroke must be applied exactly once. Previously
@@ -941,7 +1084,7 @@ mod tests {
         run_command_line(&mut app, "chat 2");
 
         let expected = app
-            .chats
+            .chats()
             .iter()
             .position(|c| c.id == 2)
             .expect("chat 2 is part of the mock data");
@@ -1197,20 +1340,77 @@ mod tests {
         assert!(!app.conversation.auto_follow());
     }
 
+    /// An arrival the conversation already holds leaves it alone: the window
+    /// deduplicates by identifier, so a message cannot sit in it twice.
+    ///
+    /// The flat window underneath is a different thing — a record of what the
+    /// client has been sent, which does not deduplicate — so the event still
+    /// reports a change. That difference is why the two are fed separately
+    /// rather than one being derived from the other, and it is why the
+    /// assertion here is about the conversation rather than about the report.
     #[test]
-    fn an_arrival_the_window_already_holds_owes_no_redraw() {
+    fn an_arrival_the_conversation_already_holds_leaves_it_alone() {
+        let mut app = App::mock();
+        let before = app.conversation.window.len();
+
+        let moved = app.apply_update(&UpdateEvent::NewMessage(message(10, "again")));
+
+        assert_eq!(
+            app.conversation.window.len(),
+            before,
+            "the open window holds one copy of the message"
+        );
+        assert_eq!(
+            text_of(&app, 10),
+            Some("See you at the demo."),
+            "and the message on show keeps the text it arrived with"
+        );
+        assert!(moved, "while the flat window recorded what it was sent");
+    }
+
+    /// One event, two windows: the message lands in the conversation on show,
+    /// and the conversation's unread count moves in the list behind it.
+    #[test]
+    fn one_arrival_reaches_both_the_window_and_the_list() {
+        let mut app = App::mock();
+        let before = unread(&app, MOCK_CHAT);
+
+        assert!(app.apply_update(&UpdateEvent::NewMessage(message(11, "ping"))));
+
+        assert_eq!(reading(&app), Some(11), "the window took the message");
+        assert_eq!(
+            unread(&app, MOCK_CHAT),
+            before + 1,
+            "and the list counted it, which is what the panel shows"
+        );
+    }
+
+    /// An event for a conversation the client does not hold has nowhere to go:
+    /// neither window can apply it, so nothing observable moved.
+    #[test]
+    fn an_arrival_for_an_unknown_conversation_changes_nothing() {
         let mut app = App::mock();
 
-        assert!(!app.apply_update(&UpdateEvent::NewMessage(message(10, "again"))));
+        assert!(!app.apply_update(&UpdateEvent::NewMessage(unknown(11))));
         assert_eq!(app.conversation.window.len(), 10);
     }
 
+    /// A conversation other than the one on show is still one the list holds,
+    /// so the arrival reaches the list and stops there.
     #[test]
-    fn an_arrival_for_another_conversation_changes_nothing() {
+    fn an_arrival_for_another_conversation_reaches_the_list_alone() {
         let mut app = App::mock();
+        let before = app.conversation.window.len();
 
-        assert!(!app.apply_update(&UpdateEvent::NewMessage(stranger(11))));
-        assert_eq!(app.conversation.window.len(), 10);
+        assert!(
+            app.apply_update(&UpdateEvent::NewMessage(stranger(11))),
+            "the list holds the conversation the message belongs to"
+        );
+        assert_eq!(
+            app.conversation.window.len(),
+            before,
+            "but the window on show is a different conversation"
+        );
     }
 
     #[test]
@@ -1297,15 +1497,73 @@ mod tests {
         assert!(app.wants_older(), "the direction is open again");
     }
 
+    /// The directions are tracked apart, so a page in flight in one of them
+    /// does not hold up the others.
+    #[test]
+    fn the_directions_are_tracked_apart() {
+        let mut app = App::mock();
+
+        app.begin_fetch(FetchDirection::Latest);
+        app.begin_fetch(FetchDirection::Older);
+
+        assert!(app.is_fetching(FetchDirection::Latest));
+        assert!(app.is_fetching(FetchDirection::Older));
+        assert!(!app.is_fetching(FetchDirection::Newer));
+
+        app.end_fetch(FetchDirection::Latest);
+        assert!(!app.is_fetching(FetchDirection::Latest));
+        assert!(
+            app.is_fetching(FetchDirection::Older),
+            "releasing one says nothing about the rest"
+        );
+    }
+
+    /// Opening another conversation forgets what was in flight for the old one:
+    /// the page is coming for a window that is no longer on screen.
+    #[test]
+    fn opening_a_conversation_forgets_what_was_in_flight() {
+        let mut app = App::mock();
+        app.begin_fetch(FetchDirection::Latest);
+        app.begin_fetch(FetchDirection::Older);
+
+        app.select_chat(1);
+
+        for direction in [
+            FetchDirection::Latest,
+            FetchDirection::Older,
+            FetchDirection::Newer,
+        ] {
+            assert!(
+                !app.is_fetching(direction),
+                "{direction:?} is still in flight"
+            );
+        }
+    }
+
+    /// A conversation with nothing loaded has no message to count a page from,
+    /// so the newest page is the only one it can be given.
+    #[test]
+    fn an_empty_conversation_is_near_neither_of_its_ends() {
+        let mut app = App::mock();
+        app.select_chat(1);
+
+        assert!(app.conversation.window.is_empty());
+        assert!(!app.wants_older());
+        assert!(!app.wants_newer());
+    }
+
     #[test]
     fn a_direction_the_conversation_has_run_out_of_is_not_asked_for() {
         let mut app = App::mock();
         assert!(app.wants_older());
 
-        app.conversation.window.exhausted_older = true;
+        app.exhaust(FetchDirection::Older);
         assert!(
             !app.wants_older(),
             "there is nothing in front of the oldest message"
         );
+
+        app.exhaust(FetchDirection::Newer);
+        assert!(!app.wants_newer(), "nor behind the newest one");
     }
 }
