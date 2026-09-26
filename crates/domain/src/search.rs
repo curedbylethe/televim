@@ -374,6 +374,15 @@ impl SearchState {
         });
     }
 
+    /// Forgets a wrap announcement.
+    ///
+    /// A step that did not wrap supersedes the announcement the last one made,
+    /// so that the label describes where the reader is now rather than where
+    /// they once were.
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
+    }
+
     /// What the status line says about the search.
     ///
     /// One function owns every wording, so the status line cannot drift from the

@@ -11,6 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
 use domain::history::{ConversationView, unread_target};
 use domain::message::{Message, MessageStatus};
+use domain::search::{SearchState, word_prefix_match};
 use domain::updates::{ChatList, UpdateEvent};
 use domain::vim::{Motion, VimState};
 use ratatui::Frame;
@@ -291,8 +292,12 @@ pub struct App {
     pub status: String,
     pub should_quit: bool,
 
-    /// Set by `/` search: the query text.
-    pub search_query: Option<String>,
+    /// Set by `/` search: the query text, the matches, and where the walk is.
+    ///
+    /// One value rather than a list beside a query: the label, the highlight and
+    /// `n`/`N` all read the same state, and keeping them apart would let the
+    /// three disagree about which list is on screen.
+    search: SearchState,
 
     /// The message the next composed message answers, if it is a reply.
     pub reply_to: Option<i64>,
@@ -375,7 +380,7 @@ impl App {
             input: String::new(),
             status: IDLE_STATUS.to_string(),
             should_quit: false,
-            search_query: None,
+            search: SearchState::default(),
             reply_to: None,
             editing: None,
             pending_d: false,
@@ -422,6 +427,21 @@ impl App {
         self.pending_jump
     }
 
+    /// The query the open conversation is being searched for, if any.
+    ///
+    /// The half of a search result's identity that `chat_id` does not carry: a
+    /// result is dropped when it no longer names the query the reader is asking.
+    #[must_use]
+    pub fn search_query(&self) -> Option<&str> {
+        self.search.query()
+    }
+
+    /// The search on the open conversation, for the panel to mark matches with.
+    #[must_use]
+    pub fn search(&self) -> &SearchState {
+        &self.search
+    }
+
     /// Installs a freshly fetched chat list.
     ///
     /// The window the messages were seen in goes with it: the list is replaced
@@ -449,7 +469,7 @@ impl App {
         self.vim = VimState::new(0);
         self.fetching.clear();
         self.pending_jump = None;
-        self.search_query = None;
+        self.search.clear();
         self.reply_to = None;
         self.editing = None;
         self.pending_d = false;
@@ -572,8 +592,6 @@ impl App {
 
         self.conversation.window.replace(page);
         self.vim.set_total(self.conversation.window.len());
-        // Search matches are positions in the window that was just replaced.
-        self.vim.set_matches(Vec::new());
         self.conversation.follow();
         self.vim.apply_motion(Motion::Last);
 
@@ -718,8 +736,6 @@ impl App {
         self.conversation.window.exhausted_newer = false;
 
         self.vim.set_total(self.conversation.window.len());
-        // Search matches are positions in the window that was just replaced.
-        self.vim.set_matches(Vec::new());
 
         let landing = self.landing_index(target_id);
         self.vim.set_cursor(landing);
@@ -1039,6 +1055,12 @@ impl App {
                     // end". The page on its way is for a place they no longer
                     // want to be, and it is dropped when it lands.
                     Some(Motion::Last) => self.pending_jump = None,
+
+                    // `n` and `N` walk the search's matches. `VimState` reports
+                    // the motion but cannot answer it, because a match is a
+                    // place in a conversation and the list of them lives here.
+                    Some(Motion::NextMatch) => self.walk_search(true),
+                    Some(Motion::PrevMatch) => self.walk_search(false),
 
                     _ => {}
                 }
@@ -1387,32 +1409,147 @@ impl App {
         }
     }
 
+    /// Answers `/`: scans the window now, and asks the server if it can do
+    /// better.
+    ///
+    /// The local pass is free and synchronous, so `n` works in the same frame.
+    /// It is provisional — it can only see what is loaded, and it approximates
+    /// what the server does — so the server's answer replaces it when it comes.
+    ///
+    /// An empty query repeats the last search, as in Vim. With nothing to
+    /// repeat, the refusal is visible rather than the key doing nothing.
     fn run_search(&mut self, query: &str) {
-        if query.is_empty() {
-            self.vim.set_matches(vec![]);
+        let Some(query) = self.search_to_run(query) else {
+            self.flash("no previous search");
             return;
-        }
-        let matches: Vec<usize> = self
+        };
+
+        let ids: Vec<i64> = self
             .conversation
             .window
             .iter()
-            .enumerate()
-            .filter_map(|(i, m)| {
-                if m.text.contains(query) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
+            .filter(|message| word_prefix_match(&message.text, &query))
+            .map(|message| message.id)
             .collect();
-        let n = matches.len();
-        self.vim.set_matches(matches);
-        self.search_query = Some(query.to_owned());
-        self.status = format!("/{query} — {n} match(es)");
-        if n > 0 {
-            self.vim.handle_char('n');
-            self.settle_follow();
+
+        self.search.begin_local(&query, ids);
+        self.land_on_match();
+        // The window's own answer is the only one this side can produce; the
+        // request for a better one is handed to the caller, which can reach the
+        // network, and lands through [`App::apply_searched`].
+        self.search.finish_local();
+    }
+
+    /// The query a search should run, resolving an empty one to the last search.
+    ///
+    /// `None` when there is nothing to repeat, which is the one case `/` cannot
+    /// answer.
+    fn search_to_run(&self, query: &str) -> Option<String> {
+        let query = query.trim();
+        if !query.is_empty() {
+            return Some(query.to_owned());
         }
+
+        self.search.query().map(str::to_owned)
+    }
+
+    /// Lands the reader on the match the walk has just moved to.
+    ///
+    /// The local pass's matches are all in the window, so this is synchronous.
+    fn land_on_match(&mut self) {
+        if let Some(id) = self.search.next()
+            && let Some(position) = self.conversation.window.position_of(id)
+        {
+            self.vim.set_cursor(position);
+        }
+
+        self.settle_follow();
+    }
+
+    /// Walks the search's matches in the direction given.
+    ///
+    /// A match that is loaded is a cursor move; one that is not is a [`Jump`],
+    /// which is the same path `gg` takes. Wrapping announces itself, because a
+    /// walk that looped silently reads as a stuck key.
+    fn walk_search(&mut self, forward: bool) {
+        if !self.search.is_active() {
+            self.flash("no previous search");
+            return;
+        }
+        if self.search.is_empty() {
+            self.flash("nothing matched");
+            return;
+        }
+
+        self.search.clear_notice();
+        let before = self.search.index();
+        let Some(id) = (if forward {
+            self.search.next()
+        } else {
+            self.search.prev()
+        }) else {
+            return;
+        };
+
+        if wrapped(before, self.search.index(), self.search.len()) {
+            self.search.note_wrap(forward);
+        }
+
+        if let Some(position) = self.conversation.window.position_of(id) {
+            self.vim.set_cursor(position);
+        } else {
+            self.pending_jump = Some(Jump {
+                peer_id: self.conversation.window.chat_id,
+                target_id: id,
+            });
+        }
+
+        self.settle_follow();
+    }
+
+    /// Replaces the local matches with the server's answer, if it is still
+    /// wanted.
+    ///
+    /// Returns whether the answer landed. It is refused for a conversation that
+    /// is no longer open and for a query the reader has replaced — the same
+    /// discipline a send's result gets, applied to the other half of the
+    /// answer's identity.
+    pub fn apply_searched(
+        &mut self,
+        chat_id: i64,
+        query: &str,
+        ids: Vec<i64>,
+        total: usize,
+    ) -> bool {
+        if self.conversation.window.chat_id != chat_id {
+            return false;
+        }
+
+        let cursor_id = self.cursor_message_id();
+        if !self.search.adopt_server(query, ids, total, cursor_id) {
+            return false;
+        }
+
+        // The cursor was on a local match the server may not have confirmed.
+        // Landing it on the nearest surviving match keeps its sense of place;
+        // the next `n` then moves forward from there rather than restarting.
+        if let Some(target) = self.search.landing(cursor_id)
+            && let Some(position) = self.conversation.window.position_of(target)
+        {
+            self.vim.set_cursor(position);
+        }
+
+        self.settle_follow();
+        true
+    }
+
+    /// Records that the server pass for `query` failed, keeping the local list.
+    pub fn search_failed(&mut self, query: &str, reason: String) {
+        if self.search.query() != Some(query) {
+            return;
+        }
+
+        self.search.fail(reason);
     }
 
     // ---- rendering -----------------------------------------------------
@@ -1497,30 +1634,34 @@ impl App {
     /// What the status line shows.
     ///
     /// A confirmation outranks everything: it is a question waiting for an
-    /// answer, and it is over as soon as one is given. A jump outranks the
-    /// status below it, for the same reason it always did: it is what the reader
-    /// has just asked for, and it is over as soon as its page lands. Below both,
-    /// the full reason a failed message failed is shown while the cursor is on
-    /// it — the row itself only has room for a short form.
+    /// answer, and it is over as soon as one is given. A search's label comes
+    /// next, and outranks a transient status, because it describes state the
+    /// reader must not lose: it is not a `flash`, so `expire_status` must not be
+    /// able to take it away. Below both, a jump in flight — what the reader has
+    /// just asked for — and then the full reason a failed message failed while
+    /// the cursor is on it, and finally whatever was written to the status.
     #[must_use]
-    pub fn status_text(&self) -> &str {
+    pub fn status_text(&self) -> String {
         if let Some(ConfirmKind::DeleteMessage { is_outgoing, .. }) = self.confirm {
             return if is_outgoing {
-                DELETE_OUTGOING_PROMPT
+                DELETE_OUTGOING_PROMPT.to_owned()
             } else {
-                DELETE_INCOMING_PROMPT
+                DELETE_INCOMING_PROMPT.to_owned()
             };
         }
+        if self.search.is_active() {
+            return self.search.label();
+        }
         if self.pending_jump.is_some() {
-            return JUMP_LABEL;
+            return JUMP_LABEL.to_owned();
         }
         if let Some(message) = self.cursor_message()
             && let Some(reason) = self.conversation.failure(message.id)
         {
-            return reason;
+            return reason.to_owned();
         }
 
-        &self.status
+        self.status.clone()
     }
 }
 
@@ -1547,6 +1688,18 @@ fn landing_position(len: usize, unread: u32) -> Option<usize> {
     let unread = usize::try_from(unread).unwrap_or(usize::MAX);
 
     (unread <= len).then(|| len - unread)
+}
+
+/// Whether a walk wrapped from one end of the match list to the other.
+///
+/// A single match is its own neighbour, so its "wrap" carries no information and
+/// is not announced.
+fn wrapped(before: Option<usize>, after: Option<usize>, len: usize) -> bool {
+    if len <= 1 {
+        return false;
+    }
+
+    (before == Some(len - 1) && after == Some(0)) || (before == Some(0) && after == Some(len - 1))
 }
 
 // ---- sample data -------------------------------------------------------
@@ -2287,7 +2440,7 @@ mod tests {
         let mut app = App::mock();
         run_search_line(&mut app, "benchmarks");
 
-        assert_eq!(app.search_query.as_deref(), Some("benchmarks"));
+        assert_eq!(app.search_query(), Some("benchmarks"));
         assert_eq!(
             app.vim.cursor(),
             6,
@@ -2296,6 +2449,183 @@ mod tests {
         assert!(
             !app.conversation.auto_follow(),
             "the reader moved off the end"
+        );
+    }
+
+    /// The local pass answers from the window, and the label says what the
+    /// answer is: a list of loaded matches rather than a final count.
+    #[test]
+    fn a_search_answers_from_the_window() {
+        let mut app = App::mock();
+        run_search_line(&mut app, "benchmarks");
+
+        assert_eq!(
+            app.search().label(),
+            "/benchmarks — 1 loaded",
+            "the local list is all this side can produce"
+        );
+        assert_eq!(app.search().source(), domain::search::SearchSource::Local);
+    }
+
+    #[test]
+    fn an_empty_query_repeats_the_last_search() {
+        let mut app = App::mock();
+        run_search_line(&mut app, "benchmarks");
+
+        run_search_line(&mut app, "");
+
+        assert_eq!(
+            app.search_query(),
+            Some("benchmarks"),
+            "as in Vim, an empty `/` runs the last search again"
+        );
+        assert_eq!(app.search().label(), "/benchmarks — 1 loaded");
+    }
+
+    #[test]
+    fn an_empty_query_with_nothing_to_repeat_says_so() {
+        let mut app = App::mock();
+
+        run_search_line(&mut app, "");
+
+        assert!(!app.search().is_active());
+        assert!(
+            app.status.contains("no previous search"),
+            "a key that does nothing reads as a hang: {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn n_with_no_search_says_so() {
+        let mut app = App::mock();
+        let before = reading(&app);
+
+        app.handle_key(press(KeyCode::Char('n')));
+
+        assert_eq!(reading(&app), before, "nothing moves");
+        assert!(
+            app.status.contains("no previous search"),
+            "and the key explains itself: {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn opening_another_conversation_clears_the_search() {
+        let mut app = App::mock();
+        run_search_line(&mut app, "benchmarks");
+        assert!(app.search().is_active());
+
+        app.select_chat(1);
+
+        assert!(
+            !app.search().is_active(),
+            "a match is a place in the conversation that was open"
+        );
+        assert_eq!(app.search_query(), None);
+    }
+
+    /// The label is state, not a flash: a transient status must not outrank it,
+    /// and its expiry must not take it away.
+    #[test]
+    fn the_search_label_outlives_a_transient_status() {
+        let mut app = App::mock();
+        run_search_line(&mut app, "benchmarks");
+
+        app.flash("something that passes");
+
+        assert!(
+            app.status_text().contains("/benchmarks"),
+            "the search line is not replaced by a passing message: {:?}",
+            app.status_text()
+        );
+
+        app.expire_status(Instant::now() + FLASH_FOR);
+
+        assert_eq!(app.status, IDLE_STATUS, "the flash did expire");
+        assert!(
+            app.status_text().contains("/benchmarks"),
+            "and the search line is still there: {:?}",
+            app.status_text()
+        );
+    }
+
+    #[test]
+    fn wrapping_the_walk_is_announced_and_loops_within_the_page() {
+        let mut app = App::mock();
+        // `the` starts a word — or a word beginning with it, like `then` — in
+        // six of the sample messages.
+        run_search_line(&mut app, "the");
+        for _ in 0..5 {
+            app.handle_key(press(KeyCode::Char('n')));
+        }
+        assert_eq!(reading(&app), Some(10), "the newest match");
+        assert!(
+            !app.search().label().contains("hit"),
+            "a step that did not wrap says nothing"
+        );
+
+        app.handle_key(press(KeyCode::Char('n')));
+
+        assert_eq!(reading(&app), Some(1), "the walk loops within the page");
+        assert!(
+            app.search()
+                .label()
+                .contains("search hit BOTTOM, continuing at TOP"),
+            "and says so: {}",
+            app.search().label()
+        );
+    }
+
+    #[test]
+    fn a_result_for_a_replaced_query_changes_nothing() {
+        let mut app = App::mock();
+        run_search_line(&mut app, "benchmarks");
+        run_search_line(&mut app, "slides");
+        let before = app.search().ids().to_vec();
+        assert_eq!(before, vec![6], "the second search stands");
+
+        assert!(
+            !app.apply_searched(MOCK_CHAT, "benchmarks", vec![7], 1),
+            "an answer for the query the reader has left must not land"
+        );
+
+        assert_eq!(app.search().ids().to_vec(), before);
+        assert_eq!(app.search_query(), Some("slides"));
+    }
+
+    #[test]
+    fn a_result_for_another_conversation_changes_nothing() {
+        let mut app = App::mock();
+        run_search_line(&mut app, "benchmarks");
+
+        assert!(!app.apply_searched(MOCK_CHAT + 1, "benchmarks", vec![7], 1));
+
+        assert_eq!(
+            app.search().source(),
+            domain::search::SearchSource::Local,
+            "the local list is what is still on screen"
+        );
+    }
+
+    /// The server's answer replaces the local one rather than being merged with
+    /// it, and the cursor moves with it.
+    #[test]
+    fn a_server_result_replaces_the_local_matches() {
+        let mut app = App::mock();
+        run_search_line(&mut app, "benchmarks");
+        assert_eq!(reading(&app), Some(7));
+
+        assert!(app.apply_searched(MOCK_CHAT, "benchmarks", vec![3, 7], 1_000));
+
+        assert_eq!(app.search().source(), domain::search::SearchSource::Server);
+        assert_eq!(app.search().total(), 1_000);
+        assert_eq!(app.search().ids().to_vec(), vec![3, 7]);
+        assert_eq!(
+            reading(&app),
+            Some(7),
+            "the cursor was on a match the server confirmed, so it stays"
         );
     }
 
@@ -2963,22 +3293,76 @@ mod tests {
         );
     }
 
-    /// A window that was replaced is one the search indices no longer describe:
-    /// they are positions, and the messages they pointed at are gone.
+    /// The contrapositive of what used to hold: a window that was replaced no
+    /// longer invalidates the match list, because a match is a message
+    /// identifier rather than a position in the window that was on screen.
     #[test]
-    fn a_jump_clears_the_search_matches() {
+    fn a_jump_keeps_the_match_list() {
         let mut app = with_unread_out_of_reach(2);
         run_search_line(&mut app, "text");
+        assert!(
+            app.search().is_match(3),
+            "the loaded window matched message 3"
+        );
+
         go_to_top(&mut app);
         assert!(app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
 
-        let landing = app.vim.cursor();
-        app.handle_key(press(KeyCode::Char('n')));
+        assert!(app.search().is_active(), "the search survives the jump");
+        assert!(
+            app.search().is_match(3),
+            "and still remembers the places it found"
+        );
+    }
 
+    /// The other half: loading the newest page replaces the window, and the
+    /// match list is places, which survive that too.
+    #[test]
+    fn a_latest_page_keeps_the_match_list() {
+        let mut app = App::mock();
+        run_search_line(&mut app, "benchmarks");
+        assert!(app.search().is_match(7), "the sample match is message 7");
+
+        assert!(app.apply_latest(page(&[5, 6, 7, 8, 9, 10])));
+
+        assert!(app.search().is_active());
+        assert!(app.search().is_match(7));
+    }
+
+    /// The test that fails the moment someone puts a `clear` back into
+    /// `apply_jump`: `n` walks across the boundary instead of restarting.
+    #[test]
+    fn n_crosses_a_jump_boundary() {
+        let mut app = with_unread_out_of_reach(2);
+        run_search_line(&mut app, "text");
+        assert!(app.apply_searched(MOCK_CHAT, "text", vec![3, 7, 19, 25], 4));
         assert_eq!(
-            app.vim.cursor(),
-            landing,
-            "there is nothing to search for until the next `/`"
+            reading(&app),
+            Some(3),
+            "the walk starts at the oldest match"
+        );
+
+        app.handle_key(press(KeyCode::Char('n')));
+        assert_eq!(reading(&app), Some(7), "a loaded match is a cursor move");
+
+        app.handle_key(press(KeyCode::Char('n')));
+        assert_eq!(
+            app.pending_jump(),
+            Some(Jump {
+                peer_id: MOCK_CHAT,
+                target_id: 19,
+            }),
+            "an unloaded match is a jump, the same path `gg` takes"
+        );
+
+        assert!(app.apply_jump(&page(&[19, 20, 21, 22, 23, 24, 25]), 19));
+        assert_eq!(reading(&app), Some(19));
+
+        app.handle_key(press(KeyCode::Char('n')));
+        assert_eq!(
+            reading(&app),
+            Some(25),
+            "the walk continues from the jumped-to match, not from the top"
         );
     }
 

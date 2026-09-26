@@ -15,13 +15,11 @@ pub enum Motion {
     PrevMatch,
 }
 
-/// Cursor + search state for a scrollable buffer of `total` items.
+/// Cursor state for a scrollable buffer of `total` items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VimState {
     cursor: usize,
     total: usize,
-    matches: Vec<usize>,
-    match_index: Option<usize>,
     pending_g: bool,
 }
 
@@ -37,8 +35,6 @@ impl VimState {
         Self {
             cursor: 0,
             total,
-            matches: Vec::new(),
-            match_index: None,
             pending_g: false,
         }
     }
@@ -70,23 +66,20 @@ impl VimState {
         self.clamp();
     }
 
-    /// Replace the search-match list. Does not move the cursor.
-    pub fn set_matches(&mut self, matches: Vec<usize>) {
-        self.matches = matches;
-        self.match_index = None;
-    }
-
     /// Feed a single character as if typed in Normal mode.
     ///
     /// Returns the motion the character applied, if it applied one: a character
     /// that opens a sequence, and one this state has no meaning for, both move
     /// nothing at all.
     ///
-    /// The caller is told which, because two of these are more than motions to a
+    /// The caller is told which, because some of these are more than motions to a
     /// screen. `gg` is where a reader's unread messages start rather than the top
     /// of what happens to be loaded, and `G` is the end of the conversation —
     /// neither of which this state can know about, and both of which it would
-    /// otherwise hide behind an unchanged cursor.
+    /// otherwise hide behind an unchanged cursor. `n` and `N` are the same case
+    /// for a different reason: a match is a place in a conversation, which this
+    /// state cannot see, so it reports the motion and leaves the walking to the
+    /// caller.
     pub fn handle_char(&mut self, c: char) -> Option<Motion> {
         if self.pending_g {
             self.pending_g = false;
@@ -120,8 +113,10 @@ impl VimState {
             Motion::Up => self.move_up(),
             Motion::First => self.move_first(),
             Motion::Last => self.move_last(),
-            Motion::NextMatch => self.next_match(),
-            Motion::PrevMatch => self.prev_match(),
+            // The two match motions are reported, not answered: what the next
+            // match *is* is a list this state does not hold. The caller walks
+            // its own list and moves the cursor to the message it names.
+            Motion::NextMatch | Motion::PrevMatch => {}
         }
     }
 
@@ -153,30 +148,6 @@ impl VimState {
         if self.total > 0 {
             self.cursor = self.total - 1;
         }
-    }
-
-    fn next_match(&mut self) {
-        if self.matches.is_empty() {
-            return;
-        }
-        let next = match self.match_index {
-            Some(i) => (i + 1) % self.matches.len(),
-            None => 0,
-        };
-        self.match_index = Some(next);
-        self.cursor = self.matches[next];
-    }
-
-    fn prev_match(&mut self) {
-        if self.matches.is_empty() {
-            return;
-        }
-        let prev = match self.match_index {
-            Some(0) | None => self.matches.len() - 1,
-            Some(i) => i - 1,
-        };
-        self.match_index = Some(prev);
-        self.cursor = self.matches[prev];
     }
 }
 
@@ -232,35 +203,18 @@ mod tests {
         assert_eq!(v.cursor(), 4);
     }
 
+    /// The two match motions are the one thing this state reports but cannot
+    /// answer: a match is a place in a conversation, and the list of them lives
+    /// with the search. The cursor must not move on its own for either.
     #[test]
-    fn n_wraps_around_matches() {
+    fn the_match_motions_are_reported_but_not_answered() {
         let mut v = VimState::new(10);
-        v.set_matches(vec![2, 5, 8]);
-        v.handle_char('n');
-        assert_eq!(v.cursor(), 2);
-        v.handle_char('n');
-        assert_eq!(v.cursor(), 5);
-        v.handle_char('n');
-        assert_eq!(v.cursor(), 8);
-        v.handle_char('n');
-        assert_eq!(v.cursor(), 2);
-    }
+        let before = v.cursor();
 
-    #[test]
-    fn big_n_wraps_backwards() {
-        let mut v = VimState::new(10);
-        v.set_matches(vec![2, 5, 8]);
-        v.handle_char('N');
-        assert_eq!(v.cursor(), 8);
-        v.handle_char('N');
-        assert_eq!(v.cursor(), 5);
-    }
-
-    #[test]
-    fn n_with_no_matches_is_noop() {
-        let mut v = VimState::new(10);
-        v.handle_char('n');
-        assert_eq!(v.cursor(), 0);
+        assert_eq!(v.handle_char('n'), Some(Motion::NextMatch));
+        assert_eq!(v.cursor(), before, "the matches are the caller's to walk");
+        assert_eq!(v.handle_char('N'), Some(Motion::PrevMatch));
+        assert_eq!(v.cursor(), before);
     }
 
     #[test]
