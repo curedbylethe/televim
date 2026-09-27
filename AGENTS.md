@@ -610,6 +610,10 @@ Working today:
   deleting. Delete removes it for both sides.
 - **Search:** `/` searches the loaded window, then asks the server and prefers
   its answer. `n` repeats or cycles.
+- **Yank / paste:** `y` in Visual puts the selection in a register — the selected
+  characters for a text selection, one line per message oldest-first for a set of
+  them — and `p` in Normal opens the line with it. The register is cleared by
+  opening another conversation. `p` is not bound in Visual.
 - **Commands:** `:q`/`:quit` and `:chat <id>`.
 
 Not built, and named here so nobody reads the roadmap below as current:
@@ -618,8 +622,8 @@ Not built, and named here so nobody reads the roadmap below as current:
   cursor's message, `Esc` drops it, `o`/`O` swap its ends, `j`/`k` move the focus to
   another message and `h` `l` `w` `b` `e` `0` `$` `f` `t` `F` `T` move it by
   character *within* one. A selection spanning two or more messages is a set of
-  messages; one inside a single message is a text range. `d`, `y` and `r` do
-  nothing there yet, and neither do `dd`, `yy` or any `yank` equivalent. `p` is
+  messages; one inside a single message is a text range. `y` yanks it. `d` and `r`
+  do nothing there yet, and neither do `dd`, `yy` or any `yank` equivalent. `p` is
   unbound in Visual — replacing a selection with the reader's own text is a
   destructive reading of a key that looks additive.
 - **`:w`** — not a command. The only commands are `q`, `quit` and `chat <id>`.
@@ -629,7 +633,11 @@ Not built, and named here so nobody reads the roadmap below as current:
   reachable with `Tab`.
 - **Vim motions inside the input** — none. `w`, `b`, `f`, `0`, `$` do not exist
   there; `vim-line` is declared for this and unused.
-- **Yank to the system clipboard** — no register, no OSC 52.
+- **Yank to the system clipboard** — no OSC 52. A yank reaches the register and
+  `p`, and stops there.
+- **`p` is not in the input bar's hint.** The bar is one row of eighty columns and
+  the hint is already 71 of the 78 it has; its length is asserted by a test, so
+  adding a key means removing one.
 - **A column is a character.** The wrap counts characters, so a double-width
   character or a combining mark is laid out as one column whatever cells the
   terminal gives it. What it costs is a fact about the font, and the answer
@@ -675,9 +683,9 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
 
 Real, and named so they are not mistaken for oversights:
 
-- **Visual mode has no operations yet.** `v`, `V`, `o` and `Esc` work and a
-  selection is drawn, but `d`, `y` and `r` in Visual do nothing. See the feature
-  list for what is bound.
+- **Visual mode has no operations but one.** `v`, `V`, `o` and `Esc` work, a
+  selection is drawn and `y` yanks it, but `d` and `r` in Visual do nothing. See
+  the feature list for what is bound.
 - **The input line has no vim controls, no multi-line, and no drafts.**
   `vim-line` is declared for exactly this and is not yet wired up.
 - **A feed dropped without `finish` persists a stale update position.** See

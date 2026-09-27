@@ -317,6 +317,50 @@ struct Find {
     onto: bool,
 }
 
+/// Text the reader has yanked.
+///
+/// One unnamed register, oldest line first: a yank of three messages pastes back
+/// as three messages, which is what "yank these" means in a conversation.
+///
+/// Owned strings rather than borrows of the window's, because a selection can be
+/// yanked and then paged out from under it, and a borrow would dangle on the next
+/// page. This is the same reason `after_window_change` anchors by identifier.
+///
+/// Named registers are a Vim feature with no consumer here, and a second register
+/// is a second thing to keep in step with the first.
+#[derive(Debug, Clone, Default)]
+pub struct Register(Vec<String>);
+
+impl Register {
+    /// Replaces the contents with `lines`.
+    fn set(lines: Vec<String>) -> Self {
+        Self(lines)
+    }
+
+    /// The lines, oldest first.
+    #[must_use]
+    pub fn lines(&self) -> &[String] {
+        &self.0
+    }
+
+    /// Whether anything has been yanked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Everything yankable, as one string, which is what pasting into the line
+    /// wants.
+    ///
+    /// The lines joined by newlines rather than concatenated: a yank of three
+    /// messages pasted into the line is three lines, and a reader who wants them
+    /// as one sentence can join them.
+    #[must_use]
+    pub fn text(&self) -> String {
+        self.0.join("\n")
+    }
+}
+
 /// Which pages are in flight.
 ///
 /// One flag per direction rather than a single "busy": the three are asked for
@@ -425,6 +469,14 @@ pub struct App {
     /// survive a page landing: see [`App::after_window_change`].
     selection: Option<Selection>,
 
+    /// What the reader last yanked.
+    ///
+    /// A yank is about *this* conversation and does not follow the reader into
+    /// another one: carrying it across would be a feature nobody asked for and
+    /// would need its own answer about whether it survives the change. So
+    /// [`App::select_chat_none`] forgets it along with everything else.
+    register: Register,
+
     /// The operations the reader asked for, waiting to be taken by the caller.
     ///
     /// The outbound half of the [`Jump`] pattern: recorded here because `tui`
@@ -524,6 +576,7 @@ impl App {
             sending: None,
             confirm: None,
             selection: None,
+            register: Register::default(),
             actions: VecDeque::new(),
             status_until: None,
             fetching: Fetching::default(),
@@ -626,6 +679,13 @@ impl App {
         self.selection = Some(selection);
     }
 
+    /// What the reader last yanked, for the caller that hands it to the system
+    /// clipboard.
+    #[must_use]
+    pub fn register(&self) -> &Register {
+        &self.register
+    }
+
     /// Installs a freshly fetched chat list.
     ///
     /// The window the messages were seen in goes with it: the list is replaced
@@ -659,6 +719,7 @@ impl App {
         self.pending_d = false;
         self.confirm = None;
         self.selection = None;
+        self.register = Register::default();
     }
 
     // ---- what is on show ------------------------------------------------
@@ -1482,6 +1543,10 @@ impl App {
                 self.start_edit();
             }
             KeyCode::Char('d') => self.pending_delete(),
+            KeyCode::Char('p') => {
+                self.pending_d = false;
+                self.paste();
+            }
             KeyCode::Char('D') => {
                 self.pending_d = false;
                 self.dismiss_failed_at_cursor();
@@ -1762,6 +1827,8 @@ impl App {
                 }
             }
 
+            KeyCode::Char('y') => self.yank(),
+
             KeyCode::Char('j') => self.move_focus_to_message(true),
             KeyCode::Char('k') => self.move_focus_to_message(false),
 
@@ -1802,8 +1869,86 @@ impl App {
         }
     }
 
-    /// Starts a selection at the cursor's message, character-wise or whole.
+    /// Handles `y` in Visual: what the selection covers goes into the register.
     ///
+    /// A text selection yanks exactly the characters selected and nothing else.
+    /// Anything else yanks one line per message, oldest first, so a yank of three
+    /// messages pastes back as three messages — which is what "yank these" means
+    /// in a conversation, where a message is the unit a reader thinks in.
+    ///
+    /// Visual is left either way, worked or not. A `y` that found nothing has
+    /// still answered the key, and staying in Visual would hide the refusal: the
+    /// selection's own note outranks a transient status, so a `flash` written
+    /// while a selection is up is a message the reader never sees.
+    ///
+    /// The register is the load-bearing half. The system clipboard is a
+    /// convenience that depends on the terminal, the terminal emulator and often
+    /// the user's settings — three things none of which can be tested here — and a
+    /// yank that only works in the second is a yank that appears broken.
+    fn yank(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+
+        let lines = self.yanked(&selection);
+        self.selection = None;
+        self.mode = Mode::Normal;
+
+        if lines.iter().all(String::is_empty) {
+            // A charwise selection that has not been moved is a position rather
+            // than a span, and there is nothing in it to take. Said rather than
+            // silently replacing whatever was in the register with nothing.
+            self.flash("nothing to yank — move the selection first");
+            return;
+        }
+
+        self.register = Register::set(lines);
+    }
+
+    /// The lines a selection yanks: one for a text selection, one per message for
+    /// anything else.
+    ///
+    /// All of them possibly empty — a collapsed charwise selection yields one
+    /// empty string, and a set of messages that happen to be blank yields several
+    /// — which [`App::yank`] is what notices.
+    ///
+    /// A selection naming a message the window no longer holds yields nothing,
+    /// which [`App::retain_selection`] makes unreachable and which is answered
+    /// with an empty yank rather than a panic.
+    fn yanked(&self, selection: &Selection) -> Vec<String> {
+        if let Some((id, range)) = selection.text_range() {
+            let Some(message) = self.conversation.window.iter().find(|m| m.id == id) else {
+                return Vec::new();
+            };
+
+            return vec![message.text[rows::byte_span(&message.text, range)].to_owned()];
+        }
+
+        self.conversation
+            .window
+            .iter()
+            .filter(|message| selection.touches(message.id))
+            .map(|message| message.text.to_string())
+            .collect()
+    }
+
+    /// Handles `p` in Normal: opens the line with what was last yanked.
+    ///
+    /// A yank with no paste is a one-way trip to the system clipboard, and the
+    /// system clipboard is not somewhere a message can be sent from. This is the
+    /// paste that puts the reader's own words back in front of them, at the caret,
+    /// to be edited and sent like anything else they typed.
+    fn paste(&mut self) {
+        if self.register.is_empty() {
+            self.flash("nothing has been yanked");
+            return;
+        }
+
+        self.start_compose();
+        self.input = self.register.text();
+    }
+
+    /// Starts a selection at the cursor's message, character-wise or whole.    ///
     /// `Some(0)` is a charwise selection from the message's first character;
     /// `None` is the whole message, which is what `V` selects. Both set the mode,
     /// because this is the only way *into* Visual.
@@ -3514,6 +3659,160 @@ mod tests {
 
         assert_eq!(app.selection(), None);
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    // ---- yanking and pasting --------------------------------------------
+
+    /// The sample conversation, at the top, with the first message selected.
+    fn selecting_message_one(charwise: bool) -> App {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, if charwise { 'v' } else { 'V' });
+        app
+    }
+
+    /// What the register holds.
+    fn yanked(app: &App) -> Vec<String> {
+        app.register().lines().to_vec()
+    }
+
+    #[test]
+    fn y_pulls_a_text_selection_into_the_register_and_ends_the_selection() {
+        let mut app = selecting_message_one(true);
+        for _ in 0..8 {
+            key(&mut app, 'l');
+        }
+
+        key(&mut app, 'y');
+
+        assert_eq!(yanked(&app), vec!["Hey, is ".to_owned()]);
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "a yank ends the selection, as in Vim"
+        );
+        assert_eq!(app.selection(), None);
+    }
+
+    #[test]
+    fn y_pulls_one_line_per_message_oldest_first() {
+        let mut app = selecting_message_one(false);
+        key(&mut app, 'j');
+        key(&mut app, 'j');
+
+        key(&mut app, 'y');
+
+        assert_eq!(
+            yanked(&app),
+            vec![
+                "Hey, is the build green?".to_owned(),
+                "Yes — clippy is happy.".to_owned(),
+                "Nice. Did you pin the toolchain?".to_owned(),
+            ],
+            "three messages, oldest first, whatever order they were selected in"
+        );
+    }
+
+    /// A yank with no motion behind it is a position, not a span, and there is
+    /// nothing in it to take. Said rather than silently emptying the register.
+    #[test]
+    fn a_selection_that_covers_nothing_says_so_rather_than_yanking_nothing() {
+        let mut app = selecting_message_one(true);
+
+        key(&mut app, 'y');
+
+        assert!(
+            app.status.contains("nothing to yank"),
+            "got {:?}",
+            app.status
+        );
+        assert_eq!(
+            app.status_text(),
+            app.status,
+            "and the refusal is on the screen: a selection's own note outranks a \
+             transient status, so leaving Visual is what makes it visible at all"
+        );
+        assert!(yanked(&app).is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    /// A yank with no paste is a one-way trip to the system clipboard, which is
+    /// not somewhere a message can be sent from.
+    #[test]
+    fn p_opens_the_line_with_what_was_yanked() {
+        let mut app = selecting_message_one(false);
+        key(&mut app, 'j');
+        key(&mut app, 'y');
+
+        key(&mut app, 'p');
+
+        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.prompt, PromptKind::Message);
+        assert_eq!(
+            app.input, "Hey, is the build green?\nYes — clippy is happy.",
+            "two messages, pasted as two lines"
+        );
+    }
+
+    /// The register holds owned text, so a page landing between the yank and the
+    /// paste cannot pull the text out from under it.
+    #[test]
+    fn what_was_yanked_survives_a_page_landing() {
+        let mut app = App::mock();
+        app.apply_latest(numbered(10..=20));
+        go_to_top(&mut app);
+        key(&mut app, 'V');
+        key(&mut app, 'j');
+        key(&mut app, 'y');
+        let before = yanked(&app);
+
+        assert!(app.apply_older(numbered(1..=9)));
+        key(&mut app, 'p');
+
+        assert_eq!(yanked(&app), before, "and the paste is the same text");
+        assert_eq!(app.input, before.join("\n"));
+    }
+
+    #[test]
+    fn p_with_nothing_yanked_says_so() {
+        let mut app = App::mock();
+
+        key(&mut app, 'p');
+
+        assert!(
+            app.status.contains("nothing has been yanked"),
+            "got {:?}",
+            app.status
+        );
+        assert_eq!(app.focus, Focus::Conversation, "and no line was opened");
+    }
+
+    /// A yank is about this conversation, so opening another one forgets it —
+    /// the same discipline as the search and the selection.
+    #[test]
+    fn opening_another_conversation_forgets_what_was_yanked() {
+        let mut app = selecting_message_one(false);
+        key(&mut app, 'y');
+
+        app.select_chat(1);
+
+        assert!(yanked(&app).is_empty());
+    }
+
+    #[test]
+    fn p_is_not_bound_in_visual_mode() {
+        let mut app = selecting_message_one(false);
+
+        key(&mut app, 'p');
+
+        assert_eq!(
+            app.focus,
+            Focus::Conversation,
+            "replacing a selection with the reader's own text is a destructive reading \
+             of a key that looks additive, so it does nothing here"
+        );
+        assert!(yanked(&app).is_empty());
+        assert_eq!(app.mode, Mode::Visual, "and the selection is untouched");
     }
 
     // ---- dd and the confirm --------------------------------------------

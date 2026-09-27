@@ -17,4 +17,4 @@ pub mod theme;
 pub mod widgets;
 pub mod wrap;
 
-pub use app::{Action, App, ConfirmKind, FetchDirection, Focus, Jump, Mode, PromptKind};
+pub use app::{Action, App, ConfirmKind, FetchDirection, Focus, Jump, Mode, PromptKind, Register};
