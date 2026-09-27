@@ -93,13 +93,22 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         };
 
         let wrapped = rows::message_rows(app, message, body.width);
+        let covered = coverage(app, message);
         for (row, range) in wrapped.iter().enumerate().skip(view.skip) {
             if drawn >= view.budget {
                 break;
             }
             let first = row == 0;
             let last = row + 1 == wrapped.len();
-            items.push(message_row(app, message, range, first, last, body.width));
+            items.push(message_row(
+                app,
+                message,
+                range,
+                covered.as_ref(),
+                first,
+                last,
+                body.width,
+            ));
             drawn += 1;
         }
     }
@@ -121,20 +130,20 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     }
 }
 
-/// The panel's title: where in what is loaded the reader is, and what a search
-/// found there.
+/// The panel's title: where in what is loaded the reader is, what a search found
+/// there, and what they have selected.
 ///
 /// Counted in messages, because that is where in the conversation the reader is:
 /// the cursor stands on a message however many rows that message is, and a
 /// message number is the one position that survives a page landing.
 fn conversation_title(app: &App) -> String {
-    let search = search_note(app);
+    let notes = format!("{}{}", search_note(app), selection_note(app));
     let total = app.conversation.window.len();
     if total == 0 {
-        return format!(" Conversation{search} ");
+        return format!(" Conversation{notes} ");
     }
 
-    format!(" Conversation ({}/{total}){search} ", app.vim.cursor() + 1)
+    format!(" Conversation ({}/{total}){notes} ", app.vim.cursor() + 1)
 }
 
 /// What the title says about a search, if one is running.
@@ -147,6 +156,48 @@ fn search_note(app: &App) -> String {
     }
 
     format!(" · {} match(es)", app.search().len())
+}
+
+/// What the title says about a selection, if there is one.
+///
+/// A bare count, because the title is one row wide and the status line beside it
+/// is where the sentence lives — including which unit the count is in, which
+/// matters because a selection can be three characters or three messages.
+fn selection_note(app: &App) -> String {
+    app.selection().map_or_else(String::new, |selection| {
+        format!(" · {} selected", selection.len())
+    })
+}
+
+/// What a selection covers of one message, in the panel's own units.
+///
+/// Byte offsets, because that is what a row's range is: the mark itself is
+/// counted in characters, and [`rows::byte_span`] is where the two meet. Worked
+/// out once per message rather than once per row, because the conversion walks
+/// the text.
+enum Coverage {
+    /// These bytes of the message's text, in a selection inside it.
+    Text(Range<usize>),
+
+    /// All of it, decorations included — a selection of whole messages, where
+    /// "the message" is what the reader selected and `[you]` is part of it.
+    Whole,
+}
+
+/// What a selection covers of `message`, or nothing if it is not in the selection.
+fn coverage(app: &App, message: &Message) -> Option<Coverage> {
+    let selection = app.selection()?;
+
+    // One rule decides it, and it is the rule every operation follows: a
+    // selection inside a single message is a text selection, and anything else is
+    // a set of messages. `text_range` being `None` *is* the second case.
+    match selection.text_range() {
+        Some((id, range)) if id == message.id => {
+            Some(Coverage::Text(rows::byte_span(&message.text, range)))
+        }
+        Some(_) => None,
+        None => selection.touches(message.id).then_some(Coverage::Whole),
+    }
 }
 
 /// One row of one message: the slice of its text `range` names, which the
@@ -166,11 +217,16 @@ fn search_note(app: &App) -> String {
 /// A message a search matched has its spans patched with
 /// [`Theme::match_style`](crate::theme::Theme::match_style) rather than given a
 /// style of their own, so that the cursor's `REVERSED` selection composes on top
-/// of it instead of replacing it.
+/// of it instead of replacing it. The same goes for a selection: a selected
+/// substring is split out of the row and given
+/// [`Theme::visual_style`](crate::theme::Theme::visual_style), and a selected
+/// message has its whole row patched, so the cursor still composes on top. The
+/// order the two are applied in is the theme's, and the theme says what it is.
 fn message_row(
     app: &App,
     message: &Message,
     range: &Range<usize>,
+    covered: Option<&Coverage>,
     first: bool,
     last: bool,
     width: u16,
@@ -189,13 +245,38 @@ fn message_row(
         }
     }
 
-    spans.push(Span::styled(
-        message.text[range.clone()].to_owned(),
-        app.theme.text,
-    ));
+    let text = &message.text[range.clone()];
+    match covered {
+        // The selected slice is styled where it is built rather than patched
+        // afterwards, because styling a slice of a row means splitting the row,
+        // and a row is only splittable while its text is still one span.
+        Some(Coverage::Text(selected)) => {
+            let (from, to) = rows::clip(selected, range);
+            if from < to {
+                spans.push(Span::styled(text[..from].to_owned(), app.theme.text));
+                spans.push(Span::styled(
+                    text[from..to].to_owned(),
+                    app.theme.text.patch(app.theme.visual_style),
+                ));
+                spans.push(Span::styled(text[to..].to_owned(), app.theme.text));
+            } else {
+                spans.push(Span::styled(text.to_owned(), app.theme.text));
+            }
+        }
+        _ => spans.push(Span::styled(text.to_owned(), app.theme.text)),
+    }
 
     if last && let Some(suffix) = rows::status_suffix(app, message) {
         spans.push(Span::styled(suffix, app.theme.text_dim));
+    }
+
+    // A selected message is styled in one pass, which is what puts the
+    // decorations and the trailing note inside the selection with the text. A
+    // text selection has already been handled above and must not be caught here.
+    if matches!(covered, Some(Coverage::Whole)) {
+        for span in &mut spans {
+            span.style = span.style.patch(app.theme.visual_style);
+        }
     }
 
     if app.search().is_match(message.id) {
@@ -262,6 +343,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use domain::selection::Mark;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
@@ -1070,6 +1152,219 @@ mod tests {
         assert!(
             row(&screen, 0).contains("1 match(es)"),
             "the title carries what the search found: {}",
+            row(&screen, 0)
+        );
+    }
+
+    // ---- what a selection marks ------------------------------------------
+
+    /// How many columns a message's text has on its first row at this terminal.
+    ///
+    /// The panel is the right 70% of eighty columns, less its two borders and the
+    /// scrollbar's, and the first row also gives up seven columns to the sender's
+    /// name. A message of nothing but `x` has no whitespace to break at, so its
+    /// rows are cut at the edge and these are exact.
+    const FIRST_ROW: usize = 46;
+    const LATER_ROW: usize = 53;
+
+    /// The body width the rows are laid out at, and the sender's name that comes
+    /// off its first row.
+    const BODY: u16 = 53;
+    const SENDER: usize = 7;
+
+    /// One application holding one long unbreakable message.
+    fn one_long_message() -> App {
+        use std::borrow::Cow;
+
+        use domain::chat::{Chat, ChatKind};
+        use domain::message::{Message, MessageStatus};
+
+        const CHAT: i64 = 3;
+
+        let mut app = App::new();
+        app.set_chats(vec![Chat {
+            id: CHAT,
+            title: "Ada".into(),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: Some(1),
+            last_timestamp: Some(0),
+        }]);
+        app.select_chat(0);
+        app.apply_latest(vec![Message {
+            id: 1,
+            chat_id: CHAT,
+            text: Cow::Owned("x".repeat(FIRST_ROW * 3)),
+            timestamp: 0,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+        }]);
+
+        app
+    }
+
+    /// A selection over a span of one message's characters, placed directly.
+    fn selecting_chars(app: &mut App, id: i64, from: usize, to: usize) {
+        assert!(
+            app.select(id, Some(from)),
+            "the mark is on a loaded message"
+        );
+        let mut selection = *app.selection().expect("a selection");
+        selection.focus = Mark::text(id, to);
+        app.set_selection(selection);
+    }
+
+    /// The same, with a selection over two of the long message's characters.
+    fn selecting(from: usize, to: usize) -> App {
+        let mut app = one_long_message();
+        selecting_chars(&mut app, 1, from, to);
+        app
+    }
+
+    /// One cell of a message's *text*, counting columns from the start of the
+    /// text rather than from the start of the body.
+    ///
+    /// The assertions below are about characters a reader can see themselves, and
+    /// a selection counts characters, so every one of them is read in those units.
+    /// Only the first row carries the sender's name.
+    fn text_cell(buffer: &Buffer, x: usize, y: u16) -> &Cell {
+        let prefix = if y == 1 { SENDER as u16 } else { 0 };
+        cell(buffer, BODY_X + prefix + x as u16, y)
+    }
+
+    /// Which of a message's text columns carry the selection's background.
+    fn selected_text_columns(buffer: &Buffer, y: u16) -> Vec<usize> {
+        (0..usize::from(BODY))
+            .filter(|x| text_cell(buffer, *x, y).bg == Color::Magenta)
+            .collect()
+    }
+
+    #[test]
+    fn a_selected_substring_is_styled_and_the_rest_of_its_row_is_not() {
+        let screen = screen(&selecting(0, 5), 80, 10);
+
+        assert_eq!(
+            selected_text_columns(&screen, 1),
+            (0..5).collect::<Vec<usize>>(),
+            "five characters, and nothing in front of them: the sender's name is not text"
+        );
+        assert_eq!(
+            text_cell(&screen, 5, 1).bg,
+            Color::Reset,
+            "the sixth character of the same row is plain text"
+        );
+    }
+
+    /// A selection that spans rows highlights the leading row's suffix and the
+    /// trailing row's prefix, which is what a reader expects from Vim and is what
+    /// intersecting the selection with each row gives.
+    #[test]
+    fn a_selection_across_wrapped_rows_highlights_the_right_slices() {
+        let text = "x".repeat(FIRST_ROW * 3);
+        let rows = crate::wrap::wrap_decorated(&text, SENDER, 0, BODY);
+        assert_eq!(rows[0], 0..FIRST_ROW, "the fixture wraps where this says");
+        assert_eq!(rows[1], FIRST_ROW..FIRST_ROW + LATER_ROW);
+
+        let screen = screen(&selecting(40, 60), 80, 10);
+
+        assert_eq!(
+            selected_text_columns(&screen, 1),
+            (40..FIRST_ROW).collect::<Vec<usize>>(),
+            "the first row's suffix, from where the selection began"
+        );
+        assert_eq!(
+            selected_text_columns(&screen, 2),
+            (0..60 - FIRST_ROW).collect::<Vec<usize>>(),
+            "and the second row's prefix, up to where the selection ends"
+        );
+        assert_eq!(
+            selected_text_columns(&screen, 3),
+            vec![],
+            "a row the selection never reached is left alone"
+        );
+    }
+
+    /// A selection of whole messages covers the decorations too: the reader
+    /// selected the message, and the sender's name is part of the message's row.
+    #[test]
+    fn a_selected_message_is_styled_whole_decorations_and_all() {
+        let mut app = App::mock();
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Char('g'));
+        }
+        assert!(app.select(1, None));
+
+        let screen = screen(&app, 80, 10);
+
+        assert_eq!(
+            cell(&screen, BODY_X, 1).bg,
+            Color::Magenta,
+            "the `[` of the sender is inside the selection"
+        );
+        assert_eq!(
+            cell(&screen, BODY_X, 2).bg,
+            Color::Reset,
+            "and the message below it, which is not in the selection, is not"
+        );
+    }
+
+    /// The cursor can stand inside a selection, and the two have to compose for
+    /// that cell: the reverse video is the cursor's and stays, the background is
+    /// the selection's and stays.
+    #[test]
+    fn the_cursor_row_inside_a_selection_still_reads_as_the_cursor() {
+        use ratatui::style::Modifier;
+
+        let screen = screen(&selecting(0, 5), 80, 10);
+        let cursor = text_cell(&screen, 0, 1);
+
+        assert_eq!(cursor.bg, Color::Magenta, "the selection is still there");
+        assert!(
+            cursor.modifier.contains(Modifier::REVERSED),
+            "and so is the cursor: {:?}",
+            cursor.modifier
+        );
+    }
+
+    /// A match under a selection is the later of the theme's two, and the two have
+    /// to be legible together rather than one replacing the other.
+    #[test]
+    fn a_match_under_a_selection_keeps_both_of_its_marks() {
+        let mut app = App::mock();
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Char('g'));
+        }
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "build");
+        press(&mut app, KeyCode::Enter);
+
+        // Over "build", which starts at character 12 of "Hey, is the build green?".
+        selecting_chars(&mut app, 1, 12, 17);
+
+        let screen = screen(&app, 80, 10);
+        let marked = text_cell(&screen, 12, 1);
+
+        assert_eq!(
+            marked.bg,
+            Color::Magenta,
+            "the selection's background stays"
+        );
+        assert_eq!(
+            marked.fg,
+            Color::Yellow,
+            "and the match's colour is legible on top of it"
+        );
+    }
+
+    #[test]
+    fn the_selection_count_is_in_the_panel_title() {
+        let screen = screen(&selecting(0, 2), 80, 10);
+
+        assert!(
+            row(&screen, 0).contains("· 2 selected"),
+            "the title carries the count: {}",
             row(&screen, 0)
         );
     }

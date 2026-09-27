@@ -30,7 +30,14 @@ use crate::wrap::wrap_decorated;
 ///
 /// Named on the first row of a message and on no other, so this is a constant
 /// of the panel rather than something a message decides.
-const WHO_WIDTH: usize = 6;
+///
+/// Seven, because the bracket, the name and the space that follows it are all
+/// drawn. It was six, which is one narrower than what `message_row` puts on the
+/// row: the first row was then laid out a column wider than the panel and its
+/// last character was clipped by the terminal rather than wrapped to the next row.
+/// `a_whole_message_is_as_wide_as_its_own_decorations` is the arithmetic that
+/// pins it.
+const WHO_WIDTH: usize = 7;
 
 /// How much of a failed send's reason is quoted at the end of its last row.
 ///
@@ -251,6 +258,52 @@ pub(crate) fn truncate(text: &str, budget: usize) -> String {
     let mut shortened: String = text.chars().take(budget.saturating_sub(1)).collect();
     shortened.push('…');
     shortened
+}
+
+/// Where `chars` of `text` fall, in the units a row's range is in.
+///
+/// The one place two units meet. A mark's position is counted in characters,
+/// because a motion that steps by one has to step by one thing the reader can
+/// see; a row's range is counted in bytes, because that is what indexes a string.
+/// Everything downstream of here is arithmetic on byte offsets.
+///
+/// A position past the end of the text clamps to the end of it rather than
+/// panicking or wrapping, which is what a motion that ran off the end of a
+/// message should do.
+pub(crate) fn byte_span(text: &str, chars: Range<usize>) -> Range<usize> {
+    let mut span = text.len()..text.len();
+
+    for (index, offset) in text
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(text.len()))
+        .enumerate()
+    {
+        if index == chars.start {
+            span.start = offset;
+        }
+        if index == chars.end {
+            span.end = offset;
+            break;
+        }
+    }
+
+    span
+}
+
+/// The part of `row` that `selected` covers, as offsets into `row`.
+///
+/// Both are ranges into the same string, so the answer is arithmetic. That is the
+/// whole reason the panel wraps by byte range: a selected substring is then three
+/// slices rather than a text-layout problem.
+///
+/// A selection that misses the row entirely comes back empty — `start` past
+/// `end` — which the caller reads as "this row is not covered" rather than as a
+/// range to slice with.
+pub(crate) fn clip(selected: &Range<usize>, row: &Range<usize>) -> (usize, usize) {
+    let start = selected.start.max(row.start) - row.start;
+
+    (start, selected.end.min(row.end).saturating_sub(row.start))
 }
 
 #[cfg(test)]
@@ -504,10 +557,115 @@ mod tests {
         assert_eq!(status_suffix(&app, &sent), None);
     }
 
+    /// A message is as wide as the panel gives it: the rows of its first row,
+    /// plus the sender's name in front of it, are the panel's columns and not one
+    /// more.
+    ///
+    /// A terminal clips without saying so, so a row laid out one column too wide
+    /// loses its last character to the edge rather than wrapping. That is what
+    /// [`WHO_WIDTH`] being one narrower than the drawn name used to cause.
+    #[test]
+    fn a_whole_message_is_as_wide_as_its_own_decorations() {
+        let app = App::mock();
+        let width = 40_u16;
+
+        for text in ["hi", &"x".repeat(500)] {
+            let message = Message {
+                text: (*text).to_owned().into(),
+                ..app
+                    .conversation
+                    .window
+                    .get(0)
+                    .expect("the window holds a message")
+                    .clone()
+            };
+
+            let (prefix, suffix) = decoration_columns(&app, &message, width);
+            let rows = message_rows(&app, &message, width);
+
+            let drawn: usize = rows
+                .iter()
+                .enumerate()
+                .map(|(index, range)| {
+                    // What the panel puts on this row, decorations included.
+                    prefix.min(usize::from(width)) * usize::from(index == 0)
+                        + (range.end - range.start)
+                        + suffix * usize::from(index + 1 == rows.len())
+                })
+                .max()
+                .unwrap_or(0);
+
+            assert!(
+                drawn <= usize::from(width),
+                "{rows:?} is drawn {drawn} columns into a panel of {width}"
+            );
+        }
+    }
+
     #[test]
     fn a_truncation_is_marked_and_never_cuts_a_character_in_half() {
         assert_eq!(truncate("hello", 8), "hello");
         assert_eq!(truncate("hello", 4), "hel…");
         assert_eq!(truncate("héllo", 3), "hé…");
+    }
+
+    // ---- the two range units ---------------------------------------------
+
+    /// A mark's position counts characters and a row's range counts bytes, so
+    /// this is where the two meet. The multi-byte cases are the whole reason: a
+    /// character position is not a byte position, and a selection that silently
+    /// cut a `é` in half would be a selection over nothing.
+    #[test]
+    fn a_character_span_is_where_those_characters_start_in_bytes() {
+        assert_eq!(
+            byte_span("hello", 0..3),
+            0..3,
+            "ascii is the same either way"
+        );
+        assert_eq!(
+            byte_span("héllo", 0..2),
+            0..3,
+            "two characters, three bytes"
+        );
+        assert_eq!(
+            byte_span("héllo", 1..3),
+            1..4,
+            "and a span that starts after it"
+        );
+        assert_eq!(
+            byte_span("😀 ok", 0..1),
+            0..4,
+            "one character, four bytes: the case a byte position gets wrong"
+        );
+        assert_eq!(byte_span("😀 ok", 1..3), 4..6);
+        assert_eq!(
+            byte_span("héllo", 0..99),
+            0..6,
+            "and past the end is the end"
+        );
+        assert_eq!(byte_span("héllo", 99..99), 6..6);
+        assert_eq!(byte_span("", 0..1), 0..0, "an empty message is not a panic");
+    }
+
+    #[test]
+    fn a_selection_is_clipped_to_the_row_it_is_drawn_on() {
+        // Row 0 of a three-row wrap of "hello", over the whole of it.
+        assert_eq!(clip(&(1..4), &(0..2)), (1, 2), "the tail of the selection");
+        assert_eq!(clip(&(1..4), &(2..4)), (0, 2), "the whole of the row");
+        assert_eq!(clip(&(3..5), &(2..4)), (1, 2), "the head of the selection");
+    }
+
+    /// A selection that does not reach a row clips to nothing, which is how the
+    /// caller tells "not covered" from "covered and empty": a row the selection
+    /// misses entirely must not be sliced at its start.
+    #[test]
+    fn a_selection_that_misses_a_row_clips_to_nothing() {
+        for (selected, row) in [((0..1), (5..9)), ((8..9), (0..2)), ((4..5), (0..4))] {
+            let (from, to) = clip(&selected, &row);
+            assert!(
+                from >= to,
+                "{selected:?} against {row:?} clipped to {from}..{to}, which is not empty"
+            );
+        }
     }
 }

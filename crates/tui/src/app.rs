@@ -596,8 +596,19 @@ impl App {
             return false;
         }
 
-        self.selection = Some(Selection::at(message_id, char));
+        self.set_selection(Selection::at(message_id, char));
         true
+    }
+
+    /// Replaces the selection outright.
+    ///
+    /// The writer half of [`App::selection`], and the whole of what a motion
+    /// needs: a motion moves one end of a selection and changes nothing else
+    /// about it. It does not check that the marks are loaded, because a motion
+    /// works from the window and the text in front of it and cannot name
+    /// anything else.
+    pub fn set_selection(&mut self, selection: Selection) {
+        self.selection = Some(selection);
     }
 
     /// Installs a freshly fetched chat list.
@@ -2099,12 +2110,14 @@ impl App {
     /// What the status line shows.
     ///
     /// A confirmation outranks everything: it is a question waiting for an
-    /// answer, and it is over as soon as one is given. A search's label comes
-    /// next, and outranks a transient status, because it describes state the
-    /// reader must not lose: it is not a `flash`, so `expire_status` must not be
-    /// able to take it away. Below both, a jump in flight — what the reader has
-    /// just asked for — and then the full reason a failed message failed while
-    /// the cursor is on it, and finally whatever was written to the status.
+    /// answer, and it is over as soon as one is given. A selection comes next —
+    /// also state the reader must not lose, and the one thing on screen whose
+    /// extent is not otherwise visible. A search's label is below it, and outranks
+    /// a transient status, because it describes state the reader must not lose: it
+    /// is not a `flash`, so `expire_status` must not be able to take it away.
+    /// Below both, a jump in flight — what the reader has just asked for — and
+    /// then the full reason a failed message failed while the cursor is on it, and
+    /// finally whatever was written to the status.
     #[must_use]
     pub fn status_text(&self) -> String {
         if let Some(ConfirmKind::DeleteMessage { is_outgoing, .. }) = self.confirm {
@@ -2113,6 +2126,9 @@ impl App {
             } else {
                 DELETE_INCOMING_PROMPT.to_owned()
             };
+        }
+        if let Some(selection) = &self.selection {
+            return selection_note(selection);
         }
         if self.search.is_active() {
             return self.search.label();
@@ -2183,6 +2199,20 @@ fn wrapped(before: Option<usize>, after: Option<usize>, len: usize) -> bool {
     (before == Some(len - 1) && after == Some(0)) || (before == Some(0) && after == Some(len - 1))
 }
 
+/// What the status line says about a selection.
+///
+/// The unit is whatever the selection is of, because one number cannot carry
+/// both: three characters and three messages are both "3", and a reader who has
+/// just pressed `v` has to be able to tell which of the two they are holding.
+/// The wording lives here rather than in the panel because the title is one row
+/// wide and can only carry the count.
+fn selection_note(selection: &Selection) -> String {
+    if let Some((_, range)) = selection.text_range() {
+        return format!("{} character(s) selected — Esc clears", range.len());
+    }
+
+    format!("{} message(s) selected — Esc clears", selection.len())
+}
 // ---- sample data -------------------------------------------------------
 
 /// The conversation the sample messages belong to.
