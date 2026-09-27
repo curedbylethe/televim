@@ -198,6 +198,32 @@ pub enum FrameworkError {
         /// The most characters a message may have.
         limit: usize,
     },
+
+    /// Some of a batched deletion went through before one of the batches failed.
+    ///
+    /// A deletion of more than
+    /// [`DELETE_BATCH`](crate::messages::DELETE_BATCH) identifiers is several
+    /// requests, and the first ones may have succeeded before a later one was
+    /// refused. The count is what landed, so a caller can say "deleted 200 of 250"
+    /// rather than "failed" — which are different events, and the reader can act
+    /// on only one of them.
+    ///
+    /// A failure *before* anything landed is an ordinary
+    /// [`FrameworkError::Request`] rather than this, because there is then nothing
+    /// to report but the failure.
+    ///
+    /// The identifiers that did not go are not here. The request that failed named
+    /// them, and a caller that wants to retry has them; building a retry is out of
+    /// scope for this crate.
+    #[error("deleted {deleted} message(s) before the rest failed: {source}")]
+    PartialDelete {
+        /// How many identifiers were deleted before the failure.
+        deleted: usize,
+
+        /// What the request that failed said.
+        #[source]
+        source: Box<RequestError>,
+    },
 }
 
 #[cfg(feature = "live")]

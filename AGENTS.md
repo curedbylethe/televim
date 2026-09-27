@@ -609,7 +609,9 @@ Working today:
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
   which side the messages are from, and says how many were left out because they
-  are placeholders. Delete removes for both sides.
+  are placeholders. Delete removes for both sides. More than a hundred messages is
+  several requests with a pause between them, and a failure part-way through is
+  reported as how many went through rather than as a plain failure.
 - **Search:** `/` searches the loaded window, then asks the server and prefers
   its answer. `n` repeats or cycles.
 - **Yank / paste:** `y` in Visual puts the selection in a register — the selected
@@ -678,6 +680,16 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
   the reader never sees. That is why an operation that finishes in Visual leaves
   Visual, and why a prompt carries the count of what it left out instead of
   flashing it.
+- **Why a deletion of many messages is several requests:** Telegram caps
+  `messages.deleteMessages` at 100 identifiers, and the pinned `grammers` passes
+  `delete_messages` the whole vector rather than chunking it, so a longer
+  selection is refused outright unless `telegram-framework` splits it. It does, in
+  `delete_batches`, and waits `DELETE_BATCH_PAUSE` between the requests it makes:
+  a burst of back-to-back bulk deletions is how a five-hundred-message selection
+  becomes a `FLOOD_WAIT` and a half-deleted conversation. A batch that fails after
+  an earlier one landed is `FrameworkError::PartialDelete`, carrying how much went
+  through, because "deleted 200 of 250" and "failed" are different events and only
+  one of them is actionable. Retrying the remainder is deliberately absent.
 - **Why `anyhow` + `thiserror`:** `thiserror` for typed errors in `telegram-framework`, `proto`, and `domain`. `anyhow` at the `app` boundary.
 - **Why `ratatui` + `crossterm`:** `ratatui` is the UI layer; `crossterm` is the terminal I/O backend. They are complementary.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.

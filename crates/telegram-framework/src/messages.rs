@@ -45,6 +45,25 @@
 //! `revoke: false` hidden under the same confirmation every delete already uses
 //! would make each one silently "for both".
 //!
+//! # A deletion of many messages is several requests
+//!
+//! Telegram's own limit for `messages.deleteMessages` is
+//! [`DELETE_BATCH`] identifiers, and the pinned `grammers` does not chunk: its
+//! `delete_messages` passes the whole vector, so a larger selection is rejected
+//! outright rather than split. So [`Client::delete_messages`] splits it itself,
+//! and waits between the requests it makes.
+//!
+//! The wait is not politeness. Telegram rate-limits bulk deletions, and a burst of
+//! back-to-back batches is how a five-hundred-message selection becomes a
+//! `FLOOD_WAIT` and a conversation that is half deleted. Whether the later batches
+//! go through is Telegram's to decide; the pause is what keeps the question from
+//! being asked too many times at once.
+//!
+//! A batch that fails after an earlier one has landed is
+//! [`FrameworkError::PartialDelete`], which says how much landed. "Deleted 200 of
+//! 250" and "failed" are different events and a reader can act on only one of
+//! them.
+//!
 //! # Cancelling is out of scope
 //!
 //! A message that is still on its way cannot be cancelled here. Doing so needs
@@ -63,6 +82,22 @@ use crate::updates::{MessageInfo, message_info};
 /// message of 4096 emoji even though that is twice as many bytes. Counting
 /// [`str::chars`] — rather than [`str::len`] — is what keeps the two in step.
 pub const TEXT_LIMIT: usize = 4096;
+
+/// The most identifiers one deletion request may name.
+///
+/// Telegram's own limit for `messages.deleteMessages`. The pinned `grammers` does
+/// not batch, so a larger selection would be refused outright rather than split —
+/// which is why [`delete_batches`] exists.
+pub const DELETE_BATCH: usize = 100;
+
+/// How long to wait between two deletion requests.
+///
+/// A floor rather than a backoff: there is nothing to be polite *to* between
+/// requests this client makes itself, and the only thing a pause buys is that
+/// Telegram's rate limiter is not asked twice in the same instant. A second is
+/// long enough for that and short enough that a reader deleting a few hundred
+/// messages is not left watching a progress bar.
+pub const DELETE_BATCH_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Checks that `text` can be sent as a message.
 ///
@@ -96,6 +131,32 @@ pub fn validate_text(text: &str) -> Result<(), FrameworkError> {
     }
 
     Ok(())
+}
+
+/// The batches `ids` is deleted in, oldest first.
+///
+/// Pure, and free of a client, so the two things that can be wrong here — how many
+/// requests a selection becomes, and how they are sized — are checked on every CI
+/// job rather than only against a datacenter. Empty in, empty out: a deletion of
+/// nothing is no requests, not one empty one.
+#[must_use]
+pub fn delete_batches(ids: &[i32]) -> Vec<&[i32]> {
+    ids.chunks(DELETE_BATCH).collect()
+}
+
+/// What a failed deletion means, given how much had already landed.
+///
+/// The distinction is between "it did not work" and "most of it did", and a
+/// caller that cannot tell them apart has nothing to tell the reader.
+fn deletion_failed(deleted: usize, error: RequestError) -> FrameworkError {
+    if deleted == 0 {
+        return FrameworkError::Request(error);
+    }
+
+    FrameworkError::PartialDelete {
+        deleted,
+        source: Box::new(error),
+    }
 }
 
 impl Client {
@@ -225,9 +286,12 @@ impl Client {
     /// why this takes it even though the account-wide request cannot use it —
     /// see the module documentation for what that means for the caller.
     ///
-    /// Nothing is returned. `grammers` reports a `pts_count`, which counts
-    /// updates rather than messages and would be a lie any caller read as "how
-    /// many were deleted". A deletion arrives over the feed as
+    /// More identifiers than [`DELETE_BATCH`] is several requests, with a pause
+    /// between them; see the module documentation for why both.
+    ///
+    /// Nothing is returned on success. `grammers` reports a `pts_count`, which
+    /// counts updates rather than messages and would be a lie any caller read as
+    /// "how many were deleted". A deletion arrives over the feed as
     /// [`UpdateKind::MessagesDeleted`](crate::UpdateKind::MessagesDeleted),
     /// which names every identifier irrespective of whether the request deleted
     /// anything for it.
@@ -236,7 +300,10 @@ impl Client {
     ///
     /// Returns [`FrameworkError::UnknownPeer`] when the conversation is not in
     /// the session's peer cache, and [`FrameworkError::Request`] when Telegram
-    /// rejects the request or the connection fails.
+    /// rejects the request or the connection fails. A batch that fails after an
+    /// earlier one landed is [`FrameworkError::PartialDelete`], which says how
+    /// much landed — the identifiers that did not go are in the request that
+    /// failed, and retrying them is the caller's to arrange.
     pub async fn delete_messages(&self, peer_id: i64, ids: &[i32]) -> Result<(), FrameworkError> {
         let Some(peer) = self.peer_ref(peer_id) else {
             tracing::warn!(
@@ -246,17 +313,33 @@ impl Client {
             return Err(FrameworkError::UnknownPeer(peer_id));
         };
 
-        // The `usize` grammers returns is a count of updates, not of deletions,
-        // and is deliberately dropped rather than surfaced as either.
-        let _ = self
-            .inner()
-            .delete_messages(peer, ids)
-            .await
-            .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
+        let mut deleted = 0usize;
+
+        for batch in delete_batches(ids) {
+            // Between the batches, and never after the last one: the reader is
+            // already waiting on that one.
+            if deleted > 0 {
+                tokio::time::sleep(DELETE_BATCH_PAUSE).await;
+            }
+
+            // The `usize` grammers returns is a count of updates, not of
+            // deletions, and is deliberately dropped rather than surfaced as
+            // either.
+            if let Err(error) = self
+                .inner()
+                .delete_messages(peer, batch)
+                .await
+                .map_err(|error| RequestError::from_invocation(&error))
+            {
+                return Err(deletion_failed(deleted, error));
+            }
+
+            deleted += batch.len();
+        }
 
         self.flush_session();
 
-        tracing::debug!(peer_id, deleted = ids.len(), "deleted messages");
+        tracing::debug!(peer_id, deleted, "deleted messages");
 
         Ok(())
     }
@@ -265,6 +348,87 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ids` from `0` up to but not including `up_to`, as Telegram would number
+    /// them — the numbering does not matter, only how many there are.
+    fn ids(up_to: usize) -> Vec<i32> {
+        let mut all: Vec<i32> = Vec::with_capacity(up_to);
+        for n in 0..up_to {
+            all.push(i32::try_from(n).expect("a test's count fits telegram's range"));
+        }
+        all
+    }
+
+    // ---- batching --------------------------------------------------------
+
+    /// Telegram caps one request at a hundred identifiers and `grammers` does not
+    /// split them, so a longer selection is several requests or it is refused.
+    #[test]
+    fn a_selection_longer_than_one_request_is_split() {
+        let all = ids(250);
+        let batches = delete_batches(&all);
+
+        assert_eq!(
+            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+            vec![DELETE_BATCH, DELETE_BATCH, 50]
+        );
+    }
+
+    /// Every identifier goes exactly once, in order, and none is dropped at a
+    /// batch boundary — the failure a chunking bug produces is a silent omission.
+    #[test]
+    fn splitting_a_selection_keeps_every_identifier_in_order() {
+        let all = ids(250);
+        let batches = delete_batches(&all);
+
+        assert_eq!(batches.concat(), all, "nothing dropped, nothing reordered");
+    }
+
+    #[test]
+    fn a_selection_that_fits_in_one_request_is_not_split() {
+        assert_eq!(delete_batches(&ids(1)).len(), 1);
+        assert_eq!(delete_batches(&ids(DELETE_BATCH)).len(), 1);
+        assert_eq!(delete_batches(&ids(DELETE_BATCH + 1)).len(), 2);
+    }
+
+    /// A deletion of nothing is no requests. An empty batch would be a request
+    /// Telegram has no reason to answer.
+    #[test]
+    fn a_deletion_of_nothing_is_no_requests() {
+        assert!(delete_batches(&[]).is_empty());
+    }
+
+    // ---- what a failure means ---------------------------------------------
+
+    #[test]
+    fn a_failure_after_nothing_landed_is_an_ordinary_request_error() {
+        let error = deletion_failed(0, RequestError::Network("reset".to_owned()));
+
+        assert!(matches!(error, FrameworkError::Request(_)), "got {error:?}");
+    }
+
+    /// "Deleted 200 of 250" and "failed" are different events, and a reader can
+    /// act on only one of them.
+    #[test]
+    fn a_failure_after_some_landed_says_how_many() {
+        let error = deletion_failed(200, RequestError::Network("reset".to_owned()));
+
+        assert!(
+            error.to_string().contains("deleted 200"),
+            "the wording says what happened: {error}"
+        );
+
+        let FrameworkError::PartialDelete { deleted, source } = error else {
+            panic!("expected a partial deletion, got {error:?}");
+        };
+        assert_eq!(deleted, 200);
+        assert!(
+            matches!(*source, RequestError::Network(_)),
+            "and the cause is kept"
+        );
+    }
+
+    // ---- the text limit ----------------------------------------------------
 
     #[test]
     fn text_within_the_limit_is_accepted() {

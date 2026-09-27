@@ -798,6 +798,12 @@ fn apply_edited(app: &mut App, chat_id: i64, message_id: i64, result: Result<(),
 /// conversation — so `chat_id` decides only whether the reader is told about a
 /// failure. A failure for a conversation they have left is not worth a line they
 /// cannot act on.
+///
+/// A deletion of more than one request can be part-way through when it fails, and
+/// "deleted 200 of 250" and "failed" are different events: one leaves the reader
+/// with a conversation to finish cleaning up, the other leaves them with the same
+/// one they started with. The count is reported because only one of them is
+/// actionable.
 fn apply_deleted(app: &mut App, chat_id: i64, message_ids: &[i64], result: Result<(), ProtoError>) {
     match result {
         Ok(()) => {
@@ -808,11 +814,31 @@ fn apply_deleted(app: &mut App, chat_id: i64, message_ids: &[i64], result: Resul
             );
         }
         Err(error) => {
-            tracing::debug!(chat_id, %error, "a deletion failed");
+            let partial = deleted_before_failure(&error);
+            tracing::debug!(chat_id, partial, %error, "a deletion failed");
+
             if app.conversation.window.chat_id == chat_id {
-                app.flash(format!("delete: {}", failure_reason(&error)));
+                app.flash(match partial {
+                    Some(deleted) => format!(
+                        "delete: {deleted} of {} went through, the rest did not",
+                        message_ids.len()
+                    ),
+                    None => format!("delete: {}", failure_reason(&error)),
+                });
             }
         }
+    }
+}
+
+/// How many identifiers a failed deletion had already removed, if it had got
+/// that far.
+///
+/// `None` for a failure before anything landed, which is the ordinary case and
+/// which the caller reports as itself rather than as a partial deletion.
+fn deleted_before_failure(error: &ProtoError) -> Option<usize> {
+    match error {
+        ProtoError::Framework(FrameworkError::PartialDelete { deleted, .. }) => Some(*deleted),
+        _ => None,
     }
 }
 
@@ -1556,8 +1582,70 @@ mod tests {
         assert_eq!(app.conversation.window.newest_id(), Some(4));
     }
 
-    // ---- what a send answers --------------------------------------------
+    /// "Deleted 200 of 250" and "failed" are different events: one leaves a
+    /// conversation to finish cleaning up, the other leaves the same one. Only the
+    /// first is actionable, so it is the one the status line carries.
+    #[test]
+    fn a_deletion_that_got_part_way_says_how_far() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let partial = || {
+            ProtoError::from(FrameworkError::PartialDelete {
+                deleted: 200,
+                source: Box::new(RequestError::Network("reset".to_owned())),
+            })
+        };
 
+        assert_eq!(deleted_before_failure(&partial()), Some(200));
+
+        apply_deleted(&mut app, CHAT, &[1, 2, 3], Err(partial()));
+
+        assert_eq!(
+            app.status, "delete: 200 of 3 went through, the rest did not",
+            "got {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn a_deletion_that_failed_before_it_started_is_reported_as_a_plain_failure() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let failed = || {
+            ProtoError::from(FrameworkError::Request(RequestError::Network(
+                "reset".to_owned(),
+            )))
+        };
+
+        assert_eq!(deleted_before_failure(&failed()), None);
+
+        apply_deleted(&mut app, CHAT, &[1], Err(failed()));
+
+        assert_eq!(
+            app.status, "delete: network error: reset",
+            "got {:?}",
+            app.status
+        );
+    }
+
+    /// A failure for a conversation the reader has left is not worth a line they
+    /// cannot act on.
+    #[test]
+    fn a_deletion_that_failed_elsewhere_is_silent() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+
+        apply_deleted(
+            &mut app,
+            CHAT + 1,
+            &[1],
+            Err(ProtoError::from(FrameworkError::PartialDelete {
+                deleted: 200,
+                source: Box::new(RequestError::Network("reset".to_owned())),
+            })),
+        );
+
+        assert_eq!(app.status, "televim", "got {:?}", app.status);
+    }
+
+    // ---- what a send answers --------------------------------------------
     /// A result for a conversation the reader has left must still free the send
     /// key: the gate is released before the conversation is checked, because a
     /// return that happened first would wedge it with no visible symptom.
