@@ -638,10 +638,11 @@ Not built, and named here so nobody reads the roadmap below as current:
   cursor's message, `Esc` drops it, `o`/`O` swap its ends, `j`/`k` move the focus to
   another message and `h` `l` `w` `b` `e` `0` `$` `f` `t` `F` `T` move it by
   character *within* one. A selection spanning two or more messages is a set of
-  messages; one inside a single message is a text range. `y` yanks it and `d`
-  deletes it, with a confirmation. `dd` is `d` with no second press to
-  distinguish. `p` is unbound in Visual — replacing a selection with the reader's
-  own text is a destructive reading of a key that looks additive.
+  messages; one inside a single message is a text range. `y` yanks it, `d` deletes
+  it with a confirmation, and `r` is a **refusal** — see **Known Gaps**. `dd` is
+  `d` with no second press to distinguish. `p` is unbound in Visual — replacing a
+  selection with the reader's own text is a destructive reading of a key that
+  looks additive.
 - **`:w`** — not a command. The only commands are `q`, `quit` and `chat <id>`.
 - **Multi-line input** — the line is one row, append-only, with a fake `█`
   caret pinned to the end. `Esc` clears it and `Ctrl+w` keeps it, but the bar
@@ -704,6 +705,28 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
   an earlier one landed is `FrameworkError::PartialDelete`, carrying how much went
   through, because "deleted 200 of 250" and "failed" are different events and only
   one of them is actionable. Retrying the remainder is deliberately absent.
+- **Why `r` in Visual mode is a refusal and not a reply:** two reasons, and they
+  differ. A selection that is not inside one message has no quote to send —
+  Telegram quotes a fragment of *one* message, and there is no wire representation
+  for quoting five. And a quote of one message cannot be sent at all on the pinned
+  `grammers`: `InputMessage` has no field for one, and the `input_reply_to` helper
+  hard-codes `quote_text`/`quote_offset` to `None`. That is the upstream gap
+  `~/.opencode/plan/pr-grammers-quote-support.md` is about. It is a refusal rather
+  than a workaround because composing the quote as ordinary message text produces
+  something that *looks* like a quote and is not, and the difference is visible to
+  the person receiving it. It is not "reply to the cursor's message instead"
+  either: a key that answered a different question than the one asked, while the
+  screen said `-- VISUAL --`, would be worse than a refusal. The refusal is
+  replaced in a follow-up once the upstream patch lands; the two wordings are
+  distinct so a reader can tell which of the two applies. For the same reason
+  `domain::utf16_len` — the UTF-16 offset conversion a quote needs — is **not**
+  written yet: it would have no caller, and the whole point of having one is that
+  there is exactly one thing to test.
+- **Why an operation that finishes in Visual leaves Visual:** a selection's own
+  note on the status line outranks a transient status, so a `flash` written while a
+  selection is up is a line the reader never sees. `y`, `d` and `r` all return to
+  Normal whether they worked or not, and a prompt carries its counts rather than
+  flashing them.
 - **Why `anyhow` + `thiserror`:** `thiserror` for typed errors in `telegram-framework`, `proto`, and `domain`. `anyhow` at the `app` boundary.
 - **Why `ratatui` + `crossterm`:** `ratatui` is the UI layer; `crossterm` is the terminal I/O backend. They are complementary.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.
@@ -730,9 +753,11 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
 
 Real, and named so they are not mistaken for oversights:
 
-- **Visual mode has one operation left to bind.** `v`, `V`, `o`, `Esc`, `y` and
-  `d` work and a selection is drawn; `r` in Visual does nothing. See the feature
-  list for what is bound.
+- **Visual mode's `r` refuses rather than replying.** `v`, `V`, `o`, `Esc`, `y` and
+  `d` work and a selection is drawn. `r` in Visual says no, for one of two reasons —
+  see **Key Decisions**. Neither `domain::utf16_len` nor the rendering of an
+  incoming quote's fragment is written, because both exist only for a quote this
+  build cannot send.
 - **The input line has no vim controls, no multi-line, and no drafts.**
   `vim-line` is declared for exactly this and is not yet wired up.
 - **A feed dropped without `finish` persists a stale update position.** See

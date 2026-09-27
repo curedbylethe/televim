@@ -2030,6 +2030,7 @@ impl App {
 
             KeyCode::Char('y') => self.yank(),
             KeyCode::Char('d') => self.request_delete(),
+            KeyCode::Char('r') => self.reply_to_selection(),
 
             KeyCode::Char('j') => self.move_focus_to_message(true),
             KeyCode::Char('k') => self.move_focus_to_message(false),
@@ -2135,6 +2136,46 @@ impl App {
             .take(covered.len())
             .map(|message| message.text.to_string())
             .collect()
+    }
+
+    /// Handles `r` in Visual, which is a refusal.
+    ///
+    /// This is the whole implementation, and it is a refusal for one of two
+    /// reasons:
+    ///
+    /// - A selection that is not inside one message has no quote to send. Telegram
+    ///   quotes a fragment of *one* message, and there is no wire representation
+    ///   for quoting five — so `V` and a range have nothing to answer.
+    /// - A quote of one message cannot be sent at all on the pinned `grammers`:
+    ///   its `InputMessage` has no field for one, and it hard-codes
+    ///   `quote_text`/`quote_offset` to `None` in the reply it builds. The
+    ///   upstream gap is written up in
+    ///   `~/.opencode/plan/pr-grammers-quote-support.md`, and it is a refusal
+    ///   rather than a workaround because composing the quote as ordinary message
+    ///   text produces something that *looks* like a quote and is not — the
+    ///   difference is visible to the person receiving it.
+    ///
+    /// Which is also why this is not "reply to the cursor's message instead": a key
+    /// that answered a different question than the one asked, while the screen said
+    /// `-- VISUAL --`, would be worse than a refusal.
+    ///
+    /// Visual is left either way, for the reason [`App::yank`] gives: the selection's
+    /// own note outranks a transient status, so a refusal written while a selection
+    /// is up is a line the reader never sees.
+    fn reply_to_selection(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+
+        let refused = if selection.text_range().is_some() {
+            "quoting a reply is not built yet"
+        } else {
+            "a reply can only quote words inside one message"
+        };
+
+        self.selection = None;
+        self.mode = Mode::Normal;
+        self.flash(refused);
     }
 
     /// Handles `p` in Normal: opens the line with what was last yanked.
@@ -4049,6 +4090,60 @@ mod tests {
             vec!["Hey, is the build green?".to_owned()],
             "the register is what is left whatever happened to the offer"
         );
+    }
+
+    /// Two refusals, and a reader who cannot tell them apart cannot tell what to
+    /// select instead.
+    #[test]
+    fn a_visual_r_is_refused_and_says_which_way() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+        for _ in 0..5 {
+            key(&mut app, 'l');
+        }
+
+        key(&mut app, 'r');
+
+        assert_eq!(app.mode, Mode::Normal, "a refusal still answers the key");
+        assert_eq!(app.selection(), None);
+        assert_eq!(
+            app.status_text(),
+            "quoting a reply is not built yet",
+            "a selection inside one message is the case a quote would serve"
+        );
+        assert_eq!(app.focus, Focus::Conversation, "and no line was opened");
+    }
+
+    #[test]
+    fn a_visual_r_over_several_messages_is_refused_for_the_other_reason() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'V');
+        key(&mut app, 'j');
+
+        key(&mut app, 'r');
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.status_text(),
+            "a reply can only quote words inside one message",
+            "there is no wire representation for quoting five messages"
+        );
+    }
+
+    /// `r` in Normal is a plain reply with no quote, and is not affected by any of
+    /// the above.
+    #[test]
+    fn a_normal_r_still_opens_a_plain_reply() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+
+        key(&mut app, 'r');
+
+        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.prompt, PromptKind::Reply);
+        assert_eq!(app.reply_to, Some(1));
     }
 
     #[test]
