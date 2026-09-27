@@ -2,9 +2,14 @@
 //!
 //! The window holds far more than a terminal can show, so the panel renders the
 //! slice the reader is in rather than the whole of it: at most a screenful of
-//! rows is built per frame, whatever the window's ceiling is. Nothing is cached
-//! between frames — a couple of hundred rows is cheap to build, and a cache
-//! would be a second thing to keep in step with the window.
+//! rows is built per frame, whatever the window's ceiling is. A message is as
+//! tall as its text is at the width the panel gave it, and the rows it takes up
+//! are worked out in [`crate::rows`] — the panel asks for them rather than
+//! counting anything itself. Nothing is cached between frames: a couple of
+//! hundred rows is cheap to build, and a cache would be a second thing to keep
+//! in step with the window.
+
+use std::ops::Range;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -13,9 +18,10 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use domain::message::{Message, MessageStatus};
+use domain::message::Message;
 
 use crate::app::{App, FetchDirection, JUMP_LABEL};
+use crate::rows;
 
 /// How many columns the messages keep for themselves before a scrollbar is
 /// worth showing beside them.
@@ -23,13 +29,6 @@ use crate::app::{App, FetchDirection, JUMP_LABEL};
 /// A narrow panel has no room to give: the bar would cost more than it tells
 /// the reader.
 const MIN_BODY_WIDTH: u16 = 8;
-
-/// How much of a failed send's reason fits at the end of its own row.
-///
-/// A row is one message, and the reason belongs to it rather than to a row of
-/// its own; the full text is on the status line when the cursor is on the
-/// message.
-const FAILED_REASON_WIDTH: usize = 24;
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let block = Block::default()
@@ -44,66 +43,81 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 
     let (body, gutter) = split_gutter(inner);
     app.record_rows(usize::from(body.height));
+    app.record_body(body.width);
 
-    let older = app.is_fetching(FetchDirection::Older);
-    let newer = app.is_fetching(FetchDirection::Newer);
-    let jumping = app.pending_jump().is_some();
-    // A page that replaces an empty window has no edge to be announced at, so
-    // it is announced in place of the messages: there is nothing else to say
-    // while a conversation is being opened.
-    let opening = app.is_fetching(FetchDirection::Latest) && app.conversation.window.is_empty();
-    // Every row above the messages, which is what the cursor's own row has to
-    // be counted past.
-    let above = usize::from(older) + usize::from(jumping);
-    let reserved = above + usize::from(newer);
-    let budget = usize::from(body.height).saturating_sub(reserved);
+    let reserved = app.reserved();
+    let above = reserved.above();
+    let budget = usize::from(body.height).saturating_sub(above + reserved.below());
 
-    let window = &app.conversation.window;
-    let start = app.viewport_start(budget);
+    let layout = app.row_layout();
+    let view = app.viewport(&layout, budget);
 
-    let mut items: Vec<ListItem> = Vec::with_capacity(budget + reserved);
-    if older {
+    let mut items: Vec<ListItem> =
+        Vec::with_capacity(reserved.above() + reserved.below() + view.rows);
+    if reserved.older {
         items.push(loading(app, FetchDirection::Older.label()));
     }
-    if jumping {
+    if reserved.jumping {
         // A jump replaces the window rather than extending it, so it is said
         // where the messages are: the page it is waiting for has no edge of the
         // window on show to sit at.
         items.push(loading(app, JUMP_LABEL));
     }
-    if opening {
+    // Said in place of the messages rather than at an edge of the window, which
+    // an empty one does not have. It is not one of the reserved rows either: a
+    // window that is empty is never taller than the row the announcement takes.
+    if app.is_fetching(FetchDirection::Latest) && app.conversation.window.is_empty() {
         items.push(loading(app, FetchDirection::Latest.label()));
     }
-    items.extend(
-        window
-            .iter()
-            .skip(start)
-            .take(budget)
-            .map(|message| message_line(app, message, body.width)),
-    );
-    if newer {
+
+    let window = &app.conversation.window;
+    let mut drawn = 0;
+    for span in layout.iter().skip(view.start) {
+        // A message is drawn whole or not at all: half a message with no way to
+        // scroll to the rest of it is a different, worse thing than a row the
+        // panel did not fill.
+        if drawn >= view.budget {
+            break;
+        }
+        let Some(message) = window.get(span.index) else {
+            break;
+        };
+
+        let wrapped = rows::message_rows(app, message, body.width);
+        for (row, range) in wrapped.iter().enumerate().skip(view.skip) {
+            if drawn >= view.budget {
+                break;
+            }
+            let first = row == 0;
+            let last = row + 1 == wrapped.len();
+            items.push(message_row(app, message, range, first, last, body.width));
+            drawn += 1;
+        }
+    }
+
+    if reserved.newer {
         items.push(loading(app, FetchDirection::Newer.label()));
     }
 
     // Only a message can be the selection, so an empty window has none — the
     // indicator rows are not places the cursor can be.
     let mut state = ListState::default();
-    state.select((!window.is_empty()).then(|| app.vim.cursor().saturating_sub(start) + above));
+    state.select((!window.is_empty()).then(|| view.selection + above));
 
     let list = List::new(items).highlight_style(app.theme.selection);
     frame.render_stateful_widget(list, body, &mut state);
 
     if let Some(gutter) = gutter {
-        render_scrollbar(app, gutter, frame, start, budget);
+        render_scrollbar(app, gutter, frame, &view);
     }
 }
 
 /// The panel's title: where in what is loaded the reader is, and what a search
 /// found there.
 ///
-/// Counted in messages rather than in lines, because that is the only measure
-/// the client has — how many lines a message wraps onto is a question about the
-/// width of a terminal.
+/// Counted in messages, because that is where in the conversation the reader is:
+/// the cursor stands on a message however many rows that message is, and a
+/// message number is the one position that survives a page landing.
 fn conversation_title(app: &App) -> String {
     let search = search_note(app);
     let total = app.conversation.window.len();
@@ -116,8 +130,8 @@ fn conversation_title(app: &App) -> String {
 
 /// What the title says about a search, if one is running.
 ///
-/// The count is how many matches are held, which is the number of rows that can
-/// be marked; how many there are in all is the status line's to say.
+/// The count is how many matches are held, which is the number of messages that
+/// can be marked; how many there are in all is the status line's to say.
 fn search_note(app: &App) -> String {
     if !app.search().is_active() {
         return String::new();
@@ -126,32 +140,53 @@ fn search_note(app: &App) -> String {
     format!(" · {} match(es)", app.search().len())
 }
 
-/// One message as a row.
+/// One row of one message: the slice of its text `range` names, which the
+/// panel's width has already made room for.
 ///
-/// The reply and the state of a send are same-line additions rather than rows of
-/// their own: the panel's geometry assumes one message is one row, and a second
-/// line would revisit that. A reply reads as a prefix, before the body it
-/// answers; a pending or failed send reads as a suffix, after it.
+/// The decorations belong to the message rather than to the row. Who it is
+/// from and what it quotes say which message this is, so they are drawn once,
+/// on the first row — the row the reader reaches the message by. A pending or
+/// failed send is a fact about the whole message, so it goes on the last row,
+/// which is the one with room for it; a continuation row repeats neither, and
+/// a reader scrolling into the middle of a long message is reading the same
+/// speaker they were a moment ago.
+///
+/// The row was cut at a width that already made room for both, in
+/// [`rows::message_rows`], so nothing here is clipped by the terminal and lost.
 ///
 /// A message a search matched has its spans patched with
 /// [`Theme::match_style`](crate::theme::Theme::match_style) rather than given a
 /// style of their own, so that the cursor's `REVERSED` selection composes on top
 /// of it instead of replacing it.
-fn message_line(app: &App, message: &Message, width: u16) -> ListItem<'static> {
-    let who = if message.is_outgoing { "you" } else { "them" };
-    let mut spans = vec![Span::styled(format!("[{who}] "), app.theme.text_dim)];
+fn message_row(
+    app: &App,
+    message: &Message,
+    range: &Range<usize>,
+    first: bool,
+    last: bool,
+    width: u16,
+) -> ListItem<'static> {
+    let mut spans = Vec::new();
 
-    if let Some(reply_to) = message.reply_to {
-        spans.push(Span::styled(
-            format!("> {} ‖ ", reply_excerpt(app, reply_to, width)),
-            app.theme.text_dim,
-        ));
+    if first {
+        let who = if message.is_outgoing { "you" } else { "them" };
+        spans.push(Span::styled(format!("[{who}] "), app.theme.text_dim));
+
+        if let Some(reply_to) = message.reply_to {
+            spans.push(Span::styled(
+                rows::reply_prefix(app, reply_to, width),
+                app.theme.text_dim,
+            ));
+        }
     }
 
-    spans.push(Span::styled(message.text.to_string(), app.theme.text));
+    spans.push(Span::styled(
+        message.text[range.clone()].to_owned(),
+        app.theme.text,
+    ));
 
-    if let Some(suffix) = status_suffix(app, message) {
-        spans.push(suffix);
+    if last && let Some(suffix) = rows::status_suffix(app, message) {
+        spans.push(Span::styled(suffix, app.theme.text_dim));
     }
 
     if app.search().is_match(message.id) {
@@ -161,58 +196,6 @@ fn message_line(app: &App, message: &Message, width: u16) -> ListItem<'static> {
     }
 
     ListItem::new(Line::from(spans))
-}
-
-/// The short form of the message a reply answers.
-///
-/// At most half the panel, so the body the reply carries still has room: a
-/// prefix that filled the row would hide the thing it is a prefix to. A target
-/// that is not in the window says so rather than leaving the reply looking
-/// unanchored, and a target that is itself still on its way says that instead of
-/// quoting a message that has not arrived.
-fn reply_excerpt(app: &App, reply_to: i64, width: u16) -> String {
-    let text = match app.conversation.message(reply_to) {
-        Some(message) if matches!(message.status, MessageStatus::Sending) => {
-            return "[sending…]".to_owned();
-        }
-        Some(message) => message.text.to_string(),
-        None => return "[message not loaded]".to_owned(),
-    };
-
-    truncate(&text, (usize::from(width) / 2).max(8))
-}
-
-/// The short form of what a send is doing, for the end of its own row.
-///
-/// The full reason a send failed is longer than a row has room for, and lives on
-/// the status line while the cursor is on the message; this is only enough to
-/// say that there is one.
-fn status_suffix(app: &App, message: &Message) -> Option<Span<'static>> {
-    match message.status {
-        MessageStatus::Sending => Some(Span::styled("  [sending…]", app.theme.text_dim)),
-        MessageStatus::Failed => {
-            let reason = app.conversation.failure(message.id).unwrap_or("failed");
-            Some(Span::styled(
-                format!("  [failed: {}]", truncate(reason, FAILED_REASON_WIDTH)),
-                app.theme.text_dim,
-            ))
-        }
-        MessageStatus::Sent | MessageStatus::Received => None,
-    }
-}
-
-/// Truncates `text` to `budget` characters, marking the cut.
-///
-/// Characters rather than bytes, because a multibyte character cut in half is
-/// not text at all.
-fn truncate(text: &str, budget: usize) -> String {
-    if text.chars().count() <= budget {
-        return text.to_owned();
-    }
-
-    let mut shortened: String = text.chars().take(budget.saturating_sub(1)).collect();
-    shortened.push('…');
-    shortened
 }
 
 /// A row saying what is being fetched.
@@ -244,18 +227,19 @@ fn split_gutter(inner: Rect) -> (Rect, Option<Rect>) {
 
 /// Draws how far into the loaded messages the reader has scrolled.
 ///
-/// The bar measures the window rather than the conversation: the client holds a
-/// window, not a history, so the only extent it can honestly show is the one it
-/// has.
-fn render_scrollbar(app: &App, area: Rect, frame: &mut Frame<'_>, start: usize, budget: usize) {
-    let total = app.conversation.window.len();
-    if total <= budget {
+/// The bar measures the rows the window was laid out in, and so does the slice
+/// beside it: both come from one layout, so the thumb always describes what is
+/// on the screen. The bar measures the window rather than the conversation: the
+/// client holds a window, not a history, so the only extent it can honestly
+/// show is the one it has.
+fn render_scrollbar(app: &App, area: Rect, frame: &mut Frame<'_>, view: &rows::Slice) {
+    if view.total <= view.budget {
         return;
     }
 
-    let mut state = ScrollbarState::new(total)
-        .position(start)
-        .viewport_content_length(budget);
+    let mut state = ScrollbarState::new(view.total)
+        .position(view.start_row)
+        .viewport_content_length(view.budget);
 
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .thumb_style(app.theme.text)
@@ -346,6 +330,85 @@ mod tests {
         body_column(buffer, usize::from(buffer.area.width) - 2)
     }
 
+    /// The rows the messages are drawn on, in the panel's body.
+    fn message_rows(buffer: &Buffer) -> Vec<u16> {
+        let height = usize::from(buffer.area.height);
+        (1..height - 5).map(|y| y as u16).collect()
+    }
+
+    /// One row of the panel's body: from its first message column to the last,
+    /// without the borders and the chat list beside it.
+    fn body_row(buffer: &Buffer, y: u16) -> String {
+        let last = usize::from(buffer.area.width) - 2;
+
+        (usize::from(BODY_X)..last)
+            .map(|x| cell(buffer, x as u16, y).symbol())
+            .collect()
+    }
+
+    /// Whether a row of the panel's body has anything on it.
+    fn drawn(buffer: &Buffer, y: u16) -> bool {
+        let last = usize::from(buffer.area.width) - 2;
+        (usize::from(BODY_X)..last).any(|x| cell(buffer, x as u16, y).symbol() != " ")
+    }
+
+    /// The lowest row the panel drew a message on, if it drew one.
+    fn last_drawn(buffer: &Buffer) -> Option<u16> {
+        message_rows(buffer)
+            .into_iter()
+            .rev()
+            .find(|y| drawn(buffer, *y))
+    }
+
+    /// The rows the bar's thumb covers, counted from the top of the track.
+    fn thumb(buffer: &Buffer) -> Vec<usize> {
+        let width = usize::from(buffer.area.width);
+        let x = width - 2;
+
+        (1..usize::from(buffer.area.height) - 5)
+            .filter(|y| buffer.content()[y * width + x].symbol() == "█")
+            .collect()
+    }
+
+    /// The panel's own account of itself: the rows it filled, and what the bar
+    /// beside them says about where the reader is.
+    ///
+    /// The slice and the bar are two answers to one question, and the failure
+    /// this guards is them disagreeing: nothing fails and nothing panics when
+    /// they do, and it reads as a scrollbar in the wrong place, which is a
+    /// cosmetic complaint about a geometry computed twice. Read off the screen,
+    /// because a slice drawn a row out from the one that was computed is still
+    /// a slice.
+    fn assert_one_answer(app: &App, buffer: &Buffer) {
+        let reserved = app.reserved();
+        let panel_rows = message_rows(buffer).len();
+        let budget = panel_rows - reserved.above() - reserved.below();
+        let view = app.viewport(&app.row_layout(), budget);
+        let filled = message_rows(buffer)
+            .into_iter()
+            .filter(|y| drawn(buffer, *y))
+            .count();
+
+        assert_eq!(
+            filled,
+            view.rows + reserved.above() + reserved.below(),
+            "the panel drew the rows the layout says, and no others"
+        );
+        assert_eq!(
+            !thumb(buffer).is_empty(),
+            view.total > view.budget,
+            "the bar is there exactly when there is somewhere to scroll"
+        );
+
+        if view.start_row == 0 && view.total > view.budget {
+            assert_eq!(
+                thumb(buffer).first().copied(),
+                Some(1),
+                "the thumb is at the top of the track, below the arrow"
+            );
+        }
+    }
+
     /// A message long enough to reach the edge of any panel.
     fn long_message(chat_id: i64) -> domain::message::Message {
         use std::borrow::Cow;
@@ -360,6 +423,18 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+        }
+    }
+
+    /// The same message, from the reader's side of it, and one a send is still
+    /// on its way for.
+    fn long_message_sending(chat_id: i64) -> domain::message::Message {
+        use domain::message::MessageStatus;
+
+        domain::message::Message {
+            status: MessageStatus::Sending,
+            is_outgoing: true,
+            ..long_message(chat_id)
         }
     }
 
@@ -591,13 +666,16 @@ mod tests {
 
     /// The column the bar sits in is one the messages gave up, so a long message
     /// has to stop before it rather than be written under it.
+    ///
+    /// The panel is tall enough for the whole message, because the question is
+    /// what is drawn where and not whether there is anything to scroll.
     #[test]
     fn a_long_message_stops_at_the_column_the_bar_was_given() {
         let mut app = App::mock();
         let chat_id = app.conversation.window.chat_id;
         app.apply_latest(vec![long_message(chat_id)]);
 
-        let screen = screen(&app, 80, 10);
+        let screen = screen(&app, 80, 24);
         let last_message_column = usize::from(screen.area.width) - 3;
 
         assert!(
@@ -609,6 +687,222 @@ mod tests {
             gutter_content(&screen).trim().is_empty(),
             "and stop there: {:?}",
             gutter_content(&screen)
+        );
+    }
+
+    // ---- a message of more than one row ---------------------------------
+
+    /// A message is as tall as its text is at the panel's width, and every row
+    /// of it is drawn.
+    #[test]
+    fn a_long_message_is_as_many_rows_as_it_needs() {
+        let mut app = App::mock();
+        let chat_id = app.conversation.window.chat_id;
+        app.apply_latest(vec![long_message(chat_id)]);
+
+        let screen = screen(&app, 80, 24);
+
+        assert_eq!(
+            app.row_layout()[0].len,
+            8,
+            "47 columns on the first row, 53 on the seven after it"
+        );
+        assert!(
+            row(&screen, 1).contains("[them] xxx"),
+            "the first row: {}",
+            row(&screen, 1)
+        );
+        assert!(
+            message_rows(&screen)
+                .into_iter()
+                .take(8)
+                .all(|y| drawn(&screen, y)),
+            "all nine rows are on the screen: {:?}",
+            message_rows(&screen)
+                .into_iter()
+                .map(|y| row(&screen, y))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            last_drawn(&screen),
+            Some(8),
+            "and the ninth is the panel's own padding, not a message"
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// A continuation row names nobody: it is the same message as the row above
+    /// it, and a reader scrolling into the middle of a long one is reading the
+    /// speaker they were a moment ago.
+    #[test]
+    fn a_continuation_row_names_nobody() {
+        let mut incoming = App::mock();
+        let chat_id = incoming.conversation.window.chat_id;
+        incoming.apply_latest(vec![long_message(chat_id)]);
+        let theirs = screen(&incoming, 80, 24);
+
+        assert!(row(&theirs, 1).contains("[them]"), "the first row names it");
+        assert!(
+            !row(&theirs, 2).contains('['),
+            "and a continuation row does not: {}",
+            row(&theirs, 2)
+        );
+
+        let mut outgoing = App::mock();
+        let chat_id = outgoing.conversation.window.chat_id;
+        outgoing.apply_latest(vec![long_message_sending(chat_id)]);
+        let yours = screen(&outgoing, 80, 24);
+
+        assert!(row(&yours, 1).contains("[you]"), "the first row names it");
+        assert!(
+            !row(&yours, 2).contains('['),
+            "and a continuation row does not: {}",
+            row(&yours, 2)
+        );
+    }
+
+    /// A page of rows moves the reader by rows and leaves the slice and the bar
+    /// beside it in step, which is the one thing they must never stop agreeing
+    /// about.
+    #[test]
+    fn a_page_of_rows_leaves_the_slice_and_the_bar_in_step() {
+        let mut app = App::mock();
+
+        let pinned = screen(&app, 80, 10);
+        assert_one_answer(&app, &pinned);
+        assert!(
+            row(&pinned, 1).contains("And the benchmarks."),
+            "pinned to the end of the window: {}",
+            row(&pinned, 1)
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let paged = screen(&app, 80, 10);
+
+        assert_one_answer(&app, &paged);
+        assert!(
+            row(&paged, 1).contains("1.85.0, edition 2024."),
+            "a screenful of rows up: {}",
+            row(&paged, 1)
+        );
+    }
+
+    /// A send on its way says so on the last row of its message, which is the
+    /// one with room for it: the first row of a long message is full.
+    #[test]
+    fn a_pending_send_says_so_on_the_last_row_of_its_message() {
+        let mut app = App::mock();
+        let chat_id = app.conversation.window.chat_id;
+        app.apply_latest(vec![long_message_sending(chat_id)]);
+
+        let screen = screen(&app, 80, 24);
+        let last = last_drawn(&screen).expect("the message is on the screen");
+
+        assert!(
+            !row(&screen, 1).contains("[sending…]"),
+            "not on the first row, which is full: {}",
+            row(&screen, 1)
+        );
+        assert!(
+            row(&screen, last).contains("[sending…]"),
+            "but on the last: {}",
+            row(&screen, last)
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// A reply quotes a share of the row it shares with its body, so that the
+    /// body the reply carries still has room. A prefix that filled the row would
+    /// push the thing it is a prefix to off it, and the terminal would clip
+    /// without saying so.
+    #[test]
+    fn a_wrapped_reply_leaves_its_body_room_on_the_first_row() {
+        use std::borrow::Cow;
+
+        use domain::message::{Message, MessageStatus};
+
+        let mut app = App::mock();
+        let chat_id = app.conversation.window.chat_id;
+        app.apply_latest(vec![
+            Message {
+                id: 90,
+                chat_id,
+                text: Cow::Owned("q".repeat(200)),
+                timestamp: 0,
+                status: MessageStatus::Received,
+                is_outgoing: false,
+                reply_to: None,
+            },
+            Message {
+                id: 91,
+                chat_id,
+                text: Cow::Borrowed("sure"),
+                timestamp: 0,
+                status: MessageStatus::Received,
+                is_outgoing: true,
+                reply_to: Some(90),
+            },
+        ]);
+
+        let screen = screen(&app, 80, 24);
+        let on = message_rows(&screen)
+            .into_iter()
+            .find(|y| row(&screen, *y).contains("sure"))
+            .expect("the reply is on the screen");
+        let first = body_row(&screen, on);
+
+        assert!(first.contains("> qqq"), "the target is quoted: {first:?}");
+        assert!(
+            first.contains("‖ sure"),
+            "and the body is on the same row: {first:?}"
+        );
+        assert!(
+            first.chars().count() <= 53,
+            "the row is the panel's width and no more: {} columns",
+            first.chars().count()
+        );
+    }
+
+    /// A search marks every row of the message it matched, and the cursor
+    /// stands on the first of them.
+    #[test]
+    fn a_wrapped_match_is_marked_throughout_and_the_cursor_is_on_its_first_row() {
+        use ratatui::style::{Color, Modifier};
+
+        use std::borrow::Cow;
+
+        use domain::message::{Message, MessageStatus};
+
+        let mut app = App::mock();
+        let chat_id = app.conversation.window.chat_id;
+        app.apply_latest(vec![Message {
+            id: 90,
+            chat_id,
+            text: Cow::Owned(format!("benchmarks and {}", "x".repeat(200))),
+            timestamp: 0,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+        }]);
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "benchmarks");
+        press(&mut app, KeyCode::Enter);
+
+        let screen = screen(&app, 80, 24);
+        let first = cell(&screen, BODY_X, 1);
+        let second = cell(&screen, BODY_X, 2);
+
+        assert_eq!(first.fg, Color::Yellow, "the first row is marked");
+        assert_eq!(second.fg, Color::Yellow, "and so is the row after it");
+        assert!(
+            first.modifier.contains(Modifier::REVERSED),
+            "the cursor is on the first of them: {:?}",
+            first.modifier
+        );
+        assert!(
+            !second.modifier.contains(Modifier::REVERSED),
+            "and not on the rest: {:?}",
+            second.modifier
         );
     }
 

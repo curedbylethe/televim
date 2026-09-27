@@ -17,6 +17,7 @@ use domain::vim::{Motion, VimState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 
+use crate::rows::{self, Reserved, RowSpan, Slice};
 use crate::theme::Theme;
 use crate::widgets;
 
@@ -25,7 +26,9 @@ use crate::widgets;
 ///
 /// A margin rather than the edge itself, because a fetch costs a round trip:
 /// asking a screenful early means the reader reaches the end of what is loaded
-/// with the next page already on its way.
+/// with the next page already on its way. Counted in rows, because a reader
+/// scrolling upwards is counting the screen: twenty messages that came to fill
+/// four rows is four rows from the top, not twenty.
 const FETCH_MARGIN: usize = 20;
 
 /// How many message rows the conversation panel is assumed to have before it
@@ -35,6 +38,13 @@ const FETCH_MARGIN: usize = 20;
 /// the key handling falls back on in between, and it is deliberately a normal
 /// size rather than a small one: a page that overshoots is clamped.
 const ASSUMED_ROWS: usize = 20;
+
+/// How many columns the conversation panel's messages are assumed to have
+/// before it has been drawn once.
+///
+/// The same fallback as [`ASSUMED_ROWS`] and for the same reason: the layout
+/// has to be answerable before the first frame.
+const ASSUMED_BODY_WIDTH: u16 = 80;
 
 /// What the status line shows before anything has happened.
 const IDLE_STATUS: &str = "televim";
@@ -366,6 +376,15 @@ pub struct App {
     /// terminal made it. It is a measurement rather than state anything decides,
     /// so recording it late is the same as recording it at all.
     rows: Cell<usize>,
+
+    /// How many columns the conversation panel's messages had room for as of
+    /// the last frame, which is the width the rows are laid out at.
+    ///
+    /// Recorded beside [`App::rows`] and for the same reason: only the panel
+    /// knows, and the layout cannot be worked out without it. What is given up
+    /// for the scrollbar is given up before this, so no message is ever laid
+    /// out — or drawn — under the bar.
+    body_width: Cell<u16>,
 }
 
 impl Default for App {
@@ -404,6 +423,7 @@ impl App {
             fetching: Fetching::default(),
             pending_jump: None,
             rows: Cell::new(ASSUMED_ROWS),
+            body_width: Cell::new(ASSUMED_BODY_WIDTH),
         }
     }
 
@@ -849,6 +869,9 @@ impl App {
     ///
     /// A window shorter than the margin is near both of its ends at once, and
     /// asking is still right: the conversation simply is not loaded yet.
+    ///
+    /// Counted in rows rather than in messages, which is the only way "near the
+    /// top" means what a reader scrolling upwards thinks it means.
     #[must_use]
     pub fn wants_older(&self) -> bool {
         let window = &self.conversation.window;
@@ -856,7 +879,7 @@ impl App {
         !self.fetching.is_in_flight(FetchDirection::Older)
             && !window.is_empty()
             && !window.exhausted_older
-            && self.vim.cursor() < FETCH_MARGIN
+            && self.cursor_extent().0 < FETCH_MARGIN
     }
 
     /// Whether the page behind what is loaded is worth asking for.
@@ -872,7 +895,26 @@ impl App {
             && !window.is_empty()
             && !window.exhausted_newer
             && !self.conversation.auto_follow()
-            && self.vim.cursor().saturating_add(FETCH_MARGIN) >= window.len()
+            && self.near_the_end()
+    }
+
+    /// Whether the rows behind the cursor's message are within the fetch
+    /// margin of the end of the window.
+    fn near_the_end(&self) -> bool {
+        let (first, total) = self.cursor_extent();
+        total - first <= FETCH_MARGIN
+    }
+
+    /// The first row the cursor's message occupies, and how many rows the whole
+    /// window occupies, at the panel's width.
+    ///
+    /// What the two paging triggers are measured against. Both are rows,
+    /// because both are about where the reader is on the screen.
+    fn cursor_extent(&self) -> (usize, usize) {
+        let layout = self.row_layout();
+        let first = layout.get(self.vim.cursor()).map_or(0, |span| span.first);
+
+        (first, rows::total_rows(&layout))
     }
 
     /// Records that a fetch for `direction` has been asked for.
@@ -1260,6 +1302,11 @@ impl App {
 
     /// Moves the cursor a screenful, which is what `Ctrl+d` and `Ctrl+u` mean.
     ///
+    /// A screenful is rows, and a page lands on a message: moving down can
+    /// arrive in the middle of one, and the message that owns the row the
+    /// reader asked for is what the cursor stands on — its first row, as a
+    /// terminal page puts the reader at the top of what it moved to.
+    ///
     /// Landing on the newest message re-engages following and moving away from
     /// it disengages, on the same rule as `j` and `k`, so a page and a line
     /// cannot disagree about whether the view is pinned.
@@ -1269,15 +1316,19 @@ impl App {
     fn page(&mut self, down: bool) {
         self.pending_d = false;
         let step = self.rows.get().max(1);
-        let last = self.conversation.window.len().saturating_sub(1);
+        let layout = self.row_layout();
+        let total = rows::total_rows(&layout);
+        let here = layout.get(self.vim.cursor()).map_or(0, |span| span.first);
 
-        let cursor = if down {
-            self.vim.cursor().saturating_add(step).min(last)
+        let target = if down {
+            here.saturating_add(step).min(total.saturating_sub(1))
         } else {
-            self.vim.cursor().saturating_sub(step)
+            here.saturating_sub(step)
         };
 
-        self.vim.set_cursor(cursor);
+        if let Some(cursor) = rows::message_at_row(&layout, target) {
+            self.vim.set_cursor(cursor);
+        }
         self.settle_follow();
     }
 
@@ -1597,42 +1648,105 @@ impl App {
         widgets::status_bar::render(self, vertical[2], frame);
     }
 
-    /// How many message rows the conversation panel had room for, as of the last
-    /// frame.
-    #[must_use]
-    pub fn visible_rows(&self) -> usize {
-        self.rows.get()
-    }
-
     /// Records how many message rows the conversation panel has room for.
     ///
     /// Called from the panel, which is the only place the terminal's height has
     /// been turned into a rectangle. Zero is not a measurement anything can act
     /// on, so it is stored as one row: a page that moves nowhere is worse than a
     /// page that moves too little.
+    ///
+    /// This is the panel's height, and it is rows rather than messages: a
+    /// message is as tall as its text is, and how tall that is depends on the
+    /// width the panel gave it.
     pub fn record_rows(&self, rows: usize) {
         self.rows.set(rows.max(1));
     }
 
-    /// The first message the conversation panel shows, given `rows` of room.
+    /// The columns the conversation panel's messages have room for, as of the
+    /// last frame.
+    ///
+    /// What the rows are laid out at. Recorded by the panel after the scrollbar
+    /// has taken its column, because a message must never be laid out — or
+    /// drawn — under the bar.
+    #[must_use]
+    pub fn body_width(&self) -> u16 {
+        self.body_width.get()
+    }
+
+    /// Records how many columns the conversation panel's messages have room for.
+    pub fn record_body(&self, width: u16) {
+        self.body_width.set(width);
+    }
+
+    /// The rows every message in the window occupies, laid out at the panel's
+    /// width.
+    ///
+    /// The single source of truth for the panel's geometry. Everything that
+    /// needs to know how tall something is — the viewport, the scrollbar, the
+    /// paging keys, the fetch triggers — asks here rather than working it out
+    /// again, because two measurements of one thing is a bug waiting for the
+    /// case where they disagree.
+    ///
+    /// A pure function of the window's messages and [`App::body_width`], and of
+    /// nothing else: not the cursor, not the mode, not when it was asked. A
+    /// layout worked out before a page lands is thrown away rather than kept,
+    /// which is why a [`RowSpan`] is named by message id.
+    #[must_use]
+    pub fn row_layout(&self) -> Vec<RowSpan> {
+        let width = self.body_width();
+        let mut laid_out: Vec<RowSpan> = Vec::with_capacity(self.conversation.window.len());
+        let mut first = 0;
+
+        for (index, message) in self.conversation.window.iter().enumerate() {
+            let text = 0..message.text.len();
+            let len = rows::message_rows(self, message, width).len();
+
+            laid_out.push(RowSpan {
+                message_id: message.id,
+                index,
+                first,
+                len,
+                text,
+            });
+            first += len;
+        }
+
+        laid_out
+    }
+
+    /// The rows the panel spends on the fetches it is announcing.
+    ///
+    /// One answer, read by the panel for both what it draws and what the
+    /// messages have left, because the two cannot be allowed to disagree about
+    /// how tall an announcement is.
+    #[must_use]
+    pub fn reserved(&self) -> Reserved {
+        Reserved {
+            older: self.fetching.is_in_flight(FetchDirection::Older),
+            jumping: self.pending_jump.is_some(),
+            newer: self.fetching.is_in_flight(FetchDirection::Newer),
+        }
+    }
+
+    /// The rows the conversation panel shows, given a `budget` of room for
+    /// messages and the `layout` it is drawing from.
     ///
     /// While the view is pinned to the newest message the slice ends at it;
     /// otherwise it is centred on the cursor, which is the reader's place, and
     /// then pulled back inside the window so that the slice is always exactly as
     /// tall as the panel and never starts past the end.
+    ///
+    /// The layout is the caller's, because the caller has one to draw: laying it
+    /// out a second time to ask what the first one says is the work this
+    /// arrangement exists to avoid.
     #[must_use]
-    pub fn viewport_start(&self, rows: usize) -> usize {
-        let total = self.conversation.window.len();
-        if total == 0 {
-            return 0;
-        }
-
-        let rows = rows.clamp(1, total);
-        if self.conversation.auto_follow() {
-            return total - rows;
-        }
-
-        self.vim.cursor().saturating_sub(rows / 2).min(total - rows)
+    pub fn viewport(&self, layout: &[RowSpan], budget: usize) -> Slice {
+        rows::slice(
+            layout,
+            self.vim.cursor(),
+            budget,
+            self.conversation.auto_follow(),
+        )
     }
 
     // ---- helpers -------------------------------------------------------
@@ -1846,6 +1960,17 @@ mod tests {
     /// Messages of the sample conversation, with these identifiers.
     fn page(ids: &[i64]) -> Vec<Message> {
         ids.iter().map(|id| message(*id, "text")).collect()
+    }
+
+    /// `to` messages of a screenful each, which is a window of rows rather
+    /// than of lines.
+    fn tall_page(to: i64) -> Vec<Message> {
+        (0..to)
+            .map(|id| Message {
+                text: Cow::Owned("x".repeat(400)),
+                ..message(id, "text")
+            })
+            .collect()
     }
 
     /// A message in a conversation the sample data does not hold.
@@ -2798,18 +2923,53 @@ mod tests {
         assert_eq!(app.vim.cursor(), 9);
     }
 
+    /// A page is a screenful of rows, not a screenful of messages: a message
+    /// wider than the panel is more than one row, and four rows of one are four
+    /// rows the reader has moved.
+    #[test]
+    fn a_page_moves_by_rows_and_lands_on_a_message() {
+        let mut app = App::mock();
+        app.record_body(53);
+        app.record_rows(4);
+        app.apply_latest(vec![
+            message(0, "a"),
+            Message {
+                id: 1,
+                text: Cow::Owned("y".repeat(400)),
+                ..message(1, "text")
+            },
+            message(2, "b"),
+            message(3, "c"),
+        ]);
+        go_to_top(&mut app);
+        assert_eq!(app.vim.cursor(), 0);
+
+        app.handle_key(press_ctrl('d'));
+
+        assert_eq!(
+            app.vim.cursor(),
+            1,
+            "row 4 is inside the message at row 1, which is what the cursor stands on"
+        );
+    }
+
+    /// The first message the panel shows, given a panel `budget` rows tall.
+    fn shown_from(app: &App, budget: usize) -> usize {
+        app.viewport(&app.row_layout(), budget).start
+    }
+
     #[test]
     fn the_viewport_is_a_windowful_ending_at_a_pinned_view() {
         let app = App::mock();
 
         assert_eq!(
-            app.viewport_start(4),
+            shown_from(&app, 4),
             6,
             "pinned to the bottom, the slice is the last screenful"
         );
-        assert_eq!(app.viewport_start(99), 0, "a panel taller than the window");
+        assert_eq!(shown_from(&app, 99), 0, "a panel taller than the window");
         assert_eq!(
-            app.viewport_start(0),
+            shown_from(&app, 0),
             9,
             "a panel with no room still shows the newest row"
         );
@@ -2821,21 +2981,21 @@ mod tests {
         go_to_top(&mut app);
 
         assert_eq!(
-            app.viewport_start(4),
+            shown_from(&app, 4),
             0,
             "the top of the window is the top of the slice"
         );
 
         app.vim.set_cursor(5);
         assert_eq!(
-            app.viewport_start(4),
+            shown_from(&app, 4),
             3,
             "half a panel either side of the cursor"
         );
 
         app.vim.set_cursor(9);
         assert_eq!(
-            app.viewport_start(4),
+            shown_from(&app, 4),
             6,
             "a slice is never taller than the panel, nor starts past the end"
         );
@@ -3071,6 +3231,30 @@ mod tests {
             "the reader is at the top of what is loaded"
         );
         assert!(!app.wants_newer());
+    }
+
+    /// The margin is counted in rows, which is what a reader scrolling upwards
+    /// is counting. Twenty messages that came to fill four rows each is eighty
+    /// rows of conversation, and a reader on the fourth of them is nowhere near
+    /// the top of it.
+    #[test]
+    fn a_page_is_asked_for_by_rows_rather_than_by_messages() {
+        let mut app = App::mock();
+        app.record_body(53);
+        app.apply_latest(tall_page(10));
+        app.vim.set_cursor(3);
+
+        assert!(
+            !app.wants_older(),
+            "message 4 begins at row {}, and what is in front of it is a screenful of text rather than one line of window",
+            app.row_layout()[3].first
+        );
+
+        app.vim.set_cursor(0);
+        assert!(
+            app.wants_older(),
+            "and the reader on the first message is near the top of both"
+        );
     }
 
     #[test]

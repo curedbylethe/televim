@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod event;
+pub mod rows;
 pub mod theme;
 pub mod widgets;
 pub mod wrap;
