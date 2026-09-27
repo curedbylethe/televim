@@ -64,6 +64,33 @@ a `SessionStore`. Nothing flows back out except this crate's own types.
                         └────────────── SessionData ◀────────────────────┘
 ```
 
+## The `grammers` version, and what it constrains
+
+Pinned to `0.10.0` from crates.io. Upstream stopped tagging after `v0.8.0`, so
+no `tag =` can name 0.8.1, 0.9.0 or 0.10.0; see the dependency notes in
+`AGENTS.md` for the evidence. `grammers-tl-types` generates from **TL layer 227**.
+
+Three things about that release shape this crate, and are worth knowing before
+changing any of it:
+
+- **`PeerMap` has no public constructor.** It can only be obtained from a
+  `grammers` response. `fetch_history` builds its own `GetHistory` request,
+  because the typed iterator cannot scroll newer, so there is no response to
+  take one from — which is why `history.rs` reads the raw message rather than
+  going through `grammers`' `Message`. Every field it reads is the same read
+  `grammers` makes off the same value.
+- **A `Session` method can fail, and the setters are `async`.** Every method this
+  crate implements touches the in-memory mirror, so `Session::Error` is
+  `Infallible` and saying so is the point: the credential store is written
+  separately, precisely so that a keyring write never lands in the request path.
+- **The update position is not written on drop.** Asking for it is `async` and a
+  destructor cannot await, so `UpdateSubscription::finish` does it and the
+  update pump calls it. See **Not here yet** below.
+
+`Client::subscribe_updates` and `Client::send_message` are `async` where they
+were not before, for the same reason: `grammers` made the first one `async`, and
+`send_message`'s future is large enough that boxing it keeps the stack small.
+
 ## Logging in
 
 ```text
@@ -343,8 +370,17 @@ reaching for it:
 - **`bumpalo`/`jemalloc` tuning lives at the composition root.** This crate
   allocates like any other; the arena and allocator choices belong to the binary.
 
-Two things are known gaps rather than deliberate scope cuts:
+Three things are known gaps rather than deliberate scope cuts:
 
+- **A feed that is dropped without `finish` persists a stale update position.**
+  `grammers` no longer records the position when the stream is dropped — asking
+  for it is `async`, and a destructor cannot await — so
+  `UpdateSubscription::finish` does it and the update pump calls it once the
+  feed has been read to its end. A feed torn down without that call, which is
+  what a shutdown mid-run looks like, persists a position behind the one it
+  reached, and the next launch resolves the gap by replaying updates the reader
+  has already seen. Recording it periodically instead would bound that to a
+  fixed window; it is not done because nothing has been hurt by it yet.
 - **The update stream is drained and counted until it is taken, not buffered.**
   `ClientBuilder` captures the pool's update receiver and a task discards what
   arrives until `subscribe_updates` hands the feed to a caller, warning once so
