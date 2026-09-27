@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use grammers_client::session::defs::PeerRef;
+use grammers_client::session::types::PeerRef;
 use grammers_mtsender::SenderPool;
 use tokio::task::JoinHandle;
 
@@ -115,18 +115,19 @@ impl ClientBuilder {
 
         let session = Arc::new(StoreSession::new(store)?);
         let pool = SenderPool::new(Arc::clone(&session), self.api_id);
-        let inner = grammers_client::Client::new(&pool);
 
-        // `grammers` keeps the request half of the pool alive through a handle
-        // it clones into the client, so what is left here is the runner itself
-        // and the update channel. The runner owns the sockets: it opens a
-        // connection on demand and has to keep running for as long as the
+        // The client takes the pool's request handle by value, so the pool is
+        // split before the client is built. What is left here is the runner
+        // itself and the update channel. The runner owns the sockets: it opens
+        // a connection on demand and has to keep running for as long as the
         // client does.
         let SenderPool {
             runner,
-            handle: _,
+            handle,
             updates,
         } = pool;
+        let inner = grammers_client::Client::new(handle);
+
         // The runner is kept rather than detached. It owns the sockets, so a
         // client that has been dropped must be able to stop it; a detached one
         // would keep the connection open until the process ended.
@@ -346,7 +347,12 @@ impl Client {
     /// [`FrameworkError::UnknownPeer`] rather than a request Telegram would
     /// reject.
     pub(crate) fn peer_ref(&self, peer_id: i64) -> Option<PeerRef> {
-        self.session.cached_peer(peer_id).map(PeerRef::from)
+        // A peer with no `access_hash` cannot be addressed at all, so it is not
+        // a `PeerRef` — which is why this is a filter rather than a map.
+        self.session.cached_peer(peer_id).and_then(|info| {
+            let id = info.id();
+            info.auth().map(|auth| PeerRef { id, auth })
+        })
     }
 
     /// Takes a share of the session, for the update feed.

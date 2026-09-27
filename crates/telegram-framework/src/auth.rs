@@ -78,13 +78,13 @@ impl SingleUse {
 /// delivers it over SMS or another logged-in client. Do not call
 /// [`Client::request_login_code`](crate::Client::request_login_code) in a loop.
 pub struct LoginToken {
-    pub(crate) inner: grammers_client::types::LoginToken,
+    pub(crate) inner: grammers_client::client::LoginToken,
     used: SingleUse,
 }
 
 impl LoginToken {
     /// Wraps a token handed out by `grammers`.
-    pub(crate) fn new(inner: grammers_client::types::LoginToken) -> Self {
+    pub(crate) fn new(inner: grammers_client::client::LoginToken) -> Self {
         Self {
             inner,
             used: SingleUse::default(),
@@ -120,19 +120,19 @@ impl fmt::Debug for LoginToken {
 pub struct PasswordToken {
     /// Boxed because the SRP challenge is large, and because it would otherwise
     /// inflate every [`SignInResult`] to several hundred bytes.
-    inner: Box<grammers_client::types::PasswordToken>,
+    inner: Box<grammers_client::client::PasswordToken>,
 }
 
 impl PasswordToken {
     /// Wraps a challenge handed out by `grammers`.
-    pub(crate) fn new(inner: grammers_client::types::PasswordToken) -> Self {
+    pub(crate) fn new(inner: grammers_client::client::PasswordToken) -> Self {
         Self {
             inner: Box::new(inner),
         }
     }
 
     /// Unwraps the challenge for `grammers`.
-    pub(crate) fn into_inner(self) -> grammers_client::types::PasswordToken {
+    pub(crate) fn into_inner(self) -> grammers_client::client::PasswordToken {
         *self.inner
     }
 

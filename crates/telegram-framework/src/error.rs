@@ -79,6 +79,16 @@ pub enum RequestError {
     /// The request named a datacenter the session does not know about.
     #[error("the requested datacenter is not known")]
     UnknownDatacenter,
+
+    /// The session implementation failed while the request was being built.
+    ///
+    /// This crate's own session is infallible — it holds the decoded state in
+    /// memory and writes the credential store separately — so nothing should
+    /// reach this. It is mapped rather than dropped so that a session failure
+    /// is never reported as a network failure, which is what a reader would
+    /// otherwise be told to check their connection for.
+    #[error("the session could not be read or written: {0}")]
+    Session(String),
 }
 
 /// The login flow could not be completed.
@@ -209,6 +219,7 @@ impl RequestError {
             InvocationError::Dropped => Self::Dropped,
             InvocationError::InvalidDc => Self::UnknownDatacenter,
             InvocationError::Authentication(error) => Self::Network(error.to_string()),
+            InvocationError::Session(error) => Self::Session(error.to_string()),
         }
     }
 }
@@ -239,9 +250,13 @@ impl AuthError {
     pub(crate) fn from_sign_in(error: SignInError) -> Self {
         match error {
             SignInError::InvalidCode => Self::InvalidCode,
-            SignInError::InvalidPassword => Self::InvalidPassword,
+            // `grammers` hands back a fresh SRP challenge alongside the failure,
+            // so the reader could retry the password without authenticating
+            // again. Carrying it would mean holding a token in the error type,
+            // which is a change to the login flow rather than to this mapping.
+            SignInError::InvalidPassword(_) => Self::InvalidPassword,
             SignInError::PasswordRequired(_) => Self::PasswordRequired,
-            SignInError::SignUpRequired { .. } => Self::SignUpRequired,
+            SignInError::SignUpRequired => Self::SignUpRequired,
             SignInError::Other(error) => Self::from_invocation(&error),
         }
     }
@@ -394,13 +409,13 @@ mod tests {
             AuthError::InvalidCode
         ));
         assert!(matches!(
-            AuthError::from_sign_in(SignInError::InvalidPassword),
+            AuthError::from_sign_in(SignInError::InvalidPassword(testing::password_token(Some(
+                "hint"
+            )),)),
             AuthError::InvalidPassword
         ));
         assert!(matches!(
-            AuthError::from_sign_in(SignInError::SignUpRequired {
-                terms_of_service: None
-            }),
+            AuthError::from_sign_in(SignInError::SignUpRequired),
             AuthError::SignUpRequired
         ));
     }

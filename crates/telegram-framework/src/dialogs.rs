@@ -18,7 +18,7 @@
 
 use std::cmp::Ordering;
 
-use grammers_client::types::{Dialog, Peer};
+use grammers_client::peer::{Dialog, Peer};
 
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
@@ -174,7 +174,14 @@ fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
     };
 
     let peer = dialog.peer();
-    let peer_id = peer.id().bare_id();
+    // `grammers` reports no bare identifier for a peer that is the account
+    // itself, and there is no number to substitute: the account's real user
+    // identifier is only ever disclosed by asking Telegram for the account's own
+    // user, which this crate does not do. A conversation is therefore skipped
+    // rather than filed under an identifier that would address nothing. See
+    // `every_real_user_keeps_its_identifier`, which is what makes this
+    // unreachable for a real conversation.
+    let peer_id = peer.id().bare_id()?;
     let last_message = dialog.last_message.as_ref();
 
     Some(DialogInfo {

@@ -77,7 +77,7 @@ impl ProtoClient {
     /// # Errors
     ///
     /// Returns [`ProtoError::Framework`] if the feed has already been taken.
-    pub fn subscribe_updates(&self) -> Result<UpdateStream, ProtoError> {
+    pub async fn subscribe_updates(&self) -> Result<UpdateStream, ProtoError> {
         if !self.inner.has_fetched_dialogs() {
             tracing::warn!(
                 "subscribing to updates before the chat list was fetched; messages \
@@ -85,6 +85,6 @@ impl ProtoClient {
             );
         }
 
-        Ok(UpdateStream::new(self.inner.subscribe_updates()?))
+        Ok(UpdateStream::new(self.inner.subscribe_updates().await?))
     }
 }

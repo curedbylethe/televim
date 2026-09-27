@@ -51,7 +51,7 @@
 //! task-abort machinery, and the interface refuses to delete a message that has
 //! not been acknowledged rather than pretending to.
 
-use grammers_client::types::InputMessage;
+use grammers_client::message::InputMessage;
 
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
@@ -143,11 +143,17 @@ impl Client {
             return Err(FrameworkError::UnknownPeer(peer_id));
         };
 
-        let message = self
-            .inner()
-            .send_message(peer, InputMessage::new().text(text).reply_to(reply_to))
-            .await
-            .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
+        // Boxed because the state this future has to carry is large — over
+        // twenty kilobytes — and it is created on the stack of whatever asked for
+        // the send. On a runtime this program's requests run on, that is a stack
+        // that does not need the pressure. `edit_message` and `delete_messages`
+        // below are not large enough to need the same treatment.
+        let message = Box::pin(
+            self.inner()
+                .send_message(peer, InputMessage::new().text(text).reply_to(reply_to)),
+        )
+        .await
+        .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
 
         // A send can cache a peer or move the datacenter, and that only reaches
         // the store through this call. `persist_if_dirty` skips the write when

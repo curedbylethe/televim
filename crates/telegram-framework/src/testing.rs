@@ -8,7 +8,7 @@
 //! Nothing here reaches a release build: the module is behind `cfg(test)` and,
 //! because it names `grammers` types, behind `live` as well.
 
-use grammers_client::types::PasswordToken;
+use grammers_client::client::PasswordToken;
 use grammers_mtsender::{InvocationError, RpcError};
 
 use crate::tl;

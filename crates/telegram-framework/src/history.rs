@@ -28,9 +28,6 @@
 //! caller owns the window the page goes into, and reversing is its decision to
 //! make once rather than the framework's on every call.
 
-use grammers_client::PeerMap;
-use grammers_client::types::Message;
-
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::tl;
@@ -202,7 +199,12 @@ impl Client {
             .await
             .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
 
-        let (raw, users, chats) = match response {
+        // The peers the page carries are not read. Every field a `MessageInfo` is
+        // built from lives on the message itself, so the peers would only matter
+        // for resolving who sent it — and the conversation this page belongs to
+        // is one the chat list already vetted. See [`message_from_raw`] for why
+        // the raw message is read directly.
+        let (raw, _users, _chats) = match response {
             tl::enums::messages::Messages::Messages(page) => {
                 (page.messages, page.users, page.chats)
             }
@@ -221,24 +223,9 @@ impl Client {
             }
         };
 
-        // The response carries the peers its messages refer to, and a message is
-        // only fully described with them in hand — the same call the feed's
-        // mapping makes, so a message read from history and the same message
-        // arriving live are described identically.
-        let peers = PeerMap::new(users, chats);
         let messages: Vec<MessageInfo> = raw
-            .into_iter()
-            .map(|raw| {
-                let message = Message::from_raw(self.inner(), raw, Some(peer), &peers);
-                message_info(
-                    message.id(),
-                    peer_id,
-                    message.text(),
-                    message.date().timestamp(),
-                    message.outgoing(),
-                    message.reply_to_message_id(),
-                )
-            })
+            .iter()
+            .map(|raw| message_from_raw(raw, peer_id))
             .collect();
 
         // Reading history can migrate the datacenter or cache a peer, and that
@@ -256,6 +243,59 @@ impl Client {
 
         Ok(messages)
     }
+}
+
+/// Reads a raw history message into the description this crate publishes.
+///
+/// # Why the raw message is read here
+///
+/// `grammers`' `Message` is not used for a hand-made request. It is built
+/// through `Message::from_raw`, which needs a `PeerMap`, and a `PeerMap` can
+/// only be obtained from a `grammers` response — it has no public constructor,
+/// and `Client` exposes no way to make one. This module builds its own
+/// `GetHistory` request (see the module docs), so there is nothing to take one
+/// from. This is the one place where a `grammers` type is read field by field
+/// rather than through an accessor.
+///
+/// Nothing is lost by it, because every field read here is the same read
+/// `grammers` makes, off the same raw value:
+///
+/// - an empty or service message carries no text, and
+/// - an empty message is not outgoing, while a service one is whatever
+///   `out` says.
+///
+/// A message read out of a conversation and the same message arriving over the
+/// feed are therefore still described identically, which is what lets the two
+/// be deduplicated against each other.
+///
+/// The date is widened straight from the raw `i32`. `grammers` would route it
+/// through a `DateTime` and take the timestamp back out, which is the same
+/// number for every value that conversion accepts — and does not abort on a
+/// value it does not.
+fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> MessageInfo {
+    let (id, text, date, is_outgoing, reply_to_msg_id) = match raw {
+        tl::enums::Message::Empty(message) => (message.id, "", 0, false, None),
+        tl::enums::Message::Message(message) => (
+            message.id,
+            message.message.as_str(),
+            message.date,
+            message.out,
+            match &message.reply_to {
+                Some(tl::enums::MessageReplyHeader::Header(header)) => header.reply_to_msg_id,
+                _ => None,
+            },
+        ),
+        tl::enums::Message::Service(message) => (message.id, "", message.date, message.out, None),
+    };
+
+    message_info(
+        id,
+        chat_peer_id,
+        text,
+        i64::from(date),
+        is_outgoing,
+        reply_to_msg_id,
+    )
 }
 
 #[cfg(test)]

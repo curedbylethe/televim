@@ -59,6 +59,18 @@ impl UpdateStream {
     pub fn dropped(&self) -> u64 {
         self.inner.dropped()
     }
+
+    /// Records how far the feed got, and writes the session back.
+    ///
+    /// Call this once the feed has been read to its end. It is explicit because
+    /// the position is synchronised through an `async` call that a destructor
+    /// cannot make, so a stream dropped without it leaves the session pointing at
+    /// an older position and the next launch replays updates that were already
+    /// seen. Consumes the stream, because there is nothing left to read.
+    pub async fn finish(self) -> Result<(), ProtoError> {
+        self.inner.finish().await?;
+        Ok(())
+    }
 }
 
 /// Translates an event the framework described into the domain's vocabulary.

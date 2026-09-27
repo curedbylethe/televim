@@ -281,6 +281,7 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
     // the dialogs is what puts them there.
     let updates = client
         .subscribe_updates()
+        .await
         .context("taking the update feed")?;
 
     let _ = tx.send(AppEvent::Net(Event::Ready { client, chats }));
@@ -360,6 +361,15 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
                 tracing::warn!(%error, "the update feed reported a failure it can recover from");
             }
         }
+    }
+
+    // The feed has been read to its end, so the position it reached is final.
+    // Recording it is an explicit call rather than something the drop does,
+    // because it has to be awaited, and the next launch resolves a gap against
+    // the stored position — so a session left pointing further back would replay
+    // every update in between.
+    if let Err(error) = updates.finish().await {
+        tracing::warn!(%error, "the update position could not be recorded");
     }
 }
 

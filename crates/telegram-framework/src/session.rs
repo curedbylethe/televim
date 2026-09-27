@@ -469,11 +469,11 @@ mod bridge {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-    use grammers_client::session::defs::{
+    use grammers_client::session::types::{
         ChannelKind as TlChannelKind, ChannelState as TlChannelState, DcOption as TlDcOption,
         PeerAuth, PeerId, PeerInfo, UpdateState as TlUpdateState, UpdatesState as TlUpdatesState,
     };
-    use grammers_client::session::{Session, SessionData as TlSessionData};
+    use grammers_client::session::{BoxFuture, Session, SessionData as TlSessionData};
 
     use super::{
         AuthKey, ChannelKind, ChannelState, DcOption, Peer, SessionData, SessionStore, UpdateState,
@@ -554,11 +554,17 @@ mod bridge {
         /// between three constructors that panic on a value outside their range.
         /// The cache holds one entry per conversation the account has, so the
         /// scan is short and it only runs when a request is being built.
+        ///
+        /// A peer whose identifier is the account's own has no bare identifier at
+        /// all, and so can never be the answer to a lookup by one. That is a miss
+        /// rather than a match, which is what makes this safe to compare rather
+        /// than a case that has to be handled: the question being asked is always
+        /// "which peer *is* this number", and the self entry is not a number.
         pub(crate) fn cached_peer(&self, bare_id: i64) -> Option<PeerInfo> {
             self.lock()
                 .peer_infos
                 .values()
-                .find(|info| info.id().bare_id() == bare_id)
+                .find(|info| info.id().bare_id() == Some(bare_id))
                 .cloned()
         }
 
@@ -613,63 +619,94 @@ mod bridge {
     }
 
     impl Session for StoreSession {
-        fn home_dc_id(&self) -> i32 {
-            self.lock().home_dc
+        /// Every method here touches the in-memory mirror, which cannot fail.
+        ///
+        /// The store is written separately, by
+        /// [`StoreSession::persist_if_dirty`], precisely so that a credential
+        /// write never lands in the request path. So the fallibility the trait
+        /// requires is answered with the absence of it rather than with a
+        /// swallowed error — a session that reports `Infallible` and then failed
+        /// would be lying in a way nothing downstream could detect.
+        type Error = std::convert::Infallible;
+
+        fn home_dc_id(&self) -> Result<i32, Self::Error> {
+            Ok(self.lock().home_dc)
         }
 
-        fn set_home_dc_id(&self, dc_id: i32) {
-            self.lock().home_dc = dc_id;
-            self.mark_dirty();
+        fn set_home_dc_id(&self, dc_id: i32) -> BoxFuture<'_, Result<(), Self::Error>> {
+            Box::pin(async move {
+                self.lock().home_dc = dc_id;
+                self.mark_dirty();
+                Ok(())
+            })
         }
 
-        fn dc_option(&self, dc_id: i32) -> Option<TlDcOption> {
-            self.lock().dc_options.get(&dc_id).cloned()
+        fn dc_option(&self, dc_id: i32) -> Result<Option<TlDcOption>, Self::Error> {
+            Ok(self.lock().dc_options.get(&dc_id).cloned())
         }
 
-        fn set_dc_option(&self, dc_option: &TlDcOption) {
-            self.lock()
-                .dc_options
-                .insert(dc_option.id, dc_option.clone());
-            self.mark_dirty();
+        fn set_dc_option(&self, dc_option: &TlDcOption) -> BoxFuture<'_, Result<(), Self::Error>> {
+            // Taken by value before the future is built, so that the future
+            // borrows only `self`. The trait's output lifetime is tied to `&self`
+            // alone, so a future that also captured the argument would not
+            // satisfy it. Cloning once here is cheaper than the clone the body
+            // would otherwise make anyway.
+            let dc_option = dc_option.clone();
+            Box::pin(async move {
+                self.lock().dc_options.insert(dc_option.id, dc_option);
+                self.mark_dirty();
+                Ok(())
+            })
         }
 
-        fn peer(&self, peer: PeerId) -> Option<PeerInfo> {
-            self.lock().peer_infos.get(&peer).cloned()
+        fn peer(&self, peer: PeerId) -> BoxFuture<'_, Result<Option<PeerInfo>, Self::Error>> {
+            Box::pin(async move { Ok(self.lock().peer_infos.get(&peer).cloned()) })
         }
 
-        fn cache_peer(&self, peer: &PeerInfo) {
-            let id = peer.id();
-            self.lock().peer_infos.insert(id, peer.clone());
-            self.mark_dirty();
+        fn cache_peer(&self, peer: &PeerInfo) -> BoxFuture<'_, Result<(), Self::Error>> {
+            // Taken by value for the same reason as `set_dc_option`.
+            let peer = peer.clone();
+            Box::pin(async move {
+                let id = peer.id();
+                self.lock().peer_infos.insert(id, peer);
+                self.mark_dirty();
+                Ok(())
+            })
         }
 
-        fn updates_state(&self) -> TlUpdatesState {
-            self.lock().updates_state.clone()
+        fn updates_state(&self) -> BoxFuture<'_, Result<TlUpdatesState, Self::Error>> {
+            Box::pin(async move { Ok(self.lock().updates_state.clone()) })
         }
 
-        fn set_update_state(&self, update: TlUpdateState) {
-            let mut state = self.lock();
-            match update {
-                TlUpdateState::All(updates) => state.updates_state = updates,
-                TlUpdateState::Primary { pts, date, seq } => {
-                    state.updates_state.pts = pts;
-                    state.updates_state.date = date;
-                    state.updates_state.seq = seq;
+        fn set_update_state(
+            &self,
+            update: TlUpdateState,
+        ) -> BoxFuture<'_, Result<(), Self::Error>> {
+            Box::pin(async move {
+                let mut state = self.lock();
+                match update {
+                    TlUpdateState::All(updates) => state.updates_state = updates,
+                    TlUpdateState::Primary { pts, date, seq } => {
+                        state.updates_state.pts = pts;
+                        state.updates_state.date = date;
+                        state.updates_state.seq = seq;
+                    }
+                    TlUpdateState::Secondary { qts } => state.updates_state.qts = qts,
+                    TlUpdateState::Channel { id, pts } => {
+                        state
+                            .updates_state
+                            .channels
+                            .retain(|channel| channel.id != id);
+                        state
+                            .updates_state
+                            .channels
+                            .push(TlChannelState { id, pts });
+                    }
                 }
-                TlUpdateState::Secondary { qts } => state.updates_state.qts = qts,
-                TlUpdateState::Channel { id, pts } => {
-                    state
-                        .updates_state
-                        .channels
-                        .retain(|channel| channel.id != id);
-                    state
-                        .updates_state
-                        .channels
-                        .push(TlChannelState { id, pts });
-                }
-            }
-            drop(state);
-            self.mark_dirty();
+                drop(state);
+                self.mark_dirty();
+                Ok(())
+            })
         }
     }
 
@@ -734,14 +771,14 @@ mod bridge {
                 is_self,
             } => Peer::User {
                 id: *id,
-                auth: auth.map(|auth| auth.hash()),
+                auth: auth.map(PeerAuth::hash),
                 bot: *bot,
                 is_self: *is_self,
             },
             PeerInfo::Chat { id } => Peer::Chat { id: *id },
             PeerInfo::Channel { id, auth, kind } => Peer::Channel {
                 id: *id,
-                auth: auth.map(|auth| auth.hash()),
+                auth: auth.map(PeerAuth::hash),
                 kind: kind.map(channel_kind_to_data),
             },
         }
@@ -1168,7 +1205,7 @@ mod tests {
     #[cfg(feature = "live")]
     #[test]
     fn bridge_finds_a_cached_peer_by_its_bare_identifier() {
-        use grammers_client::session::defs::PeerInfo;
+        use grammers_client::session::types::{PeerAuth, PeerInfo};
 
         let session = bridge_session(&sample_session());
 
@@ -1180,7 +1217,7 @@ mod tests {
         };
         assert_eq!(id, 42);
         assert_eq!(
-            auth.map(|auth| auth.hash()),
+            auth.map(PeerAuth::hash),
             Some(-1_234_567_890),
             "the access hash is what addressing the peer needs"
         );
@@ -1199,8 +1236,8 @@ mod tests {
     /// logins has to survive a restart, and the store must not be written when
     /// nothing changed.
     #[cfg(feature = "live")]
-    #[test]
-    fn bridge_writes_a_datacenter_migration_back_to_the_store() {
+    #[tokio::test]
+    async fn bridge_writes_a_datacenter_migration_back_to_the_store() {
         use std::sync::Arc;
 
         use grammers_client::session::Session as _;
@@ -1214,7 +1251,10 @@ mod tests {
             "a session nothing has touched is not worth writing"
         );
 
-        session.set_home_dc_id(4);
+        session
+            .set_home_dc_id(4)
+            .await
+            .expect("the mirror cannot fail");
         assert!(
             session.persist_if_dirty().expect("the write succeeds"),
             "a migration has to be written back"
@@ -1228,7 +1268,7 @@ mod tests {
 
         let restored = super::bridge::StoreSession::new(store).expect("the stored session loads");
         assert_eq!(
-            restored.home_dc_id(),
+            restored.home_dc_id().expect("the mirror cannot fail"),
             4,
             "a rebuilt session must come back on the datacenter it migrated to"
         );
@@ -1237,32 +1277,38 @@ mod tests {
     /// A cached peer and a moved update counter are the other two mutations that
     /// happen outside the login flow, and they have to raise the flag too.
     #[cfg(feature = "live")]
-    #[test]
-    fn bridge_marks_a_cached_peer_and_a_moved_counter_dirty() {
+    #[tokio::test]
+    async fn bridge_marks_a_cached_peer_and_a_moved_counter_dirty() {
         use std::sync::Arc;
 
         use grammers_client::session::Session as _;
-        use grammers_client::session::defs::{PeerInfo, UpdateState as TlUpdateState};
+        use grammers_client::session::types::{PeerInfo, UpdateState as TlUpdateState};
 
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let session = super::bridge::StoreSession::new(store).expect("a fresh session loads");
 
-        session.cache_peer(&PeerInfo::User {
-            id: 42,
-            auth: None,
-            bot: None,
-            is_self: None,
-        });
+        session
+            .cache_peer(&PeerInfo::User {
+                id: 42,
+                auth: None,
+                bot: None,
+                is_self: None,
+            })
+            .await
+            .expect("the mirror cannot fail");
         assert!(
             session.persist_if_dirty().expect("the write succeeds"),
             "a cached peer is a change worth keeping"
         );
 
-        session.set_update_state(TlUpdateState::Primary {
-            pts: 7,
-            date: 0,
-            seq: 1,
-        });
+        session
+            .set_update_state(TlUpdateState::Primary {
+                pts: 7,
+                date: 0,
+                seq: 1,
+            })
+            .await
+            .expect("the mirror cannot fail");
         assert!(
             session.persist_if_dirty().expect("the write succeeds"),
             "a moved update counter is a change worth keeping"
@@ -1298,8 +1344,8 @@ mod tests {
     /// A write that fails has to leave the flag raised, or the change would be
     /// dropped as soon as the store has a bad day.
     #[cfg(feature = "live")]
-    #[test]
-    fn bridge_retries_a_write_the_store_refused() {
+    #[tokio::test]
+    async fn bridge_retries_a_write_the_store_refused() {
         use std::sync::Arc;
         use std::sync::atomic::Ordering;
 
@@ -1309,7 +1355,10 @@ mod tests {
         let session = super::bridge::StoreSession::new(Arc::clone(&store) as Arc<dyn SessionStore>)
             .expect("a fresh session loads");
 
-        session.set_home_dc_id(4);
+        session
+            .set_home_dc_id(4)
+            .await
+            .expect("the mirror cannot fail");
 
         assert!(
             session.persist_if_dirty().is_err(),

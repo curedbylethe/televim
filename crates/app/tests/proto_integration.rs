@@ -347,6 +347,7 @@ async fn the_feed_names_only_conversations_the_fetch_returned() {
     // stream underneath and has to outlive nothing but its own polling.
     let mut updates = proto
         .subscribe_updates()
+        .await
         .expect("the feed is taken for the first time");
 
     // An account has one ordered update sequence, so the feed can be taken
@@ -354,6 +355,7 @@ async fn the_feed_names_only_conversations_the_fetch_returned() {
     // from Telegram, so it is checkable without waiting for anything.
     let error = proto
         .subscribe_updates()
+        .await
         .expect_err("a second subscription must be refused");
     assert!(
         matches!(
@@ -1175,6 +1177,7 @@ async fn a_send_edit_and_delete_round_trip_through_saved_messages() {
     // Taken before anything is sent, so the arrival cannot be missed.
     let mut updates = proto
         .subscribe_updates()
+        .await
         .expect("the feed is taken for the first time");
 
     let marker = std::process::id();

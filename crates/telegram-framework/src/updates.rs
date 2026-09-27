@@ -42,12 +42,12 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use grammers_client::client::updates::UpdateStream;
-use grammers_client::session::defs::PeerKind;
+use grammers_client::InvocationError;
+use grammers_client::client::{UpdateStream, UpdatesConfiguration};
+use grammers_client::peer::Peer;
+use grammers_client::session::types::PeerKind;
 use grammers_client::session::updates::UpdatesLike;
-use grammers_client::types::Peer;
-use grammers_client::types::update::Message;
-use grammers_client::{InvocationError, Update, UpdatesConfiguration};
+use grammers_client::update::{Message, Update};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
@@ -178,7 +178,7 @@ impl Client {
     /// let chats = client.fetch_dialogs().await?;
     /// println!("{} conversations", chats.len());
     ///
-    /// let mut updates = client.subscribe_updates()?;
+    /// let mut updates = client.subscribe_updates().await?;
     ///
     /// while let Some(event) = updates.next().await {
     ///     match event? {
@@ -187,10 +187,14 @@ impl Client {
     ///         UpdateKind::MessagesDeleted { message_ids } => println!("{message_ids:?}"),
     ///     }
     /// }
+    ///
+    /// // The position the feed reached is recorded here rather than on drop,
+    /// // // so that the next launch does not replay what was just read.
+    /// updates.finish().await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn subscribe_updates(&self) -> Result<UpdateSubscription, FrameworkError> {
+    pub async fn subscribe_updates(&self) -> Result<UpdateSubscription, FrameworkError> {
         if !self.has_fetched_dialogs() {
             tracing::debug!(
                 "subscribing to updates before the chat list was fetched; a gap \
@@ -200,16 +204,24 @@ impl Client {
 
         let receiver = self.updates().take()?;
 
-        let stream = self.inner().stream_updates(
-            receiver,
-            UpdatesConfiguration {
-                // Replays whatever arrived while the client was offline, out of
-                // the update state the session store holds. The queue limit is
-                // left at grammers' default, which bounds the buffer.
-                catch_up: true,
-                ..UpdatesConfiguration::default()
-            },
-        );
+        let stream = self
+            .inner()
+            .stream_updates(
+                receiver,
+                UpdatesConfiguration {
+                    // Replays whatever arrived while the client was offline, out of
+                    // the update state the session store holds. The queue limit is
+                    // left at grammers' default, which bounds the buffer.
+                    catch_up: true,
+                    ..UpdatesConfiguration::default()
+                },
+            )
+            .await
+            // The only thing that can fail in here is a read of the session, and
+            // this crate's session cannot fail — so this arm is unreachable in
+            // practice, and is mapped rather than dropped so that a session that
+            // somehow did fail is not reported as a network fault.
+            .map_err(|error| FrameworkError::from(RequestError::Session(error.to_string())))?;
 
         Ok(UpdateSubscription {
             stream,
@@ -232,6 +244,41 @@ pub struct UpdateSubscription {
 }
 
 impl UpdateSubscription {
+    /// Records how far the feed got, and writes the session back.
+    ///
+    /// This has to be called for the position to be kept, and it is explicit
+    /// rather than automatic because `grammers` no longer writes the position
+    /// when the stream is dropped: it asks for it to be synchronised, and the
+    /// call is `async` while a destructor cannot await. The mirror is therefore
+    /// only as current as the last call here, and a feed that is dropped without
+    /// one leaves the session pointing at an older position — which the next
+    /// launch resolves by replaying updates the reader has already seen.
+    ///
+    /// A caller that reads the feed to its end should call this. It consumes the
+    /// subscription, because there is nothing left to read afterwards.
+    pub async fn finish(self) -> Result<(), FrameworkError> {
+        self.stream
+            .sync_update_state()
+            .await
+            .map_err(|error| FrameworkError::from(RequestError::Session(error.to_string())))?;
+        self.persist_position();
+        Ok(())
+    }
+
+    /// Writes the session back if anything in it changed.
+    ///
+    /// Split out of [`Drop`] so that [`Self::finish`] and the destructor agree on
+    /// what is written, and do not disagree about whether it was.
+    fn persist_position(&self) {
+        match self.session.persist_if_dirty() {
+            Ok(false) => {}
+            Ok(true) => tracing::debug!("wrote the session back when the update feed ended"),
+            Err(error) => tracing::warn!(
+                %error,
+                "the update position changed but could not be saved; the next launch may replay updates"
+            ),
+        }
+    }
     /// Awaits the next update televim displays.
     ///
     /// `None` means the feed has ended, which only happens once the client is
@@ -296,24 +343,20 @@ impl fmt::Debug for UpdateSubscription {
 }
 
 impl Drop for UpdateSubscription {
-    /// Writes the session back once delivery has stopped.
+    /// Writes back whatever the session already holds.
     ///
-    /// `grammers` records how far the stream got in the session object when the
-    /// stream itself is dropped, and that happens after this body runs. The
-    /// state is therefore synchronised here, explicitly, and only then
-    /// persisted — otherwise the last position would be lost, and the next
-    /// launch would replay updates the caller has already seen.
+    /// A destructor cannot await, and `grammers` no longer records the position
+    /// for itself when the stream is dropped — it has to be asked, and asking is
+    /// `async`. So the position is synchronised by [`Self::finish`], and this
+    /// only writes back what the mirror already carries. A subscription dropped
+    /// without having been finished therefore persists a position that may be
+    /// behind the one the feed actually reached.
+    ///
+    /// It is still worth doing: a peer cached by a request that read history, or
+    /// a datacenter migrated mid-session, is in the mirror and would otherwise be
+    /// lost, and the write is a no-op when nothing changed.
     fn drop(&mut self) {
-        self.stream.sync_update_state();
-
-        match self.session.persist_if_dirty() {
-            Ok(false) => {}
-            Ok(true) => tracing::debug!("wrote the session back when the update feed ended"),
-            Err(error) => tracing::warn!(
-                %error,
-                "the update position changed but could not be saved; the next launch may replay updates"
-            ),
-        }
+        self.persist_position();
     }
 }
 
@@ -442,9 +485,15 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
         return None;
     }
 
+    // A peer with no bare identifier is the account itself, and there is no
+    // number to substitute for one — see the same note in `dialogs.rs`. Skipping
+    // it is unreachable for a conversation Telegram named, and dropping it beats
+    // filing it under an identifier that addresses nothing.
+    let chat_peer_id = peer_id.bare_id()?;
+
     Some(message_info(
         message.id(),
-        peer_id.bare_id(),
+        chat_peer_id,
         message.text(),
         message.date().timestamp(),
         message.outgoing(),
@@ -458,7 +507,7 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
 /// only be read out of the peer map the update arrived with. `None` means that
 /// map did not hold the peer — a cache miss, not an answer.
 fn bot_flag(message: &Message) -> Option<bool> {
-    match message.peer().ok()? {
+    match message.peer()? {
         Peer::User(user) => Some(user.is_bot()),
         // A group and a channel are not users and carry no bot flag; they are
         // already excluded by their kind.
@@ -490,7 +539,7 @@ fn is_displayed_conversation(kind: DialogKind, is_bot: Option<bool>) -> bool {
 /// bot is a separate question, answered from the peer map.
 fn peer_kind_from_id(kind: PeerKind) -> DialogKind {
     match kind {
-        PeerKind::User | PeerKind::UserSelf => DialogKind::PrivateUser,
+        PeerKind::User => DialogKind::PrivateUser,
         PeerKind::Chat => DialogKind::Group,
         PeerKind::Channel => DialogKind::Channel,
     }
@@ -549,6 +598,45 @@ mod tests {
     static_assertions::assert_impl_all!(UpdateSubscription: Send);
 
     #[test]
+    fn every_real_user_keeps_its_identifier() {
+        use grammers_client::session::types::PeerId;
+
+        // `private_message` and `dialog_to_info` skip a peer that has no bare
+        // identifier, because there is no number to substitute for one. That
+        // skip is only sound while every user Telegram can name still reports
+        // its own — if it ever stopped, the skip would quietly swallow real
+        // conversations rather than fail, which is the failure mode this guards.
+        for id in [1_i64, 42, 0xffff_ffff, 0x00ff_ffff_ffff] {
+            let peer = PeerId::user(id).expect("in the user range");
+            assert_eq!(
+                peer.bare_id(),
+                Some(id),
+                "user {id} lost its identifier, so it would be skipped"
+            );
+        }
+
+        assert!(PeerId::user(0).is_none(), "zero is not a user identifier");
+    }
+
+    #[test]
+    fn the_account_itself_is_the_only_peer_without_an_identifier() {
+        use grammers_client::session::types::PeerId;
+
+        // Which is what makes the skip above unreachable: the sentinel stands
+        // for the account, and a conversation arriving from Telegram always
+        // names the account's real identifier instead.
+        assert!(
+            PeerId::self_user().bare_id().is_none(),
+            "the account's own sentinel has no bare identifier"
+        );
+        assert_eq!(
+            PeerKind::User,
+            PeerId::self_user().kind(),
+            "so it is classified as an ordinary private conversation"
+        );
+    }
+
+    #[test]
     fn only_conversations_with_people_are_displayed() {
         assert!(is_displayed_conversation(
             DialogKind::PrivateUser,
@@ -575,9 +663,10 @@ mod tests {
 
     #[test]
     fn a_peer_identifier_maps_onto_a_conversation_kind() {
+        // The account's own peer reports `User`, so Saved Messages is classified
+        // as a private conversation by the same arm as everyone else's.
         let cases = [
             (PeerKind::User, DialogKind::PrivateUser),
-            (PeerKind::UserSelf, DialogKind::PrivateUser),
             (PeerKind::Chat, DialogKind::Group),
             (PeerKind::Channel, DialogKind::Channel),
         ];
