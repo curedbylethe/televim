@@ -30,13 +30,20 @@
 //! because every other operation either reads whole messages or moves the focus
 //! first.
 //!
-//! # The distance between two marks is bounded by the window
+//! # Which messages a selection covers is not this type's to answer
 //!
-//! [`Selection::message_ids`] walks from the older mark to the newer one, so its
-//! length is the number of messages between them. Both ends are messages the
-//! client has loaded, so that number is at most the window's cap; nothing
-//! constructs a selection from identifiers a conversation's worth of messages
-//! apart.
+//! It is tempting to read the two identifiers as a span and say that everything
+//! between them is covered. That is wrong whenever a placeholder is involved, and
+//! a placeholder is a local stand-in for a send the server has not acknowledged:
+//! it is numbered below zero and sits at the *end* of the window, where the
+//! conversation has reached. A selection reaching one therefore spans a different
+//! set of messages by identifier than by position — and acting on the wrong one is
+//! a deletion of messages the reader did not select.
+//!
+//! So this type answers the two questions that are purely about a position — the
+//! character range, and which end is which — and the caller answers "which
+//! messages" from the window's own order, which is the only place that order is
+//! written down.
 
 use std::ops::Range;
 
@@ -120,24 +127,6 @@ impl Selection {
         std::mem::swap(&mut self.anchor, &mut self.focus);
     }
 
-    /// Whether `message_id` is covered, in whole or in part.
-    ///
-    /// True for every message between the two ends, not only the two named:
-    /// a selection from one message to another covers the ones in between, and
-    /// an operation that asked only about the ends would silently skip them.
-    #[must_use]
-    pub fn touches(&self, message_id: i64) -> bool {
-        let (older, newer) = self.span();
-        (older..=newer).contains(&message_id)
-    }
-
-    /// Every message the selection covers, oldest first.
-    #[must_use]
-    pub fn message_ids(&self) -> Vec<i64> {
-        let (older, newer) = self.span();
-        (older..=newer).collect()
-    }
-
     /// The characters selected, when the selection is inside one message.
     ///
     /// `None` whenever it is not: two messages have no single range between
@@ -154,41 +143,15 @@ impl Selection {
         Some((self.anchor.message_id, older.min(newer)..older.max(newer)))
     }
 
-    /// How much is selected, in whatever the selection is of.
-    ///
-    /// Characters for a text selection and messages for a set of them, because
-    /// the unit is what the reader is counting: "3 selected" next to a set of
-    /// three messages is three messages, and next to three characters it is
-    /// three characters. A single answer cannot carry both, and picking the
-    /// wrong unit is a number the reader cannot act on.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        if let Some((_, range)) = self.text_range() {
-            return range.len();
-        }
-
-        let (older, newer) = self.span();
-        usize::try_from(newer - older + 1).unwrap_or(usize::MAX)
-    }
-
-    /// Whether nothing at all is selected.
+    /// Whether the selection spans no characters.
     ///
     /// Only reachable for a charwise selection that has not been moved, which
-    /// covers no characters; a selection spanning messages always covers at
-    /// least one.
+    /// covers no characters. A selection spanning messages always covers at least
+    /// one, and whether it does is a question about the window rather than about
+    /// the marks.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// The older and newer of the two messages, in that order.
-    ///
-    /// Messages in a conversation are numbered in the order they were sent, so
-    /// the older is the smaller identifier — which is what makes "oldest first"
-    /// arithmetic on identifiers rather than a lookup.
-    fn span(&self) -> (i64, i64) {
-        let (left, right) = (self.anchor.message_id, self.focus.message_id);
-        (left.min(right), left.max(right))
+        self.text_range().is_some_and(|(_, range)| range.is_empty())
     }
 }
 
@@ -231,11 +194,10 @@ mod tests {
         };
 
         assert_eq!(selection.text_range(), None);
-        assert_eq!(selection.message_ids(), vec![7, 8]);
     }
 
-    /// A selection with no character position is about whole messages, whichever
-    /// message they are of.
+    /// A mark with no character position is about a whole message, whichever
+    /// message it is of.
     #[test]
     fn a_mark_with_no_position_is_never_a_text_range() {
         let mixed = Selection {
@@ -244,83 +206,27 @@ mod tests {
         };
         assert_eq!(mixed.text_range(), None);
 
-        let whole = Selection::at(7, None);
-        assert_eq!(whole.text_range(), None);
-        assert_eq!(whole.message_ids(), vec![7]);
+        assert_eq!(Selection::at(7, None).text_range(), None);
     }
 
     #[test]
     fn a_selection_that_has_not_moved_spans_no_characters() {
         let selection = Selection::at(7, Some(4));
 
-        assert_eq!(selection.text_range(), Some((7, 4..4)));
         assert!(selection.is_empty(), "a position is not a span");
-        assert!(
-            selection.touches(7),
-            "and it is still a position inside a message the operations can act on"
-        );
-    }
-
-    // ---- the messages a selection covers --------------------------------
-
-    #[test]
-    fn a_selection_covers_every_message_between_its_ends_oldest_first() {
-        let forward = Selection {
-            anchor: Mark::whole(4),
-            focus: Mark::whole(9),
-        };
-        let backward = Selection {
-            anchor: Mark::whole(9),
-            focus: Mark::whole(4),
-        };
-
-        let expected: Vec<i64> = (4..=9).collect();
-        assert_eq!(forward.message_ids(), expected);
         assert_eq!(
-            backward.message_ids(),
-            expected,
-            "the reader dragged it the other way and it is the same selection"
+            selection.text_range(),
+            Some((7, 4..4)),
+            "and the range says so too"
         );
     }
 
-    /// A selection whose ends are the same message is one message, not two of
-    /// them and not none.
     #[test]
-    fn a_selection_within_one_message_covers_exactly_that_message() {
-        let selection = within(2, 9);
-
-        assert_eq!(selection.message_ids(), vec![7]);
-        assert_eq!(selection.len(), 7, "seven characters of it");
-    }
-
-    #[test]
-    fn touching_is_the_whole_span_and_not_only_the_ends() {
-        let selection = Selection {
-            anchor: Mark::whole(4),
-            focus: Mark::whole(6),
-        };
-
-        for (id, in_span) in [(3_i64, false), (4, true), (5, true), (6, true), (7, false)] {
-            assert_eq!(
-                selection.touches(id),
-                in_span,
-                "{id} is {} the selection",
-                if in_span { "inside" } else { "outside" }
-            );
-        }
-    }
-
-    /// A placeholder is a negative identifier and sorts before every real
-    /// message, so a selection can span one without anything going wrong.
-    #[test]
-    fn a_selection_can_span_a_placeholder() {
-        let selection = Selection {
-            anchor: Mark::whole(-1),
-            focus: Mark::whole(2),
-        };
-
-        assert_eq!(selection.message_ids(), vec![-1, 0, 1, 2]);
-        assert!(selection.touches(-1));
+    fn a_selection_of_a_message_is_never_empty() {
+        // The marks alone cannot say how many messages it spans, so they cannot
+        // say it is empty either. That question belongs to the window.
+        assert!(!Selection::at(7, None).is_empty());
+        assert!(!within(2, 2 + 3).is_empty());
     }
 
     // ---- the moving end -------------------------------------------------
@@ -349,30 +255,28 @@ mod tests {
         assert_eq!(swapped, selection);
     }
 
-    // ---- the unit a count is in ----------------------------------------
-
     #[test]
-    fn a_count_is_in_whichever_unit_the_selection_is_of() {
-        assert_eq!(within(0, 3).len(), 3, "three characters");
+    fn a_mark_is_built_whole_or_at_a_character() {
         assert_eq!(
-            Selection {
-                anchor: Mark::whole(4),
-                focus: Mark::whole(6)
+            Mark::whole(3),
+            Mark {
+                message_id: 3,
+                char: None
             }
-            .len(),
-            3,
-            "three messages"
         );
-    }
-
-    #[test]
-    fn a_selection_of_messages_is_never_empty() {
-        for (older, newer) in [(4_i64, 4_i64), (4, 6), (-1, 3)] {
-            let selection = Selection {
-                anchor: Mark::whole(older),
-                focus: Mark::whole(newer),
-            };
-            assert!(!selection.is_empty(), "{older}..={newer}");
-        }
+        assert_eq!(
+            Mark::text(3, 7),
+            Mark {
+                message_id: 3,
+                char: Some(7)
+            }
+        );
+        assert_eq!(
+            Selection::at(3, None),
+            Selection {
+                anchor: Mark::whole(3),
+                focus: Mark::whole(3)
+            }
+        );
     }
 }

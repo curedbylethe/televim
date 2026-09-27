@@ -93,7 +93,11 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         };
 
         let wrapped = rows::message_rows(app, message, body.width);
-        let covered = coverage(app, message);
+        // Which window positions the selection covers is one question, and its
+        // answer does not change from one message to the next, so it is worked out
+        // once here rather than per message.
+        let covered = app.covered(app.selection());
+        let coverage = coverage(app, message, span.index, &covered);
         for (row, range) in wrapped.iter().enumerate().skip(view.skip) {
             if drawn >= view.budget {
                 break;
@@ -104,7 +108,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
                 app,
                 message,
                 range,
-                covered.as_ref(),
+                coverage.as_ref(),
                 first,
                 last,
                 body.width,
@@ -164,9 +168,8 @@ fn search_note(app: &App) -> String {
 /// is where the sentence lives — including which unit the count is in, which
 /// matters because a selection can be three characters or three messages.
 fn selection_note(app: &App) -> String {
-    app.selection().map_or_else(String::new, |selection| {
-        format!(" · {} selected", selection.len())
-    })
+    app.selection_len()
+        .map_or_else(String::new, |selected| format!(" · {selected} selected"))
 }
 
 /// What a selection covers of one message, in the panel's own units.
@@ -184,8 +187,14 @@ enum Coverage {
     Whole,
 }
 
-/// What a selection covers of `message`, or nothing if it is not in the selection.
-fn coverage(app: &App, message: &Message) -> Option<Coverage> {
+/// What a selection covers of the message at `index`, or nothing if the selection
+/// does not reach it.
+fn coverage(
+    app: &App,
+    message: &Message,
+    index: usize,
+    covered: &Range<usize>,
+) -> Option<Coverage> {
     let selection = app.selection()?;
 
     // One rule decides it, and it is the rule every operation follows: a
@@ -196,7 +205,7 @@ fn coverage(app: &App, message: &Message) -> Option<Coverage> {
             Some(Coverage::Text(rows::byte_span(&message.text, range)))
         }
         Some(_) => None,
-        None => selection.touches(message.id).then_some(Coverage::Whole),
+        None => covered.contains(&index).then_some(Coverage::Whole),
     }
 }
 

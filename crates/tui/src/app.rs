@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -104,6 +105,36 @@ pub const DELETE_OUTGOING_PROMPT: &str = "Delete your message from both sides? (
 /// record they do not solely own, and that asymmetry is the thing the wording
 /// has to carry.
 pub const DELETE_INCOMING_PROMPT: &str = "Delete their message from both sides? (y/n)";
+
+/// The prompt for a deletion of more than one of the reader's own messages.
+///
+/// A function rather than a constant because the count is in it, and a single
+/// deletion says [`DELETE_OUTGOING_PROMPT`] instead: "Delete 1 of your messages"
+/// is worse English than one deletion deserves, and there is no reason to make a
+/// single removal sound like a bulk one.
+#[must_use]
+pub fn delete_yours_prompt(count: usize) -> String {
+    format!("Delete {count} of your messages from both sides? (y/n)")
+}
+
+/// The prompt for a deletion of more than one of the other side's messages.
+#[must_use]
+pub fn delete_theirs_prompt(count: usize) -> String {
+    format!("Delete {count} of their messages from both sides? (y/n)")
+}
+
+/// The prompt for a deletion that spans both sides.
+///
+/// The two simpler prompts differ only in the possessive, and a selection can
+/// contain both. A prompt reading "their messages" while removing two of the
+/// reader's own would be a lie the reader has no way to detect.
+#[must_use]
+pub fn delete_mixed_prompt(yours: usize, theirs: usize) -> String {
+    format!(
+        "Delete {} message(s) from both sides ({yours} yours, {theirs} theirs)? (y/n)",
+        yours + theirs
+    )
+}
 
 /// Which page of a conversation a fetch is asking for.
 ///
@@ -229,21 +260,77 @@ pub enum PromptKind {
 
 /// A destructive action waiting for the reader's `y`.
 ///
-/// The message's direction is captured here, when the prompt is raised, rather
-/// than looked up again when `y` arrives: an arrival can evict the message while
-/// the prompt is up, and the wording has to keep describing what was asked
-/// about even then.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Everything the wording needs is **captured** here, when the prompt is raised,
+/// rather than looked up again when `y` arrives: an arrival can evict a message
+/// while the prompt is up, and a selection makes it worse — the window can move
+/// under a range, and re-deriving it at `y` time would delete whatever the reader
+/// is looking at *now* rather than what they were asked about.
+///
+/// How many of the messages are the other side's is not stored: it is the length
+/// of `ids` less `outgoing`, and a second count that can disagree with the first
+/// is a second thing for the wording to be wrong about.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
-    /// Delete one message. `id` is the message and `is_outgoing` says whose it
-    /// is, which is what the prompt's wording turns on.
-    DeleteMessage {
-        /// Identifier of the message to delete.
-        id: i64,
+    /// Delete these messages, for both sides.
+    DeleteMessages {
+        /// The messages to delete.
+        ids: Vec<i64>,
 
-        /// Whether the reader's own account sent it.
-        is_outgoing: bool,
+        /// How many of them the reader's own account sent.
+        outgoing: usize,
+
+        /// How many selected messages were left out of `ids` because they are
+        /// placeholders for sends the server has not acknowledged.
+        ///
+        /// Carried so the prompt can say so: a reader who selected five and had
+        /// three deleted should not have to infer the other two.
+        skipped: usize,
     },
+}
+
+/// What deleting a selection would ask the server for.
+///
+/// The breakdown rather than a bare list of identifiers, because every word of the
+/// prompt turns on it: whose the messages are decides the possessive, and how many
+/// there are decides whether it counts.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Deletion {
+    /// The identifiers the server knows, oldest first.
+    ids: Vec<i64>,
+
+    /// How many of them the reader's own account sent.
+    outgoing: usize,
+
+    /// How many were placeholders and had to be left out.
+    skipped: usize,
+}
+
+/// What the status line shows while a deletion is waiting to be confirmed.
+///
+/// A single message says `your message` and anything more counts, because "Delete
+/// 1 of your messages" is worse English than one deletion deserves. A deletion
+/// that touches both sides says which is which: the two simpler wordings differ
+/// only in the possessive, and a selection can contain both, so a prompt reading
+/// "their messages" while removing two of the reader's own would be a lie the
+/// reader has no way to detect.
+///
+/// What was left out is in the prompt rather than flashed, because a confirmation
+/// outranks a transient status: a `flash` written while the prompt is up is a line
+/// the reader never sees.
+fn delete_prompt(ids: &[i64], outgoing: usize, skipped: usize) -> String {
+    let theirs = ids.len().saturating_sub(outgoing);
+    let asked = match (ids.len(), outgoing, theirs) {
+        (1, 1, 0) => DELETE_OUTGOING_PROMPT.to_owned(),
+        (1, 0, 1) => DELETE_INCOMING_PROMPT.to_owned(),
+        (_, count, 0) => delete_yours_prompt(count),
+        (_, 0, count) => delete_theirs_prompt(count),
+        (_, mine, theirs) => delete_mixed_prompt(mine, theirs),
+    };
+
+    match skipped {
+        0 => asked,
+        count => format!("{asked} · {count} never sent"),
+    }
 }
 
 /// Something the reader asked the interface to do that only the network side can.
@@ -442,12 +529,6 @@ pub struct App {
     /// The message the buffer is editing, if it is an edit.
     pub editing: Option<i64>,
 
-    /// Whether a `d` was just pressed and a second one would delete.
-    ///
-    /// The latch is what makes `dd` two presses: any other key, and any motion,
-    /// clears it, so `jd` does not delete.
-    pub pending_d: bool,
-
     /// The placeholder of the send in flight, if one is.
     ///
     /// An `Option` rather than a flag so that a result is matched to the send it
@@ -572,7 +653,6 @@ impl App {
             search: SearchState::default(),
             reply_to: None,
             editing: None,
-            pending_d: false,
             sending: None,
             confirm: None,
             selection: None,
@@ -648,6 +728,56 @@ impl App {
         self.selection.as_ref()
     }
 
+    /// The window positions the selection covers, oldest first.
+    ///
+    /// **Positions**, and not the span between the two identifiers, because the
+    /// numbers do not say what covers what: a placeholder for a send in flight is
+    /// numbered below zero and sits at the *end* of the window, where the
+    /// conversation has reached. A selection reaching one spans a different set of
+    /// messages by identifier than by position, and acting on the wrong one is a
+    /// deletion of messages the reader did not select.
+    ///
+    /// Empty when there is no selection, and when one of its ends is not in the
+    /// window — which [`App::retain_selection`] makes unreachable and which is
+    /// answered as "nothing" rather than as a panic.
+    ///
+    /// The one answer, for the panel to mark with, the operations to act on, and
+    /// the count to come from. Two answers would be two things to disagree.
+    #[must_use]
+    pub fn covered(&self, selection: Option<&Selection>) -> Range<usize> {
+        let Some(selection) = selection else {
+            return 0..0;
+        };
+        let window = &self.conversation.window;
+
+        match (
+            window.position_of(selection.anchor.message_id),
+            window.position_of(selection.focus.message_id),
+        ) {
+            (Some(anchor), Some(focus)) => anchor.min(focus)..anchor.max(focus) + 1,
+            _ => 0..0,
+        }
+    }
+
+    /// How much is selected, in whatever the selection is of.
+    ///
+    /// Characters for a text selection and messages for a set of them, because the
+    /// unit is what the reader is counting: "3 selected" beside a set of three
+    /// messages is three messages, and beside three characters it is three
+    /// characters. A single number cannot carry both, and picking the wrong unit is
+    /// a number the reader cannot act on.
+    ///
+    /// `None` when there is no selection.
+    #[must_use]
+    pub fn selection_len(&self) -> Option<usize> {
+        let selection = self.selection.as_ref()?;
+
+        Some(selection.text_range().map_or_else(
+            || self.covered(Some(selection)).len(),
+            |(_, range)| range.len(),
+        ))
+    }
+
     /// Starts a selection at `message_id`, and reports whether it could be.
     ///
     /// A mark can only be placed on a message the window holds, so a selection
@@ -716,7 +846,6 @@ impl App {
         self.search.clear();
         self.reply_to = None;
         self.editing = None;
-        self.pending_d = false;
         self.confirm = None;
         self.selection = None;
         self.register = Register::default();
@@ -1488,21 +1617,17 @@ impl App {
         // rather than in the motion table because how much a page is depends on
         // how tall the panel turned out to be.
         //
-        // A control key is not `d`, so the latch is cleared here rather than per
-        // arm: `Ctrl+d` is a page, not the first half of a deletion.
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('d') => self.page(true),
                 KeyCode::Char('u') => self.page(false),
-                _ => self.pending_d = false,
+                _ => {}
             }
             return;
         }
 
         match key.code {
             KeyCode::Char(c) if matches!(c, 'j' | 'k' | 'g' | 'G' | 'n' | 'N') => {
-                // Any motion moves the cursor off whatever a first `d` was about.
-                self.pending_d = false;
                 let motion = self.vim.handle_char(c);
 
                 match motion {
@@ -1530,60 +1655,30 @@ impl App {
 
                 self.settle_follow();
             }
-            KeyCode::Char('i' | 'a') => {
-                self.pending_d = false;
-                self.start_compose();
-            }
-            KeyCode::Char('r') => {
-                self.pending_d = false;
-                self.start_reply();
-            }
-            KeyCode::Char('e') => {
-                self.pending_d = false;
-                self.start_edit();
-            }
-            KeyCode::Char('d') => self.pending_delete(),
-            KeyCode::Char('p') => {
-                self.pending_d = false;
-                self.paste();
-            }
-            KeyCode::Char('D') => {
-                self.pending_d = false;
-                self.dismiss_failed_at_cursor();
-            }
-            KeyCode::Char('v') => {
-                self.pending_d = false;
-                self.begin_selection(Some(0));
-            }
-            KeyCode::Char('V') => {
-                self.pending_d = false;
-                self.begin_selection(None);
-            }
+            KeyCode::Char('i' | 'a') => self.start_compose(),
+            KeyCode::Char('r') => self.start_reply(),
+            KeyCode::Char('e') => self.start_edit(),
+            KeyCode::Char('d') => self.request_delete(),
+            KeyCode::Char('p') => self.paste(),
+            KeyCode::Char('D') => self.dismiss_failed_at_cursor(),
+            KeyCode::Char('v') => self.begin_selection(Some(0)),
+            KeyCode::Char('V') => self.begin_selection(None),
             // The list is beside the conversation, so `h` is how the reader gets
             // to it. `l` has nothing to move to from here and is left unbound
             // rather than made to wrap.
-            KeyCode::Char('h') => {
-                self.pending_d = false;
-                self.set_focus(Focus::ChatList);
-            }
+            KeyCode::Char('h') => self.set_focus(Focus::ChatList),
             KeyCode::Char('/') => {
-                self.pending_d = false;
                 self.focus = Focus::Input;
                 self.prompt = PromptKind::Search;
                 self.input.clear();
             }
             KeyCode::Char(':') => {
-                self.pending_d = false;
                 self.focus = Focus::Input;
                 self.prompt = PromptKind::Command;
                 self.input.clear();
             }
-            KeyCode::Char('q') => {
-                self.pending_d = false;
-                self.should_quit = true;
-            }
-            // Any other key is not the second `d`, so it clears the latch.
-            _ => self.pending_d = false,
+            KeyCode::Char('q') => self.should_quit = true,
+            _ => {}
         }
     }
 
@@ -1642,43 +1737,120 @@ impl App {
         self.input = text;
     }
 
-    /// Handles a `d`: the first latches, the second asks to delete.
+    /// Asks to delete what the selection covers, or the message under the cursor
+    /// when there is none.
+    ///
+    /// A `d` in Normal is `dd` in Vim: a selection of exactly the message under
+    /// the cursor, with no second press to distinguish. Two ways to say one thing
+    /// is exactly what the old latch existed to arbitrate, and a reader who
+    /// presses `dd` gets the same answer either way — which is why there is no
+    /// latch any more, and why the test that a motion between the two `d`s cleared
+    /// it is now a test that `j` and then `dd` deletes the message now under the
+    /// cursor.
     ///
     /// Deletion is allowed on any real message, incoming included: Telegram
-    /// permits it, and a private chat does remove the other side's words. A
-    /// placeholder is refused because it has no identifier the server knows:
-    /// an in-flight one is still on its way, and a failed one is the reader's to
-    /// dismiss with `D` instead.
-    fn pending_delete(&mut self) {
-        let Some((id, is_outgoing, status)) = self
-            .cursor_message()
-            .map(|message| (message.id, message.is_outgoing, message.status))
-        else {
-            self.pending_d = false;
+    /// permits it, and a private chat does remove the other side's words.
+    fn request_delete(&mut self) {
+        if self.selection.is_none() {
+            // The mark goes on directly rather than through `App::select`: the
+            // message came out of the window a line ago, so there is nothing to
+            // check.
+            let Some(id) = self.cursor_message_id() else {
+                return;
+            };
+            self.set_selection(Selection::at(id, None));
+        }
+
+        self.confirm_delete();
+    }
+
+    /// Raises the confirmation for deleting every message the selection covers.
+    ///
+    /// A selection inside one message deletes the whole of it: a partial message
+    /// is not something the protocol can do, and half a deletion is not something
+    /// the reader would recognise afterwards.
+    fn confirm_delete(&mut self) {
+        let Some(selection) = self.selection else {
             return;
         };
 
-        if id <= 0 {
-            self.pending_d = false;
-            // The two refusals differ because a failed message has a `D` to
-            // offer and one still in flight does not: pointing at `D` for a
-            // message on its way would be wrong.
-            self.flash(if matches!(status, MessageStatus::Failed) {
-                "that message never left — D dismisses it"
-            } else {
-                "that message is still on its way"
-            });
+        let Some(deletion) = self.deletion(&selection) else {
+            self.selection = None;
+            self.mode = Mode::Normal;
+            self.flash(self.refuse_placeholders(&selection));
             return;
-        }
+        };
 
-        if !self.pending_d {
-            self.pending_d = true;
-            return;
-        }
-
-        self.pending_d = false;
         self.mode = Mode::Confirm;
-        self.confirm = Some(ConfirmKind::DeleteMessage { id, is_outgoing });
+        self.confirm = Some(ConfirmKind::DeleteMessages {
+            ids: deletion.ids,
+            outgoing: deletion.outgoing,
+            skipped: deletion.skipped,
+        });
+    }
+
+    /// What deleting `selection` would ask the server for, or `None` when every
+    /// message in it is a placeholder.
+    ///
+    /// A placeholder is a local stand-in for a send the server has not
+    /// acknowledged, so it has no identifier the server knows: naming one would
+    /// have the whole request refused and take the real messages down with it.
+    /// They are left out of `ids` and counted, and a selection of nothing but
+    /// placeholders has nothing left to ask for.
+    fn deletion(&self, selection: &Selection) -> Option<Deletion> {
+        let mut deletion = Deletion::default();
+        let covered = self.covered(Some(selection));
+
+        for message in self
+            .conversation
+            .window
+            .iter()
+            .skip(covered.start)
+            .take(covered.len())
+        {
+            if message.id <= 0 {
+                deletion.skipped += 1;
+                continue;
+            }
+
+            deletion.ids.push(message.id);
+            deletion.outgoing += usize::from(message.is_outgoing);
+        }
+
+        (!deletion.ids.is_empty()).then_some(deletion)
+    }
+
+    /// The refusal for a selection of nothing but placeholders.
+    ///
+    /// The two sentences that already existed, kept: a failed message has a `D` to
+    /// offer and one still on its way does not, and pointing at `D` for a message
+    /// that has not left would be wrong. A selection of several gets the same
+    /// distinction in the only words that are true of all of them — `D` dismisses
+    /// one message at a time, and there is no bulk dismiss.
+    fn refuse_placeholders(&self, selection: &Selection) -> &'static str {
+        let covered = self.covered(Some(selection));
+        let mut count = 0;
+        let mut in_flight = false;
+
+        for message in self
+            .conversation
+            .window
+            .iter()
+            .skip(covered.start)
+            .take(covered.len())
+        {
+            count += 1;
+            in_flight |= !matches!(message.status, MessageStatus::Failed);
+        }
+
+        let one = count == 1;
+
+        match (one, in_flight) {
+            (true, true) => "that message is still on its way",
+            (true, false) => "that message never left — D dismisses it",
+            (false, true) => "those messages are still on their way",
+            (false, false) => "those messages never left — D dismisses one at a time",
+        }
     }
 
     /// Dismisses the failed message under the cursor, if that is what it is.
@@ -1701,21 +1873,27 @@ impl App {
     }
 
     /// Handles a key while a confirmation is up.
+    ///
+    /// However it ends, the selection goes with it: it was made for this
+    /// question, and a second `d` afterwards must ask about whatever is under the
+    /// cursor then rather than reusing a range the reader has already answered.
     fn handle_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') => {
-                if let Some(ConfirmKind::DeleteMessage { id, .. }) = self.confirm {
+                if let Some(ConfirmKind::DeleteMessages { ids, .. }) = &self.confirm {
                     let chat_id = self.conversation.window.chat_id;
                     self.queue_action(Action::Delete {
                         chat_id,
-                        message_ids: vec![id],
+                        message_ids: ids.clone(),
                     });
                 }
                 self.confirm = None;
+                self.selection = None;
                 self.mode = Mode::Normal;
             }
             KeyCode::Char('n') | KeyCode::Esc => {
                 self.confirm = None;
+                self.selection = None;
                 self.mode = Mode::Normal;
             }
             _ => {}
@@ -1732,11 +1910,7 @@ impl App {
     /// Landing on the newest message re-engages following and moving away from
     /// it disengages, on the same rule as `j` and `k`, so a page and a line
     /// cannot disagree about whether the view is pinned.
-    ///
-    /// A page is a motion, so a `d` waiting for its second press is forgotten
-    /// here as surely as it is by `j`.
     fn page(&mut self, down: bool) {
-        self.pending_d = false;
         let step = self.rows.get().max(1);
         let layout = self.row_layout();
         let total = rows::total_rows(&layout);
@@ -1828,6 +2002,7 @@ impl App {
             }
 
             KeyCode::Char('y') => self.yank(),
+            KeyCode::Char('d') => self.request_delete(),
 
             KeyCode::Char('j') => self.move_focus_to_message(true),
             KeyCode::Char('k') => self.move_focus_to_message(false),
@@ -1924,10 +2099,12 @@ impl App {
             return vec![message.text[rows::byte_span(&message.text, range)].to_owned()];
         }
 
+        let covered = self.covered(Some(selection));
         self.conversation
             .window
             .iter()
-            .filter(|message| selection.touches(message.id))
+            .skip(covered.start)
+            .take(covered.len())
             .map(|message| message.text.to_string())
             .collect()
     }
@@ -2426,15 +2603,16 @@ impl App {
     /// finally whatever was written to the status.
     #[must_use]
     pub fn status_text(&self) -> String {
-        if let Some(ConfirmKind::DeleteMessage { is_outgoing, .. }) = self.confirm {
-            return if is_outgoing {
-                DELETE_OUTGOING_PROMPT.to_owned()
-            } else {
-                DELETE_INCOMING_PROMPT.to_owned()
-            };
+        if let Some(ConfirmKind::DeleteMessages {
+            ids,
+            outgoing,
+            skipped,
+        }) = &self.confirm
+        {
+            return delete_prompt(ids, *outgoing, *skipped);
         }
         if let Some(selection) = &self.selection {
-            return selection_note(selection);
+            return selection_note(selection, self.selection_len().unwrap_or(0));
         }
         if self.search.is_active() {
             return self.search.label();
@@ -2505,19 +2683,22 @@ fn wrapped(before: Option<usize>, after: Option<usize>, len: usize) -> bool {
     (before == Some(len - 1) && after == Some(0)) || (before == Some(0) && after == Some(len - 1))
 }
 
-/// What the status line says about a selection.
+/// What the status line says about a selection, of `selected` characters or
+/// messages as the selection is of.
 ///
-/// The unit is whatever the selection is of, because one number cannot carry
-/// both: three characters and three messages are both "3", and a reader who has
-/// just pressed `v` has to be able to tell which of the two they are holding.
 /// The wording lives here rather than in the panel because the title is one row
-/// wide and can only carry the count.
-fn selection_note(selection: &Selection) -> String {
-    if let Some((_, range)) = selection.text_range() {
-        return format!("{} character(s) selected — Esc clears", range.len());
-    }
+/// wide and can only carry the count. The unit is stated because one number
+/// cannot carry both: three characters and three messages are both "3", and a
+/// reader who has just pressed `v` has to be able to tell which of the two they
+/// are holding.
+fn selection_note(selection: &Selection, selected: usize) -> String {
+    let what = if selection.text_range().is_some() {
+        "character(s)"
+    } else {
+        "message(s)"
+    };
 
-    format!("{} message(s) selected — Esc clears", selection.len())
+    format!("{selected} {what} selected — Esc clears")
 }
 // ---- sample data -------------------------------------------------------
 
@@ -2610,7 +2791,6 @@ fn mock_messages() -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ops::Range;
 
     /// A message in the sample conversation.
     fn message(id: i64, text: &'static str) -> Message {
@@ -3201,8 +3381,8 @@ mod tests {
             "the ends are identifiers, so the nine that went in front of them cannot move them"
         );
         assert_eq!(
-            selection.message_ids(),
-            (11..=15).collect::<Vec<i64>>(),
+            app.covered(app.selection()),
+            10..15,
             "and it still covers exactly what it did"
         );
     }
@@ -3296,8 +3476,15 @@ mod tests {
 
     /// The messages the selection covers, oldest first.
     fn selected_messages(app: &App) -> Vec<i64> {
-        app.selection()
-            .map_or_else(Vec::new, Selection::message_ids)
+        let covered = app.covered(app.selection());
+
+        app.conversation
+            .window
+            .iter()
+            .skip(covered.start)
+            .take(covered.len())
+            .map(|message| message.id)
+            .collect()
     }
 
     /// The focus, as a message and a character position.
@@ -3815,105 +4002,272 @@ mod tests {
         assert_eq!(app.mode, Mode::Visual, "and the selection is untouched");
     }
 
-    // ---- dd and the confirm --------------------------------------------
+    // ---- deleting, and the confirm --------------------------------------
+
+    // ---- deleting, and the confirm --------------------------------------
+
+    /// A conversation holding exactly these turns: an identifier and whose it is.
+    ///
+    /// The sample data alternates which side sent each message, so a run of two
+    /// from the same side — which is the ordinary shape of a conversation, and the
+    /// only way to reach the "all yours" and "all theirs" wordings — is not
+    /// something it can say.
+    fn conversation(turns: &[(i64, bool)]) -> App {
+        let mut app = App::new();
+        app.set_chats(mock_chats());
+        app.select_chat(0);
+        app.apply_latest(
+            turns
+                .iter()
+                .map(|(id, outgoing)| Message {
+                    id: *id,
+                    chat_id: MOCK_CHAT,
+                    text: Cow::Borrowed("text"),
+                    timestamp: 0,
+                    status: MessageStatus::Received,
+                    is_outgoing: *outgoing,
+                    reply_to: None,
+                })
+                .collect(),
+        );
+        app
+    }
+
+    /// Three of the reader's own, then two of theirs.
+    fn one_way_then_the_other() -> App {
+        conversation(&[(1, true), (2, true), (3, true), (4, false), (5, false)])
+    }
+
+    /// Moves the cursor down onto the message with this identifier.
+    ///
+    /// Forward only, which is all these tests need: they all start at the top.
+    /// Bounded, so a target that is behind the cursor fails the test rather than
+    /// hanging the suite.
+    fn cursor_onto(app: &mut App, id: i64) {
+        for _ in 0..=app.conversation.window.len() {
+            if reading(app) == Some(id) {
+                return;
+            }
+            key(app, 'j');
+        }
+
+        panic!(
+            "no message {id} below the cursor: it holds {:?}",
+            reading(app)
+        );
+    }
+
+    /// A linewise selection from the first message to the last.
+    fn spanning_all(app: &mut App) {
+        go_to_top(app);
+        key(app, 'V');
+        while app.vim.cursor() + 1 < app.conversation.window.len() {
+            key(app, 'j');
+        }
+    }
+
+    /// The identifiers a pending deletion would ask the server for.
+    fn asked_to_delete(app: &App) -> Vec<i64> {
+        match &app.confirm {
+            Some(ConfirmKind::DeleteMessages { ids, .. }) => ids.clone(),
+            other => panic!("expected a deletion to be waiting, got {other:?}"),
+        }
+    }
 
     #[test]
-    fn dd_asks_to_delete_the_message_under_the_cursor() {
+    fn d_asks_to_delete_the_message_under_the_cursor() {
         let mut app = App::mock();
         // The newest sample message is one of theirs.
         assert_eq!(reading(&app), Some(10));
 
-        app.handle_key(press(KeyCode::Char('d')));
-        assert!(app.pending_d, "one d latches");
-        assert_eq!(app.mode, Mode::Normal);
+        key(&mut app, 'd');
 
-        app.handle_key(press(KeyCode::Char('d')));
-        assert!(!app.pending_d, "the second d spends the latch");
         assert_eq!(app.mode, Mode::Confirm);
-        assert_eq!(
-            app.confirm,
-            Some(ConfirmKind::DeleteMessage {
-                id: 10,
-                is_outgoing: false
-            })
-        );
+        assert_eq!(asked_to_delete(&app), vec![10]);
         assert_eq!(app.status_text(), DELETE_INCOMING_PROMPT);
     }
 
-    /// The asymmetry the plan is built on: `dd` accepts the other side's
-    /// message, and the prompt says which side it is about.
+    /// `dd` is `d` with no second press to distinguish, so a reader who types it
+    /// gets the same answer.
     #[test]
-    fn dd_accepts_an_outgoing_message_and_the_prompt_names_that_side() {
+    fn dd_asks_about_the_same_message_d_does() {
         let mut app = App::mock();
-        app.handle_key(press(KeyCode::Char('k')));
-        assert_eq!(reading(&app), Some(9), "an outgoing message");
 
-        app.handle_key(press(KeyCode::Char('d')));
-        app.handle_key(press(KeyCode::Char('d')));
+        key(&mut app, 'd');
+        assert_eq!(app.mode, Mode::Confirm);
+
+        app.handle_key(press(KeyCode::Char('n')));
+        key(&mut app, 'd');
+        assert_eq!(app.mode, Mode::Confirm);
+        key(&mut app, 'd');
+
+        assert_eq!(asked_to_delete(&app), vec![10], "and so does `dd`");
+    }
+
+    #[test]
+    fn a_motion_then_dd_deletes_the_message_the_cursor_is_on() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+
+        key(&mut app, 'j');
+        key(&mut app, 'd');
+        assert_eq!(asked_to_delete(&app), vec![2]);
+        key(&mut app, 'y');
 
         assert_eq!(
-            app.confirm,
-            Some(ConfirmKind::DeleteMessage {
-                id: 9,
-                is_outgoing: true
-            })
+            app.take_action(),
+            Some(Action::Delete {
+                chat_id: MOCK_CHAT,
+                message_ids: vec![2],
+            }),
+            "the message the cursor was on when the `d` landed, and not the one \
+             it was on before the `j`"
         );
+    }
+
+    /// The asymmetry this whole feature is built on: a deletion accepts the other
+    /// side's message, and the prompt says which side it is about.
+    #[test]
+    fn a_deletion_accepts_an_outgoing_message_and_the_prompt_names_that_side() {
+        let mut app = App::mock();
+        key(&mut app, 'k');
+        assert_eq!(reading(&app), Some(9), "an outgoing message");
+
+        key(&mut app, 'd');
+
         assert_eq!(app.status_text(), DELETE_OUTGOING_PROMPT);
     }
 
-    /// The classic way a `dd` binding ships a bug: `j` and `d` must not add up
-    /// to a deletion.
+    /// With no latch there is nothing for a stray key to disturb, and a second `d`
+    /// is a second question about whatever is under the cursor then — not the end
+    /// of a two-key sequence over the first one's message.
     #[test]
-    fn a_motion_between_the_ds_clears_the_latch() {
+    fn two_ds_are_two_questions_and_nothing_else_is_half_of_one() {
         let mut app = App::mock();
 
-        app.handle_key(press(KeyCode::Char('d')));
-        assert!(app.pending_d);
-        app.handle_key(press(KeyCode::Char('k')));
-        assert!(!app.pending_d, "the motion moves off what the d was about");
-
-        app.handle_key(press(KeyCode::Char('d')));
+        key(&mut app, 'x');
         assert_eq!(
             app.mode,
             Mode::Normal,
-            "the second d latches rather than deletes"
+            "an unbound key is not half of a `dd`"
         );
-        assert!(app.confirm.is_none());
+
+        key(&mut app, 'd');
+        assert_eq!(asked_to_delete(&app), vec![10]);
+        key(&mut app, 'n');
+
+        key(&mut app, 'k');
+        key(&mut app, 'd');
+        assert_eq!(asked_to_delete(&app), vec![9]);
     }
 
     #[test]
-    fn any_other_key_clears_the_latch() {
+    fn a_page_then_d_deletes_where_the_page_landed() {
         let mut app = App::mock();
+        go_to_top(&mut app);
 
-        app.handle_key(press(KeyCode::Char('d')));
-        app.handle_key(press(KeyCode::Char('x')));
-
-        assert!(!app.pending_d);
-        assert_eq!(app.mode, Mode::Normal);
-    }
-
-    #[test]
-    fn a_page_clears_the_latch() {
-        let mut app = App::mock();
-
-        app.handle_key(press(KeyCode::Char('d')));
         app.handle_key(press_ctrl('d'));
+        let after = reading(&app).expect("a message is on screen");
 
-        assert!(!app.pending_d);
-        assert_eq!(app.mode, Mode::Normal);
+        key(&mut app, 'd');
+
+        assert_eq!(asked_to_delete(&app), vec![after]);
     }
 
-    /// A send that has not been acknowledged has no identifier the server knows,
-    /// so neither deletion nor editing can touch it — and the two refusals for
-    /// deletion differ, because only a failed message has a `D`.
     #[test]
-    fn deleting_a_pending_message_is_refused_until_it_has_failed() {
+    fn a_visual_d_asks_for_every_message_the_selection_covers() {
         let mut app = App::mock();
-        submit(&mut app, "hi");
-        let id = app.sending.expect("the send is in flight");
+        go_to_top(&mut app);
+        key(&mut app, 'V');
+        cursor_onto(&mut app, 3);
 
-        app.handle_key(press(KeyCode::Char('d')));
-        app.handle_key(press(KeyCode::Char('d')));
+        key(&mut app, 'd');
+
+        assert_eq!(asked_to_delete(&app), vec![1, 2, 3], "oldest first");
+        assert_eq!(
+            app.status_text(),
+            delete_mixed_prompt(2, 1),
+            "a range that mixes both sides says which is which"
+        );
+    }
+
+    /// A selection inside one message deletes the whole of it: a partial message
+    /// is not something the protocol can do, and half a deletion is not something
+    /// the reader would recognise afterwards.
+    #[test]
+    fn a_text_selection_deletes_the_whole_message_it_is_in() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+        for _ in 0..5 {
+            key(&mut app, 'l');
+        }
+
+        key(&mut app, 'd');
+
+        assert_eq!(
+            asked_to_delete(&app),
+            vec![1],
+            "all of it, not the five characters"
+        );
+    }
+
+    #[test]
+    fn a_selection_of_only_the_reader_s_own_messages_counts_them() {
+        let mut app = conversation(&[(1, true), (2, true), (3, true)]);
+        spanning_all(&mut app);
+
+        key(&mut app, 'd');
+
+        assert_eq!(app.status_text(), delete_yours_prompt(3));
+    }
+
+    #[test]
+    fn a_selection_of_only_their_messages_counts_them() {
+        let mut app = conversation(&[(1, false), (2, false), (3, false), (4, false)]);
+        spanning_all(&mut app);
+
+        key(&mut app, 'd');
+
+        assert_eq!(app.status_text(), delete_theirs_prompt(4));
+    }
+
+    /// A placeholder is a local stand-in for a send the server has not
+    /// acknowledged, so naming one would have the whole request refused and take
+    /// the real messages down with it. It is left out — and said.
+    #[test]
+    fn a_selection_with_some_placeholders_skips_them_and_says_how_many() {
+        let mut app = conversation(&[(1, false), (2, false), (3, false)]);
+        submit(&mut app, "hi");
+        let placeholder = app.sending.expect("the send is in flight");
+        go_to_top(&mut app);
+        key(&mut app, 'V');
+        cursor_onto(&mut app, placeholder);
+
+        key(&mut app, 'd');
+
+        assert_eq!(asked_to_delete(&app), vec![1, 2, 3]);
+        assert!(
+            app.status_text().ends_with("· 1 never sent"),
+            "and the prompt says what it left out: {}",
+            app.status_text()
+        );
+    }
+
+    /// A selection of nothing but placeholders has nothing to ask for, and the
+    /// refusal keeps the distinction between a send still on its way and one that
+    /// failed: only the second has a `D`.
+    #[test]
+    fn a_selection_of_only_placeholders_is_refused() {
+        let mut app = conversation(&[(1, false)]);
+        submit(&mut app, "hi");
+        let placeholder = app.sending.expect("the send is in flight");
+        go_to_top(&mut app);
+        cursor_onto(&mut app, placeholder);
+        key(&mut app, 'V');
+
+        key(&mut app, 'd');
+
         assert_eq!(app.mode, Mode::Normal, "no confirm is raised");
         assert!(
             app.status.contains("still on its way"),
@@ -3921,14 +4275,67 @@ mod tests {
             app.status
         );
 
-        app.fail_send(id, "boom".to_owned());
-        app.handle_key(press(KeyCode::Char('d')));
-        app.handle_key(press(KeyCode::Char('d')));
-        assert_eq!(app.mode, Mode::Normal);
+        app.fail_send(placeholder, "boom".to_owned());
+        key(&mut app, 'd');
+
+        assert_eq!(app.mode, Mode::Normal, "and still none");
         assert!(
             app.status.contains("D dismisses"),
             "a failed message points at the key that clears it: {:?}",
             app.status
+        );
+    }
+
+    /// A placeholder for a send in flight is numbered below zero and sits at the
+    /// *end* of the window, so the numbers between the two ends of a selection say
+    /// something different from what the selection covers. Reading coverage off the
+    /// identifiers deleted the wrong messages.
+    #[test]
+    fn a_selection_reaching_a_placeholder_covers_the_window_positions() {
+        let mut app = App::mock();
+        submit(&mut app, "hi");
+        let placeholder = app.sending.expect("the send is in flight");
+        go_to_top(&mut app);
+        key(&mut app, 'V');
+        cursor_onto(&mut app, placeholder);
+
+        assert_eq!(
+            app.covered(app.selection()),
+            0..11,
+            "from the first message to the placeholder, which is the last position"
+        );
+
+        key(&mut app, 'd');
+
+        assert_eq!(
+            asked_to_delete(&app),
+            (1..=10).collect::<Vec<i64>>(),
+            "the ten between them, and not the one the identifier span names"
+        );
+    }
+
+    /// Everything the wording needs is captured when the prompt is raised, so
+    /// nothing that happens to the selection while the prompt is up can change
+    /// what `y` deletes. A page landing under a range, a focus change, a
+    /// conversation change: all of it moves what the reader is looking at, and
+    /// re-deriving the selection at `y` time would delete that instead.
+    #[test]
+    fn a_confirmation_hands_over_what_it_captured_and_not_the_selection_now() {
+        let mut app = one_way_then_the_other();
+        spanning_all(&mut app);
+        key(&mut app, 'd');
+        assert_eq!(asked_to_delete(&app), vec![1, 2, 3, 4, 5]);
+
+        app.set_selection(Selection::at(5, None));
+
+        key(&mut app, 'y');
+
+        assert_eq!(
+            app.take_action(),
+            Some(Action::Delete {
+                chat_id: MOCK_CHAT,
+                message_ids: vec![1, 2, 3, 4, 5],
+            })
         );
     }
 

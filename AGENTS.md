@@ -298,7 +298,7 @@ crates/domain/
 │   ├── message.rs      # Message entity
 │   ├── history.rs      # ConversationWindow, and the page/anchor rules
 │   ├── search.rs       # Query parsing, match scoring, local scanning
-│   ├── selection.rs    # Mark, Selection: a selection over messages
+│   ├── selection.rs    # Mark, Selection: the two ends of a selection
 │   ├── session.rs      # Session state
 │   ├── updates.rs      # UpdateEvent vocabulary
 │   └── vim.rs          # Pure Vim motion calculator (no UI): VimState between
@@ -606,8 +606,10 @@ Working today:
   last.
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to leave.
   Reply with `r`, edit with `e`.
-- **Send / edit / delete:** a single message, with a confirmation before
-  deleting. Delete removes it for both sides.
+- **Send / edit / delete:** one message with `d`, or every message a selection
+  covers in Visual, with a confirmation before deleting. The prompt counts, says
+  which side the messages are from, and says how many were left out because they
+  are placeholders. Delete removes for both sides.
 - **Search:** `/` searches the loaded window, then asks the server and prefers
   its answer. `n` repeats or cycles.
 - **Yank / paste:** `y` in Visual puts the selection in a register — the selected
@@ -622,10 +624,10 @@ Not built, and named here so nobody reads the roadmap below as current:
   cursor's message, `Esc` drops it, `o`/`O` swap its ends, `j`/`k` move the focus to
   another message and `h` `l` `w` `b` `e` `0` `$` `f` `t` `F` `T` move it by
   character *within* one. A selection spanning two or more messages is a set of
-  messages; one inside a single message is a text range. `y` yanks it. `d` and `r`
-  do nothing there yet, and neither do `dd`, `yy` or any `yank` equivalent. `p` is
-  unbound in Visual — replacing a selection with the reader's own text is a
-  destructive reading of a key that looks additive.
+  messages; one inside a single message is a text range. `y` yanks it and `d`
+  deletes it, with a confirmation. `dd` is `d` with no second press to
+  distinguish. `p` is unbound in Visual — replacing a selection with the reader's
+  own text is a destructive reading of a key that looks additive.
 - **`:w`** — not a command. The only commands are `q`, `quit` and `chat <id>`.
 - **Multi-line input** — the line is one row, append-only, with a fake `█`
   caret pinned to the end. `Esc` clears it and `Ctrl+w` keeps it, but the bar
@@ -657,6 +659,25 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
   feed to its end. A feed dropped without it persists a position behind the one it
   reached, and the next launch resolves the gap by replaying updates the reader
   has already seen.
+- **Why `VimState` and `char_motion` are two things:** `VimState` moves a cursor
+  between the items of a list and knows nothing about what an item is;
+  `char_motion` moves a position *within* one item's text and knows nothing about
+  the list. A selection needs both at once, and a type that did both would be doing
+  two things. For the same reason `domain::selection::Selection` answers only what
+  is purely about a position — the character range, and which end is which — and
+  `App::covered` answers "which messages" from the window's own order. The
+  identifiers alone cannot: a placeholder for a send in flight is numbered below
+  zero and sits at the *end* of the window, so a selection reaching one spans a
+  different set of messages by number than by position, and acting on the wrong one
+  deletes messages the reader did not select.
+- **Why a status line ranks a confirmation above a selection above a search:** a
+  confirmation is a question waiting for an answer and is over as soon as one is
+  given; a selection is state the reader must not lose and is the one thing on
+  screen whose extent is not otherwise visible; a search's label is state too, and
+  a `flash` is not — so a refusal written while any of the three is up is a line
+  the reader never sees. That is why an operation that finishes in Visual leaves
+  Visual, and why a prompt carries the count of what it left out instead of
+  flashing it.
 - **Why `anyhow` + `thiserror`:** `thiserror` for typed errors in `telegram-framework`, `proto`, and `domain`. `anyhow` at the `app` boundary.
 - **Why `ratatui` + `crossterm`:** `ratatui` is the UI layer; `crossterm` is the terminal I/O backend. They are complementary.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.
@@ -683,9 +704,9 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
 
 Real, and named so they are not mistaken for oversights:
 
-- **Visual mode has no operations but one.** `v`, `V`, `o` and `Esc` work, a
-  selection is drawn and `y` yanks it, but `d` and `r` in Visual do nothing. See
-  the feature list for what is bound.
+- **Visual mode has one operation left to bind.** `v`, `V`, `o`, `Esc`, `y` and
+  `d` work and a selection is drawn; `r` in Visual does nothing. See the feature
+  list for what is bound.
 - **The input line has no vim controls, no multi-line, and no drafts.**
   `vim-line` is declared for exactly this and is not yet wired up.
 - **A feed dropped without `finish` persists a stale update position.** See
