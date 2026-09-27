@@ -298,6 +298,7 @@ crates/domain/
 │   ├── message.rs      # Message entity
 │   ├── history.rs      # ConversationWindow, and the page/anchor rules
 │   ├── search.rs       # Query parsing, match scoring, local scanning
+│   ├── selection.rs    # Mark, Selection: a selection over messages
 │   ├── session.rs      # Session state
 │   ├── updates.rs      # UpdateEvent vocabulary
 │   └── vim.rs          # Pure Vim motion calculator (no UI)

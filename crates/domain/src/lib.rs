@@ -13,6 +13,7 @@ pub mod chat;
 pub mod history;
 pub mod message;
 pub mod search;
+pub mod selection;
 pub mod session;
 pub mod updates;
 pub mod vim;
