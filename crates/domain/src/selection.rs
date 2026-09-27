@@ -214,7 +214,11 @@ mod tests {
             Some((7, 0..3)),
             "which end the reader started from is not the caller's problem"
         );
-        assert_eq!(within(2, 2).text_range(), Some((7, 2..2)), "and a position is a span of none");
+        assert_eq!(
+            within(2, 2).text_range(),
+            Some((7, 2..2)),
+            "and a position is a span of none"
+        );
     }
 
     /// There is no range that names a piece of one message and a piece of
@@ -296,12 +300,12 @@ mod tests {
             focus: Mark::whole(6),
         };
 
-        for id in 3..=7 {
+        for (id, in_span) in [(3_i64, false), (4, true), (5, true), (6, true), (7, false)] {
             assert_eq!(
                 selection.touches(id),
-                (4..=6).contains(&id),
+                in_span,
                 "{id} is {} the selection",
-                if (4..=6).contains(&id) { "in" } else { "outside" }
+                if in_span { "inside" } else { "outside" }
             );
         }
     }

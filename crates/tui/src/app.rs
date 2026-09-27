@@ -7,11 +7,15 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::borrow::Cow;
 
+#[cfg(test)]
+use domain::selection::Mark;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
 use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
 use domain::message::{Message, MessageStatus};
 use domain::search::{SearchState, word_prefix_match};
+use domain::selection::Selection;
 use domain::updates::{ChatList, UpdateEvent};
 use domain::vim::{Motion, VimState};
 use ratatui::Frame;
@@ -403,6 +407,17 @@ pub struct App {
     /// The deletion waiting to be confirmed, if one is.
     pub confirm: Option<ConfirmKind>,
 
+    /// What the reader has selected over the messages, if anything.
+    ///
+    /// `None` outside a selection — and a selection with no mode of its own: the
+    /// conversation's [`Mode`] says whether a key is being applied to it, and a
+    /// `dd` puts one here for as long as the prompt is up without ever asking
+    /// for Visual.
+    ///
+    /// Both of its ends name a message by identifier, which is what lets it
+    /// survive a page landing: see [`App::after_window_change`].
+    selection: Option<Selection>,
+
     /// The operations the reader asked for, waiting to be taken by the caller.
     ///
     /// The outbound half of the [`Jump`] pattern: recorded here because `tui`
@@ -494,6 +509,7 @@ impl App {
             pending_d: false,
             sending: None,
             confirm: None,
+            selection: None,
             actions: VecDeque::new(),
             status_until: None,
             fetching: Fetching::default(),
@@ -553,6 +569,37 @@ impl App {
         &self.search
     }
 
+    /// What the reader has selected, for the panel to mark and the operations to
+    /// act on.
+    ///
+    /// One value rather than two marks on the application: an anchor and a focus
+    /// kept apart are two things to keep consistent, and the arithmetic between
+    /// them is the same in every reader.
+    #[must_use]
+    pub fn selection(&self) -> Option<&Selection> {
+        self.selection.as_ref()
+    }
+
+    /// Starts a selection at `message_id`, and reports whether it could be.
+    ///
+    /// A mark can only be placed on a message the window holds, so a selection
+    /// over one that is not loaded is refused rather than recorded: `d` on it
+    /// would name an identifier nothing can act on, and a mark the panel cannot
+    /// draw is a mark the reader cannot see.
+    ///
+    /// The mode is not touched. A selection is not a mode — `dd` leaves one here
+    /// while the reader is in Normal, answering a question, and the conversation's
+    /// [`Mode`] is about what a key means rather than about what is selected.
+    #[must_use]
+    pub fn select(&mut self, message_id: i64, char: Option<usize>) -> bool {
+        if self.conversation.window.position_of(message_id).is_none() {
+            return false;
+        }
+
+        self.selection = Some(Selection::at(message_id, char));
+        true
+    }
+
     /// Installs a freshly fetched chat list.
     ///
     /// The window the messages were seen in goes with it: the list is replaced
@@ -585,6 +632,7 @@ impl App {
         self.editing = None;
         self.pending_d = false;
         self.confirm = None;
+        self.selection = None;
     }
 
     // ---- what is on show ------------------------------------------------
@@ -733,6 +781,11 @@ impl App {
     /// The reader is put at the newest message: opening a conversation and
     /// loading the page that ends one both mean "show me the end".
     ///
+    /// A selection does not survive, because the messages it named are not
+    /// necessarily the ones on show now. There is nothing to restore it *to*:
+    /// unlike a page that extends the window, a page that replaces it has shifted
+    /// every message in it.
+    ///
     /// Reports whether anything was shown.
     pub fn apply_latest(&mut self, page: Vec<Message>) -> bool {
         if !self.page_belongs_to_open_chat(&page) {
@@ -740,6 +793,7 @@ impl App {
         }
 
         self.conversation.window.replace(page);
+        self.selection = None;
         self.vim.set_total(self.conversation.window.len());
         self.conversation.follow();
         self.vim.apply_motion(Motion::Last);
@@ -865,6 +919,9 @@ impl App {
     /// The cursor lands on the target, or on the first message after it when the
     /// page does not hold it: the page is centred on the target, so that is the
     /// nearest the fetch came to where the reader was going.
+    ///
+    /// A selection does not survive, for the same reason it does not survive
+    /// [`App::apply_latest`]: the page replaced the window.
     pub fn apply_jump(&mut self, page: &[Message], target_id: i64) -> bool {
         if !self.clear_jump(target_id) {
             return false;
@@ -878,6 +935,7 @@ impl App {
         // window is the caller's to report to the cursor it keeps, and that
         // cursor is counted from the same messages.
         self.conversation.window.replace(page.iter().cloned());
+        self.selection = None;
 
         // A window that jumped is surrounded by the unknown on both sides,
         // whatever the one before it had run out of.
@@ -941,11 +999,13 @@ impl App {
 
     /// Puts the reader back where they were, now that the window has moved.
     ///
-    /// The position is carried as a message identifier rather than as an index,
-    /// because an index means a different message on either side of a page. An
-    /// identifier that is no longer in the window has no position to restore, so
-    /// the clamp stands — the reader's message was evicted, and the nearest
-    /// survivor is the honest answer.
+    /// There are now **two** anchors to restore rather than one, and both are
+    /// restored the same way: by message identifier, because an index means a
+    /// different message on either side of a page. Restoring only the cursor is
+    /// the failure this arrangement exists to prevent — an older page landing
+    /// under a live selection shifts every index, so a selection left in index
+    /// terms would silently come to cover different messages and the next `d`
+    /// would delete something the reader did not select.
     fn after_window_change(&mut self, anchor: Option<i64>) {
         self.vim.set_total(self.conversation.window.len());
 
@@ -955,12 +1015,36 @@ impl App {
             .unwrap_or(cursor);
         self.vim.set_cursor(restored);
 
+        self.retain_selection();
+
         if self.conversation.auto_follow() {
             // A view pinned to the end stays pinned: what arrived is what the
             // reader asked to see.
             self.vim.apply_motion(Motion::Last);
         } else {
             self.settle_follow();
+        }
+    }
+
+    /// Drops the selection unless both of its ends still name a message the
+    /// window holds.
+    ///
+    /// Whole or not at all. A mark whose message has been paged out or pushed past
+    /// the window's cap cannot be put back anywhere, and narrowing the selection
+    /// to the end that survived would be worse than losing it: `d` on half a
+    /// selection is a one-message deletion the reader never asked for, and it
+    /// would be asked for by the same key they used last time.
+    fn retain_selection(&mut self) {
+        let Some(selection) = self.selection.take() else {
+            return;
+        };
+
+        let window = &self.conversation.window;
+        let held = window.position_of(selection.anchor.message_id).is_some()
+            && window.position_of(selection.focus.message_id).is_some();
+
+        if held {
+            self.selection = Some(selection);
         }
     }
 
@@ -1185,6 +1269,7 @@ impl App {
     fn set_focus(&mut self, focus: Focus) {
         if focus != Focus::Conversation {
             self.mode = Mode::Normal;
+            self.selection = None;
         }
         self.focus = focus;
     }
@@ -2208,6 +2293,11 @@ mod tests {
         ids.iter().map(|id| message(*id, "text")).collect()
     }
 
+    /// The same, however the identifiers are spelled.
+    fn numbered(ids: impl IntoIterator<Item = i64>) -> Vec<Message> {
+        ids.into_iter().map(|id| message(id, "text")).collect()
+    }
+
     /// `to` messages of a screenful each, which is a window of rows rather
     /// than of lines.
     fn tall_page(to: i64) -> Vec<Message> {
@@ -2739,6 +2829,125 @@ mod tests {
             "`gg` in the list, not the top of a window"
         );
         assert_eq!(app.conversation.window.chat_id, MOCK_CHAT);
+    }
+
+    // ---- a selection the window can move under -------------------------
+
+    /// A selection spanning two whole messages, made directly.
+    ///
+    /// The keys that make one are bound in a later step, and the question this
+    /// section is about is what survives the window moving rather than how a
+    /// selection was made — so it is built here rather than pressed.
+    fn spanning(app: &mut App, anchor: i64, focus: i64) {
+        app.selection = Some(Selection {
+            anchor: Mark::whole(anchor),
+            focus: Mark::whole(focus),
+        });
+    }
+
+    /// The invariant a selection is most likely to break: a page landing under a
+    /// live one shifts every index in the window, so restoring the cursor alone
+    /// would leave the selection covering different messages — and the next `d`
+    /// would delete something the reader did not select.
+    #[test]
+    fn a_page_landing_under_a_selection_keeps_both_of_its_ends() {
+        let mut app = App::mock();
+        app.apply_latest(numbered(10..=20));
+        spanning(&mut app, 11, 15);
+
+        assert!(app.apply_older(numbered(1..=9)));
+
+        let selection = app.selection().expect("both messages are still loaded");
+        assert_eq!(
+            (selection.anchor.message_id, selection.focus.message_id),
+            (11, 15),
+            "the ends are identifiers, so the nine that went in front of them cannot move them"
+        );
+        assert_eq!(
+            selection.message_ids(),
+            (11..=15).collect::<Vec<i64>>(),
+            "and it still covers exactly what it did"
+        );
+    }
+
+    /// The same, from the other end: an arrival pushes the oldest messages out of
+    /// a window that is at its cap.
+    #[test]
+    fn an_arrival_that_pushes_an_end_out_of_the_window_drops_the_selection() {
+        let cap = i64::try_from(CONVERSATION_WINDOW).expect("the cap fits an identifier");
+        let mut app = App::mock();
+        app.apply_latest(numbered(1..=cap));
+        spanning(&mut app, 1, 3);
+
+        assert!(app.apply_newer(numbered(cap + 1..=cap + 2)));
+        assert!(
+            app.conversation.window.position_of(1).is_none(),
+            "the oldest message has been pushed out of a window at its cap"
+        );
+
+        assert_eq!(
+            app.selection(),
+            None,
+            "half a selection is worse than none: `d` on it would be a one-message \
+             deletion the reader did not ask for"
+        );
+    }
+
+    #[test]
+    fn a_window_that_is_replaced_takes_the_selection_with_it() {
+        let mut app = App::mock();
+        spanning(&mut app, 2, 4);
+
+        app.apply_latest(numbered(1..=10));
+
+        assert_eq!(
+            app.selection(),
+            None,
+            "a page that replaces the window has moved every message in it"
+        );
+    }
+
+    #[test]
+    fn a_jump_replaces_the_window_and_the_selection_with_it() {
+        let mut app = with_unread(2, 20);
+        go_to_top(&mut app);
+        let jump = app.pending_jump().expect("the target is not loaded");
+        spanning(&mut app, 1, 2);
+
+        assert!(app.apply_jump(&numbered(1..=8), jump.target_id));
+
+        assert_eq!(app.selection(), None);
+    }
+
+    #[test]
+    fn opening_another_conversation_takes_the_selection_with_it() {
+        let mut app = App::mock();
+        spanning(&mut app, 2, 4);
+
+        app.select_chat(1);
+
+        assert_eq!(app.selection(), None);
+    }
+
+    /// A mark on a message the window does not hold is a mark nothing can draw
+    /// and `d` cannot act on, so it is refused rather than recorded.
+    #[test]
+    fn a_selection_can_only_be_started_on_a_message_that_is_loaded() {
+        let mut app = App::mock();
+
+        assert!(app.select(4, Some(0)));
+        assert_eq!(
+            app.selection().and_then(Selection::text_range),
+            Some((4, 0..0)),
+            "and it starts collapsed, which is what `v` leaves behind"
+        );
+
+        assert!(!app.select(999, Some(0)));
+        assert_eq!(
+            app.selection().and_then(Selection::text_range),
+            Some((4, 0..0)),
+            "and a refused mark leaves the selection that was there"
+        );
     }
 
     // ---- dd and the confirm --------------------------------------------
