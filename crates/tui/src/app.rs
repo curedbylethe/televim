@@ -558,6 +558,18 @@ pub struct App {
     /// [`App::select_chat_none`] forgets it along with everything else.
     register: Register,
 
+    /// The text a yank asked to be copied to the system clipboard, if one is
+    /// waiting to be written.
+    ///
+    /// Recorded rather than written, because `tui` does not hold stdout and a
+    /// widget that writes to the terminal behind the renderer's back is a race.
+    /// The caller that owns the terminal takes it with
+    /// [`App::take_clipboard`], which it does on the same pass of its loop that
+    /// the yank was read on — so this cannot outlive a conversation change by more
+    /// than a frame, and clearing it here would lose a yank rather than a stale
+    /// one.
+    clipboard: Option<String>,
+
     /// The operations the reader asked for, waiting to be taken by the caller.
     ///
     /// The outbound half of the [`Jump`] pattern: recorded here because `tui`
@@ -657,6 +669,7 @@ impl App {
             confirm: None,
             selection: None,
             register: Register::default(),
+            clipboard: None,
             actions: VecDeque::new(),
             status_until: None,
             fetching: Fetching::default(),
@@ -814,6 +827,20 @@ impl App {
     #[must_use]
     pub fn register(&self) -> &Register {
         &self.register
+    }
+
+    /// Takes the text the reader asked to copy to the system clipboard.
+    ///
+    /// Drained by the caller that owns the terminal, on the same pass it read the
+    /// yank on. Idempotent in the way every other hand-over here is: once taken it
+    /// is forgotten, so a caller that asks twice gets one copy and not two.
+    ///
+    /// A yank is also offered to the clipboard, which is a convenience rather than
+    /// the point: whether the terminal honours OSC 52 at all is not this crate's to
+    /// know, so the register — which always works — is what a yank can be relied
+    /// on for.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard.take()
     }
 
     /// Installs a freshly fetched chat list.
@@ -2078,6 +2105,7 @@ impl App {
         }
 
         self.register = Register::set(lines);
+        self.clipboard = Some(self.register.text());
     }
 
     /// The lines a selection yanks: one for a text selection, one per message for
@@ -3984,6 +4012,43 @@ mod tests {
         app.select_chat(1);
 
         assert!(yanked(&app).is_empty());
+    }
+
+    /// A yank is offered to the system clipboard as well as kept in the register,
+    /// and taking it is a hand-over like every other one here: once, not twice.
+    #[test]
+    fn a_yank_is_offered_to_the_clipboard_and_taken_once() {
+        let mut app = App::mock();
+        assert_eq!(app.take_clipboard(), None, "nothing has been yanked yet");
+
+        go_to_top(&mut app);
+        key(&mut app, 'V');
+        key(&mut app, 'j');
+        key(&mut app, 'y');
+
+        assert_eq!(
+            app.take_clipboard().as_deref(),
+            Some("Hey, is the build green?\nYes — clippy is happy."),
+            "the whole of the register, which is what a yank is for"
+        );
+        assert_eq!(app.take_clipboard(), None, "and it is gone once taken");
+    }
+
+    /// The register is the half that always works; the clipboard is a courtesy
+    /// whose terminal may or may not honour it, so nothing about a yank depends on
+    /// the offer having been taken.
+    #[test]
+    fn a_yank_survives_its_clipboard_offer_being_never_taken() {
+        let mut app = selecting_message_one(false);
+        key(&mut app, 'y');
+
+        let _offer = app.take_clipboard();
+
+        assert_eq!(
+            yanked(&app),
+            vec!["Hey, is the build green?".to_owned()],
+            "the register is what is left whatever happened to the offer"
+        );
     }
 
     #[test]

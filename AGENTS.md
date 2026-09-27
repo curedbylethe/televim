@@ -91,7 +91,7 @@ in one direction and wider in another:
 | `domain` | `thiserror` |
 | `tui` | `domain`, `ratatui`, `crossterm` |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
-| `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui` |
+| `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
 
 ## Workspace Members
 
@@ -156,6 +156,10 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 # Declared, not yet used. The global allocator is not installed; the binary runs
 # on the system allocator today. See "Known Gaps".
 tikv-jemallocator = "0.6"
+# One use: base64 inside the OSC 52 clipboard sequence. `app/src/runtime.rs` writes
+# that sequence because it is the only place holding the terminal; `tui` records
+# the text and never writes it.
+base64 = "0.22"
 
 # Dev-only
 tempfile = "3"
@@ -410,6 +414,12 @@ logs at `info` as a matter of course, so a logger that shares the screen with
 the interface takes it apart on the first connection. A directory that cannot be
 written leaves the run with no log rather than an unreadable screen.
 
+`runtime.rs` is the other half of that rule, in the opposite direction: it is the
+only module holding the terminal, so it is where the OSC 52 clipboard sequence is
+written after `net::drive` on every pass. `tui` records the text a yank asked to
+copy and never writes it — a widget that writes to the terminal behind the
+renderer's back is a race.
+
 ## Core Library Rationale
 
 | Concern               | Crate                                                                           | Rationale                                                                                              |
@@ -616,8 +626,10 @@ Working today:
   its answer. `n` repeats or cycles.
 - **Yank / paste:** `y` in Visual puts the selection in a register — the selected
   characters for a text selection, one line per message oldest-first for a set of
-  them — and `p` in Normal opens the line with it. The register is cleared by
-  opening another conversation. `p` is not bound in Visual.
+  them — and `p` in Normal opens the line with it. A yank is also offered to the
+  system clipboard with OSC 52, best-effort and truncated to 74 kB of sequence;
+  the register is the half that always works. The register is cleared by opening
+  another conversation. `p` is not bound in Visual.
 - **Commands:** `:q`/`:quit` and `:chat <id>`.
 
 Not built, and named here so nobody reads the roadmap below as current:
@@ -637,8 +649,10 @@ Not built, and named here so nobody reads the roadmap below as current:
   reachable with `Tab`.
 - **Vim motions inside the input** — none. `w`, `b`, `f`, `0`, `$` do not exist
   there; `vim-line` is declared for this and unused.
-- **Yank to the system clipboard** — no OSC 52. A yank reaches the register and
-  `p`, and stops there.
+- **The yank clipboard is one-way and says nothing.** Whether a terminal honours
+  OSC 52 at all is not something this program can find out, so a refused or capped
+  write is not a failure of the yank and is not reported as one. `y` reaching the
+  register and `p` is the whole feature; the clipboard is a convenience on top.
 - **`p` is not in the input bar's hint.** The bar is one row of eighty columns and
   the hint is already 71 of the 78 it has; its length is asserted by a test, so
   adding a key means removing one.

@@ -44,6 +44,9 @@ clap = { version = "4", features = ["derive"] }
 config = "0.15"
 
 # Utils
+# One use: base64 for the OSC 52 clipboard sequence, which is written by the
+# terminal's owner rather than by `tui`.
+base64 = "0.22"
 # `keyring` ships no default backend, so each supported platform store is
 # requested explicitly. They are target-gated, so enabling all of them is safe
 # on every platform; on Linux the Secret Service backend needs `libdbus`.

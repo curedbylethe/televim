@@ -3000,6 +3000,7 @@ name = "televim"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "config",
  "crossterm 0.28.1",
