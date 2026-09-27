@@ -301,7 +301,8 @@ crates/domain/
 │   ├── selection.rs    # Mark, Selection: a selection over messages
 │   ├── session.rs      # Session state
 │   ├── updates.rs      # UpdateEvent vocabulary
-│   └── vim.rs          # Pure Vim motion calculator (no UI)
+│   └── vim.rs          # Pure Vim motion calculator (no UI): VimState between
+│                       #   items, char_motion within one item's text
 └── Cargo.toml          # deps: thiserror
 ```
 
@@ -613,9 +614,14 @@ Working today:
 
 Not built, and named here so nobody reads the roadmap below as current:
 
-- **Visual mode** — `v` enters it and `handle_visual` returns to Normal; there is
-  no selection, so `d`, `y` and `r` do nothing there. `dd`, `yy` and `yank`
-  equivalents are not bound either.
+- **Visual mode** — `v` and `V` start a charwise or linewise selection at the
+  cursor's message, `Esc` drops it, `o`/`O` swap its ends, `j`/`k` move the focus to
+  another message and `h` `l` `w` `b` `e` `0` `$` `f` `t` `F` `T` move it by
+  character *within* one. A selection spanning two or more messages is a set of
+  messages; one inside a single message is a text range. `d`, `y` and `r` do
+  nothing there yet, and neither do `dd`, `yy` or any `yank` equivalent. `p` is
+  unbound in Visual — replacing a selection with the reader's own text is a
+  destructive reading of a key that looks additive.
 - **`:w`** — not a command. The only commands are `q`, `quit` and `chat <id>`.
 - **Multi-line input** — the line is one row, append-only, with a fake `█`
   caret pinned to the end. `Esc` clears it and `Ctrl+w` keeps it, but the bar
@@ -669,7 +675,9 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
 
 Real, and named so they are not mistaken for oversights:
 
-- **Visual mode is a stub.** `v` enters it; `handle_visual` returns to Normal.
+- **Visual mode has no operations yet.** `v`, `V`, `o` and `Esc` work and a
+  selection is drawn, but `d`, `y` and `r` in Visual do nothing. See the feature
+  list for what is bound.
 - **The input line has no vim controls, no multi-line, and no drafts.**
   `vim-line` is declared for exactly this and is not yet wired up.
 - **A feed dropped without `finish` persists a stale update position.** See

@@ -7,17 +7,14 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use std::borrow::Cow;
 
-#[cfg(test)]
-use domain::selection::Mark;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
 use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
 use domain::message::{Message, MessageStatus};
 use domain::search::{SearchState, word_prefix_match};
-use domain::selection::Selection;
+use domain::selection::{Mark, Selection};
 use domain::updates::{ChatList, UpdateEvent};
-use domain::vim::{Motion, VimState};
+use domain::vim::{CharMotion, Motion, VimState, char_motion};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 
@@ -310,6 +307,16 @@ pub enum Action {
     },
 }
 
+/// A `f`, `t`, `F` or `T` that has been pressed and is waiting for its character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Find {
+    /// Which way to look.
+    forward: bool,
+
+    /// Whether to land on the character itself rather than one short of it.
+    onto: bool,
+}
+
 /// Which pages are in flight.
 ///
 /// One flag per direction rather than a single "busy": the three are asked for
@@ -458,6 +465,13 @@ pub struct App {
     /// Vim, and a key held down is not two of them.
     pending_g: bool,
 
+    /// A `f`, `t`, `F` or `T` waiting for the character to look for.
+    ///
+    /// Two keys rather than one, as in Vim, and a latch for the same reason `dd`
+    /// has one: the key after `f` is the character, not a motion. The character
+    /// itself is not recorded, because it has not been typed yet.
+    pending_find: Option<Find>,
+
     /// How many message rows the conversation panel had room for as of the last
     /// frame.
     ///
@@ -516,6 +530,7 @@ impl App {
             pending_jump: None,
             pending_chat: None,
             pending_g: false,
+            pending_find: None,
             rows: Cell::new(ASSUMED_ROWS),
             body_width: Cell::new(ASSUMED_BODY_WIDTH),
         }
@@ -1473,8 +1488,11 @@ impl App {
             }
             KeyCode::Char('v') => {
                 self.pending_d = false;
-                self.mode = Mode::Visual;
-                self.status = "VISUAL: d=delete y=yank r=reply (stubs)".into();
+                self.begin_selection(Some(0));
+            }
+            KeyCode::Char('V') => {
+                self.pending_d = false;
+                self.begin_selection(None);
             }
             // The list is beside the conversation, so `h` is how the reader gets
             // to it. `l` has nothing to move to from here and is left unbound
@@ -1699,26 +1717,169 @@ impl App {
         }
     }
 
+    /// Handles a key while a selection is being made.
+    ///
+    /// `Esc` is the way out of it: the selection goes and the mode returns to
+    /// Normal, rather than the selection being left behind for a `d` to find.
+    /// `o` and `O` exchange the two ends, so a selection dragged "backwards" can
+    /// be re-anchored without being put back where it was.
+    ///
+    /// The character motions move the *focus* — the end that moves — rather than
+    /// the anchor, which is what makes a selection grow from one end. They clamp
+    /// to the message's own text and never cross into the next one: `j` and `k`
+    /// are for that, and a motion that silently changed what it selected would be
+    /// the worst thing a selection could do.
     fn handle_visual(&mut self, key: KeyEvent) {
+        // A `f` takes the very next keypress as the character to look for, whatever
+        // it is: that is what `fw` means, and reading the `w` as a motion would be
+        // a different key entirely. Anything else ends the sequence.
+        if let Some(Find { forward, onto }) = self.pending_find.take()
+            && let KeyCode::Char(target) = key.code
+        {
+            self.move_focus(CharMotion::Find {
+                target,
+                forward,
+                onto,
+            });
+            return;
+        }
+        self.pending_find = None;
+
         match key.code {
             KeyCode::Esc => {
+                self.selection = None;
                 self.mode = Mode::Normal;
                 self.status = IDLE_STATUS.into();
             }
-            KeyCode::Char('d') => {
-                self.status = "visual: delete (not implemented)".into();
-                self.mode = Mode::Normal;
+
+            // Re-anchoring on the cursor's message is `v` again, which is what it
+            // is for: the reader is saying "start here instead".
+            KeyCode::Char('v') => self.begin_selection(Some(0)),
+            KeyCode::Char('V') => self.begin_selection(None),
+            KeyCode::Char('o' | 'O') => {
+                if let Some(selection) = &mut self.selection {
+                    selection.swap();
+                }
             }
-            KeyCode::Char('y') => {
-                self.status = "visual: yank (not implemented)".into();
-                self.mode = Mode::Normal;
+
+            KeyCode::Char('j') => self.move_focus_to_message(true),
+            KeyCode::Char('k') => self.move_focus_to_message(false),
+
+            KeyCode::Char('h') => self.move_focus(CharMotion::Step { forward: false }),
+            KeyCode::Char('l') => self.move_focus(CharMotion::Step { forward: true }),
+            KeyCode::Char('w') => self.move_focus(CharMotion::WordStart { forward: true }),
+            KeyCode::Char('b') => self.move_focus(CharMotion::WordStart { forward: false }),
+            KeyCode::Char('e') => self.move_focus(CharMotion::WordEnd),
+            KeyCode::Char('0') => self.move_focus(CharMotion::Bound { end: false }),
+            KeyCode::Char('$') => self.move_focus(CharMotion::Bound { end: true }),
+
+            KeyCode::Char('f') => {
+                self.pending_find = Some(Find {
+                    forward: true,
+                    onto: true,
+                });
             }
-            KeyCode::Char('r') => {
-                self.status = "visual: reply (not implemented)".into();
-                self.mode = Mode::Normal;
+            KeyCode::Char('t') => {
+                self.pending_find = Some(Find {
+                    forward: true,
+                    onto: false,
+                });
             }
+            KeyCode::Char('F') => {
+                self.pending_find = Some(Find {
+                    forward: false,
+                    onto: true,
+                });
+            }
+            KeyCode::Char('T') => {
+                self.pending_find = Some(Find {
+                    forward: false,
+                    onto: false,
+                });
+            }
+
             _ => {}
         }
+    }
+
+    /// Starts a selection at the cursor's message, character-wise or whole.
+    ///
+    /// `Some(0)` is a charwise selection from the message's first character;
+    /// `None` is the whole message, which is what `V` selects. Both set the mode,
+    /// because this is the only way *into* Visual.
+    ///
+    /// The mark goes on directly rather than through [`App::select`]: the message
+    /// came out of the window a line ago, so there is nothing to check.
+    fn begin_selection(&mut self, char: Option<usize>) {
+        let Some(id) = self.cursor_message_id() else {
+            return;
+        };
+
+        self.set_selection(Selection::at(id, char));
+        self.mode = Mode::Visual;
+    }
+
+    /// Applies a character motion to the focus's position within its message.
+    ///
+    /// Nothing happens without a character position to move: a linewise selection
+    /// is of a whole message and there is no place inside it to move to, which is
+    /// also what Vim does. The cursor does not follow — it stands on the anchor's
+    /// message until the focus moves to another one, so that a charwise selection
+    /// does not drag the viewport along with every character.
+    fn move_focus(&mut self, motion: CharMotion) {
+        let Some(selection) = &mut self.selection else {
+            return;
+        };
+        let Some(at) = selection.focus.char else {
+            return;
+        };
+        let id = selection.focus.message_id;
+
+        let Some(message) = self.conversation.window.iter().find(|m| m.id == id) else {
+            return;
+        };
+
+        selection.focus.char = Some(char_motion(&message.text, at, motion));
+    }
+
+    /// Moves the focus to the next or the previous message, and the cursor with it.
+    ///
+    /// The cursor follows because this is the only motion that leaves the message:
+    /// a reader stepping through messages with `j` is reading, not selecting
+    /// characters, and a cursor left behind would be off the selection entirely.
+    ///
+    /// A character position carries over where it still fits, so a selection that
+    /// has already been moved within a message keeps its relative place in the
+    /// next one. It stops mattering as soon as the two ends are in different
+    /// messages — which is exactly what they now are.
+    fn move_focus_to_message(&mut self, forward: bool) {
+        let Some(focus) = self.selection.map(|selection| selection.focus) else {
+            return;
+        };
+        let Some(index) = self.conversation.window.position_of(focus.message_id) else {
+            return;
+        };
+        let next = if forward {
+            index + 1
+        } else {
+            index.saturating_sub(1)
+        };
+        let Some(message) = self.conversation.window.get(next) else {
+            return;
+        };
+
+        let id = message.id;
+        let last = message.text.chars().count().saturating_sub(1);
+        let char = focus.char.map(|at| at.min(last));
+
+        if let Some(selection) = &mut self.selection {
+            selection.focus = Mark {
+                message_id: id,
+                char,
+            };
+        }
+        self.vim.set_cursor(next);
+        self.settle_follow();
     }
 
     /// Handles `Enter` in the input line.
@@ -2304,6 +2465,7 @@ fn mock_messages() -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::Range;
 
     /// A message in the sample conversation.
     fn message(id: i64, text: &'static str) -> Message {
@@ -2978,6 +3140,380 @@ mod tests {
             Some((4, 0..0)),
             "and a refused mark leaves the selection that was there"
         );
+    }
+
+    // ---- the motions ----------------------------------------------------
+
+    /// The characters of the message under the cursor, for a motion's answer.
+    fn selected_chars(app: &App) -> Option<(i64, Range<usize>)> {
+        app.selection().and_then(Selection::text_range)
+    }
+
+    /// The messages the selection covers, oldest first.
+    fn selected_messages(app: &App) -> Vec<i64> {
+        app.selection()
+            .map_or_else(Vec::new, Selection::message_ids)
+    }
+
+    /// The focus, as a message and a character position.
+    fn focused(app: &App) -> Option<(i64, Option<usize>)> {
+        app.selection()
+            .map(|selection| (selection.focus.message_id, selection.focus.char))
+    }
+
+    fn key(app: &mut App, c: char) {
+        app.handle_key(press(KeyCode::Char(c)));
+    }
+
+    #[test]
+    fn v_starts_a_charwise_selection_at_the_first_character() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+
+        key(&mut app, 'v');
+
+        assert_eq!(app.mode, Mode::Visual);
+        assert_eq!(
+            selected_chars(&app),
+            Some((1, 0..0)),
+            "a position, which is a span of no characters yet"
+        );
+    }
+
+    #[test]
+    fn v_then_l_selects_one_character() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+
+        key(&mut app, 'v');
+        key(&mut app, 'l');
+
+        assert_eq!(selected_chars(&app), Some((1, 0..1)));
+    }
+
+    #[test]
+    fn v_then_j_selects_two_messages() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+
+        key(&mut app, 'v');
+        key(&mut app, 'j');
+
+        assert_eq!(
+            selected_messages(&app),
+            vec![1, 2],
+            "two ends in two messages are a set of messages"
+        );
+        assert_eq!(selected_chars(&app), None);
+        assert_eq!(reading(&app), Some(2), "and the cursor followed the focus");
+    }
+
+    /// The first sample message, whose words are `Hey,` `is` `the` `build`
+    /// `green?`.
+    const SAMPLE: &str = "Hey, is the build green?";
+
+    /// A selection dropped and Normal restored, the way a reader leaves one.
+    fn escape(app: &mut App) {
+        app.handle_key(press(KeyCode::Esc));
+    }
+
+    #[test]
+    fn v_then_selecting_upward_covers_the_same_messages() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'j');
+        key(&mut app, 'j');
+
+        key(&mut app, 'V');
+        assert_eq!(selected_messages(&app), vec![3]);
+        key(&mut app, 'k');
+        key(&mut app, 'k');
+
+        assert_eq!(
+            selected_messages(&app),
+            vec![1, 2, 3],
+            "a selection dragged upwards covers the same messages as one dragged down"
+        );
+    }
+
+    #[test]
+    fn capital_v_selects_a_whole_message() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+
+        key(&mut app, 'V');
+
+        assert_eq!(selected_messages(&app), vec![1]);
+        assert_eq!(
+            focused(&app),
+            Some((1, None)),
+            "and there is no place inside it"
+        );
+    }
+
+    /// A linewise selection has nowhere inside it to move, so the character
+    /// motions do nothing — which is what Vim does, and what the status line's
+    /// count already tells the reader.
+    #[test]
+    fn a_character_motion_over_a_whole_message_does_nothing() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'V');
+
+        for motion in ['h', 'l', 'w', 'b', 'e', '0', '$'] {
+            key(&mut app, motion);
+            assert_eq!(focused(&app), Some((1, None)), "after {motion}");
+        }
+
+        assert_eq!(
+            selected_messages(&app),
+            vec![1],
+            "and the selection is intact"
+        );
+    }
+
+    #[test]
+    fn o_swaps_the_ends_without_changing_the_selection() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+        for _ in 0..3 {
+            key(&mut app, 'l');
+        }
+        let before = selected_chars(&app);
+        let anchor = app.selection().expect("held").anchor;
+        let focus = focused(&app).expect("held");
+
+        key(&mut app, 'o');
+
+        assert_eq!(selected_chars(&app), before, "only the direction changed");
+        assert_eq!(focused(&app), Some((anchor.message_id, anchor.char)));
+        assert_eq!(app.selection().expect("held").focus.message_id, focus.0);
+
+        key(&mut app, 'o');
+        assert_eq!(focused(&app), Some(focus), "and twice is the original");
+    }
+
+    #[test]
+    fn escape_drops_the_selection_and_returns_to_normal() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+        key(&mut app, 'j');
+
+        escape(&mut app);
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.selection(), None);
+    }
+
+    #[test]
+    fn a_selection_does_not_outlive_the_status_that_announced_it() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+        assert_ne!(app.status_text(), IDLE_STATUS);
+
+        escape(&mut app);
+
+        assert_eq!(
+            app.status_text(),
+            IDLE_STATUS,
+            "so the status line does not keep describing a selection that is gone"
+        );
+    }
+
+    #[test]
+    fn the_word_motions_walk_the_words_of_a_message() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+
+        key(&mut app, 'w');
+        assert_eq!(focused(&app), Some((1, Some(5))), "over `is`");
+        key(&mut app, 'w');
+        assert_eq!(focused(&app), Some((1, Some(8))), "and over `the`");
+        key(&mut app, 'e');
+        assert_eq!(
+            focused(&app),
+            Some((1, Some(10))),
+            "and `e` to the end of it"
+        );
+        key(&mut app, 'b');
+        assert_eq!(
+            focused(&app),
+            Some((1, Some(8))),
+            "and `b` back to its start"
+        );
+    }
+
+    #[test]
+    fn zero_and_the_end_are_the_ends_of_the_message() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+
+        key(&mut app, '$');
+        let last = SAMPLE.chars().count() - 1;
+        assert_eq!(focused(&app), Some((1, Some(last))));
+
+        key(&mut app, '0');
+        assert_eq!(focused(&app), Some((1, Some(0))));
+    }
+
+    #[test]
+    fn f_and_t_find_a_character_in_the_message() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+
+        key(&mut app, 'f');
+        key(&mut app, 'i');
+        assert_eq!(
+            focused(&app),
+            Some((1, Some(5))),
+            "`fi` lands on the `i` of `is`"
+        );
+
+        key(&mut app, 'f');
+        key(&mut app, 'i');
+        assert_eq!(focused(&app), Some((1, Some(14))), "and the next one");
+
+        key(&mut app, 'F');
+        key(&mut app, 'i');
+        assert_eq!(focused(&app), Some((1, Some(5))), "`Fi` goes back");
+    }
+
+    /// The key after `f` is the character to look for, whatever it is — that is
+    /// what `fw` means. A `w` there is a letter to find, not a motion, and this
+    /// message has no `w` in it.
+    #[test]
+    fn the_key_after_f_is_the_character_and_not_another_motion() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+
+        key(&mut app, 'f');
+        key(&mut app, 'w');
+
+        assert_eq!(
+            focused(&app),
+            Some((1, Some(0))),
+            "nothing was found, so nothing moved — and `w` was not a motion"
+        );
+    }
+
+    /// A `f` whose character has not been typed must not still be waiting when an
+    /// unrelated key arrives, or that key would be read as the character.
+    #[test]
+    fn a_find_waiting_for_its_character_is_forgotten_by_another_key() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+
+        key(&mut app, 'f');
+        app.handle_key(press(KeyCode::Enter));
+        key(&mut app, 'l');
+
+        assert_eq!(
+            focused(&app),
+            Some((1, Some(1))),
+            "the `l` was a motion, so the `f` was not half of one"
+        );
+    }
+
+    /// A message's own text is the boundary, whatever the motion: crossing into
+    /// the next message is `j`'s job, and a motion that did it silently would
+    /// change what the reader thinks they selected.
+    #[test]
+    fn a_character_motion_never_leaves_the_message() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+        let last = SAMPLE.chars().count() - 1;
+
+        for motion in ['w', 'e', '$', 'b'] {
+            for _ in 0..40 {
+                key(&mut app, motion);
+            }
+
+            let (id, at) = focused(&app).expect("still a selection");
+            assert_eq!(id, 1, "{motion} stayed on the message it started on");
+            assert!(at.is_some_and(|at| at <= last), "{motion} landed on {at:?}");
+        }
+
+        // Where each of them does end up, so the test above is not satisfied by a
+        // motion that simply does nothing.
+        for (motion, bound) in [('b', 0), ('e', last), ('$', last), ('w', 18)] {
+            let mut app = App::mock();
+            go_to_top(&mut app);
+            key(&mut app, 'v');
+            for _ in 0..40 {
+                key(&mut app, motion);
+            }
+            assert_eq!(focused(&app), Some((1, Some(bound))), "{motion}");
+        }
+    }
+
+    #[test]
+    fn a_character_motion_moves_over_a_multibyte_character_rather_than_inside_it() {
+        let mut app = App::mock();
+        app.apply_latest(vec![Message {
+            text: Cow::Borrowed("é😀x"),
+            ..message(1, "unused")
+        }]);
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+
+        key(&mut app, 'l');
+        assert_eq!(
+            focused(&app),
+            Some((1, Some(1))),
+            "over the two-byte character"
+        );
+        key(&mut app, 'l');
+        assert_eq!(focused(&app), Some((1, Some(2))), "and the four-byte one");
+        key(&mut app, 'l');
+        assert_eq!(focused(&app), Some((1, Some(2))), "and stops at the last");
+        key(&mut app, 'h');
+        assert_eq!(focused(&app), Some((1, Some(1))));
+    }
+
+    /// The character position rides along to the next message, clamped, so that a
+    /// selection which has been moved within a message keeps its relative place.
+    #[test]
+    fn a_character_position_carries_to_the_next_message_and_clamps() {
+        let mut app = App::mock();
+        app.apply_latest(vec![message(1, "a long first message"), message(2, "hi")]);
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+        for _ in 0..10 {
+            key(&mut app, 'l');
+        }
+        assert_eq!(focused(&app), Some((1, Some(10))));
+
+        key(&mut app, 'j');
+
+        assert_eq!(
+            focused(&app),
+            Some((2, Some(1))),
+            "clamped to the end of a two-character message"
+        );
+    }
+
+    /// Leaving the pane drops a selection, because a selection for a conversation
+    /// nobody is looking at would leave `d` holding something invisible.
+    #[test]
+    fn leaving_the_conversation_drops_the_selection() {
+        let mut app = App::mock();
+        go_to_top(&mut app);
+        key(&mut app, 'v');
+        key(&mut app, 'j');
+
+        app.handle_key(press(KeyCode::Tab));
+
+        assert_eq!(app.selection(), None);
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     // ---- dd and the confirm --------------------------------------------
