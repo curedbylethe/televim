@@ -65,7 +65,7 @@ televim/
     │   └── src/                # lib, chat, message, history, search, session,
     │                           #   updates, vim
     ├── tui/                    # ratatui widgets & input handling
-    │   └── src/                # lib, app, event, theme, widgets/
+    │   └── src/                # lib, app, event, theme, rows, wrap, widgets/
     └── app/                    # Composition root & CLI binary
         ├── src/                # main, config, net, runtime
         └── tests/              # proto_integration.rs, tui_e2e.rs
@@ -321,6 +321,8 @@ crates/tui/
 │   ├── lib.rs
 │   ├── app.rs          # The App struct, key dispatch, layout, prompt state
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
+│   ├── rows.rs         # One owner for the panel's geometry
+│   ├── wrap.rs         # Text + width -> the rows it occupies
 │   ├── widgets/
 │   │   ├── chat_list.rs
 │   │   ├── conversation.rs
@@ -334,6 +336,16 @@ crates/tui/
 scroll arithmetic, the paging decision, and the prompt state. `event.rs` exists
 but `key_to_action` is not yet called: `App::handle_key` matches on `KeyEvent`
 directly. That is pre-existing dead code — do not delete it without asking.
+
+`rows.rs` and `wrap.rs` are one answer to "how tall is this message", and the
+panel asks them rather than working it out again: a message is as many rows as
+its text needs at the width the panel gave it, and the viewport, the scrollbar,
+`Ctrl+d`/`Ctrl+u` and the fetch triggers all count those rows. `App` records the
+panel's height and its width in `Cell`s on the way past, because a frame is
+drawn from a shared reference and only the panel knows them. Nothing is cached:
+the layout is rebuilt per frame, because a cache is a second thing to keep in
+step with the window, and that is the failure this arrangement exists to
+prevent.
 
 ### `app`
 
@@ -570,8 +582,14 @@ Working today:
   channels, with unread counts and last-message previews. Selectable only via
   `:chat <id>` — there are no chat-list keys yet.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
-  screenful, `gg` to the first unread, `n` to cycle search matches. Pages load
-  when the cursor comes within `FETCH_MARGIN` (20) messages of either end.
+  screenful, `gg` to the first unread, `n` to cycle search matches. Messages
+  soft-wrap to the panel's width — at whitespace where there is whitespace to
+  break at, and at the panel's edge where there is not — so a message is as many
+  rows as its text needs. Everything that measures the conversation counts those
+  rows rather than messages: the slice, the scrollbar beside it, a page, and the
+  `FETCH_MARGIN` (20) that asks for a page. `[you]`/`[them]` and a reply's quoted
+  target are on the first row of a message, `[sending…]`/`[failed: …]` on the
+  last.
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to leave.
   Reply with `r`, edit with `e`.
 - **Send / edit / delete:** a single message, with a confirmation before
@@ -592,6 +610,10 @@ Not built, and named here so nobody reads the roadmap below as current:
   there; `vim-line` is declared for this and unused.
 - **Yank to the system clipboard** — no register, no OSC 52.
 - **Chat-list navigation** — no `j`/`k` in the list panel.
+- **A column is a character.** The wrap counts characters, so a double-width
+  character or a combining mark is laid out as one column whatever cells the
+  terminal gives it. What it costs is a fact about the font, and the answer
+  needs a display-width table rather than a guess.
 
 The planned shape of the first four is worked out in `~/.opencode/plan/`.
 
