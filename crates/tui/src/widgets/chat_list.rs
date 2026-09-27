@@ -6,7 +6,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
-use crate::app::App;
+use crate::app::{App, Focus};
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let items: Vec<ListItem> = app
@@ -26,11 +26,19 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         .collect();
 
     let title = format!(" Chats ({}) ", app.chats().len());
+    // The focused pane's border is the only thing that says where the keys go,
+    // so the two panes cannot both be drawn as though they had it.
+    let border = if app.focus == Focus::ChatList {
+        app.theme.border_focused
+    } else {
+        app.theme.border
+    };
+
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(app.theme.border_focused)
+                .border_style(border)
                 .title(title),
         )
         .highlight_style(app.theme.selection);

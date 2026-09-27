@@ -49,6 +49,26 @@ const ASSUMED_BODY_WIDTH: u16 = 80;
 /// What the status line shows before anything has happened.
 const IDLE_STATUS: &str = "televim";
 
+/// The word the status line shows while the input line holds the focus.
+///
+/// A constant rather than a label on [`Focus`]: the other two panes are both in
+/// [`Mode::Normal`], and which of them is on show is what the border is for.
+pub const INSERT_LABEL: &str = "INSERT";
+
+/// How long the highlight has to stay put before its conversation is opened.
+///
+/// A reader holding `j` moves the highlight far faster than a page can be
+/// fetched, and opening on every position would fetch every conversation they
+/// scrolled past. Long enough to outlast the gap between two autorepeats of a
+/// held key, short enough that a deliberate choice is not left waiting: the tick
+/// that calls [`App::take_pending_chat`] runs four times a second, so a real
+/// press is open within a third of a second of it.
+///
+/// Public because the caller is the one that has to wait: the number is the
+/// worst-case delay between a reader's keypress and the conversation opening, and
+/// a caller reasoning about that latency needs to be able to read it.
+pub const CHAT_SWITCH_DELAY: Duration = Duration::from_millis(150);
+
 /// How long a transient status stays on the line before it reverts.
 ///
 /// Only things that expire on their own are transient — a send or edit failure,
@@ -138,10 +158,15 @@ pub struct Jump {
     pub target_id: i64,
 }
 
+/// What the conversation on show is in the middle of.
+///
+/// Only the conversation has a mode, because only the conversation can be in the
+/// middle of something: a key means one thing in Normal mode and another in
+/// Visual. The input line is in insert mode for as long as it has the focus,
+/// which is [`Focus`]'s business rather than this enum's — see [`Focus`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
-    Insert,
     Visual,
     Confirm,
 }
@@ -151,11 +176,44 @@ impl Mode {
     pub fn label(self) -> &'static str {
         match self {
             Mode::Normal => "NORMAL",
-            Mode::Insert => "INSERT",
             Mode::Visual => "VISUAL",
             Mode::Confirm => "CONFIRM",
         }
     }
+}
+
+/// Which pane a keystroke goes to.
+///
+/// Focus rather than a mode per pane, because a single mode cannot describe two
+/// things at once: a reader can be selecting messages in the conversation *and*
+/// have a half-written line waiting. One `Mode` for the whole application had to
+/// choose between them, and lost whichever it did not name. So the conversation
+/// owns a [`Mode`], the line owns nothing — being on the line *is* its insert
+/// mode — and this is the only thing that says where a key lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// The list of conversations.
+    ChatList,
+
+    /// The messages of the open conversation, and the selection over them.
+    Conversation,
+
+    /// The line above the status bar.
+    Input,
+}
+
+/// A conversation the reader has highlighted and asked to be taken to.
+///
+/// The index and the moment it was chosen, rather than the index alone: the
+/// caller that owns the network opens this once the movement has stopped, and
+/// deciding that needs to know how long ago the highlight last moved.
+#[derive(Debug, Clone, Copy)]
+struct ChatChoice {
+    /// Where in the list the highlight is.
+    index: usize,
+
+    /// When it got there.
+    at: Instant,
 }
 
 /// What the input bar represents when in Insert mode.
@@ -290,6 +348,7 @@ impl Fetching {
 
 pub struct App {
     pub mode: Mode,
+    pub focus: Focus,
     pub prompt: PromptKind,
     pub theme: Theme,
 
@@ -368,6 +427,22 @@ pub struct App {
     /// already on its way.
     pending_jump: Option<Jump>,
 
+    /// The conversation the highlight has moved onto but has not been taken to.
+    ///
+    /// The same hand-over as [`App::pending_jump`] — recorded here because
+    /// `tui` cannot reach the network — and for the same reason it carries a
+    /// time: a reader holding `j` would otherwise fetch every conversation they
+    /// scrolled past, and one page per chat as fast as a key repeats is how a
+    /// scroll through the list becomes a flood wait.
+    pending_chat: Option<ChatChoice>,
+
+    /// Whether a `g` was just pressed in the chat list and a second one would
+    /// take the reader to the top of it.
+    ///
+    /// The same latch as `dd` and for the same reason: `gg` is two presses in
+    /// Vim, and a key held down is not two of them.
+    pending_g: bool,
+
     /// How many message rows the conversation panel had room for as of the last
     /// frame.
     ///
@@ -403,6 +478,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             mode: Mode::Normal,
+            focus: Focus::Conversation,
             prompt: PromptKind::Message,
             theme: Theme::default(),
             list: ChatList::default(),
@@ -422,6 +498,8 @@ impl App {
             status_until: None,
             fetching: Fetching::default(),
             pending_jump: None,
+            pending_chat: None,
+            pending_g: false,
             rows: Cell::new(ASSUMED_ROWS),
             body_width: Cell::new(ASSUMED_BODY_WIDTH),
         }
@@ -511,6 +589,43 @@ impl App {
 
     // ---- what is on show ------------------------------------------------
 
+    /// Moves the highlight to `index` in the chat list, and asks for the
+    /// conversation it names to be taken to.
+    ///
+    /// The highlight moves at once and the open is recorded rather than made,
+    /// because a reader who holds `j` would otherwise have every conversation
+    /// they passed fetched. What the reader sees follows their key; what the
+    /// network is asked for waits for them to stop.
+    ///
+    /// An index outside the list moves nothing.
+    fn choose_chat(&mut self, index: usize) {
+        if self.list.chats.get(index).is_none() {
+            return;
+        }
+
+        self.selected_chat = index;
+        self.pending_chat = Some(ChatChoice {
+            index,
+            at: Instant::now(),
+        });
+    }
+
+    /// The conversation the reader has stopped on, once they have stopped.
+    ///
+    /// Nothing while they are still moving, so a held key opens the chat they
+    /// land on rather than every one between here and there. Idempotent in the
+    /// way [`App::pending_jump`] is: once handed over it is forgotten, so a
+    /// caller that asks twice gets one conversation.
+    pub fn take_pending_chat(&mut self, now: Instant) -> Option<usize> {
+        let choice = self.pending_chat?;
+        if now.saturating_duration_since(choice.at) < CHAT_SWITCH_DELAY {
+            return None;
+        }
+
+        self.pending_chat = None;
+        Some(choice.index)
+    }
+
     /// Opens the conversation at `index` in the chat list.
     ///
     /// The window is replaced rather than extended: it holds one conversation,
@@ -526,6 +641,7 @@ impl App {
         let chat_id = chat.id;
 
         self.selected_chat = index;
+        self.pending_chat = None;
         self.select_chat_none();
         // The new view starts its placeholder ids at the bottom again, so an
         // identifier the old view handed out can be handed out once more. That is
@@ -1060,6 +1176,46 @@ impl App {
 
     // ---- key handling --------------------------------------------------
 
+    /// Puts the focus somewhere, leaving whatever the pane it came from was in.
+    ///
+    /// Visual mode belongs to the conversation and names messages in it, so
+    /// leaving the conversation drops the selection and returns the mode to
+    /// Normal. A selection for a conversation nobody is looking at would leave
+    /// `d` holding something the reader cannot see.
+    fn set_focus(&mut self, focus: Focus) {
+        if focus != Focus::Conversation {
+            self.mode = Mode::Normal;
+        }
+        self.focus = focus;
+    }
+
+    /// Moves the focus one pane on, in the direction given, wrapping.
+    ///
+    /// The order is the order the panes are drawn in, so `Tab` walks the screen
+    /// rather than an arbitrary list of them.
+    fn cycle_focus(&mut self, forward: bool) {
+        const PANES: [Focus; 3] = [Focus::ChatList, Focus::Conversation, Focus::Input];
+        let step = if forward { 1 } else { PANES.len() - 1 };
+
+        let at = PANES
+            .iter()
+            .position(|pane| *pane == self.focus)
+            .unwrap_or(0);
+
+        self.set_focus(PANES[(at + step) % PANES.len()]);
+    }
+
+    /// Leaves the input line for the conversation, keeping what was typed.
+    ///
+    /// `Ctrl+w` is Vim's other idiom for this, and the one to bind for a reader
+    /// stepping between panes: `Esc` is the destructive way back, because `Esc`
+    /// in Vim abandons what is being composed. This one only looks away.
+    fn leave_line(&mut self) {
+        if self.focus == Focus::Input {
+            self.set_focus(Focus::Conversation);
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) {
         // Ctrl-C always quits.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -1067,11 +1223,91 @@ impl App {
             return;
         }
 
-        match self.mode {
-            Mode::Normal => self.handle_normal(key),
-            Mode::Insert => self.handle_insert(key),
-            Mode::Visual => self.handle_visual(key),
-            Mode::Confirm => self.handle_confirm(key),
+        // A confirmation is a question about the whole screen rather than about
+        // a pane, so it outranks the focus: it has to be answered before another
+        // key is addressed anywhere.
+        if self.mode == Mode::Confirm {
+            self.handle_confirm(key);
+            return;
+        }
+
+        // Pane movement is the one thing every pane answers the same way, so it
+        // is read here rather than bound in each of them.
+        match key.code {
+            KeyCode::Tab => {
+                self.cycle_focus(true);
+                return;
+            }
+            KeyCode::BackTab => {
+                self.cycle_focus(false);
+                return;
+            }
+            _ if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('w') =>
+            {
+                self.leave_line();
+                return;
+            }
+            _ => {}
+        }
+
+        match self.focus {
+            Focus::ChatList => self.handle_chat_list(key),
+            Focus::Conversation => match self.mode {
+                Mode::Normal => self.handle_normal(key),
+                Mode::Visual => self.handle_visual(key),
+                Mode::Confirm => self.handle_confirm(key),
+            },
+            Focus::Input => self.handle_line(key),
+        }
+    }
+
+    /// Handles a key while the chat list has the focus.
+    ///
+    /// `j`, `k`, `gg` and `G` move the highlight and record the conversation it
+    /// now names; `Enter` opens it at once, because a reader who presses it is
+    /// not going to press anything else. `h` and `l` are the pane movement, and
+    /// both mean the same thing from here: the conversation is the only pane
+    /// beside this one, so there is nothing for the two of them to choose
+    /// between.
+    fn handle_chat_list(&mut self, key: KeyEvent) {
+        let here = self.selected_chat;
+        let last = self.list.chats.len().saturating_sub(1);
+
+        match key.code {
+            // The list is the only pane beside this one, so both keys are the
+            // way into it.
+            KeyCode::Char('h' | 'l') => self.set_focus(Focus::Conversation),
+
+            KeyCode::Char('j') => {
+                self.pending_g = false;
+                self.choose_chat(here.saturating_add(1).min(last));
+            }
+            KeyCode::Char('k') => {
+                self.pending_g = false;
+                self.choose_chat(here.saturating_sub(1));
+            }
+            KeyCode::Char('g') => {
+                if std::mem::take(&mut self.pending_g) {
+                    self.choose_chat(0);
+                } else {
+                    self.pending_g = true;
+                }
+            }
+            KeyCode::Char('G') => {
+                self.pending_g = false;
+                self.choose_chat(last);
+            }
+
+            KeyCode::Enter => {
+                self.pending_g = false;
+                self.select_chat(here);
+                self.set_focus(Focus::Conversation);
+            }
+
+            // Any other key ends the sequence, so a lone `g` does not become a
+            // jump to the top the next time one is pressed.
+            _ => self.pending_g = false,
         }
     }
 
@@ -1144,15 +1380,22 @@ impl App {
                 self.mode = Mode::Visual;
                 self.status = "VISUAL: d=delete y=yank r=reply (stubs)".into();
             }
+            // The list is beside the conversation, so `h` is how the reader gets
+            // to it. `l` has nothing to move to from here and is left unbound
+            // rather than made to wrap.
+            KeyCode::Char('h') => {
+                self.pending_d = false;
+                self.set_focus(Focus::ChatList);
+            }
             KeyCode::Char('/') => {
                 self.pending_d = false;
-                self.mode = Mode::Insert;
+                self.focus = Focus::Input;
                 self.prompt = PromptKind::Search;
                 self.input.clear();
             }
             KeyCode::Char(':') => {
                 self.pending_d = false;
-                self.mode = Mode::Insert;
+                self.focus = Focus::Input;
                 self.prompt = PromptKind::Command;
                 self.input.clear();
             }
@@ -1167,7 +1410,7 @@ impl App {
 
     /// Opens the buffer for a new message, with no reply and no edit.
     fn start_compose(&mut self) {
-        self.mode = Mode::Insert;
+        self.focus = Focus::Input;
         self.prompt = PromptKind::Message;
         self.reply_to = None;
         self.editing = None;
@@ -1183,7 +1426,7 @@ impl App {
             return;
         };
 
-        self.mode = Mode::Insert;
+        self.focus = Focus::Input;
         self.prompt = PromptKind::Reply;
         self.reply_to = Some(id);
         self.editing = None;
@@ -1213,7 +1456,7 @@ impl App {
         let text = message.text.to_string();
         let id = message.id;
 
-        self.mode = Mode::Insert;
+        self.focus = Focus::Input;
         self.prompt = PromptKind::Edit;
         self.editing = Some(id);
         self.reply_to = None;
@@ -1332,10 +1575,12 @@ impl App {
         self.settle_follow();
     }
 
-    fn handle_insert(&mut self, key: KeyEvent) {
+    fn handle_line(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                // The destructive way back: `Esc` in Vim abandons what is being
+                // composed, and so does this. `Ctrl+w` is the one that keeps it.
+                self.focus = Focus::Conversation;
                 self.prompt = PromptKind::Message;
                 self.input.clear();
                 self.reply_to = None;
@@ -1380,11 +1625,12 @@ impl App {
         }
     }
 
-    /// Handles `Enter` in Insert mode.
+    /// Handles `Enter` in the input line.
     ///
     /// Which prompt it is decides what is handed over; the buffer and the reply
     /// context are cleared either way, because the work leaves here rather than
-    /// happening here.
+    /// happening here. The focus goes back to the conversation for the same
+    /// reason: the line has given up what it was for.
     fn submit(&mut self) {
         match self.prompt {
             PromptKind::Message | PromptKind::Reply => self.submit_message(),
@@ -1401,7 +1647,7 @@ impl App {
             }
         }
 
-        self.mode = Mode::Normal;
+        self.focus = Focus::Conversation;
         self.prompt = PromptKind::Message;
         self.reply_to = None;
         self.editing = None;
@@ -2131,7 +2377,7 @@ mod tests {
     fn entering_insert_mode_then_typing_records_every_key() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('i')));
-        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(app.focus, Focus::Input);
 
         type_text(&mut app, "hello");
         assert_eq!(app.input, "hello");
@@ -2144,7 +2390,7 @@ mod tests {
         type_text(&mut app, "hi");
         app.handle_key(press(KeyCode::Esc));
 
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.focus, Focus::Conversation);
         assert!(app.input.is_empty());
     }
 
@@ -2251,6 +2497,248 @@ mod tests {
             "the two edits must be distinct operations, not one twice"
         );
         assert_eq!(app.take_action(), None, "and the queue is drained");
+    }
+
+    // ---- focus and the panes --------------------------------------------
+
+    /// The sample data, with the focus on the chat list.
+    fn on_the_chat_list() -> App {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('h')));
+        app
+    }
+
+    #[test]
+    fn a_new_application_has_the_conversation_focused() {
+        assert_eq!(App::new().focus, Focus::Conversation);
+    }
+
+    #[test]
+    fn h_leaves_the_conversation_for_the_chat_list_and_l_comes_back() {
+        let mut app = App::mock();
+        assert_eq!(app.focus, Focus::Conversation);
+
+        app.handle_key(press(KeyCode::Char('h')));
+        assert_eq!(app.focus, Focus::ChatList);
+
+        // The conversation's own motions are not the list's: `k` up there moved
+        // the cursor, and here it moves the highlight.
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(app.selected_chat, 0);
+        assert_eq!(reading(&app), Some(10), "the cursor did not move");
+
+        app.handle_key(press(KeyCode::Char('l')));
+        assert_eq!(app.focus, Focus::Conversation);
+    }
+
+    #[test]
+    fn tab_walks_the_panes_in_the_order_they_are_drawn_and_wraps() {
+        let mut app = App::mock();
+
+        let mut seen = vec![app.focus];
+        for _ in 0..3 {
+            app.handle_key(press(KeyCode::Tab));
+            seen.push(app.focus);
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                Focus::Conversation,
+                Focus::Input,
+                Focus::ChatList,
+                Focus::Conversation
+            ],
+            "one full turn of Tab is back where it started"
+        );
+    }
+
+    #[test]
+    fn backtab_walks_the_other_way() {
+        let mut app = App::mock();
+
+        app.handle_key(press(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::ChatList);
+
+        app.handle_key(press(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::Input);
+    }
+
+    /// `Esc` abandons the line and `Ctrl+w` only looks away from it, because a
+    /// reader stepping between panes should not lose a half-written sentence.
+    #[test]
+    fn ctrl_w_leaves_the_line_keeping_what_was_typed() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "half a th");
+
+        app.handle_key(press_ctrl('w'));
+
+        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.input, "half a th", "the line is not thrown away");
+
+        // And it is still there to come back to, rather than lost.
+        app.handle_key(press(KeyCode::Tab));
+        assert_eq!(app.input, "half a th");
+    }
+
+    #[test]
+    fn ctrl_w_outside_the_line_does_nothing() {
+        let mut app = App::mock();
+
+        app.handle_key(press_ctrl('w'));
+
+        assert_eq!(app.focus, Focus::Conversation);
+    }
+
+    /// A selection belongs to the conversation, so a pane that is not the
+    /// conversation cannot be entered over the top of one.
+    #[test]
+    fn leaving_the_conversation_drops_a_visual_selection() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('v')));
+        assert_eq!(app.mode, Mode::Visual);
+
+        app.handle_key(press(KeyCode::Tab));
+
+        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn the_chat_list_highlight_moves_and_stops_at_both_ends() {
+        let mut app = on_the_chat_list();
+
+        app.handle_key(press(KeyCode::Char('j')));
+        assert_eq!(app.selected_chat, 1);
+        app.handle_key(press(KeyCode::Char('j')));
+        assert_eq!(app.selected_chat, 2);
+        app.handle_key(press(KeyCode::Char('j')));
+        assert_eq!(app.selected_chat, 2, "and clamps at the end");
+
+        app.handle_key(press(KeyCode::Char('k')));
+        app.handle_key(press(KeyCode::Char('k')));
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(app.selected_chat, 0, "and at the start");
+    }
+
+    /// A moment long enough after any keystroke this test could have pressed for
+    /// the highlight to have settled.
+    fn settled() -> Instant {
+        Instant::now() + CHAT_SWITCH_DELAY
+    }
+
+    /// Moving the highlight asks for the conversation it names, but not before
+    /// the reader has stopped: a held `j` would otherwise fetch every chat it
+    /// scrolled past.
+    #[test]
+    fn a_moving_highlight_waits_for_the_reader_to_stop() {
+        let mut app = on_the_chat_list();
+
+        app.handle_key(press(KeyCode::Char('j')));
+        assert!(
+            app.take_pending_chat(Instant::now()).is_none(),
+            "nothing is asked for while the key is still moving"
+        );
+
+        app.handle_key(press(KeyCode::Char('j')));
+        assert_eq!(
+            app.selected_chat, 2,
+            "the highlight follows the key at once"
+        );
+
+        assert_eq!(
+            app.take_pending_chat(settled()),
+            Some(2),
+            "and the conversation it landed on is asked for once it settles"
+        );
+        assert_eq!(
+            app.take_pending_chat(settled()),
+            None,
+            "taken once, like every other hand-over"
+        );
+    }
+
+    #[test]
+    fn a_debounce_elapsed_but_the_highlight_moving_again_defers_the_open() {
+        let mut app = on_the_chat_list();
+
+        app.handle_key(press(KeyCode::Char('j')));
+        let settled = settled();
+        assert_eq!(app.take_pending_chat(settled), Some(1));
+
+        app.handle_key(press(KeyCode::Char('j')));
+        assert_eq!(
+            app.take_pending_chat(settled),
+            None,
+            "the second press restarts the wait rather than slipping through it"
+        );
+    }
+
+    #[test]
+    fn gg_and_g_reach_both_ends_of_the_chat_list() {
+        let mut app = on_the_chat_list();
+
+        app.handle_key(press(KeyCode::Char('G')));
+        assert_eq!(app.selected_chat, 2);
+        assert_eq!(app.take_pending_chat(settled()), Some(2));
+
+        app.handle_key(press(KeyCode::Char('g')));
+        app.handle_key(press(KeyCode::Char('g')));
+        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.take_pending_chat(settled()), Some(0));
+    }
+
+    /// A lone `g` is a key with no meaning of its own, so it must not still be
+    /// waiting to be the first half of a `gg` several keys later.
+    #[test]
+    fn a_lone_g_does_not_wait_to_be_the_first_half_of_gg() {
+        let mut app = on_the_chat_list();
+
+        app.handle_key(press(KeyCode::Char('G')));
+        app.handle_key(press(KeyCode::Char('g')));
+        app.handle_key(press(KeyCode::Char('x')));
+        app.handle_key(press(KeyCode::Char('g')));
+        assert_eq!(
+            app.selected_chat, 2,
+            "the `g` after the `x` starts a sequence rather than finishing one"
+        );
+
+        app.handle_key(press(KeyCode::Char('g')));
+        assert_eq!(app.selected_chat, 0);
+    }
+
+    /// `Enter` is a reader saying "this one", not a movement, so it opens at once
+    /// and takes the focus to the messages.
+    #[test]
+    fn enter_in_the_chat_list_opens_it_and_moves_to_the_conversation() {
+        let mut app = on_the_chat_list();
+        app.handle_key(press(KeyCode::Char('j')));
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.conversation.window.chat_id, 2);
+        assert_eq!(app.selected_chat, 1);
+        assert_eq!(
+            app.take_pending_chat(settled()),
+            None,
+            "and there is nothing left to open afterwards"
+        );
+    }
+
+    /// A movement in one pane must not answer for the other: the sample
+    /// conversation's `k` walks messages, and the list's walks conversations.
+    #[test]
+    fn a_pane_only_answers_for_itself() {
+        let mut app = on_the_chat_list();
+
+        app.handle_key(press(KeyCode::Char('g')));
+        assert_eq!(
+            app.selected_chat, 0,
+            "`gg` in the list, not the top of a window"
+        );
+        assert_eq!(app.conversation.window.chat_id, MOCK_CHAT);
     }
 
     // ---- dd and the confirm --------------------------------------------
@@ -2417,7 +2905,7 @@ mod tests {
         assert_eq!(reading(&app), Some(9));
 
         app.handle_key(press(KeyCode::Char('r')));
-        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(app.focus, Focus::Input);
         assert_eq!(app.prompt, PromptKind::Reply);
         assert_eq!(app.reply_to, Some(9));
 
@@ -2442,7 +2930,7 @@ mod tests {
         assert_eq!(reading(&app), Some(9), "an outgoing message");
 
         app.handle_key(press(KeyCode::Char('e')));
-        assert_eq!(app.mode, Mode::Insert);
+        assert_eq!(app.focus, Focus::Input);
         assert_eq!(app.prompt, PromptKind::Edit);
         assert_eq!(app.editing, Some(9));
         assert!(

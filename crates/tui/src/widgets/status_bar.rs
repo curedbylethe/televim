@@ -5,14 +5,20 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app::{App, Mode};
+use crate::app::{App, Focus, INSERT_LABEL, Mode};
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
-    let (label, style) = match app.mode {
-        Mode::Normal => (Mode::Normal.label(), app.theme.mode_normal),
-        Mode::Insert => (Mode::Insert.label(), app.theme.mode_insert),
-        Mode::Visual => (Mode::Visual.label(), app.theme.mode_visual),
-        Mode::Confirm => (Mode::Confirm.label(), app.theme.mode_confirm),
+    // The label is the mode, and the mode belongs to the conversation — except
+    // that having the line at all is its insert mode, and a confirmation is a
+    // question about the whole screen. Which *pane* has the focus is the
+    // border's to say, not this row's.
+    let (label, style) = match (app.focus, app.mode) {
+        (_, Mode::Visual) => (Mode::Visual.label(), app.theme.mode_visual),
+        (_, Mode::Confirm) => (Mode::Confirm.label(), app.theme.mode_confirm),
+        (Focus::Input, _) => (INSERT_LABEL, app.theme.mode_insert),
+        (Focus::ChatList, _) | (Focus::Conversation, Mode::Normal) => {
+            (Mode::Normal.label(), app.theme.mode_normal)
+        }
     };
 
     let line = Line::from(vec![

@@ -333,9 +333,16 @@ crates/tui/
 ```
 
 `app.rs` is the largest file in the workspace and holds the key dispatch, the
-scroll arithmetic, the paging decision, and the prompt state. `event.rs` exists
-but `key_to_action` is not yet called: `App::handle_key` matches on `KeyEvent`
-directly. That is pre-existing dead code — do not delete it without asking.
+scroll arithmetic, the paging decision, and the prompt state. Key dispatch is
+`Focus` first and `Mode` second: the conversation owns a mode (Normal, Visual,
+Confirm) and the input line owns none — having the line at all is its insert mode
+— because one enum cannot describe a conversation being selected in *and* a
+half-written line waiting. `Tab` and `BackTab` walk the panes in the order they
+are drawn, `h`/`l` step between the two panes, `Ctrl+w` leaves the line without
+throwing it away, and the focused pane's block is drawn in
+`Theme::border_focused`. `event.rs` exists but `key_to_action` is not yet called:
+`App::handle_key` matches on `KeyEvent` directly. That is pre-existing dead code —
+do not delete it without asking.
 
 `rows.rs` and `wrap.rs` are one answer to "how tall is this message", and the
 panel asks them rather than working it out again: a message is as many rows as
@@ -579,8 +586,13 @@ Working today:
 - **Authentication:** MTProto login with 2FA, session stored in the OS keyring
   (or a file, per `session_path`).
 - **Chat List:** private chats only, filtered to exclude bots, groups and
-  channels, with unread counts and last-message previews. Selectable only via
-  `:chat <id>` — there are no chat-list keys yet.
+  channels, with unread counts and last-message previews. `j`/`k` move the
+  highlight, `gg`/`G` reach both ends, and `Enter` opens the highlighted
+  conversation. `:chat <id>` still works. Moving the highlight opens the
+  conversation it lands on, once the reader has stopped moving — a held key would
+  otherwise fetch every chat it scrolled past. The focused pane's border is
+  drawn in `Theme::border_focused`; `h`/`l` and `Tab` move between the two panes,
+  and `Ctrl+w` steps back out of the line.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
   screenful, `gg` to the first unread, `n` to cycle search matches. Messages
   soft-wrap to the panel's width — at whitespace where there is whitespace to
@@ -605,11 +617,12 @@ Not built, and named here so nobody reads the roadmap below as current:
   equivalents are not bound either.
 - **`:w`** — not a command. The only commands are `q`, `quit` and `chat <id>`.
 - **Multi-line input** — the line is one row, append-only, with a fake `█`
-  caret pinned to the end. `Esc` clears it.
+  caret pinned to the end. `Esc` clears it and `Ctrl+w` keeps it, but the bar
+  shows the Normal-mode hint rather than a dimmed draft, so a kept line is only
+  reachable with `Tab`.
 - **Vim motions inside the input** — none. `w`, `b`, `f`, `0`, `$` do not exist
   there; `vim-line` is declared for this and unused.
 - **Yank to the system clipboard** — no register, no OSC 52.
-- **Chat-list navigation** — no `j`/`k` in the list panel.
 - **A column is a character.** The wrap counts characters, so a double-width
   character or a combining mark is laid out as one column whatever cells the
   terminal gives it. What it costs is a fact about the font, and the answer
@@ -656,7 +669,7 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
 Real, and named so they are not mistaken for oversights:
 
 - **Visual mode is a stub.** `v` enters it; `handle_visual` returns to Normal.
-- **The input line has no vim controls, no multi-line, and `Esc` discards it.**
+- **The input line has no vim controls, no multi-line, and no drafts.**
   `vim-line` is declared for exactly this and is not yet wired up.
 - **A feed dropped without `finish` persists a stale update position.** See
   **Key Decisions**.

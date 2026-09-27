@@ -20,7 +20,7 @@ use ratatui::widgets::{
 
 use domain::message::Message;
 
-use crate::app::{App, FetchDirection, JUMP_LABEL};
+use crate::app::{App, FetchDirection, Focus, JUMP_LABEL};
 use crate::rows;
 
 /// How many columns the messages keep for themselves before a scrollbar is
@@ -31,9 +31,18 @@ use crate::rows;
 const MIN_BODY_WIDTH: u16 = 8;
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
+    // The focused pane's border is the only thing on the screen that says where
+    // a keystroke goes, so the two panes cannot both be drawn as though they had
+    // it.
+    let border = if app.focus == Focus::Conversation {
+        app.theme.border_focused
+    } else {
+        app.theme.border
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(app.theme.border)
+        .border_style(border)
         .title(conversation_title(app));
 
     // Drawn apart from the list so that the bar can have a column of its own
@@ -256,6 +265,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
+    use ratatui::style::Color;
 
     fn area(width: u16, height: u16) -> Rect {
         Rect {
@@ -1061,6 +1071,48 @@ mod tests {
             row(&screen, 0).contains("1 match(es)"),
             "the title carries what the search found: {}",
             row(&screen, 0)
+        );
+    }
+
+    // ---- where the keys go ----------------------------------------------
+
+    /// Which of the three borders is drawn focused, given where the focus is.
+    ///
+    /// The border is the only thing on the screen that says which pane a
+    /// keystroke goes to, so two panes drawn alike would be two panes the reader
+    /// has to guess between. Read off the screen rather than off the widget,
+    /// because a border styled correctly and drawn everywhere is still a border
+    /// that says nothing.
+    fn lit_borders(focus: crate::app::Focus) -> [bool; 3] {
+        let mut app = App::mock();
+        app.focus = focus;
+        let screen = screen(&app, 80, 24);
+
+        [
+            // The chat list's top-left corner, the conversation's, and the input
+            // bar's. The bar is the full width of the frame and sits below the
+            // two panes, so its corner is at the frame's own left edge.
+            (0, 0),
+            (24, 0),
+            (0, 20),
+        ]
+        .map(|(x, y)| cell(&screen, x, y).fg == Color::Cyan)
+    }
+
+    #[test]
+    fn the_focused_pane_is_the_one_with_the_focused_border() {
+        use crate::app::Focus;
+
+        assert_eq!(
+            lit_borders(Focus::Conversation),
+            [false, true, false],
+            "the conversation is on show, so the conversation is lit"
+        );
+        assert_eq!(lit_borders(Focus::ChatList), [true, false, false]);
+        assert_eq!(
+            lit_borders(Focus::Input),
+            [false, false, true],
+            "the bar is not a pane that takes the focus visually, it is the focus"
         );
     }
 }

@@ -391,6 +391,15 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         state.history.jump = None;
     }
 
+    // A conversation the reader has highlighted and stopped on. Taken before the
+    // client is looked up, because opening a conversation is what asks for its
+    // newest page, and the two have to happen on the same pass or the window is
+    // replaced and then asked about a quarter of a second later.
+    if let Some(index) = app.take_pending_chat(Instant::now()) {
+        app.select_chat(index);
+        state.history.cursor = None;
+    }
+
     let Some(client) = state.client.clone() else {
         return;
     };
@@ -939,6 +948,7 @@ mod tests {
     use domain::message::MessageStatus;
 
     use super::*;
+    use tui::app::CHAT_SWITCH_DELAY;
 
     /// The conversation the sample messages belong to.
     const CHAT: i64 = 7;
@@ -1213,6 +1223,46 @@ mod tests {
 
         assert!(app.chats().is_empty());
         assert_eq!(app.conversation.window.chat_id, 0);
+    }
+
+    /// The highlight moves on the keystroke, but the conversation it names is
+    /// opened by the driver once the reader has stopped — and opening it has to
+    /// forget the cursor, or the new conversation would be described by the old
+    /// one's history and its first page would never be asked for.
+    #[test]
+    fn the_driver_opens_the_conversation_the_reader_stopped_on() {
+        let mut app = app_with_unread_out_of_reach(2);
+        let mut state = State {
+            client: None,
+            history: opened(CHAT),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Off the chat list, onto the second conversation.
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+        drive(&mut app, &mut state, &tx);
+        assert_eq!(
+            app.conversation.window.chat_id, CHAT,
+            "the highlight has moved but the reader has not stopped"
+        );
+
+        std::thread::sleep(CHAT_SWITCH_DELAY);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(app.conversation.window.chat_id, CHAT + 1);
+        assert!(
+            state.history.cursor.is_none(),
+            "the old cursor is forgotten"
+        );
+
+        drive(&mut app, &mut state, &tx);
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Latest(CHAT + 1),
+            "so the new conversation's first page is asked for on the next pass"
+        );
     }
 
     // ---- what arrives ---------------------------------------------------
