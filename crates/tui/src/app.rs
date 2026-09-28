@@ -2011,6 +2011,7 @@ impl App {
             LineVerdict::Submit => self.submit(),
             LineVerdict::LeftEditing => self.leave_line(),
             LineVerdict::TooLong => self.flash("message is too long"),
+            LineVerdict::Refused => self.flash("that motion on non-ASCII text is not built yet"),
             LineVerdict::Edited | LineVerdict::Ignored => {}
         }
 
@@ -4250,6 +4251,49 @@ mod tests {
             "the whole of the register, which is what a yank is for"
         );
         assert_eq!(app.take_clipboard(), None, "and it is gone once taken");
+    }
+
+    /// A yank in the line is a yank: the line's `y` fills the same slot the
+    /// conversation's does, and the caller that owns the terminal drains it the
+    /// same way. One seam, two producers.
+    #[test]
+    fn a_yank_in_the_line_is_offered_to_the_clipboard_and_taken_once() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "héllo");
+        app.handle_key(press(KeyCode::Esc));
+        app.handle_key(press(KeyCode::Char('0')));
+        app.handle_key(press(KeyCode::Char('v')));
+        app.handle_key(press(KeyCode::Char('l')));
+        app.handle_key(press(KeyCode::Char('l')));
+        app.handle_key(press(KeyCode::Char('y')));
+
+        assert_eq!(
+            app.take_clipboard().as_deref(),
+            Some("hél"),
+            "the line's yank, multi-byte characters and all"
+        );
+        assert_eq!(app.take_clipboard(), None, "and it is drained once");
+    }
+
+    /// A word motion on multi-byte text would land inside a character, so the
+    /// line refuses it rather than running it — and says so, because a key that
+    /// does nothing and says nothing reads as a hang.
+    #[test]
+    fn a_word_motion_on_non_ascii_text_is_refused_and_says_so() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "héllo wörld");
+        app.handle_key(press(KeyCode::Esc));
+
+        app.handle_key(press(KeyCode::Char('w')));
+
+        assert_eq!(app.line.text(), "héllo wörld", "nothing ran");
+        assert!(
+            app.status.contains("not built yet"),
+            "and the refusal says so: {:?}",
+            app.status
+        );
     }
 
     /// The register is the half that always works; the clipboard is a courtesy

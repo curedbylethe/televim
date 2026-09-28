@@ -349,6 +349,39 @@ mod tests {
         );
     }
 
+    /// Line yanks carry whatever the reader typed, which is multi-byte text as
+    /// often as not — conversation yanks are mostly ASCII. The cut is at a
+    /// character boundary, so what is encoded must decode to the start of the
+    /// yank rather than to half a character.
+    #[test]
+    fn a_multibyte_yank_encodes_to_its_own_start() {
+        use base64::Engine as _;
+
+        let budget = CLIPBOARD_BUDGET / 4 * 3;
+        let too_large = "héllo wörld 😀".repeat(budget);
+
+        let cut = clipboard_text(&too_large);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&cut);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("it just encoded");
+
+        assert!(
+            encoded.len() <= CLIPBOARD_BUDGET,
+            "the sequence is {} bytes of a budget of {CLIPBOARD_BUDGET}",
+            encoded.len()
+        );
+        assert_eq!(
+            String::from_utf8(decoded).expect("a boundary cut decodes to text"),
+            cut,
+            "and it is the yank's start, whole characters only"
+        );
+        assert!(
+            too_large.starts_with(&cut),
+            "cut from the front, not the middle"
+        );
+    }
+
     // ---- the keyboard protocol ------------------------------------------
 
     /// A writer that hands what it is given to whoever is holding the cell, so a

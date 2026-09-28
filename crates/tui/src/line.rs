@@ -45,6 +45,22 @@
 //!   survives a submit. The conversation's register is a different thing and
 //!   does not survive a conversation change; see `crate::app::Register`.
 //!
+//! And one defect, found by feeding the wrapper multi-byte text the way a
+//! French reader would: **the crate's word motions index bytes, not
+//! characters.** `w` from the start of `"héllo wörld"` lands on byte 1, which
+//! is inside the `é`, and a visual selection is `cursor + 1`, so `v w d` asks
+//! to slice `text[0..2]` — half a character. With `panic = "abort"` that is the
+//! end of the process, and `hello`, `Esc`, `v`, `d` reached the same place on
+//! ASCII-free text before the wrapper clamped. `Up`/`Down` share the defect by
+//! a different road: the column they carry between lines is counted in bytes.
+//!
+//! The wrapper therefore never trusts a position it did not snap itself: the
+//! cursor is snapped to a character boundary before and after every key, the
+//! caret and the selection the rest of the program reads are snapped views,
+//! visual operators are applied here rather than handed over, and a word motion
+//! — or a vertical one behind an operator — on non-ASCII text is refused
+//! rather than run. See [`LineEditor::feed`].
+//!
 //! ## The wrapper
 //!
 //! [`LineEditor`] rather than a bare `VimLineEditor` for four reasons, each of
@@ -103,6 +119,14 @@ pub enum LineVerdict {
     /// pressed a key that did nothing and is owed the reason, which the
     /// conversation's own cap already said before this existed.
     TooLong,
+
+    /// The key was refused because running it would split a character.
+    ///
+    /// Its own verdict rather than [`LineVerdict::Ignored`] for the same reason
+    /// [`LineVerdict::TooLong`] exists: a key that did nothing and says nothing
+    /// reads as a hang. The reader pressed a motion the editor cannot run on
+    /// this text, and is owed the sentence.
+    Refused,
 
     /// Submit the line for its purpose.
     Submit,
@@ -288,22 +312,32 @@ impl LineEditor {
 
     /// The caret, as a byte offset into [`LineEditor::text`].
     ///
-    /// Always at a character boundary and never past the end, because the
-    /// library clamps and snaps it on every key and a caret a caller cannot
-    /// index with is not a caret.
+    /// Always at a character boundary and never past the end. The library does
+    /// not promise this — its word motions land inside multi-byte characters —
+    /// so the wrapper snaps rather than reports: a caret a caller cannot index
+    /// with is not a caret.
     #[must_use]
     pub fn caret(&self) -> usize {
-        self.editor.cursor().min(self.text.len())
+        snap_down(&self.text, self.editor.cursor().min(self.text.len()))
     }
 
     /// The characters the line's visual mode has selected, as a byte range.
     ///
     /// The same `Option<Range<usize>>` shape the conversation's selection has,
     /// and for the same reason: the bar draws it and the operations act on it,
-    /// and one answer is what stops those two disagreeing.
+    /// and one answer is what stops those two disagreeing. Snapped for the same
+    /// reason the caret is — the library computes a selection as `cursor + 1`,
+    /// which is one byte past a multi-byte character's first byte — and shrunk
+    /// rather than grown, so that operating on it can only ever touch whole
+    /// characters.
     #[must_use]
     pub fn selection(&self) -> Option<Range<usize>> {
-        self.editor.selection()
+        self.editor.selection().map(|range| {
+            let start = snap_down(&self.text, range.start.min(self.text.len()));
+            let end = snap_down(&self.text, range.end.min(self.text.len()));
+
+            start..end.max(start)
+        })
     }
 
     /// The line's own mode, for the input bar to name.
@@ -372,10 +406,20 @@ impl LineEditor {
     /// as working "where supported", and the alternative — a bare `Enter`
     /// inserting a newline and something else sending — trades a rare surprise
     /// for a constant one. Do not "fix" it that way.
+    ///
+    /// **The other limitation is a crash wearing a motion's clothes.** The
+    /// library's word motions index bytes rather than characters, so on
+    /// multi-byte text they land inside a character — and anything that then
+    /// slices there takes the process down with it, because this binary sets
+    /// `panic = "abort"`. The wrapper therefore snaps the cursor to a boundary
+    /// before and after every key, applies visual operators itself over a
+    /// snapped range, and refuses a word motion — or a vertical one behind an
+    /// operator — on non-ASCII text outright. A refused key says so
+    /// ([`LineVerdict::Refused`]) and changes nothing, not even the pending
+    /// operator: the reader can follow it with a motion that is safe.
     pub fn feed(&mut self, key: KeyEvent) -> LineVerdict {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-
         // The line feed, under either name a terminal can be relied on to
         // deliver: `Ctrl+J` arrives as a control character and, under the
         // disambiguation protocol, `Shift+Enter` arrives as `Enter` with shift
@@ -400,6 +444,19 @@ impl LineEditor {
             return LineVerdict::Ignored;
         };
 
+        // The library reads `text[..cursor]` itself on some motions, so a cursor
+        // left off a boundary by the previous key would panic it before this one
+        // is even interpreted. In practice the snap after every key keeps the
+        // invariant; this keeps it when the text was replaced under the editor.
+        self.snap_cursor();
+
+        // Byte-indexed motions on multi-byte text, before they can run.
+        if !self.text.is_ascii()
+            && let Some(verdict) = self.guard_multibyte(key)
+        {
+            return verdict;
+        }
+
         self.caret_before = self.caret();
         self.before.clone_from(&self.text);
 
@@ -411,6 +468,15 @@ impl LineEditor {
         for edit in result.edits.iter().rev() {
             self.apply(edit);
         }
+
+        // Against the text as it is now, not as it was before the key: the
+        // library moves its cursor for the edit before the host applies it, so
+        // snapping first would clamp a caret that is already right against text
+        // that does not hold it yet. The library promises nothing about where
+        // its cursor lands, so the snap is unconditional rather than only after
+        // motions: an off-boundary cursor left here is a panic in the *next*
+        // key, or a caret the bar cannot draw.
+        self.snap_cursor();
 
         // The cap is on the result of the key rather than on the key, because
         // one key can be a whole pasted message. A refusal puts the text and
@@ -439,6 +505,112 @@ impl LineEditor {
     /// of `d...`/`c...`/`y...` names — is the reader still editing.
     fn is_normal(&self) -> bool {
         self.editor.status() == "NORMAL"
+    }
+
+    /// Puts the library's cursor back on a character boundary.
+    ///
+    /// The motions that need this are the word and vertical ones, which count
+    /// in bytes: on multi-byte text they stop inside a character, and whatever
+    /// runs next — a slice in the library, or the bar drawing the caret —
+    /// cannot index there. Snapping back rather than forward, so the cursor
+    /// never runs past the end of the text it points into.
+    fn snap_cursor(&mut self) {
+        let at = self.editor.cursor().min(self.text.len());
+        self.editor
+            .set_cursor(snap_down(&self.text, at), &self.text);
+    }
+
+    /// Refuses the keys the library cannot run on this text, or applies them
+    /// here instead.
+    ///
+    /// Only called for non-ASCII text, which is the only text the byte-indexed
+    /// motions can split. `None` means the key is safe to hand over.
+    ///
+    /// Three cases, by what the line is in the middle of:
+    ///
+    /// - Behind an operator (`d...` and its siblings) a motion and its slice
+    ///   happen inside one key, so nothing can be snapped in between. The
+    ///   provably safe answers — leaving, the whole-line doubling, and the
+    ///   motions that walk boundaries (`h`, `l`, `0`, `$`, `^`) — go through;
+    ///   a word or vertical motion is refused. Anything else cancels the
+    ///   operator inside the library without touching the text, so it goes
+    ///   through too.
+    /// - In visual the operators are applied here, over the snapped range the
+    ///   rest of the program already reads, because the library would slice its
+    ///   own `cursor + 1`. A word motion that would only extend the selection
+    ///   into a split character is refused.
+    /// - In normal a word motion would only land the cursor somewhere the next
+    ///   key cannot use, so it is refused. Motions between lines are left to
+    ///   run and snapped afterwards: they move, just not by words.
+    ///
+    /// A refusal changes nothing, not even a pending operator — the reader can
+    /// follow it with a motion that is safe, and does not have to retype the
+    /// operator to do so.
+    fn guard_multibyte(&mut self, key: Key) -> Option<LineVerdict> {
+        if key.ctrl || key.alt {
+            return None;
+        }
+        let VKey::Char(motion) = key.code else {
+            // Leaving, and every key that is not a character, never slices.
+            return None;
+        };
+
+        match self.editor.status() {
+            "d..." | "c..." | "y..." => {
+                let pending = self.editor.status().chars().next();
+                let safe = Some(motion) == pending || matches!(motion, 'h' | 'l' | '0' | '$' | '^');
+
+                if safe || !is_byte_motion(motion) {
+                    None
+                } else {
+                    Some(LineVerdict::Refused)
+                }
+            }
+            "VISUAL" => match motion {
+                'd' | 'x' | 'y' | 'c' => Some(self.visual_op(motion)),
+                _ if is_word_motion(motion) => Some(LineVerdict::Refused),
+                _ => None,
+            },
+            "NORMAL" => {
+                if is_word_motion(motion) {
+                    Some(LineVerdict::Refused)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Applies a visual operator to the snapped selection, without handing the
+    /// key to the library.
+    ///
+    /// The library would slice its own `cursor + 1` range, which on multi-byte
+    /// text ends inside a character. The range here is the same snapped one the
+    /// bar draws, so what is cut is what was shown — whole characters only.
+    /// Visual is then left the way the `Esc` key would leave it, and `c` enters
+    /// insert afterwards, because a change is a deletion the reader keeps
+    /// typing after.
+    fn visual_op(&mut self, op: char) -> LineVerdict {
+        let range = self.selection().unwrap_or_default();
+        let cut = self.text[range.clone()].to_owned();
+
+        if op != 'y' && !range.is_empty() {
+            self.text.replace_range(range.clone(), "");
+            self.yanked = Some(cut);
+        } else if op == 'y' && !range.is_empty() {
+            self.yanked = Some(cut);
+        }
+
+        let _ = self.editor.handle_key(Key::code(VKey::Escape), &self.text);
+        self.editor
+            .set_cursor(range.start.min(self.text.len()), &self.text);
+        if op == 'c' {
+            let _ = self.editor.handle_key(Key::char('i'), &self.text);
+        }
+        self.snap_cursor();
+
+        LineVerdict::Edited
     }
 
     /// Starts the library in Insert with the caret at the end of the text.
@@ -544,6 +716,40 @@ impl LaidOut {
 
         (self.row + 1).saturating_sub(height).clamp(0, last)
     }
+}
+
+/// Walks `at` back to the character it falls in the middle of, if it does.
+///
+/// The one place two units meet in this module: the library counts positions in
+/// bytes but steps some of its motions as though they were characters, so a
+/// position it reports is not always one a string can be indexed with. Snapping
+/// back rather than forward, so the result never runs past the end of the text.
+fn snap_down(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// Whether `c` is a motion the library counts in bytes.
+///
+/// `w`, `b` and `e` and their `WORD` siblings walk `text.as_bytes()` and
+/// classify each byte, so on multi-byte text they stop inside a character. The
+/// rest of the motions — steps, line ends, brackets, the arrows — either walk
+/// boundaries or are snapped afterwards without anything slicing in between.
+fn is_word_motion(c: char) -> bool {
+    matches!(c, 'w' | 'b' | 'e' | 'W' | 'B' | 'E')
+}
+
+/// Whether `c` behind an operator ends in a slice of where the motion landed.
+///
+/// The word motions, and the vertical ones: `j` and `k` carry a column counted
+/// in bytes between lines, so behind `d` they land the slice the same place a
+/// word motion would. Any other character cancels the operator inside the
+/// library without touching the text, and is safe for exactly that reason.
+fn is_byte_motion(c: char) -> bool {
+    is_word_motion(c) || matches!(c, 'j' | 'k')
 }
 
 /// A key as `vim-line` names it, or `None` for one it has no code for.
@@ -1213,6 +1419,145 @@ mod tests {
         assert_eq!(line.text(), "", "Tab moves between panes, and never has");
     }
 
+    // ---- multi-byte text, and the motions that cannot run on it ----------
+
+    /// The library's word motions index bytes, so on `"héllo"` a `w` lands
+    /// inside the `é`. Running it would only put the cursor somewhere the next
+    /// key cannot use, so it is refused — and the refusal changes nothing, not
+    /// even the mode.
+    #[test]
+    fn a_word_motion_on_non_ascii_text_is_refused() {
+        let mut line = composing();
+        type_text(&mut line, "héllo wörld");
+        line.feed(press(KeyCode::Esc));
+
+        let verdict = line.feed(press(KeyCode::Char('w')));
+
+        assert_eq!(verdict, LineVerdict::Refused);
+        assert_eq!(line.text(), "héllo wörld");
+        assert_eq!(line.status(), "NORMAL");
+        assert_eq!(line.caret(), 12, "still at the end of the text");
+    }
+
+    /// Behind an operator the motion and its slice happen inside one key, so a
+    /// word motion there is not merely misplaced but a panic. It is refused —
+    /// and the operator is kept, so the reader can follow it with a motion that
+    /// is safe rather than retyping the operator.
+    #[test]
+    fn a_word_motion_behind_an_operator_is_refused_and_the_operator_is_kept() {
+        let mut line = composing();
+        type_text(&mut line, "héllo wörld");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('d')));
+        assert_eq!(line.status(), "d...");
+
+        let verdict = line.feed(press(KeyCode::Char('w')));
+
+        assert_eq!(verdict, LineVerdict::Refused);
+        assert_eq!(line.status(), "d...", "the operator is still waiting");
+        assert_eq!(line.text(), "héllo wörld");
+
+        line.feed(press(KeyCode::Char('0')));
+
+        assert_eq!(
+            line.text(),
+            "d",
+            "`d0` walks a boundary and is safe to run — and it ran, so the operator survived the refusal"
+        );
+    }
+
+    /// The whole-line doubling never leaves a line, so it never meets the byte
+    /// motions — and refusing it would take `dd` away from every reader who
+    /// writes in French.
+    #[test]
+    fn a_doubled_operator_runs_on_non_ascii_text() {
+        let mut line = composing();
+        type_text(&mut line, "héllo");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('d')));
+
+        line.feed(press(KeyCode::Char('d')));
+
+        assert_eq!(line.text(), "");
+        assert_eq!(line.take_yanked().as_deref(), Some("héllo"));
+    }
+
+    /// A vertical motion behind an operator carries a column counted in bytes,
+    /// so it is refused for the same reason a word motion is.
+    #[test]
+    fn a_vertical_motion_behind_an_operator_is_refused() {
+        let mut line = composing();
+        type_text(&mut line, "héllo\nwörld");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('d')));
+
+        let verdict = line.feed(press(KeyCode::Char('j')));
+
+        assert_eq!(verdict, LineVerdict::Refused);
+        assert_eq!(line.text(), "héllo\nwörld");
+    }
+
+    /// Between lines on its own a vertical motion only moves the cursor, so it
+    /// runs — and the snap puts the cursor back on a boundary, because the
+    /// column it carried is in bytes.
+    #[test]
+    fn moving_between_lines_of_multibyte_text_keeps_a_usable_caret() {
+        let mut line = composing();
+        type_text(&mut line, "héllo");
+        line.feed(combo(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut line, "wörld");
+        line.feed(press(KeyCode::Up));
+
+        assert!(line.text().is_char_boundary(line.caret()));
+        assert_eq!(line.text(), "héllo\nwörld", "and moving never edits");
+
+        line.feed(press(KeyCode::Char('x')));
+
+        assert!(
+            line.text().is_char_boundary(line.caret()),
+            "and whatever follows it does not split a character: {:?}",
+            line.text()
+        );
+    }
+
+    /// The library slices its own `cursor + 1` for a visual operator, which on
+    /// multi-byte text ends inside a character. The wrapper applies the
+    /// operator itself over the snapped range it draws, so what is cut is what
+    /// was shown.
+    #[test]
+    fn a_visual_delete_on_multibyte_text_cuts_whole_characters() {
+        let mut line = composing();
+        type_text(&mut line, "héllo");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('v')));
+        line.feed(press(KeyCode::Char('l')));
+        line.feed(press(KeyCode::Char('l')));
+
+        line.feed(press(KeyCode::Char('d')));
+
+        assert_eq!(line.text(), "lo");
+        assert_eq!(line.take_yanked().as_deref(), Some("hél"));
+        assert_eq!(line.status(), "NORMAL", "and visual is left");
+    }
+
+    /// A visual change is a deletion the reader keeps typing after.
+    #[test]
+    fn a_visual_change_on_multibyte_text_enters_insert() {
+        let mut line = composing();
+        type_text(&mut line, "héllo");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('v')));
+        line.feed(press(KeyCode::Char('l')));
+        line.feed(press(KeyCode::Char('l')));
+
+        line.feed(press(KeyCode::Char('c')));
+
+        assert_eq!(line.text(), "lo");
+        assert_eq!(line.status(), "INSERT");
+    }
+
     // ---- the prompt rule ------------------------------------------------
 
     #[test]
@@ -1354,6 +1699,28 @@ mod spike {
         assert_eq!(editor.cursor(), 4, "down to the second line");
         editor.handle_key(Key::code(VKey::Up), text);
         assert_eq!(editor.cursor(), 0, "and back to the first");
+    }
+
+    /// The defect the wrapper guards, stated as a test so that a `vim-line`
+    /// that fixes it fails loudly here rather than silently: the word motions
+    /// walk `text.as_bytes()` and classify each byte, so on multi-byte text
+    /// they stop where no word ends — and `e` stops inside a character. The
+    /// wrapper never hands such a key over (see `LineEditor::feed`); if this
+    /// test ever fails, the guard — and the refusal, and the flash — can go
+    /// with it.
+    #[test]
+    fn word_motions_index_bytes_not_characters() {
+        let mut editor = editor();
+        let text = "héllo wörld";
+
+        editor.handle_key(Key::char('0'), text);
+        editor.handle_key(Key::char('e'), text);
+
+        assert_eq!(editor.cursor(), 2, "two bytes in");
+        assert!(
+            !text.is_char_boundary(editor.cursor()),
+            "which is inside the `é` (bytes 1..3) — and no string can be indexed there"
+        );
     }
 
     // ---- the order edits are applied in ----------------------------------
