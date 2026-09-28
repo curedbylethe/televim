@@ -45,21 +45,34 @@
 //!   survives a submit. The conversation's register is a different thing and
 //!   does not survive a conversation change; see `crate::app::Register`.
 //!
-//! And one defect, found by feeding the wrapper multi-byte text the way a
-//! French reader would: **the crate's word motions index bytes, not
-//! characters.** `w` from the start of `"héllo wörld"` lands on byte 1, which
-//! is inside the `é`, and a visual selection is `cursor + 1`, so `v w d` asks
-//! to slice `text[0..2]` — half a character. With `panic = "abort"` that is the
-//! end of the process, and `hello`, `Esc`, `v`, `d` reached the same place on
-//! ASCII-free text before the wrapper clamped. `Up`/`Down` share the defect by
-//! a different road: the column they carry between lines is counted in bytes.
+//! Three defects, found by feeding the wrapper multi-byte text the way a
+//! French reader would. The first is **the crate's word motions index bytes,
+//! not characters.** `w` from the start of `"héllo wörld"` lands on byte 1,
+//! which is inside the `é`, and a visual selection is `cursor + 1`, so `v w d`
+//! asks to slice `text[0..2]` — half a character. With `panic = "abort"` that
+//! is the end of the process, and `hello`, `Esc`, `v`, `d` reached the same
+//! place on ASCII-free text before the wrapper clamped. `Up`/`Down` share the
+//! defect by a different road: the column they carry between lines is counted
+//! in bytes.
+//!
+//! The second is the same fault reached another way: **a visual selection is
+//! `cursor + 1`**, so a selection on the last character of a buffer asks to
+//! delete one past the end of it. `hello`, `Esc`, `v`, `d` reaches that every
+//! time.
+//!
+//! The third is fatal on its own, and is the one a reader with an emoji in a
+//! draft can reach with a single key: **`p` computes its insert position as
+//! one *byte* past the caret.** `p` means "paste after the character the caret
+//! is on", and on a four-byte emoji that index is inside the character, so
+//! `yy` then `p` on `"😀😀"` aborts the process.
 //!
 //! The wrapper therefore never trusts a position it did not snap itself: the
-//! cursor is snapped to a character boundary before and after every key, the
-//! caret and the selection the rest of the program reads are snapped views,
-//! visual operators are applied here rather than handed over, and a word motion
-//! — or a vertical one behind an operator — on non-ASCII text is refused
-//! rather than run. See [`LineEditor::feed`].
+//! cursor is snapped to a character boundary before and after every key, every
+//! index an edit carries is snapped on its way into the string
+//! ([`LineEditor::apply`]), the caret and the selection the rest of the program
+//! reads are snapped views, visual operators are applied here rather than
+//! handed over, and a word motion — or a vertical one behind an operator — on
+//! non-ASCII text is refused rather than run. See [`LineEditor::feed`].
 //!
 //! ## The wrapper
 //!
@@ -663,25 +676,39 @@ impl LineEditor {
 
     /// Applies one of the library's edits to the text the host owns.
     ///
-    /// Clamped to the text, because the library computes a visual selection as
-    /// `cursor + 1` and a selection on the **last** character therefore asks to
-    /// delete one past the end — which, with `panic = "abort"`, takes the
-    /// process down. `hello`, `Esc`, `v`, `d` reaches it every time. The
-    /// library is not wrong about the selection; it is wrong about a range on
-    /// the last character of a buffer, and clamping is cheaper than a
-    /// `panic = "abort"` the reader cannot catch.
+    /// The one place an index the library computes reaches a string, so it is
+    /// where every such index is put on a character boundary first. Three
+    /// reasons, and the third is the one that is fatal:
+    ///
+    /// - the library computes a visual selection as `cursor + 1`, so a selection
+    ///   on the **last** character asks to delete one past the end. `hello`,
+    ///   `Esc`, `v`, `d` reaches it every time, and with `panic = "abort"` it
+    ///   takes the process down.
+    /// - `p` is "paste *after* the character the caret is on", implemented as
+    ///   one **byte** after the caret. On a four-byte emoji that index is inside
+    ///   the character, so `yy` then `p` on `"😀😀"` aborts the process.
+    /// - a motion the library counts in bytes can land anywhere inside a
+    ///   character, and an index there is inside the string and not indexable.
+    ///
+    /// Clamping to the length is not enough and never was: an index can be
+    /// inside the string and still be inside a character. So the two ends of a
+    /// range are normalised in the directions that make a range *wider* — a
+    /// delete that takes a whole character is a key the reader meant, and one
+    /// that takes half of a character is a panic — while an insert snaps up,
+    /// because "after the character the caret is on" means after the whole of
+    /// it. Everywhere else `at` is the caret itself, which the wrapper has
+    /// already snapped, so the rule is a no-op.
     fn apply(&mut self, edit: &TextEdit) {
-        let len = self.text.len();
-
         match edit {
             TextEdit::Delete { start, end } => {
-                let (start, end) = (start.min(&len), end.min(&len));
+                let start = snap_down(&self.text, *start);
+                let end = snap_up(&self.text, *end);
                 if start < end {
                     self.text.replace_range(start..end, "");
                 }
             }
             TextEdit::Insert { at, text } => {
-                self.text.insert_str((*at).min(len), text);
+                self.text.insert_str(snap_up(&self.text, *at), text);
             }
         }
     }
@@ -733,6 +760,24 @@ fn snap_down(text: &str, at: usize) -> usize {
     let mut at = at.min(text.len());
     while at > 0 && !text.is_char_boundary(at) {
         at -= 1;
+    }
+    at
+}
+
+/// Walks `at` forward to the end of the character it falls in the middle of.
+///
+/// The sibling of [`snap_down`] and the other half of the same rule. A position
+/// one byte into a character has to become a real position, and the only two
+/// positions that are unambiguously right are the two ends of the character it
+/// is inside. Which one is the right end is a decision, and each caller makes
+/// it: a *cursor* and the start of a *delete* take the near end ([`snap_down`]),
+/// while an *insert* and the end of a *delete* take the far one, because a
+/// character the reader's key was already inside is better removed whole than
+/// left in halves. The end of the text is a boundary of its own.
+fn snap_up(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while at < text.len() && !text.is_char_boundary(at) {
+        at += 1;
     }
     at
 }
@@ -1165,6 +1210,118 @@ mod tests {
         assert_eq!(line.take_yanked(), None, "and it is drained once");
     }
 
+    // ---- pasting ---------------------------------------------------------
+
+    /// The regression this whole arrangement exists for. The library computes
+    /// `p`'s insert position as one **byte** past the caret, which on a four-byte
+    /// emoji is inside the character; the index then reached
+    /// `String::insert_str`, which asserts a character boundary, and with
+    /// `panic = "abort"` there is no catch. `yy` then `p` on `"😀😀"` took the
+    /// process down.
+    #[test]
+    fn a_paste_with_the_caret_on_an_emoji_does_not_split_it() {
+        let mut line = composing();
+        type_text(&mut line, "😀😀");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('y')));
+        line.feed(press(KeyCode::Char('y')));
+
+        let verdict = line.feed(press(KeyCode::Char('p')));
+
+        assert_ne!(verdict, LineVerdict::Refused);
+        assert_eq!(
+            line.text(),
+            "😀😀😀😀",
+            "the whole line pasted after the whole emoji it was on — `yy` yanks a line"
+        );
+    }
+
+    /// "After the character the caret is on" means after the whole of it, so the
+    /// position snaps *up* to the end of the character rather than down to its
+    /// start — which is what a bare clamp would give.
+    #[test]
+    fn a_paste_after_a_character_lands_after_the_whole_character() {
+        let mut line = composing();
+        type_text(&mut line, "a😀b");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('l')));
+        line.feed(press(KeyCode::Char('x')));
+        line.take_yanked();
+
+        line.feed(press(KeyCode::Char('p')));
+
+        assert_eq!(line.text(), "ab😀");
+        assert_eq!(line.caret(), 2, "the emoji starts at byte 2");
+    }
+
+    /// The `P` counterpart, which was never wrong: it uses the caret, which the
+    /// wrapper keeps on a boundary. Pinned because it is the pair of a rule, not
+    /// because it needs one.
+    #[test]
+    fn a_paste_before_a_character_lands_before_it() {
+        let mut line = composing();
+        type_text(&mut line, "a😀b");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('l')));
+        line.feed(press(KeyCode::Char('x')));
+        line.take_yanked();
+
+        line.feed(press(KeyCode::Char('P')));
+
+        assert_eq!(line.text(), "a😀b", "and the emoji is back where it was");
+        assert_eq!(line.caret(), 5, "on the `b` after it");
+    }
+
+    /// Vim's rule for where a paste leaves the caret, on a character where "the
+    /// last thing pasted" is two columns wide rather than one.
+    #[test]
+    fn a_paste_leaves_the_caret_on_the_last_thing_pasted() {
+        let mut line = composing();
+        type_text(&mut line, "😀");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('y')));
+        line.feed(press(KeyCode::Char('y')));
+        line.take_yanked();
+
+        line.feed(press(KeyCode::Char('p')));
+
+        let at = line.caret();
+        assert!(
+            line.text().is_char_boundary(at),
+            "and on a character, not inside one: {at}"
+        );
+        assert_eq!(
+            &line.text()[at..],
+            "😀",
+            "which is the last thing pasted, not the first"
+        );
+    }
+
+    /// The other reproduction of the same crash, through the visual mode's own
+    /// `cursor + 1` selection rather than through `p`.
+    #[test]
+    fn a_visual_paste_of_a_zwj_sequence_does_not_split_it() {
+        let mut line = composing();
+        type_text(&mut line, "👨‍👩‍👧");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('v')));
+        line.feed(press(KeyCode::Char('y')));
+        line.feed(press(KeyCode::Char('y')));
+        line.take_yanked();
+
+        line.feed(press(KeyCode::Char('p')));
+
+        assert!(!line.text().is_empty());
+        assert!(
+            line.text().is_char_boundary(line.caret()),
+            "the family was pasted whole: {:?}",
+            line.text()
+        );
+    }
+
     // ---- the cap --------------------------------------------------------
 
     #[test]
@@ -1426,24 +1583,6 @@ mod tests {
 
     // ---- multi-byte text, and the motions that cannot run on it ----------
 
-    /// The library's word motions index bytes, so on `"héllo"` a `w` lands
-    /// inside the `é`. Running it would only put the cursor somewhere the next
-    /// key cannot use, so it is refused — and the refusal changes nothing, not
-    /// even the mode.
-    #[test]
-    fn a_word_motion_on_non_ascii_text_is_refused() {
-        let mut line = composing();
-        type_text(&mut line, "héllo wörld");
-        line.feed(press(KeyCode::Esc));
-
-        let verdict = line.feed(press(KeyCode::Char('w')));
-
-        assert_eq!(verdict, LineVerdict::Refused);
-        assert_eq!(line.text(), "héllo wörld");
-        assert_eq!(line.status(), "NORMAL");
-        assert_eq!(line.caret(), 12, "still at the end of the text");
-    }
-
     /// Behind an operator the motion and its slice happen inside one key, so a
     /// word motion there is not merely misplaced but a panic. It is refused —
     /// and the operator is kept, so the reader can follow it with a motion that
@@ -1469,6 +1608,29 @@ mod tests {
             "d",
             "`d0` walks a boundary and is safe to run — and it ran, so the operator survived the refusal"
         );
+    }
+
+    /// The guard that survived the relaxation of the other two cases, said the
+    /// other way round: nothing else in this module may have started refusing,
+    /// or a half-applied edit may have started leaking. A refused key is a key
+    /// that changed nothing at all.
+    #[test]
+    fn a_refused_motion_behind_an_operator_leaves_the_text_alone() {
+        let mut line = composing();
+        type_text(&mut line, "héllo wörld 😀");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('d')));
+        let before = line.text().to_owned();
+        let caret = line.caret();
+
+        for key in ['w', 'e', 'b', 'W', 'j', 'k'] {
+            let verdict = line.feed(press(KeyCode::Char(key)));
+
+            assert_eq!(verdict, LineVerdict::Refused, "`d{key}`");
+            assert_eq!(line.text(), before, "no partial edit");
+            assert_eq!(line.caret(), caret, "and the caret did not move");
+            assert_eq!(line.status(), "d...", "the operator is still pending");
+        }
     }
 
     /// The whole-line doubling never leaves a line, so it never meets the byte
