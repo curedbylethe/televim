@@ -89,7 +89,7 @@ in one direction and wider in another:
 | Crate | Depends on |
 | :---- | :--------- |
 | `domain` | `thiserror` |
-| `tui` | `domain`, `ratatui`, `crossterm` |
+| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line` |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
 | `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
 
@@ -138,8 +138,9 @@ grammers-mtsender = { version = "0.10.0" }
 # TUI
 ratatui = "0.30"
 crossterm = "0.28"
-# Declared, not yet used by any crate. The line editor is meant to adopt it —
-# see "Known Gaps" — so treat this as spoken for rather than free to pick.
+# The input line's editor, wrapped in `tui::line` — see "Key Decisions" for why
+# a wrapper and not the crate direct. `7.7` is a caret range, so `tui::line`'s
+# spike tests pin the behaviour the wrapper depends on against whatever resolves.
 vim-line = "7.7"
 
 # Logging
@@ -202,7 +203,8 @@ Widget tests use `ratatui`'s own `TestBackend`; there are no benchmarks; and
 - `grammers-mtsender` is what exposes `SenderPool`, which is the only way to construct a `grammers_client::Client`. `grammers-client` re-exports its `InvocationError` but not the pool itself, so the direct dependency is required.
 - `grammers-client` is built with `default-features = false`, which drops only its `fs` feature. `grammers-tl-types` is pulled in by `grammers-client` with its default features, so `tl-api` is enabled through feature unification even though this workspace asks only for `tl-mtproto`.
 - `tokio` enables the `full` feature set for flexibility across crates, but the application runtime is chosen explicitly at startup (see **Memory Strategy**).
-- `vim-line` is pinned to `7.7` and is **not yet used by any crate**. Its API differs substantially from older major versions, so consult the current docs when writing motion logic. The input line is hand-rolled today; adopting it is the planned fix for the gaps in **Known Gaps**.
+- `vim-line` is pinned to `7.7` and used by `tui` for the input line, behind the
+  `tui::line` wrapper. Its API differs substantially from older major versions, so consult the current docs when writing motion logic — and consult the wrapper's module docs first, because two of its behaviours are defects this workspace routes around rather than depends on: `EditResult::edits` must be applied in reverse, and the word motions index bytes rather than characters.
 - `keyring` needs `libdbus-1-dev` and `pkg-config` on Linux to build the Secret Service backend; CI installs them before the first `cargo` step.
 
 ## `[profile.release]`
@@ -327,6 +329,7 @@ crates/tui/
 │   ├── lib.rs
 │   ├── app.rs          # The App struct, key dispatch, layout, prompt state
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
+│   ├── line.rs         # The input line: owns the text, wraps vim-line
 │   ├── rows.rs         # One owner for the panel's geometry
 │   ├── wrap.rs         # Text + width -> the rows it occupies
 │   ├── widgets/
@@ -335,20 +338,30 @@ crates/tui/
 │   │   ├── input_bar.rs
 │   │   └── status_bar.rs
 │   └── theme.rs        # Color schemes
-└── Cargo.toml          # deps: domain, ratatui, crossterm
+└── Cargo.toml          # deps: domain, ratatui, crossterm, vim-line
 ```
 
 `app.rs` is the largest file in the workspace and holds the key dispatch, the
 scroll arithmetic, the paging decision, and the prompt state. Key dispatch is
 `Focus` first and `Mode` second: the conversation owns a mode (Normal, Visual,
-Confirm) and the input line owns none — having the line at all is its insert mode
-— because one enum cannot describe a conversation being selected in *and* a
-half-written line waiting. `Tab` and `BackTab` walk the panes in the order they
-are drawn, `h`/`l` step between the two panes, `Ctrl+w` leaves the line without
-throwing it away, and the focused pane's block is drawn in
-`Theme::border_focused`. `event.rs` exists but `key_to_action` is not yet called:
-`App::handle_key` matches on `KeyEvent` directly. That is pre-existing dead code —
-do not delete it without asking.
+Confirm) and the input line owns a mode of its own inside `tui::line` — having
+the line at all used to be its insert mode, until the line grew a normal mode
+and a visual one, and one enum could no longer describe a conversation being
+selected in *and* a half-written line waiting. `Tab` and `BackTab` walk the
+panes in the order they are drawn, `h`/`l` step between the two panes, `Ctrl+w`
+leaves the line from any of its modes without throwing anything away, and the
+focused pane's block is drawn in `Theme::border_focused`. `event.rs` exists but
+`key_to_action` is not yet called: `App::handle_key` matches on `KeyEvent`
+directly. That is pre-existing dead code — do not delete it without asking.
+
+`line.rs` owns the composed text and wraps `vim-line`, which never stores a
+buffer: the wrapper applies the edits the library calculates, decides `Enter`
+(send) and `Esc` (two stages, nothing lost) itself without handing either over,
+and refuses the keys the library cannot run — a newline in `:` or `/`, and a
+word motion on non-ASCII text. A `:` line and a `/` line are prompts rather
+than buffers and get insert only. The bar draws the draft the wrapper lays out
+with the same `wrap` the conversation uses, grown to six rows, with a real
+terminal caret `TestBackend` cannot model — check it by hand.
 
 `rows.rs` and `wrap.rs` are one answer to "how tall is this message", and the
 panel asks them rather than working it out again: a message is as many rows as
@@ -418,7 +431,11 @@ written leaves the run with no log rather than an unreadable screen.
 only module holding the terminal, so it is where the OSC 52 clipboard sequence is
 written after `net::drive` on every pass. `tui` records the text a yank asked to
 copy and never writes it — a widget that writes to the terminal behind the
-renderer's back is a race.
+renderer's back is a race. It is also where the kitty keyboard protocol's
+`DISAMBIGUATE_ESCAPE_CODES` is pushed before the loop and popped by a guard on
+the way out: the push is what makes `Shift+Enter` arrive shifted (a newline)
+rather than bare (a send), and the pop is a `Drop` because leaving the terminal
+enhanced would change how the user's shell reads their keyboard after exit.
 
 ## Core Library Rationale
 
@@ -426,7 +443,7 @@ renderer's back is a race.
 | :-------------------- | :------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------- |
 | **Telegram Protocol** | `grammers-client` / `grammers-tl-types` / `grammers-mtproto` / `grammers-mtsender` `0.10.0` | Wrapped in a first-party `telegram-framework` crate. Taken from crates.io, because upstream no longer tags releases. |
 | **TUI Framework**     | `ratatui` `0.30`                                                                | Immediate-mode TUI, low overhead, ideal for redraw-only-what-changed.                                  |
-| **Vim Motions**       | `vim-line` `7.7` (declared, unused)                                             | Trait-based line editor with Normal/Insert modes and motions. Not adopted yet; see **Known Gaps**.      |
+| **Vim Motions**       | `vim-line` `7.7` (wrapped in `tui::line`)                                        | Trait-based line editor with Normal/Insert modes and motions. The wrapper owns the text, decides `Enter`/`Esc` itself, and routes around two upstream defects; see `tui::line`'s docs. |
 | **Async Runtime**     | `tokio` `1.53.1`                                                                | One event loop, so the runtime is current-thread. See **Memory Strategy**.                             |
 | **Error Handling**    | `thiserror` `2` + `anyhow` `1`                                                  | Typed errors in protocol/domain; `anyhow` at the `app` boundary.                                       |
 | **Logging**           | `tracing` `0.1` + `tracing-subscriber` `0.3` (`env-filter`)                     | Structured logging, written to a file. Never the terminal — see `app` below.                           |
@@ -614,7 +631,13 @@ Working today:
   `FETCH_MARGIN` (20) that asks for a page. `[you]`/`[them]` and a reply's quoted
   target are on the first row of a message, `[sending…]`/`[failed: …]` on the
   last.
-- **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to leave.
+- **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
+  typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.
+  The line is a real editor (`vim-line`, wrapped in `tui::line`): caret
+  movement, `w`/`b`/`e`, `x`, `dw`, `cc`, `p`, a visual selection with `d` and
+  `y`, and multi-line messages with `Ctrl+J` (`Shift+Enter` where the terminal
+  volunteers the distinction). The bar is always a draft: it grows to six rows,
+  survives a conversation switch, and is drawn with a real terminal caret.
   Reply with `r`, edit with `e`.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
@@ -629,7 +652,9 @@ Working today:
   them — and `p` in Normal opens the line with it. A yank is also offered to the
   system clipboard with OSC 52, best-effort and truncated to 74 kB of sequence;
   the register is the half that always works. The register is cleared by opening
-  another conversation. `p` is not bound in Visual.
+  another conversation. `p` is not bound in Visual. The line keeps its own
+  internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
+  registers are deliberately not shared, because their formats differ.
 - **Commands:** `:q`/`:quit` and `:chat <id>`.
 
 Not built, and named here so nobody reads the roadmap below as current:
@@ -644,25 +669,22 @@ Not built, and named here so nobody reads the roadmap below as current:
   selection with the reader's own text is a destructive reading of a key that
   looks additive.
 - **`:w`** — not a command. The only commands are `q`, `quit` and `chat <id>`.
-- **Multi-line input** — the line is one row, append-only, with a fake `█`
-  caret pinned to the end. `Esc` clears it and `Ctrl+w` keeps it, but the bar
-  shows the Normal-mode hint rather than a dimmed draft, so a kept line is only
-  reachable with `Tab`.
-- **Vim motions inside the input** — none. `w`, `b`, `f`, `0`, `$` do not exist
-  there; `vim-line` is declared for this and unused.
+- **Word motions on non-ASCII text in the input** — refused with a message.
+  `vim-line`'s word motions index bytes rather than characters and would split
+  one, so the wrapper snaps its cursor to boundaries, applies visual operators
+  itself, and refuses `w`/`b`/`e` (and a vertical motion behind an operator)
+  where the text is not ASCII. `h`, `l`, `0`, `$`, `^`, `dd` and the arrows all
+  still run.
 - **The yank clipboard is one-way and says nothing.** Whether a terminal honours
   OSC 52 at all is not something this program can find out, so a refused or capped
   write is not a failure of the yank and is not reported as one. `y` reaching the
   register and `p` is the whole feature; the clipboard is a convenience on top.
-- **`p` is not in the input bar's hint.** The bar is one row of eighty columns and
-  the hint is already 71 of the 78 it has; its length is asserted by a test, so
-  adding a key means removing one.
 - **A column is a character.** The wrap counts characters, so a double-width
   character or a combining mark is laid out as one column whatever cells the
   terminal gives it. What it costs is a fact about the font, and the answer
   needs a display-width table rather than a guess.
 
-The planned shape of the first four is worked out in `~/.opencode/plan/`.
+The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 
 ## Key Decisions
 
@@ -732,6 +754,7 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.
 - **Why the message window is capped:** `domain::history::ConversationWindow` keeps a flat, bounded window of the messages the client has seen — a `VecDeque` capped at `CONVERSATION_WINDOW` — rather than one list per conversation or an unbounded buffer. The window exists so that an edit or a deletion can be matched to a message; capping it is what stops that from becoming the largest allocation in the process under a live feed. An event for a message that has scrolled out is not applied, which is the same answer the window already gives for a conversation it does not hold.
 - **Why dropping a client stops the network:** the framework's `Client` owns the connection pool's runner task and the update relay, and aborts both when it is dropped. A detached task would leave the socket open until the process ended, and the relay would keep draining an unbounded channel nothing can read.
+- **Why the input line is a wrapper rather than the crate:** `vim-line` never stores the buffer, so somebody has to apply its edits — and that somebody is where the decisions live that the crate must not be asked about. `Enter` (send) and `Esc` (two stages, nothing lost) never reach it, because its own answers differ by mode; `:` and `/` get insert only, because a newline in either is a submission nobody asked for. The wrapper also snaps every position to a character boundary and refuses the byte-counted motions on non-ASCII text, because two of the crate's behaviours split multi-byte characters and this binary sets `panic = "abort"`.
 
 ## Guidance for Agents
 
@@ -745,7 +768,7 @@ The planned shape of the first four is worked out in `~/.opencode/plan/`.
 8. **`Cargo.lock` is tracked.** It is a binary, so the lockfile is what makes a build reproducible, and one pin in it is load-bearing. Do not add it to `.gitignore`; if it is ever untracked, a fresh clone does not build.
 9. **Runtime kind is a policy decision, not a feature flag.** Even with `tokio`'s `full` features enabled, `app/src/runtime.rs` must use `Builder::new_current_thread()` to honor the memory budget.
 10. **Formatting edition must match compiler edition.** Both are `2024`.
-11. **Consult `vim-line` `7.7` docs** when writing motion logic; its API differs substantially from earlier major versions.
+11. **Consult `tui::line`'s module docs before `vim-line`'s docs** when writing motion logic. The crate's API differs substantially from earlier major versions, and two of its behaviours are defects this workspace routes around rather than depends on.
 12. **`make ci` before every commit.** It is the same gate CI runs, and it catches the `boundary` violation that nothing else does.
 13. **This file describes what exists.** If a change makes a section here wrong — a new dependency, a moved module, a feature that now works — update it in the same commit. A file that is aspirational is worse than no file, because it is trusted.
 
@@ -758,8 +781,11 @@ Real, and named so they are not mistaken for oversights:
   see **Key Decisions**. Neither `domain::utf16_len` nor the rendering of an
   incoming quote's fragment is written, because both exist only for a quote this
   build cannot send.
-- **The input line has no vim controls, no multi-line, and no drafts.**
-  `vim-line` is declared for exactly this and is not yet wired up.
+- **Word motions in the input refuse non-ASCII text.** `w`, `b`, `e` and a
+  vertical motion behind an operator say no with a flash, because `vim-line`
+  counts those motions in bytes and would split a character. Everything else —
+  `h`, `l`, `0`, `$`, `^`, `dd`, the arrows, insert itself — runs, and the
+  wrapper's cursor is snapped to boundaries around every key.
 - **A feed dropped without `finish` persists a stale update position.** See
   **Key Decisions**.
 - **`tikv-jemallocator` is not installed.** No allocator work is done, and the

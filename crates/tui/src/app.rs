@@ -52,12 +52,6 @@ const ASSUMED_BODY_WIDTH: u16 = 80;
 /// What the status line shows before anything has happened.
 const IDLE_STATUS: &str = "televim";
 
-/// The word the status line shows while the input line holds the focus.
-///
-/// A constant rather than a label on [`Focus`]: the other two panes are both in
-/// [`Mode::Normal`], and which of them is on show is what the border is for.
-pub const INSERT_LABEL: &str = "INSERT";
-
 /// How long the highlight has to stay put before its conversation is opened.
 ///
 /// A reader holding `j` moves the highlight far faster than a page can be

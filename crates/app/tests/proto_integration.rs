@@ -1235,6 +1235,66 @@ async fn a_send_edit_and_delete_round_trip_through_saved_messages() {
     );
 }
 
+/// Sends a message carrying newlines and checks the echo carries them too.
+///
+/// The input line writes `Ctrl+J` as a `\n` in the composed text, and the send
+/// hands that text over whole — so a newline that did not survive the round
+/// trip would be a message the reader wrote one way and everyone else reads
+/// another. Saved Messages again, for the reason above; the message is deleted
+/// afterwards, because a test that litters is a test that cannot be rerun.
+#[tokio::test]
+async fn a_multiline_message_survives_the_send() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+
+    let Some(self_id) = self_user_id(&client).await else {
+        eprintln!("skipped: telegram did not report the account's own identifier");
+        return;
+    };
+
+    let proto = ProtoClient::new(client);
+    let chats = proto
+        .fetch_private_chats()
+        .await
+        .expect("the chat list is fetched");
+    let Some(chat) = chats.iter().find(|chat| chat.id == self_id) else {
+        eprintln!(
+            "skipped: Saved Messages is not among the {} private conversation(s)",
+            chats.len()
+        );
+        return;
+    };
+
+    let marker = std::process::id();
+    let text = format!("televim lines {marker}\nsecond line\nthird line");
+
+    let sent = proto
+        .send_message(chat.id, &text, None)
+        .await
+        .expect("the message is sent to Saved Messages");
+    assert_eq!(
+        sent.text, text,
+        "the echo carries the newlines the reader typed"
+    );
+
+    proto
+        .delete_messages(chat.id, &[sent.id])
+        .await
+        .expect("the message is deleted");
+}
+
 // ---- what the checks are worth --------------------------------------------
 //
 // Everything above needs a datacenter, so without one it proves nothing at all —
