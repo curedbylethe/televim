@@ -258,6 +258,25 @@ pub enum PromptKind {
     Edit,
 }
 
+impl PromptKind {
+    /// Whether this prompt is a buffer the reader edits, or a one-line answer
+    /// to a question.
+    ///
+    /// A message, a reply and an edit are text the reader is writing, and get
+    /// the full editor: caret movement, visual selection, quick edits. A
+    /// command and a search are a single line the reader types and submits, and
+    /// get insert only — `Esc` returns to the conversation with the text kept,
+    /// and there is no normal mode to leave.
+    ///
+    /// One method, one axis. [`crate::line::LineEditor`] consults it in exactly
+    /// two places: whether to allow a newline, and whether to treat `Esc` as
+    /// the first stage of leaving or as leaving.
+    #[must_use]
+    pub const fn is_buffer(self) -> bool {
+        matches!(self, Self::Message | Self::Reply | Self::Edit)
+    }
+}
+
 /// A destructive action waiting for the reader's `y`.
 ///
 /// Everything the wording needs is **captured** here, when the prompt is raised,
