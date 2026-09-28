@@ -8,6 +8,28 @@
 
 use std::ops::Range;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// How many terminal columns `text` occupies.
+///
+/// The one place a cell count is computed. A column is a cell, not a
+/// character: an emoji is two, a combining mark is none, and a CJK ideograph is
+/// two. `unicode-width` is the table, and it answers the multi-part emoji
+/// sequences as one cell count rather than as the sum of their parts — a
+/// fully-qualified ZWJ family, a modifier sequence (`👍🏽`) and a VS16 sequence
+/// (`❤️`) are each two columns wide, which is what the terminal draws.
+///
+/// Two consequences, both of them the safe direction. A count summed per scalar
+/// calls a ZWJ family six columns where the terminal draws two, so a row breaks
+/// earlier than it needs to and no row is ever wider than the panel; a count
+/// taken of a whole slice, which is what a caret column is, is exact. Exact ≤
+/// over-count, and that is the whole of the argument that a caret is never drawn
+/// past the end of the row it was assigned to.
+#[must_use]
+pub fn columns(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
 /// Splits `text` into the rows it occupies at `width` columns.
 ///
 /// Byte offsets, always at a character boundary, so that a row is `&text[range]`
@@ -23,10 +45,11 @@ use std::ops::Range;
 /// early for nothing. A newline in the text starts a row, which is what makes
 /// this the same function for a message that carries one.
 ///
-/// A column is a character. A cell is what a character occupies for most of
-/// what a conversation holds; what a double-width character or a combining
-/// mark costs is a fact about the terminal's font rather than about the text,
-/// and is not answered here.
+/// A column is a cell, counted by [`columns`] — so a row of emoji in a
+/// ten-column panel holds five of them rather than ten. A sequence the table
+/// cannot answer as one cell (a multi-part ZWJ family) is counted as the sum of
+/// its parts, which is what makes a row break early rather than overrun the
+/// border.
 #[must_use]
 pub fn wrap(text: &str, width: u16) -> Vec<Range<usize>> {
     rows(text, width, 0, 0, false)
@@ -130,13 +153,25 @@ fn fill(
 /// it and the next one — see [`wrap_keeping_whitespace`].
 fn one_row(line: &str, from: usize, limit: usize, keep: bool) -> (usize, usize) {
     let mut at_space: Option<(usize, usize)> = None;
+    let mut used = 0;
 
-    for (used, (offset, character)) in line[from..].char_indices().enumerate() {
+    for (offset, character) in line[from..].char_indices() {
         let at = from + offset;
-        if used >= limit {
+        // Accumulated per scalar, so a sequence `columns` would answer as one
+        // cell is counted as the sum of its parts: a row breaks early rather
+        // than overrunning the panel. The offset arithmetic below is bytes
+        // either way — a row is cut at boundaries, not at columns.
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+
+        // Whether this character *fits*, rather than whether the row has a
+        // column left: on ASCII the two are the same, and on a two-cell
+        // character they are not. An empty row is always given this one, which
+        // is what stops a panel narrower than a character from looping.
+        if used > 0 && used + width > limit {
             let (start, next) = at_space.unwrap_or((at, at));
             return if keep { (next, next) } else { (start, next) };
         }
+        used += width;
 
         if character.is_whitespace() {
             // The first space of a run is where the row can be broken. The rest
@@ -251,7 +286,7 @@ mod tests {
             for width in [1, 3, 8, 12, 80] {
                 for row in kept_rows_of(text, width) {
                     assert!(
-                        row.chars().count() <= usize::from(width),
+                        columns(row) <= usize::from(width),
                         "{row:?} is wider than {width} in {text:?}"
                     );
                 }
@@ -282,10 +317,40 @@ mod tests {
 
     #[test]
     fn a_row_is_never_wider_than_the_width() {
-        let text = "the quick brown fox jumps over the lazy dog";
+        for text in ["the quick brown fox jumps over the lazy dog"] {
+            for width in [1, 3, 8, 12, 80] {
+                for row in rows_of(text, width) {
+                    assert!(
+                        columns(row) <= usize::from(width),
+                        "{row:?} is {} columns wide in {text:?} at {width}",
+                        columns(row)
+                    );
+                }
+            }
+        }
+    }
 
-        for row in rows_of(text, 12) {
-            assert!(row.chars().count() <= 12, "{row:?} is wider than the panel");
+    /// The same invariant with characters that are not one cell, which is the
+    /// case a terminal clips silently: a row laid out one column too wide loses
+    /// its last character to the edge, and the row after it is pushed out of
+    /// sight. A panel *narrower* than a two-cell character is the documented
+    /// exception — that character still gets a row, because dropping it and
+    /// looping on it are both worse.
+    #[test]
+    fn a_row_of_wide_characters_is_never_wider_than_the_width() {
+        for text in [
+            "😀😀😀😀😀😀 mixed with 漢字 and é",
+            "👨‍👩‍👧 family and 👍🏽 and ❤️ in one row",
+        ] {
+            for width in [3, 8, 12, 80] {
+                for row in rows_of(text, width) {
+                    assert!(
+                        columns(row) <= usize::from(width),
+                        "{row:?} is {} columns wide in {text:?} at {width}",
+                        columns(row)
+                    );
+                }
+            }
         }
     }
 
@@ -358,11 +423,29 @@ mod tests {
         assert_eq!(rows_of("one\n", 40), vec!["one", ""]);
     }
 
+    /// The terminal gives an emoji two cells, so a row of a ten-column bar
+    /// holds five of them rather than ten — and the break falls where the
+    /// terminal's would, which is the only way a row's range and the drawing of
+    /// it agree.
+    #[test]
+    fn a_wide_character_is_two_columns() {
+        let text = "😀".repeat(12);
+
+        assert_eq!(
+            rows_of(&text, 10),
+            vec!["😀😀😀😀😀", "😀😀😀😀😀", "😀😀"],
+            "five to a row, and the twelfth is the start of a third"
+        );
+    }
+
     #[test]
     fn an_emoji_at_the_break_point_is_not_split() {
-        // Counted as the one character it is, so a break never lands inside it
-        // — and a range that did would not be a range that can be indexed.
-        assert_eq!(rows_of("ab😀cd", 3), vec!["ab😀", "cd"]);
+        // Counted as the two cells the terminal draws it in, so a break never
+        // lands inside it — a range that did would not be a range that can be
+        // indexed — and never makes the row wider than the panel either. Here
+        // that means the emoji begins a row of its own rather than finishing the
+        // one before it.
+        assert_eq!(rows_of("ab😀cd", 3), vec!["ab", "😀c", "d"]);
     }
 
     // ---- decorations -----------------------------------------------------

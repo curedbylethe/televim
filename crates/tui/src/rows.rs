@@ -22,9 +22,10 @@
 use std::ops::Range;
 
 use domain::message::{Message, MessageStatus};
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
-use crate::wrap::wrap_decorated;
+use crate::wrap::{columns, wrap_decorated};
 
 /// The columns a message's sender is named in: `[you] ` or `[them] `.
 ///
@@ -199,10 +200,10 @@ pub fn slice(layout: &[RowSpan], cursor: usize, budget: usize, follow: bool) -> 
 /// because a terminal clips without saying so.
 fn decoration_columns(app: &App, message: &Message, width: u16) -> (usize, usize) {
     let prefix = WHO_WIDTH
-        + message.reply_to.map_or(0, |reply_to| {
-            reply_prefix(app, reply_to, width).chars().count()
-        });
-    let suffix = status_suffix(app, message).map_or(0, |text| text.chars().count());
+        + message
+            .reply_to
+            .map_or(0, |reply_to| columns(&reply_prefix(app, reply_to, width)));
+    let suffix = status_suffix(app, message).map_or(0, |text| columns(&text));
 
     (prefix, suffix)
 }
@@ -246,16 +247,32 @@ pub(crate) fn status_suffix(app: &App, message: &Message) -> Option<String> {
     }
 }
 
-/// Truncates `text` to `budget` characters, marking the cut.
+/// Truncates `text` to `budget` columns, marking the cut.
 ///
-/// Characters rather than bytes, because a multibyte character cut in half is
-/// not text at all.
+/// Columns rather than characters, because a decoration is subtracted from a
+/// row's width before the row is cut: a prefix that is fewer characters than the
+/// budget but wider than it would push the body off the row, and one that is
+/// more characters but narrower is harmless. Walked a character at a time, so a
+/// cut is never inside one — including an emoji that straddles the budget, which
+/// is left out whole rather than half drawn.
 pub(crate) fn truncate(text: &str, budget: usize) -> String {
-    if text.chars().count() <= budget {
+    if columns(text) <= budget {
         return text.to_owned();
     }
 
-    let mut shortened: String = text.chars().take(budget.saturating_sub(1)).collect();
+    let room = budget.saturating_sub(1);
+    let mut used = 0;
+    let mut shortened = String::new();
+
+    for character in text.chars() {
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + width > room {
+            break;
+        }
+        used += width;
+        shortened.push(character);
+    }
+
     shortened.push('…');
     shortened
 }
@@ -520,7 +537,7 @@ mod tests {
 
         let quoted = reply_prefix(&app, 1, 39);
         assert!(
-            quoted.chars().count() < 39 / 2 + WHO_WIDTH + 5,
+            columns(&quoted) < 39 / 2 + WHO_WIDTH + 5,
             "a prefix that filled the row would push the body off it: {quoted:?}"
         );
         assert_eq!(
@@ -607,6 +624,69 @@ mod tests {
         assert_eq!(truncate("hello", 8), "hello");
         assert_eq!(truncate("hello", 4), "hel…");
         assert_eq!(truncate("héllo", 3), "hé…");
+    }
+
+    /// A budget is in columns, because a decoration is subtracted from a row's
+    /// width before the row is cut. An emoji that straddles the budget is left
+    /// out whole rather than half drawn — and the `…` is counted against the
+    /// budget, so a truncated decoration is never a column too wide.
+    #[test]
+    fn truncate_cuts_on_a_column_budget_and_never_mid_character() {
+        assert_eq!(
+            truncate("😀😀😀", 8),
+            "😀😀😀",
+            "and it fits, so it is whole"
+        );
+        assert_eq!(truncate("😀😀😀", 5), "😀😀…", "four columns and the mark");
+        assert_eq!(truncate("a😀b", 4), "a😀b", "four columns is a whole fit");
+        assert_eq!(
+            truncate("a😀b", 3),
+            "a…",
+            "one column short, and the emoji would straddle it, so it is not taken"
+        );
+        for budget in 1..8 {
+            let cut = truncate("😀a😀b漢", budget);
+            assert!(
+                columns(&cut) <= budget,
+                "{cut:?} is {} columns against a budget of {budget}",
+                columns(&cut)
+            );
+        }
+    }
+
+    /// A quoted reply is measured in the units it is drawn in, so an emoji in
+    /// the quoted text costs the body the two cells it is given.
+    #[test]
+    fn a_decoration_containing_an_emoji_is_measured_in_columns() {
+        let mut app = App::mock();
+        let chat_id = app.conversation.window.chat_id;
+        app.apply_latest(vec![Message {
+            id: 90,
+            chat_id,
+            text: "😀😀😀😀😀😀😀😀".repeat(4).into(),
+            timestamp: 0,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+        }]);
+        let reply = Message {
+            id: 91,
+            chat_id,
+            text: "sure".into(),
+            timestamp: 0,
+            status: MessageStatus::Received,
+            is_outgoing: true,
+            reply_to: Some(90),
+        };
+
+        let (prefix, suffix) = decoration_columns(&app, &reply, 40);
+
+        assert_eq!(suffix, 0, "a sent reply draws nothing behind it");
+        assert_eq!(
+            prefix,
+            WHO_WIDTH + columns(&reply_prefix(&app, 90, 40)),
+            "and the quote is counted in cells, not characters"
+        );
     }
 
     // ---- the two range units ---------------------------------------------

@@ -3323,6 +3323,7 @@ dependencies = [
  "crossterm 0.28.1",
  "domain",
  "ratatui",
+ "unicode-width",
  "vim-line",
 ]
 

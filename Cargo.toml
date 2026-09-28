@@ -34,6 +34,9 @@ grammers-mtsender = { version = "0.10.0" }
 ratatui = "0.30"
 crossterm = "0.28"
 vim-line = "7.7"
+# One use: how wide a string is on a terminal. `ratatui` already resolves it,
+# so `tui`'s row layout and its caret column share the same table.
+unicode-width = "0.2"
 
 # Logging
 tracing = "0.1"

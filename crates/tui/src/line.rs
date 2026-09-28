@@ -101,7 +101,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vim_line::{Key, KeyCode as VKey, LineEditor as _, TextEdit, VimLineEditor};
 
 use crate::app::PromptKind;
-use crate::wrap::wrap_keeping_whitespace;
+use crate::wrap::{columns, wrap_keeping_whitespace};
 
 /// The most characters a composed message may hold.
 ///
@@ -323,7 +323,11 @@ impl LineEditor {
         // nothing left to clamp in practice — and a caret in a run of spaces is
         // a cell of its own, which is where it is drawn.
         let at = caret.clamp(range.start, range.end);
-        let column = self.text[range.start..at].chars().count();
+        // Columns, not characters: the terminal gives an emoji two cells, and a
+        // caret counted in characters is drawn inside the glyph it is on. One
+        // exact count over a whole slice, where the row accumulator over-counts
+        // — so the caret is never past the row it was assigned to.
+        let column = columns(&self.text[range.start..at]);
 
         LaidOut { rows, row, column }
     }
@@ -1515,6 +1519,38 @@ mod tests {
             "the caret is on the wrapped row, not the first"
         );
         assert_eq!(laid_out.column, 11, "at the end of `gamma delta`");
+    }
+
+    /// A column is a cell. An emoji is two of them, so a caret behind one is
+    /// two columns in rather than one — a caret counted in characters is drawn
+    /// *inside* the glyph it is on.
+    #[test]
+    fn the_caret_column_accounts_for_a_wide_character() {
+        let mut line = composing();
+        type_text(&mut line, "a😀");
+
+        let laid_out = line.laid_out(20);
+
+        assert_eq!(laid_out.column, 3, "the cell to the right of the emoji");
+    }
+
+    /// The caret's count is exact where a row's is an accumulation, so the
+    /// argument that a caret is never drawn past the row it was assigned to is
+    /// "exact ≤ over-count" rather than prose. A ZWJ family is the case that
+    /// needs it: six columns summed against the two the terminal draws.
+    #[test]
+    fn a_caret_is_never_past_the_row_it_is_on() {
+        let mut line = composing();
+        type_text(&mut line, &"👨‍👩‍👧".repeat(4));
+
+        for width in [4_u16, 6, 10, 20] {
+            let laid_out = line.laid_out(width);
+            let row = &laid_out.rows[laid_out.row];
+            assert!(
+                laid_out.column <= columns(&line.text()[row.clone()]),
+                "{laid_out:?} puts the caret past its own row at width {width}"
+            );
+        }
     }
 
     #[test]

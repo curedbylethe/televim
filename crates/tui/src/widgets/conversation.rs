@@ -351,6 +351,7 @@ fn render_scrollbar(app: &App, area: Rect, frame: &mut Frame<'_>, view: &rows::S
 mod tests {
     use super::*;
     use crate::app::App;
+    use crate::wrap::columns;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use domain::selection::Mark;
     use ratatui::Terminal;
@@ -958,9 +959,9 @@ mod tests {
             "and the body is on the same row: {first:?}"
         );
         assert!(
-            first.chars().count() <= 53,
+            columns(&first) <= 53,
             "the row is the panel's width and no more: {} columns",
-            first.chars().count()
+            columns(&first)
         );
     }
 
