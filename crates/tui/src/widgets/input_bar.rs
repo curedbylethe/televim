@@ -40,7 +40,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let line = if composing {
         Line::from(vec![
             Span::styled(app.prompt_prefix(), app.theme.text_dim),
-            Span::styled(app.input.clone(), app.theme.text),
+            Span::styled(app.line.text(), app.theme.text),
             Span::styled("█", app.theme.text_dim), // caret
         ])
     } else {

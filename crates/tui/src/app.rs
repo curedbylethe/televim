@@ -19,6 +19,7 @@ use domain::vim::{CharMotion, Motion, VimState, char_motion};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 
+use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowSpan, Slice};
 use crate::theme::Theme;
 use crate::widgets;
@@ -77,14 +78,6 @@ pub const CHAT_SWITCH_DELAY: Duration = Duration::from_millis(150);
 /// a refusal. State the reader must not lose is written straight to the status
 /// and never carries a deadline.
 const FLASH_FOR: Duration = Duration::from_secs(5);
-
-/// The most characters a composed message may hold.
-///
-/// Telegram's own limit. Repeated here rather than reached for: `tui` may not
-/// name `telegram-framework`, and the cap is what stops a key held down from
-/// growing the buffer without bound. The framework checks the same number before
-/// the request, so the two cannot disagree about what is sendable.
-const MESSAGE_LIMIT: usize = 4096;
 
 /// How many operations the reader may have queued at once.
 ///
@@ -510,7 +503,6 @@ impl Fetching {
 pub struct App {
     pub mode: Mode,
     pub focus: Focus,
-    pub prompt: PromptKind,
     pub theme: Theme,
 
     /// The conversations, and the messages the client has seen in them.
@@ -531,7 +523,15 @@ pub struct App {
     pub conversation: ConversationView,
 
     pub vim: VimState,
-    pub input: String,
+
+    /// What the reader is composing, and the editor working on it.
+    ///
+    /// Was a `String`, and was enough of a design not to notice it was wrong:
+    /// append-only, no caret, and cleared by the key every reader presses
+    /// reflexively. A line is a buffer with a caret in it, and it is the
+    /// wrapper's whole job.
+    pub line: LineEditor,
+
     pub status: String,
     pub should_quit: bool,
 
@@ -672,13 +672,12 @@ impl App {
         Self {
             mode: Mode::Normal,
             focus: Focus::Conversation,
-            prompt: PromptKind::Message,
             theme: Theme::default(),
             list: ChatList::default(),
             selected_chat: 0,
             conversation: ConversationView::new(0),
             vim: VimState::new(0),
-            input: String::new(),
+            line: LineEditor::new(),
             status: IDLE_STATUS.to_string(),
             should_quit: false,
             search: SearchState::default(),
@@ -1715,13 +1714,11 @@ impl App {
             KeyCode::Char('h') => self.set_focus(Focus::ChatList),
             KeyCode::Char('/') => {
                 self.focus = Focus::Input;
-                self.prompt = PromptKind::Search;
-                self.input.clear();
+                self.line.open(PromptKind::Search);
             }
             KeyCode::Char(':') => {
                 self.focus = Focus::Input;
-                self.prompt = PromptKind::Command;
-                self.input.clear();
+                self.line.open(PromptKind::Command);
             }
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
@@ -1729,12 +1726,15 @@ impl App {
     }
 
     /// Opens the buffer for a new message, with no reply and no edit.
+    ///
+    /// The draft is kept: a half-written message is not garbage, and the one
+    /// thing a reader who pressed `i` by reflex should never lose is the thing
+    /// they were writing.
     fn start_compose(&mut self) {
         self.focus = Focus::Input;
-        self.prompt = PromptKind::Message;
+        self.line.open(PromptKind::Message);
         self.reply_to = None;
         self.editing = None;
-        self.input.clear();
     }
 
     /// Opens the buffer to answer the message under the cursor.
@@ -1747,13 +1747,16 @@ impl App {
         };
 
         self.focus = Focus::Input;
-        self.prompt = PromptKind::Reply;
+        self.line.open(PromptKind::Reply);
         self.reply_to = Some(id);
         self.editing = None;
-        self.input.clear();
     }
 
     /// Opens the buffer with the cursor's own message in it, for editing.
+    ///
+    /// The one opener that replaces the text, and the only one: the buffer's
+    /// meaning changes from "a message" to "an edit of message 42", so there is
+    /// only one right thing for it to contain.
     ///
     /// Both refusals are the same fact — there is nothing on the server to edit
     /// yet — so they share one line. A key that does nothing and says nothing
@@ -1777,10 +1780,9 @@ impl App {
         let id = message.id;
 
         self.focus = Focus::Input;
-        self.prompt = PromptKind::Edit;
+        self.line.open_with(PromptKind::Edit, text);
         self.editing = Some(id);
         self.reply_to = None;
-        self.input = text;
     }
 
     /// Asks to delete what the selection covers, or the message under the cursor
@@ -1974,31 +1976,26 @@ impl App {
         self.settle_follow();
     }
 
+    /// Handles a key while the line has the focus.
+    ///
+    /// The line decides what the key means and says what the host has to do;
+    /// this only carries out the two answers that are the host's. Everything
+    /// else — motions, quick edits, a selection, the two stages of `Esc` — is
+    /// answered inside [`LineEditor`], and is the reason the line is a wrapper
+    /// rather than a `String`.
     fn handle_line(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                // The destructive way back: `Esc` in Vim abandons what is being
-                // composed, and so does this. `Ctrl+w` is the one that keeps it.
-                self.focus = Focus::Conversation;
-                self.prompt = PromptKind::Message;
-                self.input.clear();
-                self.reply_to = None;
-                self.editing = None;
-            }
-            KeyCode::Backspace => {
-                self.input.pop();
-            }
-            KeyCode::Enter => self.submit(),
-            KeyCode::Char(c) => {
-                // Capped in characters, which is the unit Telegram counts, so a
-                // key held down cannot grow the buffer past what can be sent.
-                if self.input.chars().count() < MESSAGE_LIMIT {
-                    self.input.push(c);
-                } else {
-                    self.flash("message is too long");
-                }
-            }
-            _ => {}
+        match self.line.feed(key) {
+            LineVerdict::Submit => self.submit(),
+            LineVerdict::LeftEditing => self.leave_line(),
+            LineVerdict::TooLong => self.flash("message is too long"),
+            LineVerdict::Edited | LineVerdict::Ignored => {}
+        }
+
+        // A yank in the line is a yank: the same slot, the same drain, and the
+        // same OSC 52 write the conversation's goes through. One seam, two
+        // producers.
+        if let Some(yanked) = self.line.take_yanked() {
+            self.clipboard = Some(yanked);
         }
     }
 
@@ -2201,8 +2198,13 @@ impl App {
     ///
     /// A yank with no paste is a one-way trip to the system clipboard, and the
     /// system clipboard is not somewhere a message can be sent from. This is the
-    /// paste that puts the reader's own words back in front of them, at the caret,
-    /// to be edited and sent like anything else they typed.
+    /// paste that puts the reader's own words back in front of them, at the
+    /// caret, to be edited and sent like anything else they typed.
+    ///
+    /// A draft already in the bar is kept rather than replaced, and the register
+    /// goes in at the caret: `p` is a paste, so it behaves like one everywhere
+    /// else, and a reader who wants to throw their draft away has a key that
+    /// does that.
     fn paste(&mut self) {
         if self.register.is_empty() {
             self.flash("nothing has been yanked");
@@ -2210,7 +2212,7 @@ impl App {
         }
 
         self.start_compose();
-        self.input = self.register.text();
+        self.line.insert(&self.register.text());
     }
 
     /// Starts a selection at the cursor's message, character-wise or whole.    ///
@@ -2298,24 +2300,27 @@ impl App {
     /// context are cleared either way, because the work leaves here rather than
     /// happening here. The focus goes back to the conversation for the same
     /// reason: the line has given up what it was for.
+    ///
+    /// The text is taken *after* the check that a send is allowed, so a send
+    /// refused here leaves the words in the bar rather than taking them out of
+    /// it — the reader would otherwise lose a message they had already written
+    /// to a line that was already refusing.
     fn submit(&mut self) {
-        match self.prompt {
+        match self.line.purpose() {
             PromptKind::Message | PromptKind::Reply => self.submit_message(),
             PromptKind::Edit => self.submit_edit(),
             PromptKind::Command => {
-                let cmd = self.input.trim().to_owned();
-                self.input.clear();
-                self.run_command(&cmd);
+                let cmd = self.line.take();
+                self.run_command(cmd.trim());
             }
             PromptKind::Search => {
-                let q = self.input.trim().to_owned();
-                self.input.clear();
-                self.run_search(&q);
+                let query = self.line.take();
+                self.run_search(query.trim());
             }
         }
 
         self.focus = Focus::Conversation;
-        self.prompt = PromptKind::Message;
+        self.line.clear();
         self.reply_to = None;
         self.editing = None;
     }
@@ -2332,13 +2337,13 @@ impl App {
             self.flash("a message is already on its way");
             return;
         }
-        if !self.has_conversation() || self.input.trim().is_empty() {
+        if !self.has_conversation() || self.line.text().trim().is_empty() {
             return;
         }
 
         let anchor = self.cursor_message_id();
         let chat_id = self.conversation.window.chat_id;
-        let text = std::mem::take(&mut self.input);
+        let text = self.line.take();
         let temp_id = self.conversation.queue_send(&text, self.reply_to);
         self.begin_send(temp_id);
         self.queue_action(Action::Send {
@@ -2359,12 +2364,12 @@ impl App {
         let Some(message_id) = self.editing else {
             return;
         };
-        if !self.has_conversation() || self.input.trim().is_empty() {
+        if !self.has_conversation() || self.line.text().trim().is_empty() {
             return;
         }
 
         let chat_id = self.conversation.window.chat_id;
-        let text = std::mem::take(&mut self.input);
+        let text = self.line.take();
         self.queue_action(Action::Edit {
             chat_id,
             message_id,
@@ -2669,9 +2674,15 @@ impl App {
         self.list.chats.get(self.selected_chat).map_or(0, |c| c.id)
     }
 
+    /// The prefix a prompt's text is drawn behind: `:` and `/`, and nothing for
+    /// a message, a reply or an edit.
+    ///
+    /// Read from the line rather than held beside it, because the line's purpose
+    /// *is* what this names — two fields answering the same question is two
+    /// things to disagree.
     #[must_use]
     pub fn prompt_prefix(&self) -> &'static str {
-        match self.prompt {
+        match self.line.purpose() {
             PromptKind::Message | PromptKind::Reply | PromptKind::Edit => "",
             PromptKind::Command => ":",
             PromptKind::Search => "/",
@@ -3075,18 +3086,23 @@ mod tests {
         assert_eq!(app.focus, Focus::Input);
 
         type_text(&mut app, "hello");
-        assert_eq!(app.input, "hello");
+        assert_eq!(app.line.text(), "hello");
     }
 
     #[test]
-    fn escape_returns_to_normal_and_clears_input() {
+    fn escape_returns_to_the_line_and_then_to_the_conversation() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('i')));
         type_text(&mut app, "hi");
+
         app.handle_key(press(KeyCode::Esc));
 
-        assert_eq!(app.focus, Focus::Conversation);
-        assert!(app.input.is_empty());
+        assert_eq!(
+            app.focus,
+            Focus::Input,
+            "one escape stops typing, and the reader is still in the line"
+        );
+        assert_eq!(app.line.text(), "hi", "and the text is not thrown away");
     }
 
     #[test]
@@ -3096,7 +3112,7 @@ mod tests {
         type_text(&mut app, "abc");
         app.handle_key(press(KeyCode::Backspace));
 
-        assert_eq!(app.input, "ab");
+        assert_eq!(app.line.text(), "ab");
     }
 
     /// Types `text` and submits it, leaving a placeholder in flight.
@@ -3270,11 +3286,11 @@ mod tests {
         app.handle_key(press_ctrl('w'));
 
         assert_eq!(app.focus, Focus::Conversation);
-        assert_eq!(app.input, "half a th", "the line is not thrown away");
+        assert_eq!(app.line.text(), "half a th", "the line is not thrown away");
 
         // And it is still there to come back to, rather than lost.
         app.handle_key(press(KeyCode::Tab));
-        assert_eq!(app.input, "half a th");
+        assert_eq!(app.line.text(), "half a th");
     }
 
     #[test]
@@ -4022,9 +4038,10 @@ mod tests {
         key(&mut app, 'p');
 
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.prompt, PromptKind::Message);
+        assert_eq!(app.line.purpose(), PromptKind::Message);
         assert_eq!(
-            app.input, "Hey, is the build green?\nYes — clippy is happy.",
+            app.line.text(),
+            "Hey, is the build green?\nYes — clippy is happy.",
             "two messages, pasted as two lines"
         );
     }
@@ -4045,7 +4062,7 @@ mod tests {
         key(&mut app, 'p');
 
         assert_eq!(yanked(&app), before, "and the paste is the same text");
-        assert_eq!(app.input, before.join("\n"));
+        assert_eq!(app.line.text(), before.join("\n"));
     }
 
     #[test]
@@ -4161,7 +4178,7 @@ mod tests {
         key(&mut app, 'r');
 
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.prompt, PromptKind::Reply);
+        assert_eq!(app.line.purpose(), PromptKind::Reply);
         assert_eq!(app.reply_to, Some(1));
     }
 
@@ -4566,7 +4583,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('r')));
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.prompt, PromptKind::Reply);
+        assert_eq!(app.line.purpose(), PromptKind::Reply);
         assert_eq!(app.reply_to, Some(9));
 
         type_text(&mut app, "sure");
@@ -4591,12 +4608,12 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('e')));
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.prompt, PromptKind::Edit);
+        assert_eq!(app.line.purpose(), PromptKind::Edit);
         assert_eq!(app.editing, Some(9));
         assert!(
-            app.input.starts_with("No pressure then :)"),
+            app.line.text().starts_with("No pressure then :)"),
             "the buffer opens with the message's text: {:?}",
-            app.input
+            app.line.text()
         );
 
         type_text(&mut app, "!");
