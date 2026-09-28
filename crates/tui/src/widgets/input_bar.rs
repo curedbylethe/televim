@@ -10,6 +10,15 @@
 //! once: what a key would do, and whether there is a draft. The key hints go in
 //! the status line beside it, which is a row and has room for seventy columns;
 //! the bar itself is for the words.
+//!
+//! One thing on it is not the words, and only while it is being typed in: a
+//! space is a cell that paints nothing, and a caret on a blank cell is a bar on
+//! a blank cell, so a key that typed one looked like a key that did nothing.
+//! The bar stands a dim `·` in for every space in a draft the reader is
+//! composing — Vim's `list`, extended past the trailing whitespace it would
+//! mark, because a space typed between two words is as invisible as one typed at
+//! the end. The conversation does not do this: a message is read as prose, and
+//! a sentence with its spaces dotted is not a sentence any more.
 
 use std::ops::Range;
 
@@ -167,7 +176,7 @@ pub fn content_rows(app: &App, width: u16) -> usize {
         return 1;
     }
 
-    crate::wrap::wrap(app.line.text(), width)
+    crate::wrap::wrap_keeping_whitespace(app.line.text(), width)
         .len()
         .clamp(1, INPUT_MAX_ROWS)
 }
@@ -285,26 +294,62 @@ fn body_row<'a>(
         _ => app.theme.text_dim,
     };
 
+    // The dot that stands in for a space, and nothing at all when the reader is
+    // not typing in here — a draft they are not composing is read as prose, and
+    // a sentence with its spaces dotted reads as something else.
+    let space = focused.then_some(app.theme.text_dim);
+
     let mut spans = Vec::new();
     if let Some(lead) = lead {
         spans.push(Span::styled(lead, app.theme.text_dim));
     }
 
     let Some(selected) = app.line.selection() else {
-        spans.push(Span::styled(row, plain));
+        push_text(&mut spans, row, plain, space);
         return Line::from(spans);
     };
 
     let (from, to) = rows::clip(&selected, &body);
     if from > 0 {
-        spans.push(Span::styled(&row[..from], plain));
+        push_text(&mut spans, &row[..from], plain, space);
     }
-    spans.push(Span::styled(&row[from..to], app.theme.mode_visual));
+    push_text(&mut spans, &row[from..to], app.theme.mode_visual, space);
     if to < row.len() {
-        spans.push(Span::styled(&row[to..], plain));
+        push_text(&mut spans, &row[to..], plain, space);
     }
 
     Line::from(spans)
+}
+
+/// Pushes `text` as spans, standing a dot in for every space in it.
+///
+/// A space occupies a cell and paints nothing, and the caret the terminal draws
+/// is a thin bar on a blank cell, so a key that typed one changed nothing a
+/// reader could see. The dot is one column wide where the space was, which is
+/// what keeps the caret and the wrap in step: the mark is the cell the space
+/// already had, not a column taken from somewhere else.
+///
+/// `space` is [`None`] where the text is not being composed, and the text goes
+/// in as it is.
+fn push_text<'a>(spans: &mut Vec<Span<'a>>, text: &'a str, style: Style, space: Option<Style>) {
+    let Some(mark) = space else {
+        spans.push(Span::styled(text, style));
+        return;
+    };
+
+    let mut start = 0;
+    for (at, character) in text.char_indices() {
+        if character == ' ' {
+            if start < at {
+                spans.push(Span::styled(&text[start..at], style));
+            }
+            spans.push(Span::styled("·", mark));
+            start = at + 1;
+        }
+    }
+    if start < text.len() {
+        spans.push(Span::styled(&text[start..], style));
+    }
 }
 
 /// The border style.
@@ -399,6 +444,14 @@ mod tests {
         rows.iter()
             .position(|row| row.contains("Message to"))
             .expect("the bar draws a title, and this one is a message's")
+    }
+
+    /// The row the bar's top border is on while it holds a draft nobody is
+    /// typing in, which titles itself a draft rather than a message.
+    fn draft_top(rows: &[String]) -> usize {
+        rows.iter()
+            .position(|row| row.contains(" draft "))
+            .expect("the bar marks a draft, and this is one")
     }
 
     // ---- the hints -------------------------------------------------------
@@ -502,13 +555,16 @@ mod tests {
         assert!(!shown.contains("draft"), "and nothing claims to be a draft");
     }
 
+    /// A draft is a draft whether or not the reader is typing in it, so the
+    /// focused one is on show too. The spaces are dots, because that is what the
+    /// bar draws while the line has the focus.
     #[test]
     fn a_draft_is_shown_while_the_line_is_focused_too() {
         let mut app = App::mock();
         press(&mut app, KeyCode::Char('i'));
         type_text(&mut app, "half a th");
 
-        assert!(flat(&screen(&app, 80, 24)).contains("half a th"));
+        assert!(flat(&screen(&app, 80, 24)).contains("half·a·th"));
     }
 
     // ---- the draft's subject --------------------------------------------
@@ -626,6 +682,93 @@ mod tests {
             rows[top + 4].contains("─"),
             "and the bar is closed below its three rows: {:?}",
             rows[top + 4]
+        );
+    }
+
+    // ---- the spaces -------------------------------------------------------
+
+    /// A space is a cell that paints nothing, and a caret on a blank cell is a
+    /// bar on a blank cell — so a key that typed one looked like a key that did
+    /// nothing at all. The bar has to show it.
+    #[test]
+    fn a_space_being_typed_is_drawn_as_a_dot() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "a b");
+
+        let rows = rows_of(&screen(&app, 80, 24));
+        let top = bar_top(&rows);
+
+        assert!(
+            rows[top + 1].contains("a·b"),
+            "the space between the words is on show: {:?}",
+            rows[top + 1]
+        );
+    }
+
+    /// The case with nothing else on the bar to go on: a draft of spaces has no
+    /// visible character in it at all, so without the dot the reader cannot tell
+    /// the key was entered from the key being dropped.
+    #[test]
+    fn a_draft_of_nothing_but_spaces_is_not_an_empty_bar() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "   ");
+
+        let rows = rows_of(&screen(&app, 80, 24));
+        let top = bar_top(&rows);
+
+        assert!(
+            rows[top + 1].contains("···"),
+            "three spaces are three dots: {:?}",
+            rows[top + 1]
+        );
+    }
+
+    /// A draft nobody is typing in is read before it is sent, and it is read as
+    /// prose. The conversation is prose too, and it gets no dots.
+    #[test]
+    fn a_draft_nobody_is_typing_in_keeps_its_spaces_as_they_are() {
+        let mut app = App::mock();
+        drafted(&mut app, "half  a th");
+
+        let rows = rows_of(&screen(&app, 80, 24));
+        let top = draft_top(&rows);
+
+        assert!(
+            rows[top + 1].contains("half  a th"),
+            "the draft is on show as it was typed: {:?}",
+            rows[top + 1]
+        );
+        assert!(
+            !rows[top + 1].contains('·'),
+            "and nothing marks it: {:?}",
+            rows[top + 1]
+        );
+    }
+
+    /// The dot has to be the cell the space already had. One column more or
+    /// less and the caret and the wrap drift away from what is drawn — the
+    /// arithmetic the caret position is computed from is in [`App`] and in
+    /// [`crate::line`], and this is what keeps the drawing inside it.
+    #[test]
+    fn a_dot_takes_the_space_s_own_column_and_no_other() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "a b ");
+
+        let rows = rows_of(&screen(&app, 80, 24));
+        let top = bar_top(&rows);
+        let drawn = rows[top + 1]
+            .trim()
+            .trim_start_matches('│')
+            .trim_end_matches('│')
+            .trim_end();
+
+        assert_eq!(
+            drawn.chars().count(),
+            app.line.text().chars().count(),
+            "two spaces are two columns, and the trailing one is on show: {drawn:?}"
         );
     }
 

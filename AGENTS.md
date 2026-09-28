@@ -331,7 +331,8 @@ crates/tui/
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
 │   ├── line.rs         # The input line: owns the text, wraps vim-line
 │   ├── rows.rs         # One owner for the panel's geometry
-│   ├── wrap.rs         # Text + width -> the rows it occupies
+│   ├── wrap.rs         # Text + width -> the rows it occupies. `wrap` for a
+│                      #   message; `wrap_keeping_whitespace` for the input bar
 │   ├── widgets/
 │   │   ├── chat_list.rs
 │   │   ├── conversation.rs
@@ -360,8 +361,14 @@ buffer: the wrapper applies the edits the library calculates, decides `Enter`
 and refuses the keys the library cannot run — a newline in `:` or `/`, and a
 word motion on non-ASCII text. A `:` line and a `/` line are prompts rather
 than buffers and get insert only. The bar draws the draft the wrapper lays out
-with the same `wrap` the conversation uses, grown to six rows, with a real
-terminal caret `TestBackend` cannot model — check it by hand.
+with `wrap_keeping_whitespace` — the conversation's `wrap`, except that a run of
+spaces stays on the row it ends with rather than being given to neither, so that
+a space the reader typed has a cell to be seen in — grown to six rows, with a
+real terminal caret `TestBackend` cannot model — check it by hand. While the
+reader is composing, the bar stands a dim `·` in for every space in the draft:
+a space is a cell that paints nothing, and a caret on a blank cell is a bar on a
+blank cell, so the key that typed one looked like the key that did nothing. The
+conversation gets no dots — a message is read as prose.
 
 `rows.rs` and `wrap.rs` are one answer to "how tall is this message", and the
 panel asks them rather than working it out again: a message is as many rows as

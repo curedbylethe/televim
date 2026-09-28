@@ -29,7 +29,26 @@ use std::ops::Range;
 /// and is not answered here.
 #[must_use]
 pub fn wrap(text: &str, width: u16) -> Vec<Range<usize>> {
-    rows(text, width, 0, 0)
+    rows(text, width, 0, 0, false)
+}
+
+/// Splits `text` into the rows it occupies at `width`, leaving the whitespace a
+/// row ends with *on* that row.
+///
+/// The same rows as [`wrap`], and the same count: the space run a row is broken
+/// at is drawn on the row before the break rather than given to neither, and
+/// trailing whitespace reaches the end of its line instead of stopping short of
+/// it. Nothing is wider for it — a run of spaces is only ever recorded while the
+/// row still has room after it — so a caret in one of those spaces has a cell of
+/// its own to stand in.
+///
+/// This is for the input bar, where a space the reader typed has to be a cell
+/// they can see: dropped, the bar is exactly as blank after the key as it was
+/// before it. The conversation wraps with [`wrap`], because a message is read as
+/// prose and its trailing spaces are not what the reader is looking at.
+#[must_use]
+pub fn wrap_keeping_whitespace(text: &str, width: u16) -> Vec<Range<usize>> {
+    rows(text, width, 0, 0, true)
 }
 
 /// Splits `text` into rows, where the first shares `prefix` columns with a
@@ -46,14 +65,14 @@ pub fn wrap(text: &str, width: u16) -> Vec<Range<usize>> {
 /// afterwards, because a terminal clips silently: what was pushed off the row
 /// would be text the reader can scroll to and never see.
 pub fn wrap_decorated(text: &str, prefix: usize, suffix: usize, width: u16) -> Vec<Range<usize>> {
-    rows(text, width, prefix, suffix)
+    rows(text, width, prefix, suffix, false)
 }
 
 /// Lays `text` out, one line at a time.
 ///
 /// Each line always contributes at least one row, so the text's own newlines
 /// are what separate the rows rather than an accident of the widths.
-fn rows(text: &str, width: u16, prefix: usize, suffix: usize) -> Vec<Range<usize>> {
+fn rows(text: &str, width: u16, prefix: usize, suffix: usize, keep: bool) -> Vec<Range<usize>> {
     // A panel with no width is not a panel, but it must not be a loop either:
     // every character still gets a row of its own, and no row is nothing.
     let width = usize::from(width).max(1);
@@ -61,7 +80,7 @@ fn rows(text: &str, width: u16, prefix: usize, suffix: usize) -> Vec<Range<usize
     let mut offset = 0;
 
     for line in text.split('\n') {
-        fill(&mut laid_out, line, offset, width, prefix, suffix);
+        fill(&mut laid_out, line, offset, width, prefix, suffix, keep);
         offset += line.len() + 1;
     }
 
@@ -80,13 +99,16 @@ fn fill(
     width: usize,
     prefix: usize,
     suffix: usize,
+    keep: bool,
 ) {
     let mut from = 0;
 
     loop {
-        from = past_spaces(line, from);
+        if !keep {
+            from = past_spaces(line, from);
+        }
         let limit = row_width(laid_out.len(), width, prefix, suffix);
-        let (end, next) = one_row(line, from, limit);
+        let (end, next) = one_row(line, from, limit, keep);
         laid_out.push(offset + from..offset + end);
 
         if next <= from || next >= line.len() {
@@ -103,13 +125,17 @@ fn fill(
 /// which is the only thing to be done with a word wider than the panel. Neither
 /// is wider than `limit`: the row stops at the first character that does not
 /// fit, and a space is only remembered while the row still has room after it.
-fn one_row(line: &str, from: usize, limit: usize) -> (usize, usize) {
+///
+/// With `keep`, the run of spaces is the row's end rather than the gap between
+/// it and the next one — see [`wrap_keeping_whitespace`].
+fn one_row(line: &str, from: usize, limit: usize, keep: bool) -> (usize, usize) {
     let mut at_space: Option<(usize, usize)> = None;
 
     for (used, (offset, character)) in line[from..].char_indices().enumerate() {
         let at = from + offset;
         if used >= limit {
-            return at_space.unwrap_or((at, at));
+            let (start, next) = at_space.unwrap_or((at, at));
+            return if keep { (next, next) } else { (start, next) };
         }
 
         if character.is_whitespace() {
@@ -126,9 +152,10 @@ fn one_row(line: &str, from: usize, limit: usize) -> (usize, usize) {
     // The line ran out inside the row, so it is the line's end the row reaches
     // — except where the last space run runs to that end, which is trailing
     // whitespace: the terminal does not draw it, and neither does the slice the
-    // panel takes.
+    // panel takes. Keeping it gives those spaces a cell each, which is the whole
+    // of what the input bar wants and the whole of what it costs to have.
     let end = match at_space {
-        Some((start, next)) if next >= line.len() => start,
+        Some((start, next)) if next >= line.len() && !keep => start,
         _ => line.len(),
     };
 
@@ -139,7 +166,9 @@ fn one_row(line: &str, from: usize, limit: usize) -> (usize, usize) {
 ///
 /// That run is the one the row before it was broken at, so it belongs to
 /// neither row: kept, it would begin a row with a blank column and leave the
-/// two rows disagreeing about where a word starts.
+/// two rows disagreeing about where a word starts. [`wrap_keeping_whitespace`]
+/// keeps it on the row before the break instead, so the row after the break
+/// still begins on a word and nothing calls for this.
 fn past_spaces(line: &str, from: usize) -> usize {
     let rest = &line[from..];
     from + rest.len() - rest.trim_start_matches(char::is_whitespace).len()
@@ -169,6 +198,79 @@ mod tests {
             .into_iter()
             .map(|range| &text[range])
             .collect()
+    }
+
+    /// The rows a text is laid out into, as the text of each, with the
+    /// whitespace kept on the row it ends with.
+    fn kept_rows_of(text: &str, width: u16) -> Vec<&str> {
+        wrap_keeping_whitespace(text, width)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect()
+    }
+
+    // ---- the whitespace an input bar has to draw -------------------------
+
+    /// The space the reader typed at the end of a draft is a cell of the row, or
+    /// the bar is exactly as blank after the key as it was before it.
+    #[test]
+    fn trailing_whitespace_reaches_the_end_of_its_row_when_it_is_kept() {
+        assert_eq!(kept_rows_of("hi  ", 10), vec!["hi  "]);
+    }
+
+    /// The case with nothing else on the bar to go on: a draft of nothing but
+    /// spaces has no visible character in it at all.
+    #[test]
+    fn a_line_of_nothing_but_spaces_is_a_row_of_them() {
+        assert_eq!(kept_rows_of("   ", 10), vec!["   "]);
+        assert_eq!(kept_rows_of("a\n   \nb", 10), vec!["a", "   ", "b"]);
+    }
+
+    /// The run a row is broken at belongs to the row before the break rather
+    /// than to neither of them — and the row after it still begins on a word,
+    /// which is the reason the run is not simply left at the start of a row.
+    #[test]
+    fn the_run_a_row_is_broken_at_stays_on_that_row() {
+        assert_eq!(kept_rows_of("alpha   beta", 8), vec!["alpha   ", "beta"]);
+        assert_eq!(rows_of("alpha   beta", 8), vec!["alpha", "beta"]);
+    }
+
+    /// Nothing is wider for keeping the whitespace, because a run of spaces is
+    /// only ever recorded while the row still has room after it. A row that did
+    /// overflow would push the caret off the end of the bar.
+    #[test]
+    fn keeping_the_whitespace_makes_no_row_wider() {
+        let texts = [
+            "the quick brown fox jumps over the lazy dog",
+            "a  b   c    d",
+            "   leading spaces and trailing ones   ",
+            "one\ntwo   \n   three",
+        ];
+
+        for text in texts {
+            for width in [1, 3, 8, 12, 80] {
+                for row in kept_rows_of(text, width) {
+                    assert!(
+                        row.chars().count() <= usize::from(width),
+                        "{row:?} is wider than {width} in {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same rows and the same number of them, which is what lets the bar
+    /// measure a draft's height with one function and lay it out with the other.
+    #[test]
+    fn keeping_the_whitespace_adds_no_row() {
+        let text = "alpha  beta   gamma\n  delta  ";
+
+        assert_eq!(
+            kept_rows_of(text, 12).len(),
+            rows_of(text, 12).len(),
+            "{:?}",
+            kept_rows_of(text, 12)
+        );
     }
 
     // ---- the rules -------------------------------------------------------

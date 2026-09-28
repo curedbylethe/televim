@@ -88,7 +88,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vim_line::{Key, KeyCode as VKey, LineEditor as _, TextEdit, VimLineEditor};
 
 use crate::app::PromptKind;
-use crate::wrap::wrap;
+use crate::wrap::wrap_keeping_whitespace;
 
 /// The most characters a composed message may hold.
 ///
@@ -282,12 +282,16 @@ impl LineEditor {
 
     /// The rows the text occupies at `width`, and the caret's place among them.
     ///
-    /// Both from [`wrap`], the same function the conversation panel lays its
-    /// messages out with, because the input bar and the conversation wrapping
-    /// differently is a bug that only shows up on a long message.
+    /// The same rows the conversation panel lays its messages out with, from the
+    /// same function, because the input bar and the conversation wrapping
+    /// differently is a bug that only shows up on a long message — with one
+    /// exception, [`wrap_keeping_whitespace`], which is where a space the reader
+    /// typed keeps the cell it has to be seen in. The rows and their count are
+    /// the same either way; a run of spaces is only ever recorded while the row
+    /// still has room after it, so nothing is wider for it.
     #[must_use]
     pub fn laid_out(&self, width: u16) -> LaidOut {
-        let rows = wrap(&self.text, width);
+        let rows = wrap_keeping_whitespace(&self.text, width);
         let caret = self.caret();
 
         // A caret on the boundary between two rows is the *start* of the second
@@ -300,10 +304,11 @@ impl LineEditor {
             .or_else(|| rows.last().map(|row| (rows.len().saturating_sub(1), row)))
             .unwrap_or((0, &(0..0)));
 
-        // `wrap` breaks rows at whitespace and leaves the run of spaces to
-        // neither of them, so a caret can sit in the gap between two rows. It is
-        // clamped into the row it is reported on rather than slicing a range
-        // backwards.
+        // A caret is clamped into the row it is reported on rather than slicing
+        // a range backwards. With the whitespace kept on the row it ends with,
+        // every character of the text is on one row or the other, so there is
+        // nothing left to clamp in practice — and a caret in a run of spaces is
+        // a cell of its own, which is where it is drawn.
         let at = caret.clamp(range.start, range.end);
         let column = self.text[range.start..at].chars().count();
 
