@@ -8,13 +8,16 @@
 
 use std::fs::File;
 use std::io::Stdout;
-use std::io::{Write as _, stdout};
+use std::io::{Write, stdout};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{
+    Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -86,10 +89,15 @@ fn init_tracing(cfg: &Config, config_path: &Path) {
 
 async fn run_async(cfg: &Config) -> Result<()> {
     enable_raw_mode().context("enabling raw mode")?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen).context("entering alternate screen")?;
+    let mut screen = stdout();
+    execute!(screen, EnterAlternateScreen).context("entering alternate screen")?;
 
-    let backend = CrosstermBackend::new(stdout);
+    // Pushed before the reader thread starts, because a key arriving between the
+    // two would be read without it — and popped by the guard when this function
+    // returns, whatever it returns.
+    let keys = EnhancedKeys::push(stdout()).context("asking for disambiguated keys")?;
+
+    let backend = CrosstermBackend::new(screen);
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
     let result = event_loop(cfg, &mut terminal).await;
@@ -98,8 +106,56 @@ async fn run_async(cfg: &Config) -> Result<()> {
     let _ = disable_raw_mode();
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
+    drop(keys);
 
     result
+}
+
+/// The [kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/),
+/// asked for on the way in and given back on the way out.
+///
+/// `DISAMBIGUATE_ESCAPE_CODES` is what makes a shifted `Enter` arrive as
+/// `Enter` with `SHIFT` set, and a bare `Enter` arrive without it — the
+/// difference between "send this" and "new line here" in the input bar. It also
+/// makes `Esc` itself unambiguous, which removes a class of "the escape did not
+/// register".
+///
+/// **The protocol is not universal.** In a terminal that does not support it —
+/// `xterm` among them — a shifted `Enter` arrives as a bare `Enter`, and under
+/// the input line's rule that *sends the message* rather than inserting a
+/// newline. There is no way to detect that from inside `crossterm`: the terminal
+/// says nothing about whether it honoured the request. Which is why `Ctrl+J`,
+/// which needs no protocol at all, is the newline key the bar names first.
+///
+/// **The pop matters, and it is the part that is easy to get wrong.** Leaving a
+/// terminal in an enhanced mode changes how the user's *shell* reads their
+/// keyboard after this program exits, and a bare `execute!` at the bottom of a
+/// function is skipped on every early return and every `?`. So the pop is a
+/// [`Drop`], and dropping the guard is what undoes it.
+struct EnhancedKeys<W: Write> {
+    out: W,
+}
+
+impl<W: Write> EnhancedKeys<W> {
+    /// Asks the terminal for the flags, and returns the guard that gives them
+    /// back.
+    fn push(mut out: W) -> std::io::Result<Self> {
+        execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+
+        Ok(Self { out })
+    }
+}
+
+impl<W: Write> Drop for EnhancedKeys<W> {
+    fn drop(&mut self) {
+        // Nothing to report: the terminal has already been handed back by the
+        // time this runs on every path, and a pop that failed is not something
+        // the reader could act on.
+        let _ = execute!(self.out, PopKeyboardEnhancementFlags);
+    }
 }
 
 /// Draw, wait for something to happen, apply it, then ask for what comes next.
@@ -290,6 +346,82 @@ mod tests {
             encoded.len() <= CLIPBOARD_BUDGET,
             "the sequence is {} bytes of a budget of {CLIPBOARD_BUDGET}",
             encoded.len()
+        );
+    }
+
+    // ---- the keyboard protocol ------------------------------------------
+
+    /// A writer that hands what it is given to whoever is holding the cell, so a
+    /// test can read what the guard wrote *while* the guard still holds it.
+    ///
+    /// The guard borrows its writer for as long as it lives, which is the whole
+    /// of what makes it a guard — so a `&mut Vec<u8>` cannot be looked at until
+    /// the guard is gone, and the push is exactly what has to be looked at
+    /// before then.
+    #[derive(Clone, Default)]
+    struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl Shared {
+        fn written(&self) -> String {
+            String::from_utf8_lossy(&self.0.borrow()).into_owned()
+        }
+    }
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The escape sequences are written to a real terminal, so what is asserted
+    /// here is the one thing that can be checked without one: that both halves
+    /// happen, and that the second one is the guard's rather than a line at the
+    /// bottom of a function.
+    #[test]
+    fn the_keyboard_flags_are_pushed_and_given_back() {
+        let out = Shared::default();
+
+        {
+            let _keys = EnhancedKeys::push(out.clone()).expect("a cell takes the sequence");
+            assert!(
+                out.written().contains("\x1b[>1u"),
+                "the push is written, and it is the disambiguation flag: {:?}",
+                out.written()
+            );
+        }
+
+        assert!(
+            out.written().contains("\x1b[<1u"),
+            "and dropping the guard gives them back: {:?}",
+            out.written()
+        );
+    }
+
+    /// The whole reason the pop is a `Drop` and not a statement: every way out
+    /// of a function skips the statements after it, and this one is a change to
+    /// the terminal the *user's shell* inherits.
+    #[test]
+    fn the_flags_are_given_back_even_when_the_loop_panics() {
+        let out = Shared::default();
+
+        let unwound = std::panic::catch_unwind({
+            let out = out.clone();
+            std::panic::AssertUnwindSafe(move || {
+                let _keys = EnhancedKeys::push(out).expect("a cell takes the sequence");
+                panic!("the event loop fell over");
+            })
+        });
+
+        assert!(unwound.is_err(), "and the panic was not swallowed");
+        assert!(
+            out.written().contains("\x1b[<1u"),
+            "but the terminal was still handed back: {:?}",
+            out.written()
         );
     }
 }

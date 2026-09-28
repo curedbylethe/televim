@@ -56,6 +56,15 @@ const CONFIRM_HINT: &str = " y: delete  n/Esc: cancel";
 /// draws as `[failed: …]`.
 const DRAFT_HINT: &str = " ⏎ draft — i to continue, ^J/⏎ to discard";
 
+/// The hint while the line is being typed in.
+///
+/// `^J` first, because it works in every terminal and needs no protocol. A
+/// shifted `Enter` is the same key where the terminal volunteers the
+/// distinction — `xterm` among others does not, and there a shifted `Enter`
+/// arrives as a bare one, which sends. See [`crate::line::LineEditor::feed`]
+/// for the limitation, which the bar does not have room to repeat.
+const INSERT_HINT: &str = " ⏎: send  ^J: newline  shift+⏎: newline where supported";
+
 /// The hint while the line is in its own normal mode.
 ///
 /// No `j`/`k`, and that is not an oversight: `vim-line` makes those history
@@ -91,12 +100,13 @@ const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
 #[cfg(test)]
-const ALL_HINTS: [&str; 7] = [
+const ALL_HINTS: [&str; 8] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
     VISUAL_HINT,
     CONFIRM_HINT,
     DRAFT_HINT,
+    INSERT_HINT,
     LINE_NORMAL_HINT,
     LINE_VISUAL_HINT,
 ];
@@ -114,7 +124,7 @@ pub fn hint(app: &App) -> &'static str {
         (Focus::Input, _) if app.line.purpose().is_buffer() => match app.line.status() {
             "VISUAL" => LINE_VISUAL_HINT,
             "NORMAL" => LINE_NORMAL_HINT,
-            _ => DRAFT_HINT,
+            _ => INSERT_HINT,
         },
         (Focus::Input, _) => "",
         (Focus::ChatList, _) => CHAT_LIST_HINT,
@@ -431,7 +441,11 @@ mod tests {
 
         press(&mut app, KeyCode::Char('i'));
         type_text(&mut app, "hi");
-        assert_eq!(hint(&app), DRAFT_HINT, "insert: the draft is being written");
+        assert_eq!(
+            hint(&app),
+            INSERT_HINT,
+            "insert: how to send, and how to stay"
+        );
         assert_eq!(
             mode_label(&app),
             "INSERT",
