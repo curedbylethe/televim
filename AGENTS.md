@@ -363,9 +363,9 @@ directly. That is pre-existing dead code — do not delete it without asking.
 `line.rs` owns the composed text and wraps `vim-line`, which never stores a
 buffer: the wrapper applies the edits the library calculates, decides `Enter`
 (send) and `Esc` (two stages, nothing lost) itself without handing either over,
-and refuses the keys the library cannot run — a newline in `:` or `/`, and a
-word motion on non-ASCII text. A `:` line and a `/` line are prompts rather
-than buffers and get insert only. The bar draws the draft the
+and refuses the keys the library cannot run — a newline in `:` or `/`, and a byte-
+counted motion *behind an operator* on non-ASCII text. A `:` line and a `/` line
+are prompts rather than buffers and get insert only. The bar draws the draft the
 wrapper lays out with `wrap_keeping_whitespace` — the conversation's `wrap`,
 except that a run of
 spaces stays on the row it ends with rather than being given to neither, so that
@@ -682,12 +682,15 @@ Not built, and named here so nobody reads the roadmap below as current:
   selection with the reader's own text is a destructive reading of a key that
   looks additive.
 - **`:w`** — not a command. The only commands are `q`, `quit` and `chat <id>`.
-- **Word motions on non-ASCII text in the input** — refused with a message.
-  `vim-line`'s word motions index bytes rather than characters and would split
-  one, so the wrapper snaps its cursor to boundaries, applies visual operators
-  itself, and refuses `w`/`b`/`e` (and a vertical motion behind an operator)
-  where the text is not ASCII. `h`, `l`, `0`, `$`, `^`, `dd` and the arrows all
-  still run.
+- **Word motions *behind an operator* on non-ASCII text in the input** — refused
+  with a message. `vim-line`'s word motions index bytes rather than characters,
+  and behind `d`/`c`/`y` the motion and the slice to apply it happen inside one
+  key, so there is no moment at which to snap anything. That is the only place a
+  motion is refused: `w`/`b`/`e`/`W`/`B`/`E` in the line's normal mode, and a word
+  motion extending a visual selection, both *run* on text with emoji in it, as
+  does `j`/`k` on its own — where the only thing they can do is move a cursor the
+  next key re-snaps. `dw` and `cc` are the keys still refused, and they say so.
+  `h`, `l`, `0`, `$`, `^`, `dd` and the arrows have always run.
 - **The yank clipboard is one-way and says nothing.** Whether a terminal honours
   OSC 52 at all is not something this program can find out, so a refused or capped
   write is not a failure of the yank and is not reported as one. `y` reaching the
@@ -763,7 +766,7 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.
 - **Why the message window is capped:** `domain::history::ConversationWindow` keeps a flat, bounded window of the messages the client has seen — a `VecDeque` capped at `CONVERSATION_WINDOW` — rather than one list per conversation or an unbounded buffer. The window exists so that an edit or a deletion can be matched to a message; capping it is what stops that from becoming the largest allocation in the process under a live feed. An event for a message that has scrolled out is not applied, which is the same answer the window already gives for a conversation it does not hold.
 - **Why dropping a client stops the network:** the framework's `Client` owns the connection pool's runner task and the update relay, and aborts both when it is dropped. A detached task would leave the socket open until the process ended, and the relay would keep draining an unbounded channel nothing can read.
-- **Why the input line is a wrapper rather than the crate:** `vim-line` never stores the buffer, so somebody has to apply its edits — and that somebody is where the decisions live that the crate must not be asked about. `Enter` (send) and `Esc` (two stages, nothing lost) never reach it, because its own answers differ by mode; `:` and `/` get insert only, because a newline in either is a submission nobody asked for. The wrapper also snaps every position to a character boundary — the cursor around every key, and every index an edit carries on its way into the string — and refuses the byte-counted motions on non-ASCII text, because two of the crate's behaviours split multi-byte characters and this binary sets `panic = "abort"`.
+- **Why the input line is a wrapper rather than the crate:** `vim-line` never stores the buffer, so somebody has to apply its edits — and that somebody is where the decisions live that the crate must not be asked about. `Enter` (send) and `Esc` (two stages, nothing lost) never reach it, because its own answers differ by mode; `:` and `/` get insert only, because a newline in either is a submission nobody asked for. The wrapper also snaps every position to a character boundary — the cursor around every key, and every index an edit carries on its way into the string — and refuses the byte-counted motions *behind an operator* on non-ASCII text, because two of the crate's behaviours split multi-byte characters and this binary sets `panic = "abort"`. That is the only place a motion is refused: elsewhere a motion can only move a cursor, which is re-snapped before anything can slice on it.
 
 ## Guidance for Agents
 
@@ -790,11 +793,12 @@ Real, and named so they are not mistaken for oversights:
   see **Key Decisions**. Neither `domain::utf16_len` nor the rendering of an
   incoming quote's fragment is written, because both exist only for a quote this
   build cannot send.
-- **Word motions in the input refuse non-ASCII text.** `w`, `b`, `e` and a
-  vertical motion behind an operator say no with a flash, because `vim-line`
-  counts those motions in bytes and would split a character. Everything else —
-  `h`, `l`, `0`, `$`, `^`, `dd`, the arrows, insert itself — runs, and the
-  wrapper's cursor is snapped to boundaries around every key.
+- **Word motions *behind an operator* in the input refuse non-ASCII text.** `w`,
+  `b`, `e` and a vertical motion say no with a flash, because `vim-line` counts
+  those motions in bytes and `d`/`c` slice in the same key. Everywhere else they
+  run: in the line's normal mode and as a visual selection's extent, where the
+  only thing a motion can do is move a cursor the next key re-snaps. The
+  wrapper's cursor is snapped to boundaries around every key either way.
 - **A row can be cut inside a multi-part emoji sequence.** A column is a cell,
   from `unicode-width`, and a caret's column is one exact count over a slice of
   its row. A row's width is accumulated per scalar instead, so a ZWJ family is

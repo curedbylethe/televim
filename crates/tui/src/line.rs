@@ -70,9 +70,12 @@
 //! cursor is snapped to a character boundary before and after every key, every
 //! index an edit carries is snapped on its way into the string
 //! ([`LineEditor::apply`]), the caret and the selection the rest of the program
-//! reads are snapped views, visual operators are applied here rather than
-//! handed over, and a word motion — or a vertical one behind an operator — on
-//! non-ASCII text is refused rather than run. See [`LineEditor::feed`].
+//! reads are snapped views, and visual operators are applied here rather than
+//! handed over. What is *refused* is the one place snapping cannot help: a
+//! word or vertical motion **behind an operator**, where the motion and the
+//! slice to apply it happen inside a single key and there is no moment in
+//! between. Everywhere else the word motions run, because there the only thing
+//! they can do is move a cursor the next key re-snaps. See [`LineEditor::feed`].
 //!
 //! ## The wrapper
 //!
@@ -434,11 +437,13 @@ impl LineEditor {
     /// multi-byte text they land inside a character — and anything that then
     /// slices there takes the process down with it, because this binary sets
     /// `panic = "abort"`. The wrapper therefore snaps the cursor to a boundary
-    /// before and after every key, applies visual operators itself over a
-    /// snapped range, and refuses a word motion — or a vertical one behind an
-    /// operator — on non-ASCII text outright. A refused key says so
-    /// ([`LineVerdict::Refused`]) and changes nothing, not even the pending
-    /// operator: the reader can follow it with a motion that is safe.
+    /// before and after every key, snaps every index an edit carries before it
+    /// reaches the string, applies visual operators itself over a snapped range,
+    /// and refuses the one case snapping cannot help: a word or vertical motion
+    /// **behind an operator**, where the motion and the slice happen inside a
+    /// single key. Elsewhere the word motions run as they do on ASCII. A refused
+    /// key says so ([`LineVerdict::Refused`]) and changes nothing, not even the
+    /// pending operator: the reader can follow it with a motion that is safe.
     pub fn feed(&mut self, key: KeyEvent) -> LineVerdict {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -548,7 +553,7 @@ impl LineEditor {
     /// Only called for non-ASCII text, which is the only text the byte-indexed
     /// motions can split. `None` means the key is safe to hand over.
     ///
-    /// Three cases, by what the line is in the middle of:
+    /// Two cases, and only one of them is a refusal:
     ///
     /// - Behind an operator (`d...` and its siblings) a motion and its slice
     ///   happen inside one key, so nothing can be snapped in between. The
@@ -559,11 +564,16 @@ impl LineEditor {
     ///   through too.
     /// - In visual the operators are applied here, over the snapped range the
     ///   rest of the program already reads, because the library would slice its
-    ///   own `cursor + 1`. A word motion that would only extend the selection
-    ///   into a split character is refused.
-    /// - In normal a word motion would only land the cursor somewhere the next
-    ///   key cannot use, so it is refused. Motions between lines are left to
-    ///   run and snapped afterwards: they move, just not by words.
+    ///   own `cursor + 1`. A word motion is *not* refused: it only moves the
+    ///   cursor, and the end of the selection it carries is snapped into the
+    ///   range the next operator will read.
+    ///
+    /// Everywhere else — the line's normal mode above all — nothing is refused,
+    /// because a motion that only moves a cursor cannot slice anything: the
+    /// cursor is snapped after every key, and the one key that could act on the
+    /// position it lands on is an operator, which goes through the first case
+    /// above. One emoji in a draft therefore costs the reader nothing but the
+    /// emoji.
     ///
     /// A refusal changes nothing, not even a pending operator — the reader can
     /// follow it with a motion that is safe, and does not have to retype the
@@ -590,16 +600,8 @@ impl LineEditor {
             }
             "VISUAL" => match motion {
                 'd' | 'x' | 'y' | 'c' => Some(self.visual_op(motion)),
-                _ if is_word_motion(motion) => Some(LineVerdict::Refused),
                 _ => None,
             },
-            "NORMAL" => {
-                if is_word_motion(motion) {
-                    Some(LineVerdict::Refused)
-                } else {
-                    None
-                }
-            }
             _ => None,
         }
     }
@@ -786,24 +788,19 @@ fn snap_up(text: &str, at: usize) -> usize {
     at
 }
 
-/// Whether `c` is a motion the library counts in bytes.
-///
-/// `w`, `b` and `e` and their `WORD` siblings walk `text.as_bytes()` and
-/// classify each byte, so on multi-byte text they stop inside a character. The
-/// rest of the motions — steps, line ends, brackets, the arrows — either walk
-/// boundaries or are snapped afterwards without anything slicing in between.
-fn is_word_motion(c: char) -> bool {
-    matches!(c, 'w' | 'b' | 'e' | 'W' | 'B' | 'E')
-}
-
 /// Whether `c` behind an operator ends in a slice of where the motion landed.
 ///
-/// The word motions, and the vertical ones: `j` and `k` carry a column counted
-/// in bytes between lines, so behind `d` they land the slice the same place a
-/// word motion would. Any other character cancels the operator inside the
-/// library without touching the text, and is safe for exactly that reason.
+/// The word motions — `w`, `b`, `e` and their `WORD` siblings — walk
+/// `text.as_bytes()` and classify each byte, so on multi-byte text they stop
+/// inside a character; and the vertical ones, because `j` and `k` carry a column
+/// counted in bytes between lines and land the slice the same place. Any other
+/// character cancels the operator inside the library without touching the text,
+/// and is safe for exactly that reason.
+///
+/// Only behind an operator. Elsewhere these motions merely move a cursor, which
+/// is snapped after every key and slices nothing.
 fn is_byte_motion(c: char) -> bool {
-    is_word_motion(c) || matches!(c, 'j' | 'k')
+    matches!(c, 'w' | 'b' | 'e' | 'W' | 'B' | 'E' | 'j' | 'k')
 }
 
 /// A key as `vim-line` names it, or `None` for one it has no code for.
@@ -1618,6 +1615,100 @@ mod tests {
     }
 
     // ---- multi-byte text, and the motions that cannot run on it ----------
+    //
+    // They all can, except behind an operator: see the last three here.
+
+    /// The library's word motions index bytes, so on `"héllo"` a `w` lands
+    /// inside the `é` — and where it lands inside a character, the snap after
+    /// the key walks it back to that character's start, which is the character
+    /// the motion was reaching for. On its own a word motion only moves the
+    /// cursor, so it runs.
+    #[test]
+    fn a_word_motion_runs_on_text_holding_an_emoji() {
+        let mut line = composing();
+        type_text(&mut line, "héllo wörld");
+        line.feed(press(KeyCode::Esc));
+
+        let verdict = line.feed(press(KeyCode::Char('w')));
+
+        assert_ne!(verdict, LineVerdict::Refused);
+        assert_eq!(line.text(), "héllo wörld", "a motion is not an edit");
+        assert_eq!(line.status(), "NORMAL");
+        assert!(
+            line.text().is_char_boundary(line.caret()),
+            "and the caret is somewhere a string can be indexed: {}",
+            line.caret()
+        );
+    }
+
+    /// Emoji are not the interesting case on their own: a character of any
+    /// width takes the same road, and the one the reader is most likely to type
+    /// is an accented letter.
+    #[test]
+    fn a_word_motion_lands_on_the_word_after_an_emoji() {
+        let mut line = composing();
+        type_text(&mut line, "😀 word");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+
+        line.feed(press(KeyCode::Char('w')));
+
+        assert_eq!(line.caret(), 5, "the `w` of `word`, past the emoji");
+        assert_eq!(line.text(), "😀 word");
+    }
+
+    /// One emoji is not a reason to take the motions away from every other
+    /// sentence in the draft, for the rest of its life.
+    #[test]
+    fn one_emoji_does_not_refuse_the_motions_of_the_rest_of_the_draft() {
+        let mut line = composing();
+        type_text(&mut line, "hello 😀 world");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        let start = line.caret();
+
+        let first = line.feed(press(KeyCode::Char('w')));
+        let one = line.caret();
+        let second = line.feed(press(KeyCode::Char('w')));
+        let two = line.caret();
+
+        assert_ne!(
+            (first, second),
+            (LineVerdict::Refused, LineVerdict::Refused)
+        );
+        assert!(
+            one > start && two > one,
+            "two real moves: {start} -> {one} -> {two}"
+        );
+    }
+
+    /// A word motion in visual moves the cursor *and* the end of the selection,
+    /// so what is yanked afterwards is the drawn selection — over whole
+    /// characters, which is the range the wrapper already snaps.
+    #[test]
+    fn a_visual_word_motion_extends_the_selection_by_whole_characters() {
+        let mut line = composing();
+        type_text(&mut line, "héllo wörld");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('v')));
+        line.feed(press(KeyCode::Char('w')));
+        let small = line.selection().expect("a selection is up");
+
+        line.feed(press(KeyCode::Char('w')));
+        let wide = line.selection().expect("a selection is still up");
+        let grew = wide.end > small.end;
+        let text = line.text().to_owned();
+        let drawn = &text[wide];
+        line.feed(press(KeyCode::Char('y')));
+
+        assert!(grew, "a word motion moves the end too");
+        assert_eq!(
+            drawn.to_owned(),
+            line.take_yanked().expect("`y` yanks the selection"),
+            "what is cut is what was drawn, over whole characters"
+        );
+    }
 
     /// Behind an operator the motion and its slice happen inside one key, so a
     /// word motion there is not merely misplaced but a panic. It is refused —

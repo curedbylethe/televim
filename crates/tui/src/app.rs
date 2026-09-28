@@ -4270,15 +4270,40 @@ mod tests {
         assert_eq!(app.take_clipboard(), None, "and it is drained once");
     }
 
-    /// A word motion on multi-byte text would land inside a character, so the
-    /// line refuses it rather than running it — and says so, because a key that
-    /// does nothing and says nothing reads as a hang.
+    /// A word motion on multi-byte text runs, and the caret it leaves is on a
+    /// character boundary — the snap after every key is what makes that so.
     #[test]
-    fn a_word_motion_on_non_ascii_text_is_refused_and_says_so() {
+    fn a_word_motion_on_non_ascii_text_runs_and_says_nothing() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('i')));
         type_text(&mut app, "héllo wörld");
         app.handle_key(press(KeyCode::Esc));
+
+        app.handle_key(press(KeyCode::Char('w')));
+
+        assert_eq!(app.line.text(), "héllo wörld", "and it only moved");
+        assert!(
+            app.line.text().is_char_boundary(app.line.caret()),
+            "onto a character: {:?}",
+            app.line.caret()
+        );
+        assert!(
+            !app.status.contains("not built yet"),
+            "and nothing is owed the reader: {:?}",
+            app.status
+        );
+    }
+
+    /// Behind an operator the motion and the slice happen inside one key, which
+    /// is the one place snapping cannot help. It is refused — and it says so,
+    /// because a key that does nothing and says nothing reads as a hang.
+    #[test]
+    fn a_word_motion_behind_an_operator_on_non_ascii_text_is_refused_and_says_so() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "héllo wörld");
+        app.handle_key(press(KeyCode::Esc));
+        app.handle_key(press(KeyCode::Char('d')));
 
         app.handle_key(press(KeyCode::Char('w')));
 
