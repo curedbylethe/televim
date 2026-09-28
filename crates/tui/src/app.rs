@@ -989,6 +989,17 @@ impl App {
         self.list.chats.iter().find(|chat| chat.id == chat_id)
     }
 
+    /// The name of the conversation on show, for the input bar's title.
+    ///
+    /// A draft belongs to no conversation, so this is the one thing a reader
+    /// cannot work out for themselves: where the words in the bar will be
+    /// sent. `None` when nothing is open, which is the one case in which
+    /// composing does nothing at all.
+    #[must_use]
+    pub fn open_chat_name(&self) -> Option<&str> {
+        self.open_chat().map(|chat| chat.title.as_str())
+    }
+
     /// Where the open conversation's unread messages start, as far as its
     /// numbering can say.
     ///
@@ -2558,11 +2569,22 @@ impl App {
     pub fn render(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
 
+        // The bar is as tall as the draft the reader is typing in, up to its
+        // ceiling, and the conversation takes what is left. Nothing is cached
+        // between frames: the height is one wrap of a bounded string, and a
+        // cache would be a second thing to keep in step with the line.
+        let width = area.width.saturating_sub(2).max(1);
+        // `Length` counts `u16` rows and the ceiling is `INPUT_MAX_ROWS`, so this
+        // cannot overflow in practice; saturating rather than converting keeps
+        // the release profile's `panic = "abort"` from having a say about it.
+        let input = 2 + widgets::input_bar::content_rows(self, width);
+        let input = u16::try_from(input).unwrap_or(u16::MAX);
+
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
-                Constraint::Length(3),
+                Constraint::Length(input),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -2712,8 +2734,16 @@ impl App {
     /// Below both, a jump in flight — what the reader has just asked for — and
     /// then the full reason a failed message failed while the cursor is on it, and
     /// finally whatever was written to the status.
+    ///
+    /// A key inside the line is above all of them, because a keystroke cannot be
+    /// deferred and none of the rest is a question waiting for a reply: a reader
+    /// halfway through `dw` needs the rest of that line before anything else on
+    /// the screen.
     #[must_use]
     pub fn status_text(&self) -> String {
+        if self.focus == Focus::Input {
+            return widgets::input_bar::hint(self).to_owned();
+        }
         if let Some(ConfirmKind::DeleteMessages {
             ids,
             outgoing,
@@ -2736,8 +2766,15 @@ impl App {
         {
             return reason.to_owned();
         }
+        // A status worth reading — a refusal, a failure — outranks the hint. The
+        // resting state is the hint rather than the program's name, because the
+        // name says nothing and a bar showing it looks like a bar with nothing
+        // in it, which is exactly what a half-written message used to look like.
+        if self.status != IDLE_STATUS {
+            return self.status.clone();
+        }
 
-        self.status.clone()
+        widgets::input_bar::hint(self).to_owned()
     }
 }
 
@@ -3848,14 +3885,18 @@ mod tests {
         let mut app = App::mock();
         go_to_top(&mut app);
         key(&mut app, 'v');
-        assert_ne!(app.status_text(), IDLE_STATUS);
+        let selected = app.status_text();
+        assert!(
+            selected.contains("selected"),
+            "a selection says so: {selected:?}"
+        );
 
         escape(&mut app);
 
-        assert_eq!(
-            app.status_text(),
-            IDLE_STATUS,
-            "so the status line does not keep describing a selection that is gone"
+        assert!(
+            !app.status_text().contains("selected"),
+            "so the status line does not keep describing a selection that is gone: {:?}",
+            app.status_text()
         );
     }
 
