@@ -883,6 +883,15 @@ impl App {
     }
 
     /// Closes the conversation on show.
+    ///
+    /// Every other act of this function is a reset, and the draft is the one
+    /// thing it does not touch: a reader who switches chats mid-sentence does
+    /// not lose the sentence. What *is* forgotten is the draft's subject — the
+    /// reply it answers and the message it edits — because those name something
+    /// in the conversation that has just closed, and a reply sent into a
+    /// different chat to a message that is not in it is not a reply at all. The
+    /// words survive; what they were for does not, and the draft becomes a
+    /// message.
     fn select_chat_none(&mut self) {
         self.conversation = ConversationView::new(0);
         self.vim = VimState::new(0);
@@ -894,6 +903,7 @@ impl App {
         self.confirm = None;
         self.selection = None;
         self.register = Register::default();
+        self.line.forget_purpose();
     }
 
     // ---- what is on show ------------------------------------------------
@@ -1553,9 +1563,11 @@ impl App {
 
     /// Leaves the input line for the conversation, keeping what was typed.
     ///
-    /// `Ctrl+w` is Vim's other idiom for this, and the one to bind for a reader
-    /// stepping between panes: `Esc` is the destructive way back, because `Esc`
-    /// in Vim abandons what is being composed. This one only looks away.
+    /// `Ctrl+w` is Vim's other idiom for this, and the one bound to the pane
+    /// walk, because `Esc` is no longer a single key: a reader stepping between
+    /// panes should not have to know how many `Esc` presses the line's current
+    /// mode takes, and this one leaves from any of them. It only ever looks
+    /// away — nothing typed is lost to it.
     fn leave_line(&mut self) {
         if self.focus == Focus::Input {
             self.set_focus(Focus::Conversation);
@@ -3113,6 +3125,94 @@ mod tests {
         app.handle_key(press(KeyCode::Backspace));
 
         assert_eq!(app.line.text(), "ab");
+    }
+
+    /// The headline behaviour, in the reader's words. Every Vim user presses
+    /// `Esc` to stop typing and look at the conversation, and losing four lines
+    /// to it with no warning was the most complaint-worthy thing this program
+    /// did.
+    #[test]
+    fn a_typed_message_survives_two_escapes() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "half a thought\nand the rest of it");
+
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(
+            app.focus,
+            Focus::Input,
+            "the first escape stops typing: the reader is still in the line"
+        );
+
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(app.focus, Focus::Conversation, "and the second looks away");
+        assert_eq!(
+            app.line.text(),
+            "half a thought\nand the rest of it",
+            "with every word of it"
+        );
+    }
+
+    #[test]
+    fn a_draft_survives_a_conversation_switch() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "half a th");
+        app.handle_key(press(KeyCode::Esc));
+        app.handle_key(press(KeyCode::Esc));
+
+        app.select_chat(1);
+
+        assert_eq!(
+            app.line.text(),
+            "half a th",
+            "a reader who switches chats mid-sentence does not lose the sentence"
+        );
+    }
+
+    /// The draft's *subject* does not survive, though, because it names something
+    /// in the conversation that has been closed. The words stay; what they were
+    /// written against does not.
+    #[test]
+    fn a_reply_that_outlives_its_conversation_becomes_a_message() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('r')));
+        let replied_to = app
+            .reply_to
+            .expect("a reply answers the message on the cursor");
+        assert_eq!(app.line.purpose(), PromptKind::Reply);
+        type_text(&mut app, "sure");
+
+        app.select_chat(1);
+
+        assert_eq!(app.line.text(), "sure", "the words");
+        assert_eq!(
+            app.line.purpose(),
+            PromptKind::Message,
+            "but not the subject"
+        );
+        assert_eq!(
+            app.reply_to, None,
+            "and nothing to reply to any more: {replied_to} was in the other chat"
+        );
+    }
+
+    /// The rule for what a draft is: the bar is always a draft, so switching away
+    /// from it and coming back finds the text rather than a blank field.
+    #[test]
+    fn a_draft_is_still_there_after_a_submit_that_sent_it() {
+        let mut app = App::mock();
+        submit(&mut app, "ping");
+
+        assert!(
+            app.line.is_empty(),
+            "a sent message leaves nothing behind, or `Enter` would send it twice"
+        );
+
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "next");
+
+        assert_eq!(app.line.text(), "next", "and the next one starts clean");
     }
 
     /// Types `text` and submits it, leaving a placeholder in flight.
