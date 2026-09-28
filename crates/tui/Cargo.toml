@@ -9,6 +9,7 @@ license.workspace = true
 domain.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
+vim-line = "7.7"
 
 [lints]
 workspace = true
