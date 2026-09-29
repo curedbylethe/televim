@@ -116,6 +116,12 @@
 //! - Answer 4 is refused rather than acted on, because history is out of scope.
 //!   The caret's vertical movement is insert mode's arrows instead.
 //! - Answer 5 is `gg` and `G` in [`LineEditor::goto`].
+//!
+//! Three edits belong to the wrapper rather than the library: `splice` inserts,
+//! `newline` is `splice` under the two keys that mean a line feed, and
+//! [`LineEditor::replace`] puts a whole range in at once — what a completion
+//! accepting an emoji over the `:query` the reader typed needs.
+//! `App::accept_completion` is its only caller.
 
 use std::ops::Range;
 

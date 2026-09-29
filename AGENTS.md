@@ -89,7 +89,7 @@ in one direction and wider in another:
 | Crate | Depends on |
 | :---- | :--------- |
 | `domain` | `thiserror` |
-| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation` |
+| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation`, `emojis` |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
 | `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
 
@@ -148,6 +148,12 @@ unicode-width = "0.2"
 # One use: grapheme cluster edges, in `tui::grapheme`. A delete removes one
 # and a row is never cut inside one. Already in the lockfile via ratatui.
 unicode-segmentation = "1"
+# The GitHub gemoji catalog, for the input line's `:shortcode` completion. The
+# whole catalog rather than a curated subset: 1914 emoji, of which 1870 carry a
+# shortcode, at the cost of roughly 0.5 MB of binary and 2 MB of `phf` tables
+# touched only while composing, and about 5 µs to scan — a table this workspace
+# otherwise maintains by hand for bytes it does not need.
+emojis = "0.9"
 
 # Logging
 tracing = "0.1"
@@ -334,6 +340,7 @@ crates/tui/
 ├── src/
 │   ├── lib.rs
 │   ├── app.rs          # The App struct, key dispatch, layout, prompt state
+│   ├── emoji.rs        # The `:query` under the caret, and its candidates
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
 │   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break
 │   ├── line.rs         # The input line: owns the text, wraps vim-line
@@ -344,11 +351,12 @@ crates/tui/
 │   ├── widgets/
 │   │   ├── chat_list.rs
 │   │   ├── conversation.rs
+│   │   ├── emoji_popup.rs  # The `:shortcode` completion above the bar
 │   │   ├── input_bar.rs
 │   │   └── status_bar.rs
 │   └── theme.rs        # Color schemes
 └── Cargo.toml          # deps: domain, ratatui, crossterm, vim-line,
-                       #        unicode-width, unicode-segmentation
+                       #        unicode-width, unicode-segmentation, emojis
 ```
 
 `app.rs` is the largest file in the workspace and holds the key dispatch, the
@@ -463,6 +471,7 @@ enhanced would change how the user's shell reads their keyboard after exit.
 | **Telegram Protocol** | `grammers-client` / `grammers-tl-types` / `grammers-mtproto` / `grammers-mtsender` `0.10.0` | Wrapped in a first-party `telegram-framework` crate. Taken from crates.io, because upstream no longer tags releases. |
 | **TUI Framework**     | `ratatui` `0.30`                                                                | Immediate-mode TUI, low overhead, ideal for redraw-only-what-changed.                                  |
 | **Vim Motions**       | `vim-line` `7.7` (wrapped in `tui::line`)                                        | Trait-based line editor with Normal/Insert modes and motions. The wrapper owns the text, decides `Enter`/`Esc` itself, and routes around four upstream defects; see `tui::line`'s docs. |
+| **Emoji Catalog**     | `emojis` `0.9`                                                                  | The GitHub gemoji set behind the input line's `:shortcode` completion. `&'static` `phf` tables, reached only while composing, costing ~0.5 MB of binary and ~2 MB of RSS and ~5 µs to scan. The whole catalog, not a curated subset. |
 | **Async Runtime**     | `tokio` `1.53.1`                                                                | One event loop, so the runtime is current-thread. See **Memory Strategy**.                             |
 | **Error Handling**    | `thiserror` `2` + `anyhow` `1`                                                  | Typed errors in protocol/domain; `anyhow` at the `app` boundary.                                       |
 | **Logging**           | `tracing` `0.1` + `tracing-subscriber` `0.3` (`env-filter`)                     | Structured logging, written to a file. Never the terminal — see `app` below.                           |
@@ -481,8 +490,8 @@ What is in place:
 - A bounded conversation window: `domain::history::ConversationWindow` caps at
   `CONVERSATION_WINDOW` messages, so full history is never held.
 - Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = true`,
-  `panic = "abort"`. The stripped binary is currently **4.7 MB**, well inside the
-  15 MB target.
+  `panic = "abort"`. The stripped binary is currently **5.2 MB**, well inside the
+  15 MB target — about half a megabyte of which is the emoji catalog.
 
 What is declared but **not** in place, and so cannot be relied on:
 
@@ -658,7 +667,9 @@ Working today:
   terminal volunteers the distinction). `gg` and `G` are the wrapper's, not the
   library's — see **Key Decisions**. The bar is always a draft: it grows to six
   rows, survives a conversation switch, and is drawn with a real terminal caret.
-  Reply with `r`, edit with `e`.
+  A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
+  candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
+  keeps typing into the draft. Reply with `r`, edit with `e`.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
   which side the messages are from, and says how many were left out because they
@@ -824,6 +835,10 @@ Real, and named so they are not mistaken for oversights:
   run: in the line's normal mode and as a visual selection's extent, where the
   only thing a motion can do is move a cursor the next key re-snaps. The
   wrapper's cursor is snapped to boundaries around every key either way.
+- **Three keys mean something else while a `:shortcode` completion is up.**
+  `Tab`, `Enter` and `↑`/`↓` choose or accept a candidate instead of walking a
+  pane, sending the message, or moving the caret. `Esc` closes the popup and
+  gets them back, and the status line names them for as long as it is up.
 - **A feed dropped without `finish` persists a stale update position.** See
   **Key Decisions**.
 - **`tikv-jemallocator` is not installed.** No allocator work is done, and the
