@@ -74,19 +74,34 @@ fn border(app: &App) -> Style {
 fn items(app: &App, width: u16) -> Vec<ListItem<'static>> {
     match &app.account {
         AccountState::Unfetched => vec![row(app.theme.text_dim, "reading the account…")],
+        // The reason wraps for the same reason a bio does, and it is more
+        // important that it does: a reason clipped at the panel's edge is a
+        // reason the reader cannot act on, and the whole point of drawing it
+        // rather than an empty profile is that they can. A bring-up failure
+        // carries a chain, and the chain is where the answer usually is.
         AccountState::Unavailable(reason) => {
-            let mut lines = vec![
-                row(app.theme.text, "not signed in"),
-                row(app.theme.text_dim, reason.clone()),
-            ];
-            lines.push(row(
+            let mut lines = vec![row(app.theme.text, "not signed in")];
+            lines.extend(wrapped(app.theme.text_dim, reason, width));
+            lines.extend(wrapped(
                 app.theme.text_dim,
                 "set the credentials in the configuration",
+                width,
             ));
             lines
         }
         AccountState::Known(account) => known_rows(app, account, width),
     }
+}
+
+/// One field, over as many rows as it needs at the panel's width.
+///
+/// The same `wrap` the bio uses, and the same byte ranges back into the string —
+/// so a row is a slice of the text rather than a copy of it re-measured.
+fn wrapped(style: Style, text: &str, width: u16) -> Vec<ListItem<'static>> {
+    wrap::wrap(text, width)
+        .into_iter()
+        .map(|range| row(style, text[range].to_owned()))
+        .collect()
 }
 
 /// The rows for an account that is known.
@@ -104,9 +119,7 @@ fn known_rows(app: &App, account: &domain::account::Account, width: u16) -> Vec<
             ProfileRow::Identity => items.push(row(app.theme.text, identity(account))),
             ProfileRow::Bio => {
                 let bio = account.bio.as_deref().unwrap_or_default();
-                for range in wrap::wrap(bio, width) {
-                    items.push(row(app.theme.text, bio[range].to_owned()));
-                }
+                items.extend(wrapped(app.theme.text, bio, width));
             }
             ProfileRow::Birthday => items.push(row(
                 app.theme.text,
@@ -352,16 +365,41 @@ mod tests {
     #[test]
     fn a_signed_out_panel_says_so() {
         let mut app = App::mock();
-        app.set_account(Err("no API credentials in the configuration".into()));
+        app.set_account(Err(
+            "no telegram application credentials configured; set TELEVIM_API_ID \
+             and TELEVIM_API_HASH"
+                .into(),
+        ));
         app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE));
 
         let rows = rows(&app);
         assert!(rows.iter().any(|row| row.contains("not signed in")));
         assert!(
             rows.iter()
-                .any(|row| row.contains("no API credentials in the configuration")),
+                .any(|row| row.contains("no telegram application credentials")),
             "the reason is drawn, not just the fact that there is none"
         );
+    }
+
+    /// A reason clipped at the panel's edge is a reason the reader cannot act on,
+    /// and the whole point of drawing it is that they can. A bring-up failure
+    /// carries a chain, so it is routinely longer than fifty-odd columns.
+    #[test]
+    fn a_reason_too_long_for_the_panel_is_wrapped_not_cut() {
+        let mut app = App::mock();
+        app.set_account(Err(
+            "no telegram application credentials configured; set TELEVIM_API_ID and \
+             TELEVIM_API_HASH, and TELEVIM_PHONE and TELEVIM_CODE to sign in"
+                .into(),
+        ));
+        app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE));
+
+        let rows = rows(&app);
+        assert!(
+            rows.iter().any(|row| row.contains("and TELEVIM_API_HASH")),
+            "the end of the reason is on screen, not past the edge"
+        );
+        assert!(!rows.iter().any(|row| row.contains('…')));
     }
 
     /// And the state before anything has been read, which is a different thing
