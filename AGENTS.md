@@ -89,7 +89,7 @@ in one direction and wider in another:
 | Crate | Depends on |
 | :---- | :--------- |
 | `domain` | `thiserror` |
-| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width` |
+| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation` |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
 | `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
 
@@ -145,6 +145,9 @@ vim-line = "7.7"
 # One use: how wide a string is on a terminal, in `tui::wrap::columns`. `ratatui`
 # already resolves it, so the row layout and the caret column share one table.
 unicode-width = "0.2"
+# One use: grapheme cluster edges, in `tui::grapheme`. A delete removes one
+# and a row is never cut inside one. Already in the lockfile via ratatui.
+unicode-segmentation = "1"
 
 # Logging
 tracing = "0.1"
@@ -207,7 +210,7 @@ Widget tests use `ratatui`'s own `TestBackend`; there are no benchmarks; and
 - `grammers-client` is built with `default-features = false`, which drops only its `fs` feature. `grammers-tl-types` is pulled in by `grammers-client` with its default features, so `tl-api` is enabled through feature unification even though this workspace asks only for `tl-mtproto`.
 - `tokio` enables the `full` feature set for flexibility across crates, but the application runtime is chosen explicitly at startup (see **Memory Strategy**).
 - `vim-line` is pinned to `7.7` and used by `tui` for the input line, behind the
-  `tui::line` wrapper. Its API differs substantially from older major versions, so consult the current docs when writing motion logic — and consult the wrapper's module docs first, because three of its behaviours are defects this workspace routes around rather than depends on: `EditResult::edits` must be applied in reverse, the word motions index bytes rather than characters, and a visual selection is `cursor + 1` — so a range can run past the end of a buffer, or inside a character, and every index an edit carries is snapped on its way into the string.
+  `tui::line` wrapper. Its API differs substantially from older major versions, so consult the current docs when writing motion logic — and consult the wrapper's module docs first, because four of its behaviours are defects this workspace routes around rather than depends on: `EditResult::edits` must be applied in reverse, the word motions index bytes rather than characters, a visual selection is `cursor + 1` — so a range can run past the end of a buffer, or inside a character, and every index an edit carries is snapped on its way into the string — and a delete removes one code point, so the wrapper widens it to the cluster it touched.
 - `keyring` needs `libdbus-1-dev` and `pkg-config` on Linux to build the Secret Service backend; CI installs them before the first `cargo` step.
 
 ## `[profile.release]`
@@ -332,6 +335,7 @@ crates/tui/
 │   ├── lib.rs
 │   ├── app.rs          # The App struct, key dispatch, layout, prompt state
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
+│   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break
 │   ├── line.rs         # The input line: owns the text, wraps vim-line
 │   ├── rows.rs         # One owner for the panel's geometry
 │   ├── wrap.rs         # Text + width -> the rows it occupies. `wrap` for a
@@ -344,7 +348,7 @@ crates/tui/
 │   │   └── status_bar.rs
 │   └── theme.rs        # Color schemes
 └── Cargo.toml          # deps: domain, ratatui, crossterm, vim-line,
-                       #        unicode-width
+                       #        unicode-width, unicode-segmentation
 ```
 
 `app.rs` is the largest file in the workspace and holds the key dispatch, the
@@ -364,7 +368,9 @@ directly. That is pre-existing dead code — do not delete it without asking.
 buffer: the wrapper applies the edits the library calculates, decides `Enter`
 (send) and `Esc` (two stages, nothing lost) itself without handing either over,
 and refuses the keys the library cannot run — a newline in `:` or `/`, and a byte-
-counted motion *behind an operator* on non-ASCII text. A `:` line and a `/` line
+counted motion *behind an operator* on non-ASCII text. A delete is widened to
+the grapheme cluster it touches, because the library removes one code point and
+a family is several. A `:` line and a `/` line
 are prompts rather than buffers and get insert only. The bar draws the draft the
 wrapper lays out with `wrap_keeping_whitespace` — the conversation's `wrap`,
 except that a run of
@@ -456,7 +462,7 @@ enhanced would change how the user's shell reads their keyboard after exit.
 | :-------------------- | :------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------- |
 | **Telegram Protocol** | `grammers-client` / `grammers-tl-types` / `grammers-mtproto` / `grammers-mtsender` `0.10.0` | Wrapped in a first-party `telegram-framework` crate. Taken from crates.io, because upstream no longer tags releases. |
 | **TUI Framework**     | `ratatui` `0.30`                                                                | Immediate-mode TUI, low overhead, ideal for redraw-only-what-changed.                                  |
-| **Vim Motions**       | `vim-line` `7.7` (wrapped in `tui::line`)                                        | Trait-based line editor with Normal/Insert modes and motions. The wrapper owns the text, decides `Enter`/`Esc` itself, and routes around three upstream defects; see `tui::line`'s docs. |
+| **Vim Motions**       | `vim-line` `7.7` (wrapped in `tui::line`)                                        | Trait-based line editor with Normal/Insert modes and motions. The wrapper owns the text, decides `Enter`/`Esc` itself, and routes around four upstream defects; see `tui::line`'s docs. |
 | **Async Runtime**     | `tokio` `1.53.1`                                                                | One event loop, so the runtime is current-thread. See **Memory Strategy**.                             |
 | **Error Handling**    | `thiserror` `2` + `anyhow` `1`                                                  | Typed errors in protocol/domain; `anyhow` at the `app` boundary.                                       |
 | **Logging**           | `tracing` `0.1` + `tracing-subscriber` `0.3` (`env-filter`)                     | Structured logging, written to a file. Never the terminal — see `app` below.                           |
@@ -766,7 +772,7 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.
 - **Why the message window is capped:** `domain::history::ConversationWindow` keeps a flat, bounded window of the messages the client has seen — a `VecDeque` capped at `CONVERSATION_WINDOW` — rather than one list per conversation or an unbounded buffer. The window exists so that an edit or a deletion can be matched to a message; capping it is what stops that from becoming the largest allocation in the process under a live feed. An event for a message that has scrolled out is not applied, which is the same answer the window already gives for a conversation it does not hold.
 - **Why dropping a client stops the network:** the framework's `Client` owns the connection pool's runner task and the update relay, and aborts both when it is dropped. A detached task would leave the socket open until the process ended, and the relay would keep draining an unbounded channel nothing can read.
-- **Why the input line is a wrapper rather than the crate:** `vim-line` never stores the buffer, so somebody has to apply its edits — and that somebody is where the decisions live that the crate must not be asked about. `Enter` (send) and `Esc` (two stages, nothing lost) never reach it, because its own answers differ by mode; `:` and `/` get insert only, because a newline in either is a submission nobody asked for. The wrapper also snaps every position to a character boundary — the cursor around every key, and every index an edit carries on its way into the string — and refuses the byte-counted motions *behind an operator* on non-ASCII text, because two of the crate's behaviours split multi-byte characters and this binary sets `panic = "abort"`. That is the only place a motion is refused: elsewhere a motion can only move a cursor, which is re-snapped before anything can slice on it.
+- **Why the input line is a wrapper rather than the crate:** `vim-line` never stores the buffer, so somebody has to apply its edits — and that somebody is where the decisions live that the crate must not be asked about. `Enter` (send) and `Esc` (two stages, nothing lost) never reach it, because its own answers differ by mode; `:` and `/` get insert only, because a newline in either is a submission nobody asked for. The wrapper also snaps every position to a character boundary — the cursor around every key, and every index an edit carries on its way into the string — then widens a delete to the grapheme cluster that index falls in, and refuses the byte-counted motions *behind an operator* on non-ASCII text, because two of the crate's behaviours split multi-byte characters and this binary sets `panic = "abort"`. That is the only place a motion is refused: elsewhere a motion can only move a cursor, which is re-snapped before anything can slice on it.
 
 ## Guidance for Agents
 
@@ -780,7 +786,7 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 8. **`Cargo.lock` is tracked.** It is a binary, so the lockfile is what makes a build reproducible, and one pin in it is load-bearing. Do not add it to `.gitignore`; if it is ever untracked, a fresh clone does not build.
 9. **Runtime kind is a policy decision, not a feature flag.** Even with `tokio`'s `full` features enabled, `app/src/runtime.rs` must use `Builder::new_current_thread()` to honor the memory budget.
 10. **Formatting edition must match compiler edition.** Both are `2024`.
-11. **Consult `tui::line`'s module docs before `vim-line`'s docs** when writing motion logic. The crate's API differs substantially from earlier major versions, and three of its behaviours are defects this workspace routes around rather than depends on.
+11. **Consult `tui::line`'s module docs before `vim-line`'s docs** when writing motion logic. The crate's API differs substantially from earlier major versions, and four of its behaviours are defects this workspace routes around rather than depends on.
 12. **`make ci` before every commit.** It is the same gate CI runs, and it catches the `boundary` violation that nothing else does.
 13. **This file describes what exists.** If a change makes a section here wrong — a new dependency, a moved module, a feature that now works — update it in the same commit. A file that is aspirational is worse than no file, because it is trusted.
 

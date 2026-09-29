@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod event;
+mod grapheme;
 pub mod line;
 pub mod rows;
 pub mod theme;

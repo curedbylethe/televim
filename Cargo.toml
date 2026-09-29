@@ -37,6 +37,9 @@ vim-line = "7.7"
 # One use: how wide a string is on a terminal. `ratatui` already resolves it,
 # so `tui`'s row layout and its caret column share the same table.
 unicode-width = "0.2"
+# One use: grapheme cluster edges, in `tui::grapheme`. A delete removes one
+# and a row is never cut inside one. Already in the lockfile via ratatui.
+unicode-segmentation = "1"
 
 # Logging
 tracing = "0.1"

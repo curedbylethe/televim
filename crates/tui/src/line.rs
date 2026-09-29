@@ -45,15 +45,15 @@
 //!   survives a submit. The conversation's register is a different thing and
 //!   does not survive a conversation change; see `crate::app::Register`.
 //!
-//! Three defects, found by feeding the wrapper multi-byte text the way a
-//! French reader would. The first is **the crate's word motions index bytes,
-//! not characters.** `w` from the start of `"héllo wörld"` lands on byte 1,
-//! which is inside the `é`, and a visual selection is `cursor + 1`, so `v w d`
-//! asks to slice `text[0..2]` — half a character. With `panic = "abort"` that
-//! is the end of the process, and `hello`, `Esc`, `v`, `d` reached the same
-//! place on ASCII-free text before the wrapper clamped. `Up`/`Down` share the
-//! defect by a different road: the column they carry between lines is counted
-//! in bytes.
+//! Four defects. The first three were found by feeding the wrapper multi-byte
+//! text the way a French reader would, and the fourth by deleting an emoji.
+//! The first is **the crate's word motions index bytes, not characters.** `w`
+//! from the start of `"héllo wörld"` lands on byte 1, which is inside the `é`,
+//! and a visual selection is `cursor + 1`, so `v w d` asks to slice
+//! `text[0..2]` — half a character. With `panic = "abort"` that is the end of
+//! the process, and `hello`, `Esc`, `v`, `d` reached the same place on
+//! ASCII-free text before the wrapper clamped. `Up`/`Down` share the defect by
+//! a different road: the column they carry between lines is counted in bytes.
 //!
 //! The second is the same fault reached another way: **a visual selection is
 //! `cursor + 1`**, so a selection on the last character of a buffer asks to
@@ -65,6 +65,17 @@
 //! one *byte* past the caret.** `p` means "paste after the character the caret
 //! is on", and on a four-byte emoji that index is inside the character, so
 //! `yy` then `p` on `"😀😀"` aborts the process.
+//!
+//! The fourth is a delete, and it does not abort anything: **the library
+//! removes one code point.** It walks to a character boundary and stops, so
+//! backspace on `👨‍👩‍👧` leaves the joiner with its last character gone, and
+//! backspace on `👍🏽` leaves a `👍` that is one column where the sequence was
+//! two. The caret is counted in columns, so it is then sitting on the wrong
+//! character. [`LineEditor::apply`] widens the range to the cluster it touches
+//! — the same normalising step, one unit further on — and the caret stays a
+//! code point. `h` and `l` still step one, a caret may rest inside a cluster,
+//! and nothing is deleted across it until a key asks to delete. `x` is that
+//! key: it removes the cluster the caret is in.
 //!
 //! The wrapper therefore never trusts a position it did not snap itself: the
 //! cursor is snapped to a character boundary before and after every key, every
@@ -104,6 +115,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vim_line::{Key, KeyCode as VKey, LineEditor as _, TextEdit, VimLineEditor};
 
 use crate::app::PromptKind;
+use crate::grapheme;
 use crate::wrap::{columns, wrap_keeping_whitespace};
 
 /// The most characters a composed message may hold.
@@ -350,16 +362,17 @@ impl LineEditor {
     ///
     /// The same `Option<Range<usize>>` shape the conversation's selection has,
     /// and for the same reason: the bar draws it and the operations act on it,
-    /// and one answer is what stops those two disagreeing. Snapped for the same
-    /// reason the caret is — the library computes a selection as `cursor + 1`,
-    /// which is one byte past a multi-byte character's first byte — and shrunk
-    /// rather than grown, so that operating on it can only ever touch whole
-    /// characters.
+    /// and one answer is what stops those two disagreeing. The library computes
+    /// a selection as `cursor + 1`, which is one byte past a multi-byte
+    /// character's first byte, so both ends move to a cluster edge: a highlight
+    /// that stopped inside a family would be a cut inside one. The caret stays
+    /// a code point; this is the selection, and it is what a delete acts on.
     #[must_use]
     pub fn selection(&self) -> Option<Range<usize>> {
         self.editor.selection().map(|range| {
-            let start = snap_down(&self.text, range.start.min(self.text.len()));
-            let end = snap_down(&self.text, range.end.min(self.text.len()));
+            let len = self.text.len();
+            let start = grapheme::cluster_start(&self.text, range.start.min(len));
+            let end = grapheme::cluster_end(&self.text, range.end.min(len));
 
             start..end.max(start)
         })
@@ -488,13 +501,20 @@ impl LineEditor {
         self.before.clone_from(&self.text);
 
         let result = self.editor.handle_key(key, &self.text);
-        self.yanked = result.yanked.or(self.yanked.take());
 
         // Backwards, because the crate's own example does and only that makes
-        // `rx` replace rather than no-op — see this module's docs.
-        for edit in result.edits.iter().rev() {
-            self.apply(edit);
+        // `rx` replace rather than no-op — see this module's docs. What a
+        // delete removed is the cluster, not the code point the library
+        // counted, and that is what a yank has to hold. A key that yanked
+        // nothing — backspace — still yanks nothing.
+        let removed = self.apply_edits(&result.edits);
+        let reported = result.yanked;
+        self.yanked = if reported.is_some() {
+            removed.or(reported)
+        } else {
+            None
         }
+        .or(self.yanked.take());
 
         // Against the text as it is now, not as it was before the key: the
         // library moves its cursor for the edit before the host applies it, so
@@ -610,8 +630,8 @@ impl LineEditor {
     /// key to the library.
     ///
     /// The library would slice its own `cursor + 1` range, which on multi-byte
-    /// text ends inside a character. The range here is the same snapped one the
-    /// bar draws, so what is cut is what was shown — whole characters only.
+    /// text ends inside a character. The range here is the same one the bar
+    /// draws, so what is cut is what was shown — whole clusters only.
     /// Visual is then left the way the `Esc` key would leave it, and `c` enters
     /// insert afterwards, because a change is a deletion the reader keeps
     /// typing after.
@@ -680,44 +700,97 @@ impl LineEditor {
         self.editor.set_cursor(at + text.len(), &self.text);
     }
 
+    /// Applies the library's edits, back to front, and returns the text a delete
+    /// removed.
+    ///
+    /// [`LineEditor::apply`] is where an index reaches the string. The return
+    /// is `None` when the key deleted nothing — a yank with no edit, or an
+    /// insert — so the caller can tell "removed the cluster" from "yanked, and
+    /// the library's text is the one to keep".
+    fn apply_edits(&mut self, edits: &[TextEdit]) -> Option<String> {
+        let mut removed = None;
+        // Where a widened delete began, in the text from before it. The caret
+        // belongs there: the library left it on the code point it deleted,
+        // which after the widening is one code point into a cluster that is
+        // gone. An ASCII delete does not widen, and the library's caret stands.
+        let mut caret_at = None;
+        // The widened range, in those same coordinates. `r` emits an insert at
+        // the code point and a delete of it; applied back to front, the insert
+        // still speaks in the coordinates from before the delete, and a delete
+        // that started earlier than the library asked has moved them.
+        let mut hole: Option<(usize, usize)> = None;
+
+        for edit in edits.iter().rev() {
+            if let Some(cut) = self.apply(edit, &mut hole) {
+                if cut.widened {
+                    caret_at = Some(cut.at);
+                }
+                removed = Some(cut.text);
+            }
+        }
+
+        if let Some(at) = caret_at {
+            self.editor.set_cursor(at.min(self.text.len()), &self.text);
+        }
+
+        removed
+    }
+
     /// Applies one of the library's edits to the text the host owns.
     ///
-    /// The one place an index the library computes reaches a string, so it is
-    /// where every such index is put on a character boundary first. Three
-    /// reasons, and the third is the one that is fatal:
+    /// The one place an index the library computes reaches a string. A delete's
+    /// range is widened to the clusters it touches, so a key removes the glyph
+    /// the reader was on and not one code point of it. An index already on a
+    /// cluster edge stays there, which is why an ASCII delete is unchanged and
+    /// why a newline — its own cluster — is never widened across. An insert
+    /// snaps up to a character boundary, because "after the character the caret
+    /// is on" means after the whole of it; `hole` then slides that index back
+    /// when the delete just applied took bytes from in front of it.
     ///
-    /// - the library computes a visual selection as `cursor + 1`, so a selection
-    ///   on the **last** character asks to delete one past the end. `hello`,
-    ///   `Esc`, `v`, `d` reaches it every time, and with `panic = "abort"` it
-    ///   takes the process down.
-    /// - `p` is "paste *after* the character the caret is on", implemented as
-    ///   one **byte** after the caret. On a four-byte emoji that index is inside
-    ///   the character, so `yy` then `p` on `"😀😀"` aborts the process.
-    /// - a motion the library counts in bytes can land anywhere inside a
-    ///   character, and an index there is inside the string and not indexable.
-    ///
-    /// Clamping to the length is not enough and never was: an index can be
-    /// inside the string and still be inside a character. So the two ends of a
-    /// range are normalised in the directions that make a range *wider* — a
-    /// delete that takes a whole character is a key the reader meant, and one
-    /// that takes half of a character is a panic — while an insert snaps up,
-    /// because "after the character the caret is on" means after the whole of
-    /// it. Everywhere else `at` is the caret itself, which the wrapper has
-    /// already snapped, so the rule is a no-op.
-    fn apply(&mut self, edit: &TextEdit) {
+    /// Returns the text a delete removed, and where it began.
+    fn apply(&mut self, edit: &TextEdit, hole: &mut Option<(usize, usize)>) -> Option<Cut> {
         match edit {
             TextEdit::Delete { start, end } => {
-                let start = snap_down(&self.text, *start);
-                let end = snap_up(&self.text, *end);
-                if start < end {
-                    self.text.replace_range(start..end, "");
+                let len = self.text.len();
+                let raw_start = (*start).min(len);
+                let raw_end = (*end).min(len);
+                if raw_start >= raw_end {
+                    return None;
                 }
+
+                let start = grapheme::cluster_start(&self.text, raw_start);
+                let end = grapheme::cluster_end(&self.text, raw_end);
+                if start >= end {
+                    return None;
+                }
+
+                let text = self.text[start..end].to_owned();
+                let widened = start < raw_start || end > raw_end;
+                self.text.replace_range(start..end, "");
+                *hole = Some((start, end));
+                Some(Cut {
+                    at: start,
+                    text,
+                    widened,
+                })
             }
             TextEdit::Insert { at, text } => {
-                self.text.insert_str(snap_up(&self.text, *at), text);
+                let at = shift_for_hole(*at, *hole);
+                self.text.insert_str(snap_up(&self.text, at), text);
+                None
             }
         }
     }
+}
+
+/// Text a delete removed, once its range covered whole clusters.
+struct Cut {
+    /// Where the removed text began, in the string from before the delete.
+    at: usize,
+    text: String,
+    /// The range grew past the one the library asked for. The caret it left
+    /// is then inside the cluster, and belongs at [`Cut::at`] instead.
+    widened: bool,
 }
 
 /// The text laid out at a width, and where the caret fell in it.
@@ -756,6 +829,26 @@ impl LaidOut {
     }
 }
 
+/// Where an insert lands once a delete in the same key has widened.
+///
+/// `at` is in the coordinates from before the delete. An index inside the
+/// removed cluster belongs at the cluster's start — that is `r` on a code
+/// point of a family, and the replacement has to take the family's place, not
+/// a byte that the widening already removed. An index past the cluster shifts
+/// back by what was removed. No hole, and the index is unchanged.
+fn shift_for_hole(at: usize, hole: Option<(usize, usize)>) -> usize {
+    let Some((start, end)) = hole else {
+        return at;
+    };
+    if at >= end {
+        at - (end - start)
+    } else if at > start {
+        start
+    } else {
+        at
+    }
+}
+
 /// Walks `at` back to the character it falls in the middle of, if it does.
 ///
 /// The one place two units meet in this module: the library counts positions in
@@ -775,11 +868,10 @@ fn snap_down(text: &str, at: usize) -> usize {
 /// The sibling of [`snap_down`] and the other half of the same rule. A position
 /// one byte into a character has to become a real position, and the only two
 /// positions that are unambiguously right are the two ends of the character it
-/// is inside. Which one is the right end is a decision, and each caller makes
-/// it: a *cursor* and the start of a *delete* take the near end ([`snap_down`]),
-/// while an *insert* and the end of a *delete* take the far one, because a
-/// character the reader's key was already inside is better removed whole than
-/// left in halves. The end of the text is a boundary of its own.
+/// is inside. A *cursor* takes the near end ([`snap_down`]); an *insert* takes
+/// the far one, because "after the character the caret is on" means after the
+/// whole of it. A delete does not come here: it widens to a cluster, in
+/// [`LineEditor::apply`]. The end of the text is a boundary of its own.
 fn snap_up(text: &str, at: usize) -> usize {
     let mut at = at.min(text.len());
     while at < text.len() && !text.is_char_boundary(at) {
@@ -1850,6 +1942,256 @@ mod tests {
 
         assert_eq!(line.text(), "lo");
         assert_eq!(line.status(), "INSERT");
+    }
+
+    // ---- a delete removes a cluster -------------------------------------
+
+    /// Two backspaces over a family and the character after it. One code point
+    /// at a time would leave the joiner with its last character gone.
+    #[test]
+    fn a_backspace_removes_a_whole_zwj_family() {
+        let mut line = composing();
+        type_text(&mut line, "👨‍👩‍👧x");
+
+        line.feed(press(KeyCode::Backspace));
+        line.feed(press(KeyCode::Backspace));
+
+        assert_eq!(line.text(), "");
+        assert_eq!(line.caret(), 0);
+        assert_eq!(line.take_yanked(), None, "backspace does not yank");
+    }
+
+    /// The same text, from the start, with `x`. The character after the family
+    /// is not part of the cluster and stays.
+    #[test]
+    fn x_removes_a_whole_zwj_family() {
+        let mut line = composing();
+        type_text(&mut line, "👨‍👩‍👧x");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+
+        line.feed(press(KeyCode::Char('x')));
+
+        assert_eq!(line.text(), "x");
+        assert_eq!(line.caret(), 0, "where the family was");
+    }
+
+    /// A bare thumb is one column; the sequence is two. Removing the modifier
+    /// on its own would move every column after it.
+    #[test]
+    fn a_backspace_removes_the_modifier_with_its_base() {
+        let mut line = composing();
+        type_text(&mut line, "👍🏽x");
+        line.feed(press(KeyCode::Backspace));
+        assert_eq!(columns(line.text()), 2, "the sequence, once `x` is gone");
+
+        line.feed(press(KeyCode::Backspace));
+
+        assert_eq!(line.text(), "");
+        assert_eq!(
+            columns(line.text()),
+            0,
+            "a bare thumb would still be a column"
+        );
+    }
+
+    /// A lone regional indicator is a letter. Empty is the only result that
+    /// says the flag went as one thing.
+    #[test]
+    fn a_backspace_removes_a_flag_as_one_thing() {
+        let mut line = composing();
+        type_text(&mut line, "🇬🇧x");
+
+        line.feed(press(KeyCode::Backspace));
+        line.feed(press(KeyCode::Backspace));
+
+        assert_eq!(line.text(), "");
+    }
+
+    /// Text presentation of the heart is one column; the VS16 sequence is two.
+    #[test]
+    fn a_backspace_removes_a_vs16_sequence_as_one_thing() {
+        let mut line = composing();
+        type_text(&mut line, "❤️x");
+
+        line.feed(press(KeyCode::Backspace));
+        line.feed(press(KeyCode::Backspace));
+
+        assert_eq!(line.text(), "");
+    }
+
+    /// The caret is on the modifier, and the character after the sequence is
+    /// not part of the cluster.
+    #[test]
+    fn a_delete_widens_to_the_cluster_and_no_further() {
+        let mut line = composing();
+        type_text(&mut line, "👍🏽z");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Left));
+        assert_eq!(line.caret(), "👍".len(), "on the modifier, not the base");
+
+        line.feed(press(KeyCode::Char('x')));
+
+        assert_eq!(line.text(), "z");
+        assert_eq!(line.caret(), 0);
+    }
+
+    /// `dd` on the last line deletes back over the preceding newline. Widening
+    /// that newline would eat the cluster the line before ends with, and
+    /// widening the other way would eat the cluster the next line starts with.
+    #[test]
+    fn dd_still_deletes_a_whole_line_and_not_the_line_before_it() {
+        let family = "👨‍👩‍👧";
+
+        let mut line = composing();
+        type_text(&mut line, family);
+        line.feed(combo(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut line, "abc");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('d')));
+        line.feed(press(KeyCode::Char('d')));
+
+        assert_eq!(line.text(), family, "the cluster before the newline stays");
+
+        let mut line = composing();
+        type_text(&mut line, "abc");
+        line.feed(combo(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut line, family);
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('k')));
+        line.feed(press(KeyCode::Char('d')));
+        line.feed(press(KeyCode::Char('d')));
+
+        assert_eq!(line.text(), family, "and the cluster after it");
+    }
+
+    /// `x` on the newline between two clusters removes the line break and
+    /// neither cluster.
+    #[test]
+    fn a_delete_never_crosses_a_newline() {
+        let family = "👨‍👩‍👧";
+        let thumb = "👍🏽";
+        let mut line = composing();
+        type_text(&mut line, family);
+        line.feed(combo(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut line, thumb);
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('h')));
+        assert_eq!(line.caret(), family.len(), "the caret is on the newline");
+
+        line.feed(press(KeyCode::Char('x')));
+
+        assert_eq!(line.text(), format!("{family}{thumb}"));
+    }
+
+    /// The register holds the cluster the key removed. The library's own yank
+    /// is the last code point of it, and a reader who pastes that pastes a
+    /// stranger.
+    #[test]
+    fn the_yank_is_what_was_actually_removed() {
+        let family = "👨‍👩‍👧";
+        let mut line = composing();
+        type_text(&mut line, family);
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+
+        line.feed(press(KeyCode::Char('x')));
+
+        assert_eq!(
+            line.take_yanked().as_deref(),
+            Some(family),
+            "the family, not its last code point"
+        );
+    }
+
+    /// After the cluster is gone the caret is where it began, not one code
+    /// point into the hole it left.
+    #[test]
+    fn the_caret_after_a_cluster_delete_is_where_the_cluster_was() {
+        let mut line = composing();
+        type_text(&mut line, "a👨‍👩‍👧b");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Left));
+        assert!(
+            line.caret() > 1,
+            "inside the family, on its last code point"
+        );
+
+        line.feed(press(KeyCode::Char('x')));
+
+        assert_eq!(line.text(), "ab");
+        assert_eq!(line.caret(), 1);
+    }
+
+    /// `w` lands on the family and the selection's end is one byte into it.
+    /// The end drawn, and the end `d` cuts, is the family's own end.
+    #[test]
+    fn a_visual_selection_ends_on_a_cluster_edge() {
+        let family = "👨‍👩‍👧";
+        let mut line = composing();
+        type_text(&mut line, &format!("a{family}b"));
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('v')));
+        line.feed(press(KeyCode::Char('w')));
+        let selection = line.selection().expect("a selection is up");
+        assert_eq!(selection, 0..1 + family.len());
+        let drawn = line.text()[selection].to_owned();
+
+        line.feed(press(KeyCode::Char('d')));
+
+        assert_eq!(line.text(), "b");
+        assert_eq!(line.take_yanked().as_deref(), Some(drawn.as_str()));
+    }
+
+    /// `h` and `l` stay on code points. A caret that jumped the family would be
+    /// a different key.
+    #[test]
+    fn the_caret_steps_one_code_point_through_a_cluster() {
+        let family = "👨‍👩‍👧";
+        let mut line = composing();
+        type_text(&mut line, family);
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+
+        line.feed(press(KeyCode::Char('l')));
+
+        let step = '👨'.len_utf8();
+        assert_eq!(line.caret(), step);
+        assert!(step < family.len(), "still inside the family");
+    }
+
+    /// `r` on ASCII replaces one character. The insert that follows a delete
+    /// in the same key still lands where that character was.
+    #[test]
+    fn a_replace_on_ascii_replaces_one_character() {
+        let mut line = composing();
+        type_text(&mut line, "abc");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
+        line.feed(press(KeyCode::Char('r')));
+
+        line.feed(press(KeyCode::Char('x')));
+
+        assert_eq!(line.text(), "xbc");
+        assert_eq!(line.caret(), 0);
+    }
+
+    /// `r` on the modifier replaces the whole sequence, and the characters on
+    /// either side stay where they are.
+    #[test]
+    fn a_replace_inside_a_cluster_replaces_the_whole_cluster() {
+        let mut line = composing();
+        type_text(&mut line, "a👍🏽b");
+        line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Left));
+        line.feed(press(KeyCode::Char('r')));
+
+        line.feed(press(KeyCode::Char('x')));
+
+        assert_eq!(line.text(), "axb");
+        assert_eq!(line.caret(), 1);
     }
 
     // ---- the prompt rule ------------------------------------------------
