@@ -928,11 +928,11 @@ async fn history_pages_through_a_conversation_without_gaps_or_repeats() {
 
 // ---- a round trip in the one conversation an account can write to ---------
 
-/// The account's own identifier: the peer its Saved Messages chat is with.
+/// The account's own identifier, by a path that is not the framework's.
 ///
-/// Nothing else in televim needs this, so the framework does not expose it. It
-/// comes through the escape hatch instead, with the same request `grammers`' own
-/// `get_me` makes.
+/// `fetch_account` is how the program asks; this is the same question asked
+/// through the escape hatch, with the request `grammers`' own `get_me` makes.
+/// Two answers from two requests is what makes the cross-check worth running.
 async fn self_user_id(client: &Client) -> Option<i64> {
     let users = client
         .invoke(&telegram_framework::tl::functions::users::GetUsers {
@@ -1388,4 +1388,66 @@ fn a_walk_that_ran_out_of_pages_is_not_accused_of_skipping() {
 #[test]
 fn a_walk_is_not_asked_for_what_was_loaded_before_it_started() {
     assert_nothing_skipped(&[8, 9], &[1, 2, 3, 8, 9], 6);
+}
+
+/// The account's own profile, and the two things about it a real datacenter can
+/// say that a fixture cannot.
+///
+/// **The join is the assertion.** `users.getFullUser` answers with two objects —
+/// a full user holding the bio and the birthday, and a list of users holding the
+/// name, the username and the phone number — and the framework joins them on an
+/// identifier. Picking the wrong user out of that list would produce a profile
+/// made entirely of another account's fields, and nothing anywhere would say so.
+/// Asking `users.getUsers` for the same identifier over a different request and
+/// comparing is the only place the two can be caught disagreeing.
+///
+/// **The account is not in its own chat list.** Its Saved Messages chat is a
+/// self-chat, and a self-chat's peer has no bare identifier, so the fetch skips
+/// it. That skip is what reading the account's own user does not change: it is
+/// how the account is named, not how a conversation with it is filed.
+#[tokio::test]
+async fn the_accounts_own_profile_names_the_user_the_session_is_signed_in_as() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+
+    let expected = self_user_id(&client)
+        .await
+        .expect("telegram names the account's own user to anyone who asks for it");
+
+    let proto = ProtoClient::new(client);
+    let account = proto
+        .fetch_account()
+        .await
+        .expect("the account's own profile is read");
+
+    assert_eq!(
+        account.user_id, expected,
+        "two requests for the same user must name the same user"
+    );
+    assert_ne!(
+        account.user_id, 0,
+        "the identifier is what the panel's last-resort name is built from"
+    );
+
+    let chats = proto
+        .fetch_private_chats()
+        .await
+        .expect("the chat list is fetched");
+    assert!(
+        !chats.iter().any(|chat| chat.id == account.user_id),
+        "the account's own Saved Messages has no bare peer to file it under, so \
+         the fetch skips it — and reading the account's own user does not change that"
+    );
 }
