@@ -11,6 +11,7 @@
 #![allow(clippy::cast_sign_loss)]
 
 pub mod app;
+pub mod emoji;
 pub mod event;
 mod grapheme;
 pub mod line;

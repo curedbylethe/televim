@@ -12,6 +12,7 @@ crossterm.workspace = true
 vim-line = "7.7"
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
+emojis.workspace = true
 
 [lints]
 workspace = true
