@@ -9,6 +9,7 @@
 //!   mentions `grammers`, so they are always compiled.
 //! * **The client** — [`ClientBuilder`], the phone → code → 2FA login flow, the
 //!   [`Client::fetch_dialogs`] chat list, the `fetch_history` message history,
+//!   [`Client::fetch_account`] for the account's own profile,
 //!   [`Client::search_messages`], [`Client::send_message`],
 //!   [`Client::edit_message`] and [`Client::delete_messages`], the
 //!   [`Client::subscribe_updates`] feed, and [`Client::invoke`] as a raw escape
@@ -71,6 +72,8 @@ pub mod error;
 pub mod session;
 
 #[cfg(feature = "live")]
+pub mod account;
+#[cfg(feature = "live")]
 pub mod auth;
 #[cfg(feature = "live")]
 pub mod client;
@@ -97,6 +100,8 @@ pub use session::{
     SessionData, SessionStore, UpdateState,
 };
 
+#[cfg(feature = "live")]
+pub use account::{Account, Birthday};
 #[cfg(feature = "live")]
 pub use auth::{LoginToken, PasswordToken, SignInResult};
 #[cfg(feature = "live")]

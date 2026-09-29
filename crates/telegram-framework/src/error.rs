@@ -167,6 +167,16 @@ pub enum FrameworkError {
     #[error("this client is already subscribed to its updates")]
     UpdatesAlreadySubscribed,
 
+    /// The answer to `users.getFullUser` did not carry the account's own user.
+    ///
+    /// Not a decoding failure — the response parsed — and not a network one
+    /// either, so it gets its own answer rather than being folded into either.
+    /// A reader told the connection failed would check a connection that is
+    /// fine, and a reader told the response was unreadable would be looking for
+    /// a bug in a client that did nothing wrong.
+    #[error("telegram did not return the account's own user")]
+    AccountMissing,
+
     /// The conversation is not in the session's peer cache.
     ///
     /// Addressing a peer takes the `access_hash` Telegram handed out for it, and
