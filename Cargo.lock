@@ -914,7 +914,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -2385,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "domain",
  "telegram-framework",
@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "telegram-framework"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "grammers-client",
  "grammers-mtproto",
@@ -3024,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "televim"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -3345,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "tui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "crossterm 0.28.1",
  "domain",

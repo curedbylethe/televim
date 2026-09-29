@@ -229,8 +229,13 @@ fn coverage(
 /// of it instead of replacing it. The same goes for a selection: a selected
 /// substring is split out of the row and given
 /// [`Theme::selection_bg`](crate::theme::Theme::selection_bg), and a selected
-/// message has its whole row patched, so the cursor still composes on top. The
-/// order the two are applied in is the theme's, and the theme says what it is.
+/// message has its whole row patched, so the cursor still composes on top.
+///
+/// The match is applied **before** the selection, which is the order the theme's
+/// module doc states. It matters because both set a foreground: the selection's
+/// ink wins on a cell that is both, so a match inside a selection is painted in
+/// the selection's colour and keeps only its `BOLD` rather than its own colour,
+/// which on a selection is close to invisible.
 fn message_row(
     app: &App,
     message: &Message,
@@ -254,44 +259,52 @@ fn message_row(
         }
     }
 
+    // Where the message's own text lands, so a text selection can split it out
+    // after the match is on it.
+    let text_at = spans.len();
     let text = &message.text[range.clone()];
-    match covered {
-        // The selected slice is styled where it is built rather than patched
-        // afterwards, because styling a slice of a row means splitting the row,
-        // and a row is only splittable while its text is still one span.
-        Some(Coverage::Text(selected)) => {
-            let (from, to) = rows::clip(selected, range);
-            if from < to {
-                spans.push(Span::styled(text[..from].to_owned(), app.theme.text));
-                spans.push(Span::styled(
-                    text[from..to].to_owned(),
-                    app.theme.text.patch(app.theme.selection_bg),
-                ));
-                spans.push(Span::styled(text[to..].to_owned(), app.theme.text));
-            } else {
-                spans.push(Span::styled(text.to_owned(), app.theme.text));
-            }
-        }
-        _ => spans.push(Span::styled(text.to_owned(), app.theme.text)),
-    }
+    spans.push(Span::styled(text.to_owned(), app.theme.text));
 
     if last && let Some(suffix) = rows::status_suffix(app, message) {
         spans.push(Span::styled(suffix, app.theme.text_dim));
     }
 
-    // A selected message is styled in one pass, which is what puts the
-    // decorations and the trailing note inside the selection with the text. A
-    // text selection has already been handled above and must not be caught here.
-    if matches!(covered, Some(Coverage::Whole)) {
-        for span in &mut spans {
-            span.style = span.style.patch(app.theme.selection_bg);
-        }
-    }
-
+    // The match goes on first, so that the selection's own ink can win over it.
+    // See the doc comment above for why that order is the one that matters.
     if app.search().is_match(message.id) {
         for span in &mut spans {
             span.style = span.style.patch(app.theme.match_hit);
         }
+    }
+
+    match covered {
+        // A selected message is styled in one pass, which is what puts the
+        // decorations and the trailing note inside the selection with the text.
+        Some(Coverage::Whole) => {
+            for span in &mut spans {
+                span.style = span.style.patch(app.theme.selection_bg);
+            }
+        }
+        // The selected slice is split out of the row rather than styled where it
+        // is built, because styling a slice of a row means splitting the row, and
+        // a row is only splittable while its text is still one span.
+        Some(Coverage::Text(selected)) => {
+            let (from, to) = rows::clip(selected, range);
+            if from < to {
+                let base = spans[text_at].style;
+                let marked = base.patch(app.theme.selection_bg);
+                let mut split = Vec::with_capacity(3);
+                if from > 0 {
+                    split.push(Span::styled(text[..from].to_owned(), base));
+                }
+                split.push(Span::styled(text[from..to].to_owned(), marked));
+                if to < text.len() {
+                    split.push(Span::styled(text[to..].to_owned(), base));
+                }
+                spans.splice(text_at..=text_at, split);
+            }
+        }
+        None => {}
     }
 
     ListItem::new(Line::from(spans))
@@ -351,6 +364,7 @@ fn render_scrollbar(app: &App, area: Rect, frame: &mut Frame<'_>, view: &rows::S
 mod tests {
     use super::*;
     use crate::app::App;
+    use crate::theme::Theme;
     use crate::wrap::columns;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use domain::selection::Mark;
@@ -358,6 +372,34 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::style::Color;
+
+    /// The theme's own values, so a palette change does not have to touch a test.
+    ///
+    /// `App::mock()` builds on `Theme::default()`, so reading a colour here and
+    /// reading it off an app are reading the same one.
+    fn theme() -> Theme {
+        Theme::default()
+    }
+
+    /// The ink a search match is painted in.
+    fn match_fg() -> Color {
+        theme().match_hit.fg.expect("a match is a foreground")
+    }
+
+    /// The background a selection paints, and the ink its text takes.
+    fn selection_bg() -> Color {
+        theme()
+            .selection_bg
+            .bg
+            .expect("a selection is a background")
+    }
+
+    fn selection_fg() -> Color {
+        theme()
+            .selection_bg
+            .fg
+            .expect("a selection carries the text's own ink")
+    }
 
     fn area(width: u16, height: u16) -> Rect {
         Rect {
@@ -969,7 +1011,7 @@ mod tests {
     /// stands on the first of them.
     #[test]
     fn a_wrapped_match_is_marked_throughout_and_the_cursor_is_on_its_first_row() {
-        use ratatui::style::{Color, Modifier};
+        use ratatui::style::Modifier;
 
         use std::borrow::Cow;
 
@@ -994,8 +1036,8 @@ mod tests {
         let first = cell(&screen, BODY_X, 1);
         let second = cell(&screen, BODY_X, 2);
 
-        assert_eq!(first.fg, Color::Yellow, "the first row is marked");
-        assert_eq!(second.fg, Color::Yellow, "and so is the row after it");
+        assert_eq!(first.fg, match_fg(), "the first row is marked");
+        assert_eq!(second.fg, match_fg(), "and so is the row after it");
         assert!(
             first.modifier.contains(Modifier::REVERSED),
             "the cursor is on the first of them: {:?}",
@@ -1121,18 +1163,17 @@ mod tests {
 
     #[test]
     fn a_matched_message_row_is_marked_and_an_unmatched_one_is_not() {
-        use ratatui::style::Color;
-
-        let screen = screen(&searched(), 80, 24);
+        let app = searched();
+        let screen = screen(&app, 80, 24);
 
         assert_eq!(
             cell(&screen, BODY_X, MATCH_ROW).fg,
-            Color::Yellow,
+            match_fg(),
             "the matched row carries the match colour"
         );
         assert_ne!(
             cell(&screen, BODY_X, 1).fg,
-            Color::Yellow,
+            match_fg(),
             "and an ordinary row does not: {}",
             row(&screen, 1)
         );
@@ -1142,12 +1183,12 @@ mod tests {
     /// row is both marked and selected, not one instead of the other.
     #[test]
     fn the_cursor_row_on_a_match_still_reads_as_the_cursor() {
-        use ratatui::style::{Color, Modifier};
+        use ratatui::style::Modifier;
 
         let screen = screen(&searched(), 80, 24);
         let cursor = cell(&screen, BODY_X, MATCH_ROW);
 
-        assert_eq!(cursor.fg, Color::Yellow, "the match marking is still there");
+        assert_eq!(cursor.fg, match_fg(), "the match marking is still there");
         assert!(
             cursor.modifier.contains(Modifier::REVERSED),
             "and so is the selection: {:?}",
@@ -1247,7 +1288,7 @@ mod tests {
     /// Which of a message's text columns carry the selection's background.
     fn selected_text_columns(buffer: &Buffer, y: u16) -> Vec<usize> {
         (0..usize::from(BODY))
-            .filter(|x| text_cell(buffer, *x, y).bg == Color::Magenta)
+            .filter(|x| text_cell(buffer, *x, y).bg == selection_bg())
             .collect()
     }
 
@@ -1310,8 +1351,13 @@ mod tests {
 
         assert_eq!(
             cell(&screen, BODY_X, 1).bg,
-            Color::Magenta,
+            selection_bg(),
             "the `[` of the sender is inside the selection"
+        );
+        assert_eq!(
+            cell(&screen, BODY_X, 1).fg,
+            selection_fg(),
+            "and the row's text follows the selection, not the terminal"
         );
         assert_eq!(
             cell(&screen, BODY_X, 2).bg,
@@ -1330,7 +1376,7 @@ mod tests {
         let screen = screen(&selecting(0, 5), 80, 10);
         let cursor = text_cell(&screen, 0, 1);
 
-        assert_eq!(cursor.bg, Color::Magenta, "the selection is still there");
+        assert_eq!(cursor.bg, selection_bg(), "the selection is still there");
         assert!(
             cursor.modifier.contains(Modifier::REVERSED),
             "and so is the cursor: {:?}",
@@ -1342,6 +1388,8 @@ mod tests {
     /// to be legible together rather than one replacing the other.
     #[test]
     fn a_match_under_a_selection_keeps_both_of_its_marks() {
+        use ratatui::style::Modifier;
+
         let mut app = App::mock();
         for _ in 0..2 {
             press(&mut app, KeyCode::Char('g'));
@@ -1358,13 +1406,18 @@ mod tests {
 
         assert_eq!(
             marked.bg,
-            Color::Magenta,
+            selection_bg(),
             "the selection's background stays"
         );
         assert_eq!(
             marked.fg,
-            Color::Yellow,
-            "and the match's colour is legible on top of it"
+            selection_fg(),
+            "and the cell's text follows the selection, not the match's colour"
+        );
+        assert!(
+            marked.modifier.contains(Modifier::BOLD),
+            "the match is still marked, by weight: {:?}",
+            marked.modifier
         );
     }
 
@@ -1392,6 +1445,11 @@ mod tests {
         let mut app = App::mock();
         app.focus = focus;
         let screen = screen(&app, 80, 24);
+        let focused = app
+            .theme
+            .border_focused
+            .fg
+            .expect("the focused border has an ink");
 
         [
             // The chat list's top-left corner, the conversation's, and the input
@@ -1401,7 +1459,7 @@ mod tests {
             (24, 0),
             (0, 20),
         ]
-        .map(|(x, y)| cell(&screen, x, y).fg == Color::Cyan)
+        .map(|(x, y)| cell(&screen, x, y).fg == focused)
     }
 
     #[test]
