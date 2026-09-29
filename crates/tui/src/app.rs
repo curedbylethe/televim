@@ -19,6 +19,7 @@ use domain::vim::{CharMotion, Motion, VimState, char_motion};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 
+use crate::emoji;
 use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowSpan, Slice};
 use crate::theme::Theme;
@@ -526,6 +527,14 @@ pub struct App {
     /// wrapper's whole job.
     pub line: LineEditor,
 
+    /// The `:query` being completed, if there is one.
+    ///
+    /// `None` is the whole of "the popup is closed", and it is reached from five
+    /// places: a query that stopped being one, a query nobody matches, the focus
+    /// leaving the line, a submit, and an acceptance. There is no flag to fall
+    /// out of step with the state it describes.
+    emoji: Option<emoji::Trigger>,
+
     pub status: String,
     pub should_quit: bool,
 
@@ -672,6 +681,7 @@ impl App {
             conversation: ConversationView::new(0),
             vim: VimState::new(0),
             line: LineEditor::new(),
+            emoji: None,
             status: IDLE_STATUS.to_string(),
             should_quit: false,
             search: SearchState::default(),
@@ -751,6 +761,15 @@ impl App {
     #[must_use]
     pub fn selection(&self) -> Option<&Selection> {
         self.selection.as_ref()
+    }
+
+    /// The `:query` being completed, for the popup to draw and the status line
+    /// to name.
+    ///
+    /// The same shape as [`App::selection`]: one answer, read by both.
+    #[must_use]
+    pub fn completion(&self) -> Option<&emoji::Trigger> {
+        self.emoji.as_ref()
     }
 
     /// The window positions the selection covers, oldest first.
@@ -1547,6 +1566,12 @@ impl App {
             self.mode = Mode::Normal;
             self.selection = None;
         }
+        // The single clear point for every way out of the line: `Tab`,
+        // `BackTab`, `Ctrl+w` and `Esc`-to-leave all pass through here, so the
+        // completion does not need a case in each of them.
+        if focus != Focus::Input {
+            self.emoji = None;
+        }
         self.focus = focus;
     }
 
@@ -1591,6 +1616,13 @@ impl App {
         // key is addressed anywhere.
         if self.mode == Mode::Confirm {
             self.handle_confirm(key);
+            return;
+        }
+
+        // A completion owns a few keys for as long as it is up. `Ctrl-C` above
+        // stays first: a reader reaching for it to abandon a half-typed
+        // shortcode gets out of the program, which is what they asked for.
+        if self.handle_completion(key) {
             return;
         }
 
@@ -2014,6 +2046,98 @@ impl App {
         // producers.
         if let Some(yanked) = self.line.take_yanked() {
             self.clipboard = Some(yanked);
+        }
+
+        // Last, because it is a function of what the line now holds: deriving
+        // rather than maintaining is what keeps the popup from describing a
+        // fragment the reader has already typed past.
+        self.refresh_completion();
+    }
+
+    /// Handles the keys a completion takes while it is up.
+    ///
+    /// Answers whether the key was consumed. Only four keys are: `Up`/`Down`
+    /// move the candidate, `Tab` and `Enter` accept, and `Esc` puts the
+    /// completion away. Everything else — `j`, `k`, a space, `Backspace`,
+    /// `Ctrl+J`, a `p` — is passed through to the line, which is what keeps
+    /// `:joy` and `:jack_o_lantern` typable and lets a shortened query grow its
+    /// list.
+    ///
+    /// `Enter` accepted here does not send: `Some` becomes `None`, and the next
+    /// `Enter` arrives with nothing up and submits. No debounce, because the
+    /// state already gives the right answer.
+    fn handle_completion(&mut self, key: KeyEvent) -> bool {
+        if self.emoji.is_none() || key.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Up => self.move_completion(false),
+            KeyCode::Down => self.move_completion(true),
+            KeyCode::Tab | KeyCode::Enter => self.accept_completion(),
+            KeyCode::Esc => self.emoji = None,
+            _ => return false,
+        }
+
+        true
+    }
+
+    /// Moves the selected candidate one place, wrapping.
+    fn move_completion(&mut self, forward: bool) {
+        if let Some(trigger) = &mut self.emoji {
+            trigger.move_selection(forward);
+        }
+    }
+
+    /// Commits the chosen emoji over the `:query` that named it.
+    ///
+    /// The inserted text is exactly what was accepted: no trailing space,
+    /// because a character the reader did not ask for is one they would have to
+    /// delete. The range comes from the trigger, so what is replaced is what
+    /// the popup was describing.
+    fn accept_completion(&mut self) {
+        let Some(trigger) = self.emoji.as_ref() else {
+            return;
+        };
+        let Some(chosen) = trigger.chosen() else {
+            return;
+        };
+        let range = trigger.range.clone();
+        let text = chosen.as_str();
+
+        match self.line.replace(range, text) {
+            LineVerdict::TooLong => self.flash("message is too long"),
+            _ => self.emoji = None,
+        }
+    }
+
+    /// Re-derives the completion from the draft and the caret.
+    ///
+    /// Called after every key the line answered, and never anywhere else. A
+    /// re-detection is a few microseconds, so there is nothing to be careful
+    /// about. The gate is [`PromptKind::is_buffer`] rather than
+    /// [`PromptKind::Message`]: a `:` command line and a `/` search line never
+    /// complete, but a reply and an edit do. It is also insert mode only,
+    /// because a shortcode is typed: the key that leaves insert for the line's
+    /// own normal mode is not editing the text, so it must not re-open what the
+    /// reader just put away.
+    ///
+    /// The row the reader was on is carried across, clamped into the new list,
+    /// so typing one more character does not move them off a candidate that is
+    /// still there.
+    fn refresh_completion(&mut self) {
+        if self.focus != Focus::Input
+            || !self.line.purpose().is_buffer()
+            || self.line.status() != "INSERT"
+        {
+            self.emoji = None;
+            return;
+        }
+
+        let selected = self.emoji.as_ref().map_or(0, |trigger| trigger.selected);
+        self.emoji = emoji::detect(self.line.text(), self.line.caret());
+        if let Some(trigger) = &mut self.emoji {
+            trigger.reselect(selected);
         }
     }
 
@@ -6045,5 +6169,270 @@ mod tests {
             "3 conversation(s)",
             "the line goes back to what it was saying once the jump is over"
         );
+    }
+
+    // ---- the :shortcode completion --------------------------------------
+
+    /// An application composing `draft`, which opens a completion if it names a
+    /// shortcode.
+    fn typing(draft: &str) -> App {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, draft);
+        app
+    }
+
+    #[test]
+    fn a_shortcode_opens_the_completion() {
+        let app = typing(":cr");
+
+        let trigger = app.completion().expect("a completion is up");
+        assert_eq!(trigger.query, "cr");
+        assert_eq!(
+            trigger.chosen().and_then(|emoji| emoji.shortcode()),
+            Some("cry"),
+            "the shortest prefix is the top candidate"
+        );
+    }
+
+    #[test]
+    fn a_character_keeps_filtering_and_keeps_the_popup_open() {
+        let app = typing(":cry");
+
+        let trigger = app.completion().expect("a completion is up");
+        assert!(
+            trigger
+                .candidates
+                .iter()
+                .all(|emoji| emoji.shortcode().is_some_and(|code| code.contains("cry"))),
+            "a candidate is on the list without matching the query"
+        );
+    }
+
+    /// `j` and `k` are letters, not candidate motion: binding them would make
+    /// `:joy` and `:jack_o_lantern` untypable, which is the feature refusing to
+    /// work.
+    #[test]
+    fn j_and_k_are_still_letters_while_the_popup_is_open() {
+        // `k` after `:o` still matches (`ok_hand`), so the popup is up on both
+        // sides of the key — the case where a candidate motion would be reached.
+        let mut app = typing(":o");
+        assert!(app.completion().is_some(), "`:o` opens it");
+
+        app.handle_key(press(KeyCode::Char('k')));
+
+        assert_eq!(app.line.text(), ":ok", "`k` went to the draft");
+        let trigger = app.completion().expect("and the list keeps filtering");
+        assert_eq!(trigger.query, "ok");
+        assert_eq!(trigger.selected, 0, "and `k` did not move the candidate");
+
+        // `j` is the same key one row over. What matters is that the letter
+        // reached the draft rather than being taken as motion.
+        let mut app = typing(":cr");
+        app.handle_key(press(KeyCode::Char('j')));
+
+        assert_eq!(app.line.text(), ":crj", "`j` went to the draft too");
+    }
+
+    #[test]
+    fn the_arrows_move_the_candidate_and_wrap_around_it() {
+        let mut app = typing(":cry");
+        assert_eq!(app.completion().expect("up").candidates.len(), 3);
+
+        for _ in 0..3 {
+            app.handle_key(press(KeyCode::Down));
+        }
+        assert_eq!(
+            app.completion().expect("up").selected,
+            0,
+            "three downs over three candidates wrapped"
+        );
+
+        app.handle_key(press(KeyCode::Up));
+        assert_eq!(app.completion().expect("up").selected, 2, "and up wrapped");
+    }
+
+    #[test]
+    fn the_arrows_are_caret_motions_again_once_it_is_closed() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "hello");
+        app.handle_key(press_ctrl('j'));
+        type_text(&mut app, ":cr");
+        assert!(app.completion().is_some(), "there is one to close");
+
+        app.handle_key(press(KeyCode::Esc));
+        assert!(app.completion().is_none());
+
+        app.handle_key(press(KeyCode::Up));
+
+        assert_eq!(app.line.caret(), 3, "the arrow moved the caret");
+        assert_eq!(
+            app.line.laid_out(78).row,
+            0,
+            "to the first row of the draft, not to a candidate"
+        );
+    }
+
+    #[test]
+    fn tab_accepts_the_candidate() {
+        let mut app = typing(":cr");
+
+        app.handle_key(press(KeyCode::Tab));
+
+        assert_eq!(app.line.text(), "😢");
+        assert_eq!(app.line.caret(), 4, "after the glyph");
+        assert!(app.completion().is_none(), "and the popup is away");
+    }
+
+    /// Two presses fifty milliseconds apart are accept-then-send, which is what
+    /// a reader who typed `:cry` and mashed `Enter` wanted.
+    #[test]
+    fn enter_accepts_the_candidate_and_the_next_enter_sends() {
+        let mut app = typing(":cry");
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(app.take_action(), None, "accepting did not send");
+        assert_eq!(app.line.text(), "😢");
+        assert_eq!(
+            app.focus,
+            Focus::Input,
+            "and the reader is still in the line"
+        );
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_action(),
+            Some(Action::Send {
+                chat_id: MOCK_CHAT,
+                temp_id: -1,
+                text: "😢".to_owned(),
+                reply_to: None,
+            })
+        );
+    }
+
+    #[test]
+    fn escape_puts_the_completion_away_and_leaves_the_draft_alone() {
+        let mut app = typing(":cry");
+
+        app.handle_key(press(KeyCode::Esc));
+
+        assert_eq!(app.line.text(), ":cry", "the words are the reader's");
+        assert!(app.completion().is_none());
+    }
+
+    /// The popup's `Esc` is a third key in front of the line's own two-stage
+    /// `Esc`, and it does not shorten the rule.
+    #[test]
+    fn escape_twice_leaves_the_line_as_it_did_before() {
+        let mut app = typing(":cry");
+
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(app.focus, Focus::Input, "the popup's escape only closes it");
+        assert!(app.completion().is_none());
+
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(
+            app.focus,
+            Focus::Input,
+            "the line's own escape is still the first stage"
+        );
+
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(
+            app.focus,
+            Focus::Conversation,
+            "and the second stage leaves"
+        );
+    }
+
+    #[test]
+    fn backspace_shortens_the_query_and_the_list_grows() {
+        let mut app = typing(":cry");
+        let before = app.completion().expect("up").candidates.len();
+
+        app.handle_key(press(KeyCode::Backspace));
+
+        let trigger = app.completion().expect("still open on a shorter query");
+        assert_eq!(trigger.query, "cr");
+        assert!(
+            trigger.candidates.len() >= before,
+            "{} < {before}",
+            trigger.candidates.len()
+        );
+    }
+
+    #[test]
+    fn a_newline_ends_the_shortcode() {
+        let mut app = typing(":cry");
+
+        app.handle_key(press_ctrl('j'));
+
+        assert!(app.completion().is_none());
+        assert_eq!(app.line.text(), ":cry\n");
+    }
+
+    #[test]
+    fn a_space_ends_the_shortcode() {
+        let mut app = typing(":cry");
+
+        app.handle_key(press(KeyCode::Char(' ')));
+
+        assert!(app.completion().is_none(), "the query is now `cry `");
+    }
+
+    #[test]
+    fn leaving_the_line_puts_the_completion_away() {
+        let mut app = typing(":cry");
+
+        app.handle_key(press_ctrl('w'));
+
+        assert_eq!(app.focus, Focus::Conversation);
+        assert!(app.completion().is_none());
+    }
+
+    #[test]
+    fn a_command_line_never_completes() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char(':')));
+        assert_eq!(app.line.purpose(), PromptKind::Command);
+
+        type_text(&mut app, "cr");
+
+        assert!(app.completion().is_none(), "a command is not a shortcode");
+    }
+
+    #[test]
+    fn a_search_line_never_completes() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('/')));
+        assert_eq!(app.line.purpose(), PromptKind::Search);
+
+        type_text(&mut app, "cr");
+
+        assert!(app.completion().is_none(), "a search is not a shortcode");
+    }
+
+    /// The gate is `is_buffer`, not `Message`: a reply and an edit are buffers
+    /// too, and a reader answering either can name an emoji.
+    #[test]
+    fn a_reply_and_an_edit_do_complete() {
+        let mut reply = App::mock();
+        reply.handle_key(press(KeyCode::Char('r')));
+        assert_eq!(reply.line.purpose(), PromptKind::Reply);
+        type_text(&mut reply, ":cr");
+        assert!(reply.completion().is_some(), "a reply completes");
+
+        // Only the reader's own messages can be edited, and the sample
+        // conversation's newest is not one of them.
+        let mut edit = App::mock();
+        edit.handle_key(press(KeyCode::Char('k')));
+        edit.handle_key(press(KeyCode::Char('e')));
+        assert_eq!(edit.line.purpose(), PromptKind::Edit);
+        type_text(&mut edit, ":cr");
+        assert!(edit.completion().is_some(), "an edit completes");
     }
 }
