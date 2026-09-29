@@ -124,6 +124,13 @@ pub fn delete_mixed_prompt(yours: usize, theirs: usize) -> String {
     )
 }
 
+/// The prompt the status line shows when a quit is waiting to be confirmed.
+///
+/// The same screen-wide shape as a deletion's, and the same `y`/`n`: quitting is
+/// the other destructive thing a keypress can do here, and it is the one a
+/// mistyped key can do without the reader meaning to.
+pub const QUIT_PROMPT: &str = "Quit televim? (y/n)";
+
 /// Which page of a conversation a fetch is asking for.
 ///
 /// Named rather than a `bool`, because they differ in what they do to the
@@ -278,6 +285,14 @@ impl PromptKind {
 /// is a second thing for the wording to be wrong about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
+    /// Leave the program.
+    ///
+    /// The reader's `y` quits, so it is the one confirmation whose answer is
+    /// acted on by the caller rather than queued as an [`Action`]: there is
+    /// nothing to send anywhere, and a quit that waited on the network would be
+    /// a quit that can hang.
+    Quit,
+
     /// Delete these messages, for both sides.
     DeleteMessages {
         /// The messages to delete.
@@ -1769,9 +1784,25 @@ impl App {
                 self.focus = Focus::Input;
                 self.line.open(PromptKind::Command);
             }
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             _ => {}
         }
+    }
+
+    /// Asks whether the reader meant to quit.
+    ///
+    /// `q` sits where a reader's hand already is and next to keys that type
+    /// nothing else, so an accidental one is a real event rather than a
+    /// hypothetical: a confirmation is the whole difference between losing the
+    /// window and having pressed a key.
+    ///
+    /// `Ctrl-C` deliberately does not come through here. It is the way out when
+    /// the program is wedged, and a question in front of it would be a question
+    /// the reader cannot see, because a terminal that is not answering cannot
+    /// draw one either.
+    fn request_quit(&mut self) {
+        self.mode = Mode::Confirm;
+        self.confirm = Some(ConfirmKind::Quit);
     }
 
     /// Opens the buffer for a new message, with no reply and no edit.
@@ -1977,12 +2008,16 @@ impl App {
     fn handle_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') => {
-                if let Some(ConfirmKind::DeleteMessages { ids, .. }) = &self.confirm {
-                    let chat_id = self.conversation.window.chat_id;
-                    self.queue_action(Action::Delete {
-                        chat_id,
-                        message_ids: ids.clone(),
-                    });
+                match &self.confirm {
+                    Some(ConfirmKind::Quit) => self.should_quit = true,
+                    Some(ConfirmKind::DeleteMessages { ids, .. }) => {
+                        let chat_id = self.conversation.window.chat_id;
+                        self.queue_action(Action::Delete {
+                            chat_id,
+                            message_ids: ids.clone(),
+                        });
+                    }
+                    None => {}
                 }
                 self.confirm = None;
                 self.selection = None;
@@ -2521,7 +2556,7 @@ impl App {
 
     fn run_command(&mut self, cmd: &str) {
         match cmd {
-            "q" | "quit" => self.should_quit = true,
+            "q" | "quit" => self.request_quit(),
             _ if cmd.starts_with("chat ") => {
                 if let Ok(id) = cmd[5..].trim().parse::<i64>()
                     && let Some(pos) = self.list.chats.iter().position(|c| c.id == id)
@@ -2864,13 +2899,14 @@ impl App {
         if self.focus == Focus::Input {
             return widgets::input_bar::hint(self).to_owned();
         }
-        if let Some(ConfirmKind::DeleteMessages {
-            ids,
-            outgoing,
-            skipped,
-        }) = &self.confirm
-        {
-            return delete_prompt(ids, *outgoing, *skipped);
+        match &self.confirm {
+            Some(ConfirmKind::Quit) => return QUIT_PROMPT.to_owned(),
+            Some(ConfirmKind::DeleteMessages {
+                ids,
+                outgoing,
+                skipped,
+            }) => return delete_prompt(ids, *outgoing, *skipped),
+            None => {}
         }
         if let Some(selection) = &self.selection {
             return selection_note(selection, self.selection_len().unwrap_or(0));
@@ -4597,6 +4633,74 @@ mod tests {
             Some(ConfirmKind::DeleteMessages { ids, .. }) => ids.clone(),
             other => panic!("expected a deletion to be waiting, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn q_asks_before_quitting() {
+        let mut app = App::mock();
+
+        key(&mut app, 'q');
+
+        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.confirm, Some(ConfirmKind::Quit));
+        assert!(!app.should_quit);
+        assert_eq!(app.status_text(), QUIT_PROMPT);
+    }
+
+    /// The command asks the same question as the key, because they are the same
+    /// request written down.
+    #[test]
+    fn the_command_quit_asks_too() {
+        let mut app = App::mock();
+
+        run_command_line(&mut app, "q");
+
+        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.confirm, Some(ConfirmKind::Quit));
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn y_on_the_quit_prompt_quits_and_asks_the_network_for_nothing() {
+        let mut app = App::mock();
+
+        key(&mut app, 'q');
+        key(&mut app, 'y');
+
+        assert!(app.should_quit);
+        assert_eq!(app.confirm, None);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.actions.is_empty());
+    }
+
+    /// Either way of saying no, and neither of them is a third key: `Esc` is
+    /// how a reader abandons a question they have read past the end of.
+    #[test]
+    fn n_and_esc_keep_the_program_running() {
+        for answer in [
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        ] {
+            let mut app = App::mock();
+
+            key(&mut app, 'q');
+            app.handle_key(answer);
+
+            assert!(!app.should_quit, "{answer:?} quit");
+            assert_eq!(app.confirm, None, "{answer:?} left the prompt up");
+            assert_eq!(app.mode, Mode::Normal, "{answer:?} left the mode alone");
+        }
+    }
+
+    /// The one key that does not ask, and the reason it is not asked about.
+    #[test]
+    fn ctrl_c_still_quits_at_once() {
+        let mut app = App::mock();
+
+        app.handle_key(press_ctrl('c'));
+
+        assert!(app.should_quit);
+        assert_eq!(app.confirm, None);
     }
 
     #[test]

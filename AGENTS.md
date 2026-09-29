@@ -686,7 +686,12 @@ Working today:
   another conversation. `p` is not bound in Visual. The line keeps its own
   internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
   registers are deliberately not shared, because their formats differ.
-- **Commands:** `:q`/`:quit` and `:chat <id>`.
+- **Commands:** `:q`/`:quit` and `:chat <id>`. `q` in the conversation and `:q`/
+  `:quit` both raise `Quit televim? (y/n)` first — the same screen-wide
+  confirmation a deletion uses — because `q` is one keystroke away from a key
+  that types nothing else. `y` quits, `n` or `Esc` stays. `Ctrl-C` does **not**
+  ask: it is the way out when the program is wedged, and a terminal that is not
+  answering cannot draw the question either.
 
 Not built, and named here so nobody reads the roadmap below as current:
 
