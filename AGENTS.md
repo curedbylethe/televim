@@ -55,15 +55,16 @@ televim/
 └── crates/
     ├── telegram-framework/     # OUR wrapper over grammers
     │   ├── src/                # lib, error, session, client, auth, raw, dialogs,
-    │   │                       #   history, messages, search, updates, testing
+    │   │                       #   account, history, messages, search, updates,
+    │   │                       #   testing
     │   └── tests/auth_integration.rs
     ├── proto/                  # Thin adapter: telegram-framework -> domain types
-    │   ├── src/                # lib, error, client, auth, types, stream, history,
-    │   │                       #   messages, search
+    │   ├── src/                # lib, error, client, account, auth, types, stream,
+    │   │                       #   history, messages, search
     │   └── Cargo.toml
     ├── domain/                 # Pure business logic (no async, no UI)
-    │   └── src/                # lib, chat, message, history, search, session,
-    │                           #   updates, vim
+    │   └── src/                # lib, account, chat, message, history, search,
+    │                           #   session, updates, vim
     ├── tui/                    # ratatui widgets & input handling
     │   └── src/                # lib, app, event, grapheme, theme, rows, wrap, widgets/
     └── app/                    # Composition root & CLI binary
@@ -264,11 +265,14 @@ A **first-party crate** that wraps `grammers-client` and provides:
 - `SessionStore` trait with pluggable backends (keyring, file, memory).
 - Typed event stream: `Updates` filtered to messages in private conversations with people — groups, channels and bots never reach the caller.
 - Chat listing with automatic `InputPeer` resolution and caching.
+- The account's own profile, which is the only call that discloses the account's
+  own user identifier: `grammers` reports none for a peer that is the account
+  itself, so a client that has not made it cannot name its own user.
 - Message send/edit/delete builders.
 - An **escape hatch**: `Client::invoke()` that forwards directly to `grammers`.
 
 The modules beyond the three above are the ones with a rule in them: `dialogs`,
-`history`, `messages`, `search` and `updates`. Each keeps every decision that can
+`account`, `history`, `messages`, `search` and `updates`. Each keeps every decision that can
 be wrong in a free function over primitives, so it is testable on CI without a
 datacenter, and keeps the `grammers`-reading code as thin as it can be made. That
 is the same rule `app/src/net.rs` follows.
@@ -292,6 +296,7 @@ crates/proto/
 │   ├── lib.rs          # The `tl` re-export rule, and why app is exempt
 │   ├── error.rs        # ProtoError, and the framework-error mapping
 │   ├── client.rs       # Wraps telegram-framework::Client
+│   ├── account.rs      # The account's own profile -> a domain Account
 │   ├── auth.rs         # Login, 2FA, session management
 │   ├── types.rs        # Internal DTOs (never expose grammers types)
 │   ├── stream.rs       # Update subscription & event mapping
@@ -312,6 +317,7 @@ them are the conversation window, search, and the update vocabulary.
 crates/domain/
 ├── src/
 │   ├── lib.rs
+│   ├── account.rs      # The signed-in account, and its two display questions
 │   ├── chat.rs         # Chat entity, filtering rules
 │   ├── message.rs      # Message entity
 │   ├── history.rs      # ConversationWindow, and the page/anchor rules
@@ -353,6 +359,7 @@ crates/tui/
 │   │   ├── conversation.rs
 │   │   ├── emoji_popup.rs  # The `:shortcode` completion above the bar
 │   │   ├── input_bar.rs
+│   │   ├── profile.rs   # The account's own profile, in the conversation's slot
 │   │   └── status_bar.rs
 │   └── theme.rs        # Color schemes
 └── Cargo.toml          # deps: domain, ratatui, crossterm, vim-line,
@@ -411,7 +418,8 @@ crates/app/
 ├── src/
 │   ├── main.rs         # Entry point, CLI parsing (clap)
 │   ├── config.rs       # Load TOML + env
-│   ├── net.rs          # Client bring-up, history fetches, update pump
+│   ├── net.rs          # Client bring-up, the account's profile, history
+│   │                   #   fetches, update pump
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
 ├── tests/
 │   ├── proto_integration.rs  # Opt-in, against a real datacenter
@@ -640,6 +648,17 @@ below.
 
 Working today:
 
+- **Profile panel:** the signed-in account's own, reached with `S` or `:settings`
+  from either pane, and shown in the conversation's rectangle rather than as a
+  third column. It carries the name, the username and phone number on one row,
+  the bio wrapped, the birthday, the user id and where the session is kept.
+  `j`/`k`/`gg`/`G` move the highlight, `h` goes to the chat list, `l` and `Esc`
+  come back, and any other key is the conversation's — taken rather than
+  swallowed, so `i` by reflex works without a second press. `add account` and
+  `logout` are rows that refuse, and sign-out *confirms* before it does. Read
+  once at start-up beside the chat list, not on open: a panel that blanked and
+  refilled every time would be a panel the reader could not trust. With no
+  credentials it says so, and says why — the same reason the status line gives.
 - **Authentication:** MTProto login with 2FA, session stored in the OS keyring
   (or a file, per `session_path`).
 - **Chat List:** private chats only, filtered to exclude bots, groups and
@@ -725,7 +744,10 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 
 - **Why a first-party `telegram-framework` instead of `ferogram`:** The `ferogram` crate has a small contributor base and pins specific `grammers` revisions, which couples `televim` to an external maintainer's release cadence. By writing our own thin wrapper over `grammers-client`, we own the abstraction, keep the dependency surface minimal, and can tailor the API exactly to `televim`'s needs. The wrapper lives in `crates/telegram-framework` and is the only crate that touches `grammers`; `proto`, `domain`, and `tui` never see a `grammers` type.
 - **Why `grammers` from crates.io rather than git:** this used to be the other way round, and the reason it changed is that upstream stopped tagging. The newest tag is `v0.8.0`; 0.8.1, 0.9.0 and 0.10.0 exist only on the registry, so a `tag =` pin cannot name the current version at all. The registry artefact is checksummed, is what upstream publishes, and a `rev` pin in place of it would make every consumer track `master` by hand to get a patch.
-- **Why a peer with no bare identifier is skipped rather than given a number:** `grammers` reports none only for the account's own sentinel peer, and the account's real user identifier is only ever disclosed by asking Telegram for the account's own user, which this crate does not do. Substituting a constant would put a number in the chat list that addresses no conversation, so the conversation is dropped instead. It is unreachable for anything Telegram named — a received peer is a user, a group or a channel, and only `InputPeerSelf` yields the sentinel — and `every_real_user_keeps_its_identifier` in `updates.rs` is the test that would catch it becoming reachable, because the skip would then swallow real conversations in silence.
+- **Why a peer with no bare identifier is skipped rather than given a number:** `grammers` reports none only for the account's own sentinel peer, and the account's real user identifier is only ever disclosed by asking Telegram for the account's own user. Substituting a constant would put a number in the chat list that addresses no conversation, so the conversation is dropped instead. It is unreachable for anything Telegram named — a received peer is a user, a group or a channel, and only `InputPeerSelf` yields the sentinel — and `every_real_user_keeps_its_identifier` in `updates.rs` is the test that would catch it becoming reachable, because the skip would then swallow real conversations in silence. `Client::fetch_account` is that call, and it does not change the skip: naming the account is not filing a conversation under it, and Saved Messages still has no bare peer to file it under.
+- **Why the right-hand column is a `Pane` and not a third `Focus`:** `Focus` says where a keystroke lands, and being on the line is what makes it in insert mode — it is about the *line*. What the right-hand column holds is a different question, and a contact profile is the same question with a different answer, so folding it into `Focus` would make one enum mean both "which pane" and "what is in this one". Two axes means every existing `Focus` arm keeps working, the layout and the focus ring are untouched, and a contact profile is later a `ProfileId` and nothing else. The bill is four sites that read the focus and assumed the column held a conversation — the hint row, the mode label, the status bar's style, and each panel's border — and all four read the pane now. That is the argument for doing the split once: those are the four arms a third `Focus` variant would each have grown.
+- **Why the profile has its own highlight:** `App::vim`'s total is the conversation window's length, and `VimState` is one value. Driving two lists from it means each one's row count stands in for the other's, and neither test fails on its own. `VimState` knows nothing about what an item is, which is what makes the second value free.
+- **Why a `:` line never completes a shortcode:** the completion is for the reader's *own text*, and a command line is not that — `refresh_completion` requires a buffer, so a `:` line is out before the catalog is consulted. This is worth stating because the catalog would otherwise decide what a command does: it holds `seedling` and `seven` but no `settings`, so a `:settings` that reached it would work by the catalog running out. `a_command_line_never_completes_a_shortcode` is the test, and it is a test of a reason rather than of an output.
 - **Why the update position is recorded by an explicit call:** `grammers` 0.10.0
   stopped writing it when the stream is dropped, because asking for it is `async`
   and a destructor cannot await. The position therefore moves to
@@ -828,6 +850,14 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 ## Known Gaps
 
 Real, and named so they are not mistaken for oversights:
+
+- **`add account` and `logout` are rows that refuse.** `add account` flashes
+  `not yet: this build cannot add an account`; `logout` raises
+  `Sign out and forget this session? (y/n)` first and refuses inside it. Both are
+  one word long because a deliberate refusal is not a `[failed: …]` — that form is
+  for something that tried and did not come back, and a reader who reads it as a
+  bug will go looking for one that does not exist. Signing in again, and signing
+  out, land in `05`/`06`.
 
 - **Visual mode's `r` refuses rather than replying.** `v`, `V`, `o`, `Esc`, `y` and
   `d` work and a selection is drawn. `r` in Visual says no, for one of two reasons —

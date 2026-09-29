@@ -187,14 +187,19 @@ has one cell height and the reader chose the cell.
 
 `ALL_HINTS` is an array of all nine and a test iterates it, so a tenth cannot be
 added and forgotten. These are the nine, verbatim. The column count is
-`chars().count()`, which is the number the test asserts against.
+`chars().count()`, which is the number the test asserts against, and the budget
+is `ASSUMED_WIDTH - MODE_LABEL_WIDTH` — 80 less the nine columns the status line
+spends before a hint, which is the eight of ` NORMAL ` and the one space after
+it. `MODE_LABEL_WIDTH` counts the gap because the row is drawn with it: a budget
+that stopped at the label would measure a row one column wider than the terminal
+it is measured against.
 
 | Shown when | Text | Columns |
 | :--------- | :--- | ------: |
-| conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  dd:del  D:dismiss  v:vis  /:find  ::cmd  q:quit` | 70 |
-| chat list has the focus | ` j/k: chat  Enter: open  Tab: pane  h: conversation` | 51 |
+| conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  q:quit  S:acct` | 67 |
+| chat list has the focus | ` j/k: chat  Enter: open  Tab: pane  h: conversation  S:acct` | 59 |
 | conversation, Visual | ` d: delete  y: yank  r: reply  Esc: cancel` | 42 |
-| a deletion is confirmed | ` y: delete  n/Esc: cancel` | 25 |
+| the profile panel has the focus | ` j/k: row  d: do  h/l: pane  Esc: back` | 38 |
 | the bar holds a draft, not focused | ` ⏎ draft — i to continue, ^J/⏎ to discard` | 41 |
 | the line is being typed in | ` ⏎: send  ^J: newline  shift+⏎: newline where supported` | 55 |
 | a `:shortcode` is being completed | ` ⇥/⏎: pick  ↑/↓: choose  Esc: close` | 35 |
@@ -211,22 +216,28 @@ by a reader whose hints are clipped. **If a hint ever needs the room, count
 cells, not code points** — `wrap::columns` is the function that does it
 correctly, and it is already a dependency.
 
-**One of the nine is unreachable.** `CONFIRM_HINT` cannot be displayed: a
-confirmation outranks every hint, so `status_text` returns the confirmation's
-sentence before it ever reaches `hint()`. The string is width-checked and shown
-by nothing, which makes `ALL_HINTS`'s count a weaker claim than the array exists
-to make. Deleting it belongs to the change that adds a tenth hint — the settings
-panel — because that is when `ALL_HINTS` is resized anyway. Until then, nine is
-the number of *constants*, not the number of hints a reader can see.
+**Nine rows, and the ninth replaced the fourth.** There is no row for a
+confirmation, and there is one for the profile panel. The two are the same edit
+rather than two: a confirmation outranks every hint, so `status_text` returns
+the prompt's own sentence before it ever reaches `hint()` — that string was
+width-checked by a test and shown by no one, which made `ALL_HINTS`'s count a
+weaker claim than the array exists to make. The count is nine before and nine
+after, and that is the point: it was resized once, with nothing dead left in it.
 
-Three notes, because they are the answers to questions a reader will have:
+Two notes, because they are the answers to questions a reader will have:
 
-- **`NORMAL_HINT` at 70 and `LINE_NORMAL_HINT` at 67** are the two longest, one
-  and three columns under the 71 available. They took that room deliberately:
-  reply, edit, delete and `gg`/`G` all landed by shortening the mode keys, never
-  by letting the row run past the bar and be clipped. **`gg` and `G` are in the
-  line's hint because the editor has neither.** A key the line answers with
-  nothing else on screen naming it is a key the hint exists for.
+- **`NORMAL_HINT` and `LINE_NORMAL_HINT` are tied at 67**, four columns under
+  the seventy-one available. The conversation's row was 70 — one column of room —
+  and `S:acct` cost it `D:dismiss`: a key that dismisses a *failed* send, which
+  is a refusal, and a refusal is the status line's to say rather than the hint's,
+  because the row has no room for why. Every key that has been added to that row
+  has meant shortening another, never letting it run past the terminal.
+  `S:settings` would have fitted, at exactly 71; `S:acct` is the shorter word
+  every other pair on the row uses, and it leaves the next key something to
+  spend.
+- **`gg` and `G` are in the line's hint because the editor has neither.** A key
+  the line answers with nothing else on screen naming it is a key the hint
+  exists for.
 - **The line's Normal mode has no `j`/`k`, and that is not an oversight.** The
   editor behind it makes those history navigation on a one-line buffer, and
   history is not built. The caret moves between the lines of a message from
@@ -262,10 +273,14 @@ Three notes, because they are the answers to questions a reader will have:
 - **The focused pane's border is the only thing on screen that says where a
   keystroke goes.** Two panes drawn alike are two panes the reader has to guess
   between. `lit_borders` in `conversation.rs` reads the three corners and asserts
-  exactly one is `border_focused` for each of the three focus values.
-- **Titles are space-padded.** ` Chats (12) `, ` Conversation (3/48) `, ` Input `,
-  ` draft `, ` Message to Ada Lovelace `, ` Reply `, ` Edit `, ` Command `,
-  ` Find `.
+  exactly one is `border_focused` for each of the three focus values;
+  `the_profile_takes_the_right_hand_pane` and `the_conversation_is_where_it_was`
+  are the same assertion with the right-hand column holding a profile and a
+  conversation, because a change that lit the border in both states would say
+  nothing.
+- **Titles are space-padded.** ` Chats (12) `, ` Conversation (3/48) `, ` Profile `,
+  ` Input `, ` draft `, ` Message to Ada Lovelace `, ` Reply `, ` Edit `,
+  ` Command `, ` Find `.
 - **The scrollbar is a column the body gives up**, and only above
   `MIN_BODY_WIDTH = 8`. A narrow panel has no room to give: the bar would cost
   more than it tells the reader.
@@ -299,6 +314,13 @@ code.
 | `Jumping to first unread…` | a jump the window could not answer | `JUMP_LABEL` |
 | `televim` | the resting status line, when there is nothing to say | `IDLE_STATUS` |
 | `Quit televim? (y/n)` | a screen-wide confirmation | `QUIT_PROMPT` |
+| `Sign out and forget this session? (y/n)` | ditto, for the profile panel's sign-out | `LOGOUT_PROMPT` |
+| ` Profile ` | the panel's title: the subject, not the command | `profile.rs` |
+| `not yet: this build cannot …` | a **deliberate** refusal, which is not a failure | `ADD_ACCOUNT_REFUSAL` |
+| `not signed in` + the reason | the profile panel with no account, and **why** | `AccountState::Unavailable` |
+| `session: OS credential store` | where the session is kept | `session` |
+| `session: /path (plaintext)` | ditto for a file, named as the plaintext thing it is | ditto |
+| `add account` `logout` | the profile panel's two rows, dim, both inert for now | `profile.rs` |
 | `Delete your message from both sides? (y/n)` | ditto, naming **which side** | `DELETE_OUTGOING_PROMPT` |
 | `Delete 3 of your messages? (y/n)` | a count, and pluralisation | `delete_yours_prompt` |
 | `NORMAL` `INSERT` `VISUAL` `CONFIRM` | upper case, in a filled label, reverse-video cursor | `status_bar.rs` |
@@ -312,35 +334,57 @@ code.
 | `/query — match 1 of 5 (first 2)` | a server walk that is still capped | `server_position` |
 
 **No emoji in the chrome.** The emoji catalog is for the reader's *own text*, and
-`emojis` costs 0.5 MB of binary and 2 MB of RSS. A `👤` in a settings title is
-the one place that cost would be spent for nothing.
+`emojis` costs 0.5 MB of binary and 2 MB of RSS. A `👤` in a profile title is the
+one place that cost would be spent for nothing.
+
+**A refusal is not a failure, and the two are not written the same way.**
+`[failed: no route]` is for something that *tried* and did not come back — a send
+that went to Telegram and was not accepted. A key that is bound to nothing yet is
+`not yet: …`, which says the operation was never attempted. Both are one transient
+status, and a reader who reads a deliberate refusal as a bug will go looking for
+one that does not exist.
 
 ## Components
 
-Six, with their states, and the `TestBackend` assertion that would catch each
+Seven, with their states, and the `TestBackend` assertion that would catch each
 regressing.
 
-1. **Panel** — `Chats`, `Conversation`, `Input`. States: focused, unfocused,
-   empty, titled with a count, titled with notes.
+1. **Panel** — `Chats`, `Conversation`, `Input`, and the profile panel, which
+   takes the conversation's rectangle rather than adding a third column. States:
+   focused, unfocused, empty, titled with a count, titled with notes.
 2. **Message row** — states: incoming, outgoing, reply, sending, failed, search
    match, char-selected, message-selected, wrapped across rows.
 3. **Mode label** — the four above, plus the line's own `VISUAL` and `NORMAL`,
    which are *different modes that share a word*. The label belongs to whichever
    mode the keys about to be pressed will mean, and a confirmation is a question
    about the whole screen.
-4. **Hint row** — nine variants, one per state of the screen, all under
-   `ASSUMED_WIDTH - MODE_LABEL_WIDTH`. Three keys mean something else while a
-   `:shortcode` completion is up, and the status line names them for as long as
-   it is.
+4. **Hint row** — nine variants, one per state of the screen, all within
+   `ASSUMED_WIDTH - MODE_LABEL_WIDTH`. Three keys mean something else
+   while a `:shortcode` completion is up, and the status line names them for as
+   long as it is. A focused pane is not enough to pick the row: the right-hand
+   column can be a conversation *or* a profile, and naming the conversation's keys
+   on a panel that has none of them is worse than saying nothing, because it tells
+   the reader the keys are wrong rather than that they are not shown.
 5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, and the bar's own title
    switching between `Message to …` and ` draft `.
 6. **Status line** — the ranking, which is the whole of it: a **confirmation**
    outranks a **selection** outranks a **search**, and a `flash` is not a state
    at all. A refusal written while any of the three is up is a line the reader
    never sees. That is why an operation that finishes in Visual leaves Visual,
-   and why a prompt carries its counts rather than flashing them. Below the three
-   sit a jump in flight, the full reason a failed message failed, and then
-   whatever was last written to the status.
+   why a prompt carries its counts rather than flashing them, and why the
+   profile panel's sign-out is *answered* inside its confirmation rather than
+   flashing underneath it. Below the three sit a jump in flight, the full reason
+   a failed message failed, and then whatever was last written to the status.
+7. **Profile panel** — the account's own, in the conversation's rectangle. States:
+   signed in, signed out **with the reason**, and confirming a sign-out. The
+   signed-out state is the one a reader meets first on a machine with no
+   credentials, and it is the one that must not look like a widget that has gone
+   wrong: an empty panel is indistinguishable from a bug, so the panel says what
+   it is and why. The two action rows are dim and refuse, because a row that
+   looks live and does nothing is worse than a row that says it is not — and
+   sign-out *confirms* before it refuses, because a panel that flashed instead
+   would have taught the reader the wrong thing about a key that will eventually
+   throw away the only secret the program holds.
 
    **Above all of them is a keystroke inside the line.** A key being pressed
    cannot be answered by a sentence about a state the reader is in the middle of

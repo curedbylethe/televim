@@ -127,7 +127,7 @@ p.note b { color: var(--text); font-weight: 600; }
 </head>
 <body>
 <h1>Conversation, Normal mode — the reference frame</h1>
-<p class="note">Focus is on the conversation, so <b>its</b> border is the focused one and the chat list&#39;s is not. That border is the only thing on screen saying where a keystroke goes: two panes drawn alike are two panes the reader has to guess between. The bar is empty, so it is a hint rather than a draft, and the hint lives on the status line — nine of them exist, and each has to fit 80 &minus; 9 = <b>71</b> columns.</p>
+<p class="note">Focus is on the conversation, so <b>its</b> border is the focused one and the chat list&#39;s is not. That border is the only thing on screen saying where a keystroke goes: two panes drawn alike are two panes the reader has to guess between. The bar is empty, so it is a hint rather than a draft, and the hint lives on the status line — nine of them exist, and each has to fit 80 &minus; 9 for the label block and the gap after it = <b>71</b> columns.</p>
 <pre class="term"><span class="b">┌────── Chats (3) ─────┐</span><span class="bf">┌────── Conversation (7/10) ───────────────────────────┐</span>
 <span class="b">│</span><span class="cur">Ada Lovelace          </span><span class="b">│</span><span class="bf">│</span><span class="d">[them] </span><span class="t">Hey, is the build green?</span>                      <span class="d">│</span><span class="bf">│</span>
 <span class="b">│</span><span class="t">Grace Hopper          </span><span class="b">│</span><span class="bf">│</span><span class="d">[you] </span><span class="t">Yes — clippy is happy.</span>                         <span class="d">│</span><span class="bf">│</span>
@@ -151,7 +151,7 @@ p.note b { color: var(--text); font-weight: 600; }
 <span class="d">┌────── Input ─────────────────────────────────────────────────────────────────┐</span>
 <span class="d">│</span> <span class="d">│</span>                                                                             
 <span class="d">└──────────────────────────────────────────────────────────────────────────────┘</span>
-<span class="mn"> NORMAL </span> <span class="d"> i:ins  r:rep  e:edit  dd:del  D:dismiss  v:vis  /:find  ::cmd  q:quit</span> </pre>
+<span class="mn"> NORMAL </span> <span class="d"> i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  q:quit  S:acct</span>    </pre>
 <h1>TestBackend assertions this frame is the reference for</h1>
 <ul class="note"><li>Exactly one of the three pane corners carries <code>border-focused</code>, and it is the conversation at (24, 0).</li><li>The chat list title is <code> Chats (3) </code> — space-padded on both sides.</li><li>The conversation title is <code> Conversation (7/10) </code>: counted in messages, 1-indexed.</li><li><code>[them] </code> is <code>text-dim</code> and the body is <code>text</code>. Decorations are drawn once, on a message&#39;s first row.</li><li>The scrollbar has a column of its own and the messages stop before it. Under <code>MIN_BODY_WIDTH</code> (8) the panel gives that column up rather than pay more than the bar tells.</li><li>The status row is a filled 9-column label, a space, then the hint in <code>text-dim</code>.</li></ul>
 </body>

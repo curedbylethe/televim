@@ -21,20 +21,22 @@ li small { color: var(--text-dim); display: block; }
 <h1>Televim — baseline mockups</h1>
 
 <p class="note">
-  Six frames of the screens that exist today, at exactly 80 columns by 24 rows.
-  They are the reference the settings work in plans 03, 04 and 05 is measured
-  against, and they are <b>hand-written</b> rather than generated: a mockup
-  produced by the same process as the spec cannot contradict the spec, which is
-  the one thing a reference frame has to be able to do.
+  Nine frames of the screens that exist today, at exactly 80 columns by 24 rows,
+  measured in cells rather than counted in characters &#8212; a wide character has
+  to pass as two columns or the claim is not a claim. They are the reference the
+  settings work is measured against, and they are <b>hand-written</b> rather than
+  generated: a mockup produced by the same process as the spec cannot contradict
+  the spec, which is the one thing a reference frame has to be able to do.
 </p>
 
 <p class="note">
   Every string on them is copied out of <code>crates/</code> rather than
-  invented — the nine hint rows from <code>input_bar.rs</code>, the bracket
+  invented &#8212; the nine hint rows from <code>input_bar.rs</code>, the bracket
   vocabulary from <code>rows.rs</code>, the titles and the note joins from
-  <code>chat_list.rs</code> and <code>conversation.rs</code>. The colours are the
-  <code>v2</code> column of <code>DESIGN.md</code>'s palette, which the binary
-  draws.
+  <code>chat_list.rs</code>, <code>conversation.rs</code> and
+  <code>profile.rs</code>, and the refusals from <code>app.rs</code>. The colours
+  are the <code>v2</code> column of <code>DESIGN.md</code>'s palette, which the
+  binary draws.
 </p>
 
 <ul>
@@ -62,15 +64,28 @@ li small { color: var(--text-dim); display: block; }
     <a href="light.html">The reference frame, light terminal</a>
     <small>The same frame with the light column — decided and tested, but not shipped.</small>
   </li>
+  <li>
+    <a href="profile-signed-in.html">Profile panel, signed in</a>
+    <small>The conversation&#39;s rectangle, holding a profile. The identity on one row, a wrapped bio, the id and the session store dimmed, and the panel&#39;s own hint.</small>
+  </li>
+  <li>
+    <a href="profile-confirm-logout.html">Profile panel, confirming a sign-out</a>
+    <small>Confirm before refusing. No hint row, because a confirmation outranks every hint.</small>
+  </li>
+  <li>
+    <a href="profile-no-account.html">Profile panel, signed out</a>
+    <small>The frame a reader meets first. The reason, wrapped rather than clipped, because a reason cut at the edge is one they cannot act on.</small>
+  </li>
 </ul>
 
 <h1>What is not here yet</h1>
 
 <p class="note">
-  A settings panel, an editable profile, and an interactive sign-in with 2FA.
-  Each of those is work that does not exist in the code yet, and each brings its
-  own mockups in this style. The settings panel takes the conversation's
-  rectangle rather than a new pane, so a contact profile will land in the same
+  An <b>editable</b> profile, and an interactive sign-in with 2FA. Each of those is
+  work that does not exist in the code yet, and each brings its own mockups in
+  this style. The profile panel is read-only today: its two action rows refuse, and
+  a sign-out confirms before it does. The panel took the conversation&#39;s
+  rectangle rather than adding a pane, so a contact profile will land in the same
   slot later.
 </p>
 
