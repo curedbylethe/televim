@@ -21,12 +21,11 @@ colors:
   text-light: "#1d2128"
   text-dim-light: "#6b7280"
   match-light: "#8a6100"
-  mode-normal-light: "#3a6a99"
+  mode-normal-light: "#6d9dd0"
   mode-insert-light: "#4f9d55"
   mode-visual-light: "#b98d2e"
-  mode-confirm-light: "#c0454e"
+  mode-confirm-light: "#d67b83"
   on-mode-light: "#0d1117"
-  on-mode-dark: "#d7dce5"
 ---
 
 # Televim
@@ -35,12 +34,10 @@ colors:
 
 > Surface: terminal
 
-> **Status: proposed.** `crates/tui/src/theme.rs` still carries the 16 named ANSI
-> colours. The `v2` column below is a proposal and not yet what the binary draws;
-> the `baseline` column is. A reader who opens this file and then opens
-> `theme.rs` will find two different answers, and this file is the one that looks
-> authoritative — so the header has to be flipped to match the code in the commit
-> that adopts the palette, not in a later one.
+> **Status: landed** (2026-09-29). `crates/tui/src/theme.rs` draws the `v2`
+> column below, as `Color::Rgb` at every role the `Theme` carries. The
+> `baseline` column is what it drew before the refresh, and is kept so the
+> change can be read as a diff.
 
 *A private room, read at a glance, typed at without the mouse.*
 
@@ -69,9 +66,10 @@ would be fiction, and the ones this program does not have are the ones a
 designer must not invent either.
 
 Two columns: **baseline** is what a standard 16-colour terminal shows for the
-ANSI name in the third column, and is what the binary draws today. **v2** is
-the proposal. The light column is v2 re-specified for a reader on a light
-terminal.
+ANSI name in the third column, and is what the binary drew before the refresh.
+**v2** is what it draws. The light column is v2 re-specified for a reader on a
+light terminal, and it is specified and tested but **not shipped**: `Theme` has
+one set of values, and a second palette is a later change rather than a gap.
 
 | Role | ANSI today | baseline (dark) | v2 (dark) | v2 (light) | Why it holds this colour |
 | :--- | :--------- | :-------------- | :-------- | :--------- | :----------------------- |
@@ -83,16 +81,30 @@ terminal.
 | `text-dim` | `Gray` | `#8a8a8a` | `#7b8496` | `#6b7280` | decoration, hints, an unfocused draft |
 | `cursor` | `REVERSED` | reverse video | reverse video | reverse video | owned by the cursor, alone |
 | `match` | `Yellow`+`BOLD` | `#87af00` | `#e5c07b` | `#8a6100` | a search hit; colour **and** bold |
-| `selection-bg` | `Magenta` | `#af005f` | `#6b4bab` | `#6b4bab` | a Visual selection's background |
-| `mode-normal` | `Blue`/`White` | `#0000af` | `#4a7fb5` | `#3a6a99` | the mode label |
+| `selection-bg` | `Magenta` | `#af005f` | `#6b4bab` | `#6b4bab` | a Visual selection's background; its text is `#d7dce5` by rule, below |
+| `mode-normal` | `Blue`/`Black` | `#0000af` | `#4a7fb5` | `#6d9dd0` | the mode label |
 | `mode-insert` | `Green`/`Black` | `#00af00` | `#6fbf73` | `#4f9d55` | ditto |
 | `mode-visual` | `Yellow`/`Black` | `#afaf00` | `#e5c07b` | `#b98d2e` | ditto |
-| `mode-confirm` | `Red`/`White` | `#af0000` | `#e06c75` | `#c0454e` | ditto |
+| `mode-confirm` | `Red`/`Black` | `#af0000` | `#e06c75` | `#d67b83` | ditto |
 
-Labels take `on-mode-dark` (`#d7dce5`) on the three dark-enough backgrounds and
-`on-mode-light` (`#0d1117`) on the two light ones (`mode-insert`, `mode-visual`).
-Naming the foreground makes the label's contrast a property of the theme rather
-than of the reader's terminal, which is the only reason it is stated at all.
+**One ink, `#0d1117`, on all eight labels.** Naming the foreground makes the
+label's contrast a property of the theme rather than of the reader's terminal,
+which is the only reason it is stated at all; that the ink is the same on both
+columns is a consequence. An earlier rule split them — `on-mode-dark` on the
+"dark-enough" backgrounds, `on-mode-light` on the light ones — and it put four of
+the eight under the 4.5:1 body-text floor: `#d7dce5` on `mode-normal`'s
+`#4a7fb5` is 3.06:1 and on `mode-confirm`'s `#e06c75` is 2.32:1, and on the light
+column's two it was 4.12:1 and 3.63:1. So `on-mode-dark` is gone, and the two
+light-column backgrounds that could not carry the dark ink were lightened until
+they could (`mode-normal-light` from `#3a6a99`, `mode-confirm-light` from
+`#c0454e`).
+
+**The text on a selection follows the selection, not the terminal.**
+`selection-bg` is `#6b4bab` on both terminals, so the text on it is `#d7dce5` on
+both, at 4.74:1; the light column's `text` is `#1d2128`, which is 2.48:1 on the
+same background. That is why `selection-bg` carries a foreground rather than
+letting the row inherit one — and it covers a search match under a selection too:
+a mark on a selection takes the selection's ink and keeps only its `bold`.
 
 ### Why the refresh
 
@@ -108,13 +120,18 @@ Two costs, stated rather than hidden:
 - **Truecolour is required.** On a 16- or 256-colour terminal v2 degrades to the
   terminal's own approximation, which the desaturated values are chosen to
   survive. It degrades; it does not break. `Color::Indexed` was rejected: it
-  never looks right on the truecolour terminals that are the majority.
-- **`selection-bg` fails a body-text contrast ratio on a light terminal** —
-  `#d7dce5` on `#6b4bab` is near 3.3:1, under the 4.5:1 floor. It is kept
-  deliberately. A selection is a block, not small text: the reader's job is to
-  see its extent, and it fails a text ratio while passing the thing it is for.
-  Do not "fix" this by darkening the value; that stops it being a selection
-  colour on the dark terminals where this program is actually used.
+  never looks right on the truecolour terminals that are the majority. The four
+  mode labels are the rows this shows worst on, because they are the only rows
+  with two colours set: an approximation error in either field changes the
+  label's readability, and a label that cannot be read is the reader not knowing
+  which mode they are in.
+- **`selection-bg` is not re-specified for the light column, and does not need
+  to be.** It is `#6b4bab` on both, and the text on it is `#d7dce5` on both, at
+  4.74:1. An earlier note here claimed the opposite — that the value "fails a
+  body-text contrast ratio on a light terminal — near 3.3:1" — and that figure was
+  never computed. The real failure was a different pair, the light column's own
+  text (`#1d2128`) on this background at 2.48:1, and the fix for that is the rule
+  above rather than a change to the value.
 
 ### Two rules the palette cannot change
 
@@ -125,9 +142,12 @@ palette that made the screen lie.
    never use `REVERSED`. A second user of it leaves the reader unable to tell
    which row the cursor is on.
 2. **`selection-bg` is a background and `match` is a foreground.** A cell that
-   is both is then legible rather than one of them winning outright. Verified by
-   `a_match_under_a_selection` in `conversation.rs`, which asserts one cell
-   carries both.
+   is both is then legible rather than one of them winning outright, and it takes
+   the *selection's* ink: the selection is applied after the match, so a match on
+   a selection is painted in the selection's colour and keeps only its `bold`.
+   Verified by `a_match_under_a_selection_keeps_both_of_its_marks` in
+   `conversation.rs`, which asserts one cell carries the selection's background,
+   the selection's ink and the match's weight.
 
 ## Typography
 

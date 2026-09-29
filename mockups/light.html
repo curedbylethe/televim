@@ -24,11 +24,11 @@
   --text-dim: #7b8496;
   --match: #e5c07b;
   --selection-bg: #6b4bab;
+  --selection-fg: #d7dce5;
   --mode-normal: #4a7fb5;
   --mode-insert: #6fbf73;
   --mode-visual: #e5c07b;
   --mode-confirm: #e06c75;
-  --on-mode-dark: #d7dce5;
   --on-mode-light: #0d1117;
 
   /* light terminal */
@@ -37,10 +37,10 @@
   --l-text: #1d2128;
   --l-text-dim: #6b7280;
   --l-match: #8a6100;
-  --l-mode-normal: #3a6a99;
+  --l-mode-normal: #6d9dd0;
   --l-mode-insert: #4f9d55;
   --l-mode-visual: #b98d2e;
-  --l-mode-confirm: #c0454e;
+  --l-mode-confirm: #d67b83;
 
   --cell: 15px;
 }
@@ -109,8 +109,8 @@ p.note b { color: var(--text); font-weight: 600; }
 .d  { color: var(--text-dim); }                       /* decoration, hints */
 .t  { color: var(--text); }                           /* body */
 .m  { color: var(--match); font-weight: 700; }        /* a search match */
-.s  { background: var(--selection-bg); }              /* a selection block */
-.sb { background: var(--selection-bg); color: var(--match); font-weight: 700; }
+.s  { background: var(--selection-bg); color: var(--selection-fg); }              /* a selection block */
+.sb { background: var(--selection-bg); color: var(--selection-fg); font-weight: 700; }
 
 /* the cursor row: reverse video, and the only user of it in the system */
 .cur { background: var(--text); color: var(--background); }
@@ -118,16 +118,16 @@ p.note b { color: var(--text); font-weight: 600; }
 .cur.s { background: var(--text); color: var(--selection-bg); }
 
 /* the four mode labels: a filled 9-column block, upper case */
-.mn { background: var(--mode-normal); color: var(--on-mode-dark); }
-mi { background: var(--mode-insert); color: var(--on-mode-light); }
-mv { background: var(--mode-visual); color: var(--on-mode-light); }
-mc { background: var(--mode-confirm); color: var(--on-mode-dark); }
+.mn { background: var(--mode-normal); color: var(--on-mode-light); }
+.mi { background: var(--mode-insert); color: var(--on-mode-light); }
+.mv { background: var(--mode-visual); color: var(--on-mode-light); }
+.mc { background: var(--mode-confirm); color: var(--on-mode-light); }
 
 </style>
 </head>
 <body>
 <h1>The reference frame, on a light terminal</h1>
-<p class="note">The reader&#39;s terminal may be light, and the palette is specified for both. The four mode labels are the rows that have to survive it: today they are the raw ANSI primaries, and <code>#0000af</code> on a light background is a smear. The v2 column moves all four off the primaries, which is the whole of the refresh. <code>selection-bg</code> is the one value that fails a body-text ratio here — near 3.3:1 — and it is kept deliberately: a selection is a block, not small text, and it fails a text ratio while passing the thing it is for.</p>
+<p class="note">The reader&#39;s terminal may be light, and the palette is specified for both. The four mode labels are the rows that have to survive it, and all four take one ink here: each is painted in <code>#0d1117</code>. Two of their backgrounds were too dark for it — <code>mode-normal</code> at <code>#3a6a99</code> was 3.34:1 and <code>mode-confirm</code> at <code>#c0454e</code> was 3.79:1 — so those two were lightened until the ink cleared 4.5:1, which is why there is no second foreground. <code>selection-bg</code> is <code>#6b4bab</code> on both terminals and its text is <code>#d7dce5</code> on both: a selection&#39;s own ink follows the selection rather than the terminal, because <code>#1d2128</code> on it is 2.48:1.</p>
 <pre class="term light"><span class="b">┌────── Chats (3) ─────┐</span><span class="bf">┌────── Conversation (7/10) ───────────────────────────┐</span>
 <span class="b">│</span><span class="cur">Ada Lovelace          </span><span class="b">│</span><span class="bf">│</span><span class="d">[them] </span><span class="t">Hey, is the build green?</span>                      <span class="d">│</span><span class="bf">│</span>
 <span class="b">│</span><span class="t">Grace Hopper          </span><span class="b">│</span><span class="bf">│</span><span class="d">[you] </span><span class="t">Yes — clippy is happy.</span>                         <span class="d">│</span><span class="bf">│</span>
@@ -153,6 +153,6 @@ mc { background: var(--mode-confirm); color: var(--on-mode-dark); }
 <span class="d">└──────────────────────────────────────────────────────────────────────────────┘</span>
 <span class="mn"> NORMAL </span> <span class="d"> i:ins  r:rep  e:edit  dd:del  D:dismiss  v:vis  /:find  ::cmd  q:quit</span> </pre>
 <h1>TestBackend assertions this frame is the reference for</h1>
-<ul class="note"><li>All four mode labels are legible on this background, which is the property the v2 palette is chosen for.</li><li><code>border</code> is <code>#b0b5c0</code> and <code>border-focused</code> is <code>#1a7f8c</code> here — the same role, the same two values of emphasis, re-specified rather than approximated.</li><li><code>text</code> is <code>#1d2128</code> and <code>text-dim</code> is <code>#6b7280</code>.</li><li>The same two composition rules hold: reverse video is the cursor&#39;s alone, and a selection is a background.</li><li>A 16-colour terminal approximates the truecolour escapes, and the v2 values are desaturated so that approximation is survivable. It degrades; it does not break.</li></ul>
+<ul class="note"><li>All four mode labels are legible on this background, each in the one ink <code>#0d1117</code>, which is the property the v2 palette is chosen for.</li><li><code>border</code> is <code>#b0b5c0</code> and <code>border-focused</code> is <code>#1a7f8c</code> here — the same role, the same two values of emphasis, re-specified rather than approximated.</li><li><code>text</code> is <code>#1d2128</code> and <code>text-dim</code> is <code>#6b7280</code>.</li><li>The same two composition rules hold: reverse video is the cursor&#39;s alone, and a selection is a background with its own ink, because the text on it follows the selection rather than the terminal.</li><li>A 16-colour terminal approximates the truecolour escapes, and the v2 values are desaturated so that approximation is survivable. It degrades; it does not break.</li></ul>
 </body>
 </html>

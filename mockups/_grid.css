@@ -17,11 +17,11 @@
   --text-dim: #7b8496;
   --match: #e5c07b;
   --selection-bg: #6b4bab;
+  --selection-fg: #d7dce5;
   --mode-normal: #4a7fb5;
   --mode-insert: #6fbf73;
   --mode-visual: #e5c07b;
   --mode-confirm: #e06c75;
-  --on-mode-dark: #d7dce5;
   --on-mode-light: #0d1117;
 
   /* light terminal */
@@ -30,10 +30,10 @@
   --l-text: #1d2128;
   --l-text-dim: #6b7280;
   --l-match: #8a6100;
-  --l-mode-normal: #3a6a99;
+  --l-mode-normal: #6d9dd0;
   --l-mode-insert: #4f9d55;
   --l-mode-visual: #b98d2e;
-  --l-mode-confirm: #c0454e;
+  --l-mode-confirm: #d67b83;
 
   --cell: 15px;
 }
@@ -102,8 +102,8 @@ p.note b { color: var(--text); font-weight: 600; }
 .d  { color: var(--text-dim); }                       /* decoration, hints */
 .t  { color: var(--text); }                           /* body */
 .m  { color: var(--match); font-weight: 700; }        /* a search match */
-.s  { background: var(--selection-bg); }              /* a selection block */
-.sb { background: var(--selection-bg); color: var(--match); font-weight: 700; }
+.s  { background: var(--selection-bg); color: var(--selection-fg); }              /* a selection block */
+.sb { background: var(--selection-bg); color: var(--selection-fg); font-weight: 700; }
 
 /* the cursor row: reverse video, and the only user of it in the system */
 .cur { background: var(--text); color: var(--background); }
@@ -111,7 +111,7 @@ p.note b { color: var(--text); font-weight: 600; }
 .cur.s { background: var(--text); color: var(--selection-bg); }
 
 /* the four mode labels: a filled 9-column block, upper case */
-.mn { background: var(--mode-normal); color: var(--on-mode-dark); }
-mi { background: var(--mode-insert); color: var(--on-mode-light); }
-mv { background: var(--mode-visual); color: var(--on-mode-light); }
-mc { background: var(--mode-confirm); color: var(--on-mode-dark); }
+.mn { background: var(--mode-normal); color: var(--on-mode-light); }
+.mi { background: var(--mode-insert); color: var(--on-mode-light); }
+.mv { background: var(--mode-visual); color: var(--on-mode-light); }
+.mc { background: var(--mode-confirm); color: var(--on-mode-light); }
