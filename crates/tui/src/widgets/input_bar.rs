@@ -44,19 +44,38 @@ pub const INPUT_MAX_ROWS: usize = 6;
 /// empty.
 ///
 /// A constant so its length can be checked: the hints have to fit one row of the
-/// widest terminal the client assumes, and adding reply, edit and delete meant
-/// shortening the mode keys rather than letting the line run past the bar and be
-/// clipped.
-const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  dd:del  D:dismiss  v:vis  /:find  ::cmd  q:quit";
+/// widest terminal the client assumes, and every key that has been added has
+/// meant shortening the mode keys rather than letting the line run past the bar
+/// and be clipped.
+///
+/// The row was exactly full — seventy columns, all seventy of the budget — when
+/// the account's profile took `D:dismiss` out and `S:acct` in. `D` dismisses a
+/// *failed* send, which is a refusal, and a refusal is the status line's to say
+/// rather than the hint's: the row has no room for why.
+const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  q:quit  S:acct";
 
 /// The hint while the chat list has the focus.
-const CHAT_LIST_HINT: &str = " j/k: chat  Enter: open  Tab: pane  h: conversation";
+///
+/// The same spelling of the profile key as the conversation's row. One key, one
+/// word, two rows: two spellings for one key is something a reader has to notice
+/// and reconcile.
+const CHAT_LIST_HINT: &str = " j/k: chat  Enter: open  Tab: pane  h: conversation  S:acct";
 
 /// The hint while a selection is being made over the messages.
 const VISUAL_HINT: &str = " d: delete  y: yank  r: reply  Esc: cancel";
 
-/// The hint while a deletion is waiting to be confirmed.
-const CONFIRM_HINT: &str = " y: delete  n/Esc: cancel";
+/// The hint while the profile panel has the focus.
+///
+/// Its own row, and the reason is not cosmetic: `hint()` matches on
+/// `(focus, mode)`, and a focused profile *is* a focused conversation as far as
+/// that pair goes. Without this the panel would name `dd:del` and `e:edit` —
+/// keys that do nothing on it, which is worse than saying nothing, because it
+/// tells the reader the keys are wrong rather than that they are not shown.
+///
+/// `d` is named even though six of the eight rows ignore it, because the two
+/// that do not are the only interaction the panel has and the hint is the only
+/// place a reader learns they exist.
+const SETTINGS_HINT: &str = " j/k: row  d: do  h/l: pane  Esc: back";
 
 /// The hint while the bar holds a draft and the conversation has the focus.
 ///
@@ -119,12 +138,18 @@ const MODE_LABEL_WIDTH: usize = 9;
 const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
+///
+/// Nine entries, and that is not the same as nine before: the confirmation's row
+/// was here and was not reachable. A confirmation outranks every hint, so
+/// `status_text` returns the prompt's own sentence before it ever asks for one —
+/// the string was width-checked by a test and displayed by nothing. The profile's
+/// row replaced it, which is what `ALL_HINTS` is for.
 #[cfg(test)]
 const ALL_HINTS: [&str; 9] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
     VISUAL_HINT,
-    CONFIRM_HINT,
+    SETTINGS_HINT,
     DRAFT_HINT,
     INSERT_HINT,
     COMPLETION_HINT,
@@ -150,12 +175,22 @@ pub fn hint(app: &App) -> &'static str {
             "NORMAL" => LINE_NORMAL_HINT,
             _ => INSERT_HINT,
         },
-        (Focus::Input, _) => "",
         (Focus::ChatList, _) => CHAT_LIST_HINT,
+        // Before the conversation's own arms, and matched on the pane as well as
+        // the mode: a profile is in the right-hand column with the focus on it,
+        // so without this the pair below would answer for it.
+        (Focus::Conversation, Mode::Normal) if app.pane.is_profile() => SETTINGS_HINT,
         (Focus::Conversation, Mode::Visual) => VISUAL_HINT,
-        (Focus::Conversation, Mode::Confirm) => CONFIRM_HINT,
         (Focus::Conversation, Mode::Normal) if !app.line.is_empty() => DRAFT_HINT,
         (Focus::Conversation, Mode::Normal) => NORMAL_HINT,
+        // The two states that say nothing, and both say it for the same reason.
+        // A confirmation outranks every hint on the status line, so the prompt's
+        // own sentence is what is drawn and the confirm arm is reached by
+        // nothing — it used to return a row, which meant a string was
+        // width-checked by a test and displayed by no one. A command or a search
+        // line has no keys to name either: they are a line the reader is typing
+        // into, and the line answers for itself.
+        (Focus::Input, _) | (Focus::Conversation, Mode::Confirm) => "",
     }
 }
 
@@ -173,8 +208,11 @@ pub fn mode_label(app: &App) -> &'static str {
             _ => "INSERT",
         },
         (Focus::Input, _) => "INSERT",
-        (_, Mode::Visual) => Mode::Visual.label(),
-        (_, Mode::Confirm) => Mode::Confirm.label(),
+        // Named rather than wildcarded. A wildcard here is right until the day a
+        // second pane of the right-hand column can be in Visual or Confirm, and
+        // by then it is a label a reader has been misreading.
+        (Focus::Conversation, Mode::Visual) => Mode::Visual.label(),
+        (Focus::Conversation, Mode::Confirm) => Mode::Confirm.label(),
         (Focus::ChatList, _) | (Focus::Conversation, Mode::Normal) => Mode::Normal.label(),
     }
 }

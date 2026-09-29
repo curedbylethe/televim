@@ -7,8 +7,10 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use domain::account::Account;
 use domain::chat::Chat;
 use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
 use domain::message::{Message, MessageStatus};
@@ -131,6 +133,27 @@ pub fn delete_mixed_prompt(yours: usize, theirs: usize) -> String {
 /// mistyped key can do without the reader meaning to.
 pub const QUIT_PROMPT: &str = "Quit televim? (y/n)";
 
+/// The prompt the status line shows when a sign-out is waiting to be confirmed.
+///
+/// The same screen-wide shape as a quit's, for the same reason: it is the other
+/// destructive thing a keypress can do here, and it throws away the one secret
+/// this program holds.
+pub const LOGOUT_PROMPT: &str = "Sign out and forget this session? (y/n)";
+
+/// What the profile panel says when `add account` is pressed.
+///
+/// A deliberate refusal, and named as one. The bracketed `[failed: …]` form is
+/// for something that tried and did not come back; nothing was sent here, and a
+/// reader who reads a failure as a bug would be chasing one that does not exist.
+pub const ADD_ACCOUNT_REFUSAL: &str = "not yet: this build cannot add an account";
+
+/// What the profile panel says when a sign-out is confirmed.
+///
+/// Said inside the confirmation rather than under it, because a confirmation
+/// outranks every transient status on the same row: a refusal written while one
+/// is up is a line the reader never sees.
+pub const LOGOUT_REFUSAL: &str = "not yet: this build cannot sign out";
+
 /// Which page of a conversation a fetch is asking for.
 ///
 /// Named rather than a `bool`, because they differ in what they do to the
@@ -229,6 +252,141 @@ pub enum Focus {
     Input,
 }
 
+impl Focus {
+    /// Whether the right-hand pane is showing something other than the
+    /// conversation.
+    ///
+    /// Four places need this answer and none of them can work it out from
+    /// [`Focus`] alone: a focused right-hand pane is the right-hand pane whether
+    /// it holds a conversation or a profile, and the difference decides what the
+    /// border, the mode label and the status line say.
+    #[must_use]
+    pub const fn is_profile(self, pane: Pane) -> bool {
+        matches!(self, Focus::Conversation) && matches!(pane, Pane::Profile(_))
+    }
+}
+
+/// What the right-hand pane is showing.
+///
+/// A second axis beside [`Focus`], and the reason it is a second one is that
+/// [`Focus`] is about the *line*: it says where a keystroke lands, and being on
+/// the line is what makes it in insert mode. What the right-hand column holds is
+/// a different question, and folding a profile into `Focus` would make one enum
+/// mean both "which pane" and "what is in this one" — which is how a match on it
+/// ends up needing an arm for a state it cannot describe.
+///
+/// A contact profile is then a variant here rather than a fourth pane: it takes
+/// the rectangle the conversation already had, which is why the layout, the
+/// focus ring and the `Tab` order are untouched by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pane {
+    /// The open conversation's messages.
+    Conversation,
+
+    /// A profile, for the account or for somebody in a conversation.
+    Profile(ProfileId),
+}
+
+impl Pane {
+    /// Whether this is a profile rather than the conversation.
+    #[must_use]
+    pub const fn is_profile(self) -> bool {
+        matches!(self, Pane::Profile(_))
+    }
+}
+
+/// Whose profile the right-hand pane is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileId {
+    /// The signed-in account.
+    SelfAccount,
+
+    /// A person, by their bare identifier.
+    ///
+    /// Not reachable: there is no key that opens somebody else's profile yet. It
+    /// is here because the alternative is a second `Pane` variant the moment one
+    /// is needed, and a panel that can only ever show one subject is a panel
+    /// whose data model is a special case.
+    User(i64),
+}
+
+/// What the profile panel shows when it opens.
+///
+/// One value rather than an `Option<Account>` beside a status string, because
+/// the two have to agree: a panel reading "not read yet" while the status line
+/// has said "offline" for a minute is wrong twice, and two fields that must
+/// agree is one more place to be wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountState {
+    /// Nothing has been read yet, and nothing has gone wrong.
+    ///
+    /// On screen for the frames between the two, and on any machine whose
+    /// credentials never arrived — which is the more common of the two.
+    Unfetched,
+
+    /// The client could not be built, or the profile could not be read, and this
+    /// is why.
+    ///
+    /// The panel draws the reason rather than an empty profile, because an empty
+    /// profile is indistinguishable from a widget that has gone wrong.
+    Unavailable(String),
+
+    /// The account's own profile.
+    Known(domain::account::Account),
+}
+
+/// Where the session is kept, as the panel says it.
+///
+/// Derived from the same configuration the session store itself is built from, so
+/// the two cannot disagree about which one is in use.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SessionStore {
+    /// The platform's own credential store, and the default.
+    #[default]
+    Keyring,
+
+    /// A file on disk, in plaintext.
+    ///
+    /// Named for the fact rather than for the type: the panel renders
+    /// `session: /path/to/file (plaintext)`, and a variant called `File` would
+    /// have that fact nowhere to live.
+    PlaintextFile(PathBuf),
+}
+
+/// A row of the profile panel.
+///
+/// The kinds rather than the labels, because the label is a display concern and
+/// the kind is the panel's data model — which rows exist depends on what the
+/// account set, and the keys have to be able to ask what is under the highlight
+/// without drawing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileRow {
+    /// The account's name.
+    Name,
+
+    /// The username and the phone number, on one row.
+    Identity,
+
+    /// The bio, which may take as many rows as it needs.
+    Bio,
+
+    /// When the account was born, if it says.
+    Birthday,
+
+    /// The bare identifier, which is what tells two accounts with the same name
+    /// apart.
+    UserId,
+
+    /// Where the session is kept.
+    Session,
+
+    /// Adding another account. Refuses: there is nowhere to sign in from.
+    AddAccount,
+
+    /// Signing out. Confirms, then refuses.
+    Logout,
+}
+
 /// A conversation the reader has highlighted and asked to be taken to.
 ///
 /// The index and the moment it was chosen, rather than the index alone: the
@@ -292,6 +450,14 @@ pub enum ConfirmKind {
     /// nothing to send anywhere, and a quit that waited on the network would be
     /// a quit that can hang.
     Quit,
+
+    /// Sign out, and forget the session this program holds.
+    ///
+    /// It cannot be carried out yet, and it is asked for anyway. A `logout` row
+    /// that flashed a refusal instead of confirming would have taught the reader
+    /// the wrong thing about the key, and the lesson would be wrong exactly when
+    /// it starts destroying something.
+    Logout,
 
     /// Delete these messages, for both sides.
     DeleteMessages {
@@ -515,6 +681,28 @@ pub struct App {
     pub focus: Focus,
     pub theme: Theme,
 
+    /// What the right-hand pane is showing.
+    ///
+    /// A field rather than a variant of [`Focus`], because the two answer
+    /// different questions: this says what the right-hand column holds, and
+    /// `Focus` says where a keystroke lands. See [`Pane`].
+    pub pane: Pane,
+
+    /// What the profile panel shows, and why it might show nothing.
+    pub account: AccountState,
+
+    /// Where the session is kept, as the panel says it.
+    pub session_store: SessionStore,
+
+    /// The highlight on the profile panel's rows.
+    ///
+    /// A second [`VimState`] rather than a share of the conversation's, because
+    /// that one's total is the conversation window's length: driving two lists
+    /// from one value means each resize moves the other's cursor. `VimState`
+    /// knows nothing about what an item is, which is what makes the second one
+    /// free.
+    profile_vim: VimState,
+
     /// The conversations, and the messages the client has seen in them.
     ///
     /// One value rather than a list beside a window: an event from the feed
@@ -691,6 +879,10 @@ impl App {
             mode: Mode::Normal,
             focus: Focus::Conversation,
             theme: Theme::default(),
+            pane: Pane::Conversation,
+            account: AccountState::Unfetched,
+            session_store: SessionStore::default(),
+            profile_vim: VimState::new(0),
             list: ChatList::default(),
             selected_chat: 0,
             conversation: ConversationView::new(0),
@@ -731,6 +923,7 @@ impl App {
         app.set_chats(mock_chats());
         app.select_chat(0);
         app.apply_latest(mock_messages());
+        app.set_account(Ok(mock_account()));
         app
     }
 
@@ -932,6 +1125,137 @@ impl App {
         self.selection = None;
         self.register = Register::default();
         self.line.forget_purpose();
+    }
+
+    // ---- the profile panel ----------------------------------------------
+
+    /// Records what the account's own profile turned out to be.
+    ///
+    /// The only writer of [`App::account`], so the three states cannot be mixed
+    /// up by a caller that knows only one of them.
+    pub fn set_account(&mut self, account: Result<Account, String>) {
+        self.account = match account {
+            Ok(account) => AccountState::Known(account),
+            Err(reason) => AccountState::Unavailable(reason),
+        };
+    }
+
+    /// Records where the session is kept.
+    ///
+    /// Its own setter rather than a field of `set_account`, because it is known
+    /// from the configuration before anything is read from the network — and
+    /// "the session has not been placed yet" is one of the states the panel has
+    /// to draw.
+    pub fn set_session_store(&mut self, store: SessionStore) {
+        self.session_store = store;
+    }
+
+    /// The rows the profile panel is showing, in order.
+    ///
+    /// Computed rather than held: which rows exist depends on what the account
+    /// set, and a held list would be a second thing to keep in step with it.
+    /// Empty whenever the profile is not known, because there is then nothing to
+    /// put a highlight on.
+    #[must_use]
+    pub fn profile_rows(&self) -> Vec<ProfileRow> {
+        let AccountState::Known(account) = &self.account else {
+            return Vec::new();
+        };
+
+        let mut rows = vec![ProfileRow::Name, ProfileRow::Identity];
+        if account.has_bio() {
+            rows.push(ProfileRow::Bio);
+        }
+        if account.birthday.is_some() {
+            rows.push(ProfileRow::Birthday);
+        }
+        rows.extend([
+            ProfileRow::UserId,
+            ProfileRow::Session,
+            ProfileRow::AddAccount,
+            ProfileRow::Logout,
+        ]);
+        rows
+    }
+
+    /// The row under the profile's highlight.
+    #[must_use]
+    pub fn profile_row(&self) -> Option<ProfileRow> {
+        self.profile_rows().get(self.profile_vim.cursor()).copied()
+    }
+
+    /// Where the profile's highlight is, for the panel to draw.
+    #[must_use]
+    pub fn profile_cursor(&self) -> usize {
+        self.profile_vim.cursor()
+    }
+
+    /// Puts the profile in the right-hand pane.
+    ///
+    /// Sizes the highlight from whatever rows exist, so an empty panel has
+    /// nothing to move a highlight over rather than a highlight on nothing.
+    fn open_profile(&mut self) {
+        self.profile_vim = VimState::new(self.profile_rows().len());
+        self.pane = Pane::Profile(ProfileId::SelfAccount);
+        self.focus = Focus::Conversation;
+        self.mode = Mode::Normal;
+        self.selection = None;
+    }
+
+    /// Puts the conversation back in the right-hand pane.
+    fn close_profile(&mut self) {
+        self.pane = Pane::Conversation;
+        self.profile_vim = VimState::new(0);
+    }
+
+    /// Handles a key while the profile has the focus.
+    ///
+    /// `h` goes to the chat list and `l` and `Esc` come back to the
+    /// conversation, and `j`/`k`/`gg`/`G` move the highlight — all of them
+    /// through the same [`VimState`] the conversation uses, because that type
+    /// moves a cursor between items and knows nothing about what an item is.
+    ///
+    /// A key that is none of those is the conversation's, and taking it is what
+    /// stops a reader who pressed `i` by reflex from having to press it twice.
+    /// The pane closes first, so the key lands on the conversation rather than on
+    /// a profile row.
+    fn handle_profile(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('h') => self.set_focus(Focus::ChatList),
+            KeyCode::Char('l') | KeyCode::Esc => self.close_profile(),
+            KeyCode::Char(c @ ('j' | 'k' | 'g' | 'G')) => {
+                self.profile_vim.handle_char(c);
+            }
+            KeyCode::Char('d') => self.activate_profile_row(),
+            _ => {
+                self.close_profile();
+                self.handle_normal(key);
+            }
+        }
+    }
+
+    /// Acts on the row under the profile's highlight.
+    ///
+    /// `d` rather than `Enter`, because `d` is what the same key does on a
+    /// selected message: one interaction model on a screen that has one, not a
+    /// button. The rows that are neither of the two actions do nothing, and the
+    /// panel draws them dim so that a key with nothing to do is not a surprise.
+    fn activate_profile_row(&mut self) {
+        match self.profile_row() {
+            // A deliberate refusal rather than a failure. The bracketed
+            // `[failed: …]` form is for something that tried and did not come
+            // back, and nothing was sent.
+            Some(ProfileRow::AddAccount) => self.flash(ADD_ACCOUNT_REFUSAL),
+            // Confirm first and refuse inside the confirmation. A panel that
+            // flashes instead of confirming has taught the reader the wrong
+            // thing about a key that will eventually discard the one secret this
+            // program holds.
+            Some(ProfileRow::Logout) => {
+                self.mode = Mode::Confirm;
+                self.confirm = Some(ConfirmKind::Logout);
+            }
+            _ => {}
+        }
     }
 
     // ---- what is on show ------------------------------------------------
@@ -1581,6 +1905,11 @@ impl App {
             self.mode = Mode::Normal;
             self.selection = None;
         }
+        // The single clear point for every way out of a pane, beside the one
+        // below it for the line. A profile is not a stack: leaving it means the
+        // conversation is on show again, and there is no previous pane to go
+        // back to.
+        self.close_profile();
         // The single clear point for every way out of the line: `Tab`,
         // `BackTab`, `Ctrl+w` and `Esc`-to-leave all pass through here, so the
         // completion does not need a case in each of them.
@@ -1663,10 +1992,15 @@ impl App {
 
         match self.focus {
             Focus::ChatList => self.handle_chat_list(key),
-            Focus::Conversation => match self.mode {
-                Mode::Normal => self.handle_normal(key),
-                Mode::Visual => self.handle_visual(key),
-                Mode::Confirm => self.handle_confirm(key),
+            // Matched on both axes rather than on `mode` alone: the profile is a
+            // content of this pane, not a pane, and the wildcard that would save
+            // the tuple here is the kind of arm that is right until the day it
+            // is not.
+            Focus::Conversation => match (self.mode, self.pane) {
+                (Mode::Normal, Pane::Profile(_)) => self.handle_profile(key),
+                (Mode::Normal, Pane::Conversation) => self.handle_normal(key),
+                (Mode::Visual, _) => self.handle_visual(key),
+                (Mode::Confirm, _) => self.handle_confirm(key),
             },
             Focus::Input => self.handle_line(key),
         }
@@ -1688,6 +2022,14 @@ impl App {
             // The list is the only pane beside this one, so both keys are the
             // way into it.
             KeyCode::Char('h' | 'l') => self.set_focus(Focus::Conversation),
+
+            // The account's own profile, from the list as well as from the
+            // conversation: a reader looking for settings has usually not opened
+            // a conversation to look in.
+            KeyCode::Char('S') => {
+                self.pending_g = false;
+                self.open_profile();
+            }
 
             KeyCode::Char('j') => {
                 self.pending_g = false;
@@ -1785,6 +2127,7 @@ impl App {
                 self.line.open(PromptKind::Command);
             }
             KeyCode::Char('q') => self.request_quit(),
+            KeyCode::Char('S') => self.open_profile(),
             _ => {}
         }
     }
@@ -2010,6 +2353,12 @@ impl App {
             KeyCode::Char('y') => {
                 match &self.confirm {
                     Some(ConfirmKind::Quit) => self.should_quit = true,
+                    // The refusal is written here rather than after the arms
+                    // below, and the difference is visible: a confirmation
+                    // outranks every transient status on the same row, so a
+                    // refusal written while one is still up is a line the reader
+                    // never sees.
+                    Some(ConfirmKind::Logout) => self.flash(LOGOUT_REFUSAL),
                     Some(ConfirmKind::DeleteMessages { ids, .. }) => {
                         let chat_id = self.conversation.window.chat_id;
                         self.queue_action(Action::Delete {
@@ -2557,6 +2906,7 @@ impl App {
     fn run_command(&mut self, cmd: &str) {
         match cmd {
             "q" | "quit" => self.request_quit(),
+            "settings" => self.open_profile(),
             _ if cmd.starts_with("chat ") => {
                 if let Ok(id) = cmd[5..].trim().parse::<i64>()
                     && let Some(pos) = self.list.chats.iter().position(|c| c.id == id)
@@ -2749,7 +3099,12 @@ impl App {
             .split(vertical[0]);
 
         widgets::chat_list::render(self, horizontal[0], frame);
-        widgets::conversation::render(self, horizontal[1], frame);
+        // The right-hand column, whichever of the two is in it. The chat list is
+        // not in the match: it is the other column and it is always there.
+        match self.pane {
+            Pane::Conversation => widgets::conversation::render(self, horizontal[1], frame),
+            Pane::Profile(_) => widgets::profile::render(self, horizontal[1], frame),
+        }
         widgets::input_bar::render(self, vertical[1], frame);
         widgets::emoji_popup::render(self, vertical[0], vertical[1], frame);
         widgets::status_bar::render(self, vertical[2], frame);
@@ -2901,6 +3256,7 @@ impl App {
         }
         match &self.confirm {
             Some(ConfirmKind::Quit) => return QUIT_PROMPT.to_owned(),
+            Some(ConfirmKind::Logout) => return LOGOUT_PROMPT.to_owned(),
             Some(ConfirmKind::DeleteMessages {
                 ids,
                 outgoing,
@@ -3019,6 +3375,27 @@ const MOCK_CHAT: i64 = 1;
 #[cfg(test)]
 fn to_id(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// The account the sample profile panel is drawn from.
+///
+/// Every optional field set, so the panel's tests see the panel a reader with a
+/// complete profile gets rather than the narrower one a bare account produces.
+#[cfg(test)]
+pub(crate) fn mock_account() -> Account {
+    Account {
+        user_id: 1_234_567,
+        first_name: "Ada".into(),
+        last_name: "Lovelace".into(),
+        username: Some("ada".into()),
+        phone: Some("+15551234567".into()),
+        birthday: Some(domain::account::Birthday {
+            day: 10,
+            month: 12,
+            year: Some(1815),
+        }),
+        bio: Some("Notes on the analytical engine.".into()),
+    }
 }
 
 #[cfg(test)]
@@ -5146,6 +5523,230 @@ mod tests {
         app.handle_key(press(KeyCode::Char(':')));
         type_text(app, command);
         app.handle_key(press(KeyCode::Enter));
+    }
+
+    // ---- the profile panel ------------------------------------------------
+
+    /// The profile, opened from a mock application.
+    fn profile() -> App {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('S')));
+        app
+    }
+
+    #[test]
+    fn settings_command_opens_the_profile() {
+        let mut app = App::mock();
+        run_command_line(&mut app, "settings");
+
+        assert_eq!(app.pane, Pane::Profile(ProfileId::SelfAccount));
+    }
+
+    /// A `:` line is a command line, not a message, so it is not a buffer and
+    /// never opens a shortcode completion — which is why the catalog cannot
+    /// intercept `Enter` here. The test is here because that is the reason, and
+    /// a reason nobody has checked is a reason that stops being true.
+    #[test]
+    fn a_command_line_never_completes_a_shortcode() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char(':')));
+        type_text(&mut app, "sett");
+
+        assert!(
+            app.completion().is_none(),
+            "a `:shortcode` is a message's, and this line is a command's"
+        );
+    }
+
+    #[test]
+    fn the_profile_opens_from_the_chat_list_too() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('h')));
+        assert_eq!(app.focus, Focus::ChatList);
+
+        app.handle_key(press(KeyCode::Char('S')));
+        assert_eq!(app.pane, Pane::Profile(ProfileId::SelfAccount));
+        assert_eq!(app.focus, Focus::Conversation);
+    }
+
+    /// The hint row is the one thing that says which keys the panel answers, and
+    /// naming the conversation's would tell the reader they are wrong.
+    #[test]
+    fn the_profile_has_its_own_hint() {
+        let mut app = App::mock();
+        assert!(
+            app.status_text().contains("dd:del"),
+            "the conversation's row"
+        );
+
+        app.handle_key(press(KeyCode::Char('S')));
+        let hint = app.status_text();
+        assert!(hint.contains("j/k: row"), "{hint}");
+        assert!(!hint.contains("dd:del"), "the conversation's keys: {hint}");
+    }
+
+    /// `d` on a row with nothing to do must change nothing at all: no mode, no
+    /// prompt, and nothing handed to the caller to put on the wire. A key that
+    /// quietly armed the conversation's delete would make the *next* `d`,
+    /// wherever the reader had been by then, a deletion.
+    #[test]
+    fn a_profile_row_with_nothing_to_do_changes_nothing() {
+        let mut app = profile();
+        assert_eq!(app.profile_row(), Some(ProfileRow::Name));
+
+        app.handle_key(press(KeyCode::Char('d')));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.confirm, None);
+        assert!(app.take_action().is_none(), "nothing was queued");
+    }
+
+    /// The same for the row that does have something to do: it confirms, and
+    /// still queues nothing, because a sign-out is not a request this can make.
+    #[test]
+    fn a_profile_row_never_queues_a_deletion() {
+        let mut app = profile();
+        while app.profile_row() != Some(ProfileRow::Logout) {
+            app.handle_key(press(KeyCode::Char('j')));
+        }
+
+        app.handle_key(press(KeyCode::Char('d')));
+        assert_eq!(app.confirm, Some(ConfirmKind::Logout));
+
+        app.handle_key(press(KeyCode::Char('y')));
+        assert!(
+            app.take_action().is_none(),
+            "and answering it queues nothing"
+        );
+    }
+
+    /// Two cursors, one type. With one value shared, the conversation's total —
+    /// the window's length — would size the profile's highlight too, and the
+    /// profile's row count would stand in for it. Neither test fails on its own:
+    /// each one only sees its own half move.
+    #[test]
+    fn the_profile_and_the_conversation_cursors_are_independent() {
+        let mut app = profile();
+        let in_the_conversation = app.vim.cursor();
+        for _ in 0..3 {
+            app.handle_key(press(KeyCode::Char('j')));
+        }
+        assert!(app.profile_cursor() > 0, "the profile's highlight moved");
+        assert_eq!(
+            app.vim.cursor(),
+            in_the_conversation,
+            "and the conversation's did not"
+        );
+
+        // `k` rather than `j`, because the mock conversation opens pinned to its
+        // newest message and `j` there is the clamp rather than the motion.
+        app.handle_key(press(KeyCode::Char('l')));
+        app.handle_key(press(KeyCode::Char('k')));
+        assert!(
+            app.vim.cursor() < in_the_conversation,
+            "the conversation's highlight moves on its own"
+        );
+    }
+
+    /// Leaving a pane is one rule, and `Tab` is one of the four keys that does
+    /// it: the profile is not a stack, so the conversation is what comes back.
+    #[test]
+    fn every_way_out_of_the_profile_lands_on_the_conversation() {
+        for key in [KeyCode::Char('l'), KeyCode::Esc] {
+            let mut app = profile();
+            app.handle_key(press(key));
+            assert_eq!(app.pane, Pane::Conversation, "{key:?}");
+        }
+
+        let mut app = profile();
+        app.handle_key(press(KeyCode::Char('h')));
+        assert_eq!(app.pane, Pane::Conversation, "h goes to the list");
+        assert_eq!(app.focus, Focus::ChatList);
+
+        let mut app = profile();
+        app.handle_key(press(KeyCode::Tab));
+        assert_eq!(app.pane, Pane::Conversation, "Tab walks the panes");
+        assert_eq!(app.focus, Focus::Input);
+    }
+
+    /// A key the panel does not answer is the conversation's, and taking it is
+    /// what stops a reader who pressed `i` by reflex from pressing it twice.
+    #[test]
+    fn a_conversation_key_from_the_profile_does_its_own_thing() {
+        let mut app = profile();
+        app.handle_key(press(KeyCode::Char('i')));
+
+        assert_eq!(app.pane, Pane::Conversation);
+        assert_eq!(app.focus, Focus::Input, "and the line is open");
+    }
+
+    #[test]
+    fn add_account_refuses_and_says_what_it_cannot_do() {
+        let mut app = profile();
+        while app.profile_row() != Some(ProfileRow::AddAccount) {
+            app.handle_key(press(KeyCode::Char('j')));
+        }
+        app.handle_key(press(KeyCode::Char('d')));
+
+        assert_eq!(app.status, ADD_ACCOUNT_REFUSAL);
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "and nothing was asked to be confirmed"
+        );
+    }
+
+    /// A `logout` row that flashed a refusal instead of confirming would have
+    /// taught the reader the wrong thing about a key that will eventually throw
+    /// away the only secret this program holds.
+    #[test]
+    fn logout_confirms_before_it_refuses() {
+        let mut app = profile();
+        while app.profile_row() != Some(ProfileRow::Logout) {
+            app.handle_key(press(KeyCode::Char('j')));
+        }
+        app.handle_key(press(KeyCode::Char('d')));
+
+        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.confirm, Some(ConfirmKind::Logout));
+        assert_eq!(app.status_text(), LOGOUT_PROMPT);
+
+        app.handle_key(press(KeyCode::Char('y')));
+        assert_eq!(app.status, LOGOUT_REFUSAL);
+        assert_eq!(
+            app.status_text(),
+            LOGOUT_REFUSAL,
+            "not hidden under the prompt"
+        );
+        assert_eq!(app.confirm, None);
+    }
+
+    /// The rows that exist are the ones the account has something to say about.
+    #[test]
+    fn a_row_exists_only_when_the_account_says_something() {
+        let mut app = App::mock();
+        app.set_account(Ok(Account {
+            username: None,
+            phone: None,
+            birthday: None,
+            bio: None,
+            ..mock_account()
+        }));
+        app.handle_key(press(KeyCode::Char('S')));
+
+        let rows = app.profile_rows();
+        assert!(!rows.contains(&ProfileRow::Bio));
+        assert!(!rows.contains(&ProfileRow::Birthday));
+        assert!(rows.contains(&ProfileRow::Name));
+        assert_eq!(
+            rows.last(),
+            Some(&ProfileRow::Logout),
+            "the actions are last"
+        );
+        // The highlight counts the rows that exist, not the ones that would: six
+        // rows here, and the two that are missing leave no gap for `j` to land in.
+        assert_eq!(app.profile_rows().len(), 6);
+        assert_eq!(app.profile_row(), Some(ProfileRow::Name));
     }
 
     #[test]

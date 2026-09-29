@@ -17,8 +17,10 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let label = input_bar::mode_label(app);
 
     let style = match (app.focus == crate::app::Focus::Input, app.mode) {
-        (_, Mode::Visual) => app.theme.mode_visual,
-        (_, Mode::Confirm) => app.theme.mode_confirm,
+        // Named rather than wildcarded, for the same reason `mode_label` names
+        // them: a mode that only the conversation can be in should say so.
+        (false, Mode::Visual) => app.theme.mode_visual,
+        (false, Mode::Confirm) => app.theme.mode_confirm,
         // The line's insert is the one mode that is not the conversation's, and
         // it is the one the bar's border is on as well — a reader who cannot
         // see where the caret is should at least be able to see which mode the
