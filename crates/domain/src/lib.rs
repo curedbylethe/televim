@@ -9,6 +9,7 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod account;
 pub mod chat;
 pub mod history;
 pub mod message;
