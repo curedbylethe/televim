@@ -62,6 +62,7 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod account;
 pub mod auth;
 pub mod error;
 pub mod history;
