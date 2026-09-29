@@ -7,18 +7,18 @@
 //! they are applied in this order, each `patch`ed over the last:
 //!
 //! 1. `text` — the baseline everything starts from;
-//! 2. `match_style` — a row a search found;
-//! 3. `visual_style` — a slice of a row a selection covers;
+//! 2. `match_hit` — a row a search found;
+//! 3. `selection_bg` — a slice of a row a selection covers;
 //! 4. `selection` — the cursor's `REVERSED` row, drawn by the list widget.
 //!
 //! Later wins, because `Style::patch` takes the other style's fields wherever the
 //! other style sets one. Two consequences worth stating rather than leaving to be
 //! discovered:
 //!
-//! - `visual_style` never uses `REVERSED`, and neither does `match_style`. The
+//! - `selection_bg` never uses `REVERSED`, and neither does `match_hit`. The
 //!   cursor owns reverse video; a second user of it would leave the reader unable
 //!   to tell which row the cursor is on.
-//! - `visual_style` is a background and `match_style` a foreground, so a cell that
+//! - `selection_bg` is a background and `match_hit` a foreground, so a cell that
 //!   is both is legible rather than one of them winning outright.
 
 use ratatui::style::{Color, Modifier, Style};
@@ -35,14 +35,14 @@ pub struct Theme {
     /// Bold and a colour of its own rather than `selection`'s `REVERSED`: the
     /// cursor can stand on a match, and the two styles are composed for that
     /// row, so this has to stay legible underneath the reverse video.
-    pub match_style: Style,
+    pub match_hit: Style,
     /// A slice of a row a selection covers.
     ///
     /// A background rather than a foreground, for the same reason
-    /// [`Theme::match_style`] is a foreground: the cursor can stand inside a
+    /// [`Theme::match_hit`] is a foreground: the cursor can stand inside a
     /// selection, and the two have to compose for that cell. A background is what
     /// leaves a match's colour legible on top of it.
-    pub visual_style: Style,
+    pub selection_bg: Style,
     pub mode_normal: Style,
     pub mode_insert: Style,
     pub mode_visual: Style,
@@ -57,10 +57,10 @@ impl Default for Theme {
             text: Style::default().fg(Color::White),
             text_dim: Style::default().fg(Color::Gray),
             selection: Style::default().add_modifier(Modifier::REVERSED),
-            match_style: Style::default()
+            match_hit: Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-            visual_style: Style::default().bg(Color::Magenta),
+            selection_bg: Style::default().bg(Color::Magenta),
             mode_normal: Style::default().bg(Color::Blue).fg(Color::White),
             mode_insert: Style::default().bg(Color::Green).fg(Color::Black),
             mode_visual: Style::default().bg(Color::Yellow).fg(Color::Black),

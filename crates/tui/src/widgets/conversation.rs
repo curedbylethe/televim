@@ -224,11 +224,11 @@ fn coverage(
 /// [`rows::message_rows`], so nothing here is clipped by the terminal and lost.
 ///
 /// A message a search matched has its spans patched with
-/// [`Theme::match_style`](crate::theme::Theme::match_style) rather than given a
+/// [`Theme::match_hit`](crate::theme::Theme::match_hit) rather than given a
 /// style of their own, so that the cursor's `REVERSED` selection composes on top
 /// of it instead of replacing it. The same goes for a selection: a selected
 /// substring is split out of the row and given
-/// [`Theme::visual_style`](crate::theme::Theme::visual_style), and a selected
+/// [`Theme::selection_bg`](crate::theme::Theme::selection_bg), and a selected
 /// message has its whole row patched, so the cursor still composes on top. The
 /// order the two are applied in is the theme's, and the theme says what it is.
 fn message_row(
@@ -265,7 +265,7 @@ fn message_row(
                 spans.push(Span::styled(text[..from].to_owned(), app.theme.text));
                 spans.push(Span::styled(
                     text[from..to].to_owned(),
-                    app.theme.text.patch(app.theme.visual_style),
+                    app.theme.text.patch(app.theme.selection_bg),
                 ));
                 spans.push(Span::styled(text[to..].to_owned(), app.theme.text));
             } else {
@@ -284,13 +284,13 @@ fn message_row(
     // text selection has already been handled above and must not be caught here.
     if matches!(covered, Some(Coverage::Whole)) {
         for span in &mut spans {
-            span.style = span.style.patch(app.theme.visual_style);
+            span.style = span.style.patch(app.theme.selection_bg);
         }
     }
 
     if app.search().is_match(message.id) {
         for span in &mut spans {
-            span.style = span.style.patch(app.theme.match_style);
+            span.style = span.style.patch(app.theme.match_hit);
         }
     }
 
