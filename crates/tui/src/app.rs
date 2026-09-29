@@ -2716,6 +2716,7 @@ impl App {
         widgets::chat_list::render(self, horizontal[0], frame);
         widgets::conversation::render(self, horizontal[1], frame);
         widgets::input_bar::render(self, vertical[1], frame);
+        widgets::emoji_popup::render(self, vertical[0], vertical[1], frame);
         widgets::status_bar::render(self, vertical[2], frame);
     }
 

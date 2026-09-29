@@ -74,6 +74,12 @@ const DRAFT_HINT: &str = " ⏎ draft — i to continue, ^J/⏎ to discard";
 /// for the limitation, which the bar does not have room to repeat.
 const INSERT_HINT: &str = " ⏎: send  ^J: newline  shift+⏎: newline where supported";
 
+/// The hint while a `:query` is being completed.
+///
+/// `Enter` and `Tab` are the message's own keys and they mean something else
+/// for as long as this is on the row, so the row says which something.
+const COMPLETION_HINT: &str = " ⇥/⏎: pick  ↑/↓: choose  Esc: close";
+
 /// The hint while the line is in its own normal mode.
 ///
 /// No `j`/`k`, and that is not an oversight: `vim-line` makes those history
@@ -114,13 +120,14 @@ const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
 #[cfg(test)]
-const ALL_HINTS: [&str; 8] = [
+const ALL_HINTS: [&str; 9] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
     VISUAL_HINT,
     CONFIRM_HINT,
     DRAFT_HINT,
     INSERT_HINT,
+    COMPLETION_HINT,
     LINE_NORMAL_HINT,
     LINE_VISUAL_HINT,
 ];
@@ -135,6 +142,9 @@ const ALL_HINTS: [&str; 8] = [
 #[must_use]
 pub fn hint(app: &App) -> &'static str {
     match (app.focus, app.mode) {
+        // Above the mode hints it specialises: while a completion is up, the
+        // keys it takes mean something else, and the row has to say so.
+        (Focus::Input, _) if app.completion().is_some() => COMPLETION_HINT,
         (Focus::Input, _) if app.line.purpose().is_buffer() => match app.line.status() {
             "VISUAL" => LINE_VISUAL_HINT,
             "NORMAL" => LINE_NORMAL_HINT,
@@ -519,6 +529,22 @@ mod tests {
         press(&mut app, KeyCode::Char('v'));
         assert_eq!(hint(&app), LINE_VISUAL_HINT, "and a selection inside it");
         assert_eq!(mode_label(&app), Mode::Visual.label());
+    }
+
+    /// A popup that silently takes `Enter` away is a key answering a different
+    /// question than the reader asked, so the row names the keys it takes — and
+    /// goes back to the insert hint the moment it is closed.
+    #[test]
+    fn the_status_line_says_the_completion_has_those_keys() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(hint(&app), INSERT_HINT);
+
+        type_text(&mut app, ":cr");
+        assert_eq!(hint(&app), COMPLETION_HINT, "the popup names its keys");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(hint(&app), INSERT_HINT, "and the row goes back");
     }
 
     /// An operator waiting for its motion is still editing, so the bar keeps
