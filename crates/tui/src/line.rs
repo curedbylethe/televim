@@ -339,9 +339,9 @@ impl LineEditor {
         // a cell of its own, which is where it is drawn.
         let at = caret.clamp(range.start, range.end);
         // Columns, not characters: the terminal gives an emoji two cells, and a
-        // caret counted in characters is drawn inside the glyph it is on. One
-        // exact count over a whole slice, where the row accumulator over-counts
-        // — so the caret is never past the row it was assigned to.
+        // caret counted in characters is drawn inside the glyph it is on. The
+        // same `columns` the row was measured with, over the slice in front of
+        // the caret.
         let column = columns(&self.text[range.start..at]);
 
         LaidOut { rows, row, column }
@@ -1623,10 +1623,24 @@ mod tests {
         assert_eq!(laid_out.column, 3, "the cell to the right of the emoji");
     }
 
-    /// The caret's count is exact where a row's is an accumulation, so the
-    /// argument that a caret is never drawn past the row it was assigned to is
-    /// "exact ≤ over-count" rather than prose. A ZWJ family is the case that
-    /// needs it: six columns summed against the two the terminal draws.
+    /// A family is two columns, the same two the row is. The caret did not
+    /// start counting the scalars the row used to.
+    #[test]
+    fn the_caret_column_is_the_same_before_and_after_this_change() {
+        let mut line = composing();
+        type_text(&mut line, "👨‍👩‍👧");
+
+        let laid_out = line.laid_out(20);
+        let row = &line.text()[laid_out.rows[laid_out.row].clone()];
+
+        assert_eq!(laid_out.column, 2);
+        assert_eq!(columns(row), laid_out.column);
+        assert_eq!(row, "👨‍👩‍👧");
+    }
+
+    /// The caret and its row are both [`columns`] of a slice, so a caret on a
+    /// cluster boundary — here, the end of the text — is on the row it was
+    /// assigned to. A family is two columns, the same two the terminal draws.
     #[test]
     fn a_caret_is_never_past_the_row_it_is_on() {
         let mut line = composing();

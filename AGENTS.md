@@ -65,7 +65,7 @@ televim/
     │   └── src/                # lib, chat, message, history, search, session,
     │                           #   updates, vim
     ├── tui/                    # ratatui widgets & input handling
-    │   └── src/                # lib, app, event, theme, rows, wrap, widgets/
+    │   └── src/                # lib, app, event, grapheme, theme, rows, wrap, widgets/
     └── app/                    # Composition root & CLI binary
         ├── src/                # main, config, net, runtime
         └── tests/              # proto_integration.rs, tui_e2e.rs
@@ -805,13 +805,6 @@ Real, and named so they are not mistaken for oversights:
   run: in the line's normal mode and as a visual selection's extent, where the
   only thing a motion can do is move a cursor the next key re-snaps. The
   wrapper's cursor is snapped to boundaries around every key either way.
-- **A row can be cut inside a multi-part emoji sequence.** A column is a cell,
-  from `unicode-width`, and a caret's column is one exact count over a slice of
-  its row. A row's width is accumulated per scalar instead, so a ZWJ family is
-  six columns where the terminal draws two: the row breaks early, which is the
-  safe direction and is why no row is ever wider than the panel, but the break
-  can fall where a reader would not have put it. `unicode-segmentation`, making
-  the accumulator walk clusters instead of scalars, removes it.
 - **A feed dropped without `finish` persists a stale update position.** See
   **Key Decisions**.
 - **`tikv-jemallocator` is not installed.** No allocator work is done, and the

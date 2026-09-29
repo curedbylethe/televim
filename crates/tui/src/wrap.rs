@@ -8,7 +8,9 @@
 
 use std::ops::Range;
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
+
+use crate::grapheme::clusters;
 
 /// How many terminal columns `text` occupies.
 ///
@@ -17,14 +19,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// two. `unicode-width` is the table, and it answers the multi-part emoji
 /// sequences as one cell count rather than as the sum of their parts — a
 /// fully-qualified ZWJ family, a modifier sequence (`👍🏽`) and a VS16 sequence
-/// (`❤️`) are each two columns wide, which is what the terminal draws.
-///
-/// Two consequences, both of them the safe direction. A count summed per scalar
-/// calls a ZWJ family six columns where the terminal draws two, so a row breaks
-/// earlier than it needs to and no row is ever wider than the panel; a count
-/// taken of a whole slice, which is what a caret column is, is exact. Exact ≤
-/// over-count, and that is the whole of the argument that a caret is never drawn
-/// past the end of the row it was assigned to.
+/// (`❤️`) are each two columns wide, which is what the terminal draws. A row
+/// asks it of one cluster at a time, and a caret column is the same function
+/// over the slice in front of the caret.
 #[must_use]
 pub fn columns(text: &str) -> usize {
     UnicodeWidthStr::width(text)
@@ -45,11 +42,13 @@ pub fn columns(text: &str) -> usize {
 /// early for nothing. A newline in the text starts a row, which is what makes
 /// this the same function for a message that carries one.
 ///
-/// A column is a cell, counted by [`columns`] — so a row of emoji in a
-/// ten-column panel holds five of them rather than ten. A sequence the table
-/// cannot answer as one cell (a multi-part ZWJ family) is counted as the sum of
-/// its parts, which is what makes a row break early rather than overrun the
-/// border.
+/// A column is a cell, counted by [`columns`] over one grapheme cluster at a
+/// time — so a row of emoji in a ten-column panel holds five of them, and a
+/// ZWJ family is the two cells the terminal draws. A cluster that does not fit
+/// the room left ends the row before it, which can leave the row short of
+/// `width`. The one row wider than the panel is a cluster wider than the row
+/// it starts: an empty row still takes it, because dropping it and looping on
+/// it are both worse.
 #[must_use]
 pub fn wrap(text: &str, width: u16) -> Vec<Range<usize>> {
     rows(text, width, 0, 0, false)
@@ -145,9 +144,12 @@ fn fill(
 ///
 /// The row ends at the last run of whitespace that fits, so that no word is
 /// left behind; a row with no such space in it is cut where the edge falls,
-/// which is the only thing to be done with a word wider than the panel. Neither
-/// is wider than `limit`: the row stops at the first character that does not
-/// fit, and a space is only remembered while the row still has room after it.
+/// which is the only thing to be done with a word wider than the panel. A
+/// cluster that does not fit the room left ends the row before it, so a row
+/// can finish short of `limit`. The one row wider than `limit` is a cluster
+/// wider than the row it starts: an empty row still takes it, because the
+/// alternative is to loop. A space is only remembered while the row still has
+/// room after it.
 ///
 /// With `keep`, the run of spaces is the row's end rather than the gap between
 /// it and the next one — see [`wrap_keeping_whitespace`].
@@ -155,31 +157,33 @@ fn one_row(line: &str, from: usize, limit: usize, keep: bool) -> (usize, usize) 
     let mut at_space: Option<(usize, usize)> = None;
     let mut used = 0;
 
-    for (offset, character) in line[from..].char_indices() {
+    // One cluster at a time, from `from` rather than from the start of the
+    // line: a frame lays every visible message out, and walking each row from
+    // the beginning would be quadratic. `columns` of the cluster is what the
+    // terminal draws, so a family is two cells and the row ends before a
+    // cluster that does not fit rather than inside it.
+    for (offset, cluster) in clusters(&line[from..]) {
         let at = from + offset;
-        // Accumulated per scalar, so a sequence `columns` would answer as one
-        // cell is counted as the sum of its parts: a row breaks early rather
-        // than overrunning the panel. The offset arithmetic below is bytes
-        // either way — a row is cut at boundaries, not at columns.
-        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        let width = columns(cluster);
 
-        // Whether this character *fits*, rather than whether the row has a
+        // Whether this cluster *fits*, rather than whether the row has a
         // column left: on ASCII the two are the same, and on a two-cell
-        // character they are not. An empty row is always given this one, which
-        // is what stops a panel narrower than a character from looping.
+        // cluster they are not. An empty row is always given this one, which
+        // is what stops a panel narrower than a cluster from looping.
         if used > 0 && used + width > limit {
             let (start, next) = at_space.unwrap_or((at, at));
             return if keep { (next, next) } else { (start, next) };
         }
         used += width;
 
-        if character.is_whitespace() {
+        if cluster.chars().all(char::is_whitespace) {
             // The first space of a run is where the row can be broken. The rest
             // of the run only has to be remembered, so that the row after it
             // begins on a word rather than on a space.
+            let end = at + cluster.len();
             at_space = Some(match at_space {
-                Some((start, next)) if next == at => (start, at + character.len_utf8()),
-                _ => (at, at + character.len_utf8()),
+                Some((start, next)) if next == at => (start, end),
+                _ => (at, end),
             });
         }
     }
@@ -446,6 +450,70 @@ mod tests {
         // that means the emoji begins a row of its own rather than finishing the
         // one before it.
         assert_eq!(rows_of("ab😀cd", 3), vec!["ab", "😀c", "d"]);
+    }
+
+    /// A row's ends are cluster boundaries. A cluster that does not fit is left
+    /// for the next row, and the one row allowed to be wider than the panel is
+    /// a single cluster that was wider than the row it started.
+    #[test]
+    fn a_row_is_never_cut_inside_a_cluster() {
+        let texts = [
+            "a👨‍👩‍👧b👍🏽c🇬🇧d❤️e",
+            "👨‍👩‍👧 family and 👍🏽 and ❤️ in one row",
+            "the quick brown fox",
+            "a\n👨‍👩‍👧\nb",
+        ];
+        for text in texts {
+            for width in [1, 2, 3, 4, 8] {
+                for keep in [false, true] {
+                    let ranges = if keep {
+                        wrap_keeping_whitespace(text, width)
+                    } else {
+                        wrap(text, width)
+                    };
+                    let mut prev = 0;
+                    for range in ranges {
+                        assert!(
+                            range.start >= prev && range.end >= range.start,
+                            "{range:?} overlaps the row before it in {text:?} at {width}"
+                        );
+                        prev = range.end;
+                        for at in [range.start, range.end] {
+                            assert_eq!(
+                                crate::grapheme::cluster_start(text, at),
+                                at,
+                                "a row of {text:?} at {width} starts inside a cluster"
+                            );
+                            assert_eq!(
+                                crate::grapheme::cluster_end(text, at),
+                                at,
+                                "a row of {text:?} at {width} ends inside a cluster"
+                            );
+                        }
+                        let row = &text[range];
+                        let single = clusters(row).count() == 1;
+                        assert!(
+                            columns(row) <= usize::from(width) || single,
+                            "{row:?} is {} columns, and more than one cluster, in {text:?} at {width}",
+                            columns(row)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `a` is one column and the family is two, so a two-column row ends after
+    /// the `a` with a column spare rather than cutting the family to fill it.
+    #[test]
+    fn a_row_may_end_short_of_its_limit() {
+        let family = "👨‍👩‍👧";
+        let text = format!("a{family}");
+
+        assert_eq!(rows_of(&text, 2), vec!["a", family]);
+        assert_eq!(kept_rows_of(&text, 2), vec!["a", family]);
+        assert!(columns("a") < 2, "the first row stops short of the limit");
+        assert_eq!(columns(family), 2);
     }
 
     // ---- decorations -----------------------------------------------------
