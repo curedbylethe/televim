@@ -166,28 +166,47 @@ has one cell height and the reader chose the cell.
 ### The nine hint rows
 
 `ALL_HINTS` is an array of all nine and a test iterates it, so a tenth cannot be
-added and forgotten. These are the nine, verbatim.
+added and forgotten. These are the nine, verbatim. The column count is
+`chars().count()`, which is the number the test asserts against.
 
 | Shown when | Text | Columns |
 | :--------- | :--- | ------: |
-| conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  dd:del  D:dismiss  v:vis  /:find  ::cmd  q:quit` | 69 |
-| chat list has the focus | ` j/k: chat  Enter: open  Tab: pane  h: conversation` | 48 |
-| conversation, Visual | ` d: delete  y: yank  r: reply  Esc: cancel` | 37 |
-| a deletion is confirmed | ` y: delete  n/Esc: cancel` | 24 |
-| the bar holds a draft, not focused | ` ⏎ draft — i to continue, ^J/⏎ to discard` | 39 |
-| the line is being typed in | ` ⏎: send  ^J: newline  shift+⏎: newline where supported` | 60 |
-| a `:shortcode` is being completed | ` ⇥/⏎: pick  ↑/↓: choose  Esc: close` | 36 |
-| the line's own Normal mode | ` i/a: ins  w/b/e  x: del  dw/cc  p: paste  gg/G: ends  ⏎: send  Esc` | 69 |
-| a selection inside the line | ` y: yank  d: cut  Esc: back` | 28 |
+| conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  dd:del  D:dismiss  v:vis  /:find  ::cmd  q:quit` | 70 |
+| chat list has the focus | ` j/k: chat  Enter: open  Tab: pane  h: conversation` | 51 |
+| conversation, Visual | ` d: delete  y: yank  r: reply  Esc: cancel` | 42 |
+| a deletion is confirmed | ` y: delete  n/Esc: cancel` | 25 |
+| the bar holds a draft, not focused | ` ⏎ draft — i to continue, ^J/⏎ to discard` | 41 |
+| the line is being typed in | ` ⏎: send  ^J: newline  shift+⏎: newline where supported` | 55 |
+| a `:shortcode` is being completed | ` ⇥/⏎: pick  ↑/↓: choose  Esc: close` | 35 |
+| the line's own Normal mode | ` i/a: ins  w/b/e  x: del  dw/cc  p: paste  gg/G: ends  ⏎: send  Esc` | 67 |
+| a selection inside the line | ` y: yank  d: cut  Esc: back` | 27 |
+
+**A code point is not a cell, and the budget is counted in code points.** `⏎`
+`⇥` `↑` `↓` `…` are East Asian *Ambiguous*: one cell in most terminals, two on
+one configured for a CJK locale. The test counts code points, so it
+under-counts exactly the hints that use them — the worst case is
+`COMPLETION_HINT` at 35 code points and 39 cells. That is still inside 71, so
+it is not a bug today, and it is stated here rather than left to be discovered
+by a reader whose hints are clipped. **If a hint ever needs the room, count
+cells, not code points** — `wrap::columns` is the function that does it
+correctly, and it is already a dependency.
+
+**One of the nine is unreachable.** `CONFIRM_HINT` cannot be displayed: a
+confirmation outranks every hint, so `status_text` returns the confirmation's
+sentence before it ever reaches `hint()`. The string is width-checked and shown
+by nothing, which makes `ALL_HINTS`'s count a weaker claim than the array exists
+to make. Deleting it belongs to the change that adds a tenth hint — the settings
+panel — because that is when `ALL_HINTS` is resized anyway. Until then, nine is
+the number of *constants*, not the number of hints a reader can see.
 
 Three notes, because they are the answers to questions a reader will have:
 
-- **`NORMAL_HINT` and `LINE_NORMAL_HINT` are both 69** — one of the 71 available.
-  They took that room deliberately: reply, edit, delete and `gg`/`G` all landed
-  by shortening the mode keys, never by letting the row run past the bar and be
-  clipped. **`gg` and `G` are in the line's hint because the editor has neither.**
-  A key the line answers with nothing else on screen naming it is a key the hint
-  exists for.
+- **`NORMAL_HINT` at 70 and `LINE_NORMAL_HINT` at 67** are the two longest, one
+  and three columns under the 71 available. They took that room deliberately:
+  reply, edit, delete and `gg`/`G` all landed by shortening the mode keys, never
+  by letting the row run past the bar and be clipped. **`gg` and `G` are in the
+  line's hint because the editor has neither.** A key the line answers with
+  nothing else on screen naming it is a key the hint exists for.
 - **The line's Normal mode has no `j`/`k`, and that is not an oversight.** The
   editor behind it makes those history navigation on a one-line buffer, and
   history is not built. The caret moves between the lines of a message from
