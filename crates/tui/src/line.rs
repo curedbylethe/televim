@@ -34,6 +34,13 @@
 //! insert mode, where `Up` and `Down` are motions. That is the same answer
 //! readline gives, and it is why the line's normal-mode hint names no `j`/`k`.
 //!
+//! **5. What is in the motion table?** `h l j k 0 ^ $ w b e W B E %`, and
+//! `Left`/`Right`/`Home`/`End` beside them. Everything else the normal mode
+//! answers is a mode switch, an operator, or a direct deletion — so **`g` and
+//! `G` are not motions this crate has**, and an unhandled key is dropped
+//! rather than refused, so they arrive here as silence. They are the
+//! wrapper's, in [`LineEditor::goto`].
+//!
 //! Two more facts the code depends on, found while answering the above:
 //!
 //! - `EditResult::edits` must be applied **in reverse**. The field is
@@ -108,6 +115,7 @@
 //!   the three dotted operator states — is handed to the library.
 //! - Answer 4 is refused rather than acted on, because history is out of scope.
 //!   The caret's vertical movement is insert mode's arrows instead.
+//! - Answer 5 is `gg` and `G` in [`LineEditor::goto`].
 
 use std::ops::Range;
 
@@ -186,6 +194,13 @@ pub struct LineEditor {
     /// The caret as it was before the key now being applied.
     caret_before: usize,
 
+    /// A `g` waiting for the `g` that completes it, spent by whatever key
+    /// comes next.
+    ///
+    /// The only multi-key state in the wrapper, and it exists because the
+    /// library has no `gg` — see [`LineEditor::goto`].
+    pending_g: bool,
+
     /// The text the line's last yank produced, waiting to be taken.
     yanked: Option<String>,
 }
@@ -206,6 +221,7 @@ impl LineEditor {
             purpose: PromptKind::Message,
             before: String::new(),
             caret_before: 0,
+            pending_g: false,
             yanked: None,
         }
     }
@@ -458,6 +474,12 @@ impl LineEditor {
     /// key says so ([`LineVerdict::Refused`]) and changes nothing, not even the
     /// pending operator: the reader can follow it with a motion that is safe.
     pub fn feed(&mut self, key: KeyEvent) -> LineVerdict {
+        // Spent here rather than where it is set, so that `Esc` and `Enter` —
+        // which return before any key is dispatched — spend it too. A `g` that
+        // survived a second `Esc` would be waiting behind a mode the reader had
+        // already left.
+        let pending_g = std::mem::take(&mut self.pending_g);
+
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         // The line feed, under either name a terminal can be relied on to
@@ -483,6 +505,15 @@ impl LineEditor {
         let Some(key) = translate(key) else {
             return LineVerdict::Ignored;
         };
+
+        // The library's motion table is `h l j k 0 ^ $ w b e W B E %` and has no
+        // `g` or `G` in it, so the two are answered here rather than handed over
+        // and dropped. Normal mode only, because in insert mode they are letters.
+        if self.is_normal()
+            && let Some(verdict) = self.goto(key, pending_g)
+        {
+            return verdict;
+        }
 
         // The library reads `text[..cursor]` itself on some motions, so a cursor
         // left off a boundary by the previous key would panic it before this one
@@ -552,6 +583,58 @@ impl LineEditor {
     /// of `d...`/`c...`/`y...` names — is the reader still editing.
     fn is_normal(&self) -> bool {
         self.editor.status() == "NORMAL"
+    }
+
+    /// `gg` and `G` in the line's normal mode, which the library has no key for.
+    ///
+    /// `vim-line` 7.7's [`dispatch_motion`] is `h l j k 0 ^ $ w b e W B E %`,
+    /// and everything else in its normal mode is a mode switch, an operator or
+    /// a direct deletion — so `g` and `G` fall out of the end of it and are
+    /// silently dropped. They are two motions over the whole draft, which is
+    /// what the library does not have: its `0` and `$` are per *row*, and
+    /// nothing addresses the buffer. `0` and `$` are left as the library has
+    /// them, because a reader who has just pressed `gg` and then `0` means "and
+    /// now this row", not "back where I was".
+    ///
+    /// Only the line's own normal mode. In insert mode `g` and `G` are
+    /// letters, and a command or search line never reaches normal mode at all,
+    /// so neither needs a case.
+    ///
+    /// `G` lands **on** the last character rather than past it, which is the
+    /// library's own normal-mode invariant (`clamp_to_last_char`, applied to
+    /// every motion it dispatches) and the same answer `move_line_end` gives
+    /// for `$`. A caret one past the end is a caret the next `h`, `x` or `dd`
+    /// would act on wrongly. An empty draft has no last character and goes to
+    /// zero.
+    ///
+    /// `Ignored` because a motion changes no text — every other motion in the
+    /// editor returns it, and the bar redraws on the key either way.
+    ///
+    /// [`dispatch_motion`]: https://docs.rs/vim-line/7.7/vim_line/struct.VimLineEditor.html
+    fn goto(&mut self, key: Key, pending_g: bool) -> Option<LineVerdict> {
+        if key.ctrl || key.alt {
+            return None;
+        }
+        let VKey::Char(motion) = key.code else {
+            return None;
+        };
+
+        match (motion, pending_g) {
+            ('g', true) => {
+                self.editor.set_cursor(0, &self.text);
+                Some(LineVerdict::Ignored)
+            }
+            ('g', false) => {
+                self.pending_g = true;
+                Some(LineVerdict::Ignored)
+            }
+            ('G', _) => {
+                let last = snap_down(&self.text, self.text.len().saturating_sub(1));
+                self.editor.set_cursor(last, &self.text);
+                Some(LineVerdict::Ignored)
+            }
+            _ => None,
+        }
     }
 
     /// Puts the library's cursor back on a character boundary.
@@ -1718,6 +1801,195 @@ mod tests {
 
         assert_eq!(verdict, LineVerdict::Ignored);
         assert_eq!(line.text(), "", "Tab moves between panes, and never has");
+    }
+
+    // ---- gg and G, which the library has no key for ---------------------
+
+    /// The line in its own normal mode, with `text` in it and the caret at the
+    /// end of it — where a reader who has just finished typing stands.
+    fn normal_with(text: &str) -> LineEditor {
+        let mut line = composing();
+        type_text(&mut line, text);
+        line.feed(press(KeyCode::Esc));
+        line
+    }
+
+    /// Feeds the keys of `keys` as presses, for the tests that want to spell a
+    /// motion out key by key.
+    fn keys(line: &mut LineEditor, keys: &str) -> Vec<LineVerdict> {
+        answer(
+            line,
+            &keys
+                .chars()
+                .map(|c| press(KeyCode::Char(c)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn gg_puts_the_caret_at_the_start_of_the_draft() {
+        let mut line = normal_with("hello");
+        // `Esc` leaves the caret on the last character and the library holds it
+        // there, so `0` is how a normal-mode caret travels right in a draft this
+        // short — which is the reason the two motions are worth telling apart.
+        keys(&mut line, "0ll");
+        assert_eq!(line.caret(), 2, "moved off the character it started on");
+
+        keys(&mut line, "gg");
+
+        assert_eq!(line.caret(), 0);
+    }
+
+    /// `G` lands **on** the last character, because the library's normal mode
+    /// holds the caret on a character and never past the last one — the same
+    /// invariant `$` obeys. A caret one past the end is one the next `h`, `x` or
+    /// `dd` would act on wrongly.
+    ///
+    /// The `0` first is load-bearing: `Esc` leaves the caret on the last
+    /// character, so a `G` from there and no `G` at all are the same caret, and
+    /// a test written without it would pass against a build with no `G` in it.
+    #[test]
+    fn upper_g_puts_the_caret_on_the_last_character() {
+        let mut line = normal_with("hello");
+        keys(&mut line, "0");
+        assert_eq!(line.caret(), 0, "which is not where G should leave it");
+
+        keys(&mut line, "G");
+
+        assert_eq!(line.caret(), line.text().len() - 1, "not past the end");
+    }
+
+    /// The four keys that address a position, and the two answers they must not
+    /// blur into each other: `0` and `$` are the library's and are scoped to the
+    /// caret's **row**; `gg` and `G` are the wrapper's and address the **whole
+    /// draft**. A reader who has just pressed `gg` and then `0` means "and now
+    /// this row", not "back where I was".
+    #[test]
+    fn zero_and_dollar_stay_on_the_caret_row_and_gg_and_upper_g_do_not() {
+        let mut line = composing();
+        type_text(&mut line, "abc");
+        line.feed(combo(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut line, "def");
+        line.feed(press(KeyCode::Esc));
+
+        keys(&mut line, "0");
+        assert_eq!(line.caret(), 4, "the first character of the second row");
+
+        keys(&mut line, "$");
+        assert_eq!(line.caret(), 6, "the end of this row, which is the end");
+
+        keys(&mut line, "0");
+        assert_eq!(
+            line.caret(),
+            4,
+            "and 0 is the start of it, not of the draft"
+        );
+
+        keys(&mut line, "gg");
+        assert_eq!(line.caret(), 0, "gg is the start of the draft");
+
+        keys(&mut line, "G");
+        assert_eq!(line.caret(), 6, "and G is the end of it");
+    }
+
+    /// A `g` is a prefix, and a prefix the reader does not complete must cost
+    /// the next key nothing — `g` then `x` is `x`, and the `g` after it starts
+    /// over rather than completing a sequence three keys old.
+    #[test]
+    fn a_lone_g_costs_the_next_key_nothing() {
+        let mut line = normal_with("abc");
+
+        keys(&mut line, "gx");
+        assert_eq!(line.text(), "ab", "x deleted, as if no g came first");
+
+        keys(&mut line, "gg");
+        assert_eq!(line.caret(), 0, "and the g after it was a fresh prefix");
+    }
+
+    /// `Esc` spends a pending `g` like any other key. A prefix that survived it
+    /// would be waiting behind a mode the reader had already left, and the `g`
+    /// of the next `gg` would be spent completing nothing.
+    /// `Esc` spends a pending `g` like any other key.
+    ///
+    /// `Esc` from the line's own normal mode returns before any key is
+    /// dispatched, so it is the one key that can leave the prefix standing —
+    /// and a `g` that outlived it would complete a sequence the reader had
+    /// already abandoned, taking the caret somewhere they did not ask to go.
+    ///
+    /// The keys are fed to the editor directly, because the host has stopped
+    /// addressing the line by the time `Esc` has been answered: leaving the line
+    /// is `App`'s business, and what is under test is the wrapper's own promise
+    /// about its state.
+    #[test]
+    fn a_g_left_pending_is_spent_by_esc() {
+        let mut line = normal_with("abc");
+        assert_eq!(line.caret(), 2, "which is where the reader was");
+
+        keys(&mut line, "gg");
+        assert_eq!(line.caret(), 0, "a pair of them moves the caret");
+
+        keys(&mut line, "l");
+        line.feed(press(KeyCode::Char('g')));
+        line.feed(press(KeyCode::Esc));
+        keys(&mut line, "g");
+
+        assert_eq!(
+            line.caret(),
+            1,
+            "this g is a prefix, so the g before the Esc was spent"
+        );
+    }
+
+    /// In insert mode they are letters, which is the whole reason `goto` is
+    /// reached only from the line's own normal mode.
+    #[test]
+    fn g_and_upper_g_are_ordinary_letters_while_inserting() {
+        let mut line = composing();
+
+        type_text(&mut line, "gG");
+
+        assert_eq!(line.text(), "gG");
+    }
+
+    /// The last character of a draft that has none: `len - 1` underflows, and
+    /// `saturating_sub` is what keeps the caret at zero rather than at a
+    /// position no string can be indexed with. It passes with or without the
+    /// feature — it guards the arithmetic, not the motion.
+    #[test]
+    fn upper_g_on_an_empty_draft_does_not_panic() {
+        let mut line = normal_with("");
+
+        keys(&mut line, "G");
+        assert_eq!(line.caret(), 0);
+
+        keys(&mut line, "gg");
+        assert_eq!(line.caret(), 0);
+    }
+
+    /// The last byte of a draft is inside its last character on any text with an
+    /// emoji in it, and a caret there is one the bar cannot draw or an operator
+    /// cannot slice. `G` snaps to the character, as every other position the
+    /// wrapper reports does.
+    #[test]
+    fn upper_g_lands_on_a_character_boundary_of_non_ascii_text() {
+        let mut line = normal_with("héllo");
+        keys(&mut line, "0");
+
+        keys(&mut line, "G");
+
+        assert!(
+            line.text().is_char_boundary(line.caret()),
+            "the caret is somewhere a string can be indexed: {}",
+            line.caret()
+        );
+        assert_eq!(
+            line.text().get(line.caret()..),
+            Some("o"),
+            "the last character"
+        );
+
+        line.feed(press(KeyCode::Char('x')));
+        assert_eq!(line.text(), "héll", "and x removes it whole");
     }
 
     // ---- multi-byte text, and the motions that cannot run on it ----------

@@ -80,8 +80,13 @@ const INSERT_HINT: &str = " ⏎: send  ^J: newline  shift+⏎: newline where sup
 /// navigation on a one-line buffer, and history is not built. The caret moves
 /// between the lines of a message from insert mode, where `Up` and `Down` are
 /// motions. See [`crate::line`]'s docs for what the crate actually does.
+///
+/// `gg` and `G` are here because the library has neither, and a key the line
+/// answers with nothing else on screen naming it is a key the hint exists for.
+/// They took the room `word` and `chg` had — the row is exactly as full as it
+/// was before, which is what the length test below is for.
 const LINE_NORMAL_HINT: &str =
-    " i/a: ins  w/b/e word  x: del  dw/cc: chg  p: paste  ⏎: send  Esc: back";
+    " i/a: ins  w/b/e  x: del  dw/cc  p: paste  gg/G: ends  ⏎: send  Esc";
 
 /// The hint while a selection is being made inside the line.
 ///
@@ -473,11 +478,13 @@ mod tests {
     }
 
     /// A hint that names a key nothing else on the screen names is a hint that
-    /// has to be there, so `dw`, `cc` and `w` are asserted on individually —
-    /// a test that only measures length would pass on a hint that had lost them.
+    /// has to be there, so `dw`, `cc`, `w` and `gg`/`G` are asserted on
+    /// individually — a test that only measures length would pass on a hint that
+    /// had lost them. `gg` and `G` are the wrapper's own rather than the
+    /// library's, so nothing else on the screen names them.
     #[test]
     fn the_line_hints_name_the_keys_the_line_and_nothing_else_answers() {
-        for key in ["i/a", "w/b/e", "x", "dw", "cc", "p", "⏎", "Esc"] {
+        for key in ["i/a", "w/b/e", "x", "dw", "cc", "p", "gg", "G", "⏎", "Esc"] {
             assert!(
                 LINE_NORMAL_HINT.contains(key),
                 "{key:?} is bound in the line and nowhere else, and the hint has dropped it"

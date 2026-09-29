@@ -653,10 +653,11 @@ Working today:
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
   typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.
   The line is a real editor (`vim-line`, wrapped in `tui::line`): caret
-  movement, `w`/`b`/`e`, `x`, `dw`, `cc`, `p`, a visual selection with `d` and
-  `y`, and multi-line messages with `Ctrl+J` (`Shift+Enter` where the terminal
-  volunteers the distinction). The bar is always a draft: it grows to six rows,
-  survives a conversation switch, and is drawn with a real terminal caret.
+  movement, `w`/`b`/`e`, `x`, `dw`, `cc`, `p`, `gg`/`G`, a visual selection with
+  `d` and `y`, and multi-line messages with `Ctrl+J` (`Shift+Enter` where the
+  terminal volunteers the distinction). `gg` and `G` are the wrapper's, not the
+  library's — see **Key Decisions**. The bar is always a draft: it grows to six
+  rows, survives a conversation switch, and is drawn with a real terminal caret.
   Reply with `r`, edit with `e`.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
@@ -772,6 +773,24 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.
 - **Why the message window is capped:** `domain::history::ConversationWindow` keeps a flat, bounded window of the messages the client has seen — a `VecDeque` capped at `CONVERSATION_WINDOW` — rather than one list per conversation or an unbounded buffer. The window exists so that an edit or a deletion can be matched to a message; capping it is what stops that from becoming the largest allocation in the process under a live feed. An event for a message that has scrolled out is not applied, which is the same answer the window already gives for a conversation it does not hold.
 - **Why dropping a client stops the network:** the framework's `Client` owns the connection pool's runner task and the update relay, and aborts both when it is dropped. A detached task would leave the socket open until the process ended, and the relay would keep draining an unbounded channel nothing can read.
+- **Why `gg` and `G` are the wrapper's and not the library's:** `vim-line` 7.7's
+  motion table is `h l j k 0 ^ $ w b e W B E %`, and its normal mode answers
+  everything else by switching mode, taking an operator, or deleting — so `g`
+  and `G` fall out of the end of it. An unhandled key there is *dropped*, not
+  refused, which is why they arrived as silence rather than as a message. They
+  are two motions over the whole draft, which is the one thing the library has
+  no notion of: its `0` and `$` are scoped to the caret's **row**, and nothing
+  addresses the buffer. Both are kept, because they are not the same answer —
+  a reader who has just pressed `gg` and then `0` means "and now this row", not
+  "back where I was", and `zero_and_dollar_stay_on_the_caret_row_and_gg_and_upper_g_do_not`
+  is the test that says so. `G` lands **on** the last character rather than past
+  it, which is the library's own normal-mode invariant (`clamp_to_last_char`,
+  applied to every motion it dispatches) and what `move_line_end` does for `$`; a
+  caret one past the end is one the next `h`, `x` or `dd` would act on wrongly.
+  They run in the line's own normal mode only, because in insert mode they are
+  letters, and the wrapper's `pending_g` is spent by every key — including the
+  `Esc` that returns before any dispatch happens, which is the one key that could
+  otherwise leave a prefix standing behind a mode the reader had left.
 - **Why the input line is a wrapper rather than the crate:** `vim-line` never stores the buffer, so somebody has to apply its edits — and that somebody is where the decisions live that the crate must not be asked about. `Enter` (send) and `Esc` (two stages, nothing lost) never reach it, because its own answers differ by mode; `:` and `/` get insert only, because a newline in either is a submission nobody asked for. The wrapper also snaps every position to a character boundary — the cursor around every key, and every index an edit carries on its way into the string — then widens a delete to the grapheme cluster that index falls in, and refuses the byte-counted motions *behind an operator* on non-ASCII text, because two of the crate's behaviours split multi-byte characters and this binary sets `panic = "abort"`. That is the only place a motion is refused: elsewhere a motion can only move a cursor, which is re-snapped before anything can slice on it.
 
 ## Guidance for Agents
