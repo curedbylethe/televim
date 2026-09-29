@@ -71,13 +71,25 @@ const RETRY: Duration = Duration::from_secs(5);
 
 /// Something that happened away from the keyboard.
 pub enum Event {
-    /// The client is up and the chat list has been fetched.
+    /// The client is up, the chat list has been fetched, and the account's own
+    /// profile has been read.
     Ready {
         /// The wrapper the fetches go through.
         client: Arc<ProtoClient>,
 
         /// The conversations, newest first.
         chats: Vec<Chat>,
+
+        /// The account's own profile, or why there is not one.
+        ///
+        /// Its own `Result` rather than a second event, because a profile that
+        /// could not be read is not a failure of the client: the conversations
+        /// are there, and the screen is usable. It travels with the rest of what
+        /// "the client is up" means, so the two cannot be applied apart.
+        account: Result<domain::account::Account, String>,
+
+        /// Where the session is kept, as the panel says it.
+        session_store: tui::SessionStore,
     },
 
     /// The client could not be brought up.
@@ -276,6 +288,19 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         .await
         .context("fetching the chat list")?;
 
+    // Read once, here, and not when the panel is opened: the profile does not
+    // change under a reader, and a panel that blanked and refilled every time
+    // would be a panel they could not trust. A failure is carried rather than
+    // raised, because the conversations are here either way and the screen is
+    // usable without a profile — the panel says why it has none.
+    let account = match client.fetch_account().await {
+        Ok(account) => Ok(account),
+        Err(error) => {
+            tracing::warn!(%error, "the account's own profile could not be read");
+            Err(format!("{error:#}"))
+        }
+    };
+
     // The list is fetched before the feed is taken. Resolving what arrived while
     // the client was offline reads peers back out of the session, and iterating
     // the dialogs is what puts them there.
@@ -284,18 +309,36 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         .await
         .context("taking the update feed")?;
 
-    let _ = tx.send(AppEvent::Net(Event::Ready { client, chats }));
+    let _ = tx.send(AppEvent::Net(Event::Ready {
+        client,
+        chats,
+        account,
+        session_store: session_description(cfg),
+    }));
     tokio::spawn(pump(updates, tx.clone()));
 
     Ok(())
 }
 
-/// Where the session is kept: the file the configuration names, or the machine's
-/// own credential store.
-fn session_store(cfg: &Config) -> Box<dyn SessionStore> {
+/// Where the session is kept, in the words the profile panel says it in.
+///
+/// The decision, and the only one: [`session_store`] builds the store out of
+/// what this returns, so the panel cannot describe a store the session is not
+/// in. Reading the same field twice would leave that to a test, and a test
+/// cannot see a field read two ways.
+fn session_description(cfg: &Config) -> tui::SessionStore {
     match &cfg.session_path {
-        Some(path) => Box::new(FileStore::new(path.clone())),
-        None => Box::new(KeyringStore::default()),
+        Some(path) => tui::SessionStore::PlaintextFile(path.clone()),
+        None => tui::SessionStore::Keyring,
+    }
+}
+
+/// The store itself: the file the configuration names, or the machine's own
+/// credential store.
+fn session_store(cfg: &Config) -> Box<dyn SessionStore> {
+    match session_description(cfg) {
+        tui::SessionStore::Keyring => Box::new(KeyringStore::default()),
+        tui::SessionStore::PlaintextFile(path) => Box::new(FileStore::new(path)),
     }
 }
 
@@ -620,12 +663,27 @@ fn request_action(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSende
 /// Folds something that arrived from the network into the screen's state.
 pub fn apply(app: &mut App, state: &mut State, event: Event) {
     match event {
-        Event::Ready { client, chats } => {
+        Event::Ready {
+            client,
+            chats,
+            account,
+            session_store,
+        } => {
             open_first_chat(app, chats);
+            app.set_session_store(session_store);
+            app.set_account(account);
             state.client = Some(client);
         }
 
-        Event::Offline(reason) => app.status = format!("offline: {reason:#}"),
+        // The panel is told too, not only the status line. A status is a flash:
+        // it is gone within seconds, and a reader who opens the profile a minute
+        // later must still be told why it is empty rather than shown a blank
+        // panel they cannot tell from a broken one.
+        Event::Offline(reason) => {
+            let reason = format!("{reason:#}");
+            app.set_account(Err(reason.clone()));
+            app.status = format!("offline: {reason}");
+        }
 
         Event::Update(event) => {
             // Whether it moved anything is not acted on: the loop redraws on
@@ -2087,5 +2145,33 @@ mod tests {
             "the landed page keeps the match list, so the next n works"
         );
         assert!(app.search().is_match(19));
+    }
+}
+
+#[cfg(test)]
+mod session_store_tests {
+    use super::*;
+
+    /// The panel names the store, and it names the one the session is in. The
+    /// two are the same decision rather than two reads of a field, so this test
+    /// is about the description alone — which is the half a reader sees.
+    #[test]
+    fn the_panel_names_the_store_the_session_goes_in() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.session_path, None,
+            "nothing named, so nothing asked for"
+        );
+        assert_eq!(session_description(&cfg), tui::SessionStore::Keyring);
+
+        let cfg = Config {
+            session_path: Some("/tmp/televim.session".into()),
+            ..Config::default()
+        };
+        assert_eq!(
+            session_description(&cfg),
+            tui::SessionStore::PlaintextFile("/tmp/televim.session".into()),
+            "a file is named, and named as the plaintext thing it is"
+        );
     }
 }
