@@ -768,6 +768,44 @@ impl LineEditor {
         LineVerdict::Edited
     }
 
+    /// Replaces `range` with `text` and leaves the caret after it.
+    ///
+    /// The host's own edit, and the third of them: `newline` is the second and
+    /// `splice` under it is the first. It exists for one caller — the
+    /// completion accepting an emoji over the `:query` the reader typed — and
+    /// it is on this type rather than in `app.rs` because the text and the
+    /// caret are private here, and a `String` handed out to be edited in place
+    /// is a `String` that will be. It is not `splice`: `splice` inserts and
+    /// this replaces.
+    ///
+    /// The same three disciplines the library's own edits go through, in
+    /// [`LineEditor::apply`] and [`LineEditor::feed`]:
+    ///
+    /// - the range is widened to the grapheme clusters it touches, because a
+    ///   range that ended inside one would cut a family in half;
+    /// - the cap is checked on the **result**, and a refusal changes nothing —
+    ///   an emoji is one character, so a 4096-character draft cannot absorb one;
+    /// - the caret is placed by hand, at `start + text.len()` **in bytes**,
+    ///   because the library never saw the key and its cursor is its own.
+    ///
+    /// [`LineVerdict::Edited`] on success, [`LineVerdict::TooLong`] on a
+    /// refusal. Nothing else: there is no third outcome.
+    pub fn replace(&mut self, range: Range<usize>, text: &str) -> LineVerdict {
+        let len = self.text.len();
+        let start = grapheme::cluster_start(&self.text, range.start.min(len));
+        let end = grapheme::cluster_end(&self.text, range.end.min(len)).max(start);
+
+        let removed = self.text[start..end].chars().count();
+        let total = self.text.chars().count() - removed + text.chars().count();
+        if total > MESSAGE_LIMIT {
+            return LineVerdict::TooLong;
+        }
+
+        self.text.replace_range(start..end, text);
+        self.editor.set_cursor(start + text.len(), &self.text);
+        LineVerdict::Edited
+    }
+
     /// Whether `more` characters can go in on top of what is there.
     fn fits(&self, more: usize) -> bool {
         self.text.chars().count() + more <= MESSAGE_LIMIT
@@ -2478,6 +2516,80 @@ mod tests {
 
         assert_eq!(line.text(), "axb");
         assert_eq!(line.caret(), 1);
+    }
+
+    // ---- accepting a completion -----------------------------------------
+    //
+    // The one caller of `replace`: a `:query` goes in, the glyph it named comes
+    // out, and the caret lands after it.
+
+    #[test]
+    fn a_replacement_puts_the_caret_after_what_it_wrote() {
+        let mut line = composing();
+        type_text(&mut line, ":cry");
+
+        let verdict = line.replace(0..4, "😢");
+
+        assert_eq!(verdict, LineVerdict::Edited);
+        assert_eq!(line.text(), "😢");
+        assert_eq!(line.caret(), 4, "after the glyph, not over it");
+    }
+
+    /// 😢 is four bytes, one character and two columns, and only the first of
+    /// those three is what a caret into a `String` means. The other two are
+    /// wrong answers that happen to look plausible.
+    #[test]
+    fn the_caret_after_a_replacement_is_a_byte_offset() {
+        let mut line = composing();
+        type_text(&mut line, ":cry");
+
+        line.replace(0..4, "😢");
+
+        assert_eq!(line.caret(), 4, "four bytes");
+        assert_ne!(line.caret(), 1, "not one character");
+        assert_ne!(line.caret(), 2, "and not the two columns it draws");
+    }
+
+    #[test]
+    fn a_replacement_widens_to_the_clusters_it_touches() {
+        let family = "👨‍👩‍👧";
+        let mut line = composing();
+        type_text(&mut line, &format!("a{family}b"));
+
+        line.replace(1..2, "x");
+
+        assert_eq!(
+            line.text(),
+            "axb",
+            "the whole family, not one code point of it"
+        );
+        assert_eq!(line.caret(), 2);
+    }
+
+    #[test]
+    fn a_replacement_past_the_message_limit_changes_nothing() {
+        let mut line = composing();
+        type_text(&mut line, &"x".repeat(MESSAGE_LIMIT));
+        let caret = line.caret();
+
+        let verdict = line.replace(MESSAGE_LIMIT..MESSAGE_LIMIT, "😢");
+
+        assert_eq!(verdict, LineVerdict::TooLong);
+        assert_eq!(line.text(), "x".repeat(MESSAGE_LIMIT));
+        assert_eq!(line.caret(), caret, "the caret did not move");
+    }
+
+    #[test]
+    fn a_replacement_leaves_the_library_able_to_read_the_text() {
+        let mut line = composing();
+        type_text(&mut line, ":cry");
+
+        line.replace(0..4, "😢");
+        let verdict = line.feed(press(KeyCode::Backspace));
+
+        assert_eq!(verdict, LineVerdict::Edited);
+        assert_eq!(line.text(), "", "the editor still knows where the text is");
+        assert_eq!(line.caret(), 0);
     }
 
     // ---- the prompt rule ------------------------------------------------
