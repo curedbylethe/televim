@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Televim — baseline mockups</title>
+<style>
+@import url("_grid.css");
+
+body { max-width: 78ch; }
+
+a { color: var(--border-focused); }
+
+ul { padding-left: 1.4em; }
+li { line-height: 1.9; }
+li small { color: var(--text-dim); display: block; }
+</style>
+</head>
+<body>
+
+<h1>Televim — baseline mockups</h1>
+
+<p class="note">
+  Six frames of the screens that exist today, at exactly 80 columns by 24 rows.
+  They are the reference the settings work in plans 03, 04 and 05 is measured
+  against, and they are <b>hand-written</b> rather than generated: a mockup
+  produced by the same process as the spec cannot contradict the spec, which is
+  the one thing a reference frame has to be able to do.
+</p>
+
+<p class="note">
+  Every string on them is copied out of <code>crates/</code> rather than
+  invented — the nine hint rows from <code>input_bar.rs</code>, the bracket
+  vocabulary from <code>rows.rs</code>, the titles and the note joins from
+  <code>chat_list.rs</code> and <code>conversation.rs</code>. The colours are the
+  <code>v2</code> column of <code>DESIGN.md</code>'s palette, which the binary does
+  not draw yet.
+</p>
+
+<ul>
+  <li>
+    <a href="baseline-conversation.html">Conversation, Normal mode</a>
+    <small>The reference frame. Focused border, both titles, the scrollbar's own column, the hint row.</small>
+  </li>
+  <li>
+    <a href="baseline-visual.html">Two messages selected</a>
+    <small>Selection as a background across whole rows; reverse video still only the cursor's.</small>
+  </li>
+  <li>
+    <a href="baseline-confirm.html">A confirmation</a>
+    <small>The label outranks the focus, the hint is gone, and the prompt names which side.</small>
+  </li>
+  <li>
+    <a href="baseline-login-draft.html">Composing</a>
+    <small>The bar grown to two rows, <code>·</code> for every space, <code>Message to …</code> rather than <code>Message</code>.</small>
+  </li>
+  <li>
+    <a href="baseline-match.html">A search hit under the cursor</a>
+    <small>Match is a foreground, selection is a background, one cell is both.</small>
+  </li>
+  <li>
+    <a href="light.html">The reference frame, light terminal</a>
+    <small>The same frame with the light column — and the one value that fails a body-text ratio, deliberately.</small>
+  </li>
+</ul>
+
+<h1>What is not here yet</h1>
+
+<p class="note">
+  A settings panel, an editable profile, and an interactive sign-in with 2FA.
+  Each of those is work that does not exist in the code yet, and each brings its
+  own mockups in this style. The settings panel takes the conversation's
+  rectangle rather than a new pane, so a contact profile will land in the same
+  slot later.
+</p>
+
+<h1>What each one is for</h1>
+
+<p class="note">
+  Each mockup carries its own <code>TestBackend</code> assertion list — the
+  checks that would catch it regressing, written before the code exists. That is
+  the point of a reference frame: it is not a picture of a screen, it is a
+  statement about what the screen must be true, expressed as something a test can
+  read off a buffer.
+</p>
+
+</body>
+</html>

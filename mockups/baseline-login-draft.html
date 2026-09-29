@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Composing, in Insert mode — televim</title>
+<style>
+/* Televim mockups: a character grid, not a web page.
+ *
+ * Every frame is exactly 80 columns by 24 rows. One monospace cell, box
+ * drawing characters for borders, and nothing that a 16-colour terminal
+ * cannot draw. No margins, no rounded corners, no shadows.
+ *
+ * Tokens come from DESIGN.md's palette table (the v2 column).
+ */
+
+:root {
+  /* dark terminal */
+  --background: #0b0d10;
+  --surface: #141821;
+  --border: #3a4150;
+  --border-focused: #5ad4e6;
+  --text: #d7dce5;
+  --text-dim: #7b8496;
+  --match: #e5c07b;
+  --selection-bg: #6b4bab;
+  --mode-normal: #4a7fb5;
+  --mode-insert: #6fbf73;
+  --mode-visual: #e5c07b;
+  --mode-confirm: #e06c75;
+  --on-mode-dark: #d7dce5;
+  --on-mode-light: #0d1117;
+
+  /* light terminal */
+  --l-border: #b0b5c0;
+  --l-border-focused: #1a7f8c;
+  --l-text: #1d2128;
+  --l-text-dim: #6b7280;
+  --l-match: #8a6100;
+  --l-mode-normal: #3a6a99;
+  --l-mode-insert: #4f9d55;
+  --l-mode-visual: #b98d2e;
+  --l-mode-confirm: #c0454e;
+
+  --cell: 15px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 24px 0 48px;
+  background: #05070a;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", "Consolas",
+    "DejaVu Sans Mono", monospace;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 32px 24px 12px;
+}
+
+p.note {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 0 24px 14px;
+  max-width: 78ch;
+  line-height: 1.6;
+}
+
+p.note b { color: var(--text); font-weight: 600; }
+
+/* ---- the terminal frame ------------------------------------------------ */
+
+.term {
+  margin: 0 24px 34px;
+  background: var(--background);
+  width: calc(80ch * 0.6em + 2px);
+  font-size: 15px;
+  line-height: 1.25;
+  letter-spacing: 0;
+  white-space: pre;
+  tab-size: 8;
+}
+
+.term.light {
+  --border: var(--l-border);
+  --border-focused: var(--l-border-focused);
+  --text: var(--l-text);
+  --text-dim: var(--l-text-dim);
+  --match: var(--l-match);
+  --mode-normal: var(--l-mode-normal);
+  --mode-insert: var(--l-mode-insert);
+  --mode-visual: var(--l-mode-visual);
+  --mode-confirm: var(--l-mode-confirm);
+  color: var(--l-text);
+}
+
+/* cell-level roles */
+
+.b  { color: var(--border); }                        /* unfocused border */
+.bf { color: var(--border-focused); }                 /* focused border */
+.d  { color: var(--text-dim); }                       /* decoration, hints */
+.t  { color: var(--text); }                           /* body */
+.m  { color: var(--match); font-weight: 700; }        /* a search match */
+.s  { background: var(--selection-bg); }              /* a selection block */
+.sb { background: var(--selection-bg); color: var(--match); font-weight: 700; }
+
+/* the cursor row: reverse video, and the only user of it in the system */
+.cur { background: var(--text); color: var(--background); }
+.cur .d, .cur .t, .cur .b { color: var(--background); }
+.cur.s { background: var(--text); color: var(--selection-bg); }
+
+/* the four mode labels: a filled 9-column block, upper case */
+.mn { background: var(--mode-normal); color: var(--on-mode-dark); }
+mi { background: var(--mode-insert); color: var(--on-mode-light); }
+mv { background: var(--mode-visual); color: var(--on-mode-light); }
+mc { background: var(--mode-confirm); color: var(--on-mode-dark); }
+
+</style>
+</head>
+<body>
+<h1>Composing, in Insert mode</h1>
+<p class="note">The bar is <b>always a draft</b>: it holds what the reader last typed, survives a conversation switch, and grows to six rows because a draft is their own words and the bar is the only place those words can be read back. Every space is a <b><code>·</code></b> while the draft is being composed — a space is a cell that paints nothing, and a caret on a blank cell is a bar on a blank cell, so the key that typed one looked like the key that did nothing. The dot stands in the space&#39;s own cell, which is what keeps the caret and the wrap in step. <b>The conversation gets no dots</b>: a message is read as prose.</p>
+<pre class="term"><span class="b">┌────── Chats (3) ─────┐</span><span class="bf">┌────── Conversation (5/10) ───────────────────────────┐</span>
+<span class="b">│</span><span class="t">Ada Lovelace          </span><span class="b">│</span><span class="bf">│</span><span class="d">[them] </span><span class="t">Hey, is the build green?</span>                      <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span><span class="t">Grace Hopper          </span><span class="b">│</span><span class="bf">│</span><span class="d">[you] </span><span class="t">Yes — clippy is happy.</span>                         <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span><span class="t">Alan Turing (1)       </span><span class="b">│</span><span class="bf">│</span><span class="d">[them] </span><span class="t">Nice. Did you pin the toolchain?</span>              <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span><span class="d">[you] </span><span class="t">1.85.0, edition 2024.</span>                          <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span><span class="d">[them] </span><span class="t">Perfect. Let&#x27;s meet tomorrow.</span>                 <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span><span class="d">[you] </span><span class="t">I&#x27;ll bring the slides.</span>                         <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span><span class="d">[them] </span><span class="t">And the benchmarks.</span>                           <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span><span class="d">[you] </span><span class="t">50 MB RSS or bust.</span>                             <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">│</span>                      <span class="b">│</span><span class="bf">│</span>                                                     <span class="d">│</span><span class="bf">│</span>
+<span class="b">└──────────────────────┘</span><span class="bf">└──────────────────────────────────────────────────────┘</span>
+<span class="d">┌────── Message to Ada Lovelace ───────────────────────────────────────────────┐</span>
+<span class="d">│</span><span class="t">sending·the·benchmarks·now,</span><span class="d">│</span>                                                   
+<span class="d">│</span><span class="t">and·the·slides</span><span class="d">│</span>                                                                
+<span class="d">└──────────────────────────────────────────────────────────────────────────────┘</span>
+<span class="mi"> INSERT </span> <span class="d"> ⏎: send  ^J: newline  shift+⏎: newline where supported</span>                </pre>
+<h1>TestBackend assertions this frame is the reference for</h1>
+<ul class="note"><li>The bar&#39;s border is <code>border-focused</code> when the line has the focus, because the bar does not take the focus visually — it <b>is</b> the focus.</li><li>The title is <code> Message to Ada Lovelace </code>, not <code> Message </code>: a draft belongs to no conversation, and where it will be sent is the one thing a reader cannot work out for themselves.</li><li>Every space in the draft is <code>·</code> in <code>text-dim</code>; no message row has one.</li><li>The label is <code> INSERT </code> — the line&#39;s own mode, not the conversation&#39;s, because it is the only mode that is not the conversation&#39;s.</li><li>The caret is the terminal&#39;s, drawn at the row and column the wrapper worked out. <b>TestBackend cannot model it</b>: the arithmetic is tested, the cursor is checked by hand.</li><li>The hint is <code>⏎: send  ^J: newline  shift+⏎: newline where supported</code> — 60 columns of the 71 available, because a hint that does not fit fails the build.</li></ul>
+</body>
+</html>
