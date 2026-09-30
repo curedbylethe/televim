@@ -181,6 +181,10 @@ impl CardRow {
     /// where the text is the action's own name. The one row that is not is a
     /// reserved slot, which has no text at all: a selection over an empty range is
     /// a selection of nothing, and `y` on it would put nothing in the register.
+    ///
+    /// A held slot is not drawn at all, so nothing reaches this with one in hand —
+    /// it is the row model's statement of the rule rather than a branch anything
+    /// takes today, and it is the answer a selection or a yank should ask first.
     #[must_use]
     pub const fn is_selectable(&self) -> bool {
         !self.reserved
@@ -217,14 +221,12 @@ pub fn rows(app: &App) -> Vec<CardRow> {
 /// draws nothing, and a highlight nobody can see is worse than one that does not
 /// move.
 ///
-/// This is currently also what makes the *interior* slot safe, because the colour
-/// slot is the last row a contact's card has: the highlight's whole range is the
-/// one row above it, so it cannot land on the slot at all. **That stops being true
-/// the moment a row is added after the colour** — which is the first thing §4's
-/// transport does, since a username and a bio follow the slot by design. At that
-/// point `j` and `k` have to step over the slot, and this function alone will not do
-/// it: it bounds the highlight, it does not skip inside the bound. The step belongs
-/// in `card_motion_row`, and it belongs with a test that can reach it.
+/// **This bounds the highlight; it does not skip inside the bound.** The colour
+/// slot is *interior* on a contact's card — the name is above it and the identity
+/// and everything after it are below — so a held slot inside the range is still
+/// somewhere `j` can land. [`App::card_motion_row`](crate::app) steps off it, and
+/// the two are one rule split in two: this decides where the highlight may go, and
+/// that decides where it stops being.
 #[must_use]
 pub fn navigable(rows: &[CardRow]) -> usize {
     rows.iter()

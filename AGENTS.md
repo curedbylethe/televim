@@ -982,6 +982,14 @@ Real, and named so they are not mistaken for oversights:
   winning, a light-terminal value, local state keyed by the peer's id — are in
   `DESIGN.md`. The slot is *interior* on a contact's card, so `j` and `k` step over
   it, and `card::navigable` bounds the highlight past a slot at the end.
+- **The design artifact does not model a contact card before its read lands.**
+  The engine has a shell for the account's two states — `reading` and `signedout`
+  — and none for a contact's, so the third and fourth shells the binary now draws
+  are only in the Rust. That is a divergence in the *other* direction from the
+  usual one, and it is left rather than hand-fixed: the engine is a 59 kB design
+  model that an agent wrote against `DESIGN.md`, and editing it by hand to add a
+  state is the failure `design/README.md` names. It wants a design run that adds
+  the state to `DESIGN.md` and the engine together, and `make design-pull` after.
 - **The join of a `userFull` to its `user` is unasserted.** Every decision it makes
   is tested at the level it can be written at — an empty `about` is not a bio, an
   empty username is not a username, a date that is not a date is dropped, a
