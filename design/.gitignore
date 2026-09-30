@@ -1,0 +1,11 @@
+# The vendored design project. Everything here is a copy of the OpenDesign project
+# `televim-app`, kept in step by `scripts/design-sync.sh` — so these are the paths
+# a full copy of that project drags in and this repo does not want.
+#
+# OpenDesign's own undo store. It is an undo history, not a reviewable one, and the
+# repository's git history is the record.
+.file-versions/
+# The skill OpenDesign installed for its own runs. Not ours to version.
+.od-skills/
+# OpenDesign's per-file metadata, written when it makes something an artifact.
+*.artifact.json

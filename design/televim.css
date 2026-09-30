@@ -1,0 +1,83 @@
+/* Page chrome is deliberately plain. Everything inside .screen is a character grid: one font, no radius,
+   no shadow, no gradient. Colours come from design-system/tokens.css only. */
+html { background: var(--surface); }
+body {
+  margin: 0; padding: 1.5lh 24px 3lh; min-height: 100vh;
+  font-family: var(--font-terminal); font-size: 14px; line-height: var(--cell-height);
+  color: var(--text); font-variant-ligatures: none;
+}
+.chrome { max-width: 1420px; margin: 0 auto; }
+h1 { font-size: 1em; font-weight: bold; margin: 0; }
+.sub { color: var(--text-dim); margin: 0 0 1lh; max-width: 90ch; }
+
+.bar { display: grid; grid-template-columns: 8ch 1fr; align-items: start; column-gap: 1ch; margin: 0 0 6px; }
+.bar > span { color: var(--text-dim); padding-top: 6px; }
+.btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.btns button {
+  font: inherit; color: var(--text); background: transparent;
+  border: 1px solid var(--border); border-radius: 0; padding: 0 1ch; min-height: 32px; cursor: pointer;
+}
+.btns button:hover { background: var(--background); border-color: var(--text-dim); }
+.btns button[aria-pressed="true"] { background: var(--background); border-color: var(--text); }
+.btns button:focus-visible { outline: 1px solid var(--border-focused); outline-offset: 2px; }
+.btns .mode-N[aria-pressed="true"] { border-color: var(--mode-normal); }
+.btns .mode-I[aria-pressed="true"] { border-color: var(--mode-insert); }
+.btns .mode-V[aria-pressed="true"] { border-color: var(--mode-visual); }
+.btns .mode-X[aria-pressed="true"] { border-color: var(--mode-confirm); }
+
+.stage { margin: 2lh 0 0; }
+.frames { display: flex; flex-wrap: wrap; gap: 2lh 32px; align-items: flex-start; }
+.fig { margin: 0; }
+.fig figcaption { color: var(--text-dim); padding-bottom: 6px; }
+
+.screen {
+  margin: 0; width: 80ch; height: calc(24 * 1lh); box-sizing: content-box;
+  font: inherit; line-height: var(--cell-height); white-space: pre; overflow: hidden;
+  background: var(--c-ground); color: var(--c-text); outline: 1px solid var(--c-border);
+  tab-size: 1; cursor: default; user-select: none;
+}
+.w { display: inline-block; width: 1ch; text-align: center; font-style: normal; vertical-align: top; overflow: visible; }
+
+/* foreground roles */
+.ft { color: var(--c-text); }
+.fd { color: var(--c-dim); }
+.fm { color: var(--c-match); font-weight: bold; }
+.ff { color: var(--c-focus); }
+.fb { color: var(--c-border); }
+/* the four filled mode labels, each with its named foreground */
+.fN { background: var(--c-normal);  color: var(--c-on-normal); }
+.fI { background: var(--c-insert);  color: var(--c-on-insert); }
+.fV { background: var(--c-visual);  color: var(--c-on-visual); }
+.fX { background: var(--c-confirm); color: var(--c-on-confirm); }
+/* selection is a background; a match stays a foreground on top of it */
+.sl { background: var(--c-select); }
+.sl.ft, .sl.fd { color: var(--c-on-select); }
+.sl.fm { color: var(--c-match); }
+/* reverse video: the selection row, and nothing else. Foreground and background swap. */
+.rv.ft, .rv.fd, .rv.fm { color: var(--c-ground); }
+.rv.ft { background: var(--c-selection); }
+.rv.fd { background: var(--c-dim); }
+.rv.fm { background: var(--c-match); }
+/* Carets are painted, not asked of the terminal: a two-column bar while the line is composed
+   (the insert caret), a hollow cell for the line's own Normal mode and for a card's inline
+   position (the normal caret). On a plain ground the ink is --text. */
+.ci, .cn { position: relative; }
+.ci::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--c-caret-insert); }
+.cn::after { content: ""; position: absolute; inset: 0; border: 1px solid var(--c-caret-normal); }
+/* A caret drawn inside the selection row takes the ground colour: on that row the ink is the
+   reverse of the row's own background, which would otherwise hide it. */
+.rv.ci::after { background: var(--c-ground); }
+.rv.cn::after { border-color: var(--c-ground); }
+
+.caption { margin: 1lh 0 0; color: var(--text-dim); }
+.caption b { color: var(--text); font-weight: normal; }
+.legend { margin: 1lh 0 0; color: var(--text-dim); max-width: 100ch; }
+.legend b { color: var(--text); font-weight: normal; }
+.legend code { color: var(--text); }
+
+/* the arithmetic and the two constraints the card cannot draw: prose beside the frames, not chrome */
+.note { margin: 1.5lh 0 0; max-width: 110ch; }
+.note p { margin: 0 0 1lh; color: var(--text-dim); }
+.note b { color: var(--text); font-weight: normal; }
+.note code { color: var(--text); }
+.note pre { margin: 0 0 1lh; color: var(--text-dim); white-space: pre-wrap; overflow-wrap: anywhere; }

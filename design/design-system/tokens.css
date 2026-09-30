@@ -1,0 +1,99 @@
+/* Televim — token layer. Source: DESIGN.md frontmatter. Terminal surface: no radii, shadows, spacing scale or type scale.
+   Raw values live here and nowhere else. */
+
+:root {
+  /* dark terminal — v2 */
+  --background: #0b0d10;      /* mockup ground only; the program never paints it */
+  --surface: #141821;         /* panel inside; specified, never painted */
+  --border: #3a4150;
+  --border-focused: #5ad4e6;  /* the only thing saying where keys go */
+  --text: #d7dce5;
+  --text-dim: #7b8496;
+  --selection: #d7dce5;       /* the selection row: the cell takes --selection as its background, the ground as its foreground */
+  --match: #e5c07b;           /* foreground + bold, never reversed */
+  --selection-bg: #6b4bab;    /* a Visual selection's background, never reversed */
+  --caret-insert: #d7dce5;    /* the insert caret: the bar, on the bar's plain ground; the bar is never reversed */
+  --caret-normal: #d7dce5;    /* the normal caret on a plain ground; on the selection row its ink is --background */
+  --mode-normal: #4a7fb5;
+  --mode-insert: #6fbf73;
+  --mode-visual: #e5c07b;
+  --mode-confirm: #e06c75;
+
+  /* mode label foreground. One ink, both columns: #0d1117 on all eight fills.
+     Dark 4.50 / 8.45 / 10.96 / 5.92. Light 6.65 / 5.67 / 6.23 / 6.33. */
+  --on-mode-light: #0d1117;
+
+  /* light terminal — v2 re-specified, decided and tested, not shipped.
+     Theme has one set of values; a second palette is a later change.
+     background/surface/selection stay the terminal's own. */
+  --background-light: Canvas;
+  --surface-light: Canvas;
+  --border-light: #b0b5c0;
+  --border-focused-light: #1a7f8c;
+  --text-light: #1d2128;
+  --text-dim-light: #6b7280;
+  --selection-light: #1d2128;
+  --match-light: #8a6100;
+  --selection-bg-light: #6b4bab;
+  --caret-insert-light: #1d2128;
+  --caret-normal-light: #1d2128;
+  --mode-normal-light: #6d9dd0;
+  --mode-insert-light: #4f9d55;
+  --mode-visual-light: #b98d2e;
+  --mode-confirm-light: #d67b83;
+
+  /* column budget */
+  --mode-label-width: 9ch;
+  --assumed-width: 80ch;
+  --hint-width: calc(var(--assumed-width) - var(--mode-label-width)); /* 71ch; the hint's own leading space is the gap */
+  --rows: 24;
+
+  /* one family, regular + bold; the cell is the reader's */
+  --font-terminal: ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", Consolas, monospace;
+  --cell-height: 1.17; /* joins vertical box-drawing strokes */
+
+  /* semantic aliases — components read only these */
+  --c-ground: var(--background);
+  --c-border: var(--border);
+  --c-focus: var(--border-focused);
+  --c-text: var(--text);
+  --c-dim: var(--text-dim);
+  --c-selection: var(--selection);
+  --c-match: var(--match);
+  --c-select: var(--selection-bg);
+  --c-caret-insert: var(--caret-insert);
+  --c-caret-normal: var(--caret-normal);
+  --c-on-select: var(--text); /* #d7dce5 on #6b4bab is 4.74:1; follows the selection, not the terminal. A match under a selection takes this ink too */
+  --c-normal: var(--mode-normal);
+  --c-insert: var(--mode-insert);
+  --c-visual: var(--mode-visual);
+  --c-confirm: var(--mode-confirm);
+  --c-on-normal: var(--on-mode-light);
+  --c-on-insert: var(--on-mode-light);
+  --c-on-visual: var(--on-mode-light);
+  --c-on-confirm: var(--on-mode-light);
+  color-scheme: dark;
+}
+
+[data-terminal="light"] {
+  --c-ground: var(--background-light);
+  --c-border: var(--border-light);
+  --c-focus: var(--border-focused-light);
+  --c-text: var(--text-light);
+  --c-dim: var(--text-dim-light);
+  --c-selection: var(--selection-light);
+  --c-match: var(--match-light);
+  --c-select: var(--selection-bg-light);
+  --c-caret-insert: var(--caret-insert-light);
+  --c-caret-normal: var(--caret-normal-light);
+  --c-on-select: var(--text); /* same #d7dce5 on #6b4bab, 4.74:1, both terminals. Light match #8a6100 on it is 1.18:1, so a match takes the pale ink too */
+  --c-normal: var(--mode-normal-light);
+  --c-insert: var(--mode-insert-light);
+  --c-visual: var(--mode-visual-light);
+  --c-confirm: var(--mode-confirm-light);
+  --c-on-normal: var(--on-mode-light); /* #0d1117 on #6d9dd0 is 6.65:1 */
+  --c-on-insert: var(--on-mode-light); /* #0d1117 on #4f9d55 is 5.67:1 */
+  --c-on-visual: var(--on-mode-light); /* #0d1117 on #b98d2e is 6.23:1 */
+  --c-on-confirm: var(--on-mode-light); /* #0d1117 on #d67b83 is 6.33:1 */
+  color-scheme: light;
+}

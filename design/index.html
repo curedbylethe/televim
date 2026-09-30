@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>televim: application UI (80×24)</title>
+<link rel="stylesheet" href="design-system/tokens.css">
+<link rel="stylesheet" href="televim.css">
+</head>
+<body>
+<div class="chrome" data-od-id="chrome">
+  <h1 data-od-id="page-title">televim</h1>
+  <p class="sub" data-od-id="page-sub">Private-chat Telegram client for the terminal, driven by Vim keys. Every frame is an exact 80×24 cell grid. Pick a screen, then use the keyboard: the keys are the program's own.</p>
+
+  <div class="bar" data-od-id="screen-switcher"><span>screen</span><div class="btns" id="screens"></div></div>
+  <div class="bar" data-od-id="state-switcher"><span>state</span><div class="btns" id="variants"></div></div>
+  <div class="bar" data-od-id="mode-switcher"><span>mode</span><div class="btns" id="modes"></div></div>
+  <div class="bar" data-od-id="theme-switcher"><span>terminal</span><div class="btns" id="themes"></div></div>
+  <div class="bar" data-od-id="key-strip"><span>keys</span><div class="btns" id="keys"></div></div>
+
+  <div class="stage" data-od-id="stage"><div class="frames" id="frames"></div></div>
+  <p class="caption" id="caption" data-od-id="caption"></p>
+
+  <p class="legend" data-od-id="legend-profile">
+    <b>Profile.</b> A profile row is the same kind of object a message is, so it takes the same keys: j/k between rows,
+    h/l inside the row's text, v to select, y to yank, yy for the whole row, g/G the ends, Esc back.
+    <b>l</b> from the conversation opens the contact's card, <b>A</b> opens it from either pane, <b>S</b> opens your own,
+    and <b>h</b> at a card row's first cell is the way back, because that is where it runs out of room to move.
+    A card is read-only, so <b>d</b> acts on the self card's two action rows and refuses on the contact's, and <b>p</b> says why it cannot paste.
+    The editable profile is its own screen, at <b>:settings</b>. On a card <b>Ctrl+w h</b> / <b>Ctrl+w l</b> walk the panes, since h and l are inline.
+  </p>
+
+  <p class="legend" data-od-id="legend-keys">
+    <b>Move</b> j/k row, gg/G ends, Ctrl+d/u half page. <b>Pane</b> Tab, or Ctrl+w h / Ctrl+w l.
+    <b>Insert</b> i or a, then Esc for the line's Normal, Esc again to leave with the draft kept.
+    <b>Select</b> v, then j/k. <b>Find</b> / then n/N. <b>Command</b> : (:settings, :signin, :q).
+    <b>Delete</b> dd, or d in Visual. <b>Also</b> r reply, e edit, D dismiss, q quit.
+    Sign-in demo: any phone number, code 42424, any password. Ctrl+w may be taken by the browser: use the key strip.
+  </p>
+
+  <div class="note" data-od-id="hint-budget">
+    <p><b>The hint row is a budget, not a sentence.</b> The status line is <code>NORMAL</code> plus one space, then the hint, on eighty columns. The hint gets 71, counted with <code>chars().count()</code>, and a test iterates every hint and fails the build on one that does not fit. The conversation's row starts from the binary's 67, not the 70 an earlier note quoted, and <code>A:card</code> costs eight; one of the three keys the reader uses most has to pay for it:</p>
+<pre data-od-id="hint-subtraction">
+  conversation, Normal   " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  q:quit  S:acct"   67
+  remove  q:quit        q is the only one of the three with a second route to the same action:
+                        :q and :quit reach it, and "::cmd" is named on the same row. e:edit and
+                        v:vis have no other mention on screen.                            − 8
+  add     A:card                                                                            + 8
+                                                                                          = 67 of 71
+  chat list              " j/k: chat  Enter: open  Tab: pane  h: conversation  A:card  S:you"       66
+</pre>
+    <p>The row is three columns shorter than an earlier note assumed: <code>D:dismiss</code> is gone, because dismissing a failed send is a refusal and the status line owns the reason, and <code>S:acct</code> is present. So the arithmetic is four columns spare, not one. What is tight is the pair of keys: <code>A:card</code> and <code>S:acct</code> are both named, and neither may be dropped for the other. <code>S</code> is one key with two spellings, <code>S:acct</code> on the conversation's row and <code>S:you</code> on the chat list's, which a reader has to reconcile, and neither is renamed to match. The two card rows differ because their rows differ, and each names only keys its own card answers.</p>
+  </div>
+
+  <p class="legend" data-od-id="reserved-colour">
+    <b>One row is reserved, not designed.</b> The contact card holds a slot for a colour the reader will one day give a person, drawn as a background behind their name in the chat list and as the indicator ink on <code>[them]</code>, because there are no profile pictures and colour is the only identity signal left. The slot sits just under the name, and it is empty: nothing is drawn from it. It will have to satisfy five things, and they are constraints rather than choices: a fixed set of named colours, never a free picker, because sixteen colours and a chosen background behind body text is a contrast-bug generator and a named set is the only checkable form; a contrast floor against the body text, with the name staying in that text so colour only ever reinforces it, which is also why <code>Color::Indexed</code> is rejected; the cursor row winning against the person's colour, because reverse video belongs to the cursor alone and a colour drawn over it would hide the row the cursor is on; local state this program owns, keyed by the peer's identifier and kept in its own file, because Telegram has no field for it; and a light value beside the dark one, as every other colour in the table has, or it is the one thing in the interface with no light-terminal answer.
+  </p>
+
+  <p class="legend" data-od-id="transport">
+    <b>Both cards are one request.</b> <code>users.getFullUser</code> takes any <code>InputUser</code>: your own is <code>UserSelf</code>, a contact's is <code>User(id, access_hash)</code>, and the <code>access_hash</code> is already in the peer cache the chat list fills. The shared rule is that a row exists only when the peer says something, which is why a contact's birthday row is absent whenever their privacy hides it, and why the same rule governs an empty bio and a missing username. The one write is the escape hatch, and it forwards straight to the protocol layer. The full spec, the entry and exit table and the Esc ladder are in <code>design-system/DESIGN.md</code>.
+  </p>
+</div>
+<script src="televim-engine.js"></script>
+<script src="televim-ui.js"></script>
+</body>
+</html>

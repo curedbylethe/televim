@@ -72,9 +72,38 @@ test: ## Run all tests (all features, so the grammers-backed code is covered)
 audit: ## Audit dependencies for security vulnerabilities (requires cargo-audit)
 	$(CARGO) audit
 
+# --- Design ---
+# The design project is vendored under design/ and kept in step with the
+# OpenDesign project by scripts/design-sync.sh. `check` is part of `ci`, so two
+# copies of a screen cannot drift apart unnoticed. See design/README.md.
+.PHONY: design-check
+design-check: ## Verify the vendored design model, and diff it against OpenDesign
+	@cd design && node scripts/check-model.js
+	@scripts/design-sync.sh check || { \
+		if [ -z "$${OPEN_DESIGN_PROJECT:-}" ] && [ ! -d "$$HOME/Library/Application Support/Open Design/namespaces/release-stable/data/projects/televim-app" ]; then \
+			echo "⚠️  the OpenDesign half was SKIPPED: no project on this machine."; \
+			echo "    The vendored copy is verified above; only the diff against"; \
+			echo "    OpenDesign was not run. Set OPEN_DESIGN_PROJECT to check it."; \
+			exit 0; \
+		fi; \
+		exit 1; \
+	}
+
+.PHONY: design-pull
+design-pull: ## Copy the OpenDesign project's files into this repo
+	scripts/design-sync.sh pull
+
+.PHONY: design-push
+design-push: ## Copy this repo's design files into the OpenDesign project
+	scripts/design-sync.sh push
+
+.PHONY: design-specimen
+design-specimen: ## Rebuild the specimen's frame bodies from the engine
+	cd design && node design-system/build-specimen.js
+
 # --- CI / Pre-commit ---
 .PHONY: ci
-ci: fmt-check lint boundary test build-release ## Run all checks required for CI
+ci: fmt-check lint boundary test design-check build-release ## Run all checks required for CI
 	@echo "✅ CI checks passed!"
 
 .PHONY: clean

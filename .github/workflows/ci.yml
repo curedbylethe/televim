@@ -10,7 +10,7 @@ env:
 
 jobs:
   check:
-    name: fmt / lint / test / build-release
+    name: fmt / lint / test / design / build-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +44,14 @@ jobs:
       # datacenter skip themselves unless `TELEVIM_TEST_DC` is set.
       - name: test
         run: cargo test --all --all-features
+
+      # The vendored design model is verified here, and the diff against the
+      # OpenDesign project is not: a runner has no such project, so that half
+      # skips and says so. The point of running it at all is that the vendored
+      # copy's two invariants — every frame exactly 24x80, every hint inside the
+      # 71-column budget — hold in the repository rather than on one machine.
+      - name: design
+        run: make design-check
 
       - name: build-release
         run: cargo build --release

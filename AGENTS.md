@@ -66,7 +66,8 @@ televim/
     │   └── src/                # lib, account, chat, message, history, search,
     │                           #   session, updates, vim
     ├── tui/                    # ratatui widgets & input handling
-    │   └── src/                # lib, app, event, grapheme, theme, rows, wrap, widgets/
+    │   └── src/                # lib, app, card, event, grapheme, line, rows,
+    │                           #   text_row, theme, wrap, widgets/
     └── app/                    # Composition root & CLI binary
         ├── src/                # main, config, net, runtime
         └── tests/              # proto_integration.rs, tui_e2e.rs
@@ -587,7 +588,11 @@ disallowed-methods = [
 
 | Target | Does |
 | :----- | :--- |
-| `make ci` | `fmt-check lint boundary test build-release` — the whole gate |
+| `make ci` | `fmt-check lint boundary test design-check build-release` — the whole gate |
+| `make design-check` | fail if `design/` and the OpenDesign project differ; **skips loudly** when there is no project on the machine |
+| `make design-pull` | copy the OpenDesign project's files into the repo (after a design run) |
+| `make design-push` | copy the repo's design files into the OpenDesign project |
+| `make design-specimen` | rebuild the specimen's frame bodies from the engine |
 | `make fmt` / `fmt-check` | format, or check formatting |
 | `make lint` | `clippy --all-targets --all-features -- -D warnings` |
 | `make boundary` | asserts no `grammers` crate outside `telegram-framework` |
@@ -608,7 +613,8 @@ disallowed-methods = [
 2. `cargo clippy --all-targets --all-features -- -D warnings`
 3. `make boundary`
 4. `cargo test --all --all-features`
-5. `cargo build --release`
+5. `make design-check`
+6. `cargo build --release`
 
 `libdbus-1-dev` and `pkg-config` are installed first, because `keyring`'s Linux
 backend links against DBus at build time.
@@ -876,6 +882,31 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
   meaning at its own edge. Pane navigation moved to `Ctrl-w h`/`Ctrl-w l` for the
   same reason `h` cannot be both a motion and a pane: one key in two places is a key
   a reader learns twice.
+- **Why the design model is vendored into the repository:** it is the most faithful
+  model of every screen — 43 drivable scenes, each verified at exactly 24 rows by
+  80 columns, with a generator that rebuilds the specimen from them — and it was
+  living in an application data directory that is not a git repository.
+  OpenDesign keeps its own store of UUID-named files, which is an *undo* history
+  rather than a reviewable one: no branches, no diff on a screen, no pull request.
+  So the repo is the versioned record and OpenDesign is the working surface, and
+  `scripts/design-sync.sh` holds the two together with an explicit path map.
+  The two hand-written frame sets it replaced had **3 commits against 129**,
+  nothing referenced them, nothing measured them, and three of the eight already
+  described a panel the code no longer shipped — a record nobody maintains is not a
+  record.
+- **Why the design model is not a reference implementation:** `televim-engine.js` is
+  a third answer to "how tall is this message", beside `rows.rs` and `wrap.rs`, and
+  nothing keeps the three in step. **When the engine and the Rust disagree the Rust
+  is right.** A green engine run proves nothing about the binary: the behavioural
+  source of truth is the Rust's own `TestBackend` assertions, and the engine is the
+  *visual* one. `design/README.md` says so at the point of use, because the failure
+  mode is somebody "fixing" the engine when the program is what moved.
+- **Why the specimen is tracked even though its frames are generated:** it is a
+  document, not a generated file. Its headings, ledes and notes are hand-written and
+  the frame *bodies* inside it are written by `build-specimen.js`, so the prose is
+  the reason it is in git and the generator is what keeps the frames honest. It is
+  idempotent: run it and get no diff, and the committed specimen is already what the
+  engine produces.
 - **Why `anyhow` + `thiserror`:** `thiserror` for typed errors in `telegram-framework`, `proto`, and `domain`. `anyhow` at the `app` boundary.
 - **Why `ratatui` + `crossterm`:** `ratatui` is the UI layer; `crossterm` is the terminal I/O backend. They are complementary.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.
