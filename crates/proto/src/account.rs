@@ -1,6 +1,10 @@
-//! Reading the account's own profile.
+//! Reading a profile: the account's own, and a contact's.
 //!
-//! The account operation, which needs the framework's client.
+//! Two operations, which need the framework's client, and one translation between
+//! them. They are the same operation — `users.getFullUser` takes any `inputUser`
+//! and returns the same shape either way — so they share `translate` rather than
+//! each having one, because a field that survives the first and not the second is
+//! a card that shows a bio and not a birthday with nothing to say which.
 //!
 //! Thin on purpose: a field-by-field translation and nothing else. Every
 //! decision that could be wrong — what an empty username means, whether a
@@ -33,6 +37,33 @@ impl crate::ProtoClient {
             has_username = account.username.is_some(),
             has_bio = account.bio.is_some(),
             "read the account's own profile"
+        );
+
+        Ok(translate(account))
+    }
+
+    /// Reads a contact's profile.
+    ///
+    /// Fetched when the reader opens somebody's card rather than at start-up,
+    /// because there is one card the reader opens and not one profile — and
+    /// because a field their privacy hides is *absent* rather than empty, which a
+    /// card cannot report until it has asked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] if the request fails, if the peer is not
+    /// in the session's cache, or if the person has become a `userEmpty`. The
+    /// second of those is a fact about this client rather than about the
+    /// connection, and the card says which it is.
+    pub async fn fetch_user(&self, peer_id: i64) -> Result<Account, ProtoError> {
+        let account = self.inner().fetch_user(peer_id).await?;
+
+        tracing::debug!(
+            peer_id,
+            user_id = account.user_id,
+            has_username = account.username.is_some(),
+            has_bio = account.bio.is_some(),
+            "read a contact's profile"
         );
 
         Ok(translate(account))
@@ -114,6 +145,24 @@ mod tests {
                 year: Some(1815)
             })
         );
+    }
+
+    /// A contact whose privacy hides everything arrives sparse, and the card's
+    /// whole rule is *a row exists only when the peer says something* — so a
+    /// field that is absent has to stay absent rather than becoming an empty one.
+    /// An empty value is a row reading "not set", which is precisely the thing the
+    /// card is not supposed to draw.
+    #[test]
+    fn a_contact_who_says_nothing_translates_to_an_account_with_nothing_in_it() {
+        let contact = translate(framework(42));
+
+        assert_eq!(contact.user_id, 42);
+        assert_eq!(contact.display_name(), "Ada Lovelace");
+        assert_eq!(contact.username, None);
+        assert_eq!(contact.phone, None);
+        assert_eq!(contact.bio, None);
+        assert_eq!(contact.birthday, None);
+        assert!(!contact.has_bio(), "and an absent bio is not a bio");
     }
 
     /// A yearless birthday has to stay yearless through the translation: it is

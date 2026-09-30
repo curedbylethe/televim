@@ -167,15 +167,33 @@ pub enum FrameworkError {
     #[error("this client is already subscribed to its updates")]
     UpdatesAlreadySubscribed,
 
-    /// The answer to `users.getFullUser` did not carry the account's own user.
+    /// The answer to `users.getFullUser` did not carry the user it was asked for.
     ///
     /// Not a decoding failure — the response parsed — and not a network one
     /// either, so it gets its own answer rather than being folded into either.
     /// A reader told the connection failed would check a connection that is
     /// fine, and a reader told the response was unreadable would be looking for
     /// a bug in a client that did nothing wrong.
-    #[error("telegram did not return the account's own user")]
-    AccountMissing,
+    ///
+    /// The answer to a request for *your own* profile carries the one identifier
+    /// Telegram discloses in exactly one place, so this is the only way a client
+    /// that has never asked learns its own number. The same answer to a request
+    /// for somebody else means they have become a `userEmpty` — a person with a
+    /// number and nothing to say about themselves, which is not a profile. Both
+    /// are the same fact about the answer and the same thing to do about it: show
+    /// nothing rather than show a name nobody set.
+    #[error("telegram did not return a user for the profile that was asked for")]
+    ProfileMissing,
+
+    /// The peer is in the session's cache but is not a person.
+    ///
+    /// A group and a channel are addressable and have no `users.getFullUser` at
+    /// all, and `televim` drops both at the chat list — so this is unreachable
+    /// through the reader's own path and exists so that a caller who reaches a
+    /// profile by identifier is told the truth about it rather than watching
+    /// Telegram reject a request this client could have refused to send.
+    #[error("peer {0} is not a person, and only a person has a profile")]
+    NotAUser(i64),
 
     /// The conversation is not in the session's peer cache.
     ///

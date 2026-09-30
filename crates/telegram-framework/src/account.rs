@@ -24,6 +24,8 @@
 //! user, which is why the chat list skips such a peer rather than filing it
 //! under an identifier that would address nothing.
 
+use grammers_client::session::types::PeerRef;
+
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::tl;
@@ -106,9 +108,84 @@ impl Client {
     /// # }
     /// ```
     pub async fn fetch_account(&self) -> Result<Account, FrameworkError> {
-        let request = tl::functions::users::GetFullUser {
-            id: tl::enums::InputUser::UserSelf,
+        self.full_user(tl::enums::InputUser::UserSelf, "the account's own")
+            .await
+    }
+
+    /// Reads somebody else's profile.
+    ///
+    /// The same request as [`Client::fetch_account`] with a different argument,
+    /// because `users.getFullUser` takes any `inputUser`: yours is
+    /// `inputUserSelf` and a contact's is `inputUser(id, access_hash)`. The
+    /// `access_hash` is the only thing that has to be resolved first, and it is
+    /// not a new fetch — iterating the chat list is what puts every peer's into
+    /// the session's cache, and this reads it back out. So opening somebody's
+    /// card costs one request and no new knowledge of the peer.
+    ///
+    /// Read when the card is opened rather than at start-up, because there is one
+    /// card the reader opens and not one profile: a field a person's privacy
+    /// hides is *absent* rather than empty, and a card cannot say that until it
+    /// has asked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] if the peer is not in the session's
+    /// cache, which is a request this client cannot address rather than one
+    /// Telegram refused; [`FrameworkError::NotAUser`] if the cached peer is a group
+    /// or a channel, which has no profile to read at all; and the same two as
+    /// [`Client::fetch_account`] for a request that fails or an answer with no
+    /// user in it.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use telegram_framework::session::MemoryStore;
+    /// use telegram_framework::ClientBuilder;
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ClientBuilder::new(1234, "api-hash")
+    ///     .session_store(Box::new(MemoryStore::new()))
+    ///     .build()
+    ///     .await?;
+    ///
+    /// // The chat list first: it is what discloses the `access_hash` this needs.
+    /// client.fetch_dialogs().await?;
+    /// let contact = client.fetch_user(42).await?;
+    /// println!("{} {}", contact.first_name, contact.last_name);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn fetch_user(&self, peer_id: i64) -> Result<Account, FrameworkError> {
+        let Some(peer) = self.peer_ref(peer_id) else {
+            tracing::warn!(
+                peer_id,
+                "a profile was requested for a conversation that is not in the peer cache"
+            );
+            return Err(FrameworkError::UnknownPeer(peer_id));
         };
+
+        let Some(id) = input_user(peer) else {
+            tracing::warn!(
+                peer_id,
+                "a profile was requested for a peer that is not a person"
+            );
+            return Err(FrameworkError::NotAUser(peer_id));
+        };
+
+        self.full_user(id, "a contact's").await
+    }
+
+    /// The request both profile calls make, with the subject named for the log.
+    ///
+    /// One body rather than two, because the whole of `users.getFullUser` is the
+    /// reading: the argument differs and the subject differs, and a second copy
+    /// would be a second thing that can be wrong about how an answer is joined.
+    async fn full_user(
+        &self,
+        id: tl::enums::InputUser,
+        subject: &'static str,
+    ) -> Result<Account, FrameworkError> {
+        let request = tl::functions::users::GetFullUser { id };
 
         let response = self
             .inner()
@@ -117,8 +194,11 @@ impl Client {
             .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
 
         let Some(account) = account_from(response) else {
-            tracing::warn!("telegram answered users.getFullUser without the account's own user");
-            return Err(FrameworkError::AccountMissing);
+            tracing::warn!(
+                subject,
+                "telegram answered users.getFullUser without the user it was asked for"
+            );
+            return Err(FrameworkError::ProfileMissing);
         };
 
         // A call like this can cache a peer or move the datacenter, and that only
@@ -129,11 +209,26 @@ impl Client {
             user_id = account.user_id,
             has_username = account.username.is_some(),
             has_bio = account.bio.is_some(),
-            "read the account's own profile"
+            "read a profile"
         );
 
         Ok(account)
     }
+}
+
+/// The `inputUser` that names this peer, when the peer is a person.
+///
+/// `PeerRef` converts into an `InputUser` for any peer, and it answers `Empty`
+/// for a group and a channel and `UserSelf` for the account itself. Neither is
+/// an error the wire reports usefully, and building a request from either would
+/// be a request about somebody this caller did not ask about — so the conversion
+/// is checked rather than trusted.
+///
+/// A free function over a value rather than a step inside the request: that is
+/// what makes the one decision in this call testable without a datacenter.
+fn input_user(peer: PeerRef) -> Option<tl::enums::InputUser> {
+    let input: tl::enums::InputUser = (&peer).into();
+    matches!(input, tl::enums::InputUser::User(_)).then_some(input)
 }
 
 /// Joins a `userFull` and the `user` of the same identifier into one account.
@@ -224,6 +319,7 @@ fn birthday(raw: Option<&tl::enums::Birthday>) -> Option<Birthday> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grammers_client::session::types::{PeerAuth, PeerId};
 
     /// A user Telegram has nothing to say about, which still has an identifier.
     fn empty(id: i64) -> tl::enums::User {
@@ -281,6 +377,43 @@ mod tests {
         for year in [Some(0), Some(-1815), None] {
             let kept = birthday(Some(&born(1, 1, year))).expect("1 January is a date");
             assert_eq!(kept.year, None, "year={year:?} is not a year");
+        }
+    }
+
+    /// Only a person has a profile, and the conversion says so rather than sending
+    /// a request Telegram will reject.
+    ///
+    /// A group and a channel convert to `InputUser::Empty` and the account itself
+    /// to `InputUser::UserSelf`; both would name somebody this caller did not ask
+    /// about, and the second would quietly answer the *wrong* question rather
+    /// than fail. `televim` drops groups and channels at the chat list, so this is
+    /// not reachable through the reader's own path — which is exactly why it is
+    /// worth a test that it would still be refused.
+    #[test]
+    fn only_a_person_becomes_an_input_user() {
+        let input = input_user(PeerRef {
+            id: PeerId::user(42).expect("42 is in the user range"),
+            auth: PeerAuth::from_hash(7),
+        })
+        .expect("a person has a profile to read");
+        let tl::enums::InputUser::User(user) = input else {
+            panic!("a person addresses as inputUser(id, access_hash)");
+        };
+        assert_eq!((user.user_id, user.access_hash), (42, 7));
+
+        for not_a_person in [
+            PeerId::chat(42).expect("42 is in the chat range"),
+            PeerId::channel(42).expect("42 is in the channel range"),
+            PeerId::self_user(),
+        ] {
+            assert_eq!(
+                input_user(PeerRef {
+                    id: not_a_person,
+                    auth: PeerAuth::from_hash(7)
+                }),
+                None,
+                "peer {not_a_person:?} is not a person"
+            );
         }
     }
 
