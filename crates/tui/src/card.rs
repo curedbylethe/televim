@@ -55,6 +55,17 @@ use crate::wrap;
 /// value moves as the value changes, so the cue is what holds the column.
 const CUE: &str = "·";
 
+/// The label of the row that would add another account. Refuses: there is nowhere
+/// to sign in from.
+///
+/// Named rather than written where it is needed because the key handler matches on
+/// it, and a literal in two places is a way to spell the same row two ways — which
+/// is what the enum these replace was guarding against.
+pub const ADD_ACCOUNT: &str = "add account";
+
+/// The label of the row that signs out. Confirms, then refuses.
+pub const LOGOUT: &str = "logout";
+
 /// Where the cue, the label and the value start, measured from the panel's border.
 ///
 /// Fixed rather than measured, because a label column that moved with the longest
@@ -198,8 +209,8 @@ fn self_rows(app: &App) -> Vec<CardRow> {
     }
     rows.push(CardRow::value("id", format!("id {}", account.user_id)));
     rows.push(CardRow::value("session", session(&app.session_store)));
-    rows.push(CardRow::action("add account"));
-    rows.push(CardRow::action("logout"));
+    rows.push(CardRow::action(ADD_ACCOUNT));
+    rows.push(CardRow::action(LOGOUT));
     rows
 }
 
@@ -503,6 +514,23 @@ mod tests {
     fn only_an_action_row_is_something_d_can_act_on() {
         assert!(CardRow::action("logout").is_action());
         assert!(!CardRow::value("name", "Ada").is_action());
+    }
+
+    /// The only rows `d` can act on are the two named actions, and they are named
+    /// by the constants the key handler matches on.
+    ///
+    /// The two subjects differ by exactly this much, so it is the one thing about
+    /// the rows that must not grow quietly: a third action is a key that needs a
+    /// hint, a confirmation or a refusal, and this is where it would show up.
+    #[test]
+    fn the_only_rows_d_can_act_on_are_the_two_named_actions() {
+        let app = App::mock();
+        let actions: Vec<&str> = rows(&app)
+            .iter()
+            .filter(|row| row.is_action())
+            .map(|row| row.label)
+            .collect();
+        assert_eq!(actions, [ADD_ACCOUNT, LOGOUT]);
     }
 
     /// An action's text is the action's own name, which is why the label is not

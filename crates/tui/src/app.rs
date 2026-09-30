@@ -365,36 +365,6 @@ pub enum SessionStore {
 ///
 /// The kinds rather than the labels, because the label is a display concern and
 /// the kind is the panel's data model — which rows exist depends on what the
-/// account set, and the keys have to be able to ask what is under the highlight
-/// without drawing it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProfileRow {
-    /// The account's name.
-    Name,
-
-    /// The username and the phone number, on one row.
-    Identity,
-
-    /// The bio, which may take as many rows as it needs.
-    Bio,
-
-    /// When the account was born, if it says.
-    Birthday,
-
-    /// The bare identifier, which is what tells two accounts with the same name
-    /// apart.
-    UserId,
-
-    /// Where the session is kept.
-    Session,
-
-    /// Adding another account. Refuses: there is nowhere to sign in from.
-    AddAccount,
-
-    /// Signing out. Confirms, then refuses.
-    Logout,
-}
-
 /// A conversation the reader has highlighted and asked to be taken to.
 ///
 /// The index and the moment it was chosen, rather than the index alone: the
@@ -1216,40 +1186,6 @@ impl App {
         self.session_store = store;
     }
 
-    /// The rows the profile panel is showing, in order.
-    ///
-    /// Computed rather than held: which rows exist depends on what the account
-    /// set, and a held list would be a second thing to keep in step with it.
-    /// Empty whenever the profile is not known, because there is then nothing to
-    /// put a highlight on.
-    #[must_use]
-    pub fn profile_rows(&self) -> Vec<ProfileRow> {
-        let AccountState::Known(account) = &self.account else {
-            return Vec::new();
-        };
-
-        let mut rows = vec![ProfileRow::Name, ProfileRow::Identity];
-        if account.has_bio() {
-            rows.push(ProfileRow::Bio);
-        }
-        if account.birthday.is_some() {
-            rows.push(ProfileRow::Birthday);
-        }
-        rows.extend([
-            ProfileRow::UserId,
-            ProfileRow::Session,
-            ProfileRow::AddAccount,
-            ProfileRow::Logout,
-        ]);
-        rows
-    }
-
-    /// The row under the profile's highlight.
-    #[must_use]
-    pub fn profile_row(&self) -> Option<ProfileRow> {
-        self.profile_rows().get(self.profile_vim.cursor()).copied()
-    }
-
     /// Where the profile's highlight is, for the panel to draw.
     #[must_use]
     pub fn profile_cursor(&self) -> usize {
@@ -1351,6 +1287,19 @@ impl App {
     #[cfg(test)]
     pub(crate) fn any_chat(&self) -> Option<domain::chat::Chat> {
         self.list.chats.first().cloned()
+    }
+
+    /// Whether the card's highlight is on the row with this label.
+    ///
+    /// Walked to by label rather than by index, because a row that is *absent* is
+    /// the whole rule — a test that asked for row 4 would be asserting that the
+    /// row after `bio` is `birthday`, which is false for every account whose
+    /// privacy hides one of them.
+    #[cfg(test)]
+    pub(crate) fn on_card_row(&self, label: &str) -> bool {
+        crate::card::rows(self)
+            .get(self.profile_cursor())
+            .is_some_and(|row| row.label == label)
     }
 
     /// The moving end of a card selection: the cursor row and the inline position.
@@ -1654,29 +1603,38 @@ impl App {
     /// button. The rows that are neither of the two actions do nothing, and the
     /// panel draws them dim so that a key with nothing to do is not a surprise.
     fn activate_profile_row(&mut self) {
+        // The row is whatever `card::rows` says the panel is drawing, rather than
+        // a second enumeration of it. A key that acted on its own list could act
+        // on a row the panel is not showing, and that failure is silent: no
+        // message, no wrong frame, just a key that did the wrong thing.
+        let Some(row) = crate::card::rows(self)
+            .get(self.profile_cursor())
+            .map(|row| (row.is_action(), row.label))
+        else {
+            return;
+        };
+        let (is_action, label) = row;
+
         // A contact's card has no row to act on, and the refusal says *which* of
         // the two reasons applies: a value row is not something to act on, and a
         // card with no actions at all is the contact's. They read as one message
         // because a reader who pressed `d` wants to know it will not happen.
         if let crate::card::CardSubject::Contact(_) = self.card_subject()
-            && !matches!(
-                self.profile_row(),
-                Some(ProfileRow::Logout | ProfileRow::AddAccount)
-            )
+            && !is_action
         {
             self.flash(NOT_YOURS_REFUSAL);
             return;
         }
-        match self.profile_row() {
+        match label {
             // A deliberate refusal rather than a failure. The bracketed
             // `[failed: …]` form is for something that tried and did not come
             // back, and nothing was sent.
-            Some(ProfileRow::AddAccount) => self.flash(ADD_ACCOUNT_REFUSAL),
+            crate::card::ADD_ACCOUNT => self.flash(ADD_ACCOUNT_REFUSAL),
             // Confirm first and refuse inside the confirmation. A panel that
             // flashes instead of confirming has taught the reader the wrong
             // thing about a key that will eventually discard the one secret this
             // program holds.
-            Some(ProfileRow::Logout) => {
+            crate::card::LOGOUT => {
                 self.mode = Mode::Confirm;
                 self.confirm = Some(ConfirmKind::Logout);
             }
@@ -6036,7 +5994,7 @@ mod tests {
     #[test]
     fn a_profile_row_with_nothing_to_do_changes_nothing() {
         let mut app = profile();
-        assert_eq!(app.profile_row(), Some(ProfileRow::Name));
+        assert!(app.on_card_row("name"));
 
         app.handle_key(press(KeyCode::Char('d')));
 
@@ -6050,7 +6008,7 @@ mod tests {
     #[test]
     fn a_profile_row_never_queues_a_deletion() {
         let mut app = profile();
-        while app.profile_row() != Some(ProfileRow::Logout) {
+        while !app.on_card_row(crate::card::LOGOUT) {
             app.handle_key(press(KeyCode::Char('j')));
         }
 
@@ -6061,6 +6019,36 @@ mod tests {
         assert!(
             app.take_action().is_none(),
             "and answering it queues nothing"
+        );
+    }
+
+    /// The keys walk the rows the panel is drawing.
+    ///
+    /// There used to be a second enumeration of the card's rows — a bare enum the
+    /// keys asked instead of the panel — and the two agreed only because both were
+    /// built from the same field. The failure was never a crash: it was a key that
+    /// acted on a row the panel was not showing, or a row nothing could reach.
+    /// Walking the card and comparing the two lists is the assertion that catches
+    /// it, and the reason this test walks by `j` rather than by index: an index
+    /// would match even if the two lists were ordered differently.
+    #[test]
+    fn the_keys_walk_the_rows_the_panel_is_drawing() {
+        let mut app = profile();
+        let drawn: Vec<&'static str> = crate::card::rows(&app)
+            .iter()
+            .map(|row| row.label)
+            .collect();
+        assert!(drawn.len() > 2, "the mock account has rows: {drawn:?}");
+
+        let mut walked = Vec::new();
+        for _ in 0..drawn.len() {
+            walked.push(crate::card::rows(&app)[app.profile_cursor()].label);
+            app.handle_key(press(KeyCode::Char('j')));
+        }
+
+        assert_eq!(
+            walked, drawn,
+            "`j` walked a different list than the panel drew"
         );
     }
 
@@ -6187,7 +6175,7 @@ mod tests {
     #[test]
     fn add_account_refuses_and_says_what_it_cannot_do() {
         let mut app = profile();
-        while app.profile_row() != Some(ProfileRow::AddAccount) {
+        while !app.on_card_row(crate::card::ADD_ACCOUNT) {
             app.handle_key(press(KeyCode::Char('j')));
         }
         app.handle_key(press(KeyCode::Char('d')));
@@ -6206,7 +6194,7 @@ mod tests {
     #[test]
     fn logout_confirms_before_it_refuses() {
         let mut app = profile();
-        while app.profile_row() != Some(ProfileRow::Logout) {
+        while !app.on_card_row(crate::card::LOGOUT) {
             app.handle_key(press(KeyCode::Char('j')));
         }
         app.handle_key(press(KeyCode::Char('d')));
@@ -6238,19 +6226,19 @@ mod tests {
         }));
         app.handle_key(press(KeyCode::Char('S')));
 
-        let rows = app.profile_rows();
-        assert!(!rows.contains(&ProfileRow::Bio));
-        assert!(!rows.contains(&ProfileRow::Birthday));
-        assert!(rows.contains(&ProfileRow::Name));
+        let rows = crate::card::rows(&app);
+        assert!(!rows.iter().any(|row| row.label == "bio"));
+        assert!(!rows.iter().any(|row| row.label == "birthday"));
+        assert!(rows.iter().any(|row| row.label == "name"));
         assert_eq!(
-            rows.last(),
-            Some(&ProfileRow::Logout),
+            rows.last().map(|row| row.label),
+            Some(crate::card::LOGOUT),
             "the actions are last"
         );
         // The highlight counts the rows that exist, not the ones that would: six
         // rows here, and the two that are missing leave no gap for `j` to land in.
-        assert_eq!(app.profile_rows().len(), 6);
-        assert_eq!(app.profile_row(), Some(ProfileRow::Name));
+        assert_eq!(rows.len(), 6);
+        assert!(app.on_card_row("name"));
     }
 
     #[test]

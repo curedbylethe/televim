@@ -24,5 +24,5 @@ pub mod wrap;
 
 pub use app::{
     AccountState, Action, App, ConfirmKind, FetchDirection, Focus, Jump, Mode, Pane, ProfileId,
-    ProfileRow, PromptKind, Register, SessionStore,
+    PromptKind, Register, SessionStore,
 };
