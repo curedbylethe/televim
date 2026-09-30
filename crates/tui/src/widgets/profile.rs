@@ -73,7 +73,36 @@ fn border(app: &App) -> Style {
 }
 
 /// The lines for a card with no rows: the two states in which that happens.
+///
+/// **A contact's two states are the account's with their own words.** The
+/// account's first line is `not signed in` because its problem is credentials;
+/// putting that on a failed profile read would send a reader to check something
+/// that is not the problem. Neither borrows the other's wording, and the
+/// difference is the only thing that tells a reader which of the two they are
+/// looking at.
 fn shell(app: &App, width: u16) -> Vec<Line<'_>> {
+    if let Some(contact) = app.contact() {
+        return match &contact.state {
+            AccountState::Unfetched => vec![Line::from(Span::styled(
+                "reading their profile…",
+                app.theme.text_dim,
+            ))],
+            // The reason for the same reason the account's is, and more so here: a
+            // clipped reason is a reason the reader cannot act on, and the whole
+            // point of drawing it rather than an empty card is that they can.
+            AccountState::Unavailable(reason) => {
+                let mut lines = vec![Line::from(Span::styled(
+                    "could not read this profile",
+                    app.theme.text,
+                ))];
+                lines.extend(wrapped(&app.theme.text_dim, reason, width));
+                lines
+            }
+            // Known, so `card::rows` had rows and this was never called.
+            AccountState::Known(_) => Vec::new(),
+        };
+    }
+
     match &app.account {
         AccountState::Unfetched => vec![Line::from(Span::styled(
             "reading the account…",

@@ -343,6 +343,21 @@ pub enum AccountState {
     Known(domain::account::Account),
 }
 
+/// Somebody the reader is talking to, and what is known about them.
+///
+/// The same three states as the account's own and for the same reason: a card
+/// that has not asked yet, one that asked and could not be told, and one that
+/// was told. What differs is only the wording the panel uses, because the
+/// account's first line is about credentials and a contact's is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContactProfile {
+    /// Bare identifier of the person, which is what an answer is matched back on.
+    pub peer_id: i64,
+
+    /// Unfetched, unavailable, or known — the same three as the account's.
+    pub state: AccountState,
+}
+
 /// Where the session is kept, as the panel says it.
 ///
 /// Derived from the same configuration the session store itself is built from, so
@@ -566,6 +581,18 @@ pub enum Action {
         message_ids: Vec<i64>,
     },
 
+    /// Read the profile of the peer with this bare identifier.
+    ///
+    /// A question rather than a fetch, for the same reason as [`Action::Search`]:
+    /// it does not touch the conversation's window or its cursor, and its answer
+    /// is matched back to the card that asked for it. One per card opened, because
+    /// a card is opened, read and closed, and the alternative is a cache of
+    /// profiles for people the reader glanced at and moved on from.
+    FetchContact {
+        /// Bare identifier of the person to read.
+        peer_id: i64,
+    },
+
     /// Search `chat_id` for `query`.
     ///
     /// A question rather than a fetch: it does not touch the window or the
@@ -723,6 +750,13 @@ pub struct App {
     /// of it. Reusing the type is what makes `v` one keystroke here as it is
     /// there, rather than a second selection model beside the first.
     profile_visual: Option<domain::selection::Mark>,
+
+    /// The contact whose profile the card on show is about, if it is about one.
+    ///
+    /// One at a time rather than one per person: a card is opened, read and
+    /// closed, so a map would be a cache with no reader. The `peer_id` is what
+    /// lets an answer be matched back to the card that asked for it.
+    contact: Option<ContactProfile>,
 
     /// A count typed before a motion, as `12j` means twelve.
     profile_count: Option<u32>,
@@ -918,6 +952,7 @@ impl App {
             profile_caret: 0,
             profile_visual: None,
             profile_count: None,
+            contact: None,
             profile_pending_w: false,
             list: ChatList::default(),
             selected_chat: 0,
@@ -1176,6 +1211,45 @@ impl App {
         };
     }
 
+    /// The contact the card on show is about, if it is about one.
+    ///
+    /// `None` for the account's own card, which is what tells the card whether
+    /// there is a second subject's data at all.
+    #[must_use]
+    pub fn contact(&self) -> Option<&ContactProfile> {
+        self.contact.as_ref()
+    }
+
+    /// Records what a contact's profile read came back with.
+    ///
+    /// The only writer of a contact's state, for the same reason `set_account` is
+    /// the only writer of the account's: three states that cannot be mixed up by a
+    /// caller that knows only one of them.
+    ///
+    /// An answer about somebody the card is not on show for is dropped. The
+    /// reader may open a second card while the first read is in flight, and the
+    /// second card's fields are not the first one's.
+    pub fn set_contact(&mut self, peer_id: i64, profile: Result<Account, String>) {
+        let Some(open) = self.contact.as_ref().filter(|open| open.peer_id == peer_id) else {
+            return;
+        };
+        self.contact = Some(ContactProfile {
+            peer_id: open.peer_id,
+            state: match profile {
+                Ok(account) => AccountState::Known(account),
+                Err(reason) => AccountState::Unavailable(reason),
+            },
+        });
+        // The highlight is re-sized because the row count just changed under it.
+        // The account's own card is read once at start-up, so its rows are settled
+        // before the card opens; a contact's card is drawn with *no* rows until
+        // this answer arrives, and a highlight bounded over zero rows can never be
+        // moved afterwards — `j` clamps to a buffer of nothing. Re-clamping rather
+        // than resetting keeps the reader where they were, which here is the top.
+        self.profile_vim
+            .set_total(crate::card::navigable(&crate::card::rows(self)));
+    }
+
     /// Records where the session is kept.
     ///
     /// Its own setter rather than a field of `set_account`, because it is known
@@ -1367,6 +1441,18 @@ impl App {
     /// question they did not ask.
     pub(crate) fn open_card(&mut self, subject: ProfileId) {
         self.profile_subject = subject;
+        // One read per card opened, asked for here rather than by the panel: the
+        // panel draws what it has, and the reader asked a question by pressing `A`.
+        self.contact = match subject {
+            ProfileId::User(peer_id) => {
+                self.queue_action(Action::FetchContact { peer_id });
+                Some(ContactProfile {
+                    peer_id,
+                    state: AccountState::Unfetched,
+                })
+            }
+            ProfileId::SelfAccount => None,
+        };
         // Over the rows that are drawn, not over every row there is: a held slot
         // at the end of a card is not somewhere the highlight goes.
         self.profile_vim = VimState::new(crate::card::navigable(&crate::card::rows(self)));
@@ -1579,7 +1665,50 @@ impl App {
         // `apply_motion` on the result would move the row twice — which is a bug
         // that looks like a card with one more row than it has.
         self.profile_vim.handle_char(c);
+        self.off_reserved(matches!(c, 'j' | 'G'));
         self.profile_caret = 0;
+    }
+
+    /// Steps the row cursor off a held slot.
+    ///
+    /// A held slot draws nothing, so a highlight landing on one would be a
+    /// highlight the reader cannot see and a value they cannot read. Stepping is
+    /// needed rather than bounding alone because the colour slot is *interior* on
+    /// a contact's card: the name is above it and the identity and everything
+    /// after it are below.
+    ///
+    /// Bounded by the row count, and it scans the other way as well as the way
+    /// the reader was going — a card that is nothing but held slots should leave
+    /// the highlight on a real row rather than on nothing, and there is no reason
+    /// to prefer one end to the other.
+    fn off_reserved(&mut self, forward: bool) {
+        let rows = crate::card::rows(self);
+        let last = rows.len().saturating_sub(1);
+        let start = self.profile_vim.cursor().min(last);
+        if !rows
+            .get(start)
+            .is_some_and(crate::card::CardRow::is_reserved)
+        {
+            return;
+        }
+
+        for ahead in [forward, !forward] {
+            let mut cursor = start;
+            for _ in 0..rows.len() {
+                if !rows
+                    .get(cursor)
+                    .is_some_and(crate::card::CardRow::is_reserved)
+                {
+                    self.profile_vim.set_cursor(cursor);
+                    return;
+                }
+                cursor = if ahead {
+                    cursor + 1
+                } else {
+                    cursor.saturating_sub(1)
+                };
+            }
+        }
     }
 
     /// A count before a motion, as `12j` means twelve.
@@ -1605,28 +1734,27 @@ impl App {
     /// button. The rows that are neither of the two actions do nothing, and the
     /// panel draws them dim so that a key with nothing to do is not a surprise.
     fn activate_profile_row(&mut self) {
+        // A contact's card has no row that acts, and that is decided by *who it is
+        // about* rather than by which row the cursor is on — so the refusal comes
+        // before the row is looked for. A card whose profile has not been read has
+        // no rows at all, and a key that means "you cannot" has to say so there
+        // too: swallowing it is the one thing such a key must not do.
+        if let crate::card::CardSubject::Contact(_) = self.card_subject() {
+            self.flash(NOT_YOURS_REFUSAL);
+            return;
+        }
+
         // The row is whatever `card::rows` says the panel is drawing, rather than
         // a second enumeration of it. A key that acted on its own list could act
         // on a row the panel is not showing, and that failure is silent: no
         // message, no wrong frame, just a key that did the wrong thing.
-        let Some(row) = crate::card::rows(self)
+        let Some(label) = crate::card::rows(self)
             .get(self.profile_cursor())
-            .map(|row| (row.is_action(), row.label))
+            .filter(|row| row.is_action())
+            .map(|row| row.label)
         else {
             return;
         };
-        let (is_action, label) = row;
-
-        // A contact's card has no row to act on, and the refusal says *which* of
-        // the two reasons applies: a value row is not something to act on, and a
-        // card with no actions at all is the contact's. They read as one message
-        // because a reader who pressed `d` wants to know it will not happen.
-        if let crate::card::CardSubject::Contact(_) = self.card_subject()
-            && !is_action
-        {
-            self.flash(NOT_YOURS_REFUSAL);
-            return;
-        }
         match label {
             // A deliberate refusal rather than a failure. The bracketed
             // `[failed: …]` form is for something that tried and did not come

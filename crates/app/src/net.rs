@@ -134,6 +134,19 @@ pub enum Event {
         result: Result<Vec<Message>, ProtoError>,
     },
 
+    /// A contact's profile came back, or the read failed.
+    ///
+    /// The `peer_id` is the card that asked, and a card the reader has since left
+    /// is not the one this answer belongs to — which is checked when it is applied
+    /// rather than here, because only the screen knows which card is on show.
+    Contact {
+        /// Bare identifier of the person who was asked about.
+        peer_id: i64,
+
+        /// Their profile, or why there is not one.
+        result: Result<domain::account::Account, ProtoError>,
+    },
+
     /// A send came back, or the request failed.
     Sent {
         /// The conversation it was sent to, so a result the reader has left can
@@ -644,6 +657,15 @@ fn request_action(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSende
                 }));
             }
 
+            // A profile is a question about a person rather than an operation on
+            // a conversation, for the same reason as the search below, and it shares
+            // this task's shape for the same reason: a round trip here would stop
+            // the reader's keystrokes being read while it runs.
+            Action::FetchContact { peer_id } => {
+                let result = client.fetch_user(peer_id).await;
+                let _ = tx.send(AppEvent::Net(Event::Contact { peer_id, result }));
+            }
+
             // A search is not an operation on the conversation's messages: it
             // asks a question and returns places. It shares this task's shape
             // for the same reason as the three above — a round trip here would
@@ -673,6 +695,14 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             app.set_session_store(session_store);
             app.set_account(account);
             state.client = Some(client);
+        }
+
+        // A contact's profile, and nothing else: no status and no cursor. The
+        // card is already on show and already says it is waiting, so the answer
+        // fills it in — and an answer for a card the reader has left is dropped by
+        // `set_contact`, which is the only place that knows which card is on show.
+        Event::Contact { peer_id, result } => {
+            app.set_contact(peer_id, result.map_err(|error| format!("{error:#}")));
         }
 
         // The panel is told too, not only the status line. A status is a flash:

@@ -706,12 +706,26 @@ Working today:
   contact's card `d` refuses, because that card has no row to act on. Read once at
   start-up, not on open: a panel that blanked and refilled every time would be one
   the reader could not trust. With no credentials it says so, and says why.
-- **A contact's card has one row today.** The card is one widget over two subjects
-  and the *model* is finished, but the transport is not built: `App` holds a
-  `Chat`, which carries a title and a kind and nothing else about the person, so
-  the one row a card can show is the one the chat list already knows. The fetch is
-  one call either way — `users.getFullUser` takes any `InputUser` and a contact's
-  `access_hash` is already in the peer cache — and it is the named next step.
+- **A contact's card reads their profile, and says so until it arrives.** `A`
+  queues a `users.getFullUser` for the person the highlight is on, and the card
+  draws **no rows at all** until the answer lands — a shell sentence naming them
+  and saying it is reading, or a shell sentence saying why it could not be read.
+  Half a card that fills in is a card the reader has to believe a moment before
+  they do not have to, and a shell is the one thing that says what it is waiting
+  for. The two shell sentences are the account's with their own wording: the
+  account's first line is `not signed in` because its problem is credentials, and
+  putting that on a failed profile read would send a reader to check something
+  that is not the problem.
+  A contact's rows are the ones **they** said, and a field their privacy hides is
+  *absent* rather than empty — so the identity row degrades to the username alone
+  and to **no row at all** when there is neither, which is not what your own card
+  does. Your own card writes `not set`, because you always have a phone number and
+  a missing one is a fact; a contact who sets no username has not told you
+  something is wrong with them. The count in the title is what makes the
+  difference visible.
+  One read per card opened, dropped when the card is no longer on show, because a
+  round trip is long enough that opening a second card first is the normal case
+  rather than a race.
 - **Authentication:** MTProto login with 2FA, session stored in the OS keyring
   (or a file, per `session_path`).
 - **Chat List:** private chats only, filtered to exclude bots, groups and
@@ -966,14 +980,16 @@ Real, and named so they are not mistaken for oversights:
   and the username loses silently. The design's five constraints for the picker — a
   fixed named set, a contrast floor against `--text`, the chat list's cursor row
   winning, a light-terminal value, local state keyed by the peer's id — are in
-  `DESIGN.md`. One thing to know when the transport lands: `card::navigable` bounds
-  the highlight past a slot at the *end* of a card, which is all that needs today,
-  and the moment a row is added *after* the slot `j`/`k` must step over it.
-- **A contact's card shows one row.** See the feature list: the model is two
-  subjects and the data is one field, because `users.getFullUser` for a contact is
-  not called yet. Everything absent is *absent* rather than empty, which is the
-  rule the account's own card follows too, so the shape is right and only the rows
-  are missing.
+  `DESIGN.md`. The slot is *interior* on a contact's card, so `j` and `k` step over
+  it, and `card::navigable` bounds the highlight past a slot at the end.
+- **The join of a `userFull` to its `user` is unasserted.** Every decision it makes
+  is tested at the level it can be written at — an empty `about` is not a bio, an
+  empty username is not a username, a date that is not a date is dropped, a
+  `userEmpty` is not a profile — but the two objects are not joined in a test.
+  Layer 227's `tl::types::UserFull` is 58 fields with no `Default`, so the fixture
+  would be a 58-field literal that breaks on every schema bump and reads as noise.
+  The `live` integration test in `app/tests/proto_integration.rs` is the other end
+  of it, and it needs a datacenter.
 - **`add account` and `logout` are rows that refuse.** `add account` flashes
   `not yet: this build cannot add an account`; `logout` raises
   `Sign out and forget this session? (y/n)` first and refuses inside it. Both are

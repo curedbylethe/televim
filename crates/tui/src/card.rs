@@ -206,7 +206,7 @@ impl CardRow {
 pub fn rows(app: &App) -> Vec<CardRow> {
     match app.card_subject() {
         CardSubject::SelfAccount => self_rows(app),
-        CardSubject::Contact(chat) => contact_rows(chat),
+        CardSubject::Contact(_) => contact_rows(app),
     }
 }
 
@@ -261,7 +261,13 @@ fn self_rows(app: &App) -> Vec<CardRow> {
 
     let mut rows = vec![
         CardRow::value("name", account.display_name()),
-        CardRow::value("username", identity(account)),
+        // `not set` rather than no row, and the two are not the same thing here.
+        // The account always has a phone number, so a missing one is a fact about
+        // the reader's own account and a row worth drawing; see `identity`.
+        CardRow::value(
+            "username",
+            identity(account).unwrap_or_else(|| "not set".to_owned()),
+        ),
     ];
     if let Some(bio) = account.bio.as_deref().filter(|_| account.has_bio()) {
         rows.push(CardRow::value("bio", bio.to_owned()));
@@ -278,22 +284,40 @@ fn self_rows(app: &App) -> Vec<CardRow> {
 
 /// A contact's rows.
 ///
-/// The same request either way — `users.getFullUser` takes any `InputUser`, and a
-/// contact's `access_hash` is already in the peer cache the chat list fills — so
-/// the transport is one call for both subjects. **What is not built is the fetch:**
-/// `App` holds a `Chat`, which carries a title and a kind and nothing else about
-/// the person, so the one row a card can show is the one the chat list already
-/// knows. Every other row is *absent* rather than empty, which is the shared rule
-/// [`self_rows`] follows and the reason the count in the title is worth reading.
-fn contact_rows(chat: &domain::chat::Chat) -> Vec<CardRow> {
-    vec![
-        CardRow::value("name", chat.title.clone()),
+/// **No rows at all until the profile has been read.** The card shows the panel's
+/// two shell sentences instead, and that is the whole difference between this and
+/// a card that drew the name and then filled in: the reader pressed `A` to ask a
+/// question, and a card that answers half of it is a card that has to be believed
+/// a moment before it is. The account's own card is read once at start-up for the
+/// same reason — a panel that blanked and refilled every time would be one the
+/// reader could not trust — and a contact's card is read once per open.
+///
+/// The name is the one row the chat list already knows, and it is drawn *from the
+/// profile* rather than from the chat, so that a name the peer has since changed
+/// is the name they have now.
+fn contact_rows(app: &App) -> Vec<CardRow> {
+    let Some(AccountState::Known(account)) = app.contact().map(|c| &c.state) else {
+        return Vec::new();
+    };
+
+    let mut rows = vec![
+        CardRow::value("name", account.display_name()),
         // The design's per-peer colour, held and not built. It sits here and not
         // at the end because a colour is something a reader *scans* — it is the
         // thing they are looking for when they open somebody at all — so a field
         // that means to be seen belongs above the identity, not below it.
         CardRow::reserved(COLOUR),
-    ]
+    ];
+    if let Some(identity) = identity(account) {
+        rows.push(CardRow::value("username", identity));
+    }
+    if let Some(bio) = account.bio.as_deref().filter(|_| account.has_bio()) {
+        rows.push(CardRow::value("bio", bio.to_owned()));
+    }
+    if let Some(birthday) = birthday(account.birthday) {
+        rows.push(CardRow::value("birthday", birthday));
+    }
+    rows
 }
 
 /// The label of the held slot, which is the design's per-peer colour.
@@ -308,7 +332,17 @@ const COLOUR: &str = "colour";
 /// One line rather than three, because the identity is one thing and a reader
 /// scanning for "which account is this" wants one line to find it on. The `·` is
 /// the title-note joiner the status line and the chat list already use.
-fn identity(account: &domain::account::Account) -> String {
+///
+/// `None` when the account gave neither part, and **the two subjects read that
+/// differently on purpose**. For your own account it is a row saying `not set`,
+/// because you always have a phone number and a missing one is a fact. For a
+/// contact it is *no row at all*, because most people do not set a username and
+/// their phone number is hidden by their own privacy — and a card that wrote
+/// `not set` under a person's name would be telling a reader that something about
+/// them is missing when what is missing is only the answer. The card's rule is
+/// that a row exists when the peer says something, and a contact who says nothing
+/// about their identity has said that.
+fn identity(account: &domain::account::Account) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(username) = account.username.as_deref() {
         parts.push(format!("@{username}"));
@@ -316,11 +350,7 @@ fn identity(account: &domain::account::Account) -> String {
     if let Some(phone) = account.phone.as_deref() {
         parts.push(phone.to_owned());
     }
-    if parts.is_empty() {
-        "not set".to_owned()
-    } else {
-        parts.join(" · ")
-    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// A birthday as a reader would write it.
@@ -382,7 +412,10 @@ pub fn title(app: &App) -> String {
     let drawn = |row: &&CardRow| !row.is_reserved();
     let total = all.iter().filter(drawn).count();
     if total == 0 {
-        return " Profile ".to_owned();
+        // The subject even here. A card that is drawing a sentence because it has
+        // no rows yet is the card where naming the subject matters most — it is
+        // the one a reader is waiting to see the right name on.
+        return format!(" Profile · {} ", app.card_subject().name());
     }
     let before = app.profile_cursor().min(all.len());
     let cursor = all[..before].iter().filter(drawn).count() + 1;
@@ -582,11 +615,16 @@ mod tests {
         assert_eq!(birthday(None), None);
     }
 
-    /// An identity the account gave neither part of is a row that says so, because
-    /// the row exists to say whether there is one.
+    /// An identity the account gave one part of is that part, and an identity it
+    /// gave none of is a row that says so — **for your own account**.
+    ///
+    /// The two subjects read the same `None` differently and the test says both,
+    /// because the difference is the whole of it: you always have a phone number,
+    /// so a missing one is a fact worth drawing, and a contact who sets no
+    /// username has not told you something is wrong with them.
     #[test]
-    fn an_identity_with_nothing_in_it_says_so() {
-        let account = domain::account::Account {
+    fn an_identity_with_nothing_in_it_says_so_for_you_and_is_no_row_for_a_contact() {
+        let bare = domain::account::Account {
             user_id: 1,
             first_name: "Ada".to_owned(),
             last_name: "Lovelace".to_owned(),
@@ -595,7 +633,27 @@ mod tests {
             birthday: None,
             bio: None,
         };
-        assert_eq!(identity(&account), "not set");
+        assert_eq!(identity(&bare), None, "there is no identity to show");
+        assert_eq!(
+            CardRow::value(
+                "username",
+                identity(&bare).unwrap_or_else(|| "not set".to_owned())
+            )
+            .value,
+            "not set",
+            "and your own card says so rather than showing nothing"
+        );
+
+        let username_only = domain::account::Account {
+            username: Some("ada".to_owned()),
+            ..bare.clone()
+        };
+        assert_eq!(identity(&username_only).as_deref(), Some("@ada"));
+        let phone_only = domain::account::Account {
+            phone: Some("+15551234567".to_owned()),
+            ..bare
+        };
+        assert_eq!(identity(&phone_only).as_deref(), Some("+15551234567"));
     }
 
     /// `d` acts on an action and on nothing else. This is the entire difference
@@ -740,6 +798,19 @@ mod drawing {
         let mut app = App::mock();
         app.open_card(crate::app::ProfileId::SelfAccount);
         app
+    }
+
+    /// A card about a contact whose profile has been read.
+    ///
+    /// A contact's card draws nothing until the read lands, so every test about
+    /// its *rows* has to land the read first — and a test that quietly did not
+    /// would be testing a card with no rows, which passes for the wrong reason.
+    fn contact_card() -> (App, domain::chat::Chat) {
+        let mut app = self_card();
+        let chat = app.any_chat().expect("the mock has a chat");
+        app.open_card(crate::app::ProfileId::User(chat.id));
+        app.set_contact(chat.id, Ok(crate::app::mock_account()));
+        (app, chat)
     }
 
     /// A dump of the card's spans, for reading a test failure.
@@ -953,11 +1024,8 @@ mod drawing {
     /// the only thing said about a contact today is their name.
     #[test]
     fn a_contacts_card_names_them_and_has_fewer_rows_than_the_accounts() {
-        let mut app = self_card();
-        let mine = rows(&app).len();
-
-        let chat = app.any_chat().expect("the mock has a chat");
-        app.open_card(crate::app::ProfileId::User(chat.id));
+        let mine = rows(&self_card()).len();
+        let (app, chat) = contact_card();
         let theirs = rows(&app);
 
         assert!(
@@ -972,17 +1040,156 @@ mod drawing {
         );
     }
 
+    /// A contact's card draws **nothing** until the profile has been read, and
+    /// says so rather than drawing the name and then filling in.
+    ///
+    /// The reader pressed `A` to ask a question, and a card that answers half of
+    /// it is a card the reader has to believe a moment before they do not have to.
+    #[test]
+    fn a_contacts_card_draws_nothing_until_the_profile_has_been_read() {
+        let mut app = self_card();
+        let chat = app.any_chat().expect("the mock has a chat");
+        app.open_card(crate::app::ProfileId::User(chat.id));
+
+        assert!(rows(&app).is_empty(), "no rows, and no half of one");
+        let text = rows_of(&screen(&app, 40)).join("\n");
+        assert!(
+            text.contains("reading their profile"),
+            "and it says what it is waiting for: {text}"
+        );
+        assert!(
+            title(&app).contains(&chat.title),
+            "while still naming who it is about: {}",
+            title(&app)
+        );
+
+        app.set_contact(chat.id, Ok(crate::app::mock_account()));
+        assert!(
+            !rows(&app).is_empty(),
+            "and the rows arrive with the answer"
+        );
+    }
+
+    /// A read that lands after the reader has opened somebody else's card is
+    /// dropped rather than drawn on the wrong person.
+    ///
+    /// The reader may open a second card while the first read is in flight, and a
+    /// round trip is long enough that this is the normal case rather than a race.
+    /// Matching the answer to the card that asked is what keeps a card from filling
+    /// in with somebody else's bio.
+    #[test]
+    fn an_answer_about_somebody_else_is_dropped() {
+        let (mut app, chat) = contact_card();
+        let before = rows(&app);
+
+        app.set_contact(
+            chat.id + 1,
+            Ok(domain::account::Account {
+                user_id: 99,
+                first_name: "Somebody".to_owned(),
+                last_name: "Else".to_owned(),
+                bio: Some("not this card's bio".to_owned()),
+                ..domain::account::Account::default()
+            }),
+        );
+
+        assert_eq!(rows(&app), before, "the card on show did not change");
+        assert!(
+            !rows_of(&screen(&app, 40))
+                .join("\n")
+                .contains("Somebody Else"),
+            "and the other person's name is nowhere on the screen"
+        );
+    }
+
+    /// A read that failed says why, in its own words rather than the account's.
+    ///
+    /// The account's first line is `not signed in` because its problem is
+    /// credentials. Putting that on a failed profile read would send a reader to
+    /// check something that is not the problem, which is the whole reason the two
+    /// carry their own wording.
+    #[test]
+    fn a_contacts_card_whose_read_failed_says_why() {
+        let mut app = self_card();
+        let chat = app.any_chat().expect("the mock has a chat");
+        app.open_card(crate::app::ProfileId::User(chat.id));
+        app.set_contact(chat.id, Err("peer 42 is not a person".to_owned()));
+
+        assert!(rows(&app).is_empty());
+        let text = rows_of(&screen(&app, 40)).join("\n");
+        assert!(text.contains("could not read this profile"), "{text}");
+        assert!(text.contains("not a person"), "and the reason: {text}");
+        assert!(
+            !text.contains("not signed in"),
+            "and not the account's: {text}"
+        );
+        assert!(!text.contains("credentials"), "{text}");
+    }
+
+    /// The rows a contact's card draws are the ones **they** said, and nothing
+    /// else.
+    ///
+    /// A contact's phone number is hidden by their own privacy far more often than
+    /// not, so the identity row has to degrade to the username alone and to *no
+    /// row* when there is neither — which is the card's own rule, and the reason
+    /// the count in the title is worth reading.
+    #[test]
+    fn a_contacts_rows_are_the_ones_they_said() {
+        let (mut app, _) = contact_card();
+        let peer = app.any_chat().expect("the mock has a chat").id;
+
+        // Everything they said.
+        let full = rows(&app);
+        assert_eq!(
+            full.iter().map(|row| row.label).collect::<Vec<_>>(),
+            ["name", COLOUR, "username", "bio", "birthday"],
+            "the colour slot sits between the name and the identity"
+        );
+
+        // Nothing they said but a name.
+        app.set_contact(
+            peer,
+            Ok(domain::account::Account {
+                user_id: 42,
+                first_name: "Grace".to_owned(),
+                last_name: "Hopper".to_owned(),
+                ..domain::account::Account::default()
+            }),
+        );
+        let bare = rows(&app);
+        assert_eq!(
+            bare.iter().map(|row| row.label).collect::<Vec<_>>(),
+            ["name", COLOUR],
+            "no username, no bio, no birthday: no rows either"
+        );
+        assert!(
+            !bare.iter().any(|row| row.value == "not set"),
+            "and a person who set no username has not told us anything is wrong: {bare:?}"
+        );
+        assert!(bare.len() < full.len(), "and the count says a row went");
+    }
+
     /// `d` on a contact's card refuses, and says which of the two reasons applies
     /// rather than a bare "no": a reader who pressed it wants to know it will not
     /// happen.
     #[test]
     fn d_on_a_contacts_card_refuses_and_says_why() {
-        let mut app = self_card();
-        let chat = app.any_chat().expect("the mock has a chat");
-        app.open_card(crate::app::ProfileId::User(chat.id));
+        // Both states a contact's card can be in when `d` is pressed: the read has
+        // landed, and it has not. A card with no rows must not swallow the key —
+        // saying "you cannot" quietly is the one thing such a key must not do.
+        let (mut read, _) = contact_card();
+        read.handle_card_key('d');
+        assert_eq!(read.status_text(), crate::app::NOT_YOURS_REFUSAL);
 
-        app.handle_card_key('d');
-        assert_eq!(app.status_text(), crate::app::NOT_YOURS_REFUSAL);
+        let mut unread = self_card();
+        let chat = unread.any_chat().expect("the mock has a chat");
+        unread.open_card(crate::app::ProfileId::User(chat.id));
+        unread.handle_card_key('d');
+        assert_eq!(
+            unread.status_text(),
+            crate::app::NOT_YOURS_REFUSAL,
+            "and it refuses with no rows on show too"
+        );
     }
 
     /// A row with nothing in it is a row that is not there, not a row of nothing.
@@ -1011,9 +1218,7 @@ mod drawing {
     /// "what the peer told you", which is the only reason the count is on screen.
     #[test]
     fn a_reserved_slot_draws_nothing_and_does_not_move_the_count() {
-        let mut app = self_card();
-        let chat = app.any_chat().expect("the mock has a chat");
-        app.open_card(crate::app::ProfileId::User(chat.id));
+        let (app, _) = contact_card();
 
         let all = rows(&app);
         assert!(
@@ -1022,16 +1227,19 @@ mod drawing {
         );
 
         let drawn = lines(&app, &all, 40);
-        let name = all
-            .iter()
-            .position(|row| row.label == "name")
-            .expect("a name");
-        let names_drawn = drawn.iter().filter(|(index, _)| *index == name).count();
         let real_rows = all.iter().filter(|row| !row.is_reserved()).count();
+        assert!(
+            !drawn.iter().any(|(index, _)| all[*index].is_reserved()),
+            "no line is drawn for the slot at all: {drawn:?}"
+        );
+        // Counted by *row* rather than by line, because a bio wraps and a wrapped
+        // value is still one row.
+        let distinct: std::collections::BTreeSet<usize> =
+            drawn.iter().map(|(index, _)| *index).collect();
         assert_eq!(
-            drawn.len(),
-            names_drawn,
-            "one line for the one real row, and none for the slot: {drawn:?}"
+            distinct.len(),
+            real_rows,
+            "one drawn row for each real row, and none for the slot"
         );
         assert!(
             !drawn
@@ -1041,11 +1249,22 @@ mod drawing {
         );
 
         // The count is over what is drawn, and the cursor's number is its position
-        // among those — `1/1`, not `1/2`.
-        assert!(title(&app).ends_with("(1/1) "), "{}", title(&app));
+        // among those — so the title's total is the real rows, not `all.len()`.
+        let title = title(&app);
+        let (_, rest) = title
+            .rsplit_once('(')
+            .unwrap_or_else(|| panic!("the title counts the rows: {title:?}"));
+        let (counts, _) = rest
+            .split_once(')')
+            .unwrap_or_else(|| panic!("the title counts the rows: {title:?}"));
+        let (cursor, total) = counts
+            .split_once('/')
+            .unwrap_or_else(|| panic!("the title counts two numbers: {title:?}"));
+        let (cursor, total) = (cursor.trim(), total.trim());
+        assert_eq!(total.parse::<usize>(), Ok(real_rows), "{title:?}");
         assert_eq!(
-            real_rows, 1,
-            "which is why the count is 1 rather than the row count"
+            cursor, "1",
+            "and the cursor's number is among those: {title:?}"
         );
     }
 
@@ -1056,20 +1275,38 @@ mod drawing {
     /// row, so bounding the highlight is enough. When a row lands after the slot
     /// this test has to grow a step with it — see [`navigable`].
     #[test]
-    fn the_row_cursor_cannot_reach_a_reserved_slot() {
-        let mut app = self_card();
-        let chat = app.any_chat().expect("the mock has a chat");
-        app.open_card(crate::app::ProfileId::User(chat.id));
+    fn the_row_cursor_steps_over_a_reserved_slot() {
+        let (mut app, _) = contact_card();
+        let all = rows(&app);
+        let slot = all
+            .iter()
+            .position(CardRow::is_reserved)
+            .expect("the colour slot is held");
+        assert!(
+            slot > 0 && slot + 1 < all.len(),
+            "the slot is interior on a contact's card: {all:?}"
+        );
 
-        // This card's only real row is *above* the slot, so every motion — `j`,
-        // `k`, `G` — has to land back on the name rather than on nothing.
-        for key in ['j', 'k', 'G'] {
-            app.handle_card_key(key);
-            assert!(
-                app.on_card_row("name"),
-                "{key} left the highlight on a row that draws nothing"
-            );
-        }
+        // `j` onto it, from above.
+        app.handle_card_row(slot - 1);
+        app.handle_card_key('j');
+        assert_eq!(
+            app.profile_cursor(),
+            slot + 1,
+            "and lands on the row below it rather than on the slot"
+        );
+
+        // `k` back onto it, from below.
+        app.handle_card_row(slot + 1);
+        app.handle_card_key('k');
+        assert_eq!(app.profile_cursor(), slot - 1, "and the same going back up");
+
+        // And `G`, which is the motion most likely to land on a trailing slot.
+        app.handle_card_key('G');
+        assert!(
+            !rows(&app)[app.profile_cursor()].is_reserved(),
+            "and `G` never leaves it on the slot"
+        );
     }
 
     /// The slot is the *contact's* colour and not the account's, and a card is not
