@@ -52,14 +52,30 @@ pub const INPUT_MAX_ROWS: usize = 6;
 /// the account's profile took `D:dismiss` out and `S:acct` in. `D` dismisses a
 /// *failed* send, which is a refusal, and a refusal is the status line's to say
 /// rather than the hint's: the row has no room for why.
-const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  q:quit  S:acct";
+///
+/// **`q:quit` is what pays for `A:card`.** A hint is the only place a reader
+/// learns a key the rest of the screen is silent about, and `A` is one — it opens
+/// the contact the highlight is on, which is the difference between a card about
+/// yourself and a card about somebody. `q` is the only one of the three keys used
+/// most here — `e:edit`, `v:vis`, `q:quit` — with a second route to the same
+/// action: `:q` and `:quit` reach it and `::cmd` is named on this very row. `e`
+/// and `v` have no other mention anywhere on screen, so they keep theirs. The cost
+/// is real and a reader who has not learned `q` now has to learn `:q`. `DESIGN.md`
+/// carries the arithmetic and what else the row has paid for.
+const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct";
 
 /// The hint while the chat list has the focus.
 ///
-/// The same spelling of the profile key as the conversation's row. One key, one
-/// word, two rows: two spellings for one key is something a reader has to notice
-/// and reconcile.
-const CHAT_LIST_HINT: &str = " j/k: chat  Enter: open  Tab: pane  h: conversation  S:acct";
+/// The same two card keys as the conversation's row, and `S` spelled **differently**
+/// here on purpose — which is the one place in the hints where one key has two
+/// words, so it is worth saying why. `S` opens your own profile from either pane
+/// and, like `A`, only a hint names it. The chat list spells it among the people,
+/// where you are one of them, so `S:you`; the conversation spells it for the
+/// account the card is about, so `S:acct`. A reader meets the second spelling and
+/// has to reconcile it with the first, so both are named deliberately and neither
+/// is renamed to match the other. `DESIGN.md` says so where a reader of the spec
+/// finds it.
+const CHAT_LIST_HINT: &str = " j/k: chat  Enter: open  Tab: pane  h: conversation  A:card  S:you";
 
 /// The hint while a selection is being made over the messages.
 const VISUAL_HINT: &str = " d: delete  y: yank  r: reply  Esc: cancel";
@@ -489,6 +505,21 @@ mod tests {
                 "the hint is {} columns, and the status line has {}: {hint:?}",
                 hint.chars().count(),
                 ASSUMED_WIDTH - MODE_LABEL_WIDTH
+            );
+        }
+    }
+
+    /// The two card keys are bound on **both** the chat list and the conversation,
+    /// and a hint is the only place either is named — so both rows have to name
+    /// both. This is the defect no width check catches: a hint that fits perfectly
+    /// and is silent about a key the reader just bound.
+    #[test]
+    fn a_key_bound_on_both_panes_is_named_on_both() {
+        for hint in [NORMAL_HINT, CHAT_LIST_HINT] {
+            assert!(hint.contains("A:card"), "the contact's card: {hint:?}");
+            assert!(
+                hint.contains("S:acct") || hint.contains("S:you"),
+                "your own card, whichever of the two words this row uses: {hint:?}"
             );
         }
     }
