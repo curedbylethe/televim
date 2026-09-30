@@ -2,17 +2,26 @@
 //!
 //! # The order styles compose in
 //!
-//! Four of them can land on one cell — the cursor's reverse video, a selection's
-//! background, a search match's colour and the plain text under all three — and
-//! they are applied in this order, each `patch`ed over the last:
+//! Five of them can land on one cell — the cursor's reverse video, a selection's
+//! background, a search match's colour, a caret, and the plain text under all of
+//! them. **Four** of them compose in this order, each `patch`ed over the last:
 //!
 //! 1. `text` — the baseline everything starts from;
 //! 2. `match_hit` — a row a search found;
 //! 3. `selection_bg` — a slice of a row a selection covers;
 //! 4. `selection` — the cursor's `REVERSED` row, drawn by the list widget.
 //!
+//! The fifth is a **caret**, and it is deliberately *not* a fifth patch.
+//! `caret_insert` and `caret_normal` say what a caret looks like on a row the
+//! surface has *not* reversed. On a reversed row the caret comes out as the
+//! ground colour, and it gets there by **not** being patched with `selection` at
+//! all: one cell of the row keeps its own ink, which is a hole in the reverse
+//! video. That is the design's rule, and it is why a caret cannot be a patch —
+//! `patch` can only add, and the caret's whole job on a reversed row is to take
+//! something away. [`crate::text_row`] is what applies it.
+//!
 //! Later wins, because `Style::patch` takes the other style's fields wherever the
-//! other style sets one. Three consequences worth stating rather than leaving to
+//! other style sets one. Four consequences worth stating rather than leaving to
 //! be discovered:
 //!
 //! - `selection_bg` never uses `REVERSED`, and neither does `match_hit`. The
@@ -24,6 +33,20 @@
 //!   selection is applied later and a selection's text follows the selection
 //!   rather than the terminal. The match keeps its `BOLD`, which is what still
 //!   says a match is there.
+//! - A caret on a reversed row is a hole, not a colour, so it is legible
+//!   whatever the surface behind it happens to be. Painting it in a second ink
+//!   would need that ink to clear the contrast floor against *the selection's*
+//!   background instead of the terminal's, which is a number that changes with
+//!   the theme; a hole needs no floor.
+//!
+//! # Why the two carets differ by a modifier and not by a colour
+//!
+//! Both are `text`'s own colour. A terminal has no border to draw a hollow with,
+//! and a two-column bar overhangs a row in a way no cell can, so the *shape* of a
+//! caret has to come from the cell decoration rather than from the palette:
+//! `caret_insert` reverses the cell and `caret_normal` underlines it. That is
+//! also the reason the line cannot ask the terminal for its cursor: a terminal
+//! cursor has exactly one shape, and these are two.
 //!
 //! # Why the values are hex and not the named ANSI colours
 //!
@@ -66,6 +89,20 @@ pub struct Theme {
     /// too — [`Theme::text`] would be `#1d2128` on a light one, which is 2.48:1
     /// on `#6b4bab`.
     pub selection_bg: Style,
+    /// The line's caret while it is being composed.
+    ///
+    /// A block, which is what an insert caret is in every terminal, and the
+    /// reason this is a modifier and not a colour. It is drawn in `text`'s own
+    /// ink because the bar is never reversed, so a reversed cell is the only
+    /// thing distinguishing it.
+    pub caret_insert: Style,
+    /// The line's caret in its own Normal mode, and a card row's inline position.
+    ///
+    /// One cell marked without being filled, which is a terminal's nearest
+    /// equivalent of a hollow. The two carets are the two shapes a terminal
+    /// cursor cannot be at once, which is why neither of them asks the terminal
+    /// for one.
+    pub caret_normal: Style,
     pub mode_normal: Style,
     pub mode_insert: Style,
     pub mode_visual: Style,
@@ -94,6 +131,15 @@ impl Default for Theme {
             selection_bg: Style::default()
                 .bg(rgb(0x6b, 0x4b, 0xab))
                 .fg(rgb(0xd7, 0xdc, 0xe5)),
+            // Both carets are `text`. A palette entry that distinguished them by
+            // colour would be a distinction a terminal could not draw, because
+            // what separates them is a shape and a shape is a modifier.
+            caret_insert: Style::default()
+                .fg(rgb(0xd7, 0xdc, 0xe5))
+                .add_modifier(Modifier::REVERSED),
+            caret_normal: Style::default()
+                .fg(rgb(0xd7, 0xdc, 0xe5))
+                .add_modifier(Modifier::UNDERLINED),
             // One ink for all four, because all four clear 4.5:1 with it: the
             // two-foreground split this palette replaced put NORMAL and CONFIRM
             // *under* the floor, and CONFIRM is the word a reader has to parse

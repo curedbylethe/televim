@@ -16,6 +16,7 @@ pub mod event;
 mod grapheme;
 pub mod line;
 pub mod rows;
+pub mod text_row;
 pub mod theme;
 pub mod widgets;
 pub mod wrap;

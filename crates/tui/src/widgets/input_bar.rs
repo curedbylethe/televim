@@ -23,13 +23,13 @@
 use std::ops::Range;
 
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, Focus, Mode, PromptKind};
-use crate::rows;
+use crate::text_row;
 
 /// How many content rows the bar may take before it starts scrolling.
 ///
@@ -298,33 +298,23 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 
     frame.render_widget(paragraph, area);
 
-    // A real caret, drawn by the terminal, on the row and column the wrapper
-    // worked out. It is set on the frame rather than painted into the buffer
-    // because a `█` drawn as a character is one the reader cannot tell from a
-    // real one, and it cannot go backwards through what is already on screen.
+    // The caret is painted by `body_row`, into the buffer, as an ordinary cell.
     //
-    // `Terminal::draw` reconciles visibility against what the frame asked for,
-    // so a frame that sets a position shows the cursor and every other frame
-    // does not. **Nothing here can be tested with `TestBackend`, which does not
-    // model a terminal cursor at all**: the arithmetic is tested in `App` and in
-    // `crate::line`, and the cursor itself has to be checked by hand.
-    if focused {
-        let offset = laid_out.row.saturating_sub(first);
-        if offset < height {
-            frame.set_cursor_position(Position::new(
-                area.x + 1 + laid_out.column as u16,
-                area.y + 1 + offset as u16,
-            ));
-        }
-    }
+    // It used to be asked of the terminal with `set_cursor_position`, and the two
+    // are not the same thing. A terminal cursor has exactly one shape, and this
+    // program needs two: a block while the line is being composed and a hollow in
+    // the line's own Normal mode. Asking for a block gave a filled block in both,
+    // so the state the reader is most often in was the one that was wrong. It also
+    // cannot be tested: `TestBackend` does not model a terminal cursor at all, so
+    // a painted caret is a cell an assertion can look at and a real one is not.
 }
 
 /// One row of the draft.
 ///
-/// The selection is the line's own, and is clipped with the same helper the
-/// conversation panel uses: a range is a range into the text and a row is a
-/// slice of it, so how much of each falls where is arithmetic both — and doing it
-/// in two places is how they come to disagree.
+/// The text, the selection and the caret are [`text_row`]'s, because a card row
+/// wants the same three and doing them here alone is how two panels come to
+/// disagree about what a selection looks like. Only the prompt's prefix is this
+/// panel's.
 fn body_row<'a>(
     app: &'a App,
     range: &Range<usize>,
@@ -338,71 +328,31 @@ fn body_row<'a>(
     // before its rows are cut rather than clipped after.
     let lead_columns = lead.map_or(0, str::len);
     let body = (range.start + lead_columns).min(range.end)..range.end;
-    let row = &text[body.clone()];
-
-    let plain = match (focused, caret_row) {
-        (true, true) => app.theme.text,
-        // Unfocused is dimmed, because a draft the reader is not typing in
-        // should not look like something the program just printed.
-        _ => app.theme.text_dim,
-    };
-
-    // The dot that stands in for a space, and nothing at all when the reader is
-    // not typing in here — a draft they are not composing is read as prose, and
-    // a sentence with its spaces dotted reads as something else.
-    let space = focused.then_some(app.theme.text_dim);
 
     let mut spans = Vec::new();
     if let Some(lead) = lead {
         spans.push(Span::styled(lead, app.theme.text_dim));
     }
 
-    let Some(selected) = app.line.selection() else {
-        push_text(&mut spans, row, plain, space);
-        return Line::from(spans);
-    };
-
-    let (from, to) = rows::clip(&selected, &body);
-    if from > 0 {
-        push_text(&mut spans, &row[..from], plain, space);
-    }
-    push_text(&mut spans, &row[from..to], app.theme.mode_visual, space);
-    if to < row.len() {
-        push_text(&mut spans, &row[to..], plain, space);
-    }
+    spans.extend(text_row::spans(&text_row::TextRow {
+        text,
+        range: body,
+        // A draft is not a search result: `/` searches the window and the server,
+        // never the line the reader is typing in.
+        matched: false,
+        selected: app.line.selection(),
+        // The bar is never reversed, so the caret is its own style rather than a
+        // hole in a row of reverse video. It needs the focus as well as the row:
+        // a caret on a draft nobody is typing into is a promise the program does
+        // not keep.
+        caret: (focused && caret_row).then(|| app.line.caret()),
+        reversed: false,
+        // `status()` rather than a mode of this panel's own, because the line's
+        // mode is the line's and the bar already reads it to pick its hint.
+        ink: text_row::Ink::draft(&app.theme, focused, app.line.status() == "NORMAL"),
+    }));
 
     Line::from(spans)
-}
-
-/// Pushes `text` as spans, standing a dot in for every space in it.
-///
-/// A space occupies a cell and paints nothing, and the caret the terminal draws
-/// is a thin bar on a blank cell, so a key that typed one changed nothing a
-/// reader could see. The dot is one column wide where the space was, which is
-/// what keeps the caret and the wrap in step: the mark is the cell the space
-/// already had, not a column taken from somewhere else.
-///
-/// `space` is [`None`] where the text is not being composed, and the text goes
-/// in as it is.
-fn push_text<'a>(spans: &mut Vec<Span<'a>>, text: &'a str, style: Style, space: Option<Style>) {
-    let Some(mark) = space else {
-        spans.push(Span::styled(text, style));
-        return;
-    };
-
-    let mut start = 0;
-    for (at, character) in text.char_indices() {
-        if character == ' ' {
-            if start < at {
-                spans.push(Span::styled(&text[start..at], style));
-            }
-            spans.push(Span::styled("·", mark));
-            start = at + 1;
-        }
-    }
-    if start < text.len() {
-        spans.push(Span::styled(&text[start..], style));
-    }
 }
 
 /// The border style.
@@ -424,6 +374,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
 
     /// The whole frame, drawn into an in-memory terminal.
     fn screen(app: &App, width: u16, height: u16) -> Buffer {
@@ -774,6 +725,117 @@ mod tests {
             rows[top + 1].contains("a·b"),
             "the space between the words is on show: {:?}",
             rows[top + 1]
+        );
+    }
+
+    /// The cells of the bar that carry a caret, as `(x, y, modifier)`.
+    ///
+    /// A painted caret is an ordinary cell with a modifier on it, which is the
+    /// whole reason it is painted: this is a thing an assertion can find, and a
+    /// terminal cursor is not a thing at all in a `TestBackend` buffer.
+    fn carets(buffer: &Buffer, top: u16) -> Vec<(u16, u16, Modifier)> {
+        let mut found = Vec::new();
+        for y in top..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let modifier = buffer[(x, y)].modifier;
+                if modifier.contains(Modifier::REVERSED) || modifier.contains(Modifier::UNDERLINED)
+                {
+                    found.push((x, y, modifier));
+                }
+            }
+        }
+        found
+    }
+
+    /// The design's rule, in the one place it used to be untestable. The line
+    /// asks the terminal for nothing; it paints a block while it is being
+    /// composed, and that block is a cell in the buffer.
+    #[test]
+    fn a_line_being_composed_paints_its_caret_as_a_reversed_cell() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "hi");
+
+        let buffer = screen(&app, 80, 24);
+        let top = bar_top(&rows_of(&buffer)) as u16;
+        let found = carets(&buffer, top);
+
+        assert_eq!(found.len(), 1, "one caret, on one cell: {found:?}");
+        assert!(
+            found[0].2.contains(Modifier::REVERSED),
+            "an insert caret is a block: {:?}",
+            found[0].2
+        );
+        // One past the last character, because that is where a reader types.
+        assert_eq!(
+            found[0].0, 3,
+            "the draft is drawn at column 1, so this is its end"
+        );
+    }
+
+    /// The two carets are two shapes, which is the reason neither of them asks
+    /// the terminal for one: a terminal cursor is a block in both modes, and the
+    /// mode the reader is most often in is the one that was wrong.
+    #[test]
+    fn the_line_in_its_own_normal_mode_marks_its_caret_rather_than_reversing_it() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "hi");
+        press(&mut app, KeyCode::Esc);
+
+        let buffer = screen(&app, 80, 24);
+        let top = bar_top(&rows_of(&buffer)) as u16;
+        let found = carets(&buffer, top);
+
+        assert_eq!(found.len(), 1, "one caret, on one cell: {found:?}");
+        assert!(
+            found[0].2.contains(Modifier::UNDERLINED) && !found[0].2.contains(Modifier::REVERSED),
+            "a normal caret marks its cell rather than filling it: {:?}",
+            found[0].2
+        );
+    }
+
+    /// A caret the reader cannot move is a decoration, and this is the first
+    /// thing that can say it is not one.
+    #[test]
+    fn a_caret_moves_when_the_caret_moves() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "hi");
+
+        let buffer = screen(&app, 80, 24);
+        let top = bar_top(&rows_of(&buffer)) as u16;
+        let before = carets(&buffer, top)[0].0;
+
+        press(&mut app, KeyCode::Left);
+
+        let buffer = screen(&app, 80, 24);
+        let after = carets(&buffer, top)[0].0;
+
+        assert_eq!(
+            after,
+            before - 1,
+            "one cell back, and the cell moved with it"
+        );
+    }
+
+    /// A bar nobody is typing in is read, not edited, so it has no caret to
+    /// show — a caret on a draft the reader cannot type into is a promise the
+    /// program does not keep.
+    #[test]
+    fn a_draft_nobody_is_typing_in_has_no_caret() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "hi");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+
+        let buffer = screen(&app, 80, 24);
+        let top = draft_top(&rows_of(&buffer)) as u16;
+
+        assert!(
+            carets(&buffer, top).is_empty(),
+            "a draft is not being edited"
         );
     }
 

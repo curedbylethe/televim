@@ -351,6 +351,10 @@ crates/tui/
 │   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break
 │   ├── line.rs         # The input line: owns the text, wraps vim-line
 │   ├── rows.rs         # One owner for the panel's geometry
+│   ├── text_row.rs     # A run of text the reader can put a cursor in: the
+│                      #   text, a match on it, a selection split out of it, and
+│                      #   a caret cut into it. Shared by the conversation, the
+│                      #   input bar and a card row
 │   ├── wrap.rs         # Text + width -> the rows it occupies. `wrap` for a
 │                      #   message; `wrap_keeping_whitespace` for the input bar;
 │                      #   `columns` for how wide any of it is
@@ -391,11 +395,35 @@ wrapper lays out with `wrap_keeping_whitespace` — the conversation's `wrap`,
 except that a run of
 spaces stays on the row it ends with rather than being given to neither, so that
 a space the reader typed has a cell to be seen in — grown to six rows, with a
-real terminal caret `TestBackend` cannot model — check it by hand. While the
+**painted** caret. While the
 reader is composing, the bar stands a dim `·` in for every space in the draft:
 a space is a cell that paints nothing, and a caret on a blank cell is a bar on a
 blank cell, so the key that typed one looked like the key that did nothing. The
 conversation gets no dots — a message is read as prose.
+
+`text_row.rs` is the one place a run of text is painted, and it is three
+surfaces sharing it: a message, a draft, and a row of a profile card. All three
+need the same three things in the same order — the text, a search match patched
+on, a selection split out of it — and the order is the rule rather than an
+accident, because a match and a selection each set a foreground and the one
+applied last wins. What it deliberately does **not** hold is everything around
+the text: a message's `[you]` prefix, a card's label gutter and the line's `: `
+prompt are drawn by the caller and spliced around the spans it returns, because a
+conversation's sender participates in wrapping and a card's label is a fixed
+gutter, and one component that grew a `label: Option<&str>` to hold both would be
+two components wearing a trenchcoat. It never wraps anything either — a row is a
+byte range into a string its caller owns, so a selection across a wrapped value
+is arithmetic on two ranges (`rows::clip`) and never a text-layout problem.
+
+**The caret is a marker at a position, not a span appended to a row**, which is
+the one thing about it that is easy to get wrong: appending it puts the caret one
+cell past wherever it belongs, which on a two-character draft is invisible and on
+a message is a column out. It is cut into the row at its own offset, beside the
+selection's two edges, by one walk over the row. Its offset is a **byte** offset
+like every other field, because a caret is clipped and wrapped by the same
+arithmetic as everything else; a motion that produces a character position
+(`domain::vim::char_motion` does) is converted at the call site with
+`rows::byte_span`, which is the one converter in the program.
 
 `rows.rs` and `wrap.rs` are one answer to "how tall is this message", and the
 panel asks them rather than working it out again: a message is as many rows as
@@ -685,7 +713,8 @@ Working today:
   `d` and `y`, and multi-line messages with `Ctrl+J` (`Shift+Enter` where the
   terminal volunteers the distinction). `gg` and `G` are the wrapper's, not the
   library's — see **Key Decisions**. The bar is always a draft: it grows to six
-  rows, survives a conversation switch, and is drawn with a real terminal caret.
+  rows, survives a conversation switch, and is drawn with a painted caret that
+  `TestBackend` can assert, which the real terminal's could not.
   A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
   candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
   keeps typing into the draft. Reply with `r`, edit with `e`.

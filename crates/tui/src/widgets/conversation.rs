@@ -22,6 +22,7 @@ use domain::message::Message;
 
 use crate::app::{App, FetchDirection, Focus, JUMP_LABEL};
 use crate::rows;
+use crate::text_row;
 
 /// How many columns the messages keep for themselves before a scrollbar is
 /// worth showing beside them.
@@ -236,15 +237,15 @@ fn coverage(
 /// ink wins on a cell that is both, so a match inside a selection is painted in
 /// the selection's colour and keeps only its `BOLD` rather than its own colour,
 /// which on a selection is close to invisible.
-fn message_row(
+fn message_row<'m>(
     app: &App,
-    message: &Message,
+    message: &'m Message,
     range: &Range<usize>,
     covered: Option<&Coverage>,
     first: bool,
     last: bool,
     width: u16,
-) -> ListItem<'static> {
+) -> ListItem<'m> {
     let mut spans = Vec::new();
 
     if first {
@@ -259,52 +260,49 @@ fn message_row(
         }
     }
 
-    // Where the message's own text lands, so a text selection can split it out
-    // after the match is on it.
-    let text_at = spans.len();
-    let text = &message.text[range.clone()];
-    spans.push(Span::styled(text.to_owned(), app.theme.text));
-
-    if last && let Some(suffix) = rows::status_suffix(app, message) {
-        spans.push(Span::styled(suffix, app.theme.text_dim));
-    }
-
-    // The match goes on first, so that the selection's own ink can win over it.
-    // See the doc comment above for why that order is the one that matters.
-    if app.search().is_match(message.id) {
+    // The decorations are the message's, not the text's, so they are patched with
+    // the match here rather than inside the row — a reader who is told a row is a
+    // hit by its text alone is being told the same thing.
+    let matched = app.search().is_match(message.id);
+    if matched {
         for span in &mut spans {
             span.style = span.style.patch(app.theme.match_hit);
         }
     }
 
-    match covered {
-        // A selected message is styled in one pass, which is what puts the
-        // decorations and the trailing note inside the selection with the text.
-        Some(Coverage::Whole) => {
-            for span in &mut spans {
-                span.style = span.style.patch(app.theme.selection_bg);
-            }
+    // The text's own three steps — the text, a match on it, a selection split out
+    // of it — are [`text_row`]'s, because the line and a card row want them too.
+    spans.extend(text_row::spans(&text_row::TextRow {
+        ink: text_row::Ink::readonly(&app.theme),
+        text: &message.text,
+        range: range.clone(),
+        matched,
+        selected: match covered {
+            Some(Coverage::Text(selected)) => Some(selected.clone()),
+            _ => None,
+        },
+        // A message is a row of reverse video and the cursor is the row; there is
+        // no position *within* one, which is what a card row adds.
+        caret: None,
+        reversed: false,
+    }));
+
+    if last && let Some(suffix) = rows::status_suffix(app, message) {
+        spans.push(Span::styled(suffix, app.theme.text_dim));
+        if matched {
+            let last_span = spans.len() - 1;
+            spans[last_span].style = spans[last_span].style.patch(app.theme.match_hit);
         }
-        // The selected slice is split out of the row rather than styled where it
-        // is built, because styling a slice of a row means splitting the row, and
-        // a row is only splittable while its text is still one span.
-        Some(Coverage::Text(selected)) => {
-            let (from, to) = rows::clip(selected, range);
-            if from < to {
-                let base = spans[text_at].style;
-                let marked = base.patch(app.theme.selection_bg);
-                let mut split = Vec::with_capacity(3);
-                if from > 0 {
-                    split.push(Span::styled(text[..from].to_owned(), base));
-                }
-                split.push(Span::styled(text[from..to].to_owned(), marked));
-                if to < text.len() {
-                    split.push(Span::styled(text[to..].to_owned(), base));
-                }
-                spans.splice(text_at..=text_at, split);
-            }
+    }
+
+    // A selected *message* is styled in one pass, which is what puts the
+    // decorations and the trailing note inside the selection with the text. A
+    // selection inside one message is not this: the text was already split, and
+    // splitting it again would be splitting a row that is no longer one span.
+    if let Some(Coverage::Whole) = covered {
+        for span in &mut spans {
+            span.style = span.style.patch(app.theme.selection_bg);
         }
-        None => {}
     }
 
     ListItem::new(Line::from(spans))
