@@ -111,6 +111,14 @@ pub struct CardRow {
 
     /// What the peer said, or what the action is called.
     pub value: String,
+
+    /// Whether this row is a slot held for a field that does not exist yet.
+    ///
+    /// Not a row a reader can reach and not a row a count includes: it draws
+    /// nothing, and what it holds is a **position**, so that the field which fills
+    /// it lands where the design put it rather than wherever it was appended. See
+    /// [`CardRow::reserved`].
+    pub reserved: bool,
 }
 
 impl CardRow {
@@ -121,6 +129,7 @@ impl CardRow {
             kind: RowKind::Value,
             label,
             value: value.into(),
+            reserved: false,
         }
     }
 
@@ -132,18 +141,49 @@ impl CardRow {
             kind: RowKind::Action,
             label,
             value: label.to_owned(),
+            reserved: false,
         }
+    }
+
+    /// A slot held open for a field the design has and this build has not built.
+    ///
+    /// The design reserves a row for a **per-peer colour** between the name and the
+    /// username, and held its slot without designing it: Telegram has no field for
+    /// a colour, so there is nothing to draw, and a row that draws nothing is not a
+    /// row. Building one anyway is the alternative, and it is what this is — because
+    /// a reservation held only by a comment is a reservation the next person to
+    /// insert a field between the name and the username loses silently, and a
+    /// silently lost reservation is a design decision undone by nobody's decision.
+    ///
+    /// Everything downstream therefore knows about it: [`lines`](self::lines)
+    /// draws no line for it, [`title`] neither counts nor numbers it, the row
+    /// cursor steps over it, a yank skips it, and it is neither selectable nor
+    /// something `d` can act on. What it buys is the index.
+    #[must_use]
+    pub fn reserved(label: &'static str) -> Self {
+        Self {
+            kind: RowKind::Value,
+            label,
+            value: String::new(),
+            reserved: true,
+        }
+    }
+
+    /// Whether this row is a held slot rather than a field.
+    #[must_use]
+    pub const fn is_reserved(&self) -> bool {
+        self.reserved
     }
 
     /// Whether the row can be selected inside, as a range of characters.
     ///
-    /// Every row has text, so every row is selectable — including an action's,
-    /// where the text is the action's own name. What is *not* selectable is a row
-    /// with no value at all, and a row that should have had one is a bug rather
-    /// than a state, so there is no such thing here.
+    /// Every field has text, so every field is selectable — including an action's,
+    /// where the text is the action's own name. The one row that is not is a
+    /// reserved slot, which has no text at all: a selection over an empty range is
+    /// a selection of nothing, and `y` on it would put nothing in the register.
     #[must_use]
     pub const fn is_selectable(&self) -> bool {
-        true
+        !self.reserved
     }
 
     /// Whether `d` can act on this row.
@@ -168,6 +208,28 @@ pub fn rows(app: &App) -> Vec<CardRow> {
         CardSubject::SelfAccount => self_rows(app),
         CardSubject::Contact(chat) => contact_rows(chat),
     }
+}
+
+/// How many rows the highlight can reach.
+///
+/// Up to and including the last row that is **drawn**. A held slot at the end of a
+/// card is not somewhere `j` goes: `j` there would put the highlight on a row that
+/// draws nothing, and a highlight nobody can see is worse than one that does not
+/// move.
+///
+/// This is currently also what makes the *interior* slot safe, because the colour
+/// slot is the last row a contact's card has: the highlight's whole range is the
+/// one row above it, so it cannot land on the slot at all. **That stops being true
+/// the moment a row is added after the colour** — which is the first thing §4's
+/// transport does, since a username and a bio follow the slot by design. At that
+/// point `j` and `k` have to step over the slot, and this function alone will not do
+/// it: it bounds the highlight, it does not skip inside the bound. The step belongs
+/// in `card_motion_row`, and it belongs with a test that can reach it.
+#[must_use]
+pub fn navigable(rows: &[CardRow]) -> usize {
+    rows.iter()
+        .rposition(|row| !row.is_reserved())
+        .map_or(0, |last| last + 1)
 }
 
 /// Whom the card is about.
@@ -224,8 +286,22 @@ fn self_rows(app: &App) -> Vec<CardRow> {
 /// knows. Every other row is *absent* rather than empty, which is the shared rule
 /// [`self_rows`] follows and the reason the count in the title is worth reading.
 fn contact_rows(chat: &domain::chat::Chat) -> Vec<CardRow> {
-    vec![CardRow::value("name", chat.title.clone())]
+    vec![
+        CardRow::value("name", chat.title.clone()),
+        // The design's per-peer colour, held and not built. It sits here and not
+        // at the end because a colour is something a reader *scans* — it is the
+        // thing they are looking for when they open somebody at all — so a field
+        // that means to be seen belongs above the identity, not below it.
+        CardRow::reserved(COLOUR),
+    ]
 }
+
+/// The label of the held slot, which is the design's per-peer colour.
+///
+/// Named so the thing being held is named in the program rather than only in the
+/// design document: a slot called `reserved` could be anything, and a reader of
+/// this file should be able to see what is meant to land in it.
+const COLOUR: &str = "colour";
 
 /// The username and the phone number, on one row.
 ///
@@ -297,11 +373,19 @@ fn session(store: &SessionStore) -> String {
 /// that a row went rather than that they misremembered.
 #[must_use]
 pub fn title(app: &App) -> String {
-    let total = rows(app).len();
+    let all = rows(app);
+    // Over the rows that are **drawn**, because the count's whole job is to tell a
+    // reader that a field *went* — and a held slot did not go and was never there,
+    // so counting it would make the number count something other than what the peer
+    // told them. The cursor's number is its position among the same rows, for the
+    // same reason: `1/2` must mean the first of two things there are.
+    let drawn = |row: &&CardRow| !row.is_reserved();
+    let total = all.iter().filter(drawn).count();
     if total == 0 {
         return " Profile ".to_owned();
     }
-    let cursor = (app.profile_cursor() + 1).min(total);
+    let before = app.profile_cursor().min(all.len());
+    let cursor = all[..before].iter().filter(drawn).count() + 1;
     format!(
         " Profile · {} ({cursor}/{total}) ",
         app.card_subject().name()
@@ -330,6 +414,12 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
 
     let mut out = Vec::new();
     for (index, row) in rows.iter().enumerate() {
+        // A held slot draws nothing — no cue, no label, no value, and no line for
+        // it either. A blank line would be worse than nothing: it would read as a
+        // field the peer left empty, which is the one thing a card never draws.
+        if row.is_reserved() {
+            continue;
+        }
         let on_cursor = index == cursor;
         let ink = ink_for(app, row, on_cursor);
         let selected = selection
@@ -911,6 +1001,111 @@ mod drawing {
             "two fields went and two rows went with them: {without:?}"
         );
         assert!(!without.iter().any(|row| row.label == "birthday"));
+    }
+
+    /// The held slot is in the card and is on screen nowhere.
+    ///
+    /// Two assertions, because the slot can fail two ways that look the same: a
+    /// blank line drawn for it would read as a field the peer left empty — the one
+    /// thing a card never draws — and a count that included it would stop meaning
+    /// "what the peer told you", which is the only reason the count is on screen.
+    #[test]
+    fn a_reserved_slot_draws_nothing_and_does_not_move_the_count() {
+        let mut app = self_card();
+        let chat = app.any_chat().expect("the mock has a chat");
+        app.open_card(crate::app::ProfileId::User(chat.id));
+
+        let all = rows(&app);
+        assert!(
+            all.iter().any(CardRow::is_reserved),
+            "the slot is in the rows, or it holds nothing: {all:?}"
+        );
+
+        let drawn = lines(&app, &all, 40);
+        let name = all
+            .iter()
+            .position(|row| row.label == "name")
+            .expect("a name");
+        let names_drawn = drawn.iter().filter(|(index, _)| *index == name).count();
+        let real_rows = all.iter().filter(|row| !row.is_reserved()).count();
+        assert_eq!(
+            drawn.len(),
+            names_drawn,
+            "one line for the one real row, and none for the slot: {drawn:?}"
+        );
+        assert!(
+            !drawn
+                .iter()
+                .any(|(_, line)| line.spans.iter().any(|span| span.content.contains(COLOUR))),
+            "and the slot's own label is nowhere on the screen"
+        );
+
+        // The count is over what is drawn, and the cursor's number is its position
+        // among those — `1/1`, not `1/2`.
+        assert!(title(&app).ends_with("(1/1) "), "{}", title(&app));
+        assert_eq!(
+            real_rows, 1,
+            "which is why the count is 1 rather than the row count"
+        );
+    }
+
+    /// The highlight cannot reach the slot, because it draws nothing — and a
+    /// highlight on a row nobody can see is worse than one that does not move.
+    ///
+    /// Today the card is too small for this to need a *step*: the slot is its last
+    /// row, so bounding the highlight is enough. When a row lands after the slot
+    /// this test has to grow a step with it — see [`navigable`].
+    #[test]
+    fn the_row_cursor_cannot_reach_a_reserved_slot() {
+        let mut app = self_card();
+        let chat = app.any_chat().expect("the mock has a chat");
+        app.open_card(crate::app::ProfileId::User(chat.id));
+
+        // This card's only real row is *above* the slot, so every motion — `j`,
+        // `k`, `G` — has to land back on the name rather than on nothing.
+        for key in ['j', 'k', 'G'] {
+            app.handle_card_key(key);
+            assert!(
+                app.on_card_row("name"),
+                "{key} left the highlight on a row that draws nothing"
+            );
+        }
+    }
+
+    /// The slot is the *contact's* colour and not the account's, and a card is not
+    /// obliged to hold a slot it has no use for: the design puts the colour between
+    /// the name and the username on the card a *person* is on.
+    #[test]
+    fn only_a_contacts_card_holds_the_colour_slot() {
+        assert!(
+            rows(&self_card()).iter().all(|row| !row.is_reserved()),
+            "your own card has no use for a label you gave yourself"
+        );
+    }
+
+    /// `y` with no selection is `yy`.
+    ///
+    /// There is no pending-yank latch on a card, so `y` yanks the cursor row's
+    /// value and `yy` yanks it again. That is harmless, and it is not what a reader
+    /// thinks they asked for — so this test says what the second `y` does, and the
+    /// hint that says `y/yy` on a contact's card is naming one key rather than two.
+    #[test]
+    fn yy_on_a_card_yanks_the_row_once() {
+        let mut app = self_card();
+        let expected = rows(&app)
+            .first()
+            .map(|row| row.value.clone())
+            .expect("the card has a row");
+
+        app.handle_card_key('y');
+        assert_eq!(app.register().lines(), std::slice::from_ref(&expected));
+
+        app.handle_card_key('y');
+        assert_eq!(
+            app.register().lines(),
+            std::slice::from_ref(&expected),
+            "and the second press is the same yank, not an empty line"
+        );
     }
 
     /// Not a test: a dump, for reading the card as a reader would rather than as a

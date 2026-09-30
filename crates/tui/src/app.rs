@@ -1330,12 +1330,6 @@ impl App {
         }
     }
 
-    /// Selects whole rows, which is what `V` leaves behind and what a selection
-    /// that reaches a second row becomes.
-    fn start_card_rowwise(&mut self) {
-        self.profile_visual = Some(Mark::whole(self.card_row_id()));
-    }
-
     /// Puts the profile in the right-hand pane.
     ///
     /// Sizes the highlight from whatever rows exist, so an empty panel has
@@ -1373,7 +1367,9 @@ impl App {
     /// question they did not ask.
     pub(crate) fn open_card(&mut self, subject: ProfileId) {
         self.profile_subject = subject;
-        self.profile_vim = VimState::new(crate::card::rows(self).len());
+        // Over the rows that are drawn, not over every row there is: a held slot
+        // at the end of a card is not somewhere the highlight goes.
+        self.profile_vim = VimState::new(crate::card::navigable(&crate::card::rows(self)));
         self.profile_caret = 0;
         self.profile_visual = None;
         self.profile_count = None;
@@ -1457,8 +1453,12 @@ impl App {
                 self.card_motion_char(c);
             }
             KeyCode::Char(c @ ('j' | 'k' | 'g' | 'G')) => self.card_motion_row(c),
+            // `v`, and `j` to reach further. There is no `V`: one gesture for one
+            // thing is one thing to learn, and the design's own entry table has
+            // only `v` on a card — `V` there is the *mode* label for Visual. A
+            // selection that grows to a second row becomes a set of whole rows by
+            // itself, which is what rowwise meant.
             KeyCode::Char('v') => self.start_card_visual(),
-            KeyCode::Char('V') => self.start_card_rowwise(),
             KeyCode::Char('y') => self.yank_card(),
             KeyCode::Char('d') => self.activate_profile_row(),
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => self.card_count(c),
@@ -1522,11 +1522,13 @@ impl App {
         }
 
         // Across rows: one line per row, oldest first, which is the register's own
-        // order and the conversation's.
+        // order and the conversation's. A held slot inside the range is left out
+        // rather than yanking as an empty line, because it is not a row the
+        // reader selected — it is a position, and the register holds text.
         let (from, to) = row_bounds(&selection, rows.len());
         rows.iter()
             .enumerate()
-            .filter(|(index, _)| (from..=to).contains(index))
+            .filter(|(index, row)| (from..=to).contains(index) && !row.is_reserved())
             .map(|(_, row)| row.value.clone())
             .collect()
     }

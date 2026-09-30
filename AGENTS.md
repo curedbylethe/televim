@@ -689,19 +689,23 @@ Working today:
   and a contact with `A`, shown in the conversation's rectangle rather than as a
   third column. **A row is the same kind of object a message is**: `j`/`k`/`gg`/`G`
   between rows, `h`/`l` and `w`/`b`/`e`/`0`/`$` *within* a row's value, `v` for a
-  charwise selection, `V` for whole rows, `y` the selection and `yy` the row's own
-  value, and `d` on a row that acts. A value wraps and is still one row, so its
-  highlight covers all of it. `Esc` is a ladder — a selection, then the card, then
-  out — and `h` at a row's first cell is the way back, because there is nothing to
-  its left for the motion to reach. Pane movement is `Ctrl-w h`/`Ctrl-w l`, since
-  `h`/`l` are a motion; `Ctrl-w l` says nothing is drawn to the right of a card.
+  selection — and `j` to reach further, which is how a selection becomes a set of
+  whole rows, so there is no `V` — `y` the selection, and `d` on a row that acts. A
+  value wraps and is still one row, so its highlight covers all of it. `Esc` is a
+  ladder — a selection, then the card, then out — and `h` at a row's first cell is
+  the way back, because there is nothing to its left for the motion to reach. Pane
+  movement is `Ctrl-w h`/`Ctrl-w l`, since `h`/`l` are a motion; `Ctrl-w l` says
+  nothing is drawn to the right of a card.
   A row exists **only when the peer says something**, so a birthday a privacy
   setting hides is a row that is not there rather than one reading "not set", and
-  the title's `(n/m)` is what tells a reader a row went. `add account` and
-  `logout` refuse, and sign-out *confirms* before it does; on a contact's card `d`
-  refuses, because that card has no row to act on. Read once at start-up, not on
-  open: a panel that blanked and refilled every time would be one the reader could
-  not trust. With no credentials it says so, and says why.
+  the title's `(n/m)` is what tells a reader a row went. `y` with no selection is
+  `yy`: there is no pending-yank latch on a card, so the second press yanks the same
+  row again, and the hint naming `y/yy` is naming one key rather than two. The
+  design's per-peer **colour slot is held and not built** — see **Known Gaps**.
+  `add account` and `logout` refuse, and sign-out *confirms* before it does; on a
+  contact's card `d` refuses, because that card has no row to act on. Read once at
+  start-up, not on open: a panel that blanked and refilled every time would be one
+  the reader could not trust. With no credentials it says so, and says why.
 - **A contact's card has one row today.** The card is one widget over two subjects
   and the *model* is finished, but the transport is not built: `App` holds a
   `Chat`, which carries a title and a kind and nothing else about the person, so
@@ -764,7 +768,8 @@ Working today:
 
 Not built, and named here so nobody reads the roadmap below as current:
 
-- **Visual mode** — `v` and `V` start a charwise or linewise selection at the
+- **Visual mode** *(the conversation; a card has `v` alone and reaches further with
+  `j`)* — `v` and `V` start a charwise or linewise selection at the
   cursor's message, `Esc` drops it, `o`/`O` swap its ends, `j`/`k` move the focus to
   another message and `h` `l` `w` `b` `e` `0` `$` `f` `t` `F` `T` move it by
   character *within* one. A selection spanning two or more messages is a set of
@@ -953,6 +958,17 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 
 Real, and named so they are not mistaken for oversights:
 
+- **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
+  between a contact's `name` and `username`, draws nothing, is not selectable, is
+  not something `d` can act on, is skipped by a yank, and is neither counted nor
+  numbered in the title. It is there to hold an **index**, because a reservation
+  held only by a comment is one the next person to insert a field between the name
+  and the username loses silently. The design's five constraints for the picker — a
+  fixed named set, a contrast floor against `--text`, the chat list's cursor row
+  winning, a light-terminal value, local state keyed by the peer's id — are in
+  `DESIGN.md`. One thing to know when the transport lands: `card::navigable` bounds
+  the highlight past a slot at the *end* of a card, which is all that needs today,
+  and the moment a row is added *after* the slot `j`/`k` must step over it.
 - **A contact's card shows one row.** See the feature list: the model is two
   subjects and the data is one field, because `users.getFullUser` for a contact is
   not called yet. Everything absent is *absent* rather than empty, which is the
