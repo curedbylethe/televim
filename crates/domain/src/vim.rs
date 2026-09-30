@@ -81,6 +81,28 @@ pub enum CharMotion {
 /// offsets happens here and nowhere else. A keystroke must not build a vector of
 /// a four-thousand-character message's characters to find out where the next one
 /// is.
+impl CharMotion {
+    /// The motion a key names, or `None` when it names no motion.
+    ///
+    /// The one place a character becomes a motion, so a caller with a key in its
+    /// hand does not write the same `match` the conversation wrote. `g` and `G` are
+    /// absent by design: they are motions over a whole buffer and the library has
+    /// no notion of one.
+    #[must_use]
+    pub fn from_key(key: char) -> Option<Self> {
+        Some(match key {
+            'l' => Self::Step { forward: true },
+            'h' => Self::Step { forward: false },
+            'w' => Self::WordStart { forward: true },
+            'b' => Self::WordStart { forward: false },
+            'e' => Self::WordEnd,
+            '0' => Self::Bound { end: false },
+            '$' => Self::Bound { end: true },
+            _ => return None,
+        })
+    }
+}
+
 #[must_use]
 pub fn char_motion(text: &str, at: usize, motion: CharMotion) -> usize {
     // Clamped here rather than in `offset_of` because the clamped value is also

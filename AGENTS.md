@@ -346,6 +346,8 @@ crates/tui/
 ├── src/
 │   ├── lib.rs
 │   ├── app.rs          # The App struct, key dispatch, layout, prompt state
+│   ├── card.rs         # One profile panel over two subjects: the row model, the
+│                      #   drawing, and which rows exist
 │   ├── emoji.rs        # The `:query` under the caret, and its candidates
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
 │   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break
@@ -363,7 +365,7 @@ crates/tui/
 │   │   ├── conversation.rs
 │   │   ├── emoji_popup.rs  # The `:shortcode` completion above the bar
 │   │   ├── input_bar.rs
-│   │   ├── profile.rs   # The account's own profile, in the conversation's slot
+│   │   ├── profile.rs   # The card, in the conversation's rectangle
 │   │   └── status_bar.rs
 │   └── theme.rs        # Color schemes
 └── Cargo.toml          # deps: domain, ratatui, crossterm, vim-line,
@@ -676,17 +678,29 @@ below.
 
 Working today:
 
-- **Profile panel:** the signed-in account's own, reached with `S` or `:settings`
-  from either pane, and shown in the conversation's rectangle rather than as a
-  third column. It carries the name, the username and phone number on one row,
-  the bio wrapped, the birthday, the user id and where the session is kept.
-  `j`/`k`/`gg`/`G` move the highlight, `h` goes to the chat list, `l` and `Esc`
-  come back, and any other key is the conversation's — taken rather than
-  swallowed, so `i` by reflex works without a second press. `add account` and
-  `logout` are rows that refuse, and sign-out *confirms* before it does. Read
-  once at start-up beside the chat list, not on open: a panel that blanked and
-  refilled every time would be a panel the reader could not trust. With no
-  credentials it says so, and says why — the same reason the status line gives.
+- **Profile card:** one widget over two subjects, the signed-in account with `S`
+  and a contact with `A`, shown in the conversation's rectangle rather than as a
+  third column. **A row is the same kind of object a message is**: `j`/`k`/`gg`/`G`
+  between rows, `h`/`l` and `w`/`b`/`e`/`0`/`$` *within* a row's value, `v` for a
+  charwise selection, `V` for whole rows, `y` the selection and `yy` the row's own
+  value, and `d` on a row that acts. A value wraps and is still one row, so its
+  highlight covers all of it. `Esc` is a ladder — a selection, then the card, then
+  out — and `h` at a row's first cell is the way back, because there is nothing to
+  its left for the motion to reach. Pane movement is `Ctrl-w h`/`Ctrl-w l`, since
+  `h`/`l` are a motion; `Ctrl-w l` says nothing is drawn to the right of a card.
+  A row exists **only when the peer says something**, so a birthday a privacy
+  setting hides is a row that is not there rather than one reading "not set", and
+  the title's `(n/m)` is what tells a reader a row went. `add account` and
+  `logout` refuse, and sign-out *confirms* before it does; on a contact's card `d`
+  refuses, because that card has no row to act on. Read once at start-up, not on
+  open: a panel that blanked and refilled every time would be one the reader could
+  not trust. With no credentials it says so, and says why.
+- **A contact's card has one row today.** The card is one widget over two subjects
+  and the *model* is finished, but the transport is not built: `App` holds a
+  `Chat`, which carries a title and a kind and nothing else about the person, so
+  the one row a card can show is the one the chat list already knows. The fetch is
+  one call either way — `users.getFullUser` takes any `InputUser` and a contact's
+  `access_hash` is already in the peer cache — and it is the named next step.
 - **Authentication:** MTProto login with 2FA, session stored in the OS keyring
   (or a file, per `session_path`).
 - **Chat List:** private chats only, filtered to exclude bots, groups and
@@ -835,6 +849,33 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
   selection is up is a line the reader never sees. `y`, `d` and `r` all return to
   Normal whether they worked or not, and a prompt carries its counts rather than
   flashing them.
+- **Why a card is a `Paragraph` and not a `List`:** two things, and both are the
+  same thing. A value wraps, and a wrapped value is **one row** the reader moves
+  over with one `j` whose highlight covers all of its lines; a `List` selects one
+  item, so it would need one item per drawn line — which makes `j` move a third of
+  the way through a field. And a caret is a *cell within* a row, which
+  `ListItem` cannot hold. So the reversed cursor row is patched onto the spans by
+  hand, in the order `theme`'s module doc states, and the panel must not add
+  `Wrap` on top: it wraps its own values with `wrap::wrap` and hands over finished
+  lines, because the rows a value occupies are the geometry `j`, the highlight and
+  the caret all count.
+- **Why a caret is an overlay and not a cell of its own:** a cell inserted at the
+  caret's position pushes the text after it along, and a card's values would jump a
+  column every time the cursor landed on one of them — a column of a table that
+  moves when you look at a cell in it. So the caret is a one-character *style
+  range*: the character at its offset, re-styled. It matches the design's own
+  stylesheet, where the caret is a `::after` pseudo-element drawn on the cell rather
+  than a character in the stream. Only a position one past the end of a value has
+  no character to mark, and that one takes a cell of its own, which is at the end
+  of a value where a column of movement is invisible.
+- **Why `h` does two jobs on a card:** it is a motion everywhere else, and the way
+  back at a row's first cell. It is sound because a card is **one column of
+  values**: there is no column to the left of the first one, so at that edge the
+  motion is finished rather than the key having been repurposed mid-word. A reader
+  with no way back has a stuck screen, which is worse than a key with a second
+  meaning at its own edge. Pane navigation moved to `Ctrl-w h`/`Ctrl-w l` for the
+  same reason `h` cannot be both a motion and a pane: one key in two places is a key
+  a reader learns twice.
 - **Why `anyhow` + `thiserror`:** `thiserror` for typed errors in `telegram-framework`, `proto`, and `domain`. `anyhow` at the `app` boundary.
 - **Why `ratatui` + `crossterm`:** `ratatui` is the UI layer; `crossterm` is the terminal I/O backend. They are complementary.
 - **Why `panic = "abort"`:** Reduces binary size and eliminates unwinding machinery. Requires explicit error handling throughout.
@@ -880,6 +921,11 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 
 Real, and named so they are not mistaken for oversights:
 
+- **A contact's card shows one row.** See the feature list: the model is two
+  subjects and the data is one field, because `users.getFullUser` for a contact is
+  not called yet. Everything absent is *absent* rather than empty, which is the
+  rule the account's own card follows too, so the shape is right and only the rows
+  are missing.
 - **`add account` and `logout` are rows that refuse.** `add account` flashes
   `not yet: this build cannot add an account`; `logout` raises
   `Sign out and forget this session? (y/n)` first and refuses inside it. Both are

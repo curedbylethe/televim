@@ -75,7 +75,19 @@ const VISUAL_HINT: &str = " d: delete  y: yank  r: reply  Esc: cancel";
 /// `d` is named even though six of the eight rows ignore it, because the two
 /// that do not are the only interaction the panel has and the hint is the only
 /// place a reader learns they exist.
-const SETTINGS_HINT: &str = " j/k: row  d: do  h/l: pane  Esc: back";
+/// A card's own hint, and the account's.
+const CARD_SELF_HINT: &str = " j/k: row  h/l: within  v: vis  y: yank  d: act  Esc: back";
+
+/// A contact's card.
+///
+/// The same keys as the account's own **except** `d`, and the difference is the
+/// whole of what a contact's card cannot do: it has no row to act on, so naming
+/// `d` here would be naming a key that refuses. And `yy` rather than `y`, because
+/// a contact has no actions and yanking the row whole is the only yank it has.
+///
+/// The two rows differ because their rows differ. A key named on a card that does
+/// not answer it tells the reader the key is wrong, so neither names the other's.
+const CARD_CONTACT_HINT: &str = " j/k: row  h/l: within  v: vis  y/yy: yank  Esc: back";
 
 /// The hint while the bar holds a draft and the conversation has the focus.
 ///
@@ -145,11 +157,12 @@ const ASSUMED_WIDTH: usize = 80;
 /// the string was width-checked by a test and displayed by nothing. The profile's
 /// row replaced it, which is what `ALL_HINTS` is for.
 #[cfg(test)]
-const ALL_HINTS: [&str; 9] = [
+const ALL_HINTS: [&str; 10] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
     VISUAL_HINT,
-    SETTINGS_HINT,
+    CARD_SELF_HINT,
+    CARD_CONTACT_HINT,
     DRAFT_HINT,
     INSERT_HINT,
     COMPLETION_HINT,
@@ -177,9 +190,13 @@ pub fn hint(app: &App) -> &'static str {
         },
         (Focus::ChatList, _) => CHAT_LIST_HINT,
         // Before the conversation's own arms, and matched on the pane as well as
-        // the mode: a profile is in the right-hand column with the focus on it,
-        // so without this the pair below would answer for it.
-        (Focus::Conversation, Mode::Normal) if app.pane.is_profile() => SETTINGS_HINT,
+        // the mode: a card is in the right-hand column with the focus on it, so
+        // without this the pair below would answer for it. Two rows, because the
+        // two subjects do not have the same keys.
+        (Focus::Conversation, Mode::Normal) if app.pane.is_profile() => match app.card_subject() {
+            crate::card::CardSubject::SelfAccount => CARD_SELF_HINT,
+            crate::card::CardSubject::Contact(_) => CARD_CONTACT_HINT,
+        },
         (Focus::Conversation, Mode::Visual) => VISUAL_HINT,
         (Focus::Conversation, Mode::Normal) if !app.line.is_empty() => DRAFT_HINT,
         (Focus::Conversation, Mode::Normal) => NORMAL_HINT,

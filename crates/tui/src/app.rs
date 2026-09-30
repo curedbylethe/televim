@@ -154,6 +154,13 @@ pub const ADD_ACCOUNT_REFUSAL: &str = "not yet: this build cannot add an account
 /// is up is a line the reader never sees.
 pub const LOGOUT_REFUSAL: &str = "not yet: this build cannot sign out";
 
+/// What a card says when `d` lands on a value rather than an action.
+///
+/// A deliberate refusal, and a *different* refusal from [`ADD_ACCOUNT_REFUSAL`]:
+/// a contact's card has no row the reader can act on at all, and one word is too
+/// long to tell a reader which of the two reasons applies.
+pub const NOT_YOURS_REFUSAL: &str = "Not yours: a contact card has no row you can act on.";
+
 /// Which page of a conversation a fetch is asking for.
 ///
 /// Named rather than a `bool`, because they differ in what they do to the
@@ -301,12 +308,13 @@ pub enum ProfileId {
     /// The signed-in account.
     SelfAccount,
 
-    /// A person, by their bare identifier.
+    /// A person, by the conversation they were found in.
     ///
-    /// Not reachable: there is no key that opens somebody else's profile yet. It
-    /// is here because the alternative is a second `Pane` variant the moment one
-    /// is needed, and a panel that can only ever show one subject is a panel
-    /// whose data model is a special case.
+    /// A chat rather than a bare identifier because a chat is the handle a reader
+    /// can name: the conversation on show is a person, and the chat list is where
+    /// they were found. The identifier is one lookup away and a peer is not —
+    /// `grammers` reports none for a peer that is the account itself, so an id
+    /// here could address nothing.
     User(i64),
 }
 
@@ -399,6 +407,26 @@ struct ChatChoice {
 
     /// When it got there.
     at: Instant,
+}
+
+/// The first and last row a selection reaches, in the card's own order.
+///
+/// A selection is a pair of marks and the pair may be in either order, so this is
+/// the one place that normalises them for the card. `text_range` being `None` is
+/// what says the selection is a set of rows rather than a range inside one, and
+/// that is the same rule the conversation follows for the same reason: there is
+/// no such thing as a selection that quotes half of each.
+fn row_bounds(selection: &Selection, total: usize) -> (usize, usize) {
+    let to_id = |id: i64| {
+        usize::try_from(id)
+            .unwrap_or(0)
+            .min(total.saturating_sub(1))
+    };
+    let (from, to) = (
+        to_id(selection.anchor.message_id),
+        to_id(selection.focus.message_id),
+    );
+    if from <= to { (from, to) } else { (to, from) }
 }
 
 /// What the input bar represents when in Insert mode.
@@ -703,6 +731,39 @@ pub struct App {
     /// free.
     profile_vim: VimState,
 
+    /// The subject the card is about: the account, or a contact by chat.
+    ///
+    /// A `ProfileId::User` already existed and was unreachable, and a chat is the
+    /// handle a reader can actually name — a conversation on show is a person, and
+    /// the chat list is where they were found.
+    profile_subject: ProfileId,
+
+    /// Where the inline position is within the cursor row's value.
+    ///
+    /// A **character** count, because every motion that produces one counts
+    /// characters; it becomes a byte offset only where it is drawn, by
+    /// [`rows::byte_span`]. Separate from [`VimState`] because that moves between
+    /// rows and knows nothing about what a row is.
+    profile_caret: usize,
+
+    /// A card selection's fixed end, when there is one.
+    ///
+    /// A [`Mark`] and not a row index, because the card's two ends are the same
+    /// two ends the conversation has: a row and a position within it, or the whole
+    /// of it. Reusing the type is what makes `v` one keystroke here as it is
+    /// there, rather than a second selection model beside the first.
+    profile_visual: Option<domain::selection::Mark>,
+
+    /// A count typed before a motion, as `12j` means twelve.
+    profile_count: Option<u32>,
+
+    /// `Ctrl-w` was pressed on a card and the next key is its argument.
+    ///
+    /// The pane's `h`/`l` became an inline motion, so pane navigation moved under
+    /// a prefix. Bare `Ctrl-w` keeps its existing meaning — leaving the input line
+    /// — which is the same prefix-with-a-bare-fallback shape `g`/`gg` has.
+    profile_pending_w: bool,
+
     /// The conversations, and the messages the client has seen in them.
     ///
     /// One value rather than a list beside a window: an event from the feed
@@ -883,6 +944,11 @@ impl App {
             account: AccountState::Unfetched,
             session_store: SessionStore::default(),
             profile_vim: VimState::new(0),
+            profile_subject: ProfileId::SelfAccount,
+            profile_caret: 0,
+            profile_visual: None,
+            profile_count: None,
+            profile_pending_w: false,
             list: ChatList::default(),
             selected_chat: 0,
             conversation: ConversationView::new(0),
@@ -1190,13 +1256,179 @@ impl App {
         self.profile_vim.cursor()
     }
 
+    /// Whom the card is about.
+    ///
+    /// A contact is looked up in the chat list by the id the `ProfileId` holds, and
+    /// a subject that is not there is the account's own: a card whose subject has
+    /// gone should not read as somebody else's, and there is nobody else.
+    #[must_use]
+    pub fn card_subject(&self) -> crate::card::CardSubject<'_> {
+        match self.profile_subject {
+            ProfileId::SelfAccount => crate::card::CardSubject::SelfAccount,
+            ProfileId::User(id) => self.list.chats.iter().find(|chat| chat.id == id).map_or(
+                crate::card::CardSubject::SelfAccount,
+                crate::card::CardSubject::Contact,
+            ),
+        }
+    }
+
+    /// The row the inline position is in, as a character count within its value.
+    #[must_use]
+    pub fn card_caret(&self) -> usize {
+        self.profile_caret
+    }
+
+    /// The inline position as a byte offset into `value`.
+    ///
+    /// A caret is a byte offset like every other field of
+    /// [`crate::text_row::TextRow`], and a motion is a character count, so this is
+    /// where the two meet — by [`crate::rows::byte_span`], the one converter in the
+    /// program. A position past the end clamps to the end, because a caret belongs
+    /// at the end of a value and not one past it.
+    #[must_use]
+    pub fn card_caret_byte(&self, value: &str) -> usize {
+        let chars = value.chars().count();
+        let at = self.profile_caret.min(chars);
+        if at >= chars {
+            return value.len();
+        }
+        crate::rows::byte_span(value, at..at + 1).start
+    }
+
+    /// The card's selection, when there is one.
+    ///
+    /// A row is named by its index in [`crate::card::rows`], which is what the
+    /// panel and the keys already agree on, and a position within it is a character
+    /// count — so the same `text_range` rule applies unchanged: a selection whose
+    /// two ends are in **one** row is a text range, and a selection reaching two
+    /// rows is a set of rows, because there is no such thing as a selection that
+    /// quotes half of each.
+    #[must_use]
+    pub fn card_selection(&self) -> Option<Selection> {
+        let anchor = self.profile_visual?;
+        let focus = self.card_mark();
+
+        // `char: None` whenever the selection covers whole rows, which is what `V`
+        // leaves behind and what moving off the row it started on becomes: the
+        // reader selected rows, and the values inside them are yankable whole.
+        let both_chars = anchor.char.is_some() && focus.char.is_some();
+        let (anchor, focus) = if both_chars {
+            (anchor, focus)
+        } else {
+            (
+                Mark::whole(anchor.message_id),
+                Mark::whole(focus.message_id),
+            )
+        };
+
+        Some(Selection { anchor, focus })
+    }
+
+    /// Moves the card's highlight to `row`, for a caller that knows where it wants
+    /// the cursor rather than which key gets it there.
+    ///
+    /// A test helper *and* the reason the two are separate: a card's cursor is
+    /// `j`/`k` and a position is `l`/`h`, and every test that cares about the
+    /// second has to walk to the first to get there.
+    #[cfg(test)]
+    pub(crate) fn handle_card_row(&mut self, row: usize) {
+        self.profile_vim.set_cursor(row);
+    }
+
+    /// One charwise motion within the cursor row's value.
+    #[cfg(test)]
+    pub(crate) fn handle_card_motion(&mut self, key: char) {
+        self.card_motion_char(key);
+    }
+
+    /// One key at the card, for a test that is about the key and not the path.
+    #[cfg(test)]
+    pub(crate) fn handle_card_key(&mut self, key: char) {
+        self.handle_profile(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+    }
+
+    /// A chat from the list, for a test that needs a contact to open a card about.
+    #[cfg(test)]
+    pub(crate) fn any_chat(&self) -> Option<domain::chat::Chat> {
+        self.list.chats.first().cloned()
+    }
+
+    /// The moving end of a card selection: the cursor row and the inline position.
+    ///
+    /// The inline position is only part of the mark while the selection is inside
+    /// one row, because a selection that has reached a second row is a selection
+    /// of rows and the position within the first is not what it covers.
+    fn card_mark(&self) -> Mark {
+        let inside = self
+            .profile_visual
+            .is_some_and(|anchor| anchor.message_id == self.card_row_id());
+        if inside {
+            Mark::text(self.card_row_id(), self.profile_caret)
+        } else {
+            Mark::whole(self.card_row_id())
+        }
+    }
+
+    /// The cursor row as the identifier a [`Mark`] names.
+    fn card_row_id(&self) -> i64 {
+        i64::try_from(self.profile_vim.cursor()).unwrap_or(i64::MAX)
+    }
+
+    /// Starts a card selection at the inline position, or extends the one there is.
+    fn start_card_visual(&mut self) {
+        if self.profile_visual.is_none() {
+            self.profile_visual = Some(Mark::text(self.card_row_id(), self.profile_caret));
+        }
+    }
+
+    /// Selects whole rows, which is what `V` leaves behind and what a selection
+    /// that reaches a second row becomes.
+    fn start_card_rowwise(&mut self) {
+        self.profile_visual = Some(Mark::whole(self.card_row_id()));
+    }
+
     /// Puts the profile in the right-hand pane.
     ///
     /// Sizes the highlight from whatever rows exist, so an empty panel has
     /// nothing to move a highlight over rather than a highlight on nothing.
     fn open_profile(&mut self) {
-        self.profile_vim = VimState::new(self.profile_rows().len());
-        self.pane = Pane::Profile(ProfileId::SelfAccount);
+        self.open_card(ProfileId::SelfAccount);
+    }
+
+    /// Puts the card for whoever the chat list is highlighting, in the pane.
+    ///
+    /// The highlight rather than the open conversation, so a reader can look
+    /// somebody up without opening them — which is the whole difference between a
+    /// chat list and a list of links, and the reason the chat list is one.
+    ///
+    /// An empty list opens nothing: there is nobody to open, and a card about
+    /// nobody would fall back to the account's own, which is a card the reader did
+    /// not ask for.
+    fn open_contact(&mut self) {
+        // From the chat list it is the highlight, and from the conversation it is
+        // the open one: the two are the same value, because opening a conversation
+        // is what moves the highlight to it.
+        let Some(chat) = self.list.chats.get(self.selected_chat) else {
+            return;
+        };
+        self.open_card(ProfileId::User(chat.id));
+    }
+
+    /// Puts a card about `subject` in the right-hand pane.
+    ///
+    /// The highlight starts at the top and the inline position at the start of the
+    /// first value, every time. The conversation keeps its message cursor across a
+    /// trip to the card and back because a conversation is a document the reader
+    /// has a place in; a card is a fixed-shape list of values with no order to lose
+    /// a place in, and restoring the row they looked at last time would answer a
+    /// question they did not ask.
+    pub(crate) fn open_card(&mut self, subject: ProfileId) {
+        self.profile_subject = subject;
+        self.profile_vim = VimState::new(crate::card::rows(self).len());
+        self.profile_caret = 0;
+        self.profile_visual = None;
+        self.profile_count = None;
+        self.pane = Pane::Profile(subject);
         self.focus = Focus::Conversation;
         self.mode = Mode::Normal;
         self.selection = None;
@@ -1208,6 +1440,19 @@ impl App {
         self.profile_vim = VimState::new(0);
     }
 
+    /// Leaves a card, for the way back rather than for `Esc`.
+    ///
+    /// Drops the selection and the inline position as well as the pane, because
+    /// all three describe a card that is no longer on show: a position inside a
+    /// value means nothing in a conversation, and leaving it behind would be a
+    /// caret waiting to be drawn on the wrong surface.
+    fn close_card(&mut self) {
+        self.profile_visual = None;
+        self.profile_caret = 0;
+        self.profile_count = None;
+        self.close_profile();
+    }
+
     /// Handles a key while the profile has the focus.
     ///
     /// `h` goes to the chat list and `l` and `Esc` come back to the
@@ -1215,23 +1460,191 @@ impl App {
     /// through the same [`VimState`] the conversation uses, because that type
     /// moves a cursor between items and knows nothing about what an item is.
     ///
+    /// A key on a card.
+    ///
+    /// Three families, and the order they are matched in is the design:
+    ///
+    /// - **Leaving.** `Esc` walks down — a selection, then the card, then the
+    ///   conversation — and `h` leaves from the row's first cell, where the inline
+    ///   position has nowhere left to go. That is `h` doing two jobs, and it is
+    ///   sound because a card is one column of values: there is no column to the
+    ///   left of the first one, so the motion is at its edge rather than the key
+    ///   being repurposed mid-word.
+    /// - **Within a row.** `l` and `h` move the inline position, and `w`/`b`/`e`
+    ///   and `0`/`$` move it by word, clamped to the value rather than crossing
+    ///   into the next row — crossing is what `j` is for, and a motion that
+    ///   silently changes *what it selects* is the worst failure a selection has.
+    /// - **Between rows.** `j`/`k` and `gg`/`G` move the row and reset the inline
+    ///   position to its start, because a position inside a row means nothing in
+    ///   the next one.
+    ///
     /// A key that is none of those is the conversation's, and taking it is what
     /// stops a reader who pressed `i` by reflex from having to press it twice.
-    /// The pane closes first, so the key lands on the conversation rather than on
-    /// a profile row.
     fn handle_profile(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('h') => self.set_focus(Focus::ChatList),
-            KeyCode::Char('l') | KeyCode::Esc => self.close_profile(),
-            KeyCode::Char(c @ ('j' | 'k' | 'g' | 'G')) => {
-                self.profile_vim.handle_char(c);
+        // `Ctrl-w` is a prefix here, and bare it still leaves the input line: the
+        // same prefix-with-a-bare-fallback shape `g`/`gg` already has.
+        if self.profile_pending_w {
+            self.profile_pending_w = false;
+            match key.code {
+                KeyCode::Char('h') => return self.set_focus(Focus::ChatList),
+                // Nothing is drawn to the right of a card, so `Ctrl-w l` has no
+                // destination. It is named nowhere on the card's hint for that
+                // reason, and saying so here is what keeps the key from looking
+                // broken to a reader who tries it.
+                KeyCode::Char('l') => return self.flash("nothing to the right of a card"),
+                _ => return,
             }
+        }
+
+        match key.code {
+            KeyCode::Esc => self.escape_card(),
+            // `h` at the first cell is the way back, because that is where the
+            // inline position has nothing to its left. A card is one column of
+            // values, so there is no second column for the motion to reach — which
+            // is what lets one key be the motion everywhere else and the way out
+            // at the one edge where the motion is finished.
+            KeyCode::Char('h') if self.card_caret_at_start() => self.close_card(),
+            KeyCode::Char(c @ ('l' | 'h' | 'w' | 'b' | 'e' | '0' | '$')) => {
+                self.card_motion_char(c);
+            }
+            KeyCode::Char(c @ ('j' | 'k' | 'g' | 'G')) => self.card_motion_row(c),
+            KeyCode::Char('v') => self.start_card_visual(),
+            KeyCode::Char('V') => self.start_card_rowwise(),
+            KeyCode::Char('y') => self.yank_card(),
             KeyCode::Char('d') => self.activate_profile_row(),
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => self.card_count(c),
             _ => {
                 self.close_profile();
                 self.handle_normal(key);
             }
         }
+    }
+
+    /// `y` on a card, which yanks one of two things.
+    ///
+    /// A selection inside one row is the selected characters, and a selection
+    /// across rows is one line per row, oldest first — the same two cases the
+    /// conversation's `y` answers with, and for the same reason. A selection that
+    /// has not been moved is a position rather than a span, and there is nothing in
+    /// it to take; that is said rather than silently replacing the register with
+    /// nothing.
+    ///
+    /// The register is also offered to the system clipboard, best-effort: whether a
+    /// terminal honours OSC 52 at all is not something this program can find out,
+    /// so a refused or capped write is not a failure of the yank and is not
+    /// reported as one.
+    fn yank_card(&mut self) {
+        let lines = self.card_yanked();
+        self.profile_visual = None;
+
+        if lines.iter().all(String::is_empty) {
+            self.flash("nothing to yank — move the selection first");
+            return;
+        }
+
+        self.register = Register::set(lines);
+        self.clipboard = Some(self.register.text());
+    }
+
+    /// The lines a card selection yanks, or the cursor row's value when there is
+    /// no selection — which is what `yy` is.
+    fn card_yanked(&self) -> Vec<String> {
+        let rows = crate::card::rows(self);
+        let Some(selection) = self.card_selection() else {
+            // No selection: the whole value of the row the cursor is on. A card
+            // has no buffer, so there is no linewise equivalent to reach for.
+            return rows
+                .get(self.profile_vim.cursor())
+                .map(|row| vec![row.value.clone()])
+                .unwrap_or_default();
+        };
+
+        // Two cases, and which one it is falls out of `text_range` being `Some`:
+        // inside one row it is a range of characters, and anything else is a set of
+        // rows, because there is no such thing as a selection that quotes half of
+        // each.
+        if let Some((id, range)) = selection.text_range() {
+            let Some(row) = usize::try_from(id).ok().and_then(|id| rows.get(id)) else {
+                return Vec::new();
+            };
+            let end = range.end.min(row.value.chars().count());
+            let start = range.start.min(end);
+            return vec![row.value[crate::rows::byte_span(&row.value, start..end)].to_owned()];
+        }
+
+        // Across rows: one line per row, oldest first, which is the register's own
+        // order and the conversation's.
+        let (from, to) = row_bounds(&selection, rows.len());
+        rows.iter()
+            .enumerate()
+            .filter(|(index, _)| (from..=to).contains(index))
+            .map(|(_, row)| row.value.clone())
+            .collect()
+    }
+
+    /// `Esc` on a card, as a ladder: a selection, then the card, then out.
+    ///
+    /// Four presses from a selection on a second row, and no special case
+    /// anywhere in it — a key that means one thing in one state and another in the
+    /// next is a key a reader has to learn twice, and `Esc` is the one key every
+    /// reader already reaches for.
+    fn escape_card(&mut self) {
+        if self.profile_visual.take().is_some() {
+            return;
+        }
+        self.close_card();
+    }
+
+    /// Whether the inline position is at the start of its value, which is where
+    /// `h` leaves the card rather than moving.
+    #[must_use]
+    fn card_caret_at_start(&self) -> bool {
+        self.profile_caret == 0
+    }
+
+    /// A motion within the cursor row's value: `l`/`h`, a word motion, or a bound.
+    ///
+    /// Every one of them is clamped to the value rather than crossing into the next
+    /// row, and that is not Vim's rule — in Vim `w` at the end of a buffer wraps.
+    /// Crossing is what `j` is for, and a motion that silently changes *what it
+    /// selects* is the worst failure mode a selection has.
+    fn card_motion_char(&mut self, c: char) {
+        let Some(motion) = CharMotion::from_key(c) else {
+            return;
+        };
+        let Some(value) = self.card_value() else {
+            return;
+        };
+        self.profile_caret = char_motion(&value, self.profile_caret, motion);
+    }
+
+    /// A motion between rows, which resets the inline position.
+    ///
+    /// The reset is the point: a character position inside one value means nothing
+    /// in the next, and carrying it over would put the caret at a column the next
+    /// value may not have.
+    fn card_motion_row(&mut self, c: char) {
+        // `handle_char` applies the motion *and* returns it, so calling
+        // `apply_motion` on the result would move the row twice — which is a bug
+        // that looks like a card with one more row than it has.
+        self.profile_vim.handle_char(c);
+        self.profile_caret = 0;
+    }
+
+    /// A count before a motion, as `12j` means twelve.
+    ///
+    /// The digits are otherwise unbound on a card, so a count costs one line rather
+    /// than shadowing a key that means something else.
+    fn card_count(&mut self, c: char) {
+        let digit = u32::from(c);
+        self.profile_count = Some(self.profile_count.unwrap_or(0) * 10 + digit);
+    }
+
+    /// The cursor row's value, if the card has one on show.
+    fn card_value(&self) -> Option<String> {
+        crate::card::rows(self)
+            .get(self.profile_vim.cursor())
+            .map(|row| row.value.clone())
     }
 
     /// Acts on the row under the profile's highlight.
@@ -1241,6 +1654,19 @@ impl App {
     /// button. The rows that are neither of the two actions do nothing, and the
     /// panel draws them dim so that a key with nothing to do is not a surprise.
     fn activate_profile_row(&mut self) {
+        // A contact's card has no row to act on, and the refusal says *which* of
+        // the two reasons applies: a value row is not something to act on, and a
+        // card with no actions at all is the contact's. They read as one message
+        // because a reader who pressed `d` wants to know it will not happen.
+        if let crate::card::CardSubject::Contact(_) = self.card_subject()
+            && !matches!(
+                self.profile_row(),
+                Some(ProfileRow::Logout | ProfileRow::AddAccount)
+            )
+        {
+            self.flash(NOT_YOURS_REFUSAL);
+            return;
+        }
         match self.profile_row() {
             // A deliberate refusal rather than a failure. The bracketed
             // `[failed: …]` form is for something that tried and did not come
@@ -1981,10 +2407,19 @@ impl App {
                 self.cycle_focus(false);
                 return;
             }
+            // `Ctrl-w` is the input line's way out, and a card's prefix for pane
+            // movement — because the card's own `h`/`l` are an inline motion and a
+            // key that is a motion in one place and a pane in the next is a key a
+            // reader has to learn twice. The prefix is armed only on a card, so on
+            // every other pane `Ctrl-w` is still exactly what it was.
             _ if key.modifiers.contains(KeyModifiers::CONTROL)
                 && key.code == KeyCode::Char('w') =>
             {
-                self.leave_line();
+                if self.pane.is_profile() {
+                    self.profile_pending_w = true;
+                } else {
+                    self.leave_line();
+                }
                 return;
             }
             _ => {}
@@ -2023,12 +2458,20 @@ impl App {
             // way into it.
             KeyCode::Char('h' | 'l') => self.set_focus(Focus::Conversation),
 
-            // The account's own profile, from the list as well as from the
-            // conversation: a reader looking for settings has usually not opened
-            // a conversation to look in.
+            // The account's own card, from the list as well as from the
+            // conversation: a reader looking for settings has usually not opened a
+            // conversation to look in.
             KeyCode::Char('S') => {
                 self.pending_g = false;
                 self.open_profile();
+            }
+
+            // The contact the highlight is on. `A` and not `l`, because `l` is
+            // already the way into the conversation on this pane, and a key that
+            // means two things in two panes is a key a reader has to learn twice.
+            KeyCode::Char('A') => {
+                self.pending_g = false;
+                self.open_contact();
             }
 
             KeyCode::Char('j') => {
@@ -2128,6 +2571,7 @@ impl App {
             }
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Char('S') => self.open_profile(),
+            KeyCode::Char('A') => self.open_contact(),
             _ => {}
         }
     }
@@ -5631,16 +6075,17 @@ mod tests {
         for _ in 0..3 {
             app.handle_key(press(KeyCode::Char('j')));
         }
-        assert!(app.profile_cursor() > 0, "the profile's highlight moved");
+        assert!(app.profile_cursor() > 0, "the card's highlight moved");
         assert_eq!(
             app.vim.cursor(),
             in_the_conversation,
             "and the conversation's did not"
         );
 
-        // `k` rather than `j`, because the mock conversation opens pinned to its
-        // newest message and `j` there is the clamp rather than the motion.
-        app.handle_key(press(KeyCode::Char('l')));
+        // `Esc` out and `k` on the conversation: `k` rather than `j`, because the
+        // mock conversation opens pinned to its newest message and `j` there is
+        // the clamp rather than the motion.
+        app.handle_key(press(KeyCode::Esc));
         app.handle_key(press(KeyCode::Char('k')));
         assert!(
             app.vim.cursor() < in_the_conversation,
@@ -5648,25 +6093,84 @@ mod tests {
         );
     }
 
-    /// Leaving a pane is one rule, and `Tab` is one of the four keys that does
-    /// it: the profile is not a stack, so the conversation is what comes back.
+    /// Leaving a pane is one rule, and `Tab` is one of the keys that does it: the
+    /// card is not a stack, so the conversation is what comes back.
+    ///
+    /// `Esc` and `l` no longer both leave, and that is the design: `h`/`l` are an
+    /// inline motion now, so a card is a column of values with no column to the
+    /// right of the last one, and `l` at the end of a value has nowhere to go. The
+    /// way out is `Esc`, and `h` at the *start* of a value — the two edges, each
+    /// key doing the one thing its own edge allows.
     #[test]
-    fn every_way_out_of_the_profile_lands_on_the_conversation() {
-        for key in [KeyCode::Char('l'), KeyCode::Esc] {
-            let mut app = profile();
-            app.handle_key(press(key));
-            assert_eq!(app.pane, Pane::Conversation, "{key:?}");
-        }
+    fn every_way_out_of_the_card_lands_on_the_conversation() {
+        // `Esc` with nothing selected: one press leaves.
+        let mut app = profile();
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(app.pane, Pane::Conversation, "Esc closes the card");
 
+        // `l` at the end of a value is not a way out, because it is a motion with
+        // nowhere to go and saying otherwise would teach a key to lie.
+        let mut app = profile();
+        while app.card_caret() < 3 {
+            app.handle_key(press(KeyCode::Char('l')));
+        }
+        app.handle_key(press(KeyCode::Char('l')));
+        assert!(
+            app.pane.is_profile(),
+            "l past the end of a value is a motion, not a way out"
+        );
+
+        // `h` at the start of a value is the way back, and the way back is the
+        // conversation. The chat list is `Ctrl-w h`, because `h` is a motion here
+        // and a key that is a motion in one place and a pane in the next is a key
+        // a reader has to learn twice.
         let mut app = profile();
         app.handle_key(press(KeyCode::Char('h')));
-        assert_eq!(app.pane, Pane::Conversation, "h goes to the list");
-        assert_eq!(app.focus, Focus::ChatList);
+        assert_eq!(app.pane, Pane::Conversation, "h at the start goes back");
+
+        let mut app = profile();
+        app.handle_key(press_ctrl('w'));
+        app.handle_key(press(KeyCode::Char('h')));
+        assert_eq!(app.focus, Focus::ChatList, "Ctrl-w h is the chat list");
+
+        // Nothing is drawn to the right of a card, so `Ctrl-w l` has nowhere to
+        // go and says so rather than doing nothing.
+        let mut app = profile();
+        app.handle_key(press_ctrl('w'));
+        app.handle_key(press(KeyCode::Char('l')));
+        assert!(
+            app.pane.is_profile(),
+            "the card stays, and the reason is on show"
+        );
 
         let mut app = profile();
         app.handle_key(press(KeyCode::Tab));
         assert_eq!(app.pane, Pane::Conversation, "Tab walks the panes");
         assert_eq!(app.focus, Focus::Input);
+    }
+
+    /// `Esc` is a ladder and not a switch: a selection, then the card, then out.
+    /// Four presses from a selection on a second row, with no special case
+    /// anywhere in it.
+    #[test]
+    fn escape_on_a_card_is_a_ladder_and_not_a_switch() {
+        let mut app = profile();
+        app.handle_key(press(KeyCode::Char('j')));
+        app.handle_key(press(KeyCode::Char('v')));
+        app.handle_key(press(KeyCode::Char('j')));
+        assert!(
+            app.card_selection().is_some(),
+            "a selection across two rows"
+        );
+
+        // One press drops the selection and keeps the card.
+        app.handle_key(press(KeyCode::Esc));
+        assert!(app.card_selection().is_none(), "the selection went");
+        assert!(app.pane.is_profile(), "and the card stayed");
+
+        // The next press leaves.
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(app.pane, Pane::Conversation, "and the next one leaves");
     }
 
     /// A key the panel does not answer is the conversation's, and taking it is

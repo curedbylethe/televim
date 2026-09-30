@@ -178,10 +178,11 @@ enum Mark {
     /// A selection ended here, so what follows is the row's own again.
     Plain,
 
-    /// A caret sits here. A mark rather than more text: it occupies a cell the
-    /// text does not, and it belongs *between* two characters rather than after
-    /// the last one.
-    Caret,
+    /// A caret begins here: the character at this offset is marked.
+    CaretOn,
+
+    /// The caret's character is over and the row is its own ink again.
+    CaretOff,
 }
 
 #[must_use]
@@ -217,36 +218,80 @@ pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
         .map(|at| at - row.range.start);
 
     // What divides the row, in the order it divides it. The selection goes on
-    // first so that a caret sharing an offset with its edge is painted inside the
+    // first so that a caret sharing an offset with its edge is marked inside the
     // selection rather than beside it.
-    let mut marks: Vec<(usize, Mark)> = Vec::with_capacity(3);
+    let mut marks: Vec<(usize, Mark)> = Vec::with_capacity(4);
     if selected {
         marks.push((from, Mark::Selected));
         marks.push((to, Mark::Plain));
     }
     if let Some(at) = caret {
-        marks.push((at, Mark::Caret));
+        // A caret is a **one-character style range**, from the character at its
+        // offset to the one after it. It is not a mark in the text and it is not a
+        // cell of its own: a cell that pushed the text along would move everything
+        // after it, and a card's values would jump a column every time the cursor
+        // landed on one of them. An overlay is also what the design's own stylesheet
+        // does — a `::after` pseudo-element drawn on the cell rather than a
+        // character in the stream — and it is the only reading under which a card's
+        // columns stay put.
+        //
+        // One past the end of the value there is no character to mark, so the range
+        // is empty and the cell is emitted on its own below. That is the only case
+        // where a caret costs a column, and it is at the end of a value, where a
+        // column of movement is invisible.
+        let end = text[at..]
+            .chars()
+            .next()
+            .map_or(at, |character| at + character.len_utf8());
+        marks.push((at, Mark::CaretOn));
+        marks.push((end, Mark::CaretOff));
     }
     marks.sort_by_key(|(at, _)| *at);
 
     let mut out: Vec<Span<'a>> = Vec::new();
     let mut at = 0;
     let mut style = base;
+    let mut on_caret = false;
+    let effective = |style: Style, on_caret: bool| {
+        if on_caret {
+            caret_style(row, style)
+        } else {
+            style
+        }
+    };
+
     for (offset, mark) in marks {
         if at < offset {
-            push(&mut out, &text[at..offset], style, row.ink.dot);
+            push(
+                &mut out,
+                &text[at..offset],
+                effective(style, on_caret),
+                row.ink.dot,
+            );
             at = offset;
         }
         match mark {
             Mark::Selected => style = base.patch(row.ink.selected),
             Mark::Plain => style = base,
-            // The caret takes the ink of the segment it stands in, so a caret
-            // inside a selection looks like it is in the selection.
-            Mark::Caret => out.push(Span::styled(" ", caret_style(row, style))),
+            Mark::CaretOn => on_caret = true,
+            Mark::CaretOff => on_caret = false,
         }
     }
     if at < text.len() {
-        push(&mut out, &text[at..], style, row.ink.dot);
+        push(
+            &mut out,
+            &text[at..],
+            effective(style, on_caret),
+            row.ink.dot,
+        );
+    }
+
+    // A caret past the last character has nothing to mark, so it is the one cell
+    // the row grows: a space **in the caret's own ink**, which is the whole reason
+    // it is a cell at all. A reader looking at the end of a draft is looking at
+    // this cell, and in the row's ink it would be nothing to see.
+    if caret.is_some_and(|at| at >= text.len()) {
+        out.push(Span::styled(" ", caret_style(row, style)));
     }
 
     out
@@ -331,25 +376,15 @@ mod tests {
         spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// Where the caret sits among the row's spans, by index.
+    /// The span a caret is on, found by **ink** rather than by content.
     ///
-    /// Found by content — a single space — and asserted to be *unique*, so a test
-    /// text that grows a space of its own fails loudly rather than quietly
-    /// pointing the assertions at the wrong cell. The index is the point: a caret
-    /// is a marker at a position, so "which span is it" is what says where the
-    /// reader is looking.
-    fn caret_at(spans: &[Span<'_>]) -> Option<usize> {
-        let found: Vec<usize> = spans
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.content == " ")
-            .map(|(index, _)| index)
-            .collect();
-        match found.as_slice() {
-            [] => None,
-            &[one] => Some(one),
-            many => panic!("the caret is not the only space in the row: {many:?} of {spans:?}"),
-        }
+    /// A caret is an overlay: it is the character at its own offset, re-styled, and
+    /// the text does not move. So it cannot be found by looking for a space — the
+    /// character under it is still the reader's text. A caret one past the end of a
+    /// value has no character to mark and takes a cell of its own, and it carries
+    /// the same ink, so one lookup finds both cases.
+    fn caret_index(out: &[Span<'_>], caret: Style) -> Option<usize> {
+        out.iter().position(|span| span.style == caret)
     }
 
     #[test]
@@ -468,16 +503,22 @@ mod tests {
         };
 
         let out = spans(&row);
-        // The caret is a *cell*, so it takes one the text did not have: the row
-        // reads a column longer with a caret in it, which is what a reader sees.
-        assert_eq!(plain_text(&out), "A da");
-        assert_eq!(caret_at(&out), Some(1), "between the A and the d: {out:?}");
+        // An overlay, so the text is the text: a card's values must not move a
+        // column because the cursor landed on one of them.
+        assert_eq!(plain_text(&out), "Ada");
         assert!(
             out.first()
-                .is_some_and(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+                .is_some_and(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+            "and the rest of the row still is"
         );
+
+        // The hole is the character at the caret's offset, still the reader's and
+        // no longer reversed.
         let caret = &out[1];
-        assert_eq!(caret.content, " ");
+        assert_eq!(
+            caret.content, "d",
+            "the character under the caret is still there"
+        );
         assert!(
             !caret.style.add_modifier.contains(Modifier::REVERSED),
             "a hole in the reverse video, not another reverse: {:?}",
@@ -509,10 +550,21 @@ mod tests {
         };
 
         let out = spans(&row);
-        let caret = &out[caret_at(&out).expect("the caret is there")];
+        // The hole is the first character with the reversal off, and the match
+        // underneath it must not put the reversal back.
+        let caret = out
+            .iter()
+            .find(|span| !span.style.add_modifier.contains(Modifier::REVERSED))
+            .expect("a hole in the row");
+        assert_eq!(caret.content, "A", "and it is the character at the caret");
         assert!(
             !caret.style.add_modifier.contains(Modifier::REVERSED),
             "a match underneath must not put the reversal back: {:?}",
+            caret.style.add_modifier
+        );
+        assert!(
+            caret.style.add_modifier.contains(Modifier::BOLD),
+            "while the match's own bold survives: {:?}",
             caret.style.add_modifier
         );
     }
@@ -549,7 +601,7 @@ mod tests {
                 reversed: false,
                 ink: ink(),
             };
-            if caret_at(&spans(&row)).is_some() {
+            if caret_index(&spans(&row), theme().caret_normal).is_some() {
                 painted += 1;
                 assert_eq!(range, 0..4, "the first row owns the seam");
             }
@@ -596,9 +648,14 @@ mod tests {
 
         let out = spans(&row);
         assert_eq!(
-            caret_at(&out),
+            plain_text(&out),
+            "🎂Ada",
+            "an overlay: the text has not moved"
+        );
+        assert_eq!(
+            caret_index(&out, theme().caret_normal),
             Some(1),
-            "after the cake, before the A: {out:?}"
+            "and it is the A — the character at byte four, not the byte before it: {out:?}"
         );
     }
 
@@ -621,7 +678,7 @@ mod tests {
         };
 
         assert_eq!(offset, 4, "one character in is four bytes in");
-        assert_eq!(caret_at(&spans(&row)), Some(1));
+        assert_eq!(caret_index(&spans(&row), theme().caret_normal), Some(1));
     }
 
     /// The dot stands in for a space so the caret has a cell to be seen in, and
@@ -723,24 +780,22 @@ mod tests {
     fn a_caret_is_only_ever_the_text_colour_the_theme_gave_it() {
         let theme = theme();
         let text = "Ada";
-        for reversed in [false, true] {
-            for caret in [theme.caret_insert, theme.caret_normal] {
-                let row = TextRow {
-                    text,
-                    range: 0..text.len(),
-                    matched: false,
-                    selected: None,
-                    caret: Some(0),
-                    reversed,
-                    ink: Ink { caret, ..ink() },
-                };
-                let out = spans(&row);
-                let index = caret_at(&out).expect("the caret is there");
-                assert_eq!(
-                    out[index].style.fg, theme.text.fg,
-                    "a caret is never painted in a colour of its own"
-                );
-            }
+        for caret in [theme.caret_insert, theme.caret_normal] {
+            let row = TextRow {
+                text,
+                range: 0..text.len(),
+                matched: false,
+                selected: None,
+                caret: Some(1),
+                reversed: false,
+                ink: Ink { caret, ..ink() },
+            };
+            let out = spans(&row);
+            let index = caret_index(&out, caret).expect("the caret is there");
+            assert_eq!(
+                out[index].style.fg, theme.text.fg,
+                "a caret is never painted in a colour of its own"
+            );
         }
     }
 }
