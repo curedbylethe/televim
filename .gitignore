@@ -29,3 +29,6 @@ televim.toml
 # ai
 AGENTS.md
 .workbuddy-ai/
+
+// env
+.env
