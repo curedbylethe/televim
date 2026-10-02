@@ -31,6 +31,13 @@ use crate::app::{AccountState, App};
 use crate::card;
 use crate::wrap;
 
+/// Where to put the credentials back, as the signed-out card says it.
+///
+/// A command rather than a place: the card has no idea whether the reader's
+/// configuration file is somewhere they can reach, and `:signin` is a key this
+/// program answers wherever it is typed.
+const SET_CREDENTIALS: &str = "Set the credentials again with :signin.";
+
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -113,14 +120,17 @@ fn shell(app: &App, width: u16) -> Vec<Line<'_>> {
         // reader cannot act on, and the whole point of drawing it rather than an
         // empty profile is that they can. A bring-up failure carries a chain, and
         // the chain is where the answer usually is.
+        //
+        // **An empty reason draws no line**, which is the one answer that is not
+        // a failure: a machine with no session sends `""`, and the signed-out
+        // card is two lines — that there is no session, and where to put the
+        // credentials back. A blank row between them is a row saying nothing.
         AccountState::Unavailable(reason) => {
             let mut lines = vec![Line::from(Span::styled("not signed in", app.theme.text))];
-            lines.extend(wrapped(&app.theme.text_dim, reason, width));
-            lines.extend(wrapped(
-                &app.theme.text_dim,
-                "set the credentials in the configuration",
-                width,
-            ));
+            if !reason.is_empty() {
+                lines.extend(wrapped(&app.theme.text_dim, reason, width));
+            }
+            lines.extend(wrapped(&app.theme.text_dim, SET_CREDENTIALS, width));
             lines
         }
         AccountState::Known(_) => Vec::new(),
@@ -136,4 +146,50 @@ fn wrapped<'a>(style: &Style, text: &'a str, width: u16) -> Vec<Line<'a>> {
         .into_iter()
         .map(|range| Line::from(Span::styled(&text[range], *style)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The card for an account in one state, at the panel's width.
+    fn card(account: Result<domain::account::Account, String>) -> Vec<String> {
+        let mut app = App::mock();
+        // The account's own card, which is the only card that draws these lines.
+        app.set_account(account);
+
+        shell(&app, 50)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    /// A machine with no session has no reason to give, and its card says so in
+    /// two lines rather than three.
+    ///
+    /// `wrap` gives an empty string a row of its own, and the empty `Err` a
+    /// signed-out launch sends would otherwise be drawn as a blank line between
+    /// the only two sentences that mean anything.
+    #[test]
+    fn a_signed_out_session_with_no_reason_draws_no_blank_line() {
+        let rows = card(Err(String::new()));
+
+        assert_eq!(rows.len(), 2, "no blank row between them: {rows:#?}");
+        assert!(rows[0].contains("not signed in"), "{}", rows[0]);
+        assert!(rows[1].contains(SET_CREDENTIALS), "{}", rows[1]);
+    }
+
+    /// A reason is a failure's own words, and there is no reason to refuse one:
+    /// dropping it would send a reader to look for something that is not wrong.
+    #[test]
+    fn a_failed_profile_read_keeps_its_reason() {
+        let rows = card(Err("the network is unreachable".to_owned()));
+
+        assert_eq!(rows.len(), 3, "the reason is between the two: {rows:#?}");
+        assert!(
+            rows[1].contains("the network is unreachable"),
+            "{}",
+            rows[1]
+        );
+    }
 }

@@ -285,6 +285,7 @@ fn message_row<'m>(
         // no position *within* one, which is what a card row adds.
         caret: None,
         reversed: false,
+        concealed: false,
     }));
 
     if last && let Some(suffix) = rows::status_suffix(app, message) {

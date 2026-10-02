@@ -50,11 +50,21 @@ pub(crate) enum AppEvent {
 /// derived so that the two cannot disagree about which run they belong to.
 pub fn run(cfg: &Config, config_path: &Path) -> Result<()> {
     init_tracing(cfg, config_path);
-    let rt = tokio::runtime::Builder::new_current_thread()
+    build_runtime()?.block_on(run_async(cfg))
+}
+
+/// The one runtime builder in the program.
+///
+/// Current-thread, explicitly, whatever `tokio`'s features enable: a TUI has
+/// one event loop, so a work-stealing runtime is overhead with nothing to
+/// schedule. Both entry paths build theirs here rather than each writing a
+/// builder, because the memory budget is a property of the runtime and a second
+/// builder is a second thing that can disagree with it.
+pub fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("building tokio runtime")?;
-    rt.block_on(run_async(cfg))
+        .context("building tokio runtime")
 }
 
 /// Sends the diagnostics to a file beside the configuration.
@@ -162,6 +172,16 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     let mut app = App::new();
     "connecting…".clone_into(&mut app.status);
+
+    // What the configuration carries goes into the sign-in flow as pre-fills,
+    // and nothing more: the flow is where a phone number, a code and a password
+    // are read, and these are what a launch with a reader in a hurry saves them
+    // typing. `credentials_configured` is the flag that decides whether there is
+    // a flow to put them in at all.
+    app.phone = cfg.phone.clone().unwrap_or_default();
+    app.code_prefill = cfg.code.clone().unwrap_or_default();
+    app.password_prefill = cfg.password.clone().unwrap_or_default();
+    app.credentials_configured = cfg.credentials().is_some();
 
     let mut network = net::State::default();
 

@@ -28,7 +28,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::app::{App, Focus, Mode, PromptKind};
+use crate::app::{AccountState, App, Focus, Mode, PromptKind, SignIn};
 use crate::text_row;
 
 /// How many content rows the bar may take before it starts scrolling.
@@ -147,6 +147,41 @@ const LINE_NORMAL_HINT: &str =
 /// `y` because the crate implements them, and all it needs here is the hint.
 const LINE_VISUAL_HINT: &str = " y: yank  d: cut  Esc: back";
 
+/// The hint while the signed-out shell card has the focus.
+///
+/// The two keys the shell cards are the whole program behind, so they are the
+/// only two named: there is nothing to go back to, which is also why `Esc` has
+/// nowhere to land and is not on this row.
+const CARD_SIGNED_OUT_HINT: &str = " ::signin  q:quit";
+
+/// The hint while nothing has been read yet, and on the no-credentials shell.
+///
+/// `q` alone. It must not borrow the other shell's wording: nothing has
+/// established that the session is missing, so naming `:signin` here would be
+/// naming the way out of a problem the reader may not have.
+const CARD_READING_HINT: &str = " q:quit";
+
+/// The hint while a sign-in field is open.
+///
+/// `⏎` is the submit and `Esc` is the way out of the step, and those two are all
+/// there is: the three fields are one line each, so the message row's `^J` and
+/// `shift+⏎` name keys that do nothing here, and a hint that names a key which
+/// does nothing tells the reader the key is broken rather than that it is not
+/// shown.
+const SIGNIN_FIELD_HINT: &str = " ⏎: send  Esc: cancel";
+
+/// The hint while the sign-in flow is paused.
+///
+/// The one key that brings it back, and the flash beside it has already said the
+/// same thing — this is the row that survives the flash expiring.
+const SIGNIN_PAUSED_HINT: &str = " sign-in paused; Tab brings it back";
+
+/// The hint while a sign-in request is on its way.
+///
+/// `⏎` is refused rather than silent while a request is in flight, and this is
+/// what says so before the reader presses it.
+const SIGNIN_WAITING_HINT: &str = " Checking… — the request is in flight";
+
 /// The columns the status line spends on the mode label and the gap after it.
 ///
 /// The widest label the line itself can produce is `NORMAL`, and a `Confirm`
@@ -167,23 +202,30 @@ const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
 ///
-/// Nine entries, and that is not the same as nine before: the confirmation's row
-/// was here and was not reachable. A confirmation outranks every hint, so
-/// `status_text` returns the prompt's own sentence before it ever asks for one —
-/// the string was width-checked by a test and displayed by nothing. The profile's
-/// row replaced it, which is what `ALL_HINTS` is for.
+/// Fifteen entries: the design's fourteen minus the two this build cannot reach —
+/// the editable profile's row, because there is no editable profile, and the
+/// deletion confirmation's, because a confirmation outranks every hint and so is
+/// never asked for one — plus the three sign-in rows, which the design does not
+/// list because the sign-in surface is new. A string that is width-checked by a
+/// test and displayed by nothing is the defect this list exists to prevent, and
+/// it is why the count is written out rather than derived.
 #[cfg(test)]
-const ALL_HINTS: [&str; 10] = [
+const ALL_HINTS: [&str; 15] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
     VISUAL_HINT,
     CARD_SELF_HINT,
     CARD_CONTACT_HINT,
+    CARD_SIGNED_OUT_HINT,
+    CARD_READING_HINT,
     DRAFT_HINT,
     INSERT_HINT,
     COMPLETION_HINT,
     LINE_NORMAL_HINT,
     LINE_VISUAL_HINT,
+    SIGNIN_FIELD_HINT,
+    SIGNIN_PAUSED_HINT,
+    SIGNIN_WAITING_HINT,
 ];
 
 /// The hint for the state the screen is in.
@@ -196,6 +238,23 @@ const ALL_HINTS: [&str; 10] = [
 #[must_use]
 pub fn hint(app: &App) -> &'static str {
     match (app.focus, app.mode) {
+        // The sign-in surface, above every other row: it is not a pane and it is
+        // not a card, so nothing about the pair describes it. The keys are the
+        // field's while one is open and the flow's while it is not.
+        (Focus::Input, _) if app.signin().and_then(SignIn::flow).is_some() => SIGNIN_FIELD_HINT,
+        (Focus::ChatList, _) if app.signin_field().is_some() => {
+            if app
+                .signin()
+                .and_then(SignIn::flow)
+                .is_some_and(|flow| flow.waiting)
+            {
+                SIGNIN_WAITING_HINT
+            } else {
+                SIGNIN_PAUSED_HINT
+            }
+        }
+        // The no-credentials sentence is a shell, and the shell's row names `q`.
+        (Focus::Conversation, _) if app.signin().is_some() => CARD_READING_HINT,
         // Above the mode hints it specialises: while a completion is up, the
         // keys it takes mean something else, and the row has to say so.
         (Focus::Input, _) if app.completion().is_some() => COMPLETION_HINT,
@@ -210,7 +269,15 @@ pub fn hint(app: &App) -> &'static str {
         // without this the pair below would answer for it. Two rows, because the
         // two subjects do not have the same keys.
         (Focus::Conversation, Mode::Normal) if app.pane.is_profile() => match app.card_subject() {
-            crate::card::CardSubject::SelfAccount => CARD_SELF_HINT,
+            crate::card::CardSubject::SelfAccount => match app.account {
+                // The signed-out shell has no rows to move over and no draft to
+                // continue, so its row names the command that fixes it and `q`.
+                AccountState::Unavailable(_) => CARD_SIGNED_OUT_HINT,
+                // Nothing read yet is not the same as nothing there: it must not
+                // borrow the other shell's wording.
+                AccountState::Unfetched => CARD_READING_HINT,
+                AccountState::Known(_) => CARD_SELF_HINT,
+            },
             crate::card::CardSubject::Contact(_) => CARD_CONTACT_HINT,
         },
         (Focus::Conversation, Mode::Visual) => VISUAL_HINT,
@@ -277,17 +344,25 @@ pub fn content_rows(app: &App, width: u16) -> usize {
 /// have to guess at.
 #[must_use]
 pub fn title(app: &App) -> String {
-    match (app.focus, app.line.purpose(), app.line.is_empty()) {
-        (Focus::Input, PromptKind::Message, _) => match app.open_chat_name() {
-            Some(name) => format!(" Message to {name} "),
-            None => " Message ".to_owned(),
+    // A sign-in field names itself whatever the focus is, the draft row included:
+    // the step survives a `Tab` away from it, and a bar that said `draft` on the
+    // way back would have stopped naming the field the reader is about to answer.
+    match app.line.purpose() {
+        PromptKind::Phone => " Phone ".to_owned(),
+        PromptKind::Code => " Login code ".to_owned(),
+        PromptKind::Password => " Password ".to_owned(),
+        _ => match (app.focus, app.line.purpose(), app.line.is_empty()) {
+            (Focus::Input, PromptKind::Message, _) => match app.open_chat_name() {
+                Some(name) => format!(" Message to {name} "),
+                None => " Message ".to_owned(),
+            },
+            (Focus::Input, PromptKind::Reply, _) => " Reply ".to_owned(),
+            (Focus::Input, PromptKind::Edit, _) => " Edit ".to_owned(),
+            (Focus::Input, PromptKind::Command, _) => " Command ".to_owned(),
+            (Focus::Input, PromptKind::Search, _) => " Find ".to_owned(),
+            (_, _, false) => " draft ".to_owned(),
+            _ => " Input ".to_owned(),
         },
-        (Focus::Input, PromptKind::Reply, _) => " Reply ".to_owned(),
-        (Focus::Input, PromptKind::Edit, _) => " Edit ".to_owned(),
-        (Focus::Input, PromptKind::Command, _) => " Command ".to_owned(),
-        (Focus::Input, PromptKind::Search, _) => " Find ".to_owned(),
-        (_, _, false) => " draft ".to_owned(),
-        _ => " Input ".to_owned(),
     }
 }
 
@@ -380,6 +455,9 @@ fn body_row<'a>(
         // not keep.
         caret: (focused && caret_row).then(|| app.line.caret()),
         reversed: false,
+        // A password is Telegram's secret rather than the reader's draft, and it
+        // is the only prompt that conceals — see [`crate::line::LineEditor::concealed`].
+        concealed: app.line.concealed(),
         // `status()` rather than a mode of this panel's own, because the line's
         // mode is the line's and the bar already reads it to pick its hint.
         ink: text_row::Ink::draft(&app.theme, focused, app.line.status() == "NORMAL"),

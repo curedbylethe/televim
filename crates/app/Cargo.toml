@@ -29,6 +29,7 @@ tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 config.workspace = true
+dotenvy.workspace = true
 serde.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -9,10 +9,11 @@
 //!
 //! Three things, in order of how much they decide:
 //!
-//! * **Brings the client up** — build it from the configuration, sign in when
-//!   the stored session is not enough, fetch the chat list, take the update
-//!   feed. Every failure is reported to the screen rather than raised, because
-//!   a client that cannot connect is a state the reader is in, not a crash.
+//! * **Brings the client up** — build it from the configuration, fetch the chat
+//!   list and take the update feed **when the stored session is signed in**, and
+//!   run the sign-in flow when it is not. Every failure is reported to the screen
+//!   rather than raised, because a client that cannot connect is a state the
+//!   reader is in, not a crash.
 //! * **Asks for pages** — after every event and every tick, the conversation on
 //!   show is asked what it needs next, and a fetch is spawned for it. The fetch
 //!   runs as its own task so that a round trip does not stop the reader's
@@ -34,6 +35,11 @@
 //! needs to know: that a direction has run out. That is the one fact the trigger
 //! cannot work out for itself, because a short page and the last full one look
 //! the same once they are in the window.
+//!
+//! The same is true of the sign-in tokens — [`LoginCode`] and
+//! [`PasswordChallenge`], which are `proto` types `tui` may not name — and of
+//! the store the session went into. [`State`] holds them, so the one module that
+//! may see both halves sees them in one place.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,13 +49,16 @@ use domain::chat::Chat;
 use domain::message::Message;
 use domain::search::SEARCH_MATCHES;
 use domain::updates::UpdateEvent;
-use proto::{HistoryCursor, ProtoClient, ProtoError, SearchResults, UpdateStream};
+use proto::{
+    HistoryCursor, LoginCode, PasswordChallenge, ProtoClient, ProtoError, SearchResults, SignIn,
+    UpdateStream,
+};
 use telegram_framework::{
-    Client, ClientBuilder, FileStore, FrameworkError, KeyringStore, RequestError, SessionStore,
-    SignInResult,
+    ClientBuilder, FileStore, FrameworkError, KeyringStore, PASSWORD_ATTEMPTS, Refusal,
+    RequestError, SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tui::app::{Action, App, FetchDirection, Jump};
+use tui::app::{Action, App, FetchDirection, Jump, LoginField};
 
 use crate::config::Config;
 use crate::runtime::AppEvent;
@@ -71,6 +80,14 @@ const RETRY: Duration = Duration::from_secs(5);
 
 /// Something that happened away from the keyboard.
 pub enum Event {
+    /// The machine carries no application credentials, so there is nothing to
+    /// connect as.
+    ///
+    /// Its own event rather than an [`Event::Offline`], because nothing failed:
+    /// there is no client to build and no session to fetch, and the screen's
+    /// answer is a sentence about the configuration rather than a failure.
+    NoCredentials,
+
     /// The client is up, the chat list has been fetched, and the account's own
     /// profile has been read.
     Ready {
@@ -86,10 +103,50 @@ pub enum Event {
         /// could not be read is not a failure of the client: the conversations
         /// are there, and the screen is usable. It travels with the rest of what
         /// "the client is up" means, so the two cannot be applied apart.
+        ///
+        /// **Three answers, and the empty one is not a failure.**
+        /// `Ok(account)` is signed in. `Err(String::new())` is *no session at
+        /// all* — the signed-out card, which is a state and not a reason, so it
+        /// carries no reason. `Err(reason)` is signed in and the profile read
+        /// failed, and the reason is what the card draws under it.
         account: Result<domain::account::Account, String>,
 
         /// Where the session is kept, as the panel says it.
         session_store: tui::SessionStore,
+    },
+
+    /// Telegram accepted a number and sent its code, or refused the request.
+    ///
+    /// The number travels back because the panel draws where the code went, and
+    /// the configuration's copy is a pre-fill rather than the answer: a reader
+    /// who changed it must be told about the number that was actually used.
+    CodeRequested {
+        /// The number the request went out with, as the reader gave it.
+        phone: String,
+
+        /// The code to redeem, or why there is not one.
+        result: Result<LoginCode, ProtoError>,
+    },
+
+    /// A login code was redeemed, or refused.
+    ///
+    /// A completed step does not merely clear the overlay: the account it named
+    /// arrives here, and the chat list and the feed are fetched behind it, so
+    /// "you are in" reaches the screen through [`Event::Ready`] either way.
+    SignedIn {
+        /// The account, the password step to come, or why there is neither.
+        result: Result<SignIn, ProtoError>,
+    },
+
+    /// A two-factor password was checked, or refused.
+    ///
+    /// Its own event rather than another [`Event::SignedIn`] because the
+    /// question is different and the count is different: only a password answer
+    /// carries attempts left, and a panel counting them for the wrong step would
+    /// count something Telegram did not count.
+    PasswordChecked {
+        /// The account, or why it is not signed in.
+        result: Result<SignIn, ProtoError>,
     },
 
     /// The client could not be brought up.
@@ -220,6 +277,32 @@ pub struct State {
     /// The cursor for the conversation on show, and how long it has to be left
     /// alone.
     history: History,
+
+    /// The sign-in tokens, and the store the session is in.
+    ///
+    /// Both here for the same reason [`History`] is: they are `proto` and
+    /// configuration types that `tui` may not name, and they outlive the request
+    /// that made them.
+    login: Login,
+
+    /// Where the session went, once bring-up has said so.
+    session_store: Option<tui::SessionStore>,
+}
+
+/// The two answers Telegram has given this sign-in, and nothing else.
+///
+/// Both are spent, never kept: a login code is redeemed once and a two-factor
+/// challenge is answered once, so a token that is still here is a token whose
+/// answer has not come back yet. Holding both at once is the ordinary middle of
+/// the flow rather than a mistake — the code is spent before the challenge
+/// arrives.
+#[derive(Default)]
+struct Login {
+    /// The code Telegram sent, until a login code is redeemed with it.
+    code: Option<LoginCode>,
+
+    /// The two-factor challenge, until a password is submitted against it.
+    challenge: Option<PasswordChallenge>,
 }
 
 /// Where the loaded part of the open conversation ends.
@@ -269,13 +352,30 @@ enum Wanted {
 /// went wrong instead of staying silently empty.
 pub fn spawn_bring_up(cfg: Config, tx: UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
+        // Half a pair of application credentials is the same as having none, and
+        // neither can build a client — so nothing is built. The screen's answer
+        // is the sentence about the configuration rather than an `offline:` line
+        // with nothing to have gone offline *to*.
+        if cfg.credentials().is_none() {
+            let _ = tx.send(AppEvent::Net(Event::NoCredentials));
+            return;
+        }
+
         if let Err(reason) = bring_up(&cfg, &tx).await {
             let _ = tx.send(AppEvent::Net(Event::Offline(reason)));
         }
     });
 }
 
-/// Builds the client, signs in if it has to, and fetches the chat list.
+/// Builds the client, and fetches what a signed-in session may fetch.
+///
+/// **It never signs in.** A stored session Telegram no longer knows is not a
+/// failure of bring-up and not something a file can repair: the reader is asked
+/// for the number and the code on the screen, by the flow [`request_action`]
+/// runs, which is the only way a sign-in happens now. So the check below is kept
+/// as a *value*, and everything that needs a session is skipped when it is false
+/// — the conversations, the account's own profile and the update feed are all
+/// requests an unauthorised client cannot answer.
 async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
     let (api_id, api_hash) = cfg.credentials().context(
         "no telegram application credentials configured; set TELEVIM_API_ID and TELEVIM_API_HASH",
@@ -287,32 +387,32 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         .await
         .context("building the client")?;
 
-    if !client
+    let authorized = client
         .is_authorized()
         .await
-        .context("checking whether the stored session is signed in")?
-    {
-        log_in(&client, cfg).await?;
-    }
+        .context("checking whether the stored session is signed in")?;
 
     let client = Arc::new(ProtoClient::new(client));
+    let session_store = session_description(cfg);
+
+    if !authorized {
+        // A drawable state rather than a failure: the signed-out card is what a
+        // reader with no session is in, and it says what to do about it. The
+        // empty `Err` is the one account meaning that carries no reason.
+        let _ = tx.send(AppEvent::Net(Event::Ready {
+            client,
+            chats: Vec::new(),
+            account: Err(String::new()),
+            session_store,
+        }));
+        return Ok(());
+    }
+
     let chats = client
         .fetch_private_chats()
         .await
         .context("fetching the chat list")?;
-
-    // Read once, here, and not when the panel is opened: the profile does not
-    // change under a reader, and a panel that blanked and refilled every time
-    // would be a panel they could not trust. A failure is carried rather than
-    // raised, because the conversations are here either way and the screen is
-    // usable without a profile — the panel says why it has none.
-    let account = match client.fetch_account().await {
-        Ok(account) => Ok(account),
-        Err(error) => {
-            tracing::warn!(%error, "the account's own profile could not be read");
-            Err(format!("{error:#}"))
-        }
-    };
+    let account = read_account(&client).await;
 
     // The list is fetched before the feed is taken. Resolving what arrived while
     // the client was offline reads peers back out of the session, and iterating
@@ -326,11 +426,28 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         client,
         chats,
         account,
-        session_store: session_description(cfg),
+        session_store,
     }));
     tokio::spawn(pump(updates, tx.clone()));
 
     Ok(())
+}
+
+/// The account's own profile, or why there is not one.
+///
+/// Read once, here, and not when the panel is opened: the profile does not
+/// change under a reader, and a panel that blanked and refilled every time would
+/// be a panel they could not trust. A failure is carried rather than raised,
+/// because the conversations are here either way and the screen is usable
+/// without a profile — the panel says why it has none.
+async fn read_account(client: &ProtoClient) -> Result<domain::account::Account, String> {
+    match client.fetch_account().await {
+        Ok(account) => Ok(account),
+        Err(error) => {
+            tracing::warn!(%error, "the account's own profile could not be read");
+            Err(format!("{error:#}"))
+        }
+    }
 }
 
 /// Where the session is kept, in the words the profile panel says it in.
@@ -352,49 +469,6 @@ fn session_store(cfg: &Config) -> Box<dyn SessionStore> {
     match session_description(cfg) {
         tui::SessionStore::Keyring => Box::new(KeyringStore::default()),
         tui::SessionStore::PlaintextFile(path) => Box::new(FileStore::new(path)),
-    }
-}
-
-/// Signs in with the credentials the configuration carries.
-///
-/// A stored session is the ordinary case and this is not reached; when it is,
-/// the phone number and the code Telegram sent have to be in the configuration,
-/// because the screen has nowhere to ask for them yet. Once the session has been
-/// written, neither is read again.
-async fn log_in(client: &Client, cfg: &Config) -> Result<()> {
-    let (phone, code) = cfg.login_credentials().context(
-        "the stored session is not signed in; set TELEVIM_PHONE and TELEVIM_CODE to sign in",
-    )?;
-
-    let token = client
-        .request_login_code(phone)
-        .await
-        .context("requesting a login code")?;
-
-    match client
-        .sign_in(&token, code)
-        .await
-        .context("submitting the login code")?
-    {
-        SignInResult::Success => Ok(()),
-
-        SignInResult::PasswordRequired(password_token) => {
-            let hint = password_token
-                .hint()
-                .map_or_else(String::new, |hint| format!(" (hint: {hint})"));
-            let password = cfg.password.as_deref().with_context(|| {
-                format!("this account has two-factor authentication; set TELEVIM_PASSWORD{hint}")
-            })?;
-
-            client
-                .check_password(password_token, password)
-                .await
-                .context("submitting the two-factor password")
-        }
-
-        // `SignInResult` is `#[non_exhaustive]`, and a step this build does not
-        // know is reported rather than guessed at.
-        _ => anyhow::bail!("telegram answered with a sign-in step this build does not know"),
     }
 }
 
@@ -465,7 +539,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // must not be held up by either. An action is left in place while there is
     // no client, because a message typed offline must not be thrown away.
     while let Some(action) = app.take_action() {
-        request_action(&client, action, tx);
+        request_action(&client, state, action, tx);
     }
 
     match wanted(app, state.history, Instant::now()) {
@@ -612,7 +686,168 @@ fn request_jump(
 ///
 /// The same shape as the two above, and for the same reason: a round trip in the
 /// event loop would stop the reader's keystrokes from being read while it runs.
-fn request_action(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender<AppEvent>) {
+///
+/// It takes the state because the sign-in is the one operation whose *input* is
+/// a `proto` token rather than a value the reader typed: the code and the
+/// two-factor challenge are `proto` types `tui` may not name, so they are spent
+/// here. Both are taken **before** the task is spawned, because a task that
+/// borrowed them would outlive this function and neither token can be copied.
+fn request_action(
+    client: &Arc<ProtoClient>,
+    state: &mut State,
+    action: Action,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    // The reader giving up on the step. Nothing to ask for: `tui` has already put
+    // its own state back to the phone, and the tokens that step was reached with
+    // are what has to go with it.
+    let action = match action {
+        Action::LoginCancelled => {
+            state.login.code = None;
+            state.login.challenge = None;
+            return;
+        }
+        other => other,
+    };
+
+    let Action::Login { field, value } = action else {
+        request_plain(client, action, tx);
+        return;
+    };
+
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+    let session_store = state.session_store.clone().unwrap_or_default();
+
+    match field {
+        LoginField::Phone => {
+            tokio::spawn(async move {
+                // Asked for locally, because Telegram's own answer to an empty
+                // number is a throttled round trip that says nothing a reader
+                // typing `⏎` on a blank field cannot be told here.
+                let phone = value.trim();
+                let result = if phone.is_empty() {
+                    Err(ProtoError::Auth {
+                        refusal: Refusal::PhoneInvalid,
+                        detail: None,
+                    })
+                } else {
+                    client.request_login_code(phone).await
+                };
+                let _ = tx.send(AppEvent::Net(Event::CodeRequested {
+                    phone: value,
+                    result,
+                }));
+            });
+        }
+
+        LoginField::Code => {
+            let Some(code) = state.login.code.take() else {
+                // Nothing to redeem: the step was left without answering it, and
+                // a request with no hash would burn a login attempt on nothing.
+                tracing::debug!("a login code was submitted with no code to redeem it");
+                return;
+            };
+            tokio::spawn(async move {
+                let result = client.sign_in(code, value.trim()).await;
+                report_sign_in(
+                    |result| Event::SignedIn { result },
+                    client,
+                    result,
+                    session_store,
+                    &tx,
+                )
+                .await;
+            });
+        }
+
+        LoginField::Password => {
+            let Some(challenge) = state.login.challenge.take() else {
+                tracing::debug!("a password was submitted with no challenge to check it against");
+                return;
+            };
+            tokio::spawn(async move {
+                let result = client.check_password(challenge, value.trim()).await;
+                report_sign_in(
+                    |result| Event::PasswordChecked { result },
+                    client,
+                    result,
+                    session_store,
+                    &tx,
+                )
+                .await;
+            });
+        }
+    }
+}
+
+/// Reports a finished sign-in step, and does what being signed in means.
+///
+/// The answer is wrapped in `as_event` rather than hard-coded, because the two
+/// steps are two events: a panel counting password attempts left must not count
+/// them against a login code. The account answer is sent first, so the overlay
+/// comes down while the chat list is still on its way; a step that did not finish
+/// — a refusal, or the password step still to come — reports itself and stops,
+/// because there is nothing to fetch for an account that is not signed in yet.
+async fn report_sign_in(
+    as_event: fn(Result<SignIn, ProtoError>) -> Event,
+    client: Arc<ProtoClient>,
+    result: Result<SignIn, ProtoError>,
+    session_store: tui::SessionStore,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    match result {
+        Ok(SignIn::Account(account)) => {
+            let _ = tx.send(AppEvent::Net(as_event(Ok(SignIn::Account(
+                account.clone(),
+            )))));
+
+            // The same tail bring-up runs, and deliberately tolerantly: a
+            // sign-in that worked and a chat list that did not is a signed-in
+            // account with nothing on show, which is drawable. `Offline` would
+            // wipe the account the reader just earned.
+            let chats = match client.fetch_private_chats().await {
+                Ok(chats) => chats,
+                Err(error) => {
+                    tracing::warn!(%error, "the chat list could not be fetched after signing in");
+                    Vec::new()
+                }
+            };
+            // The launch path reads the account's own profile, and this one has
+            // to reach the same screen: the login hand-back carries the identity
+            // and nothing else, and the card does not re-read on open, so a bio
+            // or a birthday would be missing until the next launch. A failed read
+            // falls back to the hand-back rather than losing the sign-in.
+            let account = match read_account(&client).await {
+                Ok(full) => full,
+                Err(_) => account,
+            };
+            match client.subscribe_updates().await {
+                Ok(updates) => {
+                    tokio::spawn(pump(updates, tx.clone()));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "the update feed could not be taken after signing in");
+                }
+            }
+
+            let _ = tx.send(AppEvent::Net(Event::Ready {
+                client,
+                chats,
+                account: Ok(account),
+                session_store,
+            }));
+        }
+
+        other => {
+            let _ = tx.send(AppEvent::Net(as_event(other)));
+        }
+    }
+}
+
+/// Everything a sign-in step is *not*: an operation on a conversation, or a
+/// question about somebody.
+fn request_plain(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender<AppEvent>) {
     let client = Arc::clone(client);
     let tx = tx.clone();
 
@@ -678,6 +913,11 @@ fn request_action(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSende
                     result,
                 }));
             }
+
+            // The sign-in actions are handled by `request_action`, which has to
+            // reach the state before this function exists. Unreachable rather
+            // than wrong: a value is one of the two, never both.
+            Action::Login { .. } | Action::LoginCancelled => {}
         }
     });
 }
@@ -691,10 +931,30 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             account,
             session_store,
         } => {
-            open_first_chat(app, chats);
-            app.set_session_store(session_store);
-            app.set_account(account);
+            apply_ready_to_screen(app, state, chats, account, session_store);
             state.client = Some(client);
+        }
+
+        // Nothing failed, so nothing is an `Offline`: the screen's answer is a
+        // sentence about the configuration, which is what the flow draws.
+        Event::NoCredentials => {
+            app.begin_no_credentials();
+            "televim has no application credentials".clone_into(&mut app.status);
+        }
+
+        Event::CodeRequested { phone, result } => match result {
+            Ok(code) => {
+                state.login.code = Some(code);
+                // The number the request went out with, not the pre-fill: the
+                // row under the code says where Telegram sent it.
+                app.phone.clone_from(&phone);
+                app.login_advanced(domain::session::SessionState::AwaitingCode { phone }, None);
+            }
+            Err(error) => apply_login_refusal(app, &error, 0),
+        },
+
+        Event::SignedIn { result } | Event::PasswordChecked { result } => {
+            apply_sign_in(app, state, result);
         }
 
         // A contact's profile, and nothing else: no status and no cursor. The
@@ -747,44 +1007,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::History {
             direction,
-            mut cursor,
+            cursor,
             result,
-        } => {
-            // However it ended, the direction is open again: a fetch that failed
-            // must not close a conversation for good.
-            app.end_fetch(direction);
-
-            // A page was fetched for one conversation, and the reader can open
-            // another while it is in flight. The window refuses a page that is
-            // not its own; the cursor has to be refused here too, or it would
-            // start describing a conversation that is no longer on screen.
-            if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
-                return;
-            }
-
-            match result {
-                Ok(page) => {
-                    if direction == FetchDirection::Latest {
-                        cursor.reset_to(&page);
-                    }
-                    apply_page(app, direction, page);
-                    settle(app, cursor);
-                    state.history.cursor = Some(cursor);
-                }
-
-                Err(error) => {
-                    app.status = format!("history: {error}");
-                    state.history.retry_at = Some(Instant::now() + backoff(&error));
-
-                    // A first page that failed leaves nothing to count from, so
-                    // the conversation is opened again once the backoff has
-                    // passed rather than staying empty for good.
-                    if direction == FetchDirection::Latest {
-                        state.history.cursor = None;
-                    }
-                }
-            }
-        }
+        } => apply_history(app, state, direction, cursor, result),
 
         Event::Jumped {
             jump,
@@ -832,6 +1057,174 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             }
         }
     }
+}
+
+/// Puts a fetched page on screen, or holds every direction for a while.
+///
+/// A page is for the conversation the cursor names, and the reader can open
+/// another one while it is in flight: the window refuses a page that is not its
+/// own, and the cursor is refused here too, or it would go on describing a
+/// conversation that is no longer on screen.
+fn apply_history(
+    app: &mut App,
+    state: &mut State,
+    direction: FetchDirection,
+    mut cursor: HistoryCursor,
+    result: Result<Vec<Message>, ProtoError>,
+) {
+    // However it ended, the direction is open again: a fetch that failed
+    // must not close a conversation for good.
+    app.end_fetch(direction);
+
+    if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
+        return;
+    }
+
+    match result {
+        Ok(page) => {
+            if direction == FetchDirection::Latest {
+                cursor.reset_to(&page);
+            }
+            apply_page(app, direction, page);
+            settle(app, cursor);
+            state.history.cursor = Some(cursor);
+        }
+
+        Err(error) => {
+            app.status = format!("history: {error}");
+            state.history.retry_at = Some(Instant::now() + backoff(&error));
+
+            // A first page that failed leaves nothing to count from, so
+            // the conversation is opened again once the backoff has
+            // passed rather than staying empty for good.
+            if direction == FetchDirection::Latest {
+                state.history.cursor = None;
+            }
+        }
+    }
+}
+
+/// Puts a client that is up on screen: its conversations, its store, and its
+/// account.
+///
+/// **The sign-in flow comes down here.** A sign-in that has just finished
+/// leaves the overlay up, and [`App::login_complete`] is the one call that takes
+/// it down — before the account, because the account is what the card draws and a
+/// card drawn under an overlay is a card nobody sees. At a launch there is no
+/// flow open and the method is a no-op.
+///
+/// **And the one case that opens the flow instead: credentials, no session.**
+/// That is `Err("")` — not an account and not a reason — and a reader who lands
+/// on an empty chat list is being asked to notice that they are signed out, which
+/// `:signin` in a hint row is a poor way of saying. So the same entry point that
+/// command uses is called here, and a non-empty reason never reaches it: a
+/// session that authorizes with a profile this build could not read is a signed-in
+/// account, and answering that with a sign-in form would be wrong twice.
+///
+/// Both decisions are read *before* `login_complete`, because that call takes any
+/// flow down unconditionally — read after, `signin()` is always `None` and the
+/// guard against clobbering a flow the reader already started would be a guard
+/// against nothing. It is not reachable today (`Ready` is sent once, by bring-up,
+/// before the reader can type anything) but a `Ready` that arrived mid-flow would
+/// cost the reader a code they had already sent, which is exactly what the guard is
+/// for. A `Ready` carrying an account still takes the overlay down as it always
+/// has: that is a sign-in that *worked*.
+///
+/// Everything a `Ready` says *about the screen*, with the client itself left to
+/// the caller: a client cannot be built without a runtime, and these effects can
+/// be checked without one.
+fn apply_ready_to_screen(
+    app: &mut App,
+    state: &mut State,
+    chats: Vec<Chat>,
+    account: Result<domain::account::Account, String>,
+    session_store: tui::SessionStore,
+) {
+    open_first_chat(app, chats);
+    app.set_session_store(session_store.clone());
+    state.session_store = Some(session_store);
+    let no_session = matches!(&account, Err(reason) if reason.is_empty());
+    let interrupted = app.signin().is_some();
+    if !no_session || !interrupted {
+        app.login_complete();
+    }
+    app.set_account(account);
+    if no_session && !interrupted {
+        app.begin_signin();
+    }
+}
+
+/// Folds a sign-in answer into the flow, whatever step it came from.
+///
+/// The two events differ only in which sentence they carry, so they are applied
+/// by one function: a code and a password are the same shape of answer, and a
+/// third copy of this match would be a third place for the two to disagree.
+fn apply_sign_in(app: &mut App, state: &mut State, result: Result<SignIn, ProtoError>) {
+    match result {
+        Ok(SignIn::Account(account)) => {
+            // The account first, then the flow down: `login_complete` is what
+            // puts the status line back to its resting sentence, and the flash
+            // naming the account is read out of the account state by the reader's
+            // own next action — so this order is what lets both be true.
+            app.set_account(Ok(account.clone()));
+            app.login_complete();
+        }
+
+        Ok(SignIn::PasswordRequired(challenge)) => {
+            // Read once, and owned from here: the hint borrows from the
+            // challenge, and the challenge is kept for the request that spends it.
+            let hint = challenge.hint().map(str::to_owned);
+            state.login.challenge = Some(challenge);
+            let phone = app.phone.clone();
+            app.login_advanced(
+                domain::session::SessionState::AwaitingPassword { phone },
+                hint,
+            );
+        }
+
+        Err(error) => {
+            let used =
+                password_attempts_used(error.refusal()).unwrap_or_else(|| used_attempts(app));
+            apply_login_refusal(app, &error, used);
+        }
+    }
+}
+
+/// How many password attempts the reader has spent, if this refusal knows.
+///
+/// `None` for every refusal that is not about a password, which is most of them:
+/// a wrong code says nothing about the two-factor count, and answering it with a
+/// count would move a row Telegram did not move.
+fn password_attempts_used(refusal: Option<&Refusal>) -> Option<u8> {
+    match refusal {
+        Some(Refusal::PasswordInvalid { attempts_left }) => {
+            Some(PASSWORD_ATTEMPTS.saturating_sub(*attempts_left))
+        }
+        _ => None,
+    }
+}
+
+/// The count the flow is already showing, which is the answer for a refusal that
+/// says nothing about the count.
+fn used_attempts(app: &App) -> u8 {
+    app.signin()
+        .and_then(tui::app::SignIn::flow)
+        .map_or(0, |flow| flow.used)
+}
+
+/// Says what Telegram refused, in the reader's own words.
+///
+/// The sentence is `proto`'s — it is where the refusal vocabulary lives — and
+/// only the count is decided here, because only this half can read what a
+/// refusal was about.
+fn apply_login_refusal(app: &mut App, error: &ProtoError, used: u8) {
+    let sentence = match error.refusal() {
+        Some(refusal) => proto::refusal_sentence(refusal),
+        // Not a refusal at all — a request that never arrived. Its own words are
+        // the only ones there are.
+        None => error.to_string(),
+    };
+    app.login_refused(sentence, used);
 }
 
 /// Folds a send's answer into the conversation it was for.
@@ -1062,6 +1455,7 @@ mod tests {
     use domain::message::MessageStatus;
 
     use super::*;
+    use tui::app::AccountState;
     use tui::app::CHAT_SWITCH_DELAY;
 
     /// The conversation the sample messages belong to.
@@ -1347,8 +1741,8 @@ mod tests {
     fn the_driver_opens_the_conversation_the_reader_stopped_on() {
         let mut app = app_with_unread_out_of_reach(2);
         let mut state = State {
-            client: None,
             history: opened(CHAT),
+            ..State::default()
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -1385,8 +1779,8 @@ mod tests {
     fn an_older_page_lands_in_front_of_the_window() {
         let mut app = app_with_a_conversation(CHAT, 3);
         let mut state = State {
-            client: None,
             history: opened(CHAT),
+            ..State::default()
         };
         app.begin_fetch(FetchDirection::Older);
 
@@ -1418,8 +1812,8 @@ mod tests {
             .pending_jump()
             .expect("the reader asked to be taken to the unread messages");
         let mut state = State {
-            client: None,
             history: opened(CHAT),
+            ..State::default()
         };
 
         apply(
@@ -1466,8 +1860,8 @@ mod tests {
             .pending_jump()
             .expect("the reader asked to be taken to the unread messages");
         let mut state = State {
-            client: None,
             history: opened(CHAT),
+            ..State::default()
         };
 
         apply(
@@ -1511,8 +1905,8 @@ mod tests {
         app.select_chat(1);
 
         let mut state = State {
-            client: None,
             history: opened(CHAT),
+            ..State::default()
         };
 
         apply(
@@ -1549,8 +1943,8 @@ mod tests {
         assert_eq!(app.pending_jump(), None);
 
         let mut state = State {
-            client: None,
             history: opened(CHAT),
+            ..State::default()
         };
 
         apply(
@@ -1582,8 +1976,8 @@ mod tests {
     fn a_page_for_a_conversation_that_is_no_longer_open_is_dropped() {
         let mut app = app_with_a_conversation(CHAT, 3);
         let mut state = State {
-            client: None,
             history: opened(CHAT + 1),
+            ..State::default()
         };
 
         apply(
@@ -1612,8 +2006,8 @@ mod tests {
     fn a_failed_first_page_leaves_the_conversation_to_be_opened_again() {
         let mut app = app_with_a_conversation(CHAT, 0);
         let mut state = State {
-            client: None,
             history: opened(CHAT),
+            ..State::default()
         };
 
         apply(
@@ -2132,8 +2526,8 @@ mod tests {
     fn a_search_survives_a_jump_page() {
         let mut app = app_with_unread_out_of_reach(2);
         let mut state = State {
-            client: None,
             history: opened(CHAT),
+            ..State::default()
         };
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for c in "text".chars() {
@@ -2175,6 +2569,173 @@ mod tests {
             "the landed page keeps the match list, so the next n works"
         );
         assert!(app.search().is_match(19));
+    }
+
+    // ---- signing in ----------------------------------------------------
+
+    /// The one account meaning that is not a failure: no session at all.
+    ///
+    /// It travels as an empty `Err` rather than as an `Offline` because the
+    /// signed-out card is a state the reader is in — and it draws no reason,
+    /// which is why an empty reason is not a blank line on it.
+    #[test]
+    fn a_client_up_with_no_session_leaves_the_card_signed_out() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert!(
+            matches!(&app.account, AccountState::Unavailable(reason) if reason.is_empty()),
+            "signed out with no reason to draw, not offline: {:?}",
+            app.account
+        );
+        assert_eq!(app.session_store, tui::SessionStore::Keyring);
+    }
+
+    /// Credentials, no session: the reader lands on the form rather than on an
+    /// empty chat list with a hint row they have to notice.
+    ///
+    /// It is `begin_signin` — the entry point `:signin` uses — and not a second
+    /// way in, so the two cannot open differently.
+    #[test]
+    fn a_client_up_with_no_session_opens_the_sign_in_field() {
+        let mut app = App::new();
+        app.credentials_configured = true;
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
+        assert_eq!(app.focus, tui::Focus::Input, "the field has the keys");
+    }
+
+    /// A reason is not a sign-in. A session that authorizes with a profile this
+    /// build could not read is a signed-in account, and answering that with a
+    /// form would be wrong twice.
+    #[test]
+    fn a_reason_is_not_taken_for_a_missing_session() {
+        let mut app = App::new();
+        app.credentials_configured = true;
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err("the profile could not be read".to_owned()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert!(app.signin().is_none(), "the account is signed in");
+    }
+
+    /// The account itself is the other answer: nothing opens, because there is
+    /// nothing to sign in to.
+    #[test]
+    fn a_signed_in_account_opens_no_sign_in_field() {
+        let mut app = App::new();
+        app.credentials_configured = true;
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert!(app.signin().is_none());
+        assert_eq!(app.signin_field(), None);
+    }
+
+    /// And a `Ready` landing on a flow the reader is already inside does not
+    /// restart it. The reader who has sent a code keeps the step they sent it
+    /// at — which is why both halves of this decision are read before
+    /// `login_complete` rather than after.
+    #[test]
+    fn a_ready_does_not_replace_a_sign_in_the_reader_already_started() {
+        let mut app = App::new();
+        app.credentials_configured = true;
+        app.begin_signin();
+        app.login_advanced(
+            domain::session::SessionState::AwaitingCode {
+                phone: "+44 7700 900142".to_owned(),
+            },
+            None,
+        );
+        assert_eq!(app.signin_field(), Some(tui::app::LoginField::Code));
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.signin_field(),
+            Some(tui::app::LoginField::Code),
+            "still the step they sent a code for, not a fresh phone field"
+        );
+    }
+
+    /// Signing in ends with a `Ready` behind the account, and that is what takes
+    /// the overlay down — a reader who typed a password and then typed nothing
+    /// else must not be left with the form still up.
+    #[test]
+    fn a_signed_in_account_takes_the_sign_in_surface_down() {
+        let mut app = App::new();
+        app.credentials_configured = true;
+        app.begin_signin();
+        assert!(app.signin().is_some(), "the flow is up to begin with");
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert!(
+            app.signin().is_none(),
+            "and the conversation is the program again"
+        );
+        assert!(matches!(app.account, AccountState::Known(_)));
+    }
+
+    /// A machine with no `api_id` and `api_hash` gets a sentence rather than a
+    /// bring-up failure: nothing failed, because nothing was built.
+    #[test]
+    fn no_credentials_opens_the_sentence_rather_than_a_failure() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply(&mut app, &mut state, Event::NoCredentials);
+
+        assert_eq!(app.signin(), Some(&tui::app::SignIn::NoCredentials));
+        assert_eq!(app.status, "televim has no application credentials");
+        assert!(
+            state.client.is_none(),
+            "there is no client to have asked for anything"
+        );
     }
 }
 

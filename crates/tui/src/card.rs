@@ -489,6 +489,10 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
                 caret: (on_cursor && row.is_selectable() && !row.is_action())
                     .then(|| app.card_caret_byte(&row.value)),
                 reversed: on_cursor,
+                // Nothing on a card is secret: a value is the reader's own
+                // profile or somebody they are talking to, and neither is a
+                // password.
+                concealed: false,
                 ink,
             }));
 

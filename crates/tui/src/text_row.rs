@@ -156,6 +156,16 @@ pub struct TextRow<'a> {
     /// alone: see the module docs.
     pub reversed: bool,
 
+    /// Paint one `•` in place of every character, and only that.
+    ///
+    /// **A password is concealed in the paint, not in the buffer.** The text is
+    /// the reader's and the caret has to keep moving over it, so nothing here is
+    /// rewritten: every offset, wrap and selection is the same arithmetic it
+    /// always was, and only the glyph that lands in the cell changes. A row that
+    /// swapped its text for bullets would have a caret with nothing to stand on
+    /// and a selection over characters the reader cannot see.
+    pub concealed: bool,
+
     /// The inks to paint with.
     ///
     /// By value rather than by reference: it is five `Style`s and the borrow would
@@ -267,6 +277,7 @@ pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
                 &text[at..offset],
                 effective(style, on_caret),
                 row.ink.dot,
+                row.concealed,
             );
             at = offset;
         }
@@ -283,6 +294,7 @@ pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
             &text[at..],
             effective(style, on_caret),
             row.ink.dot,
+            row.concealed,
         );
     }
 
@@ -330,10 +342,27 @@ fn caret_style(row: &TextRow<'_>, base: Style) -> Style {
 /// is one column wide where the space was, which is what keeps the caret and the
 /// wrap in step: the mark is the cell the space already had, not a column taken
 /// from somewhere else.
-fn push<'a>(out: &mut Vec<Span<'a>>, text: &'a str, style: Style, dot: Option<Style>) {
+///
+/// `concealed` replaces every character with one `•` instead, which is the same
+/// idea on a row that must not be read: one bullet per character, so the bar's
+/// geometry is unchanged and only the glyph differs. It cannot borrow the text —
+/// the glyph is not in it — so that row is owned, which is the one place in this
+/// module that copies.
+fn push<'a>(
+    out: &mut Vec<Span<'a>>,
+    text: &'a str,
+    style: Style,
+    dot: Option<Style>,
+    concealed: bool,
+) {
     // An empty span is a span the renderer has to skip and a reader cannot see,
     // and an empty row is what a range outside the text slices to.
     if text.is_empty() {
+        return;
+    }
+
+    if concealed {
+        out.push(Span::styled("•".repeat(text.chars().count()), style));
         return;
     }
 
@@ -396,6 +425,7 @@ mod tests {
             matched: false,
             selected: None,
             caret: None,
+            concealed: false,
             reversed: false,
             ink: ink(),
         };
@@ -415,6 +445,7 @@ mod tests {
             matched: true,
             selected: None,
             caret: None,
+            concealed: false,
             reversed: false,
             ink: ink(),
         };
@@ -437,6 +468,7 @@ mod tests {
             // selected cell is a cell that is also a match.
             selected: Some(3..4),
             caret: None,
+            concealed: false,
             reversed: false,
             ink: ink(),
         };
@@ -470,6 +502,7 @@ mod tests {
             matched: false,
             selected: Some(40..50),
             caret: None,
+            concealed: false,
             reversed: false,
             ink: ink(),
         };
@@ -493,6 +526,7 @@ mod tests {
             matched: false,
             selected: None,
             caret: Some(1),
+            concealed: false,
             reversed: true,
             // A reversed row is a row whose ink *is* reversed: the surface patched
             // the row, so the row's own text carries it.
@@ -542,6 +576,7 @@ mod tests {
             matched: true,
             selected: None,
             caret: Some(0),
+            concealed: false,
             reversed: true,
             ink: Ink {
                 plain: reversed,
@@ -598,6 +633,7 @@ mod tests {
                 matched: false,
                 selected: None,
                 caret: Some(3),
+                concealed: false,
                 reversed: false,
                 ink: ink(),
             };
@@ -620,6 +656,7 @@ mod tests {
             matched: false,
             selected: None,
             caret: Some(text.len()),
+            concealed: false,
             reversed: false,
             ink: ink(),
         };
@@ -642,6 +679,7 @@ mod tests {
             matched: false,
             selected: None,
             caret: Some(4),
+            concealed: false,
             reversed: false,
             ink: ink(),
         };
@@ -673,6 +711,7 @@ mod tests {
             matched: false,
             selected: None,
             caret: Some(offset),
+            concealed: false,
             reversed: false,
             ink: ink(),
         };
@@ -693,6 +732,7 @@ mod tests {
             matched: false,
             selected: None,
             caret: None,
+            concealed: false,
             reversed: false,
             ink: Ink::draft(&theme, true, false),
         };
@@ -715,6 +755,7 @@ mod tests {
             matched: false,
             selected: None,
             caret: None,
+            concealed: false,
             reversed: false,
             ink: Ink::draft(&theme, false, false),
         };
@@ -737,6 +778,7 @@ mod tests {
             matched: false,
             selected: Some(0..3),
             caret: None,
+            concealed: false,
             reversed: false,
             ink: Ink::draft(&theme, true, false),
         };
@@ -768,6 +810,7 @@ mod tests {
             matched: false,
             selected: None,
             caret: Some(0),
+            concealed: false,
             reversed: false,
             ink: ink(),
         };
@@ -787,6 +830,7 @@ mod tests {
                 matched: false,
                 selected: None,
                 caret: Some(1),
+                concealed: false,
                 reversed: false,
                 ink: Ink { caret, ..ink() },
             };

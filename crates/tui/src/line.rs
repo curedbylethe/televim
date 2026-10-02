@@ -416,6 +416,17 @@ impl LineEditor {
         self.purpose
     }
 
+    /// Whether the bar paints this line as bullets rather than as its text.
+    ///
+    /// Derived rather than stored, because the only prompt that conceals is a
+    /// password and that is a property of what the prompt *is*: a second flag
+    /// could disagree with the purpose and conceal a message. Nothing about the
+    /// text changes — see [`crate::text_row::TextRow::concealed`].
+    #[must_use]
+    pub fn concealed(&self) -> bool {
+        matches!(self.purpose, PromptKind::Password)
+    }
+
     /// Keeps the text and forgets what it was for.
     ///
     /// What closing a conversation does to the draft. The words are the

@@ -8,9 +8,9 @@
 //!
 //! Four settings describe the account, and none of them is required. With no
 //! application credentials the client has nothing to connect as and the screen
-//! stays empty, which is a legitimate way to run it; with credentials but no
-//! stored session it signs in, and that step needs a phone number and the code
-//! Telegram sends to it.
+//! says so; with credentials but no stored session the sign-in flow asks for a
+//! phone number, and the three settings below are what it fills the fields in
+//! with so that a reader does not have to type them.
 //!
 //! # Where the session is kept
 //!
@@ -42,16 +42,24 @@ pub struct Config {
 
     /// Phone number of the account, in international format (`+15551234567`).
     ///
-    /// Only read when the stored session is not signed in.
+    /// A **pre-fill** for the sign-in flow's phone row, not where the number
+    /// comes from: the reader types or corrects it on the screen, and that is
+    /// what is sent. It exists in the configuration so that a launch on a machine
+    /// that is only ever one account does not ask again.
     pub phone: Option<String>,
 
     /// The login code Telegram delivered for [`Config::phone`].
     ///
-    /// Telegram expires it, so it is only useful for the sign-in that is about
-    /// to happen: once the session is stored, this is not read again.
+    /// A **pre-fill** for the sign-in flow's code row, and Telegram expires the
+    /// code — so this is only useful for a sign-in about to happen, and never
+    /// read once the session is stored.
     pub code: Option<String>,
 
     /// The two-factor password, for an account that has one enabled.
+    ///
+    /// A **pre-fill** for the sign-in flow's password row, like the code: the
+    /// flow is where it is asked for, and this only saves a reader typing it on a
+    /// machine that is only ever one account.
     pub password: Option<String>,
 
     /// A file to keep the session in, instead of the OS credential store.
@@ -86,7 +94,11 @@ impl Config {
             builder = builder.add_source(config::File::from(path));
         }
 
-        builder = builder.add_source(config::Environment::with_prefix("TELEVIM"));
+        // `TELEGRAM_*` first, `TELEVIM_*` second: the same key names from two
+        // prefixes, merged in order, so the workspace's own prefix still wins.
+        builder = builder
+            .add_source(config::Environment::with_prefix("TELEGRAM"))
+            .add_source(config::Environment::with_prefix("TELEVIM"));
 
         let cfg: Config = builder
             .build()
@@ -105,16 +117,6 @@ impl Config {
     pub fn credentials(&self) -> Option<(i32, &str)> {
         Some((self.api_id?, self.api_hash.as_deref()?))
     }
-
-    /// The phone number and login code, if both were given.
-    ///
-    /// The same rule as [`Config::credentials`], for the same reason: a phone
-    /// number with no code cannot complete a sign-in, and asking Telegram for a
-    /// code that will never be used is a request it throttles.
-    #[must_use]
-    pub fn login_credentials(&self) -> Option<(&str, &str)> {
-        Some((self.phone.as_deref()?, self.code.as_deref()?))
-    }
 }
 
 #[cfg(test)]
@@ -126,13 +128,17 @@ mod tests {
         Config::default()
     }
 
+    /// The environment is process-wide, so the two tests that write to it take
+    /// turns. Everything else in this module builds a `Config` directly and
+    /// touches no variable.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn a_configuration_with_nothing_in_it_is_still_a_configuration() {
         let cfg = bare();
 
         assert_eq!(cfg.log_level, "info");
         assert_eq!(cfg.credentials(), None);
-        assert_eq!(cfg.login_credentials(), None);
         assert_eq!(
             cfg.session_path, None,
             "the credential store is the default"
@@ -147,19 +153,14 @@ mod tests {
 
         cfg.api_hash = Some("hash".to_owned());
         assert_eq!(cfg.credentials(), Some((1234, "hash")));
-
-        let mut cfg = bare();
-        cfg.phone = Some("+15551234567".to_owned());
-        assert_eq!(cfg.login_credentials(), None, "a phone number with no code");
-
-        cfg.code = Some("00000".to_owned());
-        assert_eq!(cfg.login_credentials(), Some(("+15551234567", "00000")));
     }
 
     /// The environment is read under the prefix the rest of the workspace
     /// already uses, and a missing file is not an error.
     #[test]
     fn the_environment_supplies_what_the_file_does_not() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
         // SAFETY: the environment is process-wide and setting it races with any
         // other thread reading it. Nothing else in this crate reads these two
         // names — the other tests in this module build a `Config` directly —
@@ -175,5 +176,54 @@ mod tests {
 
         assert_eq!(cfg.credentials(), Some((4242, "from-the-environment")));
         assert_eq!(cfg.log_level, "info", "and the defaults still apply");
+    }
+
+    /// The `TELEGRAM_*` prefix is read too, and the workspace's own prefix
+    /// overrides it.
+    #[test]
+    fn the_telegram_prefix_is_read_and_televim_still_wins() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
+        // The other test in this module leaves `TELEVIM_*` set, so clear them
+        // first: this one is about the `TELEGRAM_*` prefix on its own.
+        for name in ["TELEVIM_API_ID", "TELEVIM_API_HASH"] {
+            // SAFETY: as below — process-wide environment, written only by the
+            // two tests in this module and only while holding `ENV`.
+            unsafe { std::env::remove_var(name) };
+        }
+
+        // SAFETY: as below.
+        unsafe {
+            std::env::set_var("TELEGRAM_API_ID", "1111");
+            std::env::set_var("TELEGRAM_API_HASH", "from-the-telegram-prefix");
+        }
+
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+        assert_eq!(cfg.credentials(), Some((1111, "from-the-telegram-prefix")));
+
+        // SAFETY: process-wide environment, written only by the two tests in
+        // this module and only while holding `ENV`.
+        unsafe {
+            std::env::set_var("TELEVIM_API_ID", "2222");
+        }
+
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+        assert_eq!(
+            cfg.credentials(),
+            Some((2222, "from-the-telegram-prefix")),
+            "TELEVIM_API_ID overrides TELEGRAM_API_ID while the hash still falls through"
+        );
+
+        for name in [
+            "TELEVIM_API_ID",
+            "TELEVIM_API_HASH",
+            "TELEGRAM_API_ID",
+            "TELEGRAM_API_HASH",
+        ] {
+            // SAFETY: as above — clearing names this module's tests set.
+            unsafe { std::env::remove_var(name) };
+        }
     }
 }

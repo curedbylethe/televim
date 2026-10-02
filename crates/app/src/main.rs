@@ -24,6 +24,13 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // `.env` is a convenience, not a requirement: a run with no such file is a
+    // run that takes its configuration from the file, the environment, or the
+    // defaults, and that is legitimate.
+    let _ = dotenvy::dotenv();
+
     let cfg = config::Config::load(&cli.config)?;
+
     runtime::run(&cfg, &cli.config)
 }

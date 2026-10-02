@@ -422,6 +422,9 @@ pub enum PromptKind {
     Search,
     Reply,
     Edit,
+    Phone,
+    Code,
+    Password,
 }
 
 impl PromptKind {
@@ -430,9 +433,9 @@ impl PromptKind {
     ///
     /// A message, a reply and an edit are text the reader is writing, and get
     /// the full editor: caret movement, visual selection, quick edits. A
-    /// command and a search are a single line the reader types and submits, and
-    /// get insert only — `Esc` returns to the conversation with the text kept,
-    /// and there is no normal mode to leave.
+    /// command, a search and the three sign-in fields are a single line the
+    /// reader types and submits, and get insert only — `Esc` returns to the
+    /// conversation with the text kept, and there is no normal mode to leave.
     ///
     /// One method, one axis. [`crate::line::LineEditor`] consults it in exactly
     /// two places: whether to allow a newline, and whether to treat `Esc` as
@@ -441,6 +444,151 @@ impl PromptKind {
     pub const fn is_buffer(self) -> bool {
         matches!(self, Self::Message | Self::Reply | Self::Edit)
     }
+
+    /// Which sign-in field this prompt is, if it is one.
+    ///
+    /// The three-way answer rather than a `login: bool`, because the fields are
+    /// not the same field: a phone is the reader's own number and pre-filled
+    /// from configuration, a code is Telegram's, and a password is the one the
+    /// bar paints as bullets. The conversion is what carries that distinction
+    /// out to the caller holding the network, which knows nothing about prompts.
+    #[must_use]
+    pub const fn login_field(self) -> Option<LoginField> {
+        match self {
+            Self::Phone => Some(LoginField::Phone),
+            Self::Code => Some(LoginField::Code),
+            Self::Password => Some(LoginField::Password),
+            _ => None,
+        }
+    }
+}
+
+/// Which field of the sign-in form the reader is filling in.
+///
+/// A copy of the three prompts rather than the prompts themselves, because this
+/// is what crosses the seam: `Action::Login` carries it to the caller that holds
+/// the network, and `tui` may not name `proto` or anything above it. The
+/// `LoginCode` and `PasswordChallenge` those callers hold stay on their side of
+/// that line, where Telegram's own error names are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginField {
+    /// The account's phone number, with its country code.
+    Phone,
+
+    /// The login code Telegram sent to that number.
+    Code,
+
+    /// The account's two-step verification password.
+    Password,
+}
+
+/// The sign-in surface, when there is one up.
+///
+/// An overlay field on [`App`] rather than a [`Pane`] variant and rather than a
+/// fourth [`AccountState`] case, for one reason: the form has to outlive the
+/// card that names it. `AccountState` is the *card's* value — not read yet, could
+/// not be read, read — and a reader who signs in from the card has to be able to
+/// carry on typing after the card is gone. So the flow is its own thing, drawn
+/// over the right-hand column whatever it was showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignIn {
+    /// There is nothing to sign in with.
+    ///
+    /// No `api_id` and no `api_hash`, so this is not a form: it is a sentence,
+    /// and there is no phone row, because a field the reader cannot use is worse
+    /// than no field.
+    NoCredentials,
+
+    /// The flow, at whatever step Telegram has got to.
+    Flow(SignInFlow),
+}
+
+impl SignIn {
+    /// The flow, if this is one.
+    #[must_use]
+    pub const fn flow(&self) -> Option<&SignInFlow> {
+        match self {
+            Self::NoCredentials => None,
+            Self::Flow(flow) => Some(flow),
+        }
+    }
+
+    /// The flow mutably, if this is one.
+    pub const fn flow_mut(&mut self) -> Option<&mut SignInFlow> {
+        match self {
+            Self::NoCredentials => None,
+            Self::Flow(flow) => Some(flow),
+        }
+    }
+}
+
+/// The sign-in flow's own state.
+///
+/// The step and the refusal come from [`domain::session::LoginState`] rather
+/// than being kept here: Telegram's own state machine already describes where
+/// the flow is and what it last said, and a second copy of it here is a second
+/// thing to be wrong about the same conversation.
+///
+/// Everything else is what this program's half of the flow has and that state
+/// machine has no word for: how many password attempts are spent, whether a
+/// request is in flight, whether the reader has been told so already, and
+/// whether the code survived a trip to another pane.
+// Four flags, and the lint that objects to that is wrong here: each one is a
+// fact the caller reports rather than a choice this program makes, none is
+// derivable from another, and folding them into a bitfield would be one value
+// meaning four things rather than four values meaning one thing each.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignInFlow {
+    /// Which step the flow is at, and the last thing Telegram refused.
+    pub login: domain::session::LoginState,
+
+    /// Password attempts spent, which the row counts down from three.
+    ///
+    /// A count rather than the remaining number, because the remaining number
+    /// is derived — [`domain::session::attempts_left`] — and a caller that set
+    /// it directly could set it to something the flow never earned.
+    pub used: u8,
+
+    /// A request is on its way.
+    ///
+    /// The guard on `⏎`: a second press while this is true does nothing at all,
+    /// because a second sign-in request is a second login attempt the reader did
+    /// not ask for.
+    pub waiting: bool,
+
+    /// The "still checking" sentence has been said.
+    ///
+    /// One sentence rather than a repeat: an unanswered `⏎` earns a word once,
+    /// and every press after that is silence, which is what a key that has
+    /// nothing to add should be.
+    pub still_said: bool,
+
+    /// The code did not survive the trip away from the line.
+    ///
+    /// A code is typed once and is not kept: it is Telegram's to send and the
+    /// reader's to read, and a `Tab` away from it should not leave a secret
+    /// sitting in a dimmed bar. The step is kept, so the return says what was
+    /// lost and asks for a new one.
+    pub lost_code: bool,
+
+    /// The stored session is one Telegram no longer knows.
+    ///
+    /// The one row that offers the way back rather than describing a step,
+    /// because there is no step to return to: the session is gone and the phone
+    /// is the whole way in again.
+    pub stale: bool,
+
+    /// The two-step password hint, when the account has one.
+    ///
+    /// Optional because most accounts do not, and the row is then absent rather
+    /// than empty — a `Password hint:` with nothing after it is a question this
+    /// panel cannot answer and the reader cannot either.
+    ///
+    /// Cleared on every step change, because a hint belongs to the password
+    /// Telegram is asking about now: carrying one past the step would draw a row
+    /// about an account nobody is being asked for.
+    pub hint: Option<String>,
 }
 
 /// A destructive action waiting for the reader's `y`.
@@ -605,6 +753,30 @@ pub enum Action {
         /// What to look for.
         query: String,
     },
+
+    /// Ask Telegram to move the sign-in flow on with `value`.
+    ///
+    /// The same hand-over as every other action, and for the same reason: a
+    /// password check is the network's, and `tui` may not name the client that
+    /// does it. Which field is being answered is [`LoginField`] rather than the
+    /// prompt, because the caller holds no prompts and would otherwise have to
+    /// match on three strings.
+    Login {
+        /// The field the value answers.
+        field: LoginField,
+
+        /// What the reader typed into it.
+        value: String,
+    },
+
+    /// Give up on the flow and take the shell card back.
+    ///
+    /// Not a refusal: `Esc` at the code step is the reader changing their mind,
+    /// and the cancellation has to reach the side holding the client so it can
+    /// drop the code it asked Telegram to send. A key that cancelled locally and
+    /// left a code pending would earn another one the reader is no longer there
+    /// to answer.
+    LoginCancelled,
 }
 
 /// A `f`, `t`, `F` or `T` that has been pressed and is waiting for its character.
@@ -701,6 +873,14 @@ impl Fetching {
     }
 }
 
+/// Every piece of the screen's state, and the only thing that draws.
+///
+/// `struct_excessive_bools` is off deliberately: the booleans here are the
+/// screen's own facts rather than a state machine wearing a disguise — a
+/// [`Focus`] and a [`Mode`] already carry the two axes that could be enums, and
+/// the sign-in's `credentials_configured` is a fact about the machine rather than
+/// a step the reader is in.
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub mode: Mode,
     pub focus: Focus,
@@ -718,6 +898,45 @@ pub struct App {
 
     /// Where the session is kept, as the panel says it.
     pub session_store: SessionStore,
+
+    /// The sign-in surface, when it is up.
+    ///
+    /// `None` for every reader who is already signed in, which is most of the
+    /// life of the program. `Some` is an overlay and not a pane: see [`SignIn`].
+    pub signin: Option<SignIn>,
+
+    /// The phone number configuration carried, if there is one.
+    ///
+    /// Held rather than read from a prompt because `:signin` needs it twice —
+    /// to fill the field in, and to draw the row that says where the code went —
+    /// and because it is the one thing about a sign-in a reader does not have to
+    /// type. It is rewritten by the network with the number the request actually
+    /// went out with, so it is "where the code went" rather than "what the
+    /// configuration suggested".
+    pub phone: String,
+
+    /// What the configuration carried for the login code, if any.
+    ///
+    /// A **pre-fill**, and the only place a code may come from that is not
+    /// Telegram: Telegram sends the code, and the reader types it. This saves
+    /// that on a machine where the code is already written down, and it is read
+    /// once — when the step opens — because a wrong code has to be retyped, not
+    /// restored.
+    pub code_prefill: String,
+
+    /// What the configuration carried for the two-factor password, if any.
+    ///
+    /// A pre-fill on the same terms as [`App::code_prefill`]: read when the step
+    /// opens, never restored after a refusal.
+    pub password_prefill: String,
+
+    /// Whether this machine carries application credentials at all.
+    ///
+    /// **The gate on the flow.** Without an `api_id` and `api_hash` there is no
+    /// client to sign in *to*, so a phone field would be asking the reader for
+    /// something the program still could not do with — and the sentence that
+    /// says so is a better screen than a form that cannot be finished.
+    pub credentials_configured: bool,
 
     /// The highlight on the profile panel's rows.
     ///
@@ -947,6 +1166,14 @@ impl App {
             pane: Pane::Conversation,
             account: AccountState::Unfetched,
             session_store: SessionStore::default(),
+            signin: None,
+            phone: String::new(),
+            code_prefill: String::new(),
+            password_prefill: String::new(),
+            // A program that is handed nothing assumes nothing: the caller that
+            // has read the configuration says so, and a launch without one gets
+            // the sentence rather than a form.
+            credentials_configured: false,
             profile_vim: VimState::new(0),
             profile_subject: ProfileId::SelfAccount,
             profile_caret: 0,
@@ -995,6 +1222,14 @@ impl App {
         app.select_chat(0);
         app.apply_latest(mock_messages());
         app.set_account(Ok(mock_account()));
+        // The design's own number, so the sign-in scenes are the frames the
+        // design drew rather than an approximation of them: the phone row is
+        // pre-filled in every one of them.
+        app.phone = "+44 7700 900142".to_owned();
+        // The sign-in scenes are a machine that *can* sign in; the one that
+        // cannot is its own scene, and it sets this back rather than inheriting
+        // the other answer.
+        app.credentials_configured = true;
         app
     }
 
@@ -2477,6 +2712,15 @@ impl App {
             return;
         }
 
+        // The sign-in surface answers every key itself, and it has to be asked
+        // **before** the pane walk below: while it is up `Tab` pauses the flow
+        // rather than walking the panes, and `q` is unbound, so a reader typing a
+        // phone number cannot quit the program out from under themselves.
+        if self.signin.is_some() {
+            self.handle_signin(key);
+            return;
+        }
+
         // A completion owns a few keys for as long as it is up. `Ctrl-C` above
         // stays first: a reader reaching for it to abandon a half-typed
         // shortcode gets out of the program, which is what they asked for.
@@ -3363,6 +3607,10 @@ impl App {
     /// refused here leaves the words in the bar rather than taking them out of
     /// it — the reader would otherwise lose a message they had already written
     /// to a line that was already refusing.
+    ///
+    /// The one command that leaves the line as something else is `:signin`,
+    /// which opens a field rather than finishing on the conversation: that one
+    /// returns before the reset, because the reset is what would empty it.
     fn submit(&mut self) {
         match self.line.purpose() {
             PromptKind::Message | PromptKind::Reply => self.submit_message(),
@@ -3375,6 +3623,21 @@ impl App {
                 let query = self.line.take();
                 self.run_search(query.trim());
             }
+            // Unreachable: a sign-in field answers `Enter` itself, so that its
+            // `⏎` can be refused while a request is on its way — which a submit
+            // with no way to refuse is.
+            PromptKind::Phone | PromptKind::Code | PromptKind::Password => {}
+        }
+
+        // A sign-in field is what the line is now: `:signin` opened it
+        // pre-filled, and the reset below belongs to the commands that finish
+        // on the conversation. Clearing it would empty the field the reader
+        // came for, and handing the focus to the conversation would route
+        // their keys to an arm with nothing to say about a flow in progress.
+        if self.signin_field().is_some() {
+            self.reply_to = None;
+            self.editing = None;
+            return;
         }
 
         self.focus = Focus::Conversation;
@@ -3439,6 +3702,10 @@ impl App {
         match cmd {
             "q" | "quit" => self.request_quit(),
             "settings" => self.open_profile(),
+            // The same path from the signed-out card and from a launch with no
+            // session: they are the same question, and two entry points would be
+            // two flows that could come to differ.
+            "signin" => self.begin_signin(),
             _ if cmd.starts_with("chat ") => {
                 if let Ok(id) = cmd[5..].trim().parse::<i64>()
                     && let Some(pos) = self.list.chats.iter().position(|c| c.id == id)
@@ -3600,6 +3867,429 @@ impl App {
         self.search.fail(reason);
     }
 
+    // ---- the sign-in flow -----------------------------------------------
+
+    /// The sign-in surface, if it is up.
+    #[must_use]
+    pub fn signin(&self) -> Option<&SignIn> {
+        self.signin.as_ref()
+    }
+
+    /// The field the reader is filling in, which is whatever step the flow is at.
+    ///
+    /// **Derived, never stored.** A second field naming the current one is a
+    /// second thing that can be wrong: `login.step` is Telegram's own answer to
+    /// the same question, and the moment the two disagree the bar would be
+    /// asking for a code at the phone step. One answer, read from the state.
+    #[must_use]
+    pub fn signin_field(&self) -> Option<LoginField> {
+        match self.signin.as_ref().and_then(SignIn::flow) {
+            None => None,
+            Some(flow) => match &flow.login.step {
+                domain::session::SessionState::LoggedOut => Some(LoginField::Phone),
+                domain::session::SessionState::AwaitingCode { .. } => Some(LoginField::Code),
+                domain::session::SessionState::AwaitingPassword { .. } => {
+                    Some(LoginField::Password)
+                }
+                // Signed in is not a step anybody fills a field in at: the flow
+                // is over by the time the account's own identifier exists.
+                domain::session::SessionState::LoggedIn { .. } => None,
+            },
+        }
+    }
+
+    /// Puts the sign-in flow up, with the phone field open and the configured
+    /// number in it.
+    ///
+    /// The one way in, whatever the reader came from: the signed-out card's
+    /// `:signin`, and a launch with no session are the same flow, because they
+    /// are the same question. The card is closed rather than covered — a
+    /// conversation and a card have nothing to say while somebody is typing a
+    /// password, and a card the reader asked to leave should be left.
+    ///
+    /// **A machine with no application credentials gets the sentence instead.**
+    /// `:signin` is answered wherever it is typed, including from the no-credentials
+    /// screen and from a card that is not about the account — and a form whose
+    /// answer could not be used is worse than the sentence that explains why.
+    pub fn begin_signin(&mut self) {
+        if !self.credentials_configured {
+            self.begin_no_credentials();
+            return;
+        }
+
+        self.pane = Pane::Conversation;
+        self.mode = Mode::Normal;
+        self.signin = Some(SignIn::Flow(SignInFlow::default()));
+        self.open_signin_field(LoginField::Phone);
+        self.set_focus(Focus::Input);
+    }
+
+    /// Puts up the sentence a machine with no credentials gets.
+    ///
+    /// A sentence and not a form, because there is nothing to type: the missing
+    /// `api_id` and `api_hash` are in a file, and a phone field here would ask
+    /// the reader for something the program still could not do with.
+    pub fn begin_no_credentials(&mut self) {
+        self.pane = Pane::Conversation;
+        self.mode = Mode::Normal;
+        self.signin = Some(SignIn::NoCredentials);
+        self.set_focus(Focus::Conversation);
+    }
+
+    /// Records that the stored session is one Telegram no longer knows.
+    ///
+    /// The flow starts as it always does, with one row differing: the phone
+    /// carries an offer instead of a state, because there is no step to go back
+    /// to — the session is gone and the number is the whole way in again.
+    pub fn begin_stale_signin(&mut self) {
+        self.begin_signin();
+        self.flash("the stored session is no longer valid — sign in again");
+        if let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+            flow.stale = true;
+        }
+    }
+
+    /// Opens `field` in the line, pre-filled from the configuration.
+    ///
+    /// The phone is the configuration's number because a phone number is not a
+    /// secret and is the one thing about a sign-in a reader does not have to
+    /// type. The code and the password are pre-filled only where the
+    /// configuration carries them, and only when the step *opens*: what arrives
+    /// here from a refusal is the same call, which is why a wrong code is not
+    /// restored — a line holding a wrong answer is a line holding what Telegram
+    /// already refused.
+    fn open_signin_field(&mut self, field: LoginField) {
+        self.open_signin_field_with(field, true);
+    }
+
+    /// Opens `field` with nothing in it, whatever the configuration carries.
+    ///
+    /// The refusal path, and the reason it is a separate call: a step the reader
+    /// has just been told was wrong opens on a blank line, because a pre-filled
+    /// one would put back the answer that was refused — and a code Telegram
+    /// expires is worse than one the reader has to look up again.
+    fn open_signin_field_blank(&mut self, field: LoginField) {
+        self.open_signin_field_with(field, false);
+    }
+
+    /// Opens `field`, taking the configuration's value only when `prefill` says
+    /// this is a step opening rather than a step being refused.
+    fn open_signin_field_with(&mut self, field: LoginField, prefill: bool) {
+        let prompt = match field {
+            LoginField::Phone => PromptKind::Phone,
+            LoginField::Code => PromptKind::Code,
+            LoginField::Password => PromptKind::Password,
+        };
+        let text = match field {
+            LoginField::Phone if prefill => self.phone.trim().to_owned(),
+            LoginField::Code if prefill => self.code_prefill.clone(),
+            LoginField::Password if prefill => self.password_prefill.clone(),
+            _ => String::new(),
+        };
+        self.line.open_with(prompt, text);
+    }
+
+    /// Steps away from the flow, keeping the step.
+    ///
+    /// `Tab` and `Ctrl+w` are the pane walk everywhere else and here they mean
+    /// this, which is why the sign-in is answered before the walk rather than
+    /// through it. The code does not survive the trip — see
+    /// [`SignInFlow::lost_code`] — and everything else does, because a phone
+    /// number is not a secret and a password stays in a line that paints itself
+    /// as bullets whether it has the focus or not.
+    fn signin_away(&mut self) {
+        if self.signin_field() == Some(LoginField::Code) {
+            self.line.clear();
+            if let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+                flow.lost_code = true;
+            }
+        }
+        self.set_focus(Focus::ChatList);
+        self.flash("sign-in paused; Tab brings it back");
+    }
+
+    /// Comes back to the field the step is at.
+    ///
+    /// The step survives the trip away and the code does not, so the return says
+    /// what was lost and what to do about it rather than opening an empty line
+    /// the reader has to work out the state of.
+    fn signin_back(&mut self) {
+        let Some(field) = self.signin_field() else {
+            return;
+        };
+        self.open_signin_field(field);
+        self.set_focus(Focus::Input);
+        let lost = self
+            .signin
+            .as_mut()
+            .and_then(SignIn::flow_mut)
+            .is_some_and(|flow| std::mem::take(&mut flow.lost_code));
+        if lost {
+            self.flash("the code did not survive; ⏎ asks for a new one");
+        } else {
+            self.clear_status();
+        }
+    }
+
+    /// `Esc` at the code or the password: back to the phone.
+    ///
+    /// The code Telegram sent is discarded rather than kept, so the sentence
+    /// says what that costs and offers the way to get another one. The flow
+    /// stays up: the reader asked to sign in, not to stop.
+    fn signin_cancel(&mut self) {
+        self.queue_action(Action::LoginCancelled);
+        if let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+            flow.login = domain::session::LoginState::default();
+        }
+        self.open_signin_field(LoginField::Phone);
+        self.set_focus(Focus::Input);
+        self.flash("cancelling discards the code Telegram sent; ⏎ asks for a new one");
+    }
+
+    /// `⏎` on a field: asks the caller to move the flow on.
+    ///
+    /// The value leaves as an [`Action::Login`] rather than as a call, because a
+    /// sign-in request is the network's and `tui` may not name it.
+    ///
+    /// **The in-flight guard is the whole reason this is a method rather than
+    /// three lines in the key handler.** A second `⏎` while `waiting` fires no
+    /// second request: Telegram counts a login attempt per request, and a reader
+    /// pressing `⏎` twice is asking whether the first went out, not for two
+    /// codes. The first one is answered with the sentence, and after that the
+    /// key is silence — see [`SignInFlow::still_said`].
+    fn submit_signin_field(&mut self) {
+        let Some(field) = self.signin_field() else {
+            return;
+        };
+
+        if let Some(flow) = self.signin.as_ref().and_then(SignIn::flow)
+            && flow.waiting
+        {
+            let said = self
+                .signin
+                .as_mut()
+                .and_then(SignIn::flow_mut)
+                .is_some_and(|flow| !std::mem::take(&mut flow.still_said));
+            if said {
+                self.flash("still checking — the answer is on its way");
+            }
+            return;
+        }
+
+        let value = self.line.text().trim().to_owned();
+
+        // An empty field is refused here rather than sent. A blank phone number
+        // is a request Telegram throttles, a blank code is a login attempt the
+        // reader did not mean to spend, and a blank password says nothing at
+        // all — none of which is worth a round trip to be told.
+        if value.is_empty() {
+            self.flash(match field {
+                LoginField::Phone => "there is no phone number to ask for a code with".to_owned(),
+                LoginField::Code => "there is no login code to send".to_owned(),
+                LoginField::Password => "there is no password to check".to_owned(),
+            });
+            return;
+        }
+
+        self.queue_action(Action::Login { field, value });
+        if let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+            flow.waiting = true;
+            flow.still_said = false;
+        }
+        // The line stays, dimmed, because the reader has to see what they sent
+        // while it is in flight — and because emptying it would make the answer
+        // arrive against nothing at all.
+        self.set_focus(Focus::ChatList);
+    }
+
+    /// Answers a key while the sign-in surface is up.
+    ///
+    /// Ahead of the pane walk and ahead of every focus arm, which is the shape
+    /// of the whole surface: while it is up, `Tab` means *pause* rather than
+    /// *walk*, and `q` is unbound, because a reader who types their phone number
+    /// into a chat list should not be able to quit the program from it.
+    fn handle_signin(&mut self, key: KeyEvent) {
+        match self.focus {
+            Focus::Input => self.handle_signin_field(key),
+            // Paused, or waiting for an answer. Nothing here answers anything
+            // except the way back and the stale session's offer.
+            Focus::ChatList => self.handle_signin_away(key),
+            // The no-credentials sentence: no field, so no flow to pause, and
+            // the two keys it answers are the two the shell cards name.
+            Focus::Conversation => {
+                if self.signin.as_ref() == Some(&SignIn::NoCredentials) {
+                    match key.code {
+                        KeyCode::Char('q') => self.request_quit(),
+                        // A command line is the way to `:q` from a shell that has
+                        // no session and no chat, so the key has to answer here
+                        // rather than in a focus that does not exist yet.
+                        KeyCode::Char(':') => {
+                            self.signin = None;
+                            self.line.open(PromptKind::Command);
+                            self.set_focus(Focus::Input);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// A key with a sign-in field open.
+    ///
+    /// `Enter` submits, `Esc` gives up the step — or the flow, at the phone step,
+    /// where the step *is* the flow — and everything else is the
+    /// line's: an insert-only prompt, so there is no line's Normal mode to
+    /// leave and the editor answers insert keys the same way it does for a
+    /// command line.
+    fn handle_signin_field(&mut self, key: KeyEvent) {
+        let field = self.signin_field();
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        match key.code {
+            KeyCode::Enter => self.submit_signin_field(),
+            // `Esc` at the two steps that hold a secret asks Telegram for a new
+            // code rather than leaving a typed password in a dimmed bar. At the
+            // phone step there is nothing to discard but the flow itself, and
+            // the hint names that key `cancel` — so it goes, rather than
+            // pausing into an overlay every other key is swallowed by.
+            KeyCode::Esc if matches!(field, Some(LoginField::Code | LoginField::Password)) => {
+                self.signin_cancel();
+            }
+            KeyCode::Esc => self.signin_dismiss(),
+            KeyCode::Tab | KeyCode::BackTab => self.signin_away(),
+            _ if control && key.code == KeyCode::Char('w') => self.signin_away(),
+            _ => self.handle_line(key),
+        }
+    }
+
+    /// `Esc` at the phone step: the flow is done with, and so is the surface.
+    ///
+    /// **A pause would be a trap here.** `Tab` and `Ctrl-w` step away and are
+    /// documented as the way back, so a reader who used them is not stuck; `Esc`
+    /// is the one key the hint calls `cancel`, and it used to route to that same
+    /// pause, which left the flow swallowing every key that is not `Tab`,
+    /// `BackTab` or `Ctrl-w` — the conversation included, so `q` was dead and
+    /// `Ctrl-C` was the only way out. A key that says `cancel` has to cancel.
+    ///
+    /// The shape is [`App::login_complete`]'s and it is that call rather than a
+    /// second copy of it: dropping the flow, emptying the bar and giving the
+    /// conversation its focus are the same three things in both cases, and two
+    /// copies of that is two places for them to drift. What differs is only why,
+    /// which is what this function is for.
+    fn signin_dismiss(&mut self) {
+        self.login_complete();
+    }
+
+    /// A key while the flow is paused or waiting.
+    ///
+    /// `Tab`, `BackTab` and `Ctrl-w` all come back, because the reader stepped
+    /// away with one of them and one route back is not one per way out. `Enter`
+    /// answers the stale session's offer, and nothing else answers anything: a
+    /// request is in flight, or the reader is somewhere else, and a key that
+    /// moved the flow on from here would be a key moving it on without a field.
+    fn handle_signin_away(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Tab | KeyCode::BackTab => self.signin_back(),
+            _ if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('w') =>
+            {
+                self.signin_back();
+            }
+            KeyCode::Enter
+                if self
+                    .signin
+                    .as_ref()
+                    .and_then(SignIn::flow)
+                    .is_some_and(|flow| flow.stale) =>
+            {
+                self.signin_back();
+                self.submit_signin_field();
+            }
+            _ => {}
+        }
+    }
+
+    /// Telegram answered: the flow is at `state` now.
+    ///
+    /// The answer opens the next field, because a step the reader cannot type
+    /// into is a step they are waiting on, and it opens it with whatever the
+    /// configuration carries for it — this is the step change, which is the one
+    /// moment a pre-fill is right. `SESSION_PASSWORD_NEEDED` lands here rather
+    /// than in [`App::login_refused`] — it is not a refusal, it is the answer
+    /// that puts the password row up.
+    pub fn login_advanced(&mut self, state: domain::session::SessionState, hint: Option<String>) {
+        let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) else {
+            return;
+        };
+        flow.login.step = state;
+        flow.login.refusal = None;
+        flow.waiting = false;
+        flow.still_said = false;
+        // Kept only where it means something. An account with no two-step
+        // password answers `None`, and so does every other step, so a hint read
+        // on the password step cannot be drawn on the code step that follows it.
+        flow.hint = match &flow.login.step {
+            domain::session::SessionState::AwaitingPassword { .. } => hint,
+            _ => None,
+        };
+
+        match self.signin_field() {
+            Some(field) => {
+                self.open_signin_field(field);
+                self.set_focus(Focus::Input);
+            }
+            None => self.login_complete(),
+        }
+    }
+
+    /// Telegram refused, in the reader's own words.
+    ///
+    /// The sentence is carried rather than a code, because the words are what
+    /// the reader reads and the code is Telegram's — and `tui` may not name the
+    /// enum that holds it. `used` is the password count the same sentence is
+    /// counted from, so the row and the refusal cannot disagree about how many
+    /// attempts are left.
+    ///
+    /// The field is re-opened **blank** rather than left as it was: a refusal
+    /// arrives after the reader has stopped looking at the line, and a line
+    /// holding what they typed is a line holding a wrong answer.
+    pub fn login_refused(&mut self, sentence: String, used: u8) {
+        let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) else {
+            return;
+        };
+        flow.login.refusal = Some(sentence);
+        flow.used = used;
+        flow.waiting = false;
+        flow.still_said = false;
+
+        if let Some(field) = self.signin_field() {
+            self.open_signin_field_blank(field);
+            self.set_focus(Focus::Input);
+        }
+    }
+
+    /// The account is signed in: the surface has nothing left to say.
+    ///
+    /// The flow is dropped rather than left at its last step, so the conversation
+    /// is the whole program again — which is what signing in is for.
+    pub fn login_complete(&mut self) {
+        self.signin = None;
+        self.line.clear();
+        self.set_focus(Focus::Conversation);
+        self.clear_status();
+    }
+
+    /// Puts the status line back to its resting sentence.
+    ///
+    /// The other half of [`App::flash`], for the answers that are not transient:
+    /// a flow that has said its sentence and moved on must not keep showing it
+    /// over the next thing the reader does.
+    fn clear_status(&mut self) {
+        IDLE_STATUS.clone_into(&mut self.status);
+        self.status_until = None;
+    }
+
     // ---- rendering -----------------------------------------------------
 
     pub fn render(&self, frame: &mut Frame<'_>) {
@@ -3631,11 +4321,16 @@ impl App {
             .split(vertical[0]);
 
         widgets::chat_list::render(self, horizontal[0], frame);
-        // The right-hand column, whichever of the two is in it. The chat list is
-        // not in the match: it is the other column and it is always there.
-        match self.pane {
-            Pane::Conversation => widgets::conversation::render(self, horizontal[1], frame),
-            Pane::Profile(_) => widgets::profile::render(self, horizontal[1], frame),
+        // The right-hand column, whichever of the two is in it — or the sign-in
+        // surface over it, which is an overlay and not a pane: the flow outlives
+        // the card that named it. The chat list is not in the match: it is the
+        // other column and it is always there.
+        match self.signin.as_ref() {
+            Some(signin) => widgets::signin::render(self, signin, horizontal[1], frame),
+            None => match self.pane {
+                Pane::Conversation => widgets::conversation::render(self, horizontal[1], frame),
+                Pane::Profile(_) => widgets::profile::render(self, horizontal[1], frame),
+            },
         }
         widgets::input_bar::render(self, vertical[1], frame);
         widgets::emoji_popup::render(self, vertical[0], vertical[1], frame);
@@ -3755,11 +4450,20 @@ impl App {
     ///
     /// Read from the line rather than held beside it, because the line's purpose
     /// *is* what this names — two fields answering the same question is two
-    /// things to disagree.
+    /// things to disagree. A sign-in field has no prefix either: a phone number
+    /// is not a command and a code is not a query.
     #[must_use]
     pub fn prompt_prefix(&self) -> &'static str {
         match self.line.purpose() {
-            PromptKind::Message | PromptKind::Reply | PromptKind::Edit => "",
+            // Everything that is text rather than a question: a message, a
+            // reply, an edit, and the three sign-in fields, which are the
+            // reader's own words for the same reason a message is.
+            PromptKind::Message
+            | PromptKind::Reply
+            | PromptKind::Edit
+            | PromptKind::Phone
+            | PromptKind::Code
+            | PromptKind::Password => "",
             PromptKind::Command => ":",
             PromptKind::Search => "/",
         }
@@ -3783,6 +4487,23 @@ impl App {
     /// the screen.
     #[must_use]
     pub fn status_text(&self) -> String {
+        // The sign-in flow's refusal, above the line's own hint.
+        //
+        // The hint is about the keys and this is about the value the reader just
+        // typed, and a reader who cannot see that the code was wrong types the
+        // same one again — so the refusal ranks with the selection and the search
+        // above the transient status, and above the line too. It is the one place
+        // the line's hint does not win, and it is that because the line is not the
+        // reader's words here: it is Telegram's code, and the state of it is
+        // theirs rather than the draft's.
+        if let Some(refusal) = self
+            .signin
+            .as_ref()
+            .and_then(SignIn::flow)
+            .and_then(|flow| flow.login.refusal.as_ref())
+        {
+            return refusal.clone();
+        }
         if self.focus == Focus::Input {
             return widgets::input_bar::hint(self).to_owned();
         }
@@ -7762,5 +8483,110 @@ mod tests {
         assert_eq!(edit.line.purpose(), PromptKind::Edit);
         type_text(&mut edit, ":cr");
         assert!(edit.completion().is_some(), "an edit completes");
+    }
+
+    // ---- the sign-in field through the command that opens it ---------------
+
+    /// `:signin` leaves the line holding the phone field, pre-filled, and keeps
+    /// the keys going there.
+    ///
+    /// Driven through `run_command_line` rather than `begin_signin` on purpose:
+    /// the field was being emptied and unfocused by `submit`'s reset, which only
+    /// runs when the command is *run*, so a test that calls `begin_signin`
+    /// directly walks straight past the bug. The symptom it caused is the whole
+    /// surface locking: `handle_key` routes every key to `handle_signin` once
+    /// `signin` is up, and its `Conversation` arm has nothing to say about a
+    /// flow — so a wiped line also meant no digits and no `q`.
+    #[test]
+    fn the_signin_command_leaves_the_phone_field_open_and_typed_into() {
+        let mut app = App::mock();
+        run_command_line(&mut app, "signin");
+
+        assert_eq!(app.signin_field(), Some(LoginField::Phone));
+        assert_eq!(app.focus, Focus::Input, "the field is what has the keys");
+        assert_eq!(
+            app.line.text(),
+            "+44 7700 900142",
+            "the number the configuration carries is still in the bar"
+        );
+
+        app.handle_key(press(KeyCode::Char('4')));
+
+        assert_eq!(
+            app.line.text(),
+            "+44 7700 9001424",
+            "a digit lands in the field rather than being swallowed"
+        );
+    }
+
+    /// And the step after it: `login_advanced` opens the code field and the
+    /// focus with it, so the next thing the reader types is a code.
+    #[test]
+    fn the_code_step_after_the_phone_one_is_typed_into_too() {
+        let mut app = App::mock();
+        run_command_line(&mut app, "signin");
+        app.login_advanced(
+            domain::session::SessionState::AwaitingCode {
+                phone: "+44 7700 900142".to_owned(),
+            },
+            None,
+        );
+
+        assert_eq!(app.signin_field(), Some(LoginField::Code));
+        assert_eq!(app.focus, Focus::Input);
+
+        app.handle_key(press(KeyCode::Char('4')));
+
+        assert_eq!(app.line.text(), "4", "the code is what they are typing");
+    }
+
+    /// `Esc` at the phone step is `cancel`, which is what the hint calls it —
+    /// so it takes the flow down rather than pausing into an overlay that
+    /// swallows every key, `q` among them.
+    #[test]
+    fn escape_at_the_phone_step_takes_the_flow_down() {
+        let mut app = App::mock();
+        run_command_line(&mut app, "signin");
+        assert!(app.signin().is_some(), "the flow is up to begin with");
+
+        app.handle_key(press(KeyCode::Esc));
+
+        assert!(app.signin().is_none(), "cancelled, not paused");
+        assert_eq!(
+            app.focus,
+            Focus::Conversation,
+            "and the keys are ours again"
+        );
+        // The consequence of not doing this: a paused flow swallowed every key.
+        app.handle_key(press(KeyCode::Char('q')));
+        assert!(
+            app.confirm.is_some(),
+            "`q` asks to quit, so it reached the app"
+        );
+    }
+
+    /// `Esc` at the code step is a *different* thing, and stays one: Telegram
+    /// has sent a code, so the step restarts at the phone and the status line
+    /// says what that cost. The reader asked to sign in, not to stop.
+    #[test]
+    fn escape_at_the_code_step_still_restarts_at_the_phone() {
+        let mut app = App::mock();
+        run_command_line(&mut app, "signin");
+        app.login_advanced(
+            domain::session::SessionState::AwaitingCode {
+                phone: "+44 7700 900142".to_owned(),
+            },
+            None,
+        );
+
+        app.handle_key(press(KeyCode::Esc));
+
+        assert!(app.signin().is_some(), "a code was sent, so the flow stays");
+        assert_eq!(app.signin_field(), Some(LoginField::Phone));
+        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(
+            app.status,
+            "cancelling discards the code Telegram sent; ⏎ asks for a new one"
+        );
     }
 }

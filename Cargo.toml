@@ -54,6 +54,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI / config
 clap = { version = "4", features = ["derive"] }
 config = "0.15"
+# One use: loading `.env` so the credentials it holds reach `Config`. A missing
+# file is not an error.
+dotenvy = "0.15"
 
 # Utils
 # One use: base64 for the OSC 52 clipboard sequence, which is written by the
