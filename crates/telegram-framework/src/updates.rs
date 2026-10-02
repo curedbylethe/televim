@@ -55,6 +55,7 @@ use crate::client::Client;
 use crate::dialogs::DialogKind;
 use crate::error::{FrameworkError, RequestError};
 use crate::session::StoreSession;
+use crate::tl;
 
 /// How many discarded updates to let pass between debug logs.
 ///
@@ -122,6 +123,27 @@ pub enum UpdateKind {
         /// Identifiers of the deleted messages.
         message_ids: Vec<i64>,
     },
+
+    /// The reader's own messages in a conversation have been read, up to a point.
+    ///
+    /// A watermark rather than a flag per message, because that is how Telegram
+    /// says it: `updateReadHistoryOutbox` carries one number meaning "outgoing
+    /// messages up to here have been read", and its `pts` is a sequence number
+    /// for the gap-tracking this crate does not use.
+    ///
+    /// Read from the raw update rather than from a named `grammers` variant,
+    /// because grammers has none and puts this and every other update it does
+    /// not model into `Update::Raw`. Best-effort by nature: Telegram delivers
+    /// each update to one randomly chosen active session, and a queue under load
+    /// can drop one, so a receipt that never arrives is a receipt that was never
+    /// sent rather than one that was lost here.
+    ReadReceipt {
+        /// The conversation whose messages were read.
+        chat_peer_id: i64,
+
+        /// Every outgoing message in it up to this identifier has been read.
+        max_id: i64,
+    },
 }
 
 impl Client {
@@ -185,6 +207,9 @@ impl Client {
     ///         UpdateKind::NewMessage(message) => println!("{}", message.text),
     ///         UpdateKind::MessageEdited(message) => println!("edited: {}", message.text),
     ///         UpdateKind::MessagesDeleted { message_ids } => println!("{message_ids:?}"),
+    ///         UpdateKind::ReadReceipt { chat_peer_id, max_id } => {
+    ///             println!("{chat_peer_id} read up to {max_id}")
+    ///         }
     ///     }
     /// }
     ///
@@ -466,9 +491,48 @@ fn update_to_kind(update: &Update) -> Option<UpdateKind> {
         Update::MessageEdited(message) => private_message(message).map(UpdateKind::MessageEdited),
         Update::MessageDeleted(deletion) => deleted_ids(deletion.channel_id(), deletion.messages())
             .map(|message_ids| UpdateKind::MessagesDeleted { message_ids }),
-        // Callback and inline queries only exist for bots, and `Raw` is the
-        // escape hatch for whatever this crate does not model.
+        // Everything this crate does not model arrives here, and most of it is
+        // still not displayed. Matching the raw enum once, in `read_receipt`, is
+        // what keeps that judgement in one place — the same reasoning
+        // `dialog_to_info` uses to rule folders out.
+        Update::Raw(raw) => read_receipt(raw),
+        // Callback and inline queries only exist for bots.
         _ => None,
+    }
+}
+
+/// Describes a read acknowledgement, or `None` if this update is not one.
+///
+/// The raw update is matched on its own variant rather than through a `grammers`
+/// wrapper because grammers has none for it: `updateReadHistoryOutbox` reaches
+/// the catch-all at the end of `Update::from_raw` and arrives as
+/// `Update::Raw`. Its `pts` and `pts_count` are the gap-tracking numbers this
+/// crate does not use — the update position is already in the session — so only
+/// the peer and the watermark are taken.
+fn read_receipt(raw: &grammers_client::update::Raw) -> Option<UpdateKind> {
+    let tl::enums::Update::ReadHistoryOutbox(read) = &raw.raw else {
+        return None;
+    };
+    let chat_peer_id = read_peer(&read.peer)?;
+
+    Some(UpdateKind::ReadReceipt {
+        chat_peer_id,
+        max_id: i64::from(read.max_id),
+    })
+}
+
+/// The conversation a read acknowledgement is about, if it is one this client
+/// displays.
+///
+/// A user, and only a user: a group and a channel are not conversations televim
+/// renders, so nothing read inside one is shown and nothing is recorded for it.
+/// The bot flag is not here to be had — it lives on the account object, which a
+/// raw update does not carry — and it does not need to be: a bot's conversation
+/// is dropped by the chat list's own filter, and its read state with it.
+fn read_peer(peer: &tl::enums::Peer) -> Option<i64> {
+    match peer {
+        tl::enums::Peer::User(user) => Some(user.user_id),
+        tl::enums::Peer::Chat(_) | tl::enums::Peer::Channel(_) => None,
     }
 }
 
@@ -697,6 +761,106 @@ mod tests {
             "these have no conversation attached, so the caller needs all of them"
         );
         assert_eq!(deleted_ids(None, &[]), Some(Vec::new()));
+    }
+
+    /// The read acknowledgement is the one update this crate reads out of the raw
+    /// bucket, so the mapping off Telegram's own fields is worth pinning: the
+    /// peer it names and the watermark it carries, and nothing else.
+    #[test]
+    fn a_read_acknowledgement_keeps_its_conversation_and_its_watermark() {
+        let receipt = read_receipt(&raw_outbox(user(42), 7));
+
+        assert!(
+            matches!(
+                receipt,
+                Some(UpdateKind::ReadReceipt {
+                    chat_peer_id: 42,
+                    max_id: 7
+                })
+            ),
+            "the peer and the watermark, with the pts numbers left behind: {receipt:?}"
+        );
+    }
+
+    /// A group and a channel are not conversations this client renders, so a read
+    /// inside one is dropped whole rather than filed under an identifier.
+    #[test]
+    fn a_read_acknowledgement_for_a_conversation_that_is_not_displayed_is_dropped() {
+        let group = raw_outbox(
+            tl::enums::Peer::Chat(tl::types::PeerChat { chat_id: 42 }),
+            7,
+        );
+        let channel = raw_outbox(
+            tl::enums::Peer::Channel(tl::types::PeerChannel { channel_id: 42 }),
+            7,
+        );
+
+        assert!(read_receipt(&group).is_none(), "a group is not displayed");
+        assert!(read_receipt(&channel).is_none(), "nor is a channel");
+    }
+
+    /// `Update::Raw` is the catch-all for everything `grammers` does not model, so
+    /// reading one update out of it must not mistake another for it — and the
+    /// update that looks most like this one is the *inbox* watermark, which is
+    /// this account's own reading and not the peer's.
+    #[test]
+    fn another_raw_update_is_not_a_read_acknowledgement() {
+        let inbox = tl::enums::Update::ReadHistoryInbox(tl::types::UpdateReadHistoryInbox {
+            folder_id: None,
+            peer: user(42),
+            top_msg_id: None,
+            max_id: 7,
+            still_unread_count: 0,
+            pts: 1,
+            pts_count: 1,
+        });
+
+        assert!(read_receipt(&raw_update(inbox)).is_none());
+    }
+
+    /// A watermark is an `i32` on the wire and an `i64` everywhere else, widened
+    /// without changing its sign or its order — the rule deletions follow.
+    #[test]
+    fn a_read_watermark_is_widened_without_changing_sign_or_order() {
+        assert!(
+            matches!(
+                read_receipt(&raw_outbox(user(1), i32::MAX)),
+                Some(UpdateKind::ReadReceipt { max_id, .. }) if max_id == i64::from(i32::MAX)
+            ),
+            "and the domain counts in the same units the rest of the workspace does"
+        );
+    }
+
+    fn user(id: i64) -> tl::enums::Peer {
+        tl::enums::Peer::User(tl::types::PeerUser { user_id: id })
+    }
+
+    /// A read acknowledgement as `grammers` hands it over: in the catch-all
+    /// bucket, because it models no named update for it.
+    fn raw_outbox(peer: tl::enums::Peer, max_id: i32) -> grammers_client::update::Raw {
+        raw_update(tl::enums::Update::ReadHistoryOutbox(
+            tl::types::UpdateReadHistoryOutbox {
+                peer,
+                max_id,
+                pts: 1,
+                pts_count: 1,
+            },
+        ))
+    }
+
+    fn raw_update(update: tl::enums::Update) -> grammers_client::update::Raw {
+        use grammers_client::session::updates::State;
+
+        grammers_client::update::Raw {
+            raw: update,
+            // The mapping reads nothing of it: the update position is in the
+            // session, and this state is `grammers`' own bookkeeping.
+            state: State {
+                date: 0,
+                seq: 0,
+                message_box: None,
+            },
+        }
     }
 
     #[test]

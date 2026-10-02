@@ -387,8 +387,19 @@ Three things are known gaps rather than deliberate scope cuts:
   the discard is never silent. The channel therefore cannot grow without bound,
   and nothing is lost either: the session's update position only advances while a
   feed is running, so `catch_up` replays from wherever it stopped. What the feed
-  does not model — reactions, pins, typing indicators, read receipts — is
-  discarded by the same filter.
+  does not model — reactions, pins, typing indicators — is discarded by the same
+  filter.
+- **Read receipts are read out of the raw bucket, and are best-effort.**
+  `grammers` models no named update for `updateReadHistoryOutbox`, so it arrives
+  in `Update::Raw` and is matched there: a per-conversation watermark saying every
+  outgoing message up to `max_id` has been read, which is what
+  `UpdateKind::ReadReceipt` carries. Its `pts`/`pts_count` are dropped — that is
+  gap tracking this crate does not do, the update position already being in the
+  session. The receipt is best-effort by nature and the client never claims more
+  than it was told: Telegram sends each update to one randomly chosen active
+  session, `catch_up` is off by default, and the update queue can drop one under
+  load. A watermark therefore only ever moves forward, and a message whose read
+  acknowledgement never arrived is shown as not read rather than as lost.
 - **`check_password` takes the password as `&str`.** Its bytes stay in memory for
   as long as the caller's buffer does. Zeroising our own copy would not help —
   `grammers` holds the value across the SRP exchange — so this needs a decision

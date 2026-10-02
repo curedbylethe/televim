@@ -90,6 +90,17 @@ fn to_event(kind: UpdateKind) -> UpdateEvent {
         // The event names no conversation, and neither does the domain's copy
         // of it, so the identifiers pass straight through.
         UpdateKind::MessagesDeleted { message_ids } => UpdateEvent::MessagesDeleted { message_ids },
+
+        // Both halves are already the domain's own units — a conversation
+        // identifier and a watermark — so this is a rename rather than a
+        // conversion: `chat_peer_id` is what `domain` calls `chat_id`.
+        UpdateKind::ReadReceipt {
+            chat_peer_id,
+            max_id,
+        } => UpdateEvent::ReadReceipt {
+            chat_id: chat_peer_id,
+            max_id,
+        },
     }
 }
 
@@ -181,5 +192,23 @@ mod tests {
         };
 
         assert_eq!(message_ids, vec![7, 8]);
+    }
+
+    /// The framework names the conversation the way it names one everywhere else
+    /// and the domain calls it `chat_id`; the watermark is the same number in both
+    /// layers, so the whole translation is that one rename.
+    #[test]
+    fn a_read_acknowledgement_becomes_the_conversation_and_the_watermark() {
+        let event = to_event(UpdateKind::ReadReceipt {
+            chat_peer_id: 42,
+            max_id: 7,
+        });
+
+        let UpdateEvent::ReadReceipt { chat_id, max_id } = event else {
+            panic!("a read acknowledgement is a conversation and a watermark");
+        };
+
+        assert_eq!(chat_id, 42);
+        assert_eq!(max_id, 7);
     }
 }
