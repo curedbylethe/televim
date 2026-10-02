@@ -1051,16 +1051,14 @@ Real, and named so they are not mistaken for oversights:
   refusal is not a `[failed: …]` — that form is for something that tried and did
   not come back, and a reader who reads it as a bug will go looking for one that
   does not exist. `logout` used to refuse the same way; it signs out now.
-- **The design artifact still refuses a sign-out the program performs.** The
-  engine's only logout path is `cardAct`'s `not yet: this build cannot sign out`,
-  and it has no post-logout state at all: `fresh(view)` knows
-  `signin|stale|nocreds|signedout|reading`, and the nearest of them, `stale`, is a
-  session Telegram revoked rather than one the reader ended. The model and the
-  binary disagree, and the specimen's frame still shows the refusal. It is left
-  rather than hand-fixed, the way the missing contact-card shell is: the engine is
-  a design model an agent wrote against `DESIGN.md`, and editing it by hand to add
-  a state is the failure `design/README.md` names. It wants a design run that adds
-  the state to `DESIGN.md` and the engine together, and `make design-pull` after.
+- **The specimen's frame set does not include the post-logout state.** The design
+  run added it to the engine — a `loggedout` start state with six scenes, from the
+  resting signed-out screen through signing back in — but `components.html`'s
+  frames are a hand-maintained list (`design-system/build-specimen.js`'s
+  `CARD_FRAMES`), and nothing there renders one of them yet, so the document stops
+  at `logout: the confirmation`. Nothing in it is wrong: that frame's keys are
+  `SGd`, which stop before the `y` that signs out. Adding the frame is one entry in
+  that list plus `make design-specimen`.
 - **`Config::code` and `Config::password` are pre-fills, not a way in.** They
   fill the code and the password fields when a flow reaches them; the flow is the
   only path that writes a session, and the phone has to reach the bar once.

@@ -64,6 +64,7 @@
   const NOT_SIGNED_IN = 'not signed in';
   const SIGNED_OUT_REASON = 'no session: the OS credential store holds no entry for televim, and there is no plaintext file at ~/.local/state/televim/session';
   const SET_CREDENTIALS = 'Set the credentials again with :signin.';
+  const SIGNED_OUT = 'signed out';
   const READING = 'reading the session…';
   const READING_NOTE = 'Nothing has been read yet, so nothing is known either way.';
 
@@ -142,6 +143,7 @@
     if (view === 'signin') beginSignin(s);
     else if (view === 'stale') beginStale(s);
     else if (view === 'nocreds') beginNoCreds(s);
+    else if (view === 'loggedout') beginLoggedOut(s);
     else if (view === 'signedout' || view === 'reading') beginShell(s, view);
     return s;
   }
@@ -552,8 +554,9 @@
   function beginSignin(s) {
     s.view = 'signin'; s.right = 'conv'; s.confirm = null; s.vis = null; s.search = null; s.draft = null;
     s.chats = []; s.chat = 0; /* no client until credentials arrive, so no chats */
+    const out = !!(s.signin && s.signin.out);
     s.signin = {
-      step: 0, phone: s.profile.phone || '', code: '', bad: '', twofa: true, attempts: 3,
+      out, step: 0, phone: s.profile.phone || '', code: '', bad: '', twofa: true, attempts: 3,
       checking: false, checkN: 0, pending: null, away: false, lost: false, action: ''
     };
     openSigninLine(s, 'phone');
@@ -563,6 +566,15 @@
     beginSignin(s);
     s.signin.action = SIGNOUT_ROW;
     s.flash = AUTH.AUTH_KEY_UNREGISTERED;
+  }
+  function beginLoggedOut(s) {
+    /* the reader's own sign-out, not a revoked session: no AUTH_KEY_UNREGISTERED sentence, no
+       action in the phone row. The session is gone, the list is empty, the card behind the
+       field reads 'not signed in', and the status rests on 'signed out'. */
+    beginSignin(s);
+    s.signin.out = true;
+    s.card = { sub: 'signedout', chat: 0, row: 0, col: 0, vis: null };
+    s.flash = '';
   }
   function beginNoCreds(s) {
     /* no api_id and no api_hash: there is nothing to sign in with, so this is not a form. */
@@ -753,6 +765,8 @@
     if (s.view === 'signin' && s.signin && s.signin.checking)
       return { t: ' ' + CHECKING + ' — the request is in flight', a: 't' };
     const L = s.line;
+    if (L && s.view === 'signin' && s.signin.out && s.signin.step === 0 && L.from === 'signin')
+      return { t: ' ' + SIGNED_OUT, a: 'd' };
     if (L) {
       if (L.mode === 'insert' && activeComp(L)) return { t: HINT.complete, a: 'd' };
       return { t: L.mode === 'insert' ? HINT.typing : L.mode === 'normal' ? HINT.lnormal : HINT.lvisual, a: 'd' };
@@ -1011,9 +1025,9 @@
   function cardAct(s, r) {
     if (s.card.sub === 'self' && r.kind === 'action') {
       if (r.act === 'add') refuse(s, 'not yet: this build cannot add an account');
-      /* a confirmation outranks a flash; the refusal replaces the prompt rather than writing
-         under it, because a panel that only flashed would have taught the wrong thing. */
-      else ask(s, 'Sign out and forget this session? (y/n)', (x) => { x.flash = 'not yet: this build cannot sign out'; });
+      /* a confirmation outranks a flash: it asks before it throws away the only secret the
+         program holds, and y signs out. */
+      else ask(s, 'Sign out and forget this session? (y/n)', beginLoggedOut);
       return;
     }
     if (s.card.sub === 'self') refuse(s, 'Not a row that acts: add account and logout are the two.');
@@ -1176,7 +1190,8 @@
     }
     const b = bar(s), top = H - 1 - (b.n + 2);
     drawList(g, s, top);
-    if (s.view === 'signin') drawSignin(g, s, LW, top);
+    if (s.view === 'signin' && s.signin.out && s.signin.away) drawCard(g, s, LW, top);
+    else if (s.view === 'signin') drawSignin(g, s, LW, top);
     else if (s.view === 'nocreds') drawNoCreds(g, s, LW, top);
     else if (s.right === 'settings') drawSettings(g, s, LW, top);
     else if (s.right === 'profile') drawCard(g, s, LW, top);
@@ -1252,7 +1267,7 @@
       { name: 'Profile · you', keys: 'S' },
       { name: 'add account refuses', keys: 'SGkd' },
       { name: 'logout raises the confirmation', keys: 'SGd' },
-      { name: 'the refusal replaces the prompt', keys: 'SGdy' },
+      { name: 'y signs out: the sign-in field comes back', keys: 'SGdy' },
       { name: 'Esc: the line\'s Normal, card behind', keys: 'S:<Esc>' },
       { name: 'Esc Esc: back on the card', keys: 'S:<Esc><Esc>' },
       { name: 'Esc Esc Esc: the card closes', keys: 'S:<Esc><Esc><Esc>' },
@@ -1277,7 +1292,13 @@
       { name: 'Cancel at the code', keys: '<CR><wait><Esc>' },
       { name: 'Tab out', keys: '<CR><wait><Tab>' },
       { name: 'Tab back: the code is gone', keys: '<CR><wait><Tab><Tab>' },
-      { name: 'Stored session unregistered', start: 'stale', keys: '' }] },
+      { name: 'Stored session unregistered', start: 'stale', keys: '' },
+      { name: 'Signed out, at rest', start: 'loggedout', keys: '' },
+      { name: 'Signed out: Tab to the card', start: 'loggedout', keys: '<Tab>' },
+      { name: 'Signing back in: Phone', start: 'loggedout', keys: '<CR>' },
+      { name: 'Signing back in: Login code', start: 'loggedout', keys: '<CR><wait>' },
+      { name: 'Signing back in: password', start: 'loggedout', keys: '<CR><wait>42424<CR><wait>' },
+      { name: 'Signed back in: the chat list', start: 'loggedout', keys: '<CR><wait>42424<CR><wait>hunter2!<CR><wait>' }] },
     { id: 'nocreds', name: 'No credentials', variants: [
       { name: 'No application credentials', start: 'nocreds', keys: '' }] }
   ];
