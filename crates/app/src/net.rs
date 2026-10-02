@@ -242,6 +242,21 @@ pub enum Event {
         result: Result<(), ProtoError>,
     },
 
+    /// A sign-out was carried out, or the stored session could not be cleared.
+    ///
+    /// Its own event because it is the only one that *ends* a client: the answer
+    /// is not a value to put on screen but a decision about which client there
+    /// is, and the reader who asked for it is signed out afterwards.
+    LoggedOut {
+        /// Nothing on success: the account is gone and the screen says so.
+        ///
+        /// A failure means the **local** session is still there — the framework
+        /// clears the store after a warn-only revocation, so only
+        /// `store.session.clear()` can fail and that is the one thing that
+        /// decides whether the reader is signed out at all.
+        result: Result<(), String>,
+    },
+
     /// An update arrived for a conversation televim displays.
     Update(UpdateEvent),
 
@@ -287,6 +302,42 @@ pub struct State {
 
     /// Where the session went, once bring-up has said so.
     session_store: Option<tui::SessionStore>,
+
+    /// The configuration, and the channel to answer on — the pair bring-up needs
+    /// to be run again.
+    ///
+    /// A sign-out has to rebuild the client rather than reuse it, because
+    /// `UpdateRelay::take` is single-shot: a second `subscribe_updates()` on the
+    /// same client fails, so a reader who signed out and back in would have a
+    /// live-looking UI and no updates for the rest of the process. Rebuilding
+    /// needs a `Config`, and `apply` has no way to be handed one — the loop owns
+    /// it — so it is kept here, and with the sender that has to go with it.
+    ///
+    /// **Two `Option`s that are read together and set together.** Either alone
+    /// does nothing: a configuration with no channel cannot report what it found,
+    /// and a channel with no configuration has nothing to bring up. `None` in
+    /// tests is therefore the ordinary case, not a special one.
+    cfg: Option<Config>,
+
+    /// The channel bring-up answers on. Read only beside [`State::cfg`].
+    tx: Option<UnboundedSender<AppEvent>>,
+}
+
+impl State {
+    /// The state the loop starts from, able to bring the client up again.
+    ///
+    /// Both fields at once rather than a setter each: they are read together and
+    /// mean nothing apart, and two setters is two ways to set one of them. A
+    /// bring-up that reported on a channel nobody is listening to is a bring-up
+    /// that hangs rather than fails.
+    #[must_use]
+    pub fn new(cfg: Config, tx: UnboundedSender<AppEvent>) -> Self {
+        Self {
+            cfg: Some(cfg),
+            tx: Some(tx),
+            ..Self::default()
+        }
+    }
 }
 
 /// The two answers Telegram has given this sign-in, and nothing else.
@@ -698,6 +749,19 @@ fn request_action(
     action: Action,
     tx: &UnboundedSender<AppEvent>,
 ) {
+    // The sign-out. It needs the client, so it cannot fall through to
+    // `request_plain` below with everything else: the session this destroys is
+    // reached through it and through nothing else.
+    if let Action::Logout = action {
+        let client = Arc::clone(client);
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let result = client.logout().await.map_err(|error| format!("{error:#}"));
+            let _ = tx.send(AppEvent::Net(Event::LoggedOut { result }));
+        });
+        return;
+    }
+
     // The reader giving up on the step. Nothing to ask for: `tui` has already put
     // its own state back to the phone, and the tokens that step was reached with
     // are what has to go with it.
@@ -915,11 +979,49 @@ fn request_plain(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender
             }
 
             // The sign-in actions are handled by `request_action`, which has to
-            // reach the state before this function exists. Unreachable rather
-            // than wrong: a value is one of the two, never both.
-            Action::Login { .. } | Action::LoginCancelled => {}
+            // reach the state before this function exists. `Logout` is there too:
+            // it needs the client, so it is asked for there rather than here.
+            // Unreachable rather than wrong: a value is one of the three, never
+            // two.
+            Action::Login { .. } | Action::LoginCancelled | Action::Logout => {}
         }
     });
+}
+
+/// Puts a signed-out screen up, or says why the sign-out did not happen.
+///
+/// **The client goes on success and stays on failure.** The framework's
+/// `logout` revokes the key over the network warn-only and fails only when the
+/// *local* session could not be cleared, so an error means the reader is still
+/// signed in: there is nothing to take down and nothing to replace, and wiping
+/// the screen on a failure would leave a signed-in reader looking at a signed-out
+/// program.
+///
+/// **The sign-in field is deliberately not opened here.** It is [`Event::Ready`]
+/// that opens it, and opening it twice is not harmless: `set_chats` with an empty
+/// list calls `select_chat_none`, which forgets the line's purpose — so a field
+/// opened first would lose `PromptKind::Phone` and the reader's next `⏎` would
+/// take the message path. This arm installs the screen; the `Ready` that follows
+/// installs the screen and the field together.
+fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>) {
+    match result {
+        Ok(()) => {
+            // Dropping the `Arc` is the point: the client owns the update relay
+            // and aborts its runner when it goes, so the pump feeding this
+            // screen ends with it.
+            state.client = None;
+            app.set_chats(Vec::new());
+            // The empty reason is the signed-out *state*, not a missing one: the
+            // reader chose this, so a line saying why it could not read a
+            // profile would be an excuse nobody asked for.
+            app.set_account(Err(String::new()));
+            "signed out".clone_into(&mut app.status);
+        }
+
+        // A real failure, so the real-failure wording. The deliberate-refusal
+        // words are gone with the refusal they belonged to.
+        Err(reason) => app.status = format!("could not sign out: {reason}"),
+    }
 }
 
 /// Folds something that arrived from the network into the screen's state.
@@ -973,6 +1075,18 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             let reason = format!("{reason:#}");
             app.set_account(Err(reason.clone()));
             app.status = format!("offline: {reason}");
+        }
+
+        Event::LoggedOut { result } => {
+            apply_logged_out(app, state, result);
+
+            // A fresh client, because the one that just signed out cannot be
+            // reused — see [`State::cfg`]. Its `Ready` carries
+            // `Err(String::new())`, and `apply_ready_to_screen` is what opens
+            // the phone field off the back of it.
+            if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+                spawn_bring_up(cfg, tx);
+            }
         }
 
         Event::Update(event) => {
@@ -2640,6 +2754,88 @@ mod tests {
         );
 
         assert!(app.signin().is_none(), "the account is signed in");
+    }
+
+    // ---- signing out ---------------------------------------------------
+
+    /// The screen a successful sign-out leaves: no conversations, no account,
+    /// no client, and **no field**.
+    ///
+    /// The last one is the assertion that earns the test. Opening the sign-in
+    /// here as well would be the obvious thing to do and it is wrong twice:
+    /// `set_chats` with an empty list closes the conversation and forgets the
+    /// line's purpose, so the reader's next `⏎` would go down the message path.
+    /// The `Ready` that follows opens the field instead.
+    #[test]
+    fn signing_out_empties_the_screen_and_the_client() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply_logged_out(&mut app, &mut state, Ok(()));
+
+        assert!(
+            app.chats().is_empty(),
+            "the conversations went with the session"
+        );
+        assert!(
+            matches!(&app.account, AccountState::Unavailable(reason) if reason.is_empty()),
+            "signed out, and not as a failure to read a profile: {:?}",
+            app.account
+        );
+        assert!(state.client.is_none(), "and so did the client behind it");
+        assert!(app.signin().is_none(), "the field is the next event's job");
+        assert_eq!(app.status, "signed out");
+    }
+
+    /// The whole sequence in two events: the sign-out empties the screen, and
+    /// the fresh client's `Ready` — which finds no session, because the old one
+    /// cleared the store — is what puts the reader back in front of a form.
+    #[test]
+    fn a_signed_out_client_comes_back_asking_to_sign_in() {
+        let mut app = App::new();
+        app.credentials_configured = true;
+        let mut state = State::default();
+
+        apply_logged_out(&mut app, &mut state, Ok(()));
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
+        assert_eq!(app.focus, tui::Focus::Input, "and the keys are going there");
+    }
+
+    /// A failure is a failure, and the reader is still signed in: the framework
+    /// revokes over the network warn-only and fails only when the *local*
+    /// session could not be cleared. So the screen is left exactly as it was —
+    /// wiping it would show a signed-in reader a signed-out program.
+    #[test]
+    fn a_sign_out_that_could_not_clear_the_session_leaves_the_reader_signed_in() {
+        let mut app = App::new();
+        let mut state = State::default();
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        apply_logged_out(
+            &mut app,
+            &mut state,
+            Err("the session could not be cleared".to_owned()),
+        );
+
+        assert!(matches!(app.account, AccountState::Known(_)));
+        assert_eq!(
+            app.status,
+            "could not sign out: the session could not be cleared"
+        );
     }
 
     /// The account itself is the other answer: nothing opens, because there is

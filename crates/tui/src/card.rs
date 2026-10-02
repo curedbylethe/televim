@@ -63,7 +63,8 @@ const CUE: &str = "·";
 /// is what the enum these replace was guarding against.
 pub const ADD_ACCOUNT: &str = "add account";
 
-/// The label of the row that signs out. Confirms, then refuses.
+/// The label of the row that signs out. Confirms, then asks the side holding the
+/// client to discard the session.
 pub const LOGOUT: &str = "logout";
 
 /// Where the cue, the label and the value start, measured from the panel's border.

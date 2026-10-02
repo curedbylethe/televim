@@ -147,13 +147,6 @@ pub const LOGOUT_PROMPT: &str = "Sign out and forget this session? (y/n)";
 /// reader who reads a failure as a bug would be chasing one that does not exist.
 pub const ADD_ACCOUNT_REFUSAL: &str = "not yet: this build cannot add an account";
 
-/// What the profile panel says when a sign-out is confirmed.
-///
-/// Said inside the confirmation rather than under it, because a confirmation
-/// outranks every transient status on the same row: a refusal written while one
-/// is up is a line the reader never sees.
-pub const LOGOUT_REFUSAL: &str = "not yet: this build cannot sign out";
-
 /// What a card says when `d` lands on a value rather than an action.
 ///
 /// A deliberate refusal, and a *different* refusal from [`ADD_ACCOUNT_REFUSAL`]:
@@ -614,10 +607,12 @@ pub enum ConfirmKind {
 
     /// Sign out, and forget the session this program holds.
     ///
-    /// It cannot be carried out yet, and it is asked for anyway. A `logout` row
-    /// that flashed a refusal instead of confirming would have taught the reader
-    /// the wrong thing about the key, and the lesson would be wrong exactly when
-    /// it starts destroying something.
+    /// Asked for, and the reader's `y` queues an [`Action::Logout`] rather than
+    /// acting on it here: the session lives on the side holding the client, so
+    /// the confirmation is the last thing this half can do before the key is
+    /// gone. A confirmation that refused would have taught the reader the wrong
+    /// thing about a key that destroys something, and the lesson would be wrong
+    /// exactly when it starts doing that.
     Logout,
 
     /// Delete these messages, for both sides.
@@ -777,6 +772,16 @@ pub enum Action {
     /// left a code pending would earn another one the reader is no longer there
     /// to answer.
     LoginCancelled,
+
+    /// Sign out, and forget the session this program holds.
+    ///
+    /// Asked for rather than performed, like everything else here: the session
+    /// lives on the side holding the client, and the answer destroys the key this
+    /// program holds — which is why the reader confirms it first
+    /// ([`ConfirmKind::Logout`]) and why `tui` never learns what came back. A
+    /// sign-out with no argument is the one action whose whole content is that it
+    /// happened, so it carries nothing.
+    Logout,
 }
 
 /// A `f`, `t`, `F` or `T` that has been pressed and is waiting for its character.
@@ -3129,12 +3134,7 @@ impl App {
             KeyCode::Char('y') => {
                 match &self.confirm {
                     Some(ConfirmKind::Quit) => self.should_quit = true,
-                    // The refusal is written here rather than after the arms
-                    // below, and the difference is visible: a confirmation
-                    // outranks every transient status on the same row, so a
-                    // refusal written while one is still up is a line the reader
-                    // never sees.
-                    Some(ConfirmKind::Logout) => self.flash(LOGOUT_REFUSAL),
+                    Some(ConfirmKind::Logout) => self.queue_action(Action::Logout),
                     Some(ConfirmKind::DeleteMessages { ids, .. }) => {
                         let chat_id = self.conversation.window.chat_id;
                         self.queue_action(Action::Delete {
@@ -6854,8 +6854,10 @@ mod tests {
         assert!(app.take_action().is_none(), "nothing was queued");
     }
 
-    /// The same for the row that does have something to do: it confirms, and
-    /// still queues nothing, because a sign-out is not a request this can make.
+    /// The same for the row that does have something to do: it confirms, and what
+    /// it queues is not a deletion. A card is a place to read, and the only thing
+    /// `d` can destroy from one is the reader's own session — which is what the
+    /// confirmation is asking about.
     #[test]
     fn a_profile_row_never_queues_a_deletion() {
         let mut app = profile();
@@ -6868,8 +6870,8 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('y')));
         assert!(
-            app.take_action().is_none(),
-            "and answering it queues nothing"
+            !matches!(app.take_action(), Some(Action::Delete { .. })),
+            "a card destroys no messages"
         );
     }
 
@@ -7040,10 +7042,10 @@ mod tests {
     }
 
     /// A `logout` row that flashed a refusal instead of confirming would have
-    /// taught the reader the wrong thing about a key that will eventually throw
-    /// away the only secret this program holds.
+    /// taught the reader the wrong thing about a key that throws away the only
+    /// secret this program holds.
     #[test]
-    fn logout_confirms_before_it_refuses() {
+    fn logout_confirms_before_anything_is_asked_for() {
         let mut app = profile();
         while !app.on_card_row(crate::card::LOGOUT) {
             app.handle_key(press(KeyCode::Char('j')));
@@ -7053,15 +7055,37 @@ mod tests {
         assert_eq!(app.mode, Mode::Confirm);
         assert_eq!(app.confirm, Some(ConfirmKind::Logout));
         assert_eq!(app.status_text(), LOGOUT_PROMPT);
+        assert_eq!(app.take_action(), None, "nothing is asked for yet");
 
         app.handle_key(press(KeyCode::Char('y')));
-        assert_eq!(app.status, LOGOUT_REFUSAL);
         assert_eq!(
-            app.status_text(),
-            LOGOUT_REFUSAL,
-            "not hidden under the prompt"
+            app.take_action(),
+            Some(Action::Logout),
+            "`y` asks for the sign-out"
         );
         assert_eq!(app.confirm, None);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    /// `n` and `Esc` are the other half of a confirmation, and here they mean
+    /// *do not*: the session this program holds is the reader's, and declining is
+    /// not a step towards doing it.
+    #[test]
+    fn declining_a_sign_out_asks_for_nothing() {
+        for answer in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut app = profile();
+            while !app.on_card_row(crate::card::LOGOUT) {
+                app.handle_key(press(KeyCode::Char('j')));
+            }
+            app.handle_key(press(KeyCode::Char('d')));
+            assert_eq!(app.confirm, Some(ConfirmKind::Logout));
+
+            app.handle_key(press(answer));
+
+            assert_eq!(app.confirm, None, "{answer:?} drops the question");
+            assert_eq!(app.mode, Mode::Normal);
+            assert_eq!(app.take_action(), None, "{answer:?} asks for nothing");
+        }
     }
 
     /// The rows that exist are the ones the account has something to say about.

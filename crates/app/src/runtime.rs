@@ -183,12 +183,12 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
     app.password_prefill = cfg.password.clone().unwrap_or_default();
     app.credentials_configured = cfg.credentials().is_some();
 
-    let mut network = net::State::default();
-
-    // Reader thread -> channel. On a current-thread runtime, this is the
-    // simplest way to bridge blocking crossterm reads into async code.
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     spawn_reader(tx.clone());
+
+    // Holds the configuration and this channel, because a sign-out has to rebuild
+    // the client and `apply` cannot be handed either.
+    let mut network = net::State::new(cfg.clone(), tx.clone());
 
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an
