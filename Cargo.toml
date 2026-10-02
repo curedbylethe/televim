@@ -24,7 +24,7 @@ serde_json = "1"
 
 # Telegram. Published on crates.io and taken from there: upstream stopped
 # tagging after `v0.8.0`, so no tag can name a released version. See the
-# "Telegram Protocol" section of AGENTS.md for the evidence.
+# docs/dependencies.md for the evidence.
 grammers-client = { version = "0.10.0", default-features = false }
 grammers-tl-types = { version = "0.10.0", default-features = false, features = ["tl-mtproto"] }
 grammers-mtproto = { version = "0.10.0" }
