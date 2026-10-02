@@ -352,6 +352,73 @@ Notes, because they are the answers to questions a reader will have:
   card's inline position already is, so `TestBackend` asserts them and section 09
   of the specimen shows them.
 
+### Groups, day separators and read state
+
+A message is still as many rows as its text needs, the sender label still sits
+on its first row and a status still sits on its last. Three treatments sit on
+top of that and add no row kind a message already had. Every rule below is
+conditional on a message having a time: **a message with no time never groups,
+never gets a separator and never shows a timestamp**, so a row drawn before these
+treatments existed reads exactly as it did.
+
+**Grouping.** Consecutive messages join one visual group when every one of these
+holds against the message before: the same side, the same calendar day, no more
+than five minutes (`GROUP_MIN`) between the two (the gap is to the *previous*
+message, not to the group's first), and the later one is not a reply. A change
+of direction, a reply, a day boundary or a longer gap always starts a new group.
+A reply starts a group and may be followed into it.
+
+- **The sender label, `[you]` or `[them]`, is on the group's first row only.**
+  A later message in the group has a blank 7-column tag and its text begins in
+  the same column, so the group reads as one turn. A reply's quoted target stays
+  on the reply's first row, which is always a group's first row.
+- **The time is on the group's last row only**, right-aligned in the status
+  column: `21:04`. It is not repeated per message.
+- **The cursor still selects a message.** The row fill and the selection follow
+  `mi`, so the cursor can sit on any message of a group and the group does not
+  select as one.
+- **A message's own status is never hidden by grouping.** `[sending…]` and
+  `[failed: …]` stay on the last row of the message that carries them, mid-group
+  or not. Only the read state and the time are the group's.
+
+**Read state (outgoing only).** An outgoing message carries what the peer has said
+about it: nothing yet, `delivered` (acknowledged, not read) or `read`. It is drawn
+**once per group, on the last row of the group's newest message**, left of the
+time: `[delivered] 21:16`, `[read] 21:04`. A message with a status, `sending…` or
+`failed: …`, shows that status in the same place **instead**, and a failed message
+never claims delivered or read, however the peer's last answer stood. An
+outgoing group still sending shows `[sending…] 21:32`; the earlier messages'
+receipts are not shown. An incoming message has no read state, only a time. If
+the state and the time do not fit beside the last line of text, they take a row of
+their own, as a status always has.
+
+| Last row of a group | Draws |
+| :------------------ | :---- |
+| outgoing, peer has read the newest | `[read] 21:04` |
+| outgoing, acknowledged, not read | `[delivered] 21:16` |
+| outgoing, newest is sending | `[sending…] 21:32` |
+| outgoing, newest failed | `[failed: no route] 21:38` |
+| outgoing, no answer from the peer yet | `21:40` |
+| incoming | `20:14` |
+
+**Day separators.** The first message of each calendar day is preceded by one row
+naming the day, sitting exactly between the last message of the day before and the
+first of the next, and above the first message of a chat's history. The label is
+`Today`, `Yesterday`, the weekday name for the five days before that, and a full
+date past the week: `Sep 20, 2026`.
+
+- **It is a row of its own, the full width of the text** (52 columns, the width a
+  message's tag and body occupy together): a rule of `─` in the border colour with
+  the label set into its middle in the dim colour, padded by one space each side.
+  It has no tag column, no fill, no sender label, no reply target and no status. It
+  is not a bubble and not a message row.
+- **It is not a message.** In the flat row list it is an entry with `mi: -1`, the
+  way a `Loading…` row is, so the cursor, a selection and a search never land on
+  it; it counts as one row for the viewport and the scrollbar. When the cursor is
+  on the first message of a day, the separator above it is kept in view.
+- **Group boundaries and separators agree.** A separator is always a group break,
+  because a day boundary is.
+
 ## Vocabulary
 
 This is the section a designer is most likely to get wrong, because a chat UI
@@ -360,11 +427,15 @@ code.
 
 | Written | Means | Source |
 | :------ | :---- | :----- |
-| `[you]` `[them]` | which side a message is from, on its first row | `rows.rs` |
+| `[you]` `[them]` | which side a message is from, on its first row; in a group, on the group's first row only | `rows.rs` |
 | `> quoted ‖ body` | a reply: quote and body **on one row**, `‖` between | `rows::reply_prefix` |
 | `> [message not loaded] ‖ body` | a reply whose target the window does not hold | asserted in `rows.rs` |
 | `[sending…]` | on the message's **last** row, which is the one with room | asserted |
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |
+| `[delivered]` | an outgoing group the peer's client has acknowledged and not read; the group's **last** row, beside any time | specified here; not yet in `rows.rs` |
+| `[read]` | an outgoing group the peer has read; same row, same place | ditto |
+| `21:04` | a group's time, `HH:MM`, once, on the group's **last** row, right-aligned after any state | specified here; not yet in `rows.rs` |
+| `──── Today ────` | a day separator: a rule the width of the text with the day set into it | specified here; not yet in `rows.rs` |
 | `· 2 selected` | joined onto a panel title by `·` | `selection_note` |
 | `· 3 match(es)` | a search's count, in the title | `search_note` |
 | `·` | a space in a draft being composed; a title-note joiner; a card row's cue | three meanings, all deliberate |
@@ -437,7 +508,11 @@ regressing.
 1. **Panel** — `Chats`, `Conversation`, `Input`. States: focused, unfocused,
    empty, titled with a count, titled with notes.
 2. **Message row** — states: incoming, outgoing, reply, sending, failed, search
-   match, char-selected, message-selected, wrapped across rows.
+   match, char-selected, message-selected, wrapped across rows. Also: first or
+   later in a group (the label on the first only), last of a group (the time, and
+   for an outgoing one `[delivered]` or `[read]` in place of nothing, `[sending…]`
+   or `[failed: …]` in place of both), and the **day separator** beside it, a row
+   that is not a message.
 3. **Mode label** — the four above, plus the line's own `VISUAL` and `NORMAL`,
    which are *different modes that share a word*. The label belongs to whichever
    mode the keys about to be pressed will mean, and a confirmation is a question

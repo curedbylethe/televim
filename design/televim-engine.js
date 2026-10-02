@@ -95,6 +95,29 @@
     : AUTH[code] || code;
   const pwLabel = (n) => 'two-factor password (' + attempts(n) + ')';
 
+  /* ---------- time: minutes since the epoch, in UTC so a frame is the same everywhere ----------
+     A message with no `at` has no time: it never groups, never gets a separator and never shows
+     a timestamp, which is how every row drawn before these treatments existed still reads. */
+  const GROUP_MIN = 5;                          /* a gap past this breaks a group */
+  const TODAY = [2026, 9, 2];                   /* the specimen's today: Friday 2 October 2026 */
+  const NOW = Date.UTC(TODAY[0], TODAY[1], TODAY[2], 21, 40) / 60000;
+  const at = (ago, hm) => Date.UTC(TODAY[0], TODAY[1], TODAY[2] - ago, +hm.slice(0, 2), +hm.slice(3)) / 60000;
+  const dayOf = (m) => Math.floor(m / 1440);
+  const WEEKDAY = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const MONTH = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  /* Today, Yesterday, the weekday for the days between, a full date past the week */
+  function dayLabel(m) {
+    const ago = dayOf(NOW) - dayOf(m), d = new Date(m * 60000);
+    if (ago <= 0) return 'Today';
+    if (ago === 1) return 'Yesterday';
+    if (ago < 7) return WEEKDAY[d.getUTCDay()];
+    return MONTH[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();
+  }
+  const clock = (m) => { const d = new Date(m * 60000); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); };
+  /* does b continue a's group? Same side, same calendar day, within the window, and b is not a reply. */
+  const joins = (a, b) => !!(a && b && a.at != null && b.at != null && a.from === b.from && !b.reply
+    && dayOf(a.at) === dayOf(b.at) && b.at - a.at <= GROUP_MIN);
+
   /* ---------- data ---------- */
   function makeChats() {
     const C = (name, unread, msgs, extra) => Object.assign({ name, unread, msgs, cur: Math.max(0, msgs.length - 1), top: 0 }, extra || {});
@@ -119,7 +142,27 @@
         t('Leave the train ones on the fridge. I only need the concert pair tonight.'),
         y('Understood. Saving the seat was the whole of the favour.')
       ], { cur: 5, older: true }),
-      C('Grace Hopper', 2, [t('The nanosecond wire is on my desk again.'), y('Bring it Thursday.'), t('Thursday it is.')]),
+      /* the one chat with a clock: grouped runs, five days, every read state. `rcpt` is the peer's
+         answer for an outgoing message; it is only drawn on a group's newest. */
+      C('Grace Hopper', 2, [
+        t('Proofs are back with notes.', { at: at(12, '09:12') }),
+        y('Send me the margin ones first.', { at: at(12, '09:13'), rcpt: 'read' }),
+        y('Then the footnotes.', { at: at(12, '09:15'), rcpt: 'read' }),
+        t('Volume four is on the bench.', { at: at(3, '18:02') }),
+        t('The index still needs a pass.', { at: at(3, '18:03') }),
+        y('Index tonight, I promise.', { at: at(3, '18:20'), rcpt: 'read' }),
+        t('The nanosecond wire is on my desk again.', { at: at(1, '20:11') }),
+        y('Bring it Thursday.', { at: at(1, '20:13'), rcpt: 'read' }),
+        t('Thursday it is.', { at: at(1, '20:14') }),
+        y('Packed the wire.', { at: at(0, '21:02'), rcpt: 'read' }),
+        y('And the 12-inch ruler.', { at: at(0, '21:04'), rcpt: 'read' }),
+        t('Keep the ruler dry.', { at: at(0, '21:05'), reply: { quote: 'And the 12-inch ruler.' } }),
+        y('Leaving now.', { at: at(0, '21:09'), rcpt: 'read' }),
+        y('Platform, no train yet.', { at: at(0, '21:16'), rcpt: 'delivered' }),
+        y('Train is moving.', { at: at(0, '21:31'), rcpt: 'delivered' }),
+        y('Sent from the carriage.', { at: at(0, '21:32'), status: 'sending…' }),
+        y('Is the gate open?', { at: at(0, '21:38'), status: 'failed: no route' })
+      ]),
       C('Alan Turing', 1, [y('Did the paper come back?'), t('Reviewers want one more proof.')], { newer: true }),
       C('Katherine Johnson', 0, [t('Numbers check out.'), y('Good. Send the table.')]),
       C('Margaret Hamilton', 0, [], { loading: true }),
@@ -511,6 +554,7 @@
       case 'message': case 'reply': {
         if (!buf.trim()) return refuse(s, 'Nothing to send.');
         const c = chat(s), m = { from: 'you', text: buf, status: 'sending…', live: true };
+        if (c.msgs.length && c.msgs[c.msgs.length - 1].at != null) m.at = Math.max(NOW, c.msgs[c.msgs.length - 1].at);
         if (L.kind === 'reply') m.reply = L.ref;
         c.msgs.push(m); c.cur = c.msgs.length - 1; s.draft = null; s.vis = null; closeLine(s); return;
       }
@@ -816,16 +860,28 @@
     if (c.older) rows.push({ load: 'Loading older…', mi: -1 });
     if (c.loading) rows.push({ load: 'Loading…', mi: -1 });
     c.msgs.forEach((m, mi) => {
+      const prev = c.msgs[mi - 1], next = c.msgs[mi + 1];
+      /* the first message of a calendar day is preceded by a row naming it: a row of its own, no
+         message, so mi is -1 and the cursor never lands on it */
+      if (m.at != null && (!prev || prev.at == null || dayOf(prev.at) !== dayOf(m.at))) rows.push({ sep: dayLabel(m.at), mi: -1 });
+      const head = !joins(prev, m), tail = !joins(m, next);
       let qp = '';
       if (m.reply) qp = '> ' + (m.reply.unloaded ? '[message not loaded]' : trunc(m.reply.quote, 18)) + ' ‖ ';
       const full = qp + m.text, mask = new Array(full.length).fill(false);
       if (q) { const lt = m.text.toLowerCase(); for (let i = lt.indexOf(q); i >= 0; i = lt.indexOf(q, i + q.length)) for (let j = 0; j < q.length; j++) mask[qp.length + i + j] = true; }
       const first = rows.length;
-      wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, full, qlen: qp.length, mask, s: r.s, e: r.e, from: m.from }));
-      if (m.status) {
-        const suf = '[' + m.status + ']', last = rows[rows.length - 1];
-        if (last.e - last.s + 1 + chars(suf) <= CW) last.suf = suf, last.sufA = m.status.startsWith('failed') ? 't' : 'd';
-        else rows.push({ mi, first: false, full: '', qlen: 0, mask: [], s: 0, e: 0, from: m.from, suf, sufA: m.status.startsWith('failed') ? 't' : 'd' });
+      /* the sender label is the group's, so only its first row carries it */
+      wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, s: r.s, e: r.e, from: m.from }));
+      /* the last row of a message carries its own status; the last row of a group also carries
+         the peer's read state (outgoing only, never beside a status) and the group's time */
+      const rcpt = tail && m.from === 'you' && !m.status && m.rcpt ? m.rcpt : '';
+      const suf = m.status ? '[' + m.status + ']' : rcpt ? '[' + rcpt + ']' : '';
+      const tm = tail && m.at != null ? clock(m.at) : '';
+      if (suf || tm) {
+        const sufA = m.status && m.status.startsWith('failed') ? 't' : 'd', last = rows[rows.length - 1];
+        const need = chars(suf) + (suf && tm ? 1 : 0) + chars(tm);
+        if (last.e - last.s + 1 + need <= CW) Object.assign(last, { suf, sufA, tm });
+        else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], s: 0, e: 0, from: m.from, suf, sufA, tm });
       }
       rows[first].hasStart = true;
     });
@@ -842,21 +898,31 @@
     let fr = rows.findIndex((r) => r.mi === c.cur), lr = -1;
     rows.forEach((r, i) => { if (r.mi === c.cur) lr = i; });
     if (c.cur === 0 && c.older) fr = 0;
+    if (fr > 0 && rows[fr - 1].sep) fr--;
     if (fr >= 0) { if (fr < c.top) c.top = fr; else if (lr >= c.top + V) c.top = Math.max(fr, lr - V + 1); }
     c.top = clamp(c.top, 0, Math.max(0, rows.length - V));
     let lo = -1, hi = -2; if (s.vis) [lo, hi] = range(s);
     rows.slice(c.top, c.top + V).forEach((r, i) => {
       const y = 1 + i;
       if (r.load) { put(g, x0 + 2, y, r.load, 'd'); return; }
+      if (r.sep) {
+        /* a rule the width of the text with the day set into it: no tag column, no fill */
+        const lab = ' ' + r.sep + ' ', lx = Math.floor((52 - chars(lab)) / 2);
+        put(g, x0 + 2, y, '─'.repeat(52), 'b');
+        put(g, x0 + 2 + lx, y, lab, 'd');
+        return;
+      }
       const cur = r.mi === c.cur, sel = !cur && r.mi >= lo && r.mi <= hi;
       const mod = cur ? 'r' : sel ? 's' : '';
       fill(g, x0 + 1, y, w - 2, 't' + mod);
-      if (r.first) put(g, x0 + 2, y, r.from === 'you' ? '[you]' : '[them]', (cur ? 't' : 'd') + mod);
+      if (r.lab) put(g, x0 + 2, y, r.from === 'you' ? '[you]' : '[them]', (cur ? 't' : 'd') + mod);
       for (let j = r.s; j < r.e; j++) {
         const fg = r.mask[j] ? 'm' : (j < r.qlen && !cur ? 'd' : 't');
         put(g, x0 + 9 + (j - r.s), y, r.full[j], fg + mod);
       }
-      if (r.suf) put(g, x0 + 2 + 52 - chars(r.suf), y, r.suf, (cur ? 't' : r.sufA) + mod);
+      const tmw = r.tm ? chars(r.tm) : 0;
+      if (r.tm) put(g, x0 + 2 + 52 - tmw, y, r.tm, (cur ? 't' : 'd') + mod);
+      if (r.suf) put(g, x0 + 2 + 52 - tmw - (tmw ? 1 : 0) - chars(r.suf), y, r.suf, (cur ? 't' : r.sufA) + mod);
     });
     /* the body gives up its last interior column, and only when that body is wide enough */
     if (w - 2 >= MIN_BODY_WIDTH) paintScroll(g, x0 + w - 2, 1, V, c.top, rows.length);
@@ -1240,6 +1306,12 @@
       { name: 'Chat list focused', keys: '<Tab>' },
       { name: 'Loading newer', keys: '<Tab>jjl' },
       { name: 'Loading', keys: '<Tab>jjjjl' }] },
+    /* Grace Hopper's chat is the one with a clock. G jumps the cursor to a message, which brings
+       its rows (and a day's separator) into view; every frame goes through the real handler. */
+    { id: 'grouping', name: 'Groups · days · receipts', variants: [
+      { name: 'Newest: [read], [delivered], [sending…], [failed]', keys: '<Tab>j<Tab>' },
+      { name: 'Cursor inside a group: one state, one time', keys: '<Tab>j<Tab>kk' },
+      { name: 'Oldest: full date, weekday, Yesterday, Today', keys: '<Tab>j<Tab>kkkkkkkkkkkkkkk' }] },
     { id: 'visual', name: 'Visual', variants: [
       { name: 'Two messages, search live', keys: '/tickets<CR>vj' }] },
     { id: 'insert', name: 'Insert', variants: [
