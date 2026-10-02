@@ -704,7 +704,9 @@ Working today:
   `yy`: there is no pending-yank latch on a card, so the second press yanks the same
   row again, and the hint naming `y/yy` is naming one key rather than two. The
   design's per-peer **colour slot is held and not built** — see **Known Gaps**.
-  `add account` and `logout` refuse, and sign-out *confirms* before it does; on a
+  `add account` refuses with `not yet: this build cannot add an account`; `logout`
+  confirms on the same screen-wide row and then signs out — the session is
+  discarded, the list empties, and the sign-in field comes back for the phone; on a
   contact's card `d` refuses, because that card has no row to act on. Read once at
   start-up, not on open: a panel that blanked and refilled every time would be one
   the reader could not trust. With no credentials it says so, and says why.
@@ -836,6 +838,18 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
   read yet" rather than "a read failed". And a bring-up failure narrowed: it is
   now only "the client could not be built" or "the chat list could not be
   fetched", because a missing phone is no longer something bring-up needs.
+- **Why logging out rebuilds the client:** the update feed is single-shot. The
+  framework's relay hands its receiver to a subscriber once (`UpdateRelay::take`)
+  and nothing puts one back — not a sign-out, not dropping the subscription — so a
+  second `subscribe_updates` on the same client refuses with
+  `UpdatesAlreadySubscribed` before it touches the network. A sign-out that kept
+  the client would leave a reader who signs back in with a live-looking window
+  that never receives another message, and the fault would surface long after the
+  act. So `Event::LoggedOut` drops the `Arc` — which is what ends the old pump,
+  because the relay aborts with the client — and asks bring-up for a fresh one,
+  whose `Ready` carries `Err(String::new())` and installs the signed-out screen and
+  the sign-in field together. `State` holds the `Config` and the channel, so the
+  respawn needed no change to `apply`'s signature.
 - **Why the sign-in surface is an overlay and not a `Pane` variant:** `Pane` is
   `Copy`, and its lifecycle belongs to the layout — `set_focus` closes the
   profile, `Tab` and `Ctrl-w` walk out of the right-hand column — while a flow in
@@ -1032,13 +1046,21 @@ Real, and named so they are not mistaken for oversights:
   would be a 58-field literal that breaks on every schema bump and reads as noise.
   The `live` integration test in `app/tests/proto_integration.rs` is the other end
   of it, and it needs a datacenter.
-- **`add account` and `logout` are rows that refuse.** `add account` flashes
-  `not yet: this build cannot add an account`; `logout` raises
-  `Sign out and forget this session? (y/n)` first and refuses inside it. Both are
-  one word long because a deliberate refusal is not a `[failed: …]` — that form is
-  for something that tried and did not come back, and a reader who reads it as a
-  bug will go looking for one that does not exist. Signing in again works —
-  `:signin` asks for it without a restart — and signing out is `07`.
+- **`add account` is a row that refuses.** It flashes
+  `not yet: this build cannot add an account`, one word long because a deliberate
+  refusal is not a `[failed: …]` — that form is for something that tried and did
+  not come back, and a reader who reads it as a bug will go looking for one that
+  does not exist. `logout` used to refuse the same way; it signs out now.
+- **The design artifact still refuses a sign-out the program performs.** The
+  engine's only logout path is `cardAct`'s `not yet: this build cannot sign out`,
+  and it has no post-logout state at all: `fresh(view)` knows
+  `signin|stale|nocreds|signedout|reading`, and the nearest of them, `stale`, is a
+  session Telegram revoked rather than one the reader ended. The model and the
+  binary disagree, and the specimen's frame still shows the refusal. It is left
+  rather than hand-fixed, the way the missing contact-card shell is: the engine is
+  a design model an agent wrote against `DESIGN.md`, and editing it by hand to add
+  a state is the failure `design/README.md` names. It wants a design run that adds
+  the state to `DESIGN.md` and the engine together, and `make design-pull` after.
 - **`Config::code` and `Config::password` are pre-fills, not a way in.** They
   fill the code and the password fields when a flow reaches them; the flow is the
   only path that writes a session, and the phone has to reach the bar once.

@@ -389,9 +389,9 @@ code.
 | `not signed in` | the shell card's first line, then the reason, wrapped | `NOT_SIGNED_IN` |
 | `reading the session…` | the shell card **before anything has been read**; it does not borrow the other one's wording | `READING` |
 | `Set the credentials again with :signin.` | where to put the credentials back | `SET_CREDENTIALS` |
-| `Sign out and forget this session? (y/n)` | a screen-wide confirmation, raised by the `logout` row and refused inside | the card |
+| `signed out` | the status the screen rests on after the reader signs out, until the sign-in field arrives | the screen after a sign-out |
+| `Sign out and forget this session? (y/n)` | a screen-wide confirmation, raised by the `logout` row; `y` signs out | the card |
 | `not yet: this build cannot add an account` | the `add account` row's refusal | ditto |
-| `not yet: this build cannot sign out` | the refusal **inside** the confirmation, which replaces it | ditto |
 | `Not yours: a contact card has no row you can act on.` | `d` on a contact's card | ditto |
 | `Not a row that acts: add account and logout are the two.` | `d` on a value row of the self card | ditto |
 | `Not editable here: :settings opens the editable profile.` | `e` on the self card: the one route to the editable screen | ditto |
@@ -548,8 +548,9 @@ inside a row and cannot be seen is one nobody knows.
 ### The self card
 
 Rows, in order: `name`; `username`; `phone`; `bio`; `birthday`; then
-`add account` and `logout`, dim, which refuse. No `id` and no `session`: the
-card is what the reader came to read, and both were the program's bookkeeping
+`add account`, dim, which refuses, and `logout`, which signs out. No `id` and
+no `session`: the card is what the reader came to read, and both were the
+program's bookkeeping
 rather than the person's.
 
 - `username` and `phone` each take their own row, so the phone's own key
@@ -561,12 +562,11 @@ rather than the person's.
   not required to make, and a birthday with no year has no age to state.
 - `add account` refuses with `not yet: this build cannot add an account`.
 - `logout` raises a screen-wide confirmation, `Sign out and forget this
-  session? (y/n)`, and refuses inside it with `not yet: this build cannot sign
-  out`. **Sign-out confirms before it refuses**, because a panel that only flashed
-  would have taught the reader the wrong thing about a key that will one day
-  throw away the only secret the program holds. The refusal *replaces* the prompt
-  rather than writing under it: a confirmation outranks a transient status and
-  both are the same row.
+  session? (y/n)`, and **confirms before it throws away the only secret the
+  program holds** — a panel that only flashed would have taught the reader the
+  wrong thing about that key. `y` queues the sign-out; the session is discarded,
+  the list empties, and the sign-in field comes back for the phone. The
+  confirmation outranks a transient status and both are the same row.
 
 ### A contact's card
 
