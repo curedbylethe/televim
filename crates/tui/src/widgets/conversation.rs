@@ -21,8 +21,9 @@ use ratatui::widgets::{
 use domain::message::Message;
 
 use crate::app::{App, FetchDirection, Focus, JUMP_LABEL};
-use crate::rows;
+use crate::rows::{self, RowSpan};
 use crate::text_row;
+use crate::wrap::columns;
 
 /// How many columns the messages keep for themselves before a scrollbar is
 /// worth showing beside them.
@@ -31,7 +32,13 @@ use crate::text_row;
 /// the reader.
 const MIN_BODY_WIDTH: u16 = 8;
 
-pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
+/// The panel, drawn from a layout the caller has.
+///
+/// The layout is [`App::row_layout`]'s, and is passed in rather than asked for a
+/// second time here so that the rows drawn, the rows sliced and the rows the
+/// scrollbar counts are one answer, laid out once per frame by the one owner of
+/// the geometry.
+pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) {
     // The focused pane's border is the only thing on the screen that says where
     // a keystroke goes, so the two panes cannot both be drawn as though they had
     // it.
@@ -59,8 +66,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let above = reserved.above();
     let budget = usize::from(body.height).saturating_sub(above + reserved.below());
 
-    let layout = app.row_layout();
-    let view = app.viewport(&layout, budget);
+    let view = app.viewport(layout, budget);
 
     let mut items: Vec<ListItem> =
         Vec::with_capacity(reserved.above() + reserved.below() + view.rows);
@@ -82,36 +88,64 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 
     let window = &app.conversation.window;
     let mut drawn = 0;
-    for span in layout.iter().skip(view.start) {
+    // The slice begins at a row rather than at a message, so what is drawn is
+    // every entry the layout says has a row on the screen — which is not the
+    // same set as the entries from the slice's first message onward, since a row
+    // that names no message sits in the layout too.
+    let mut on_the_first_row = true;
+    for span in layout
+        .iter()
+        .filter(|span| span.first + span.len > view.start_row)
+    {
         // A message is drawn whole or not at all: half a message with no way to
         // scroll to the rest of it is a different, worse thing than a row the
         // panel did not fill.
         if drawn >= view.budget {
             break;
         }
-        let Some(message) = window.get(span.index) else {
+        // Only the entry the slice starts inside has rows above the panel; every
+        // other one begins on it.
+        let skip = if on_the_first_row { view.skip } else { 0 };
+        on_the_first_row = false;
+
+        let Some(index) = span.kind.index() else {
+            // A row that names no message: a day separator. It takes its row of
+            // the panel's own width, and the cursor can never be on it, because
+            // the cursor names a message.
+            items.push(separator(
+                app,
+                span.kind.label().unwrap_or_default(),
+                body.width,
+            ));
+            drawn += 1;
+            continue;
+        };
+        let Some(message) = window.get(index) else {
             break;
         };
 
-        let wrapped = rows::message_rows(app, message, body.width);
+        let grouped = rows::group_of(app, index);
+        let wrapped = rows::message_rows(app, message, grouped, body.width);
         // Which window positions the selection covers is one question, and its
         // answer does not change from one message to the next, so it is worked out
         // once here rather than per message.
         let covered = app.covered(app.selection());
-        let coverage = coverage(app, message, span.index, &covered);
-        for (row, range) in wrapped.iter().enumerate().skip(view.skip) {
+        let coverage = coverage(app, message, index, &covered);
+        for (row, range) in wrapped.iter().enumerate().skip(skip) {
             if drawn >= view.budget {
                 break;
             }
-            let first = row == 0;
-            let last = row + 1 == wrapped.len();
+            let place = Place {
+                first: row == 0,
+                last: row + 1 == wrapped.len(),
+                group: grouped,
+            };
             items.push(message_row(
                 app,
                 message,
+                &place,
                 range,
                 coverage.as_ref(),
-                first,
-                last,
                 body.width,
             ));
             drawn += 1;
@@ -123,7 +157,8 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     }
 
     // Only a message can be the selection, so an empty window has none — the
-    // indicator rows are not places the cursor can be.
+    // indicator rows are not places the cursor can be, and neither is a row of
+    // the layout that names no message.
     let mut state = ListState::default();
     state.select((!window.is_empty()).then(|| view.selection + above));
 
@@ -210,6 +245,25 @@ fn coverage(
     }
 }
 
+/// Where a row stands: in its message, and in its message's group.
+///
+/// The two are not the same question and are kept apart deliberately — a row is
+/// the first or the last of a *message*, and a message is the first or the last
+/// of a *group*, and most rows and most messages are neither. What follows from
+/// that is all the drawing: the tag and the quoted target go on a message's
+/// first row, the status and the time on a message's last row, and each only
+/// once per group.
+struct Place {
+    /// The row the reader reaches the message by.
+    first: bool,
+
+    /// The row with room for what stands behind the message.
+    last: bool,
+
+    /// What the message's group says of it.
+    group: rows::Grouped,
+}
+
 /// One row of one message: the slice of its text `range` names, which the
 /// panel's width has already made room for.
 ///
@@ -221,7 +275,15 @@ fn coverage(
 /// a reader scrolling into the middle of a long message is reading the same
 /// speaker they were a moment ago.
 ///
-/// The row was cut at a width that already made room for both, in
+/// What belongs to the **group** rather than to the message is thinner still:
+/// the sender is named on the message that opens the group and on no other, so a
+/// message that follows one into its group is given the same blank tag of
+/// [`rows::WHO_WIDTH`] columns and its text begins in the same column. The time
+/// is shown on the message that closes the group and on no other. Neither the
+/// tag nor the time is taken away from a message that carries its own status:
+/// a group's last message shows both.
+///
+/// The row was cut at a width that already made room for all of it, in
 /// [`rows::message_rows`], so nothing here is clipped by the terminal and lost.
 ///
 /// A message a search matched has its spans patched with
@@ -240,17 +302,22 @@ fn coverage(
 fn message_row<'m>(
     app: &App,
     message: &'m Message,
+    place: &Place,
     range: &Range<usize>,
     covered: Option<&Coverage>,
-    first: bool,
-    last: bool,
     width: u16,
 ) -> ListItem<'m> {
     let mut spans = Vec::new();
 
-    if first {
-        let who = if message.is_outgoing { "you" } else { "them" };
-        spans.push(Span::styled(format!("[{who}] "), app.theme.text_dim));
+    if place.first {
+        if place.group.first {
+            let who = if message.is_outgoing { "you" } else { "them" };
+            spans.push(Span::styled(format!("[{who}] "), app.theme.text_dim));
+        } else {
+            // The tag is blank rather than absent, so this message's text begins
+            // in the same column as the one that opened the group.
+            spans.push(Span::raw(" ".repeat(rows::WHO_WIDTH)));
+        }
 
         if let Some(reply_to) = message.reply_to {
             spans.push(Span::styled(
@@ -288,8 +355,26 @@ fn message_row<'m>(
         concealed: false,
     }));
 
-    if last && let Some(suffix) = rows::status_suffix(app, message) {
-        spans.push(Span::styled(suffix, app.theme.text_dim));
+    if place.last
+        && let Some(note) = rows::trailing_note(app, message, place.group)
+    {
+        // The note is right-aligned: the status column is the far end of the row,
+        // so a group's time is at the same column on every group rather than
+        // hanging after whichever text happened to end last.
+        let prefix = if place.first {
+            rows::WHO_WIDTH
+                + message.reply_to.map_or(0, |reply_to| {
+                    columns(&rows::reply_prefix(app, reply_to, width))
+                })
+        } else {
+            0
+        };
+        let drawn = prefix + columns(&message.text[range.clone()]);
+        let gap = usize::from(width).saturating_sub(drawn + columns(&note));
+        if gap > 0 {
+            spans.push(Span::raw(" ".repeat(gap)));
+        }
+        spans.push(Span::styled(note, app.theme.text_dim));
         if matched {
             let last_span = spans.len() - 1;
             spans[last_span].style = spans[last_span].style.patch(app.theme.match_hit);
@@ -315,6 +400,37 @@ fn message_row<'m>(
 /// outlives the frame's own borrows, and every label here is a constant.
 fn loading(app: &App, label: &'static str) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(label, app.theme.text_dim)))
+}
+
+/// A day separator: a rule across the panel with the day set into it.
+///
+/// A row of its own, the full width of the text — the tag column included,
+/// because this is not a message and does not live inside one. The rule is in the
+/// border's ink and the label in the dim ink a decoration is drawn in, so the row
+/// reads as furniture rather than as something said: no tag, no sender, no quoted
+/// target, no status, and nothing a selection or a match could touch.
+///
+/// The label is set into the middle with a space either side, and an odd column
+/// goes to the right of it rather than the left — a rule a column wider on one
+/// side than the other is one nobody can read, and a reader looking at one is
+/// looking at the day in it.
+///
+/// `ponytail:` drawn as one line rather than as a rule above a label. The design
+/// artifact's row is this rule with the day in it; a second row would change the
+/// count the scrollbar shows for the same window.
+fn separator(app: &App, label: &str, width: u16) -> ListItem<'static> {
+    let room = usize::from(width);
+    // Truncated rather than clipped: a day longer than a narrow panel's row is
+    // said as much of as fits, and the row is still the panel's width.
+    let label = rows::truncate(label, room.saturating_sub(2));
+    let rule = room.saturating_sub(columns(&label) + 2);
+    let left = rule / 2;
+
+    ListItem::new(Line::from(vec![
+        Span::styled("─".repeat(left), app.theme.border),
+        Span::styled(format!(" {label} "), app.theme.text_dim),
+        Span::styled("─".repeat(rule - left), app.theme.border),
+    ]))
 }
 
 /// Splits the panel's inside into the messages and a column for the scrollbar.
@@ -424,6 +540,136 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    /// The same, from a layout the test holds rather than the panel's own.
+    ///
+    /// Which is how a row that names no message reaches the screen: nothing in
+    /// the program emits one yet, and the panel's whole job — the rows drawn,
+    /// the slice, and the bar beside them — is what has to hold when one does.
+    fn screen_of_layout(app: &App, layout: &[RowSpan], width: u16, height: u16) -> Buffer {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("the test backend builds");
+        terminal
+            .draw(|frame| app.render_layout(layout, frame))
+            .expect("the frame draws");
+
+        terminal.backend().buffer().clone()
+    }
+
+    /// The panel's layout with a row that names no message put in front of the
+    /// message at `index`, and every row below it moved down to make room.
+    fn layout_with_other_row(app: &App, index: usize) -> Vec<RowSpan> {
+        let mut layout = app.row_layout();
+        let first = layout[index].first;
+
+        layout.insert(
+            index,
+            RowSpan {
+                kind: rows::RowKind::Other {
+                    label: "── test ──".to_owned(),
+                },
+                message_id: None,
+                first,
+                len: 1,
+                text: 0..0,
+            },
+        );
+        for span in &mut layout[index + 1..] {
+            span.first += 1;
+        }
+
+        layout
+    }
+
+    // ---- a conversation to group ----------------------------------------
+
+    /// A moment in the middle of a day: 2024-11-14 22:13:20 UTC.
+    const AT: i64 = 1_730_000_000;
+
+    /// The sample conversation's identifier, which a fixture message has to carry.
+    fn mock_chat_id() -> i64 {
+        App::mock().conversation.window.chat_id
+    }
+
+    /// A short message of the sample conversation, `seconds` after [`AT`].
+    fn at(id: i64, seconds: i64, outgoing: bool, text: &'static str) -> Message {
+        Message {
+            id,
+            chat_id: mock_chat_id(),
+            text: text.into(),
+            timestamp: AT + seconds,
+            status: domain::message::MessageStatus::Received,
+            is_outgoing: outgoing,
+            reply_to: None,
+        }
+    }
+
+    /// An application holding exactly these messages, oldest first, with the
+    /// reader on the newest of them.
+    ///
+    /// The window is replaced rather than extended so that what a test groups is
+    /// what it built: the sample conversation alternates direction, so every one
+    /// of its messages is already a group of its own.
+    fn showing(messages: Vec<Message>) -> App {
+        let mut app = App::mock();
+        let count = messages.len();
+        app.conversation.window.replace(messages);
+        app.vim.set_total(count);
+        app.vim.set_cursor(count.saturating_sub(1));
+
+        app
+    }
+
+    /// How many of the panel's rows carry `needle`.
+    fn occurrences(buffer: &Buffer, needle: &str) -> usize {
+        message_rows(buffer)
+            .into_iter()
+            .filter(|y| row(buffer, *y).contains(needle))
+            .count()
+    }
+
+    /// The rows each entry of a layout begins on.
+    fn firsts_of(layout: &[RowSpan]) -> Vec<usize> {
+        layout.iter().map(|span| span.first).collect()
+    }
+
+    /// The `HH:MM` a message `seconds` after [`AT`] shows.
+    fn clock_at(seconds: i64) -> String {
+        crate::date::clock(AT + seconds).expect("a moment in a day has a clock")
+    }
+
+    /// The day a message `seconds` after [`AT`] is named by, with no clock
+    /// recorded: a date, which is a fact about the message rather than about when
+    /// it is being read.
+    fn day_at(seconds: i64) -> String {
+        rows::separator_label(AT + seconds, 0).into_owned()
+    }
+
+    /// The cursor is on a message, and the panel's own selection is on the row the
+    /// layout says that message begins on — a separator is a row of the panel
+    /// without ever being a place the cursor can be.
+    fn assert_cursor_stands_on_a_message(app: &App, screen: &Buffer) {
+        use ratatui::style::Modifier;
+
+        let layout = app.row_layout();
+        let view = app.viewport(&layout, message_rows(screen).len());
+        let at_row = drawn_at(view.selection);
+
+        assert!(
+            cell(screen, BODY_X, at_row)
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the selection is on the row the panel drew for message {}: {}",
+            app.vim.cursor(),
+            row(screen, at_row)
+        );
+        assert_eq!(
+            view.start_row + view.selection,
+            rows::first_row_of_message(&layout, app.vim.cursor())
+                .expect("the cursor names a message the window holds"),
+            "and that row is the message's own first row, not a separator's"
+        );
+    }
+
     /// Sends one keystroke to the application, as the reader would.
     fn press(app: &mut App, code: KeyCode) {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -523,10 +769,19 @@ mod tests {
     /// because a slice drawn a row out from the one that was computed is still
     /// a slice.
     fn assert_one_answer(app: &App, buffer: &Buffer) {
+        assert_one_answer_about(app, &app.row_layout(), buffer);
+    }
+
+    /// The same, for a layout the caller holds — the panel draws the layout it is
+    /// given, and the panel and the layout must still agree about every row.
+    ///
+    /// A day separator counts like any other row: it is in the layout, it is in
+    /// `view.total`, and it is drawn, so it is in the sum without being special.
+    fn assert_one_answer_about(app: &App, layout: &[RowSpan], buffer: &Buffer) {
         let reserved = app.reserved();
         let panel_rows = message_rows(buffer).len();
         let budget = panel_rows - reserved.above() - reserved.below();
-        let view = app.viewport(&app.row_layout(), budget);
+        let view = app.viewport(layout, budget);
         let filled = message_rows(buffer)
             .into_iter()
             .filter(|y| drawn(buffer, *y))
@@ -656,6 +911,30 @@ mod tests {
 
     // ---- what reaches the screen ----------------------------------------
 
+    /// The panel's first message row, for a window whose messages are all of one
+    /// day.
+    ///
+    /// Row 0 is the frame's own, and row 1 is the separator that anchors the day
+    /// the window starts in — a row of the panel's own, drawn before the first
+    /// message of the window whatever else is true of it.
+    const FIRST: u16 = 2;
+
+    /// One of the reader's own messages as the server left it: numbered by it and
+    /// accepted, which is the only state a receipt can be about.
+    fn mine(id: i64, seconds: i64) -> Message {
+        Message {
+            status: domain::message::MessageStatus::Sent,
+            is_outgoing: true,
+            ..at(id, seconds, true, "text")
+        }
+    }
+
+    /// The frame row a row of the layout is drawn on: the panel's body begins one
+    /// row below the frame's own.
+    fn drawn_at(layout_row: usize) -> u16 {
+        u16::try_from(layout_row + 1).expect("a row of the layout fits a frame")
+    }
+
     #[test]
     fn an_empty_window_draws_a_panel_with_nothing_in_it() {
         let screen = screen(&App::new(), 80, 24);
@@ -697,11 +976,11 @@ mod tests {
         let screen = screen(&App::mock(), 80, 24);
 
         assert!(
-            row(&screen, 1).contains("Hey, is the build green?"),
+            row(&screen, FIRST).contains("Hey, is the build green?"),
             "the whole window fits: {}",
-            row(&screen, 1)
+            row(&screen, FIRST)
         );
-        assert!(row(&screen, 10).contains("See you at the demo."));
+        assert!(row(&screen, FIRST + 9).contains("See you at the demo."));
     }
 
     #[test]
@@ -782,9 +1061,9 @@ mod tests {
             row(&screen, 1)
         );
         assert!(
-            row(&screen, 2).contains("text"),
+            row(&screen, 3).contains("text"),
             "and the messages start behind it: {}",
-            row(&screen, 2)
+            row(&screen, 3)
         );
     }
 
@@ -844,23 +1123,31 @@ mod tests {
         app.apply_latest(vec![long_message(chat_id)]);
 
         let screen = screen(&app, 80, 24);
+        // The newest entry is the long message: the day's separator sits above
+        // the window's first message, so the entries are not the messages.
+        let long = app
+            .row_layout()
+            .last()
+            .expect("the window's last entry is the long message")
+            .clone();
+        let first = drawn_at(long.first);
 
         assert_eq!(
-            app.row_layout()[0].len,
-            8,
+            long.len, 8,
             "47 columns on the first row, 53 on the seven after it"
         );
         assert!(
-            row(&screen, 1).contains("[them] xxx"),
+            row(&screen, first).contains("[them] xxx"),
             "the first row: {}",
-            row(&screen, 1)
+            row(&screen, first)
         );
         assert!(
             message_rows(&screen)
                 .into_iter()
-                .take(8)
+                .skip(usize::from(first) - 1)
+                .take(long.len)
                 .all(|y| drawn(&screen, y)),
-            "all nine rows are on the screen: {:?}",
+            "all eight rows are on the screen: {:?}",
             message_rows(&screen)
                 .into_iter()
                 .map(|y| row(&screen, y))
@@ -868,8 +1155,8 @@ mod tests {
         );
         assert_eq!(
             last_drawn(&screen),
-            Some(8),
-            "and the ninth is the panel's own padding, not a message"
+            Some(first + u16::try_from(long.len - 1).expect("eight rows fits a u16")),
+            "and the row after it is the panel's own padding, not a message"
         );
         assert_one_answer(&app, &screen);
     }
@@ -928,6 +1215,406 @@ mod tests {
             "a screenful of rows up: {}",
             row(&paged, 1)
         );
+    }
+
+    /// A row that names no message sits between two messages, takes a row of the
+    /// screen, and is counted by the scrollbar beside them — and the cursor does
+    /// not land on it, because the cursor stands on messages.
+    #[test]
+    fn a_row_that_names_no_message_is_drawn_and_never_stands_the_cursor() {
+        use ratatui::style::Modifier;
+
+        let app = App::mock();
+        // In front of the window's fifth message, so the panel shows the whole of
+        // it — the day's own separator above the window's first message is entry
+        // zero, so the entries are not the messages.
+        let layout = layout_with_other_row(&app, 5);
+        let inserted = layout[5].clone();
+        assert!(
+            inserted.kind.index().is_none(),
+            "the entry names no message"
+        );
+        let newest = layout.last().expect("the window has an entry");
+        let newest_last = drawn_at(newest.first + newest.len - 1);
+
+        let screen = screen_of_layout(&app, &layout, 80, 24);
+        let y = drawn_at(inserted.first);
+
+        assert!(
+            body_row(&screen, y).contains("── test ──"),
+            "the row says what it is: {:?}",
+            body_row(&screen, y)
+        );
+        assert!(
+            row(&screen, y - 1).contains("1.85.0, edition 2024."),
+            "the message above it is where it was: {}",
+            row(&screen, y - 1)
+        );
+        assert!(
+            row(&screen, y + 1).contains("Perfect. Let's meet tomorrow."),
+            "and the one below it is a row further down: {}",
+            row(&screen, y + 1)
+        );
+        assert!(
+            !cell(&screen, BODY_X, y)
+                .modifier
+                .contains(Modifier::REVERSED),
+            "and nothing about the row says the cursor is on it"
+        );
+        assert!(
+            cell(&screen, BODY_X, newest_last)
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the cursor is on the newest message: {}",
+            row(&screen, newest_last)
+        );
+        assert_one_answer_about(&app, &layout, &screen);
+    }
+
+    // ---- what a group says once ------------------------------------------
+
+    /// Three messages from one side a minute apart are one group: the sender is
+    /// named once, on the first row, and the time shown once, on the last. The
+    /// message in the middle is given the same blank tag so its text begins in
+    /// the same column as the rest.
+    #[test]
+    fn a_group_names_the_sender_once_and_shows_the_time_once() {
+        let app = showing(vec![
+            at(1, 0, false, "one"),
+            at(2, 60, false, "two"),
+            at(3, 120, false, "three"),
+        ]);
+
+        let screen = screen(&app, 80, 24);
+
+        assert_eq!(occurrences(&screen, "[them]"), 1, "one name for the group");
+        assert_eq!(occurrences(&screen, "[you]"), 0);
+        assert_eq!(
+            occurrences(&screen, &clock_at(120)),
+            1,
+            "and one time, on the row that ends it"
+        );
+        assert!(
+            body_row(&screen, FIRST).starts_with("[them] one"),
+            "the first row names it: {:?}",
+            body_row(&screen, FIRST)
+        );
+        assert!(
+            body_row(&screen, FIRST + 1).starts_with("       two"),
+            "the one after it is a blank tag and its own text: {:?}",
+            body_row(&screen, FIRST + 1)
+        );
+        assert!(
+            body_row(&screen, FIRST + 2).starts_with("       three"),
+            "and so is the last: {:?}",
+            body_row(&screen, FIRST + 2)
+        );
+        assert!(
+            body_row(&screen, FIRST + 2)
+                .trim_end()
+                .ends_with(&clock_at(120)),
+            "with the time at the end of the row: {:?}",
+            body_row(&screen, FIRST + 2)
+        );
+        assert_eq!(
+            body_row(&screen, FIRST + 2).trim_end().chars().count(),
+            53,
+            "and the row is full to its last column, which is what right-aligned means: {:?}",
+            body_row(&screen, FIRST + 2)
+        );
+        assert!(
+            !body_row(&screen, FIRST + 1).contains(&clock_at(120)),
+            "and on no other row of the group: {:?}",
+            body_row(&screen, FIRST + 1)
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// A change of direction is a change of who is talking, which ends the group:
+    /// the sender is named again and each group carries its own time.
+    #[test]
+    fn a_change_of_direction_names_the_sender_again() {
+        let app = showing(vec![
+            at(1, 0, false, "one"),
+            at(2, 60, true, "two"),
+            at(3, 120, false, "three"),
+        ]);
+
+        let screen = screen(&app, 80, 24);
+
+        assert_eq!(occurrences(&screen, "[them]"), 2, "the two of theirs");
+        assert_eq!(occurrences(&screen, "[you]"), 1, "and the one of yours");
+        assert_eq!(occurrences(&screen, &clock_at(0)), 1);
+        assert_eq!(occurrences(&screen, &clock_at(120)), 1);
+        assert_eq!(occurrences(&screen, &clock_at(60)), 1);
+        assert_one_answer(&app, &screen);
+    }
+
+    /// The time belongs to the group and the status to the message, so a send on
+    /// its way in the middle of a group says so and does not take the group's
+    /// time with it.
+    #[test]
+    fn a_send_on_its_way_inside_a_group_still_says_so_on_its_own_row() {
+        let mut pending = at(2, 60, false, "two");
+        pending.status = domain::message::MessageStatus::Sending;
+        let app = showing(vec![
+            at(1, 0, false, "one"),
+            pending,
+            at(3, 120, false, "three"),
+        ]);
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            body_row(&screen, FIRST + 1).contains("[sending…]"),
+            "the middle row says what its send is doing: {:?}",
+            body_row(&screen, FIRST + 1)
+        );
+        assert!(
+            !body_row(&screen, FIRST + 1).contains(&clock_at(120)),
+            "and the group's time is not on it: {:?}",
+            body_row(&screen, FIRST + 1)
+        );
+        assert!(
+            body_row(&screen, FIRST + 2).contains(&clock_at(120)),
+            "it is on the row that ends the group: {:?}",
+            body_row(&screen, FIRST + 2)
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// A reply opens its group, so its target and the sender's name are both on
+    /// the row the reader reaches it by, and the group's time is on its last row.
+    #[test]
+    fn a_reply_names_the_sender_and_quotes_its_target_on_the_groups_first_row() {
+        let mut reply = at(2, 60, true, "two");
+        reply.reply_to = Some(1);
+        let app = showing(vec![at(1, 0, false, "one"), reply]);
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            body_row(&screen, FIRST + 1).contains("[you] > one ‖ two"),
+            "the reply names and quotes on its first row: {:?}",
+            body_row(&screen, FIRST + 1)
+        );
+        assert!(
+            body_row(&screen, FIRST + 1).contains(&clock_at(60)),
+            "and the group it opens ends on it: {:?}",
+            body_row(&screen, FIRST + 1)
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    // ---- the day separators ---------------------------------------------
+
+    /// A separator is a row of the panel's own width: a rule with the day set into
+    /// its middle. It is not a message — no tag column, no sender, no quoted
+    /// target, no status — and it is inked differently from one, so a reader can
+    /// see at a glance which rows are conversation and which are furniture.
+    #[test]
+    fn a_separator_is_a_row_of_its_own_and_names_no_one() {
+        let app = showing(vec![
+            at(1, 0, false, "one"),
+            at(2, 86_400, false, "two"),
+            at(3, 86_460, false, "three"),
+        ]);
+
+        let screen = screen(&app, 80, 24);
+        let rule = body_row(&screen, 1);
+
+        assert!(rule.starts_with('─'), "the row is the rule: {rule:?}");
+        assert!(
+            rule.contains(&day_at(0)),
+            "with the first day's name set into it: {rule:?}"
+        );
+        assert!(
+            rule.trim_end().ends_with('─'),
+            "and it runs to the panel's last column: {rule:?}"
+        );
+        assert_eq!(
+            rule.trim_end().chars().count(),
+            53,
+            "which is the whole width of the text"
+        );
+        for absent in ["[you]", "[them]", "‖", "[sending", "[failed"] {
+            assert!(
+                !rule.contains(absent),
+                "and nothing of a message's is on it: {rule:?}"
+            );
+        }
+
+        let rule_before = rule.chars().take_while(|c| *c == '─').count();
+        assert_eq!(
+            cell(&screen, BODY_X, 1).fg,
+            theme().border.fg.expect("the border has an ink"),
+            "the rule is in the border's ink"
+        );
+        assert_eq!(
+            cell(
+                &screen,
+                BODY_X + u16::try_from(rule_before).expect("a column fits a u16"),
+                1
+            )
+            .fg,
+            theme().text_dim.fg.expect("dim text has an ink"),
+            "and the label in the dim ink a decoration is drawn in"
+        );
+
+        // The messages either side of it are on their own rows, which is the
+        // whole of "sitting exactly between the two days".
+        assert!(body_row(&screen, 2).contains("[them] one"));
+        assert!(body_row(&screen, 4).contains("[them] two"));
+        assert!(
+            body_row(&screen, 3).contains(&day_at(86_400)),
+            "and the second separator is between them: {:?}",
+            body_row(&screen, 3)
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// `Today` is a claim about the reader's clock, so it is made only once a
+    /// clock has been recorded; without one the row says the date.
+    #[test]
+    fn a_separator_says_today_only_when_a_clock_has_been_recorded() {
+        let app = showing(vec![at(1, -86_400, false, "old"), at(2, 0, false, "new")]);
+        assert_eq!(
+            occurrences(&screen(&app, 80, 24), "Today"),
+            0,
+            "no clock, no claim"
+        );
+
+        app.record_now(AT);
+        let screen = screen(&app, 80, 24);
+
+        assert_eq!(occurrences(&screen, "Yesterday"), 1);
+        assert_eq!(occurrences(&screen, "Today"), 1);
+        assert_eq!(
+            occurrences(&screen, &day_at(0)),
+            0,
+            "and no date where a name fits"
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// A separator is a row of the panel and nothing more: no motion lands on it,
+    /// and every way of moving leaves the cursor on a message.
+    #[test]
+    fn no_separator_is_where_the_cursor_can_stand() {
+        let mut app = showing(
+            (1..=9)
+                .map(|id| at(id, (id - 1) * 43_200, id % 2 == 0, "text"))
+                .collect(),
+        );
+
+        let shown = screen(&app, 80, 24);
+        assert_cursor_stands_on_a_message(&app, &shown);
+
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+            let stepped = screen(&app, 80, 24);
+            assert_cursor_stands_on_a_message(&app, &stepped);
+        }
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let up = screen(&app, 80, 24);
+        assert_cursor_stands_on_a_message(&app, &up);
+        assert!(
+            up.content.iter().any(|cell| cell.symbol() == "─"),
+            "and the separators are still there either side of it"
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        let down = screen(&app, 80, 24);
+        assert_cursor_stands_on_a_message(&app, &down);
+        assert_one_answer(&app, &down);
+    }
+
+    /// Twelve messages in four days of three, so the window has days in it and is
+    /// taller than a short panel.
+    fn four_days() -> App {
+        showing(
+            (1..=12)
+                .map(|id| {
+                    let day = (id - 1) / 3;
+                    at(id, day * 86_400 + (id - 1) % 3 * 60, false, "text")
+                })
+                .collect(),
+        )
+    }
+
+    /// A separator takes a row of the window, so the slice counts it and the
+    /// scrollbar counts the slice: the bar describes the rows beside it, separator
+    /// rows included.
+    #[test]
+    fn a_separator_counts_toward_the_slice_and_the_bar_beside_it() {
+        let app = four_days();
+        let layout = app.row_layout();
+
+        let screen = screen(&app, 80, 10);
+        let budget = message_rows(&screen).len();
+        let view = app.viewport(&layout, budget);
+
+        assert_eq!(
+            layout.len(),
+            16,
+            "twelve messages and four separators: {:?}",
+            firsts_of(&layout)
+        );
+        assert_eq!(
+            view.total,
+            rows::total_rows(&layout),
+            "and the slice counts every row of it"
+        );
+        assert_eq!(
+            occurrences(&screen, "─"),
+            layout
+                .iter()
+                .filter(|span| {
+                    !span.kind.is_message()
+                        && span.first >= view.start_row
+                        && span.first < view.start_row + view.rows
+                })
+                .count(),
+            "a separator row is drawn for each row of the slice that is one"
+        );
+        assert!(
+            !thumb(&screen).is_empty(),
+            "and the bar is there to describe them"
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// Landing on the first message of a day — `gg`, a search, any move that puts
+    /// the cursor there — shows the separator above it, because the slice is
+    /// centred by rows and the separator is the row above the cursor's.
+    #[test]
+    fn landing_on_a_days_first_message_shows_the_separator_above_it() {
+        let mut app = four_days();
+        // The window's seventh message, which is the first of its third day, and
+        // well inside a window too tall for the panel. Landing on it leaves the
+        // pinned view, as `gg` and a search landing do.
+        let target = 6;
+        app.vim.set_cursor(target);
+        app.conversation.unfollow();
+
+        let screen = screen(&app, 80, 10);
+        let layout = app.row_layout();
+        let view = app.viewport(&layout, message_rows(&screen).len());
+        let cursor = drawn_at(view.selection);
+
+        assert_eq!(
+            view.start_row + view.selection,
+            rows::first_row_of_message(&layout, target).expect("the window holds it"),
+            "the cursor is on the day's first message"
+        );
+        assert!(
+            body_row(&screen, cursor - 1).contains(&day_at(2 * 86_400)),
+            "and the row above it names that day: {:?}",
+            body_row(&screen, cursor - 1)
+        );
+        assert_cursor_stands_on_a_message(&app, &screen);
+        assert_one_answer(&app, &screen);
     }
 
     /// A send on its way says so on the last row of its message, which is the
@@ -1004,6 +1691,135 @@ mod tests {
             "the row is the panel's width and no more: {} columns",
             columns(&first)
         );
+        assert_one_answer(&app, &screen);
+    }
+
+    // ---- what a group has earned ----------------------------------------
+
+    /// A read receipt is drawn once per group, on the row of the group's newest
+    /// message, in front of the time — and nowhere else in the group.
+    #[test]
+    fn a_read_receipt_is_shown_once_on_the_newest_row_of_its_group() {
+        let mut app = showing(vec![mine(1, 0), mine(2, 60)]);
+        app.conversation.set_read_watermark(2);
+
+        let screen = screen(&app, 80, 24);
+        let newest = body_row(&screen, FIRST + 1);
+
+        assert_eq!(
+            occurrences(&screen, "[read]"),
+            1,
+            "one receipt for the group, however many messages are in it"
+        );
+        assert_eq!(occurrences(&screen, "[delivered]"), 0);
+        assert!(
+            newest.contains("[read]") && newest.contains(&clock_at(60)),
+            "on the newest message's row, before its time: {newest:?}"
+        );
+        assert!(
+            matches!(
+                (newest.find("[read]"), newest.find(&clock_at(60))),
+                (Some(word), Some(time)) if word < time
+            ),
+            "and the word comes before the time: {newest:?}"
+        );
+        assert!(
+            !body_row(&screen, FIRST).contains("[read]"),
+            "and not on the row that only continued it: {:?}",
+            body_row(&screen, FIRST)
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// Before the peer's read watermark reaches the group's newest message, what
+    /// it shows is that the server has it — and no more than that.
+    #[test]
+    fn an_outgoing_group_the_peer_has_not_read_says_delivered() {
+        let mut app = showing(vec![mine(1, 0), mine(2, 60)]);
+        app.conversation.set_read_watermark(1);
+
+        let screen = screen(&app, 80, 24);
+
+        assert_eq!(
+            occurrences(&screen, "[delivered]"),
+            1,
+            "one word for the group"
+        );
+        assert_eq!(occurrences(&screen, "[read]"), 0);
+        assert!(
+            body_row(&screen, FIRST + 1).contains("[delivered]"),
+            "on the newest message's row: {:?}",
+            body_row(&screen, FIRST + 1)
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    /// A group the peer has said nothing about claims nothing: the time, and the
+    /// time alone. An incoming group is in the same position for a different
+    /// reason, and neither of them gets a word it was not told.
+    #[test]
+    fn no_group_is_given_a_receipt_it_was_not_told() {
+        let silent = showing(vec![mine(1, 0), mine(2, 60)]);
+        let without_a_read = screen(&silent, 80, 24);
+        assert_eq!(
+            occurrences(&without_a_read, "[read]"),
+            0,
+            "the peer has said nothing"
+        );
+        assert_eq!(occurrences(&without_a_read, "[delivered]"), 0);
+        assert!(
+            body_row(&without_a_read, FIRST + 1).contains(&clock_at(60)),
+            "so only the time: {:?}",
+            body_row(&without_a_read, FIRST + 1)
+        );
+
+        let mut theirs = showing(vec![at(1, 0, false, "one"), at(2, 60, false, "two")]);
+        theirs.conversation.set_read_watermark(99);
+        let screen = screen(&theirs, 80, 24);
+        assert_eq!(
+            occurrences(&screen, "[read]") + occurrences(&screen, "[delivered]"),
+            0,
+            "and an incoming group is never given one at all"
+        );
+        assert_one_answer(&theirs, &screen);
+    }
+
+    /// A failed send says why, and never also claims a receipt: it did not reach
+    /// the server, so it has earned nothing (AC-14).
+    #[test]
+    fn a_failed_send_says_why_and_claims_no_receipt() {
+        let mut app = showing(vec![mine(1, 0), mine(2, 60)]);
+        app.conversation.set_read_watermark(99);
+        let failed = app.conversation.queue_send("on its way", None);
+        assert!(app.conversation.fail_send(failed, "no route".to_owned()));
+
+        let screen = screen(&app, 80, 24);
+        let last = message_rows(&screen)
+            .into_iter()
+            .rev()
+            .find(|y| body_row(&screen, *y).contains("[failed"))
+            .expect("the failure is on the screen");
+
+        let note = body_row(&screen, last);
+        assert!(
+            note.contains("[you] on its way"),
+            "the reader's own send, named like any other: {note:?}"
+        );
+        assert!(
+            note.trim_end().ends_with("[failed: no route]"),
+            "and it ends on why it failed, with no time and no receipt after it: {note:?}"
+        );
+        assert_eq!(
+            occurrences(&screen, "[delivered]"),
+            0,
+            "and nothing claims a delivery it was not told about"
+        );
+        assert_eq!(
+            occurrences(&screen, "[read]"),
+            1,
+            "while the group the failure is not in still shows what it earned"
+        );
+        assert_one_answer(&app, &screen);
     }
 
     /// A search marks every row of the message it matched, and the cursor
@@ -1047,6 +1863,7 @@ mod tests {
             "and not on the rest: {:?}",
             second.modifier
         );
+        assert_one_answer(&app, &screen);
     }
 
     // ---- sending, replying and confirming ------------------------------
@@ -1064,10 +1881,11 @@ mod tests {
         let screen = screen(&app, 80, 24);
 
         assert!(
-            row(&screen, 11).contains("> No pressure then :) ‖ sure"),
+            row(&screen, FIRST + 10).contains("> No pressure then :) ‖ sure"),
             "the reply quotes its target before its own body: {}",
-            row(&screen, 11)
+            row(&screen, FIRST + 10)
         );
+        assert_one_answer(&app, &screen);
     }
 
     /// A reply whose target the window does not hold says so rather than looking
@@ -1080,10 +1898,11 @@ mod tests {
         let screen = screen(&app, 80, 24);
 
         assert!(
-            row(&screen, 11).contains("> [message not loaded] ‖ orphan"),
+            row(&screen, FIRST + 10).contains("> [message not loaded] ‖ orphan"),
             "{}",
-            row(&screen, 11)
+            row(&screen, FIRST + 10)
         );
+        assert_one_answer(&app, &screen);
     }
 
     #[test]
@@ -1096,18 +1915,20 @@ mod tests {
 
         let sending = screen(&app, 80, 24);
         assert!(
-            row(&sending, 11).contains("[sending…]"),
+            row(&sending, FIRST + 10).contains("[sending…]"),
             "{}",
-            row(&sending, 11)
+            row(&sending, FIRST + 10)
         );
 
         app.fail_send(id, "no route".to_owned());
         let failed = screen(&app, 80, 24);
         assert!(
-            row(&failed, 11).contains("[failed: no route]"),
+            row(&failed, FIRST + 10).contains("[failed: no route]"),
             "{}",
-            row(&failed, 11)
+            row(&failed, FIRST + 10)
         );
+        assert_one_answer(&app, &sending);
+        assert_one_answer(&app, &failed);
     }
 
     /// The two wordings are the whole of what the confirm says about scope, so
@@ -1142,8 +1963,9 @@ mod tests {
 
     /// The sample conversation's seventh message is the only one containing
     /// "benchmarks"; the panel draws the whole window, so it is the seventh
-    /// message row.
-    const MATCH_ROW: u16 = 7;
+    /// message row — the eighth row of the panel, because the day it all falls in
+    /// is named above the first of them.
+    const MATCH_ROW: u16 = FIRST + 6;
 
     /// An application with a search whose match is on screen.
     fn searched() -> App {
@@ -1171,11 +1993,12 @@ mod tests {
             "the matched row carries the match colour"
         );
         assert_ne!(
-            cell(&screen, BODY_X, 1).fg,
+            cell(&screen, BODY_X, FIRST).fg,
             match_fg(),
             "and an ordinary row does not: {}",
-            row(&screen, 1)
+            row(&screen, FIRST)
         );
+        assert_one_answer(&app, &screen);
     }
 
     /// The cursor can stand on a match, so the two styles have to compose: the
@@ -1184,7 +2007,8 @@ mod tests {
     fn the_cursor_row_on_a_match_still_reads_as_the_cursor() {
         use ratatui::style::Modifier;
 
-        let screen = screen(&searched(), 80, 24);
+        let app = searched();
+        let screen = screen(&app, 80, 24);
         let cursor = cell(&screen, BODY_X, MATCH_ROW);
 
         assert_eq!(cursor.fg, match_fg(), "the match marking is still there");
@@ -1193,6 +2017,7 @@ mod tests {
             "and so is the selection: {:?}",
             cursor.modifier
         );
+        assert_one_answer(&app, &screen);
     }
 
     #[test]
@@ -1278,30 +2103,37 @@ mod tests {
     ///
     /// The assertions below are about characters a reader can see themselves, and
     /// a selection counts characters, so every one of them is read in those units.
-    /// Only the first row carries the sender's name.
-    fn text_cell(buffer: &Buffer, x: usize, y: u16) -> &Cell {
-        let prefix = if y == 1 { SENDER as u16 } else { 0 };
+    /// Only `first` — the row the message begins on — carries the sender's name,
+    /// and which row that is depends on the fixture: a window of one message with
+    /// no day separator begins on the panel's first row, and one inside the
+    /// sample conversation begins below the separator that names its day.
+    fn text_cell(buffer: &Buffer, x: usize, y: u16, first: u16) -> &Cell {
+        let prefix = if y == first { SENDER as u16 } else { 0 };
         cell(buffer, BODY_X + prefix + x as u16, y)
     }
 
     /// Which of a message's text columns carry the selection's background.
-    fn selected_text_columns(buffer: &Buffer, y: u16) -> Vec<usize> {
+    fn selected_text_columns(buffer: &Buffer, y: u16, first: u16) -> Vec<usize> {
         (0..usize::from(BODY))
-            .filter(|x| text_cell(buffer, *x, y).bg == selection_bg())
+            .filter(|x| text_cell(buffer, *x, y, first).bg == selection_bg())
             .collect()
     }
+
+    /// The first row of a message in a window that has nothing but it: no day
+    /// separator, so the panel's first row is the message's own.
+    const ONLY: u16 = 1;
 
     #[test]
     fn a_selected_substring_is_styled_and_the_rest_of_its_row_is_not() {
         let screen = screen(&selecting(0, 5), 80, 10);
 
         assert_eq!(
-            selected_text_columns(&screen, 1),
+            selected_text_columns(&screen, ONLY, ONLY),
             (0..5).collect::<Vec<usize>>(),
             "five characters, and nothing in front of them: the sender's name is not text"
         );
         assert_eq!(
-            text_cell(&screen, 5, 1).bg,
+            text_cell(&screen, 5, ONLY, ONLY).bg,
             Color::Reset,
             "the sixth character of the same row is plain text"
         );
@@ -1320,17 +2152,17 @@ mod tests {
         let screen = screen(&selecting(40, 60), 80, 10);
 
         assert_eq!(
-            selected_text_columns(&screen, 1),
+            selected_text_columns(&screen, ONLY, ONLY),
             (40..FIRST_ROW).collect::<Vec<usize>>(),
             "the first row's suffix, from where the selection began"
         );
         assert_eq!(
-            selected_text_columns(&screen, 2),
+            selected_text_columns(&screen, ONLY + 1, ONLY),
             (0..60 - FIRST_ROW).collect::<Vec<usize>>(),
             "and the second row's prefix, up to where the selection ends"
         );
         assert_eq!(
-            selected_text_columns(&screen, 3),
+            selected_text_columns(&screen, ONLY + 2, ONLY),
             vec![],
             "a row the selection never reached is left alone"
         );
@@ -1349,17 +2181,17 @@ mod tests {
         let screen = screen(&app, 80, 10);
 
         assert_eq!(
-            cell(&screen, BODY_X, 1).bg,
+            cell(&screen, BODY_X, FIRST).bg,
             selection_bg(),
             "the `[` of the sender is inside the selection"
         );
         assert_eq!(
-            cell(&screen, BODY_X, 1).fg,
+            cell(&screen, BODY_X, FIRST).fg,
             selection_fg(),
             "and the row's text follows the selection, not the terminal"
         );
         assert_eq!(
-            cell(&screen, BODY_X, 2).bg,
+            cell(&screen, BODY_X, FIRST + 1).bg,
             Color::Reset,
             "and the message below it, which is not in the selection, is not"
         );
@@ -1373,7 +2205,7 @@ mod tests {
         use ratatui::style::Modifier;
 
         let screen = screen(&selecting(0, 5), 80, 10);
-        let cursor = text_cell(&screen, 0, 1);
+        let cursor = text_cell(&screen, 0, ONLY, ONLY);
 
         assert_eq!(cursor.bg, selection_bg(), "the selection is still there");
         assert!(
@@ -1401,7 +2233,7 @@ mod tests {
         selecting_chars(&mut app, 1, 12, 17);
 
         let screen = screen(&app, 80, 10);
-        let marked = text_cell(&screen, 12, 1);
+        let marked = text_cell(&screen, 12, FIRST, FIRST);
 
         assert_eq!(
             marked.bg,

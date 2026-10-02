@@ -1,7 +1,7 @@
 //! Top-level TUI state.
 
-use std::cell::Cell;
-use std::collections::VecDeque;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -23,7 +23,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 
 use crate::emoji;
 use crate::line::{LineEditor, LineVerdict};
-use crate::rows::{self, Reserved, RowSpan, Slice};
+use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
 use crate::theme::Theme;
 use crate::widgets;
 
@@ -1148,6 +1148,34 @@ pub struct App {
     /// for the scrollbar is given up before this, so no message is ever laid
     /// out — or drawn — under the bar.
     body_width: Cell<u16>,
+
+    /// The unix second the reader's clock last read, as of the last frame.
+    ///
+    /// A measurement rather than state anything decides, for the same reason as
+    /// [`App::rows`] and [`App::body_width`]: only the host owns a clock, and this
+    /// crate reads none ([`crate::date`] is pure). Zero means no clock has been
+    /// recorded, which the day labels read as "say the date rather than `Today`"
+    /// rather than as 1970.
+    now: Cell<i64>,
+
+    /// How far each conversation this client has been told about has been read.
+    ///
+    /// One number per conversation, kept here rather than on
+    /// [`ConversationView`] because the view is replaced on every chat switch:
+    /// a reader who looks away and comes back must find the reading of that
+    /// conversation as it was, not as a fresh view believes it. The view holds
+    /// the one on show; this holds the rest.
+    ///
+    /// Monotone per conversation, because the wire says so: `max_id` is a
+    /// watermark, and a read that has already been shown cannot be taken back by
+    /// a later, lower one. Grows with the conversations the client is told about,
+    /// which is no more than the chat list already holds.
+    ///
+    /// Not written to disk: a launch starts with nothing recorded, so a receipt
+    /// the reader has not been shown is never drawn from a previous session's
+    /// memory of it. That is the "never claim more than was received" rule at the
+    /// storage layer.
+    read_receipts: RefCell<HashMap<i64, i64>>,
 }
 
 impl Default for App {
@@ -1211,6 +1239,8 @@ impl App {
             pending_find: None,
             rows: Cell::new(ASSUMED_ROWS),
             body_width: Cell::new(ASSUMED_BODY_WIDTH),
+            now: Cell::new(0),
+            read_receipts: RefCell::new(HashMap::new()),
         }
     }
 
@@ -2075,6 +2105,42 @@ impl App {
         // carried across on purpose; `net`'s drop test is the executable form of
         // this sentence.
         self.conversation = ConversationView::new(chat_id);
+        // The window is gone and with it the watermark the new view starts
+        // without. How far this conversation has been read is not a fact about
+        // the page on show, so it is put back from what the feed has said.
+        self.restore_read_watermark(chat_id);
+    }
+
+    /// Puts the conversation's recorded read watermark on the view just opened.
+    ///
+    /// Reports whether there was one to put back, which is what a reader switching
+    /// to a conversation nobody has read yet gets.
+    fn restore_read_watermark(&mut self, chat_id: i64) -> bool {
+        let recorded = self.read_receipts.borrow().get(&chat_id).copied();
+        match recorded {
+            Some(max_id) => self.conversation.set_read_watermark(max_id),
+            None => false,
+        }
+    }
+
+    /// Records how far a conversation has been read, keeping the highest figure
+    /// seen for it.
+    ///
+    /// The feed's acknowledgement can repeat or arrive late, so a lower one is
+    /// dropped rather than applied: a read already shown cannot be taken back.
+    /// Reports whether this figure moved the conversation's watermark.
+    fn note_read(&self, chat_id: i64, max_id: i64) -> bool {
+        if max_id <= 0 {
+            return false;
+        }
+
+        let mut recorded = self.read_receipts.borrow_mut();
+        let moved = recorded.get(&chat_id).is_none_or(|read| max_id > *read);
+        if moved {
+            recorded.insert(chat_id, max_id);
+        }
+
+        moved
     }
 
     /// Whether a conversation is open to put messages in.
@@ -2369,12 +2435,29 @@ impl App {
     /// redraw. Deduplicating by identifier is what makes the overlap between
     /// the two windows harmless.
     ///
+    /// A read acknowledgement is the one event that is not a window change, and
+    /// it is handled apart from the rest rather than by a flag on the path: see
+    /// the comment where it is matched.
+    ///
     /// The event is copied rather than shared because the list moves an arrival
     /// into its own window, so it needs one of its own. One copy per event is
     /// the price of a single event reaching both.
     #[must_use]
     pub fn apply_update(&mut self, event: &UpdateEvent) -> bool {
         let listed = self.list.apply_update(event.clone());
+
+        // A read acknowledgement is not a window change. It moves the watermark
+        // and nothing else — no message arrived, changed or left — so there is
+        // nothing to re-anchor and a reader scrolled back up stays exactly where
+        // they are (US-X4). The redraw is still owed: the receipt is on the screen
+        // now. It is recorded for the conversation either way, so a chat the
+        // reader is not in yet carries its reading when they open it.
+        if let UpdateEvent::ReadReceipt { chat_id, max_id } = event {
+            let noted = self.note_read(*chat_id, *max_id);
+            let open = self.conversation.apply_event(event);
+
+            return listed || noted || open;
+        }
 
         let anchor = self.cursor_message_id();
         let windowed = self.conversation.apply_event(event);
@@ -2500,7 +2583,7 @@ impl App {
     /// because both are about where the reader is on the screen.
     fn cursor_extent(&self) -> (usize, usize) {
         let layout = self.row_layout();
-        let first = layout.get(self.vim.cursor()).map_or(0, |span| span.first);
+        let first = rows::first_row_of_message(&layout, self.vim.cursor()).unwrap_or(0);
 
         (first, rows::total_rows(&layout))
     }
@@ -3171,7 +3254,7 @@ impl App {
         let step = self.rows.get().max(1);
         let layout = self.row_layout();
         let total = rows::total_rows(&layout);
-        let here = layout.get(self.vim.cursor()).map_or(0, |span| span.first);
+        let here = rows::first_row_of_message(&layout, self.vim.cursor()).unwrap_or(0);
 
         let target = if down {
             here.saturating_add(step).min(total.saturating_sub(1))
@@ -3179,7 +3262,10 @@ impl App {
             here.saturating_sub(step)
         };
 
-        if let Some(cursor) = rows::message_at_row(&layout, target) {
+        // A row that names no message — a day separator — is not somewhere the
+        // cursor stops, so the page carries on past it in the direction it was
+        // going rather than landing on it.
+        if let Some(cursor) = rows::message_at_row_moving(&layout, target, down) {
             self.vim.set_cursor(cursor);
         }
         self.settle_follow();
@@ -4293,6 +4379,17 @@ impl App {
     // ---- rendering -----------------------------------------------------
 
     pub fn render(&self, frame: &mut Frame<'_>) {
+        self.render_layout(&self.row_layout(), frame);
+    }
+
+    /// The same frame, with the conversation panel drawing `layout` rather than a
+    /// layout of its own.
+    ///
+    /// The layout is the caller's so that it is laid out once per frame and
+    /// drawn, sliced and measured from that one answer — and so that a test can
+    /// draw a layout holding a row that names no message, which nothing in the
+    /// program emits yet.
+    pub(crate) fn render_layout(&self, layout: &[RowSpan], frame: &mut Frame<'_>) {
         let area = frame.area();
 
         // The bar is as tall as the draft the reader is typing in, up to its
@@ -4328,7 +4425,9 @@ impl App {
         match self.signin.as_ref() {
             Some(signin) => widgets::signin::render(self, signin, horizontal[1], frame),
             None => match self.pane {
-                Pane::Conversation => widgets::conversation::render(self, horizontal[1], frame),
+                Pane::Conversation => {
+                    widgets::conversation::render(self, horizontal[1], frame, layout);
+                }
                 Pane::Profile(_) => widgets::profile::render(self, horizontal[1], frame),
             },
         }
@@ -4367,6 +4466,25 @@ impl App {
         self.body_width.set(width);
     }
 
+    /// The unix second the reader's clock last read.
+    ///
+    /// Zero until the host records one, which is what makes a day label say a
+    /// date rather than `Today`: this crate owns no clock, so a relative label
+    /// would otherwise be a claim it cannot support.
+    #[must_use]
+    pub fn now(&self) -> i64 {
+        self.now.get()
+    }
+
+    /// Records what the reader's clock says, in unix seconds.
+    ///
+    /// Called by the host once a frame, alongside the other measurements it
+    /// records: what a day is called depends on when it is being read, and
+    /// nothing here can know that.
+    pub fn record_now(&self, now: i64) {
+        self.now.set(now);
+    }
+
     /// The rows every message in the window occupies, laid out at the panel's
     /// width.
     ///
@@ -4376,23 +4494,48 @@ impl App {
     /// again, because two measurements of one thing is a bug waiting for the
     /// case where they disagree.
     ///
-    /// A pure function of the window's messages and [`App::body_width`], and of
-    /// nothing else: not the cursor, not the mode, not when it was asked. A
-    /// layout worked out before a page lands is thrown away rather than kept,
-    /// which is why a [`RowSpan`] is named by message id.
+    /// A pure function of the window's messages, [`App::body_width`] and
+    /// [`App::now`], and of nothing else: not the cursor, not the mode, not when
+    /// it was asked. A layout worked out before a page lands is thrown away
+    /// rather than kept, which is why a [`RowSpan`] is named by message id.
+    ///
+    /// The entries are the window's messages and the day separators in front of
+    /// them: a separator takes a row of the screen between two days and is
+    /// counted by the scrollbar beside it, so it belongs in here rather than
+    /// counted on the side. [`RowKind`] is what tells the two apart, and the
+    /// cursor — which is a message index — never rests on one.
     #[must_use]
     pub fn row_layout(&self) -> Vec<RowSpan> {
         let width = self.body_width();
+        let now = self.now();
         let mut laid_out: Vec<RowSpan> = Vec::with_capacity(self.conversation.window.len());
         let mut first = 0;
+        // The day of the last message that had one. A send still on its way has
+        // no day of its own, so it neither opens a day nor closes the search for
+        // the next message that does (T3).
+        let mut day: Option<i64> = None;
 
         for (index, message) in self.conversation.window.iter().enumerate() {
+            if rows::opens_day(message.timestamp, day) {
+                laid_out.push(RowSpan {
+                    kind: RowKind::Other {
+                        label: rows::separator_label(message.timestamp, now).into_owned(),
+                    },
+                    message_id: None,
+                    first,
+                    len: 1,
+                    text: 0..0,
+                });
+                first += 1;
+            }
+            day = rows::day_of(message.timestamp).or(day);
+
             let text = 0..message.text.len();
-            let len = rows::message_rows(self, message, width).len();
+            let len = rows::message_rows(self, message, rows::group_of(self, index), width).len();
 
             laid_out.push(RowSpan {
-                message_id: message.id,
-                index,
+                kind: RowKind::Message { index },
+                message_id: Some(message.id),
                 first,
                 len,
                 text,
@@ -7519,6 +7662,38 @@ mod tests {
         );
     }
 
+    /// A page steps over rows and lands on a message, so wherever it lands there
+    /// is a message there: the cursor is what the fetch triggers measure, and a
+    /// cursor pointing at a row rather than a message is not a thing it can
+    /// answer.
+    #[test]
+    fn a_page_never_leaves_the_cursor_off_a_message() {
+        let mut app = App::mock();
+        app.record_body(53);
+        app.record_rows(4);
+        let total = app.conversation.window.len();
+        go_to_top(&mut app);
+
+        for _ in 0..4 {
+            app.handle_key(press_ctrl('d'));
+
+            assert!(
+                app.row_layout().iter().any(|span| span.kind
+                    == RowKind::Message {
+                        index: app.vim.cursor()
+                    }),
+                "the layout has a message for the cursor at {}",
+                app.vim.cursor()
+            );
+        }
+
+        assert_eq!(
+            app.vim.cursor(),
+            total - 1,
+            "and four pages down of one screenful each is the newest message"
+        );
+    }
+
     /// The first message the panel shows, given a panel `budget` rows tall.
     fn shown_from(app: &App, budget: usize) -> usize {
         app.viewport(&app.row_layout(), budget).start
@@ -7704,6 +7879,455 @@ mod tests {
         );
     }
 
+    /// The newest message the peer has read, for `chat_id`.
+    fn read(chat_id: i64, max_id: i64) -> UpdateEvent {
+        UpdateEvent::ReadReceipt { chat_id, max_id }
+    }
+
+    /// A read acknowledgement reaching the feed moves the conversation's watermark
+    /// with nothing else happening: no message arrives, changes or leaves, so the
+    /// window, the cursor and the reader's place in it are all as they were.
+    #[test]
+    fn a_read_acknowledgement_advances_the_open_conversation_and_moves_nothing_else() {
+        let mut app = App::mock();
+        // Two of the reader's own messages, as the server leaves them: the
+        // sample conversation's are every one `Received`, which no sent message
+        // ever is.
+        app.apply_latest(vec![
+            Message {
+                id: 20,
+                chat_id: MOCK_CHAT,
+                text: Cow::Borrowed("mine"),
+                timestamp: 1_730_000_600,
+                status: MessageStatus::Sent,
+                is_outgoing: true,
+                reply_to: None,
+            },
+            Message {
+                id: 21,
+                chat_id: MOCK_CHAT,
+                text: Cow::Borrowed("also mine"),
+                timestamp: 1_730_000_660,
+                status: MessageStatus::Sent,
+                is_outgoing: true,
+                reply_to: None,
+            },
+        ]);
+        let before = (
+            reading(&app),
+            app.vim.cursor(),
+            app.conversation.window.len(),
+        );
+        let newest = before.0.expect("the window holds messages");
+
+        assert_eq!(
+            rows::group_of(&app, 1).receipt,
+            rows::Receipt::None,
+            "nothing has been read yet, so the group claims nothing"
+        );
+
+        assert!(app.apply_update(&read(MOCK_CHAT, newest)));
+
+        assert_eq!(
+            app.conversation.read_watermark(),
+            Some(newest),
+            "so the group's state is derived from it on the next frame"
+        );
+        assert_eq!(
+            rows::group_of(&app, 1).receipt,
+            rows::Receipt::Read,
+            "and the state the panel draws follows the feed, without anything else changing"
+        );
+        assert_eq!(
+            (
+                reading(&app),
+                app.vim.cursor(),
+                app.conversation.window.len()
+            ),
+            before,
+            "and nothing about the reader's place moved"
+        );
+    }
+
+    /// A receipt about a conversation the reader is not in does not touch the one
+    /// that is — but it is still remembered, so opening that chat shows how far it
+    /// has been read (AC-15's read half).
+    #[test]
+    fn a_read_acknowledgement_for_another_conversation_is_remembered_and_not_applied() {
+        let mut app = App::mock();
+        let other = MOCK_CHAT + 1;
+
+        assert!(app.apply_update(&read(other, 7)));
+
+        assert_eq!(
+            app.conversation.read_watermark(),
+            None,
+            "the conversation on show is a different one"
+        );
+
+        app.select_chat(1);
+        assert_eq!(
+            app.conversation.read_watermark(),
+            Some(7),
+            "and the chat that owns it is opened carrying what it was told"
+        );
+    }
+
+    /// The watermark is a fact about a conversation and not about the page on
+    /// show, so looking away and coming back finds it as it was.
+    #[test]
+    fn a_read_watermark_survives_a_switch_away_and_back() {
+        let mut app = App::mock();
+        assert!(app.apply_update(&read(MOCK_CHAT, 6)));
+
+        app.select_chat(1);
+        app.select_chat(0);
+
+        assert_eq!(
+            app.conversation.read_watermark(),
+            Some(6),
+            "the view is new and the conversation's reading is not"
+        );
+    }
+
+    /// The wire's watermark can repeat or arrive late, so a lower one is dropped
+    /// rather than applied, and an acknowledgement that named nothing real is not
+    /// recorded at all. Both report no change, which is what tells the loop there
+    /// is nothing to redraw for.
+    #[test]
+    fn a_read_acknowledgement_that_says_nothing_new_changes_nothing() {
+        let mut app = App::mock();
+        assert!(app.apply_update(&read(MOCK_CHAT, 9)));
+
+        for (chat_id, max_id) in [(MOCK_CHAT, 9), (MOCK_CHAT, 4), (MOCK_CHAT, 0)] {
+            assert!(
+                !app.apply_update(&read(chat_id, max_id)),
+                "{chat_id} read up to {max_id} says nothing the reader has not been shown"
+            );
+        }
+        assert_eq!(app.conversation.read_watermark(), Some(9));
+    }
+
+    /// A receipt while the reader is scrolled back up moves neither the cursor nor
+    /// the reader's place: a read is not a message arriving, and it is not entitled
+    /// to move anyone (US-X4).
+    #[test]
+    fn a_read_acknowledgement_leaves_a_scrolled_up_reader_where_they_are() {
+        let mut app = App::mock();
+        app.handle_key(press_ctrl('u'));
+        let before = (app.vim.cursor(), app.conversation.auto_follow());
+        assert!(
+            !app.conversation.auto_follow(),
+            "the fixture is scrolled back up"
+        );
+
+        assert!(app.apply_update(&read(MOCK_CHAT, 10)));
+
+        assert_eq!(
+            (app.vim.cursor(), app.conversation.auto_follow()),
+            before,
+            "and still there after it"
+        );
+    }
+
+    // ---- what a window with separators does to search and to motions -----
+
+    /// A window spanning three days, with a separator between each and a word
+    /// worth searching for in more than one of them.
+    ///
+    /// Every message is the reader's own, a minute apart within its day, so a day
+    /// is three messages in one group — the shape PR 8 puts on the screen at once:
+    /// a group, a separator, and (with a watermark) a receipt.
+    fn across_three_days() -> App {
+        let mut app = App::mock();
+        app.record_body(53);
+        app.conversation.window.replace((1..=9).map(message_of_day));
+        app.vim.set_total(9);
+        app.vim.set_cursor(8);
+
+        app
+    }
+
+    /// A search finds messages and lands on messages, whatever else is in the
+    /// window: a separator names no message, carries no identifier, and cannot be
+    /// walked onto however the walk arrived (AC-20).
+    #[test]
+    fn a_search_in_a_window_with_separators_matches_and_lands_on_messages_only() {
+        let mut app = across_three_days();
+        let layout = app.row_layout();
+        let separators: Vec<usize> = layout
+            .iter()
+            .filter(|span| !span.kind.is_message())
+            .map(|span| span.first)
+            .collect();
+        assert_eq!(separators.len(), 3, "one for each of the three days");
+
+        app.run_search("benchmarks");
+        let matched = app.search().ids().to_vec();
+        assert_eq!(
+            matched,
+            vec![102, 104, 106, 108],
+            "only message identifiers, which is all a match can be"
+        );
+
+        // Every landing the walk can produce, in both directions and across the
+        // wrap, is a message row rather than one of the separator rows.
+        for key in ['n', 'n', 'n', 'N', 'N'] {
+            app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            let on = app.vim.cursor();
+            assert!(
+                !separators.contains(&rows::first_row_of_message(&layout, on).expect("a message")),
+                "{key} landed on a separator row at message {on}"
+            );
+            assert!(
+                layout.iter().any(|span| {
+                    span.kind.index() == Some(on) && !span.first.eq(&separators[0])
+                }),
+                "{key} left the cursor on a message"
+            );
+        }
+    }
+
+    /// The landing positions are the messages themselves, which is the whole claim:
+    /// walking a search crosses separators because it never had to stop on one.
+    #[test]
+    fn every_search_landing_is_the_position_of_a_message_it_matched() {
+        let mut app = across_three_days();
+
+        app.run_search("benchmarks");
+        for _ in 0..5 {
+            let on = app.vim.cursor();
+            let id = app
+                .conversation
+                .window
+                .get(on)
+                .expect("the cursor names a message the window holds")
+                .id;
+            assert!(
+                app.search().is_match(id),
+                "the cursor is on message {id}, which matched"
+            );
+            app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        }
+    }
+
+    /// Every motion in the vocabulary lands on a message. The cursor counts
+    /// messages, so this is structural — but a separator is a row on the screen
+    /// and only a test proves the two never come apart (AC-21, US-X6).
+    #[test]
+    fn no_motion_lands_on_a_separator_row() {
+        let mut app = across_three_days();
+        let separator_rows: Vec<usize> = app
+            .row_layout()
+            .iter()
+            .filter(|span| !span.kind.is_message())
+            .map(|span| span.first)
+            .collect();
+
+        let keys = [
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            press_ctrl('d'),
+            press_ctrl('u'),
+            press_ctrl('d'),
+        ];
+        for key in keys {
+            app.handle_key(key);
+            let on = app.vim.cursor();
+            assert!(
+                app.conversation.window.get(on).is_some(),
+                "the cursor at {on} names a message the window holds"
+            );
+            assert!(
+                !separator_rows.contains(
+                    &rows::first_row_of_message(&app.row_layout(), on)
+                        .expect("the message is laid out")
+                ),
+                "and that message is not a separator row"
+            );
+        }
+    }
+
+    /// `gg` and `G` are the two ends of the window, and each is a message: the
+    /// first message of the window is below the first day's separator, and the
+    /// last is the last message rather than a row after it.
+    #[test]
+    fn the_ends_of_the_window_are_messages_and_not_separators() {
+        let mut app = across_three_days();
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.vim.cursor(), 0, "gg lands on the first message");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert_eq!(
+            app.vim.cursor(),
+            8,
+            "and G on the newest, neither of which is a separator row"
+        );
+    }
+
+    /// Grouping, separators and read state in one window, at the layer that
+    /// draws them: three groups of three, a separator before each, and the newest
+    /// group read.
+    #[test]
+    fn grouping_separators_and_read_state_agree_in_one_window() {
+        let mut app = across_three_days();
+        assert!(app.apply_update(&read(MOCK_CHAT, 109)));
+
+        let layout = app.row_layout();
+        assert_eq!(
+            layout.len(),
+            12,
+            "nine messages and three separators: {:?}",
+            layout.iter().map(|span| span.first).collect::<Vec<_>>()
+        );
+        // Each separator is the entry immediately before a message, so a day
+        // opens with a message one row below its own separator.
+        for separator in [0_usize, 4, 8] {
+            assert!(
+                !layout[separator].kind.is_message(),
+                "row {separator} is the separator"
+            );
+            let under = &layout[separator + 1];
+            assert_eq!(
+                under.kind.index(),
+                Some((separator / 4) * 3),
+                "and the message below it opens that day"
+            );
+        }
+        assert!(
+            rows::group_of(&app, 0).first,
+            "a day boundary is a group break as well as a separator"
+        );
+        assert_eq!(
+            rows::group_of(&app, 8).receipt,
+            rows::Receipt::Read,
+            "and the newest group is read"
+        );
+        assert_eq!(
+            rows::group_of(&app, 4).receipt,
+            rows::Receipt::None,
+            "while the first is not: the watermark covers only the last"
+        );
+    }
+
+    /// Looking away and coming back leaves everything PR 8 derives from the window
+    /// as it was, and restores the one thing the window does not carry (US-X1).
+    ///
+    /// The window itself is replaced by the switch, so grouping and the separators
+    /// are worked out again from the same messages and the read state is put back
+    /// from what the feed said — which is what makes this a test of the
+    /// arrangement rather than of a value that never moved.
+    #[test]
+    fn grouping_separators_and_read_state_survive_a_switch_away_and_back() {
+        let mut app = across_three_days();
+        // Through the feed rather than the view's setter: what the feed says is
+        // what survives the switch, and a figure nobody was told is not recorded.
+        assert!(app.apply_update(&read(MOCK_CHAT, 109)));
+        let before = app.row_layout();
+
+        app.select_chat(1);
+        app.select_chat(0);
+        // The same messages, in the same order, as the conversation being reopened
+        // is filled.
+        app.conversation.window.replace((1..=9).map(message_of_day));
+        app.vim.set_total(9);
+
+        assert_eq!(
+            app.row_layout(),
+            before,
+            "the same rows in the same places, worked out again rather than kept"
+        );
+        assert_eq!(
+            app.conversation.read_watermark(),
+            Some(109),
+            "and the reading of the conversation, which the switch replaced"
+        );
+    }
+
+    /// The messages [`across_three_days`] is built from, so a test can put the
+    /// same conversation back after a switch without spelling them out twice.
+    fn message_of_day(id: i64) -> Message {
+        let day = (id - 1) / 3;
+        Message {
+            id: 100 + id,
+            chat_id: MOCK_CHAT,
+            text: if id % 2 == 0 {
+                Cow::Borrowed("benchmarks and more")
+            } else {
+                Cow::Borrowed("text")
+            },
+            timestamp: 1_730_000_000 + day * 86_400 + (id - 1) % 3 * 60,
+            status: MessageStatus::Sent,
+            is_outgoing: true,
+            reply_to: None,
+        }
+    }
+
+    /// What PR 8 added to memory is bounded, and this is the part of AC-22 that
+    /// can be asserted rather than audited.
+    ///
+    /// **No RSS claim is made.** The project has no measurement harness — no
+    /// `heaptrack`, no `massif` target, and `docs/memory.md` records the 50 MB
+    /// ceiling as unmeasured (OQ-09) — so what is checked here is the property
+    /// that makes the ceiling plausible: nothing PR 8 added grows with history
+    /// beyond the window that was already bounded.
+    ///
+    /// Two claims, then: the layout is rebuilt every frame rather than kept, and
+    /// what it holds is one entry per message plus one per day; and the read state
+    /// is a single number per conversation however many acknowledgements arrive.
+    #[test]
+    fn what_pr_eight_holds_is_bounded_by_the_window_and_the_conversation_count() {
+        let mut app = App::mock();
+        app.record_body(53);
+
+        // A full window with a day per message: the worst case for separators,
+        // and still one row each.
+        app.conversation
+            .window
+            .replace((0..CONVERSATION_WINDOW).map(|day| {
+                let day = i64::try_from(day).expect("a window index fits a timestamp");
+                Message {
+                    id: 1_000 + day,
+                    chat_id: MOCK_CHAT,
+                    text: Cow::Borrowed("text"),
+                    timestamp: 1_730_000_000 + day * 86_400,
+                    status: MessageStatus::Sent,
+                    is_outgoing: true,
+                    reply_to: None,
+                }
+            }));
+        app.vim.set_total(CONVERSATION_WINDOW);
+
+        let layout = app.row_layout();
+        assert_eq!(
+            layout.len(),
+            CONVERSATION_WINDOW * 2,
+            "one entry per message and one separator per day, and nothing else"
+        );
+        assert_eq!(
+            rows::total_rows(&layout),
+            CONVERSATION_WINDOW * 2,
+            "and one row each: no message grew and no separator did"
+        );
+
+        // Read state: one number per conversation, whatever arrives.
+        for chat_id in [MOCK_CHAT, MOCK_CHAT + 1] {
+            for max_id in [1, 5, 3, 9] {
+                let _ = app.apply_update(&read(chat_id, max_id));
+            }
+        }
+        assert_eq!(
+            app.read_receipts.borrow().len(),
+            2,
+            "four acknowledgements for each of two conversations, and two numbers"
+        );
+    }
+
     /// An event for a conversation the client does not hold has nowhere to go:
     /// neither window can apply it, so nothing observable moved.
     #[test]
@@ -7766,6 +8390,113 @@ mod tests {
         );
     }
 
+    /// Three same-side messages a minute apart: one group, three identifiers.
+    fn a_group_of_three() -> Vec<Message> {
+        [0, 60, 120]
+            .into_iter()
+            .map(|seconds| Message {
+                id: 100 + seconds,
+                chat_id: MOCK_CHAT,
+                text: Cow::Borrowed("text"),
+                timestamp: 1_730_000_000 + seconds,
+                status: MessageStatus::Sent,
+                is_outgoing: true,
+                reply_to: None,
+            })
+            .collect()
+    }
+
+    /// Where each message of the window stands in its group.
+    fn places(app: &App) -> Vec<rows::Grouped> {
+        (0..app.conversation.window.len())
+            .map(|index| rows::group_of(app, index))
+            .collect()
+    }
+
+    /// An edit is a new text for a message that is already there, so it moves no
+    /// group boundary: membership is decided by who is talking, when, and what
+    /// the message is about — none of which an edit touches.
+    #[test]
+    fn an_edit_inside_a_group_changes_no_group_boundary() {
+        let mut app = App::mock();
+        app.conversation.window.replace(a_group_of_three());
+        app.record_body(53);
+
+        assert!(app.apply_update(&UpdateEvent::MessageEdited {
+            chat_id: MOCK_CHAT,
+            message_id: 160,
+            new_text: Cow::Borrowed("corrected"),
+        }));
+
+        assert_eq!(text_of(&app, 160), Some("corrected"));
+        assert_eq!(
+            places(&app),
+            vec![
+                rows::Grouped {
+                    first: true,
+                    last: false,
+                    receipt: rows::Receipt::None
+                },
+                rows::Grouped {
+                    first: false,
+                    last: false,
+                    receipt: rows::Receipt::None
+                },
+                rows::Grouped {
+                    first: false,
+                    last: true,
+                    receipt: rows::Receipt::None
+                },
+            ],
+            "the group is the same one it was"
+        );
+    }
+
+    /// A deletion takes the message out and leaves the survivors grouped; a
+    /// group with nothing left in it leaves no row behind either.
+    #[test]
+    fn a_deletion_inside_a_group_leaves_the_survivors_grouped() {
+        let mut app = App::mock();
+        app.conversation.window.replace(a_group_of_three());
+        app.record_body(53);
+
+        assert!(app.apply_update(&UpdateEvent::MessagesDeleted {
+            message_ids: vec![160],
+        }));
+
+        assert_eq!(
+            places(&app),
+            vec![
+                rows::Grouped {
+                    first: true,
+                    last: false,
+                    receipt: rows::Receipt::None
+                },
+                rows::Grouped {
+                    first: false,
+                    last: true,
+                    receipt: rows::Receipt::None
+                },
+            ],
+            "the two that are left are still one group"
+        );
+        let layout = app.row_layout();
+        assert_eq!(layout.len(), 3, "two messages and the day's separator");
+        assert_eq!(
+            rows::total_rows(&layout),
+            3,
+            "and no row for what was deleted"
+        );
+
+        // An emptied group leaves nothing at all: no entry of its own, and no
+        // rows for the scrollbar to count.
+        assert!(app.apply_update(&UpdateEvent::MessagesDeleted {
+            message_ids: vec![100, 220],
+        }));
+        assert!(app.row_layout().is_empty());
+        assert_eq!(rows::total_rows(&app.row_layout()), 0);
+    }
+
     // ---- fetching ------------------------------------------------------
 
     /// The margin is what stops a fetch from being asked for at every
@@ -7813,7 +8544,7 @@ mod tests {
         assert!(
             !app.wants_older(),
             "message 4 begins at row {}, and what is in front of it is a screenful of text rather than one line of window",
-            app.row_layout()[3].first
+            rows::first_row_of_message(&app.row_layout(), 3).expect("the message is laid out")
         );
 
         app.vim.set_cursor(0);
