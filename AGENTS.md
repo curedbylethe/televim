@@ -472,21 +472,23 @@ saying what it wants.
 — it is the composition root, and it is allowed to see everything.
 
 `net.rs` is the only module that knows both halves exist. It brings the client
-up (build, sign in when the stored session is not enough, fetch the chat list,
-take the feed), asks for a page whenever the conversation on show is near one of
-its ends, and folds in whatever arrives. Everything with a rule in it is a
-function over the state — `wanted`, `open_first_chat`, `backoff` — so the part
-that can be wrong is tested without a client or a datacenter; the rest is the
-calls. A `HistoryCursor` lives beside the loop rather than in `tui`, because
-`tui` may not name `proto`.
+up (build, fetch the chat list, take the feed — it does **not** sign in; see
+**Key Decisions**), asks for a page whenever the conversation on show is near one
+of its ends, drives the sign-in flow the panel asks for, and folds in whatever
+arrives. Everything with a rule in it is a function over the state — `wanted`,
+`open_first_chat`, `backoff` — so the part that can be wrong is tested without a
+client or a datacenter; the rest is the calls. A `HistoryCursor` lives beside the
+loop rather than in `tui`, because `tui` may not name `proto`.
 
 Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
 `TELEVIM_API_HASH`, `TELEVIM_PHONE`, `TELEVIM_CODE`, `TELEVIM_PASSWORD` and
 `TELEVIM_SESSION_PATH`; with no credentials the client is never built and the
-screen says why, and with no `session_path` the session goes to the OS
-credential store. Signing in needs the phone number and the code in the
-configuration, because the screen has nowhere to ask for them yet — that is a
-gap, not a decision.
+sign-in surface names the pair that is missing rather than drawing a form, and
+with no `session_path` the session goes to the OS credential store. `phone`,
+`code` and `password` are **pre-fills**, not the way in: a launch that finds no
+session opens the sign-in field with the phone already in the bar, and the flow
+asks for the code there, then for a two-factor password when Telegram says the
+account has one.
 
 The log goes to a file beside the configuration (`televim.toml` → `televim.log`)
 and **never the terminal**: this program draws on the terminal, and `grammers`
@@ -726,8 +728,17 @@ Working today:
   One read per card opened, dropped when the card is no longer on show, because a
   round trip is long enough that opening a second card first is the normal case
   rather than a race.
-- **Authentication:** MTProto login with 2FA, session stored in the OS keyring
-  (or a file, per `session_path`).
+- **Authentication:** MTProto login with 2FA, asked for in the sign-in surface
+  rather than in the configuration: `:signin` opens it, and a launch that finds no
+  session opens it with the phone already in the bar. The phone, the code
+  Telegram sends and a two-factor password are typed in the bar (titles
+  ` Phone `, ` Login code `, ` Password `, the last masked); the panel draws its
+  `Phone` and `Login code` rows, and a
+  `two-factor password (n attempts left)` row **only** when Telegram answers
+  `SESSION_PASSWORD_NEEDED`. A refusal is a sentence that stays up rather than a
+  flash. `⏎` sends the field once — a second `⏎` while `Checking…` says so and
+  sends nothing. The session is stored in the OS keyring (or a file, per
+  `session_path`).
 - **Chat List:** private chats only, filtered to exclude bots, groups and
   channels, with unread counts and last-message previews. `j`/`k` move the
   highlight, `gg`/`G` reach both ends, and `Enter` opens the highlighted
@@ -792,7 +803,8 @@ Not built, and named here so nobody reads the roadmap below as current:
   `d` with no second press to distinguish. `p` is unbound in Visual — replacing a
   selection with the reader's own text is a destructive reading of a key that
   looks additive.
-- **`:w`** — not a command. The only commands are `q`, `quit` and `chat <id>`.
+- **`:w`** — not a command. The commands are `q`/`quit`, `chat <id>`, `settings`
+  and `signin`.
 - **Word motions *behind an operator* on non-ASCII text in the input** — refused
   with a message. `vim-line`'s word motions index bytes rather than characters,
   and behind `d`/`c`/`y` the motion and the slice to apply it happen inside one
@@ -811,6 +823,28 @@ The planned shape of what is left here is worked out in `~/.opencode/plan/`.
 
 ## Key Decisions
 
+- **Why `bring_up` does not sign in:** signing in needs a code Telegram has just
+  sent and, when the account has one, a two-factor password only the reader has,
+  and both are answered while the screen is up — so a bring-up that blocked on
+  them would either hold the first frame until a datacenter answered a question
+  nobody had been asked yet, or write a session its owner had no part in
+  choosing. It builds the client, asks `is_authorized`, and reports either way:
+  `Event::Ready` with no account is a machine with no session, and the panel opens
+  the sign-in field for it. Two consequences are deliberate. `Ready` no longer
+  implies an account, so every caller treats it as "you are in" and
+  `account: Err(String::new())` is the one value that means "there is nothing to
+  read yet" rather than "a read failed". And a bring-up failure narrowed: it is
+  now only "the client could not be built" or "the chat list could not be
+  fetched", because a missing phone is no longer something bring-up needs.
+- **Why the sign-in surface is an overlay and not a `Pane` variant:** `Pane` is
+  `Copy`, and its lifecycle belongs to the layout — `set_focus` closes the
+  profile, `Tab` and `Ctrl-w` walk out of the right-hand column — while a flow in
+  progress holds `String`s and has to survive every one of those. So
+  `App::signin: Option<SignIn>` is intercepted ahead of the pane walk, the same
+  place `Mode::Confirm` and the `:` completion are intercepted, and neither `Pane`
+  nor `AccountState` grew a case for it. `AccountState`'s fourth case would have
+  been redundant besides: the account's card already says `not signed in` and
+  names `:signin`.
 - **Why a first-party `telegram-framework` instead of `ferogram`:** The `ferogram` crate has a small contributor base and pins specific `grammers` revisions, which couples `televim` to an external maintainer's release cadence. By writing our own thin wrapper over `grammers-client`, we own the abstraction, keep the dependency surface minimal, and can tailor the API exactly to `televim`'s needs. The wrapper lives in `crates/telegram-framework` and is the only crate that touches `grammers`; `proto`, `domain`, and `tui` never see a `grammers` type.
 - **Why `grammers` from crates.io rather than git:** this used to be the other way round, and the reason it changed is that upstream stopped tagging. The newest tag is `v0.8.0`; 0.8.1, 0.9.0 and 0.10.0 exist only on the registry, so a `tag =` pin cannot name the current version at all. The registry artefact is checksummed, is what upstream publishes, and a `rev` pin in place of it would make every consumer track `master` by hand to get a patch.
 - **Why a peer with no bare identifier is skipped rather than given a number:** `grammers` reports none only for the account's own sentinel peer, and the account's real user identifier is only ever disclosed by asking Telegram for the account's own user. Substituting a constant would put a number in the chat list that addresses no conversation, so the conversation is dropped instead. It is unreachable for anything Telegram named — a received peer is a user, a group or a channel, and only `InputPeerSelf` yields the sentinel — and `every_real_user_keeps_its_identifier` in `updates.rs` is the test that would catch it becoming reachable, because the skip would then swallow real conversations in silence. `Client::fetch_account` is that call, and it does not change the skip: naming the account is not filing a conversation under it, and Saved Messages still has no bare peer to file it under.
@@ -1003,8 +1037,20 @@ Real, and named so they are not mistaken for oversights:
   `Sign out and forget this session? (y/n)` first and refuses inside it. Both are
   one word long because a deliberate refusal is not a `[failed: …]` — that form is
   for something that tried and did not come back, and a reader who reads it as a
-  bug will go looking for one that does not exist. Signing in again, and signing
-  out, land in `05`/`06`.
+  bug will go looking for one that does not exist. Signing in again works —
+  `:signin` asks for it without a restart — and signing out is `07`.
+- **`Config::code` and `Config::password` are pre-fills, not a way in.** They
+  fill the code and the password fields when a flow reaches them; the flow is the
+  only path that writes a session, and the phone has to reach the bar once.
+- **A failed chat-list fetch has no retry.** Bring-up sends `Event::Offline` and
+  the screen says so. The update feed backs off; this does not.
+- **Two sign-in hints in the Rust differ from the engine's text.** The bar's field
+  hint is ` ⏎: send  Esc: cancel` and the waiting hint is
+  ` Checking… — the request is in flight`, where the design model reuses its
+  insert hint and the single word `Checking…`. A login code is one row with no
+  newline to type and `Shift+⏎` is refused there, so the insert hint would name a
+  key that does nothing; the waiting hint spells out the state the design leaves
+  to the status line.
 
 - **Visual mode's `r` refuses rather than replying.** `v`, `V`, `o`, `Esc`, `y` and
   `d` work and a selection is drawn. `r` in Visual says no, for one of two reasons —

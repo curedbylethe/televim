@@ -399,6 +399,31 @@ code.
 | `1 row(s) yanked — register filled, OSC 52 offered` | `yy`: the register first, then the offer to the terminal | ditto |
 | `3 row(s) selected — Esc clears` | a selection of rows, stating the unit | `cardSel` |
 | `Profile · editable` | the other screen: it edits, the cards read | `drawSettings` |
+| `Sign in to Telegram` | the sign-in view's first line | `drawSignin` |
+| `Phone` `Login code` | the two rows every sign-in has, in order | ditto |
+| `two-factor password (3 attempts left)` | the third row, drawn **only** when Telegram answered `SESSION_PASSWORD_NEEDED`; the count starts at three and drops on each refusal | ditto |
+| `Password hint: …` | the account's own hint, drawn under the password step when it has one | ditto |
+| `Checking…` | a request is in flight; `⏎` is refused and a second `⏎` does nothing | ditto |
+| `still checking — the answer is on its way` | the one `⏎` a request in flight will answer | ditto |
+| `[ok]` / `[wrong code]` | a row Telegram accepted, and one it refused | ditto |
+| `[ ⏎: sign in again ]` | the row's offer after `AUTH_KEY_UNREGISTERED` | ditto |
+| `cancelling discards the code Telegram sent; ⏎ asks for a new one` | `Esc` at the code step, naming what it costs | ditto |
+| `the code did not survive; ⏎ asks for a new one` | back after `Tab`/`Ctrl+w`: the step is kept, the code is not | ditto |
+| `televim has no application credentials. …` | no `api_id`/`api_hash`: a sentence, not a form | `drawNoCreds` |
+| `that code is not the one Telegram sent` | `PHONE_CODE_INVALID` | `AUTH` |
+| `that code has expired — ⏎ asks for a new one` | `PHONE_CODE_EXPIRED` ✱ | ditto |
+| `that is not a phone number Telegram will accept` | `PHONE_NUMBER_INVALID` | ditto |
+| `Telegram has banned that number` | `PHONE_NUMBER_BANNED` | ditto |
+| `too many attempts — wait, then try again` | `PHONE_NUMBER_FLOOD` | ditto |
+| `that password is not right (2 attempts left)` | `PASSWORD_HASH_INVALID`, with the row's own count put in | ditto |
+| `this account has no two-factor password` | `PASSWORD_MISSING` | ditto |
+| `this session was revoked — sign in again; and, for the log, the stored session is discarded` | `SESSION_REVOKED` ✱ | ditto |
+| `the stored session is no longer valid — sign in again` | `AUTH_KEY_UNREGISTERED` ✱ | ditto |
+| the raw error text | anything else, verbatim | ditto |
+
+**`SESSION_PASSWORD_NEEDED` is not a refusal**: it is the answer that puts the password row up.
+The three sentences marked ✱ are Telegram's own doing or the account's own doing, so they never
+say "you"; nothing else in the sign-in view does either.
 
 **No emoji in the chrome.** The emoji catalog is for the reader's *own text*, and
 `emojis` costs 0.5 MB of binary and 2 MB of RSS. A `👤` in a settings title is
@@ -406,7 +431,7 @@ the one place that cost would be spent for nothing.
 
 ## Components
 
-Seven, with their states, and the `TestBackend` assertion that would catch each
+Eight, with their states, and the `TestBackend` assertion that would catch each
 regressing.
 
 1. **Panel** — `Chats`, `Conversation`, `Input`. States: focused, unfocused,
@@ -460,6 +485,19 @@ regressing.
    normal caret *on it* is the ground colour, so the reader can always see where
    the cursor is; and the title's `(n/m)` counts the rows the peer gave, so a
    row that disappears when a privacy setting hides it changes the count.
+
+8. **Sign in** — the one view that is not the chat: a box over the right column, two rows, and a
+   third only when Telegram asks for it. States: the phone (pre-filled from configuration when
+   one is set), `Checking…` (a request in flight, `⏎` refused once and a second `⏎` doing
+   nothing), the login code, a refused code (`[wrong code]`), the two-factor password with its
+   `(n attempts left)` counter, a refused password, the cancelled code (`Esc`), the paused flow
+   after `Tab`/`Ctrl+w` (the step survives and the code does not, and the return says so), and
+   the stale session whose row offers `[ ⏎: sign in again ]`. A no-2FA account has two rows for
+   the whole flow: the password row is never drawn speculatively. When the machine has no
+   `api_id`/`api_hash` the view is not a form at all — it is a sentence and there is no phone
+   row, because a field the reader cannot use is worse than no field. What would catch it
+   regressing: the password row is absent at steps 0 and 1, and the `(n attempts left)` on it is
+   the same three the refusals decrement.
 
 ## Profile
 

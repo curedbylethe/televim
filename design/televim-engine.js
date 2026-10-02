@@ -67,6 +67,33 @@
   const READING = 'reading the session…';
   const READING_NOTE = 'Nothing has been read yet, so nothing is known either way.';
 
+  /* ---------- sign in: the words this view adds ----------
+     The refusals are a Telegram error code mapped to the line the reader sees. Three of them
+     are Telegram's doing or the account's own doing, so their sentences never say "you":
+     PHONE_CODE_EXPIRED, SESSION_REVOKED, AUTH_KEY_UNREGISTERED. */
+  const AUTH = {
+    PHONE_CODE_INVALID: 'that code is not the one Telegram sent',
+    PHONE_CODE_EXPIRED: 'that code has expired — ⏎ asks for a new one',
+    PHONE_NUMBER_INVALID: 'that is not a phone number Telegram will accept',
+    PHONE_NUMBER_BANNED: 'Telegram has banned that number',
+    PHONE_NUMBER_FLOOD: 'too many attempts — wait, then try again',
+    PASSWORD_MISSING: 'this account has no two-factor password',
+    SESSION_REVOKED: 'this session was revoked — sign in again; and, for the log, the stored session is discarded',
+    AUTH_KEY_UNREGISTERED: 'the stored session is no longer valid — sign in again'
+  };
+  /* SESSION_PASSWORD_NEEDED is not a refusal: it is the answer that puts the password row up. */
+  const SIGNOUT_ROW = '[ ⏎: sign in again ]';
+  const CHECKING = 'Checking…';
+  const CANCEL_COST = 'cancelling discards the code Telegram sent; ⏎ asks for a new one';
+  const LOST_CODE = 'the code did not survive; ⏎ asks for a new one';
+  const NO_CREDENTIALS = 'televim has no application credentials. It needs an api_id and an api_hash in its config file before it can sign in to anything.';
+  const attempts = (n) => n + ' attempt' + (n === 1 ? '' : 's') + ' left';
+  /* the refusal sentence, with the password's count interpolated from the row's own counter */
+  const authSentence = (code, n) => code === 'PASSWORD_HASH_INVALID'
+    ? 'that password is not right (' + attempts(n) + ')'
+    : AUTH[code] || code;
+  const pwLabel = (n) => 'two-factor password (' + attempts(n) + ')';
+
   /* ---------- data ---------- */
   function makeChats() {
     const C = (name, unread, msgs, extra) => Object.assign({ name, unread, msgs, cur: Math.max(0, msgs.length - 1), top: 0 }, extra || {});
@@ -113,6 +140,8 @@
       profile: { name: 'Noor Haddad', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
     };
     if (view === 'signin') beginSignin(s);
+    else if (view === 'stale') beginStale(s);
+    else if (view === 'nocreds') beginNoCreds(s);
     else if (view === 'signedout' || view === 'reading') beginShell(s, view);
     return s;
   }
@@ -158,10 +187,27 @@
   /* ---------- keys ---------- */
   function key(s, k) {
     if (s.view === 'quit') { const n = fresh(); Object.keys(s).forEach((x) => delete s[x]); Object.assign(s, n); return s; }
+    if (s.confirm) { s.flash = ''; confirmKey(s, k); return s; }
+    if (s.view === 'signin') {
+      const A = s.signin;
+      /* a request is in flight: the first ⏎ is refused, and every later key does nothing. */
+      if (A.checking) {
+        if (k === 'Enter' && !A.checkN) { A.checkN = 1; s.flash = 'still checking — the answer is on its way'; }
+        return s;
+      }
+      if (!A.away) {
+        if (k === 'Tab' || k === 'C-w') { signinAway(s); return s; }
+        if (k === 'Escape' && s.line && s.line.from === 'signin' && A.step === 1 && s.line.mode === 'insert') { signinCancel(s); return s; }
+      } else if (!s.line) {
+        if (k === 'Tab' || k === 'C-w') { signinBack(s); return s; }
+        if (common(s, k)) return s;
+        return s;   /* the sign-in is paused; only Tab, : and q answer */
+      }
+    }
     s.flash = '';
-    if (s.confirm) { confirmKey(s, k); return s; }
     if (s.line) { lineKey(s, k); return s; }
     const p = s.pend; s.pend = '';
+    if (s.view === 'nocreds') { common(s, k); return s; }
     if (s.focus === 'settings') settingsKey(s, k, p);
     else if (s.focus === 'profile') cardKey(s, k, p);
     else if (s.focus === 'list') listKey(s, k, p);
@@ -483,28 +529,97 @@
         s.profile.username = u; s.draft = null; closeLine(s); s.flash = 'Username saved.'; return;
       }
       case 'bio': if (buf.length > 70) return refuse(s, 'Bio is limited to 70 characters.'); s.profile.bio = buf.trim(); s.draft = null; closeLine(s); s.flash = 'Bio saved.'; return;
-      case 'phone': {
-        if (buf.replace(/\D/g, '').length < 7) return refuse(s, 'Enter the phone number with its country code.');
-        s.signin.phone = buf.trim(); s.signin.step = 1; s.signin.bad = '';
-        s.line = { kind: 'code', buf: '', pos: 0, mode: 'insert', from: 'signin', origin: '', pend: '' }; return;
-      }
-      case 'code':
-        if (buf.trim() !== '42424') { s.signin.bad = buf.trim(); s.line.buf = ''; s.line.pos = 0; s.flash = 'That code is wrong. Enter it again.'; return; }
-        s.signin.code = buf.trim(); s.signin.bad = ''; s.signin.step = 2;
-        s.line = { kind: 'pw', buf: '', pos: 0, mode: 'insert', from: 'signin', origin: '', pend: '' }; return;
-      case 'pw': {
-        if (!buf) return refuse(s, 'The password cannot be empty.');
-        const ph = s.signin.phone, n = fresh(); n.profile.phone = ph;
-        Object.keys(s).forEach((x) => delete s[x]); Object.assign(s, n); return;
+      /* the three sign-in steps do not answer here: they enter the in-flight state, and the
+         answer (the code, SESSION_PASSWORD_NEEDED, a refusal) lands in answer(). */
+      case 'phone': case 'code': case 'pw': {
+        if (L.kind === 'phone' && buf.replace(/\D/g, '').length < 7)
+          return refuse(s, authSentence('PHONE_NUMBER_INVALID'));
+        if (L.kind === 'pw' && !buf) return refuse(s, 'The password cannot be empty.');
+        s.signin.pending = { kind: L.kind, value: L.kind === 'code' ? buf.trim() : L.kind === 'pw' ? buf : buf.trim() };
+        s.signin.checking = true; s.signin.checkN = 0;
+        s.line = null; s.focus = 'list';
+        return;
       }
     }
+  }
+  function openSigninLine(s, kind) {
+    /* the phone is the one field configuration can pre-fill; the code and the password are the
+       reader's to type, so they open empty. */
+    const pre = kind === 'phone' ? s.signin.phone : '';
+    s.line = { kind, buf: pre, pos: pre.length, mode: 'insert', from: 'signin', origin: pre, pend: '' };
+    s.focus = 'input';
   }
   function beginSignin(s) {
     s.view = 'signin'; s.right = 'conv'; s.confirm = null; s.vis = null; s.search = null; s.draft = null;
     s.chats = []; s.chat = 0; /* no client until credentials arrive, so no chats */
-    s.signin = { step: 0, phone: '', code: '', bad: '' };
-    s.line = { kind: 'phone', buf: '', pos: 0, mode: 'insert', from: 'signin', origin: '', pend: '' };
-    s.focus = 'input';
+    s.signin = {
+      step: 0, phone: s.profile.phone || '', code: '', bad: '', twofa: true, attempts: 3,
+      checking: false, checkN: 0, pending: null, away: false, lost: false, action: ''
+    };
+    openSigninLine(s, 'phone');
+  }
+  function beginStale(s) {
+    /* the stored session Telegram no longer knows: the row offers the way back in. */
+    beginSignin(s);
+    s.signin.action = SIGNOUT_ROW;
+    s.flash = AUTH.AUTH_KEY_UNREGISTERED;
+  }
+  function beginNoCreds(s) {
+    /* no api_id and no api_hash: there is nothing to sign in with, so this is not a form. */
+    s.view = 'nocreds'; s.right = 'conv'; s.confirm = null; s.vis = null; s.search = null; s.draft = null;
+    s.chats = []; s.chat = 0; s.line = null; s.focus = 'nocreds';
+  }
+  function signinAway(s) {
+    const A = s.signin, L = s.line;
+    if (L && L.from === 'signin') {
+      if (L.kind === 'code') A.lost = true;   /* the code is typed once and is not kept */
+      s.line = null;
+    }
+    A.away = true; s.focus = 'list';
+    s.flash = 'sign-in paused; Tab brings it back';
+  }
+  function signinBack(s) {
+    const A = s.signin;
+    A.away = false;
+    openSigninLine(s, A.step === 0 ? 'phone' : A.step === 1 ? 'code' : 'pw');
+    if (A.lost) { A.lost = false; s.flash = LOST_CODE; }
+    else s.flash = '';
+  }
+  function signinCancel(s) {
+    const A = s.signin;
+    A.step = 0; A.code = ''; A.bad = '';
+    openSigninLine(s, 'phone');
+    s.flash = CANCEL_COST;
+  }
+  function signinDone(s) {
+    const ph = s.signin.phone, n = fresh(); n.profile.phone = ph;
+    Object.keys(s).forEach((x) => delete s[x]); Object.assign(s, n);
+  }
+  /* the answer to an in-flight request. In the app it arrives over the network; a scene walks it
+     with <wait>, and the page's timer walks it live. */
+  function answer(s) {
+    const A = s.signin, p = A && A.pending;
+    if (!A || !A.checking || !p) return s;
+    A.checking = false; A.checkN = 0; A.pending = null; s.flash = '';
+    if (p.kind === 'phone') {
+      A.phone = p.value; A.step = 1; A.bad = '';
+      openSigninLine(s, 'code');
+    } else if (p.kind === 'code') {
+      if (p.value !== '42424') {
+        A.bad = p.value; s.flash = authSentence('PHONE_CODE_INVALID');
+        openSigninLine(s, 'code');
+      } else {
+        A.code = p.value; A.bad = '';
+        if (A.twofa) { A.step = 2; A.attempts = 3; openSigninLine(s, 'pw'); } else signinDone(s);
+      }
+    } else if (p.value === 'hunter2!') {
+      signinDone(s);
+    } else {
+      A.attempts = Math.max(0, A.attempts - 1);
+      s.flash = authSentence('PASSWORD_HASH_INVALID', A.attempts);
+      openSigninLine(s, 'pw');
+    }
+    return s;
   }
 
   /* ---------- settings panel ---------- */
@@ -555,7 +670,7 @@
       if (i >= 0) { c.cur = i; key(s, 'd'); key(s, 'd'); } else { key(s, 'q'); }
     }
   }
-  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', settings: 'editable profile', profile: 'profile card', input: 'input bar' };
+  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell' };
 
   /* ---------- the grid ---------- */
   const newGrid = () => Array.from({ length: H }, () => Array.from({ length: W }, () => [' ', 't']));
@@ -587,6 +702,16 @@
   }
   function bar(s) {
     const L = s.line, d = s.draft;
+    /* in flight there is no caret and nothing to type; the bar still shows what was sent. */
+    if (s.view === 'signin' && s.signin && s.signin.checking) {
+      const p = s.signin.pending || { kind: 'phone', value: '' };
+      const conceal = p.kind === 'pw';
+      const shown = conceal ? '•'.repeat(p.value.length) : p.value;
+      const rows = wrap(shown, 76, 76, true), cr = caretRC(rows, shown.length);
+      const n = Math.min(BAR_MAX, Math.max(1, rows.length));
+      const start = rows.length > n ? clamp(cr[0] - n + 1, 0, rows.length - n) : 0;
+      return { title: kindTitle(s, { kind: p.kind }), shown, rows, cr, n, start, lit: false, prefix: '', conceal };
+    }
     let title = 'Input', buf = '', pos = 0, lit = false, prefix = '', conceal = false;
     if (L) { lit = true; title = kindTitle(s, L); buf = L.buf; pos = L.pos; prefix = L.kind === 'command' ? ': ' : L.kind === 'find' ? '/ ' : ''; conceal = L.kind === 'pw'; }
     else if (d && d.ctx === ctx(s) && s.view === 'chat') { title = 'draft'; buf = d.buf; pos = d.pos; }
@@ -625,11 +750,15 @@
     /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
     if (s.confirm) return { t: ' ' + s.confirm.prompt, a: 't' };
     if (s.flash) return { t: ' ' + s.flash, a: 't' };
+    if (s.view === 'signin' && s.signin && s.signin.checking)
+      return { t: ' ' + CHECKING + ' — the request is in flight', a: 't' };
     const L = s.line;
     if (L) {
       if (L.mode === 'insert' && activeComp(L)) return { t: HINT.complete, a: 'd' };
       return { t: L.mode === 'insert' ? HINT.typing : L.mode === 'normal' ? HINT.lnormal : HINT.lvisual, a: 'd' };
     }
+    if (s.view === 'signin' && s.signin && s.signin.away) return { t: ' sign-in paused; Tab brings it back', a: 'd' };
+    if (s.view === 'nocreds') return { t: HINT.cardReading, a: 'd' };
     if (s.vis) return { t: HINT.visual, a: 'd' };
     if (s.search) {
       const c = chat(s), h = s.search.hits, at = h.indexOf(c.cur), q = '/' + s.search.q;
@@ -975,26 +1104,50 @@
 
   /* ---------- sign in ---------- */
   function drawSignin(g, s, x0, h) {
-    const w = RW, S = s.signin, step = S.step;
+    const w = RW, S = s.signin, step = S.step, busy = S.checking;
     box(g, x0, 0, w, h, 'Sign in', false);
     const line = (y, str, a) => put(g, x0 + 2, y, trunc(str, 52), a);
     line(1, 'Sign in to Telegram', 't');
-    const expl = 'televim signs in to one account. Telegram asks for three things, in order.';
+    const expl = 'televim signs in to one account. Telegram asks for what it needs, in order.';
     wrap(expl, 52, 52, false).forEach((r, i) => put(g, x0 + 2, 2 + i, expl.slice(r.s, r.e), 'd'));
-    [['Phone', S.phone, 0], ['Login code', S.code, 1], ['Password', '', 2]].forEach(([lab, val, i]) => {
-      const y = 5 + i, done = i < step, cur = i === step;
-      put(g, x0 + 2, y, lab, cur || done ? 't' : 'd');
+    /* the phone row and the code row exist from the start; the password row is drawn only when
+       Telegram answered SESSION_PASSWORD_NEEDED, which is the account's own doing. A no-2FA
+       account therefore has two rows for the whole flow. */
+    const rows = [['Phone', S.phone, 0], ['Login code', S.code, 1]];
+    if (step === 2) rows.push([pwLabel(S.attempts), '', 2]);
+    rows.forEach(([lab, val, i]) => {
+      const y = 5 + i, done = i < step, cur = i === step && !busy;
+      put(g, x0 + 2, y, trunc(lab, 52), cur || done ? 't' : 'd');
+      if (busy && i === step) { put(g, x0 + 16, y, '· · ·', 'd'); return; }
       if (i === 1 && cur && S.bad) {
         put(g, x0 + 16, y, trunc(S.bad, 20), 'd');
         put(g, x0 + 2 + 52 - 12, y, '[wrong code]', 't');
+      } else if (i === 0 && S.action) {
+        put(g, x0 + 16, y, trunc(val, 20), 't');
+        put(g, x0 + 2 + 52 - chars(S.action), y, S.action, 't');
       } else if (done) {
         put(g, x0 + 16, y, i === 2 ? '•'.repeat(8) : trunc(val, 22), 't');
         put(g, x0 + 2 + 52 - 4, y, '[ok]', 'd');
       }
     });
-    if (step === 0) line(9, 'Include the country code.', 'd');
-    if (step === 1) line(9, 'Telegram sent a login code to ' + S.phone + '.', 'd');
-    if (step === 2) { line(9, 'Two-step verification is on.', 'd'); line(10, 'Password hint: street I grew up on', 't'); }
+    const y = 9;
+    if (busy) { line(y, CHECKING, 't'); line(y + 1, 'The request is in flight; ⏎ is refused.', 'd'); }
+    else if (step === 0) {
+      line(y, 'Include the country code.', 'd');
+      if (S.phone) line(y + 1, 'The configured number is filled in.', 'd');
+    } else if (step === 1) {
+      line(y, 'Telegram sent a login code to ' + S.phone + '.', 'd');
+    } else {
+      line(y, 'Two-step verification is on.', 'd');
+      line(y + 1, 'Password hint: street I grew up on', 't');
+    }
+  }
+  function drawNoCreds(g, s, x0, h) {
+    /* not a form: one sentence, and no field, because a field the reader cannot use is worse
+       than no field. */
+    box(g, x0, 0, RW, h, 'Sign in', s.focus === 'nocreds');
+    put(g, x0 + 2, 1, 'Sign in to Telegram', 't');
+    wrap(NO_CREDENTIALS, 52, 52, true).forEach((r, i) => put(g, x0 + 2, 3 + i, NO_CREDENTIALS.slice(r.s, r.e), 'd'));
   }
   function drawComplete(g, s, y0) {
     const c = activeComp(s.line);
@@ -1024,6 +1177,7 @@
     const b = bar(s), top = H - 1 - (b.n + 2);
     drawList(g, s, top);
     if (s.view === 'signin') drawSignin(g, s, LW, top);
+    else if (s.view === 'nocreds') drawNoCreds(g, s, LW, top);
     else if (s.right === 'settings') drawSettings(g, s, LW, top);
     else if (s.right === 'profile') drawCard(g, s, LW, top);
     else drawConv(g, s, LW, top);
@@ -1056,12 +1210,14 @@
   const TOK = { Esc: 'Escape', CR: 'Enter', Tab: 'Tab', BS: 'Backspace', 'C-j': 'C-j', 'C-w': 'C-w', 'S-CR': 'S-Enter' };
   function feed(s, script) {
     for (let i = 0; i < script.length; i++) {
-      if (script[i] === '<') { const e = script.indexOf('>', i); key(s, TOK[script.slice(i + 1, e)]); i = e; }
-      else key(s, script[i]);
+      if (script[i] === '<') {
+        const e = script.indexOf('>', i), name = script.slice(i + 1, e);
+        if (name === 'wait') answer(s); else key(s, TOK[name]);
+        i = e;
+      } else key(s, script[i]);
     }
     return s;
   }
-  const PH = '+44 7700 900142<CR>';
   const DRAFT = 'i' + 'I have the concert tickets and the blue folder. If the side gate is shut, I will ring the bell twice.<C-j>Ten minutes, not more.';
   const SCENES = [
     { id: 'conv', name: 'Conversation', variants: [
@@ -1112,16 +1268,24 @@
       { name: ':signin from the card', start: 'signedout', keys: ':signin<CR>' },
       { name: 'nothing read yet', start: 'reading', keys: '' }] },
     { id: 'signin', name: 'Sign in', start: 'signin', variants: [
-      { name: 'Phone', keys: '+44 7700 900142' },
-      { name: 'Login code', keys: PH + '42' },
-      { name: 'Wrong code', keys: PH + '13579<CR>' },
-      { name: 'Password', keys: PH + '42424<CR>hunter2!' }] }
+      { name: 'Phone, pre-filled', keys: '' },
+      { name: 'Checking…', keys: '<CR>' },
+      { name: 'Login code', keys: '<CR><wait>' },
+      { name: 'Wrong code', keys: '<CR><wait>13579<CR><wait>' },
+      { name: 'Password', keys: '<CR><wait>42424<CR><wait>' },
+      { name: 'Wrong password', keys: '<CR><wait>42424<CR><wait>letmein<CR><wait>' },
+      { name: 'Cancel at the code', keys: '<CR><wait><Esc>' },
+      { name: 'Tab out', keys: '<CR><wait><Tab>' },
+      { name: 'Tab back: the code is gone', keys: '<CR><wait><Tab><Tab>' },
+      { name: 'Stored session unregistered', start: 'stale', keys: '' }] },
+    { id: 'nocreds', name: 'No credentials', variants: [
+      { name: 'No application credentials', start: 'nocreds', keys: '' }] }
   ];
   function scene(si, vi) {
     const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start);
     return feed(s, v.keys);
   }
 
-  root.TV = { W, H, HINT, ALL_HINTS, HINT_W, fresh, key, feed, render, toHTML, toText, modeName, setMode, scene, SCENES, FOCUS_NAME, chat, chars };
+  root.TV = { W, H, HINT, ALL_HINTS, HINT_W, fresh, key, feed, render, toHTML, toText, modeName, setMode, scene, SCENES, FOCUS_NAME, chat, chars, answer };
   if (typeof module !== 'undefined') module.exports = root.TV;
 })(typeof window !== 'undefined' ? window : globalThis);

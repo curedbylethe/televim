@@ -45,8 +45,16 @@
     schedule();
   }
 
-  /* a send resolves a moment later; nothing else in the interface repaints on a schedule */
+  /* a send resolves a moment later, and a sign-in request answers on its own: the reader's ⏎
+     never hurries it. Nothing else in the interface repaints on a schedule. */
   function schedule() {
+    if (app.s.view === 'signin' && app.s.signin && app.s.signin.checking) {
+      const st = app.s;
+      if (!st.signin.timer) st.signin.timer = setTimeout(() => {
+        st.signin.timer = null; TV.answer(st); draw();
+      }, 1200);
+      return;
+    }
     if (app.s.view !== 'chat') return;
     app.s.chats.forEach((c) => c.msgs.forEach((m) => {
       if (m.live && m.status && !m.t) m.t = setTimeout(() => { m.status = null; m.live = false; draw(); }, 1400);
