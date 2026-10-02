@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod card;
+pub mod date;
 pub mod emoji;
 pub mod event;
 mod grapheme;
