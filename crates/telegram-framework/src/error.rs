@@ -113,8 +113,15 @@ pub enum AuthError {
     PasswordRequired,
 
     /// The two-factor password was wrong.
-    #[error("the two-factor password is invalid")]
-    InvalidPassword,
+    ///
+    /// Carries how many tries are left, because Telegram refuses the fourth and
+    /// a reader who is not told the count will spend all of them. The count is
+    /// the client's own: Telegram does not report it.
+    #[error("the two-factor password is invalid ({attempts_left} attempt(s) left)")]
+    InvalidPassword {
+        /// How many wrong passwords the account can still take.
+        attempts_left: u8,
+    },
 
     /// The phone number has no Telegram account yet.
     ///
@@ -308,7 +315,14 @@ impl AuthError {
             // so the reader could retry the password without authenticating
             // again. Carrying it would mean holding a token in the error type,
             // which is a change to the login flow rather than to this mapping.
-            SignInError::InvalidPassword(_) => Self::InvalidPassword,
+            //
+            // The count is a default rather than a reading: Telegram does not
+            // report it, so a refused password is counted by
+            // `Client::check_password`, which knows how many this flow has
+            // already spent. This is the fallback for any other caller.
+            SignInError::InvalidPassword(_) => Self::InvalidPassword {
+                attempts_left: crate::auth::PASSWORD_ATTEMPTS,
+            },
             SignInError::PasswordRequired(_) => Self::PasswordRequired,
             SignInError::SignUpRequired => Self::SignUpRequired,
             SignInError::Other(error) => Self::from_invocation(&error),
@@ -466,7 +480,7 @@ mod tests {
             AuthError::from_sign_in(SignInError::InvalidPassword(testing::password_token(Some(
                 "hint"
             )),)),
-            AuthError::InvalidPassword
+            AuthError::InvalidPassword { .. }
         ));
         assert!(matches!(
             AuthError::from_sign_in(SignInError::SignUpRequired),

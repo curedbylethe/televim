@@ -10,6 +10,11 @@
 //! [`MemoryStore`], [`FileStore`] and [`KeyringStore`] are the three shipped
 //! backends.
 //!
+//! A snapshot also names *who* is signed in, as an [`AccountIdentity`]. Without
+//! it a stored session cannot tell a fresh machine from a signed-out one without
+//! a round trip, and it cannot prefill a sign-in form with the number it is
+//! being asked for.
+//!
 //! # Choosing a backend
 //!
 //! | Backend        | Use it for                                                        |
@@ -185,6 +190,23 @@ pub struct SessionData {
     /// Schema version of this snapshot.
     pub version: u32,
 
+    /// Bare identifier of the account this session authorises, when the snapshot
+    /// says.
+    ///
+    /// `None` on a machine that has never signed in, and on a snapshot written
+    /// by a build older than this field — see [`SessionData::VERSION`]. Telegram
+    /// discloses the account's own identifier in exactly one place, and a
+    /// snapshot that does not carry it cannot tell a reader which account they
+    /// are looking at without a round trip.
+    pub user_id: Option<i64>,
+
+    /// The phone number the account signed in with, when the snapshot says.
+    ///
+    /// The one field of the login flow that is not derivable from anything else
+    /// and cannot be asked for: Telegram will not disclose a number the reader
+    /// did not give it. So it is kept for the sign-in form to prefill with.
+    pub phone: Option<String>,
+
     /// Datacenter that is home to the logged-in account, if it is known yet.
     ///
     /// `None` means "keep whatever default the transport layer picks", which is
@@ -195,14 +217,59 @@ pub struct SessionData {
     pub dc_options: Vec<DcOption>,
 
     /// Peers the session has cached.
+    ///
+    /// The account itself is *not* needed here for the update feed to work, and
+    /// the reason is worth writing down because the opposite is the kind of
+    /// assumption that only fails when a real message arrives:
+    ///
+    /// * An update's conversation is resolved from the peer identifier encoded
+    ///   in the message, through the peer map the update itself arrived with —
+    ///   not out of this cache. See `grammers`' `Message::peer`.
+    /// * Your own user only ever turns up as a *sender*, and there it is
+    ///   synthesised from the message's outgoing flag: no lookup, no cache.
+    /// * Even a lookup could not find it, because the account's own peer
+    ///   identifier has no bare identifier and `StoreSession::cached_peer`
+    ///   accepts nothing but one.
+    ///
+    /// So the self peer is not put here, and the chat list's own skip of a peer
+    /// with no bare identifier is the same rule rather than a second one.
     pub peers: Vec<Peer>,
 
     /// How far through the update stream the session has read.
     pub update_state: UpdateState,
 }
 
+/// Who a stored session belongs to.
+///
+/// What a snapshot can say about the account with no round trip at all: the
+/// identifier, which Telegram discloses nowhere else, and the phone number,
+/// which is the field a pre-filled sign-in form needs. It is deliberately not
+/// an account — a snapshot has never been asked for a bio or a birthday, and a
+/// type carrying two empty ones would be a card showing fields nobody filled in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountIdentity {
+    /// Bare identifier of the account's own user.
+    pub user_id: i64,
+
+    /// The phone number the account signed in with, when the snapshot has it.
+    pub phone: Option<String>,
+}
+
 impl SessionData {
     /// Schema version written by this build.
+    ///
+    /// The account identity was added *without* a bump, and that is the point:
+    /// the field is optional and the struct is `#[serde(default)]`, so a
+    /// snapshot written by an older build still parses, still carries a working
+    /// authorisation key, and is still a session worth keeping. It simply does
+    /// not name the account, and [`SessionData::account`] says so.
+    ///
+    /// The other answer — bump the version, so the old snapshot is refused — is
+    /// the one that logs every existing reader out on upgrade, and an
+    /// authorisation key that still works is not worth trading for a field that
+    /// can be fetched. A version is only for a change that genuinely cannot be
+    /// read back, and that one is refused with a sentence rather than silently
+    /// started over.
     pub const VERSION: u32 = 1;
 
     /// Serialises the snapshot to JSON.
@@ -215,7 +282,10 @@ impl SessionData {
     /// Parses a snapshot produced by [`SessionData::to_bytes`].
     ///
     /// Returns [`SessionError::Corrupt`] if the bytes are not a snapshot, or if
-    /// they were written by a schema version this build does not understand.
+    /// they were written by a schema version this build does not understand. An
+    /// old version is *refused*, never treated as a fresh session: a snapshot
+    /// that was silently reset is a reader who is asked to sign in again for a
+    /// reason nothing on the screen can explain.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SessionError> {
         let data: Self = serde_json::from_slice(bytes)
             .map_err(|error| SessionError::Corrupt(error.to_string()))?;
@@ -228,12 +298,29 @@ impl SessionData {
         }
         Ok(data)
     }
+
+    /// The account this snapshot belongs to, if it says.
+    ///
+    /// `None` is a real answer rather than a missing one: it means the snapshot
+    /// was written before anything recorded who signed in, which is what a
+    /// machine that has never used the account and a machine running an older
+    /// build both look like. Either way the authorisation key is what says
+    /// whether the account is still signed in — this only says which one.
+    #[must_use]
+    pub fn account(&self) -> Option<AccountIdentity> {
+        self.user_id.map(|user_id| AccountIdentity {
+            user_id,
+            phone: self.phone.clone(),
+        })
+    }
 }
 
 impl Default for SessionData {
     fn default() -> Self {
         Self {
             version: Self::VERSION,
+            user_id: None,
+            phone: None,
             home_dc_id: None,
             dc_options: Vec::new(),
             peers: Vec::new(),
@@ -345,8 +432,13 @@ impl SessionStore for FileStore {
         if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             fs::create_dir_all(parent).map_err(|error| SessionError::Save(error.to_string()))?;
         }
-        fs::write(&self.path, &bytes).map_err(|error| SessionError::Save(error.to_string()))?;
+        // Created empty and restricted *before* a byte is in it. A plain
+        // `fs::write` leaves a window between creating the file and the
+        // `chmod`, and what is in that window is a permanent authorisation key
+        // at whatever the umask allowed.
+        fs::File::create(&self.path).map_err(|error| SessionError::Save(error.to_string()))?;
         restrict_permissions(&self.path);
+        fs::write(&self.path, &bytes).map_err(|error| SessionError::Save(error.to_string()))?;
         Ok(())
     }
 
@@ -476,7 +568,8 @@ mod bridge {
     use grammers_client::session::{BoxFuture, Session, SessionData as TlSessionData};
 
     use super::{
-        AuthKey, ChannelKind, ChannelState, DcOption, Peer, SessionData, SessionStore, UpdateState,
+        AccountIdentity, AuthKey, ChannelKind, ChannelState, DcOption, Peer, SessionData,
+        SessionStore, UpdateState,
     };
     use crate::error::SessionError;
 
@@ -502,6 +595,13 @@ mod bridge {
         store: Arc<dyn SessionStore>,
         state: Mutex<TlSessionData>,
 
+        /// Who this session is for, when something has said.
+        ///
+        /// Not part of the mirror, because `grammers` has no field for it: the
+        /// account is disclosed by the login flow and by nothing else, so it is
+        /// carried alongside the state rather than inside it.
+        account: Mutex<Option<AccountIdentity>>,
+
         /// Set whenever the transport mutates the session.
         ///
         /// A handful of requests change the session without any of the login
@@ -523,12 +623,15 @@ mod bridge {
         /// defaults are the starting point and the snapshot is applied on top.
         pub(crate) fn new(store: Arc<dyn SessionStore>) -> Result<Self, SessionError> {
             let mut state = TlSessionData::default();
+            let mut account = None;
             if let Some(snapshot) = store.load()? {
                 apply_snapshot(&snapshot, &mut state);
+                account = snapshot.account();
             }
             Ok(Self {
                 store,
                 state: Mutex::new(state),
+                account: Mutex::new(account),
                 dirty: AtomicBool::new(false),
             })
         }
@@ -536,8 +639,15 @@ mod bridge {
         /// Snapshots the live state into a value a [`SessionStore`] can persist.
         pub(crate) fn snapshot(&self) -> SessionData {
             let state = self.lock();
+            let account = self
+                .account
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
             SessionData {
                 version: SessionData::VERSION,
+                user_id: account.as_ref().map(|account| account.user_id),
+                phone: account.and_then(|account| account.phone),
                 home_dc_id: Some(state.home_dc),
                 dc_options: state.dc_options.values().map(dc_option_to_data).collect(),
                 peers: state.peer_infos.values().map(peer_to_data).collect(),
@@ -584,6 +694,29 @@ mod bridge {
                 return Err(error);
             }
 
+            Ok(())
+        }
+
+        /// Forgets the session entirely: the store is cleared, and the in-memory
+        /// mirror is put back to what a client that has never signed in has.
+        ///
+        /// Both halves, because clearing only the store would leave a client
+        /// holding an authorisation key that nothing on the next launch has —
+        /// and clearing only the mirror would leave that key on disk, which is
+        /// the half a reader asking to log out means.
+        ///
+        /// The mirror is reset rather than patched. What it drops besides the
+        /// keys is this account's update counters, which belong to the account
+        /// that is being logged out and must not be resumed by whoever signs in
+        /// next.
+        pub(crate) fn clear(&self) -> Result<(), SessionError> {
+            self.store.clear()?;
+
+            *self.lock() = TlSessionData::default();
+            *self.account.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            // Nothing is left worth writing, so a mutation that lands after this
+            // is what raises the flag again — not the reset itself.
+            self.dirty.store(false, Ordering::Release);
             Ok(())
         }
 
@@ -914,6 +1047,8 @@ mod tests {
     fn sample_session() -> SessionData {
         SessionData {
             version: SessionData::VERSION,
+            user_id: Some(42),
+            phone: Some("+15551234567".to_owned()),
             home_dc_id: Some(2),
             dc_options: vec![DcOption {
                 id: 2,
@@ -1002,6 +1137,188 @@ mod tests {
     fn file_store_reports_its_path() {
         let store = FileStore::new("/tmp/televim-session.json");
         assert_eq!(store.path(), Path::new("/tmp/televim-session.json"));
+    }
+
+    /// The file holds a permanent authorisation key in plaintext, so it is
+    /// created for its owner alone. This is a mitigation and not a solution —
+    /// [`FileStore`]'s own docs say so — but the mode is the whole of it, so it
+    /// is asserted rather than assumed.
+    #[cfg(unix)]
+    #[test]
+    fn file_store_creates_a_file_only_its_owner_can_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        FileStore::new(&path)
+            .save(&sample_session())
+            .expect("save succeeds");
+
+        let mode = fs::metadata(&path)
+            .expect("the file is there")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the file was created with mode {mode:o}"
+        );
+    }
+
+    /// A snapshot written before this build named the account still loads, key
+    /// and all. The fields are `#[serde(default)]` precisely so that adding
+    /// them did not have to cost every existing reader a login.
+    #[test]
+    fn a_snapshot_written_before_it_named_the_account_still_loads() {
+        let key = encode_hex(&[0xab; AuthKey::LEN]);
+        let old = format!(
+            r#"{{"version":1,"home_dc_id":2,"dc_options":[{{"id":2,
+            "ipv4":"149.154.167.51:443","ipv6":"[2001:67c:4e8:f002::a]:443",
+            "auth_key":"{key}"}}],"peers":[],"update_state":{{"pts":12,"qts":3,
+            "date":1700000000,"seq":4,"channels":[]}}}}"#
+        );
+
+        let session =
+            SessionData::from_bytes(old.as_bytes()).expect("an old snapshot is still a snapshot");
+
+        assert_eq!(session.account(), None, "it simply does not say who it is");
+        assert_eq!(session.user_id, None);
+        assert_eq!(session.phone, None);
+        assert_eq!(
+            session
+                .dc_options
+                .first()
+                .and_then(|dc| dc.auth_key)
+                .map(|key| key.as_bytes().to_vec()),
+            Some(vec![0xab; AuthKey::LEN]),
+            "the authorisation key is the reason the version was not bumped"
+        );
+        assert_eq!(session.update_state.pts, 12);
+    }
+
+    /// The identity is what a caller reads a snapshot without a round trip, so
+    /// it has to come back through a backend rather than only off a clone.
+    #[test]
+    fn the_account_identity_survives_the_stores() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let session = sample_session();
+        let identity = session.account().expect("the sample names an account");
+        assert_eq!(identity.user_id, 42);
+        assert_eq!(identity.phone.as_deref(), Some("+15551234567"));
+
+        let memory = MemoryStore::new();
+        let file = FileStore::new(dir.path().join("session.json"));
+        for (name, store) in [
+            ("memory", &memory as &dyn SessionStore),
+            ("file", &file as &dyn SessionStore),
+        ] {
+            store.save(&session).expect("save succeeds");
+            assert_eq!(
+                store
+                    .load()
+                    .expect("load succeeds")
+                    .and_then(|read| read.account()),
+                Some(identity.clone()),
+                "the {name} store lost the account identity"
+            );
+            store.clear().expect("clear succeeds");
+        }
+    }
+
+    /// The credential store is not available on a headless CI machine, so this
+    /// is opt-in like the round trip above it.
+    #[test]
+    #[ignore = "requires a working OS credential store"]
+    fn the_account_identity_survives_the_keyring() {
+        let store = KeyringStore::new("televim-tests-identity", "session");
+        store.clear().expect("clear succeeds");
+
+        let session = sample_session();
+        store.save(&session).expect("save succeeds");
+        assert_eq!(
+            store
+                .load()
+                .expect("load succeeds")
+                .and_then(|read| read.account()),
+            session.account()
+        );
+
+        store.clear().expect("final clear succeeds");
+    }
+
+    /// Half a snapshot is not a session to fall back on, and silently starting
+    /// over is the one answer that cannot be explained on a screen. Both halves
+    /// of the file's bytes are refused rather than read as far as they go.
+    #[test]
+    fn a_truncated_snapshot_is_reported_rather_than_reset() {
+        let bytes = sample_session().to_bytes().expect("serialises");
+        let truncated = &bytes[..bytes.len() / 2];
+
+        let error = SessionData::from_bytes(truncated).expect_err("half a snapshot is refused");
+        assert!(matches!(error, SessionError::Corrupt(_)), "got {error:?}");
+
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        fs::write(&path, truncated).expect("fixture is written");
+
+        let error = FileStore::new(&path)
+            .load()
+            .expect_err("a truncated file is refused");
+        assert!(matches!(error, SessionError::Corrupt(_)), "got {error:?}");
+    }
+
+    /// Clearing has to leave nothing behind that a later launch would restore.
+    #[cfg(feature = "live")]
+    #[test]
+    fn clearing_the_session_forgets_the_key_and_the_account() {
+        use std::sync::Arc;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let session =
+            super::bridge::StoreSession::new(Arc::clone(&store)).expect("the stored session loads");
+
+        session.clear().expect("clearing succeeds");
+
+        assert!(
+            store.load().expect("the store is readable").is_none(),
+            "the stored key must be gone, not merely unused"
+        );
+        let left = session.snapshot();
+        assert!(
+            left.dc_options
+                .iter()
+                .all(|option| option.auth_key.is_none()),
+            "no authorisation key may be left in memory: {:?}",
+            left.dc_options
+        );
+        assert_eq!(left.user_id, None, "nor may the account be");
+        assert_eq!(
+            session.cached_peer(42),
+            None,
+            "the mirror is the state a client that has never signed in has"
+        );
+    }
+
+    /// The update feed never reads this cache: a conversation comes from the
+    /// peer encoded in the message, and your own user only ever turns up as a
+    /// *sender*, which is synthesised from the outgoing flag. So the account's
+    /// own peer does not have to be cached for the feed to work after a login,
+    /// and the client needs nothing extra before it can subscribe.
+    #[cfg(feature = "live")]
+    #[test]
+    fn the_accounts_own_peer_is_not_needed_by_the_session() {
+        let fresh = super::bridge::StoreSession::new(std::sync::Arc::new(MemoryStore::new()))
+            .expect("a fresh session loads");
+
+        assert!(
+            fresh.snapshot().peers.is_empty(),
+            "nothing has been fetched yet, so there is no peer to cache"
+        );
+        assert_eq!(
+            fresh.cached_peer(42),
+            None,
+            "the account's own peer is not here and the feed does not look for it"
+        );
     }
 
     #[test]

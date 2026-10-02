@@ -96,14 +96,16 @@ mod testing;
 
 pub use error::{AuthError, FrameworkError, RequestError, SessionError};
 pub use session::{
-    AuthKey, ChannelKind, ChannelState, DcOption, FileStore, KeyringStore, MemoryStore, Peer,
-    SessionData, SessionStore, UpdateState,
+    AccountIdentity, AuthKey, ChannelKind, ChannelState, DcOption, FileStore, KeyringStore,
+    MemoryStore, Peer, SessionData, SessionStore, UpdateState,
 };
 
 #[cfg(feature = "live")]
 pub use account::{Account, Birthday};
 #[cfg(feature = "live")]
-pub use auth::{LoginToken, PasswordToken, SignInResult};
+pub use auth::{
+    LoginToken, PASSWORD_ATTEMPTS, PasswordToken, Refusal, SignInResult, SignedInUser, classify,
+};
 #[cfg(feature = "live")]
 pub use client::{Client, ClientBuilder};
 #[cfg(feature = "live")]

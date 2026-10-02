@@ -9,7 +9,9 @@ use grammers_client::session::types::PeerRef;
 use grammers_mtsender::SenderPool;
 use tokio::task::JoinHandle;
 
-use crate::auth::{LoginToken, PasswordToken, SignInResult};
+use crate::auth::{
+    LoginToken, PasswordAttempts, PasswordToken, SignInResult, SignedInUser, signed_in_from,
+};
 use crate::error::{AuthError, FrameworkError, RequestError};
 use crate::session::{KeyringStore, SessionStore, StoreSession};
 use crate::updates::UpdateRelay;
@@ -140,6 +142,8 @@ impl ClientBuilder {
             code_requests: CodeRequestLog::default(),
             updates: UpdateRelay::start(updates),
             dialogs_fetched: AtomicBool::new(false),
+            signed_in: Mutex::new(None),
+            password_attempts: PasswordAttempts::default(),
             runner,
         })
     }
@@ -191,6 +195,14 @@ pub struct Client {
     /// Whether [`Client::fetch_dialogs`] has run. A latch: it only ever goes
     /// one way, and relaxed ordering is enough for that.
     dialogs_fetched: AtomicBool,
+
+    /// The account that signed in, as `sign_in` and `check_password` reported
+    /// it. See [`Client::signed_in_user`].
+    signed_in: Mutex<Option<SignedInUser>>,
+
+    /// How many wrong two-factor passwords this sign-in has already had. See
+    /// [`PasswordAttempts`].
+    password_attempts: PasswordAttempts,
 
     /// The connection pool's task, stopped when the client is dropped.
     runner: JoinHandle<()>,
@@ -281,13 +293,19 @@ impl Client {
         tracing::debug!("submitting the telegram login code");
 
         match self.inner.sign_in(&token.inner, code).await {
-            Ok(_user) => {
+            Ok(user) => {
+                self.remember_signed_in(&user);
                 self.persist_after_login();
                 Ok(SignInResult::Success)
             }
-            Err(grammers_client::SignInError::PasswordRequired(password_token)) => Ok(
-                SignInResult::PasswordRequired(PasswordToken::new(password_token)),
-            ),
+            Err(grammers_client::SignInError::PasswordRequired(password_token)) => {
+                // A new code is a new flow, so the previous one's spent
+                // attempts are not this one's.
+                self.password_attempts.reset();
+                Ok(SignInResult::PasswordRequired(PasswordToken::new(
+                    password_token,
+                )))
+            }
             Err(error) => Err(AuthError::from_sign_in(error)),
         }
     }
@@ -296,6 +314,14 @@ impl Client {
     ///
     /// On success the session is persisted. The [`PasswordToken`] comes from
     /// [`SignInResult::PasswordRequired`].
+    ///
+    /// # Refusals
+    ///
+    /// A wrong password is [`AuthError::InvalidPassword`] carrying how many
+    /// tries are left, counted by the client rather than read out of Telegram's
+    /// answer — so [`classify`](crate::classify) on the same error's name
+    /// reports [`PASSWORD_ATTEMPTS`](crate::PASSWORD_ATTEMPTS) and this is the
+    /// only reading that is right once one has been spent.
     pub async fn check_password(
         &self,
         token: PasswordToken,
@@ -309,12 +335,57 @@ impl Client {
             .check_password(token.into_inner(), password.as_bytes())
             .await
         {
-            Ok(_user) => {
+            Ok(user) => {
+                self.remember_signed_in(&user);
                 self.persist_after_login();
                 Ok(())
             }
+            // Counted here rather than in `from_sign_in`, which is reached from
+            // paths that have no flow to count against.
+            Err(grammers_client::SignInError::InvalidPassword(_)) => {
+                Err(AuthError::InvalidPassword {
+                    attempts_left: self.password_attempts.refuse(),
+                })
+            }
             Err(error) => Err(AuthError::from_sign_in(error)),
         }
+    }
+
+    /// The account that signed in, as Telegram described it during the flow.
+    ///
+    /// `grammers` hands the account back on the step that authenticates it, and
+    /// it is the only place a client that has just logged in can learn which
+    /// account that was without asking: the identifier of your own user is
+    /// disclosed nowhere else. So it is kept rather than dropped, and this reads
+    /// it back — no `users.getFullUser` round trip for something the login
+    /// already answered.
+    ///
+    /// `None` before a sign-in has completed, and on a client restored from a
+    /// stored session: nothing in the store names the account, so a client built
+    /// that way has not been told and must still ask
+    /// [`Client::fetch_account`]. What this returns is a `SignedInUser` and not
+    /// an [`Account`](crate::Account) because it carries no bio and no birthday:
+    /// those live on the *full* user, which login never fetches.
+    #[must_use]
+    pub fn signed_in_user(&self) -> Option<SignedInUser> {
+        self.signed_in
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Keeps the account a completed sign-in identified.
+    ///
+    /// A flow that starts again forgets what the last one was, so a client that
+    /// signs in twice as two people does not keep answering for the first.
+    fn remember_signed_in(&self, user: &grammers_client::peer::User) {
+        if let Some(user) = signed_in_from(&user.raw) {
+            *self
+                .signed_in
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(user);
+        }
+        self.password_attempts.reset();
     }
 
     /// Writes the current session state to the configured [`SessionStore`].
@@ -326,6 +397,44 @@ impl Client {
     /// callers that know something changed and want the write now.
     pub fn persist_session(&self) -> Result<(), FrameworkError> {
         self.session.persist().map_err(FrameworkError::from)
+    }
+
+    /// Signs the account out and forgets the persisted session.
+    ///
+    /// Three things happen, in this order, and only the last two are allowed to
+    /// fail:
+    ///
+    /// 1. Telegram is asked to revoke the key (`auth.logOut`). **Best effort.**
+    ///    It is the only step that needs the network, and a reader who has asked
+    ///    to log out must end up logged out whether or not the request got
+    ///    through — so a failure is logged rather than returned. A key that is
+    ///    still registered on Telegram's side is a revocation this build cannot
+    ///    make; what it can make is a machine that no longer holds it.
+    /// 2. The stored session is cleared, so the next launch has nothing to
+    ///    restore — see [`SessionStore::clear`].
+    /// 3. The in-memory mirror is reset, so *this* client is unauthorised too
+    ///    and no further request can use the key it just discarded.
+    ///
+    /// The client remains usable afterwards: [`Client::is_authorized`] reports
+    /// `false` and the login flow can be run again on it. What a fresh sign-in
+    /// produces is a different account's session and overwrites this one.
+    ///
+    /// This is the framework half only — what a caller shows the reader before
+    /// calling it, and what it does with the result, is not decided here.
+    pub async fn logout(&self) -> Result<(), FrameworkError> {
+        if let Err(error) = self.inner.sign_out().await {
+            tracing::warn!(
+                %error,
+                "telegram did not confirm the sign-out; the stored key is still being discarded"
+            );
+        }
+
+        self.session.clear()?;
+        *self
+            .signed_in
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(())
     }
 
     /// Borrows the wrapped client, for the escape hatch in [`crate::raw`].
