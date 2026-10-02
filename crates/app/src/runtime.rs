@@ -11,7 +11,7 @@ use std::io::Stdout;
 use std::io::{Write, stdout};
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -196,6 +196,11 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
     net::spawn_bring_up(cfg.clone(), tx.clone());
 
     loop {
+        // Before the draw, and every pass: what a day is called — `Today`
+        // rather than a date — depends on when the frame is being read, and the
+        // screen owns no clock of its own.
+        app.record_now(unix_seconds());
+
         terminal
             .draw(|frame| app.render(frame))
             .context("drawing frame")?;
@@ -223,6 +228,20 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
     }
 
     Ok(())
+}
+
+/// What the reader's clock says, in unix seconds.
+///
+/// The one place wall-clock time is read: the loop's own `Instant`s measure
+/// intervals and cannot say what day it is. A clock before the epoch — a
+/// machine whose date is set before 1970 — reads as zero rather than as a
+/// number that would label every day wrong.
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Hands the reader's last yank to the terminal's clipboard, if one is waiting.

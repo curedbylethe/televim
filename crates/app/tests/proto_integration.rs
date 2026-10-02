@@ -18,6 +18,9 @@
 //! | `TELEVIM_TEST_PHONE`    | login    | Phone number of the test account, in `+…` form.        |
 //! | `TELEVIM_TEST_CODE`     | login    | The login code Telegram delivers for that account.     |
 //! | `TELEVIM_TEST_PASSWORD` | 2FA only | Two-factor password, for an account that has one.      |
+//! | `TELEVIM_TEST_PEER_PHONE` | two-account | A second account, the one that reads.            |
+//! | `TELEVIM_TEST_PEER_CODE` | two-account | Its login code.                              |
+//! | `TELEVIM_TEST_PEER_PASSWORD` | 2FA only | Its two-factor password, if it has one.      |
 //!
 //! Each test requests its own login code, and Telegram throttles that hard, so
 //! run them sparingly.
@@ -57,6 +60,12 @@
 //!   and it proves an edit landed without proving it landed on the named
 //!   message. A second account, with a message each way, is what would settle
 //!   both.
+//! - **What a *peer* reads.** One account cannot read as another account, so the
+//!   read-receipt case at the end of this file takes two sessions — it sends a
+//!   message to the second account, prints an instruction, and then asserts that
+//!   the first account's feed carries the watermark once somebody opens that
+//!   conversation on the other side. It is the one test here that needs a person,
+//!   and the one that settles OQ-07 empirically.
 //!
 //! Each is covered as far as one account allows. The fetched list's ordering and
 //! the history's are asserted directly, which is deterministic, and the counts —
@@ -105,6 +114,14 @@ struct TestDc {
     phone: Option<String>,
     code: Option<String>,
     password: Option<String>,
+    /// A second account, for the cases one account cannot answer.
+    ///
+    /// The read receipt is the whole of it: what a *peer* does is not observable
+    /// from one account, so the case that settles OQ-07 needs two sessions and the
+    /// other credentials to build the second one.
+    peer_phone: Option<String>,
+    peer_code: Option<String>,
+    peer_password: Option<String>,
 }
 
 impl TestDc {
@@ -121,12 +138,28 @@ impl TestDc {
             phone: env::var("TELEVIM_TEST_PHONE").ok(),
             code: env::var("TELEVIM_TEST_CODE").ok(),
             password: env::var("TELEVIM_TEST_PASSWORD").ok(),
+            peer_phone: env::var("TELEVIM_TEST_PEER_PHONE").ok(),
+            peer_code: env::var("TELEVIM_TEST_PEER_CODE").ok(),
+            peer_password: env::var("TELEVIM_TEST_PEER_PASSWORD").ok(),
         })
     }
 
     /// The phone number and login code, or `None` when the test needs to skip.
     fn login_credentials(&self) -> Option<(&str, &str)> {
         Some((self.phone.as_deref()?, self.code.as_deref()?))
+    }
+
+    /// The second account's phone number, login code and password.
+    ///
+    /// `None` unless all three variables name something, because a two-account
+    /// case that quietly used the first account's credentials twice would prove
+    /// nothing at all.
+    fn peer_credentials(&self) -> Option<(&str, &str, Option<&str>)> {
+        Some((
+            self.peer_phone.as_deref()?,
+            self.peer_code.as_deref()?,
+            self.peer_password.as_deref(),
+        ))
     }
 }
 
@@ -154,7 +187,16 @@ async fn log_in(client: &Client, dc: &TestDc) -> bool {
     let (phone, code) = dc
         .login_credentials()
         .expect("TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE are set");
+    let password = dc.password.as_deref();
 
+    log_in_as(client, phone, code, password).await
+}
+
+/// Logs in with credentials given rather than read, for a second account.
+///
+/// Split out of [`log_in`] because the second session is configured separately and
+/// may or may not have two-factor authentication; the branch is the same one.
+async fn log_in_as(client: &Client, phone: &str, code: &str, password: Option<&str>) -> bool {
     let token = client
         .request_login_code(phone)
         .await
@@ -167,10 +209,8 @@ async fn log_in(client: &Client, dc: &TestDc) -> bool {
     {
         SignInResult::Success => true,
         SignInResult::PasswordRequired(password_token) => {
-            let password = dc
-                .password
-                .as_deref()
-                .expect("this account has two-factor authentication; set TELEVIM_TEST_PASSWORD");
+            let password =
+                password.expect("this account has two-factor authentication; set its password");
             client
                 .check_password(password_token, password)
                 .await
@@ -1232,6 +1272,189 @@ async fn a_send_edit_and_delete_round_trip_through_saved_messages() {
     assert!(
         window.position_of(sent.id).is_none(),
         "the deletion has to take the message out of the window"
+    );
+}
+
+// ---- a read receipt, which takes two accounts -------------------------------
+
+/// A conversation between the two test accounts.
+struct ReadPair {
+    /// The account that writes the message, and so the one watching for the receipt.
+    sender: ProtoClient,
+
+    /// The conversation, named by the reader's own identifier — which is what the
+    /// sender's side calls it too, since a private conversation is named by the
+    /// peer on both sides.
+    chat_id: i64,
+}
+
+/// How long the feed is watched for a human to read a message.
+///
+/// Six times [`FEED_WINDOW`], because this is the one case in the suite where
+/// something has to happen outside the test: the reader is a person, not a request.
+const HUMAN_WINDOW: Duration = Duration::from_secs(60);
+
+/// Logs both accounts in and opens the conversation between them, or reports that
+/// the run cannot be set up and why.
+async fn read_pair(dc: &TestDc) -> Option<ReadPair> {
+    let (peer_phone, peer_code, peer_password) = dc.peer_credentials()?;
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return None;
+    }
+
+    let (_reader_dir, reader_path) = session_path();
+    let reader = build_client(dc, &reader_path).await;
+    if !log_in_as(&reader, peer_phone, peer_code, peer_password).await {
+        return None;
+    }
+    let Some(chat_id) = self_user_id(&reader).await else {
+        eprintln!("skipped: telegram did not report the second account's identifier");
+        return None;
+    };
+
+    let (_sender_dir, sender_path) = session_path();
+    let sender = build_client(dc, &sender_path).await;
+    if !log_in(&sender, dc).await {
+        return None;
+    }
+    let sender = ProtoClient::new(sender);
+    let chats = sender
+        .fetch_private_chats()
+        .await
+        .expect("the sender's chat list is fetched");
+    if !chats.iter().any(|chat| chat.id == chat_id) {
+        eprintln!(
+            "skipped: the two accounts share no private conversation yet; send one from \
+             TELEVIM_TEST_PEER_PHONE first"
+        );
+        return None;
+    }
+
+    Some(ReadPair { sender, chat_id })
+}
+
+/// Sends a message to the reader and says what has to happen next.
+///
+/// The read is **not** requested from here: the framework deliberately wraps
+/// neither `mark_as_read` nor `clear_mentions`, this stage only receives read
+/// state, and inventing a request for it in a test would exercise a path the
+/// product does not have. So the case asks for the one thing it cannot do by
+/// itself — a person opening the conversation on the other account — and asserts
+/// that the sender's feed says so.
+async fn send_and_ask_to_be_read(pair: &ReadPair, text: &str) -> i64 {
+    let sent = pair
+        .sender
+        .send_message(pair.chat_id, text, None)
+        .await
+        .expect("the message is sent to the second account");
+    assert!(
+        sent.is_outgoing,
+        "the sending account wrote it, so it has to come back as outgoing"
+    );
+
+    eprintln!(
+        ">>> sent message {} to account {}: open that conversation on \
+         TELEVIM_TEST_PEER_PHONE within {HUMAN_WINDOW:?} <<<",
+        sent.id, pair.chat_id
+    );
+
+    sent.id
+}
+
+/// Waits for the sender's feed to say the reader read up to `message_id`.
+///
+/// Reports what it saw either way, because "no receipt arrived" and "a receipt
+/// arrived for something else" are different failures and only the first is
+/// expected when Telegram routes the update to another session.
+async fn wait_for_read_receipt(
+    updates: &mut UpdateStream,
+    chat_id: i64,
+    message_id: i64,
+) -> (bool, Option<i64>, usize) {
+    let deadline = tokio::time::Instant::now() + HUMAN_WINDOW;
+    let mut watermark: Option<i64> = None;
+    let mut seen = 0_usize;
+
+    while watermark.is_none_or(|read| read < message_id) {
+        match next_before(updates, deadline).await {
+            FeedStep::Update(UpdateEvent::ReadReceipt {
+                chat_id: about,
+                max_id,
+            }) => {
+                seen += 1;
+                if about == chat_id {
+                    watermark = Some(watermark.map_or(max_id, |read| read.max(max_id)));
+                }
+            }
+            FeedStep::Update(_) => seen += 1,
+            FeedStep::Failed(error) => {
+                eprintln!("the feed reported a failure it can recover from: {error}");
+            }
+            FeedStep::Quiet => break,
+        }
+    }
+
+    (
+        watermark.is_some_and(|read| read >= message_id),
+        watermark,
+        seen,
+    )
+}
+
+/// The peer reading this account's message arrives as a read receipt whose
+/// watermark covers it.
+///
+/// This is the empirical half of OQ-07, and the only case in the suite that needs
+/// two accounts: everything else here can be observed from one, but *what the peer
+/// does* cannot. It is opt-in, out of CI, and — as every assertion in it says —
+/// best-effort: Telegram delivers each update to one randomly chosen active
+/// session, so a receipt that never arrives is a receipt that was never sent to
+/// this client rather than one that was lost on the way.
+///
+/// The documented caveats are why this asserts rather than assumes: it is the
+/// only thing that can settle whether the watermark means what the design says.
+#[tokio::test]
+async fn a_peers_read_arrives_as_a_read_receipt_covering_the_message() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+
+    let Some(pair) = read_pair(&dc).await else {
+        return;
+    };
+
+    // Taken before anything is sent, so the receipt cannot be missed.
+    let mut updates = pair
+        .sender
+        .subscribe_updates()
+        .await
+        .expect("the sender's feed is taken for the first time");
+
+    let marker = std::process::id();
+    let message_id =
+        send_and_ask_to_be_read(&pair, &format!("televim read receipt {marker}")).await;
+
+    let (read, watermark, seen) =
+        wait_for_read_receipt(&mut updates, pair.chat_id, message_id).await;
+
+    eprintln!(
+        "sent message {message_id} to account {}; the reader marked it read; the feed reported \
+         watermark {watermark:?} over {seen} update(s)",
+        pair.chat_id
+    );
+
+    assert_eq!(
+        watermark.is_some_and(|read| read >= message_id),
+        read,
+        "the watermark must cover the message the reader read, and nothing else"
+    );
+    assert!(
+        read,
+        "a peer reading this account's message must arrive as a ReadReceipt whose max_id covers \
+         it; if Telegram routed the update elsewhere, this is a delivery caveat rather than a \
+         fault in the mapping — re-run with only one of the two accounts online"
     );
 }
 
