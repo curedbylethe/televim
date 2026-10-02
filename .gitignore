@@ -27,8 +27,8 @@ televim.toml
 *.log
 
 # ai
-AGENTS.md
 .workbuddy-ai/
+.opencode/index
 
 // env
 .env
