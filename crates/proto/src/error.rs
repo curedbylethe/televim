@@ -10,6 +10,12 @@
 
 use thiserror::Error;
 
+#[cfg(feature = "live")]
+use telegram_framework::{AuthError, Refusal};
+
+#[cfg(feature = "live")]
+use crate::auth::refusal_of;
+
 /// Something went wrong while talking to Telegram, or while translating what it
 /// answered into a `domain` type.
 ///
@@ -56,4 +62,74 @@ pub enum ProtoError {
         /// The identifier that could not be narrowed.
         id: i64,
     },
+
+    /// A sign-in step was refused, or could not reach Telegram.
+    ///
+    /// Carries the refusal rather than the error, because the thing a caller
+    /// has to do with a refusal is say it: `classify` already read Telegram's
+    /// error name, and [`refusal_sentence`](crate::refusal_sentence) turns the
+    /// result into the sentence the panel draws. The error itself is kept in
+    /// `detail` so the detail `grammers` carries stays reachable — a flood
+    /// wait's length, a request's name — without a `grammers` dependency.
+    #[cfg(feature = "live")]
+    #[error("{}", crate::refusal_sentence(refusal))]
+    Auth {
+        /// What Telegram said, in the vocabulary the panel speaks.
+        refusal: Refusal,
+
+        /// The framework's own error, when the refusal came from one. `None`
+        /// only where there was no error to begin with — an outcome
+        /// `SignInResult` gained that this build does not model yet, which is
+        /// reported rather than ignored.
+        detail: Option<AuthError>,
+    },
+
+    /// A sign-in completed, but the answer did not name an account.
+    ///
+    /// The framework keeps the user login hands back, and that is the only
+    /// object that identifies your own user without a round trip. Telegram can
+    /// answer a sign-in with a `userEmpty`, in which case there is no name to
+    /// hand on — and a `domain::Account` built out of one would be a name
+    /// nobody set, which is the same reason the chat list skips a peer with no
+    /// identifier. Reported rather than papered over with a fetch that could
+    /// not answer it either.
+    #[cfg(feature = "live")]
+    #[error("telegram signed the account in without saying which account it was")]
+    UnnamedAccount,
+}
+
+#[cfg(feature = "live")]
+impl ProtoError {
+    /// The refusal behind this error, if it is one.
+    ///
+    /// The one thing a sign-in panel asks of a failure, and asking for the
+    /// variant instead would mean a `match` over an error it cannot otherwise
+    /// interpret.
+    #[must_use]
+    pub fn refusal(&self) -> Option<&Refusal> {
+        match self {
+            Self::Auth { refusal, .. } => Some(refusal),
+            _ => None,
+        }
+    }
+
+    /// An answer this build has no reading for, reported in the same voice as
+    /// a refusal rather than dropped.
+    pub(crate) fn unrecognised(answer: String) -> Self {
+        Self::Auth {
+            refusal: Refusal::Other(answer),
+            detail: None,
+        }
+    }
+}
+
+#[cfg(feature = "live")]
+impl From<AuthError> for ProtoError {
+    fn from(error: AuthError) -> Self {
+        let refusal = refusal_of(&error);
+        Self::Auth {
+            refusal,
+            detail: Some(error),
+        }
+    }
 }

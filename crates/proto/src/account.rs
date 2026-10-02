@@ -12,8 +12,10 @@
 //! which is the only place a `grammers` type exists. This module's whole job is
 //! that no `telegram_framework` or `grammers` type reaches `domain` or `tui`.
 
+#[cfg(feature = "live")]
 use domain::account::{Account, Birthday};
 
+#[cfg(feature = "live")]
 use crate::ProtoError;
 
 #[cfg(feature = "live")]
@@ -77,6 +79,7 @@ impl crate::ProtoClient {
 /// them. The rule this module follows is the same one `types` follows — one
 /// named function per translation, so what a value became is named at the call
 /// site rather than implied.
+#[cfg(feature = "live")]
 fn translate(account: telegram_framework::Account) -> Account {
     Account {
         user_id: account.user_id,
@@ -90,6 +93,7 @@ fn translate(account: telegram_framework::Account) -> Account {
 }
 
 /// Translates one birthday.
+#[cfg(feature = "live")]
 fn birthday(birthday: telegram_framework::Birthday) -> Birthday {
     Birthday {
         day: birthday.day,
@@ -98,7 +102,7 @@ fn birthday(birthday: telegram_framework::Birthday) -> Birthday {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "live"))]
 mod tests {
     use super::*;
 

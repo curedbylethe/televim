@@ -80,6 +80,8 @@ pub use history::HistoryCursor;
 pub use search::SearchResults;
 
 #[cfg(feature = "live")]
+pub use auth::{LoginCode, PasswordChallenge, SignIn, refusal_sentence};
+#[cfg(feature = "live")]
 pub use client::ProtoClient;
 #[cfg(feature = "live")]
 pub use stream::UpdateStream;
