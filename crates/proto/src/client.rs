@@ -87,4 +87,32 @@ impl ProtoClient {
 
         Ok(UpdateStream::new(self.inner.subscribe_updates().await?))
     }
+
+    /// Signs the account out and forgets the persisted session.
+    ///
+    /// Every other method here reads from a session or fills it in; this is the
+    /// one that ends it. The stored session is cleared, so a next launch has
+    /// nothing to restore and comes up with the sign-in surface rather than a
+    /// client it believes in.
+    ///
+    /// The client is not spent by it. It stays usable and reads as
+    /// unauthorised afterwards — `is_authorized` on the framework client reports
+    /// `false` — so the sign-in flow can run again on this same client instead of
+    /// the reader restarting the program.
+    ///
+    /// Only the local clear can fail. Asking Telegram to revoke the key is best
+    /// effort — a reader who has asked to log out must end up logged out whether
+    /// or not that request got through — so a failure there is logged by the
+    /// framework rather than returned here, and what a caller shows before making
+    /// this call, and what it does with the result, is still its own decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] if the persisted session could not be
+    /// cleared.
+    pub async fn logout(&self) -> Result<(), ProtoError> {
+        self.inner.logout().await?;
+
+        Ok(())
+    }
 }
