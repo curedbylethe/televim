@@ -283,6 +283,11 @@ impl ConversationWindow {
             // it to: everything the window holds belongs to one, so an
             // identifier is enough to find the message if it is here at all.
             UpdateEvent::MessagesDeleted { message_ids } => self.apply_deletion(message_ids),
+
+            // The window holds messages and nothing else. Whether they have been
+            // read is the conversation's fact, kept beside the window rather than
+            // in it — which is what lets it outlive the page on show.
+            UpdateEvent::ReadReceipt { .. } => false,
         }
     }
 
@@ -389,6 +394,19 @@ pub struct ConversationView {
     /// [`FAILED_REASONS`], and an evicted reason takes its message with it.
     failures: Vec<(i64, String)>,
 
+    /// The highest outgoing message identifier the peer has read.
+    ///
+    /// A watermark rather than a state per message, because that is how the fact
+    /// arrives: one number saying everything up to here has been read. Storing it
+    /// once makes "has this been read" arithmetic over the identifier a message
+    /// already has, rather than a mutation of every message below it — and it is
+    /// what a group's state is derived from when the panel draws it.
+    ///
+    /// `None` is its own answer rather than "nothing has been read": it means
+    /// nothing has *said*, which the panel shows as no receipt at all rather than
+    /// as a claim that a message is unread.
+    read_watermark: Option<i64>,
+
     /// The next placeholder identifier to hand out.
     ///
     /// Starts at `-1` and counts down. Negative, always, so a placeholder can
@@ -409,6 +427,7 @@ impl ConversationView {
             window: ConversationWindow::new(chat_id),
             auto_follow: true,
             failures: Vec::new(),
+            read_watermark: None,
             next_temp_id: -1,
         }
     }
@@ -439,10 +458,26 @@ impl ConversationView {
 
     /// Applies an event from the feed, reporting whether anything changed.
     ///
-    /// Delegates to the window, which is where the messages live.
+    /// Everything but a read acknowledgement delegates to the window, which is
+    /// where the messages live; the acknowledgement is folded here instead,
+    /// because the watermark is the view's state and outlives the page on show —
+    /// a chat switch replaces the window, and how far that conversation has been
+    /// read does not change because the reader looked away.
     #[must_use]
     pub fn apply_event(&mut self, event: &UpdateEvent) -> bool {
-        self.window.apply_event(event)
+        match event {
+            UpdateEvent::ReadReceipt { chat_id, max_id } => self.apply_read(*chat_id, *max_id),
+            _ => self.window.apply_event(event),
+        }
+    }
+
+    /// Advances the read watermark, and only for the conversation on show.
+    ///
+    /// A receipt about another conversation is not this view's business: the chat
+    /// that owns it will be reopened later and asked again, and a watermark held
+    /// here would mark messages read that nobody read.
+    fn apply_read(&mut self, chat_id: i64, max_id: i64) -> bool {
+        chat_id == self.window.chat_id && self.set_read_watermark(max_id)
     }
 
     /// Records the reader's own message before the server has acknowledged it.
@@ -544,6 +579,40 @@ impl ConversationView {
             .iter()
             .find(|(id, _)| *id == message_id)
             .map(|(_, reason)| reason.as_str())
+    }
+
+    /// The highest outgoing message identifier the peer has read, if anything has
+    /// said.
+    #[must_use]
+    pub fn read_watermark(&self) -> Option<i64> {
+        self.read_watermark
+    }
+
+    /// Records that the peer has read every outgoing message up to `max_id`.
+    ///
+    /// Reports whether the watermark moved. Monotone — `max(existing, max_id)` —
+    /// because the acknowledgements arrive best-effort and can repeat or arrive
+    /// out of order, and a watermark that went backwards would take back a read
+    /// the reader has already been shown.
+    ///
+    /// An identifier at or below zero is refused: the only such identifiers are
+    /// the placeholders of sends the server has not acknowledged, and no peer can
+    /// have read one of those.
+    ///
+    /// This is where the feed's read state enters the client. Nothing here reads
+    /// a clock, fetches anything, or knows what a protocol update is; the caller
+    /// has already decided what the number means.
+    pub fn set_read_watermark(&mut self, max_id: i64) -> bool {
+        if max_id <= 0 {
+            return false;
+        }
+
+        let moved = self.read_watermark.is_none_or(|read| max_id > read);
+        if moved {
+            self.read_watermark = Some(max_id);
+        }
+
+        moved
     }
 
     /// Forgets any reason recorded for a message.
@@ -1197,6 +1266,146 @@ mod tests {
         assert!(view.confirm_sent(-1, message(42, 6, "hello")));
 
         assert_eq!(view.window.newest_id(), Some(6));
+    }
+
+    /// A conversation says nothing about the peer's reading until something says
+    /// something, and `None` is that answer rather than "nothing has been read".
+    #[test]
+    fn a_view_starts_with_no_read_watermark() {
+        assert_eq!(ConversationView::new(42).read_watermark(), None);
+    }
+
+    /// The watermark is one number for the whole conversation, and it only ever
+    /// moves forward: an acknowledgement that repeats or arrives late must not
+    /// take back a read the reader has already been shown.
+    #[test]
+    fn the_read_watermark_is_monotone() {
+        let mut view = ConversationView::new(42);
+
+        assert!(view.set_read_watermark(7));
+        assert_eq!(view.read_watermark(), Some(7));
+        assert!(view.set_read_watermark(9), "a higher read moves it");
+        assert_eq!(view.read_watermark(), Some(9));
+        assert!(
+            !view.set_read_watermark(9),
+            "the same read again changes nothing"
+        );
+        assert!(
+            !view.set_read_watermark(8),
+            "and a lower one does not take it back"
+        );
+        assert_eq!(view.read_watermark(), Some(9));
+    }
+
+    /// A send the server has not acknowledged has an identifier no peer can have
+    /// read, so it is not a watermark.
+    #[test]
+    fn a_read_watermark_must_name_a_real_message() {
+        let mut view = ConversationView::new(42);
+
+        assert!(!view.set_read_watermark(0));
+        assert!(!view.set_read_watermark(-1));
+        assert_eq!(view.read_watermark(), None);
+    }
+
+    /// The watermark is a fact about the conversation rather than about the
+    /// window, so replacing the window — as a page, a chat switch or a jump does —
+    /// does not forget it.
+    #[test]
+    fn the_read_watermark_outlives_the_window_it_was_recorded_against() {
+        let mut view = ConversationView::new(42);
+        view.set_read_watermark(5);
+
+        view.window.replace([message(42, 6, "hello")]);
+
+        assert_eq!(view.read_watermark(), Some(5));
+    }
+
+    /// A read acknowledgement advances the watermark of the conversation it names,
+    /// and of no other: a receipt about a chat the reader is not in is not this
+    /// view's business.
+    #[test]
+    fn a_read_acknowledgement_advances_the_open_conversation_only() {
+        let mut view = ConversationView::new(42);
+
+        assert!(view.apply_event(&UpdateEvent::ReadReceipt {
+            chat_id: 42,
+            max_id: 5
+        }));
+        assert_eq!(view.read_watermark(), Some(5));
+
+        assert!(
+            !view.apply_event(&UpdateEvent::ReadReceipt {
+                chat_id: 43,
+                max_id: 9
+            }),
+            "a conversation that is not on show is not this view's"
+        );
+        assert_eq!(
+            view.read_watermark(),
+            Some(5),
+            "and its watermark is unmoved"
+        );
+    }
+
+    /// A watermark only moves forward, so a repeated or late acknowledgement
+    /// reports no change and leaves the reader's view of what was read alone.
+    #[test]
+    fn a_read_acknowledgement_never_moves_the_watermark_backwards() {
+        let mut view = ConversationView::new(42);
+        assert!(view.apply_event(&UpdateEvent::ReadReceipt {
+            chat_id: 42,
+            max_id: 9,
+        }));
+
+        for older in [9, 5] {
+            assert!(
+                !view.apply_event(&UpdateEvent::ReadReceipt {
+                    chat_id: 42,
+                    max_id: older
+                }),
+                "{older} is not further than 9, and nothing observable moved"
+            );
+        }
+        assert_eq!(view.read_watermark(), Some(9));
+    }
+
+    /// A read that names no message is not a read: the only identifiers below one
+    /// are placeholders of sends the server has not acknowledged, and no peer can
+    /// have read one of those.
+    #[test]
+    fn a_read_acknowledgement_of_nothing_real_is_benign() {
+        let mut view = ConversationView::new(42);
+
+        assert!(!view.apply_event(&UpdateEvent::ReadReceipt {
+            chat_id: 42,
+            max_id: 0
+        }));
+        assert_eq!(view.read_watermark(), None);
+
+        assert!(view.apply_event(&UpdateEvent::ReadReceipt {
+            chat_id: 42,
+            max_id: 3
+        }));
+        assert_eq!(view.read_watermark(), Some(3));
+    }
+
+    /// A watermark older than the page on show is still the right answer for the
+    /// messages that page holds: comparison, not rewriting, is what makes an older
+    /// page cost nothing extra.
+    #[test]
+    fn a_read_watermark_marks_the_older_page_it_covers() {
+        let mut view = ConversationView::new(42);
+        view.window
+            .replace((4..=6).map(|id| message(42, id, "text")));
+        view.set_read_watermark(5);
+
+        assert!(view.window.iter().any(|message| message.id == 5));
+        assert_eq!(
+            view.read_watermark(),
+            Some(5),
+            "which is what a reader is told: everything up to here was read"
+        );
     }
 
     #[test]

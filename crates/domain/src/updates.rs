@@ -74,6 +74,28 @@ pub enum UpdateEvent {
         /// Identifiers of the deleted messages.
         message_ids: Vec<i64>,
     },
+
+    /// The other party in a conversation has read this account's messages, up to a
+    /// point.
+    ///
+    /// A watermark rather than an event per message, because that is what the
+    /// protocol carries: one number meaning "outgoing messages up to here have
+    /// been read". Which is also why it is the *conversation's* fact rather than
+    /// a message's — a conversation holds one of these and answers "has this been
+    /// read" by comparison, so nothing has to be rewritten when it moves.
+    ///
+    /// Outgoing only. This account reading someone else's messages is a different
+    /// fact about a different conversation, and the design draws no receipt for it.
+    ///
+    /// Best-effort, because the wire says it that way: a receipt that never
+    /// arrives was never sent, rather than having been lost on the way.
+    ReadReceipt {
+        /// The conversation whose messages were read.
+        chat_id: i64,
+
+        /// Every outgoing message in it up to this identifier has been read.
+        max_id: i64,
+    },
 }
 
 /// How many messages [`ChatList`] holds before the oldest is dropped.
@@ -132,6 +154,11 @@ impl ChatList {
                 new_text,
             } => self.apply_edit(chat_id, message_id, new_text),
             UpdateEvent::MessagesDeleted { message_ids } => self.apply_deletion(&message_ids),
+            // The list counts what has *not* been read, and this says what has:
+            // a chat list entry would need the inbox watermark to correct an
+            // unread count, and that is a different update entirely. Nothing here
+            // observes a read, so nothing changes.
+            UpdateEvent::ReadReceipt { .. } => false,
         }
     }
 
@@ -317,6 +344,26 @@ mod tests {
         assert_eq!(list.messages[0].id, 10);
         assert_eq!(list.messages[0].text, "hello");
         assert_eq!(list.chats[0].unread_count, 1);
+    }
+
+    /// A read acknowledgement says what *has* been read, and the list only knows
+    /// what has not: correcting an unread count would take the inbox watermark,
+    /// which is a different update about this account's own reading. So nothing
+    /// here changes, and saying so is the whole answer.
+    #[test]
+    fn a_read_acknowledgement_changes_nothing_in_the_list() {
+        let mut list = list();
+        applied(&mut list, arrival(1, 10, "hello", 2_000));
+
+        assert!(
+            !list.apply_update(UpdateEvent::ReadReceipt {
+                chat_id: 1,
+                max_id: 9
+            }),
+            "the list has no use for an outgoing read watermark"
+        );
+        assert_eq!(list.chats[0].unread_count, 1, "and the count is untouched");
+        assert_eq!(list.messages.len(), 1, "as is the window");
     }
 
     #[test]

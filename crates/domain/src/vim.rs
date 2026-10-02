@@ -279,6 +279,11 @@ fn word_end(text: &str, at: usize) -> usize {
 }
 
 /// Cursor state for a scrollable buffer of `total` items.
+///
+/// The buffer's items, which is what the cursor counts: a position here names
+/// one of them and nothing else, so a row that is drawn on screen without being
+/// one of them — a day separator, a row announcing a fetch — is not somewhere
+/// this cursor can be put and cannot make a motion stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VimState {
     cursor: usize,
