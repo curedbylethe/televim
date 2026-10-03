@@ -92,8 +92,11 @@ Real, and named so they are not mistaken for oversights:
   logical order and leaves the reordering to the terminal, which is the right
   answer for a terminal that shapes — kitty, wezterm, foot, iTerm2, VTE — and the
   wrong one for the two that do not, because nothing reverses the run for them.
-  The follow-up is the opt-in `BidiMode::Visual`, which applies the permutation
-  here instead; see [`decisions.md`](./decisions.md).
+  The opt-in `BidiMode::Visual` applies the permutation here instead, and is
+  reachable as `bidi = "visual"` (`TELEVIM_BIDI=visual`); it is one value for the
+  machine rather than one per terminal, so an ssh hop into a shaping terminal
+  keeps the setting it was launched with. Per-`TERM` is the v2 hook; see
+  [`decisions.md`](./decisions.md).
 - **Arabic and Persian letters are not contextually joined, and reordering cannot
   join them.** Nothing in this program performs script shaping, so in the
   opt-in `Visual` mode on a non-shaping terminal the letters render unjoined and
