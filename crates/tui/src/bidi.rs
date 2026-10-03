@@ -12,6 +12,11 @@
 //! Unicode Bidirectional Algorithm over that row alone, at the base direction the
 //! message was given ([`visual_row`]).
 //!
+//! Whether this program permutes the pieces or hands them over as they are stored
+//! is [`BidiMode`], and it is a fact about the terminal rather than about the row:
+//! one terminal class reverses the run itself and one does not, and only the
+//! reader knows which they are on.
+//!
 //! A row is not a reordered `String`. It stays `&text[range]` — [`crate::wrap`]
 //! needs that, and so does every row range in the panel — and what comes back is
 //! a list of *logical* byte ranges in the order they are drawn. Each range is a
@@ -32,6 +37,43 @@ use unicode_bidi::{Level, ParagraphBidiInfo, get_base_direction_full};
 
 use crate::grapheme::clusters;
 use crate::wrap::columns;
+
+/// Who arranges a right-to-left row: the terminal, or this program.
+///
+/// Chosen once, at construction, and never while a frame is being drawn — see
+/// [`crate::app::App::bidi`]. It is not a per-frame lookup because the layout
+/// below is a pure function of the window and the panel's width: a mode read out
+/// of mutable state during layout would make the same conversation two different
+/// heights depending on when it was asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BidiMode {
+    /// Emit the row as it is stored, and let the terminal rearrange it.
+    ///
+    /// The default, and the right one for the terminals that shape: kitty,
+    /// wezterm, foot, iTerm2 and VTE all run a shaper that reverses a
+    /// right-to-left run for us, so a second reversal here would scramble the
+    /// row rather than fix it. On a terminal that neither shapes nor applies the
+    /// algorithm (xterm, alacritty) this leaves the row left-to-right, which is
+    /// what it does today.
+    #[default]
+    Terminal,
+
+    /// Emit the row already permuted, by [`visual_row`].
+    ///
+    /// Correct on a terminal that draws the cells it is handed and does nothing
+    /// else, and scrambled on one that shapes. Which of those a reader has is a
+    /// setting on their terminal and not a fact about this program, so it is
+    /// theirs to say rather than something to detect.
+    Visual,
+}
+
+impl BidiMode {
+    /// Whether rows are permuted here rather than by the terminal.
+    #[must_use]
+    pub fn is_visual(self) -> bool {
+        matches!(self, Self::Visual)
+    }
+}
 
 /// One piece of a row, as it is drawn.
 #[derive(Clone, Debug, PartialEq, Eq)]

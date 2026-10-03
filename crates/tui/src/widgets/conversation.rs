@@ -8,6 +8,14 @@
 //! counting anything itself. Nothing is cached between frames: a couple of
 //! hundred rows is cheap to build, and a cache would be a second thing to keep
 //! in step with the window.
+//!
+//! One thing about a row is answered here rather than in [`crate::rows`]: the
+//! order its pieces are *drawn* in. Rows are broken logically, so a message is
+//! the same height in either mode and the bar counts the same rows — but a
+//! right-to-left row reaches the terminal in a different order than it is stored
+//! when the reader has asked this program to permute it ([`App::bidi`]). The
+//! panel asks [`crate::bidi`] for that order and hands it to [`text_row`], which
+//! paints each piece of the row and clips the selection to it.
 
 use std::ops::Range;
 
@@ -21,6 +29,7 @@ use ratatui::widgets::{
 use domain::message::Message;
 
 use crate::app::{App, FetchDirection, Focus, JUMP_LABEL};
+use crate::bidi::{self, BidiMode};
 use crate::rows::{self, RowSpan};
 use crate::text_row;
 use crate::wrap::columns;
@@ -339,7 +348,14 @@ fn message_row<'m>(
 
     // The text's own three steps — the text, a match on it, a selection split out
     // of it — are [`text_row`]'s, because the line and a card row want them too.
-    spans.extend(text_row::spans(&text_row::TextRow {
+    //
+    // The row itself is `&message.text[range]` and stays that way: which of its
+    // pieces reach the terminal first is a question about the order they are
+    // *drawn* in, and [`crate::bidi`] answers that with logical slices of the very
+    // same bytes. In [`BidiMode::Terminal`] there is no answer to ask for — the
+    // terminal's shaper reverses a right-to-left run for us, and permuting here
+    // would reverse it twice.
+    let row = text_row::TextRow {
         ink: text_row::Ink::readonly(&app.theme),
         text: &message.text,
         range: range.clone(),
@@ -353,7 +369,18 @@ fn message_row<'m>(
         caret: None,
         reversed: false,
         concealed: false,
-    }));
+    };
+    match app.bidi() {
+        BidiMode::Terminal => spans.extend(text_row::spans(&row)),
+        BidiMode::Visual => {
+            // One direction for the whole message, one permutation per row: the
+            // base level is the message's, and a row of an all-neutral message
+            // carries no evidence of its own.
+            let base = bidi::base_direction(&message.text);
+            let pieces = bidi::visual_row(&message.text[range.clone()], base);
+            spans.extend(text_row::spans_permuted(&row, &pieces));
+        }
+    }
 
     if place.last
         && let Some(note) = rows::trailing_note(app, message, place.group)
@@ -860,6 +887,32 @@ mod tests {
         showing(vec![at(1, 0, false, HEBREW), at(2, 60, true, ARABIC)])
     }
 
+    /// The same conversation, drawing right-to-left rows itself.
+    ///
+    /// The mode is chosen at construction, which is the whole of what makes a row
+    /// the same height either way: nothing here mutates an application and asks
+    /// the screen to come out differently.
+    fn showing_rtl_visual() -> App {
+        showing_rtl().with_bidi(BidiMode::Visual)
+    }
+
+    /// The glyphs of `text` as the screen shows them left to right, which is
+    /// `text` itself in [`BidiMode::Terminal`] and its reverse in
+    /// [`BidiMode::Visual`] for a fixture with no embedded left-to-right run.
+    ///
+    /// Both fixtures are one-directional words with a space between them, so the
+    /// whole row is one reversed run and the drawn order is the reverse of the
+    /// stored one. That is a property of these two strings, not a claim about
+    /// right-to-left text in general — an embedded number would stay as it is
+    /// written, which is what [`crate::bidi`]'s own tests pin.
+    fn in_drawing_order(text: &str, visual: bool) -> String {
+        if visual {
+            text.chars().rev().collect()
+        } else {
+            text.to_owned()
+        }
+    }
+
     /// One row of the panel's body as `(column, symbol)` for every cell from
     /// [`BODY_X`] to the scrollbar, in ascending column order.
     ///
@@ -940,6 +993,254 @@ mod tests {
                 .expect("the glyph is in the string")
                 .into(),
         )
+    }
+
+    /// The cells one row of the panel's body spells its body text in, from the
+    /// first text column onwards, for as many cells as the text has clusters.
+    ///
+    /// Reads the cells rather than the string, because a permuted row and an
+    /// unpermuted one have the same letters in them and are told apart only by
+    /// which column holds which letter. The extent is the message's own rather than
+    /// a run of non-blank cells: a right-to-left sentence has a space in the middle
+    /// of it, and stopping at the first one would read half a word.
+    ///
+    /// Clusters rather than [`columns`], because both fixtures are one cell per
+    /// cluster and [`columns`] says otherwise about the Arabic — `سلام` holds the
+    /// lam-alef pair, which it measures as one cell narrower than the terminal
+    /// draws it. Counting what was drawn rather than what was measured keeps the
+    /// assertion about the order of the glyphs, which is the whole question here.
+    fn spelled(buffer: &Buffer, y: u16, first: u16, text: &str) -> Vec<(u16, String)> {
+        body_cells(buffer, y)
+            .into_iter()
+            .skip(usize::from(first - BODY_X))
+            .take(crate::grapheme::clusters(text).count())
+            .collect()
+    }
+
+    /// The first `n` glyphs of `text`, as they are read when the row is drawn in
+    /// `visual` order.
+    ///
+    /// Reversed rather than re-permuted, because a run of one direction comes back
+    /// reversed — see [`in_drawing_order`], which says why that holds for these
+    /// fixtures.
+    fn leading(text: &str, n: usize, visual: bool) -> String {
+        let glyphs: Vec<char> = text.chars().take(n).collect();
+
+        if visual {
+            glyphs.into_iter().rev().collect()
+        } else {
+            glyphs.into_iter().collect()
+        }
+    }
+
+    /// The letters in the cells at `columns`, read left to right.
+    fn letters_at(buffer: &Buffer, y: u16, columns: &[u16]) -> String {
+        columns
+            .iter()
+            .map(|column| cell(buffer, *column, y).symbol())
+            .collect()
+    }
+
+    // ---- right-to-left: visual order -------------------------------------
+
+    /// The claim the whole of `BidiMode::Visual` exists for: a right-to-left row
+    /// is drawn with its logical-first glyph at the right of its run.
+    ///
+    /// Every glyph is pinned to its own column rather than the row being
+    /// `contains`-ed, and both fixtures are checked — the Hebrew the reader is
+    /// sent and the Arabic they sent, because they sit on rows that begin their
+    /// text in different columns and a row that reordered only one of them would
+    /// pass on the other.
+    #[test]
+    fn a_right_to_left_row_is_drawn_with_its_first_glyph_at_the_right() {
+        let screen = screen(&showing_rtl_visual(), 80, 24);
+
+        for (text, who, y) in [(HEBREW, "them", FIRST), (ARABIC, "you", FIRST + 1)] {
+            let first = text_column(&screen, y, who);
+            let columns = spelled(&screen, y, first, text);
+
+            assert_eq!(
+                letters_at(
+                    &screen,
+                    y,
+                    &columns.iter().map(|(x, _)| *x).collect::<Vec<_>>()
+                ),
+                in_drawing_order(text, true),
+                "every glyph of the {who} row is drawn, in the order it is read: {:?}",
+                body_row(&screen, y)
+            );
+
+            // The glyph a reader reads first is the rightmost of the run, and the
+            // last is the leftmost: the two ends of the claim, pinned.
+            assert_eq!(
+                cell(&screen, columns.last().expect("the row has text").0, y).symbol(),
+                text.chars()
+                    .next()
+                    .expect("the fixture has a glyph")
+                    .to_string(),
+                "the first glyph of {text:?} is at the right of its run"
+            );
+            assert_eq!(
+                cell(&screen, columns[0].0, y).symbol(),
+                text.chars()
+                    .last()
+                    .expect("the fixture has a glyph")
+                    .to_string(),
+                "and the last is at the left"
+            );
+        }
+    }
+
+    /// The default is unchanged: the same two rows, drawn as they are stored.
+    ///
+    /// The [`BidiMode::Terminal`] half of the claim above, and the reason the
+    /// fixture is pinned twice: a reorder that reached the default path would
+    /// corrupt every right-to-left message on a terminal that shapes, which is
+    /// where most of the readers of this text are.
+    #[test]
+    fn the_default_mode_is_still_logical_and_the_mode_is_a_construction_choice() {
+        let app = showing_rtl();
+        assert_eq!(
+            app.bidi(),
+            BidiMode::Terminal,
+            "a fresh application hands the row to the terminal"
+        );
+
+        let screen = screen(&app, 80, 24);
+        for (text, who, y) in [(HEBREW, "them", FIRST), (ARABIC, "you", FIRST + 1)] {
+            let first = text_column(&screen, y, who);
+
+            assert_eq!(
+                cell(&screen, first, y).symbol(),
+                text.chars().next().expect("a glyph").to_string(),
+                "{text:?} still begins at the left of its body text: {:?}",
+                body_row(&screen, y)
+            );
+        }
+    }
+
+    /// A permuted row is the same row: same height, same geometry, same trailing
+    /// note in the same column.
+    ///
+    /// Everything a reader scrolls by is worked out in [`crate::rows`] from the
+    /// window and the panel's width, before anything is permuted — so a mode that
+    /// changed a row's height would change the number of rows between two messages
+    /// and every selection and motion with it. The note is the last check because
+    /// its gap is computed from the row's width, and a permutation that moved a
+    /// glyph a column would move the note with it.
+    #[test]
+    fn a_permuted_row_is_the_same_height_and_its_note_stands_where_it_did() {
+        let logical = showing_rtl();
+        let visual = showing_rtl_visual();
+
+        assert_eq!(
+            logical.row_layout(),
+            visual.row_layout(),
+            "the layout is a pure function of the window and the width, so the mode \
+             cannot be in it"
+        );
+
+        let before = screen(&logical, 80, 24);
+        let after = screen(&visual, 80, 24);
+
+        for y in message_rows(&after) {
+            assert_eq!(
+                row(&before, y).trim_end().is_empty(),
+                row(&after, y).trim_end().is_empty(),
+                "row {y} is drawn in one mode and empty in the other"
+            );
+        }
+
+        // The note is on the last row of each group, and its gap is worked out from
+        // the row's own width — which a permutation cannot change, because it
+        // moves the cells and not the count of them.
+        //
+        // The Hebrew row, and not the Arabic: `سلام` holds the lam-alef pair, which
+        // [`columns`] measures as one cell narrower than a terminal draws it, so on
+        // the default path the renderer offsets the next span by a column short and
+        // the note lands one column early. That is this tree's width of a lam-alef
+        // and nothing to do with the reorder, so pinning it here would pin a defect.
+        let theirs = FIRST;
+        let hour = clock_at(0);
+        assert_eq!(
+            column_holding(&before, theirs, &hour[..1]),
+            column_holding(&after, theirs, &hour[..1]),
+            "the note stands in the same column: the row is as wide either way"
+        );
+        assert_eq!(
+            spelled(
+                &before,
+                theirs,
+                text_column(&before, theirs, "them"),
+                HEBREW
+            )
+            .len(),
+            spelled(&after, theirs, text_column(&after, theirs, "them"), HEBREW).len(),
+            "and so is the text in front of it"
+        );
+    }
+
+    /// A selection follows its own characters, not its columns.
+    ///
+    /// The selection is a range of bytes in the message and stays one: the paint
+    /// clips it to each permuted piece, so the letters carrying the selection's
+    /// background are the same letters whichever order the row is drawn in. A
+    /// paint that clipped once and then permuted would move the highlight onto
+    /// the wrong letters without changing its width — which no width assertion
+    /// can see, and which is why the letters themselves are read back.
+    #[test]
+    fn a_selection_covers_the_same_characters_after_the_reorder() {
+        // The first two characters of the Hebrew: `של`, which the reader reads
+        // first and which sit rightmost in [`BidiMode::Visual`].
+        const CHARS: std::ops::Range<usize> = 0..2;
+
+        let mut logical = showing_rtl();
+        selecting_chars(&mut logical, 1, CHARS.start, CHARS.end);
+        let mut visual = showing_rtl_visual();
+        selecting_chars(&mut visual, 1, CHARS.start, CHARS.end);
+        let y = FIRST;
+
+        let before = screen(&logical, 80, 24);
+        let after = screen(&visual, 80, 24);
+
+        let read = |buffer: &Buffer| -> String {
+            selected_text_columns(buffer, y, FIRST)
+                .iter()
+                .map(|x| cell(buffer, BODY_X + SENDER as u16 + *x as u16, y).symbol())
+                .collect()
+        };
+        let logical_letters = read(&before);
+        let visual_letters = read(&after);
+
+        assert_eq!(
+            logical_letters,
+            leading(HEBREW, CHARS.end, false),
+            "the selection covers the first two glyphs, in logical order"
+        );
+        assert_eq!(
+            visual_letters,
+            leading(HEBREW, CHARS.end, true),
+            "and the same two glyphs in visual order — the highlight followed the \
+             characters rather than the columns"
+        );
+    }
+
+    /// A row that is not right-to-left is untouched by the mode.
+    ///
+    /// The permutation is a no-op on left-to-right text — it comes back as one
+    /// chunk covering the whole row — so the panel is not asked to draw anything
+    /// different, and this is what proves the mode did not become a general
+    /// reordering.
+    #[test]
+    fn a_left_to_right_message_is_drawn_alike_in_both_modes() {
+        let logical = showing(vec![at(1, 0, false, "hello world")]);
+        let visual = showing(vec![at(1, 0, false, "hello world")]).with_bidi(BidiMode::Visual);
+
+        assert_eq!(
+            row(&screen(&logical, 80, 24), FIRST),
+            row(&screen(&visual, 80, 24), FIRST),
+            "one mode to draw it in"
+        );
     }
 
     // ---- right-to-left: the baseline ------------------------------------
