@@ -36,3 +36,7 @@ __pycache__/
 
 // env
 .env
+
+# The local OpenCode skills the workflow runs from: tooling that ships with the
+# development workflow, not with the client.
+.agents/
