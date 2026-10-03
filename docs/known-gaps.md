@@ -71,10 +71,15 @@ Real, and named so they are not mistaken for oversights:
   gets them back, and the status line names them for as long as it is up.
 - **A feed dropped without `finish` persists a stale update position.** See
   [`decisions.md`](./decisions.md).
-- **`tikv-jemallocator` is not installed.** No allocator work is done. The
-  50 MB ceiling is now measured ([`memory.md`](./memory.md)), but no figure
-  measures the program under load: the two that exist bound it from either
-  side.
+- **No figure measures the program under load.** The 50 MB ceiling is
+  measured ([`memory.md`](./memory.md)) on two processes, and neither is the
+  loaded one: the harness holds 60 chats and a drawn screen but none of the
+  network half, and the binary is the whole program with an empty chat list.
+  The figure for 50 chats in the real binary sits between 3.41 MB and 8.25 MB
+  and has not been taken, because reaching a populated list offline needs a
+  product change. The allocator question itself is closed rather than open: the
+  global allocator is the system allocator, chosen on the measured margins, and
+  no arena pays — see [`decisions.md`](./decisions.md).
 - **No benchmarks and no working PTY tests.** `app/tests/tui_e2e.rs` is
   `#[ignore]`d placeholders awaiting `termlens`. `make measure` is a
   measurement harness, not a benchmark suite: it reports what a run costs, and

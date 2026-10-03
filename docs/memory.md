@@ -298,8 +298,9 @@ which is exactly what happened while calibrating this one.
 
 ### What the harness does not measure
 
-- **Allocation counts.** No counting global allocator is installed; that is the
-  allocator stage, not this one.
+- **Allocation counts.** No counting global allocator is installed, so the
+  report names bytes and frames rather than a count of `alloc` calls; installing
+  one would be a change to what the harness measures rather than a reading of it.
 - **Heap fragmentation.** RSS does not distinguish a fragmented heap from a
   large one.
 - **Cache behaviour.**
@@ -341,10 +342,29 @@ outside an arena that cannot be handed one without that bleed. MTProto decoding
 is inside `grammers`. Recorded in [`decisions.md`](./decisions.md); `bumpalo` is
 not a dependency.
 
-### What is declared but **not** in place
+### The global allocator is `std::alloc::System`
 
-- `tikv-jemallocator` is not installed as the global allocator. The binary runs on
-  the system allocator.
+Chosen against the baseline above, and the alternatives were `tikv-jemallocator`
+and `mimalloc`. The tree is already inside both ceilings with two to three times
+of margin — **5,610,320 B** stripped against < 15 MB, and **3.41 MB** / **8.25 MB**
+RSS@idle against < 50 MB — so a candidate would have to give some of it back to
+be worth adopting. The workload is not the one those allocators target: a
+single-threaded current-thread `tokio` plus one reader thread, not many threads
+against a fragmenting heap. The choice could not be measured on this host either
+— macOS RSS moves by roughly 2x between runs with no code change, so a
+candidate's delta is inside the noise rather than a result — and
+`std::alloc::System` is the one answer that is the same on macOS, Linux and
+Windows and needs no C toolchain on any of them. Windows is not exercised in CI
+and is named as a platform gap.
+
+`#[global_allocator]` does not exist, and if it ever did it would be declared in
+`crates/app/src/main.rs` — the composition root — because an allocator is a
+property of the binary and a library that chose one would choose it for every
+dependent. `tikv-jemallocator` was in `[workspace.dependencies]` until this
+decision: declared, with no dependents and no `Cargo.lock` entry, so a name in a
+manifest for a decision nobody had made. Removing it changed nothing in the build
+— `Cargo.lock` is byte-identical. Recorded in
+[`decisions.md`](./decisions.md).
 
 ### Detailed Rationale
 

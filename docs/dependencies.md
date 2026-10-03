@@ -64,7 +64,6 @@ Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 | `base64` | One use: base64 inside the OSC 52 clipboard sequence. `app/src/runtime.rs` writes that sequence because it is the only place holding the terminal; `tui` records the text and never writes it. |
 | `keyring` | Cross-platform OS keyring for the session string; never store session strings in plaintext. It ships no default backend, so every supported platform store is named explicitly. They are target-gated, so enabling all of them is safe everywhere; on Linux the Secret Service backend links against `libdbus` and needs `libdbus-1-dev` and `pkg-config`. |
 
-| `tikv-jemallocator` | **Declared, not yet used.** The global allocator is not installed; the binary runs on the system allocator today. See [`known-gaps.md`](./known-gaps.md). |
 | `tempfile` | Dev-only. |
 | `static_assertions` | Dev-only. Compile-time assertions, used to lock the "a login token cannot be cloned or reused" guarantee with the compiler rather than with a convention. |
 
@@ -74,3 +73,9 @@ Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 Widget tests use `ratatui`'s own `TestBackend`; there are no benchmarks; and
 `app/tests/tui_e2e.rs` is waiting on `termlens` before any of it can run. See
 [`testing.md`](./testing.md).
+
+`tikv-jemallocator` is in that state too, and was there until it was removed: it
+had been declared in `[workspace.dependencies]` with no dependents and no entry in
+`Cargo.lock`, which is a name in a manifest standing in for a decision nobody had
+made. The global allocator is `std::alloc::System` — measured, not assumed; see
+[`decisions.md`](./decisions.md) and [`memory.md`](./memory.md).

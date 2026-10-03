@@ -367,8 +367,10 @@ reaching for it:
 - **Paging is expressed, not performed.** `fetch_history` sends the page it is
   given and hands it back. Where the loaded part of a conversation ends, and
   therefore what the next request should ask for, is the caller's to keep.
-- **`bumpalo`/`jemalloc` tuning lives at the composition root.** This crate
-  allocates like any other; the arena and allocator choices belong to the binary.
+- **Arena and allocator tuning live at the composition root.** This crate
+  allocates like any other, on the system allocator; an arena, or a
+  `#[global_allocator]`, would belong to the binary, because a crate that chose
+  one would choose it for every crate that linked it.
 
 Three things are known gaps rather than deliberate scope cuts:
 

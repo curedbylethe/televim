@@ -804,9 +804,10 @@ aspirational: each is a decision the code makes and a test asserts.
    truth, no layout computed twice. A frame is built from the current window or
    it is not built.
 6. **The lightest version that works.** The runtime is current-thread, chosen
-   explicitly even though `tokio`'s `full` features are on. `jemalloc` is
-   declared and not installed. Declared-but-unused is named as a gap, never
-   counted as a feature.
+   explicitly even though `tokio`'s `full` features are on. The global allocator
+   is the system allocator, chosen on measured margins and not by default — and
+   the declaration that once implied otherwise is gone. Declared-but-unused is
+   named as a gap, never counted as a feature.
 
 ## Motion
 
