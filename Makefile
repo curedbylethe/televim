@@ -30,6 +30,19 @@ build: ## Build the application in debug mode
 build-release: ## Build the optimized release binary
 	$(CARGO) build --release
 
+# --- Measurement ---
+# Builds and runs the memory harness, times the release binary, and writes
+# target/memory-report.json plus a Markdown table on stdout. The baseline the
+# later regression check compares against is docs/memory-baseline.json, which
+# this target deliberately does not write: a new baseline is a copy a person
+# makes after reading a report. Not part of `ci`, because it takes a release
+# build and a real terminal.
+.PHONY: measure
+measure: ## Measure RSS at idle, startup, input latency, and binary size
+	scripts/memory/measure.py
+
+
+
 # --- Quality Assurance ---
 .PHONY: fmt
 fmt: ## Format all code in the workspace

@@ -1,0 +1,417 @@
+{
+  "schema": "televim.memory-baseline/1",
+  "platform": "darwin-arm64",
+  "note": "The stored baseline for this host. Produced by `make measure`, which writes target/memory-report.json per run, and promoted here with `scripts/memory/check.py --record-baseline`. Each figure is the median across the runs recorded, so a single slow run cannot anchor a rule above what the tree normally costs. Compare by field name; scripts/memory/thresholds.json reads these keys.",
+  "taken_unix": 1790986509,
+  "recorded_from": 5,
+  "environment": {
+    "host": "Darwin arm64",
+    "uname": "Darwin MacBook-Air.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:38:00 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T8103 arm64",
+    "rustc": [
+      "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "binary: rustc",
+      "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985",
+      "commit-date: 2026-09-01",
+      "host: aarch64-apple-darwin",
+      "release: 1.98.1",
+      "LLVM version: 22.1.8"
+    ],
+    "toolchain_pin": "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"rustfmt\", \"clippy\"]\nprofile = \"minimal\"",
+    "cargo_profile_release": "lto = \"fat\" codegen-units = 1 strip = true panic = \"abort\"",
+    "cargo_lock_sha256": "5236e45bee285c01c88fb8ea87b007e29626a9904f3bb95294c6ec78123c19f0",
+    "cpu_count": 8,
+    "rss_method": "in-process: /proc/self/status (Linux) / proc_pidinfo (macOS)",
+    "binary_rss_method": "/proc/<pid>/status (Linux) / ps rss (macOS)",
+    "credentials_in_ambient_env": false,
+    "credentials_reaching_the_run": false,
+    "ambient_dotenv_present": true,
+    "session_isolated_to_sandbox": true,
+    "isolation": {
+      "sandbox": "/var/folders/13/j7tlf4xn5r1c6nhw_xy7mk6w0000gn/T/televim-measure-eiybvy6j",
+      "outside_repository": true,
+      "home": "/var/folders/13/j7tlf4xn5r1c6nhw_xy7mk6w0000gn/T/televim-measure-eiybvy6j/home",
+      "cwd": "/var/folders/13/j7tlf4xn5r1c6nhw_xy7mk6w0000gn/T/televim-measure-eiybvy6j",
+      "config": "/var/folders/13/j7tlf4xn5r1c6nhw_xy7mk6w0000gn/T/televim-measure-eiybvy6j/televim.toml",
+      "session_path": "/var/folders/13/j7tlf4xn5r1c6nhw_xy7mk6w0000gn/T/televim-measure-eiybvy6j/session.json",
+      "inherited": [
+        "HOME",
+        "LANG",
+        "PATH",
+        "TELEVIM_MEASURE",
+        "TELEVIM_SESSION_PATH",
+        "TERM",
+        "TMPDIR",
+        "USER"
+      ],
+      "removed_prefixes": [
+        "TELEGRAM_",
+        "TELEVIM_"
+      ],
+      "removed_names": [],
+      "ambient_dotenv_in_repo": true,
+      "dotenv_search": "dotenvy::dotenv() searches the cwd and every parent, so the sandbox is outside the repository: an in-repo sandbox would still load the root .env",
+      "credentials_supplied": false,
+      "note": "no TELEGRAM_*/TELEVIM_* credential reaches the run, so the binary takes the unauthorized path, builds no client, and its chat list is empty"
+    },
+    "binary_launches": 5,
+    "first_frame_excludes": "the chat list: this is the empty/sign-in frame drawn before any network round trip",
+    "first_frame_warmth": "median of launches 2..5; launch 1 is cold (pages the binary in from disk) and is reported separately as first_frame_cold_ms",
+    "input_latency_excludes": "the reader thread's blocking read and the terminal's paint; measured from the loop taking the key to the draw completing",
+    "massif_available": false,
+    "massif_version": null,
+    "profiler_involved_in_comparison": false
+  },
+  "load": {
+    "chats": 60,
+    "messages_supplied": 250,
+    "messages_in_window": 200,
+    "settle_ms": 2000,
+    "terminal": {
+      "width": 120,
+      "height": 40
+    }
+  },
+  "idle_definition": null,
+  "metrics": {
+    "rss_idle_harness_bytes": {
+      "unit": "bytes",
+      "measured": true,
+      "value": 3571712.0,
+      "samples": 25,
+      "min": 3555328.0,
+      "max": 3620864.0,
+      "spread": 49152.0
+    },
+    "rss_idle_binary_bytes": {
+      "unit": "MB",
+      "measured": true,
+      "value": 8.25,
+      "samples": 125,
+      "min": 7.0,
+      "max": 8.281,
+      "spread": 1.266
+    },
+    "startup_populated_load_ms": {
+      "unit": "ms",
+      "measured": true,
+      "value": 1.41,
+      "samples": 25,
+      "min": 1.181,
+      "max": 2.252,
+      "spread": 1.155
+    },
+    "startup_first_frame_ms": {
+      "unit": "ms",
+      "measured": true,
+      "value": 0.728,
+      "samples": 20,
+      "min": 0.567,
+      "max": 0.794,
+      "spread": 0.233,
+      "of_launches": 5,
+      "cold_ms": 12.7002,
+      "warmth": "median of launches 2..N; launch 1 is cold and excluded"
+    },
+    "input_latency_ms": {
+      "unit": "ms",
+      "measured": true,
+      "value": 0.066,
+      "samples": 75,
+      "min": 0.044,
+      "max": 0.133,
+      "spread": 0.084
+    },
+    "frame_ms": {
+      "unit": "ms",
+      "measured": true,
+      "value": 0.518,
+      "samples": 25,
+      "min": 0.512,
+      "max": 0.53,
+      "spread": 0.018
+    },
+    "harness_input_latency_ms": {
+      "unit": "ms",
+      "measured": true,
+      "value": 0.515,
+      "samples": 25,
+      "min": 0.508,
+      "max": 0.52,
+      "spread": 0.01
+    },
+    "binary_bytes": {
+      "unit": "bytes",
+      "measured": true,
+      "value": 5610320,
+      "samples": 5
+    }
+  },
+  "cross_invocation": {
+    "_source": "per-invocation medians across the runs recorded here, pooled with any earlier invocations in the driver's history",
+    "invocations": 5,
+    "binary_bytes": {
+      "n": 20,
+      "median": 5610320.0,
+      "min": 5610320,
+      "max": 5610320,
+      "values": [
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320,
+        5610320
+      ]
+    },
+    "frame_ms": {
+      "n": 20,
+      "median": 0.52,
+      "min": 0.512,
+      "max": 0.525,
+      "values": [
+        0.525,
+        0.525,
+        0.525,
+        0.52,
+        0.52,
+        0.525,
+        0.52,
+        0.518,
+        0.518,
+        0.525,
+        0.52,
+        0.518,
+        0.517,
+        0.517,
+        0.525,
+        0.52,
+        0.518,
+        0.517,
+        0.512,
+        0.512
+      ]
+    },
+    "harness_input_latency_ms": {
+      "n": 20,
+      "median": 0.518,
+      "min": 0.511,
+      "max": 0.522,
+      "values": [
+        0.522,
+        0.522,
+        0.522,
+        0.518,
+        0.518,
+        0.522,
+        0.518,
+        0.515,
+        0.515,
+        0.522,
+        0.518,
+        0.515,
+        0.515,
+        0.515,
+        0.522,
+        0.518,
+        0.515,
+        0.515,
+        0.511,
+        0.511
+      ]
+    },
+    "input_latency_ms": {
+      "n": 20,
+      "median": 0.066,
+      "min": 0.059,
+      "max": 0.071,
+      "values": [
+        0.059,
+        0.059,
+        0.059,
+        0.071,
+        0.071,
+        0.059,
+        0.071,
+        0.066,
+        0.066,
+        0.059,
+        0.071,
+        0.066,
+        0.062,
+        0.062,
+        0.059,
+        0.071,
+        0.066,
+        0.062,
+        0.071,
+        0.071
+      ]
+    },
+    "rss_idle_binary_bytes": {
+      "n": 20,
+      "median": 8.25,
+      "min": 8.188,
+      "max": 8.281,
+      "values": [
+        8.25,
+        8.25,
+        8.25,
+        8.25,
+        8.25,
+        8.25,
+        8.25,
+        8.281,
+        8.281,
+        8.25,
+        8.25,
+        8.281,
+        8.234,
+        8.234,
+        8.25,
+        8.25,
+        8.281,
+        8.234,
+        8.188,
+        8.188
+      ]
+    },
+    "rss_idle_harness_bytes": {
+      "n": 20,
+      "median": 3571712.0,
+      "min": 3555328.0,
+      "max": 3588096.0,
+      "values": [
+        3571712.0,
+        3571712.0,
+        3571712.0,
+        3588096.0,
+        3588096.0,
+        3571712.0,
+        3588096.0,
+        3555328.0,
+        3555328.0,
+        3571712.0,
+        3588096.0,
+        3555328.0,
+        3571712.0,
+        3571712.0,
+        3571712.0,
+        3588096.0,
+        3555328.0,
+        3571712.0,
+        3571712.0,
+        3571712.0
+      ]
+    },
+    "startup_first_frame_ms": {
+      "n": 20,
+      "median": 0.731,
+      "min": 0.699,
+      "max": 0.807,
+      "values": [
+        0.734,
+        0.734,
+        0.734,
+        0.724,
+        0.724,
+        0.734,
+        0.724,
+        0.807,
+        0.807,
+        0.734,
+        0.724,
+        0.807,
+        0.699,
+        0.699,
+        0.734,
+        0.724,
+        0.807,
+        0.699,
+        0.728,
+        0.728
+      ]
+    },
+    "startup_populated_load_ms": {
+      "n": 20,
+      "median": 1.41,
+      "min": 1.241,
+      "max": 1.512,
+      "values": [
+        1.512,
+        1.512,
+        1.512,
+        1.403,
+        1.403,
+        1.512,
+        1.403,
+        1.241,
+        1.241,
+        1.512,
+        1.403,
+        1.241,
+        1.41,
+        1.41,
+        1.512,
+        1.403,
+        1.241,
+        1.41,
+        1.42,
+        1.42
+      ]
+    }
+  },
+  "massif_diagnostic": {
+    "ran": false,
+    "reason": "not requested (--massif)"
+  },
+  "targets": {
+    "target_rss_mb_50": {
+      "status": "met",
+      "largest_figure": "binary",
+      "measured_mb": {
+        "binary": 8.25,
+        "harness": 3.41
+      },
+      "note": "no figure is the program under load; the largest bounds it from one side only",
+      "attempted": false,
+      "ceiling_mb": 50
+    },
+    "stretch_target_mb_20_30": {
+      "status": "below range",
+      "largest_figure": "binary",
+      "measured_mb": {
+        "binary": 8.25,
+        "harness": 3.41
+      },
+      "note": "recorded, not attempted; the 20-30 MB stretch was neither chased nor abandoned, and the range was not changed",
+      "attempted": false,
+      "band_mb": [
+        20,
+        30
+      ]
+    }
+  },
+  "not_measured": [
+    "allocation counts (no counting global allocator is installed; that is a later stage)",
+    "heap fragmentation (RSS does not distinguish a fragmented heap from a large one)",
+    "cache behaviour",
+    "anything inside grammers, including MTProto decoding",
+    "the reader thread's blocking crossterm read and the terminal's own paint: input latency is measured from the loop taking the key to the draw completing, so it is not end-to-end keystroke-to-photons",
+    "the real binary's startup with a populated chat list: reaching one needs a Telegram round trip, so first-frame is the empty/sign-in frame",
+    "a Windows RSS figure (no portable way to ask a process; reported as null)"
+  ]
+}

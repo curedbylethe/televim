@@ -1,8 +1,200 @@
 # Memory
 
 The memory budget: what is in place, what is declared but not installed, and
-what nobody has measured. The 50 MB ceiling is a **target**, not a verified
-number — see "not in place" below before quoting any memory claim.
+what has been measured. The numbers below come from a real run of
+`make measure` on the machine named in the environment block, and are stored
+machine-readably in [`memory-baseline.json`](./memory-baseline.json). The
+[regression budget](#the-regression-budget) below is what keeps them from
+quietly going backwards.
+
+## Measured baseline
+
+Taken on a release build (`lto = "fat"`, `codegen-units = 1`, `strip = true`,
+`panic = "abort"`), median of three `make measure` runs — which is what
+`docs/memory-baseline.json` records.
+
+| Metric | Target | Measured | Verdict |
+| :--- | :--- | ---: | :--- |
+| RSS at idle, harness at 60 chats | < 50 MB | **3.41 MB** | inside |
+| RSS at idle, shipped binary, unauthorised | < 50 MB | **8.25 MB** | inside |
+| Startup, launch → first frame (empty/sign-in frame) | < 500 ms | **0.728 ms** | inside |
+| Startup, harness launch → populated screen | — | **1.410 ms** | recorded |
+| Input latency, key→draw (real binary) | < 16 ms | **0.066 ms** | inside |
+| Input latency, key→draw (harness, 50 keypresses) | < 16 ms | **0.515 ms** | inside |
+| Frame time, harness | — | **0.518 ms** | recorded |
+| Binary size, stripped release | < 15 MB | **5,610,320 bytes** (5.35 MB) | inside |
+
+### Two corrections to how these figures were taken
+
+Both were found by an audit of the first version of this harness, and both
+changed the numbers rather than just the wording.
+
+**The "real binary" run was a signed-in session.** `measure.py` used to pass the
+whole environment through and start the binary in the repository root. The root
+`.env` is gitignored and holds `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`,
+`TELEVIM_SESSION_PATH` and `TELEVIM_PHONE`, and `main.rs` calls
+`dotenvy::dotenv()` — so the run fetched a real chat list over the network and
+its RSS was a function of an account's history. This file described that figure
+as "no account: the chat list is empty", which was false.
+
+The measured process now runs in a **sandbox outside the repository**: a
+temporary directory with its own `HOME`, `TMPDIR`, session path and an empty
+config, with only `PATH`/`TERM`/`LANG`-class variables inherited and every
+`TELEGRAM_*`/`TELEVIM_*` name dropped. With no application credentials the
+program builds no client at all (`net::spawn_bring_up` returns `NoCredentials`
+before constructing anything), so the run takes the unauthorised path
+deterministically on any machine. The evidence is in the report's environment
+block: `credentials_reaching_the_run: false`, the list of dropped names, and
+`outside_repository: true`.
+
+The sandbox is outside the repository rather than under `target/` because
+`dotenvy::dotenv()` searches the working directory **and every parent of it** —
+a sandbox at `target/measure/sandbox` still found the root `.env`, which is
+exactly the failure this is fixing. That was caught by checking the run's log for
+a salt exchange: with credentials present, `grammers` performs one even before
+signing in. The log now contains only the probe lines.
+
+The cost of this correction is that the "real binary" RSS figure fell by roughly
+half. The old figure was measuring a connected client — its buffers, its TLS
+state, its datacenter connections — none of which is present in the
+unauthorised state the report claims to describe.
+
+**`valgrind --tool=massif` was wrapping the compared run on Linux.** Under
+valgrind the harness's own `VmRSS` reading reports *valgrind's* memory, and
+every timing is valgrind's, so the compared metrics were a distortion — worse on
+CI, where valgrind is more likely to be present than on a developer machine. The
+harness now always runs directly on every platform. A massif pass exists as an
+opt-in diagnostic (`make measure` with `--massif`), reported separately as
+`massif_diagnostic` with `compared: false` and never thresholded.
+
+**Environment.** `Darwin arm64`, Darwin 25.5.0; `rustc 1.98.1
+(48a229cea 2026-09-01)`, host `aarch64-apple-darwin`, LLVM 22.1.8; toolchain pin
+`channel = "1.98.1"`; release profile as above; `Cargo.lock` sha256
+`5236e45bee285c01c…`; 8 CPUs. RSS read in-process from `proc_pidinfo`
+(`/proc/self/status` on Linux), and from `/proc/<pid>/status` (`ps rss`) for the
+binary. No `valgrind`, `heaptrack`, or `hyperfine` on this host. The block also
+records the confounds that decided the figures above: credential and session
+presence, the sandbox's isolation, how many launches each figure came from, what
+the first-frame number excludes, and that no profiler took part.
+
+**"Idle" is defined operationally**, because otherwise the word means nothing:
+after the 60-chat / 250-message load is applied and drawn, 2,000 ms of quiet
+with no keypress pending and no frame in flight, then five RSS samples 200 ms
+apart, of which the median is the number above.
+
+**Two RSS figures, not one**, because no single process in this tree is the
+program under load. The harness is 60 chats with the screen fully drawn, but
+none of the network half — no `grammers`, no session, no update stream. The
+binary is the whole shipped program, but unauthorised and with an empty chat
+list: a populated list needs a Telegram round trip, which a credential-free run
+deliberately cannot make. So the binary's figure bounds the program from below
+and the harness's bounds the loaded screen, and the number the program reaches
+with 50 chats is between them and has not been measured. Any figure quoted as
+"RSS at idle after 50+ chats" should say which of these it is.
+
+### What the startup and latency figures do not include
+
+Two words in this project's own vocabulary need narrowing, because the
+measurement is narrower than the words.
+
+**First frame is the empty/sign-in frame, not the chat list.** The loop draws
+before any network round trip, so the frame being timed is the one that says the
+program has nothing to connect as. The README's < 500 ms target is unchanged and
+still the contract; this note is about which frame the number describes. The
+"populated load" row is the harness's substitute, and it measures a synthetic
+60-chat screen rather than a fetched one.
+
+**Input latency is key→draw, not end-to-end.** The probe spans from the loop
+taking the keypress to the completion of the draw that shows its effect. Two real
+costs sit outside it: the reader thread's blocking `crossterm::event::read`,
+which is where a keystroke waits for the terminal to deliver it, and the
+terminal's own paint, which happens after `Terminal::draw` returns. Both are in
+the harness's `not_measured` list as well as here.
+
+### The 20–30 MB stretch target: not attempted
+
+Recorded, not chased and not abandoned. Measured RSS is **below** the 20–30 MB
+band on both figures, which is a third answer from "met" — the stretch asks for
+a process between 20 and 30 MB, and the binary's figure is a different thing
+from either end of it. The range was not changed.
+
+### The harness
+
+`make measure` (driver: `scripts/memory/measure.py`, harness:
+`crates/app/examples/memory_harness.rs`). It builds a synthetic load through
+`tui`'s public API only — never the `#[cfg(test)]` sample data, which no
+dependent crate can see — draws frames into an in-memory terminal, and writes
+`target/memory-report.json`. An `[[example]]` rather than a second binary
+because `cargo build --release` does not build examples, so nothing in it can
+reach the shipped artifact.
+
+`docs/memory-baseline.json` is the stored baseline, and it is recorded by
+hand, never by the driver: `check.py --record-baseline` takes the median across
+several reports, so one slow run cannot anchor a rule above what the tree
+normally costs. It also carries a `cross_invocation` block, and every metric
+carries its sample count — so the figures behind the baseline can be recomputed
+from the tree rather than taken on trust.
+
+The release binary is launched **five times** per run and its startup reported
+warm. This was not in the first version of the harness and it mattered: a single
+launch reads 10–17 ms because it is paging the binary in from disk, while the
+launches after it read ~0.7 ms. A figure that swings an order of magnitude on
+page-cache state is not a measurement of the program, and a threshold calibrated
+on one would be a threshold on disk speed. The cold figure is still recorded, as
+`first_frame_cold_ms`, and the report says how many launches the warm median came
+from — so `startup_first_frame_ms` can never be mistaken for a single sample
+with a spread of zero.
+
+### Noise floor
+
+A regression threshold has to be wider than this or it fires on the machine
+rather than on the code. The driver keeps the last twenty invocations'
+per-metric medians in `target/measure/history.jsonl` and reports the aggregate
+in `cross_invocation`; recording a baseline pools every run recorded into it, and
+the per-invocation values are carried alongside so the spread can be recomputed
+from this file rather than trusted.
+
+| Metric | Typical | Range across 20 invocations |
+| :--- | ---: | ---: |
+| RSS, harness | 3.41 MB | 3.39 – 3.43 MB |
+| RSS, binary | 8.25 MB | 8.19 – 8.28 MB |
+| Startup, first frame | 0.728 ms | 0.70 – 0.81 ms |
+| Startup, populated load | 1.410 ms | 1.24 – 1.51 ms |
+| Input latency, harness | 0.515 ms | 0.511 – 0.522 ms |
+| Input latency, binary | 0.066 ms | 0.059 – 0.071 ms |
+| Frame time | 0.518 ms | 0.512 – 0.525 ms |
+| Binary size | 5,610,320 B | exact on every run |
+
+On the **warm** figure this spread is small — under 8% on every metric, and zero
+on binary size. Two known effects sit outside it and are worth stating rather
+than folding into a number:
+
+- **Harness RSS has a low mode.** Most runs sit near 3.4 MB, but roughly one in
+  fifteen lands near 1.4–2.9 MB, with all five samples inside that run agreeing
+  exactly. The disagreement is between processes: macOS not faulting every page
+  in. It does not threaten the budget, which fails only on an *increase* and this
+  scatter is downward — but a rule that failed in either direction would be
+  reporting the page-in schedule.
+- **The first launch of a run is cold.** It pages the binary in from disk and
+  reads ~12.7 ms against the warm ~0.73 ms, which is why the figure is the median
+  of launches 2–5 and the cold one is recorded separately as `cold_ms`.
+
+The frame-time and harness-latency figures are the stable ones. **Binary size is
+stable to the byte** — clean release builds from scratch produce identical sizes
+— which is why it carries the tightest band in the budget.
+
+### What the harness does not measure
+
+- **Allocation counts.** No counting global allocator is installed; that is the
+  allocator stage, not this one.
+- **Heap fragmentation.** RSS does not distinguish a fragmented heap from a
+  large one.
+- **Cache behaviour.**
+- **Anything inside `grammers`**, including MTProto decoding, which happens in
+  an external crate this workspace does not build.
+- **Windows.** There is no portable way to ask a process for its resident size,
+  so a Windows run reports `null` rather than a number of the wrong kind. This
+  is a platform gap, not a pass.
 
 ## What is in place
 
@@ -10,18 +202,17 @@ number — see "not in place" below before quoting any memory claim.
   `app/src/runtime.rs`, explicitly, even though the `full` feature set is enabled.
 - A bounded conversation window: `domain::history::ConversationWindow` caps at
   `CONVERSATION_WINDOW` messages, so full history is never held.
+- Measurement-only `Instant` probes in the event loop, gated on
+  `TELEVIM_MEASURE` and written to the log rather than the screen, so a launch's
+  first frame and a keypress's latency have numbers behind them.
 - Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = true`,
-  `panic = "abort"`. The stripped binary is currently **5.2 MB**, well inside the
-  15 MB target — about half a megabyte of which is the emoji catalog.
+  `panic = "abort"`.
 
 What is declared but **not** in place, and so cannot be relied on:
 
 - `tikv-jemallocator` is not installed as the global allocator. The binary runs on
   the system allocator.
-- No arena allocator is used for MTProto deserialization. `bumpalo` is not a
-  dependency.
-- No `heaptrack`/`valgrind` step measures RSS in CI, so the 50 MB ceiling is a
-  target nobody has measured yet.
+- No arena allocator is used anywhere. `bumpalo` is not a dependency.
 
 ### Detailed Rationale
 
@@ -36,6 +227,11 @@ What is declared but **not** in place, and so cannot be relied on:
 4. **Zero-copy where possible:** translating framework types into domain types
    should use `Cow<'_, str>` and byte slices rather than cloning strings, so the
    domain types stay lightweight DTOs.
-5. **Allocator work is still ahead.** `jemalloc` and an arena for the parse path
-   are the intended answer to long-tail fragmentation; neither is built, so treat
-   any memory claim as unverified.
+5. **Two RSS figures, deliberately.** A single number would have to claim to be
+   the program under load, and neither candidate process is. The gap between
+   them is the honest state of the measurement, and closing it needs an offline
+   path to a populated chat list in the real binary — a product question, not a
+   harness one.
+6. **Allocator work is still ahead.** An arena and a global allocator choice are
+   the intended answers to long-tail fragmentation; neither is built. The
+   baseline above is the evidence both will be judged against.

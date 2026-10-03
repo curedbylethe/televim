@@ -11,7 +11,8 @@ use std::io::Stdout;
 use std::io::{Write, stdout};
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -51,6 +52,83 @@ pub(crate) enum AppEvent {
 pub fn run(cfg: &Config, config_path: &Path) -> Result<()> {
     init_tracing(cfg, config_path);
     build_runtime()?.block_on(run_async(cfg))
+}
+
+/// Records the instant the program was asked to start.
+///
+/// The clock starts here rather than inside the loop, because the loop's own
+/// clock cannot see process start-up, configuration loading or tracing setup —
+/// which is most of what a launch spends its first half-millisecond on. Called
+/// from `main` before anything else, so the first-frame figure covers them.
+pub fn note_launch() {
+    if measuring() {
+        let _ = LAUNCHED.set(Instant::now());
+    }
+}
+
+/// Whether this run is being measured, and so should record timings.
+///
+/// Off unless `TELEVIM_MEASURE` is set, which only `make measure` does. It is
+/// an environment variable rather than a flag so that adding it cannot add a
+/// user-visible surface, and the cost when it is unset is one `var_os` per
+/// event plus a load that is already `None`.
+fn measuring() -> bool {
+    std::env::var_os("TELEVIM_MEASURE").is_some()
+}
+
+/// Set by [`note_launch`], read by the first-frame probe.
+static LAUNCHED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Records the first drawn frame's age, once.
+///
+/// To the log, never the terminal: a `tracing` line written mid-frame lands on
+/// the screen this program is in the middle of drawing (see [`init_tracing`]).
+///
+/// Only the first frame, and it is the **empty** one: the frame drawn before
+/// any network round trip, which with no account is the screen saying it has
+/// nothing to connect as. It is not the chat list — no populated chat list is
+/// reachable without credentials, and see `docs/memory.md` for why that figure
+/// is therefore not measured here.
+///
+/// Every later frame is the loop doing its ordinary work, and reporting those
+/// would fill the log with numbers nobody is measuring.
+fn probe_first_frame() {
+    // `LAUNCHED` is the gate, and it is empty unless `note_launch` ran while
+    // `TELEVIM_MEASURE` was set — so an ordinary run reaches this line, finds
+    // `None`, and returns on one atomic load, with no environment lookup and
+    // nothing to re-arm. A measured run sets it, and sets it once.
+    let Some(launched) = LAUNCHED.get() else {
+        return;
+    };
+    if FIRST_FRAME_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::info!(
+        first_frame_ms = launched.elapsed().as_secs_f64() * 1000.0,
+        "first frame drawn"
+    );
+}
+
+/// Set once the first frame's age has been reported.
+static FIRST_FRAME_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Records how long a keypress took to reach the screen.
+///
+/// The interval is from the loop taking the key to the completion of the draw
+/// that shows its effect — **not** end to end. Two real costs sit outside it
+/// and are therefore not measured by this number or by the harness: the reader
+/// thread's blocking `crossterm::event::read`, which is where a keystroke waits
+/// for the terminal to deliver it, and the terminal's own paint, which happens
+/// after `Terminal::draw` has returned. What this measures is the part the loop
+/// is answerable for. To the log, like every other probe here.
+fn probe_input_latency(pressed: Instant) {
+    if !measuring() {
+        return;
+    }
+    tracing::info!(
+        input_latency_ms = pressed.elapsed().as_secs_f64() * 1000.0,
+        "keypress drawn"
+    );
 }
 
 /// The one runtime builder in the program.
@@ -170,6 +248,10 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 
 /// Draw, wait for something to happen, apply it, then ask for what comes next.
 async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    // When a key was taken on the previous pass, so the next frame can be timed
+    // against it. Nothing to report in an ordinary run, hence the `Option`.
+    let mut keypress_to_probe: Option<Instant> = None;
+
     let mut app = App::new();
     "connecting…".clone_into(&mut app.status);
 
@@ -205,6 +287,15 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
             .draw(|frame| app.render(frame))
             .context("drawing frame")?;
 
+        probe_first_frame();
+
+        // The key was taken on the previous pass; what arrives here is the
+        // frame that shows what it did.
+        if let Some(pressed) = keypress_to_probe {
+            probe_input_latency(pressed);
+            keypress_to_probe = None;
+        }
+
         if app.should_quit {
             break;
         }
@@ -214,6 +305,11 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
                 if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
                 app.handle_key(key);
+                // The clock only starts for a measured run: an ordinary run
+                // leaves the `None` it has, and never reads the environment.
+                if keypress_to_probe.is_some() || measuring() {
+                    keypress_to_probe = Some(Instant::now());
+                }
             }
             Ok(Some(AppEvent::Input(_))) | Err(_) => {}
             Ok(Some(AppEvent::Net(event))) => net::apply(&mut app, &mut network, event),

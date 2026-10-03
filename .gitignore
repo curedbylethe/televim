@@ -26,6 +26,10 @@ target/
 televim.toml
 *.log
 
+# Python bytecode, from the measurement drivers under scripts/memory/ being
+# imported rather than only run. A run artifact, never source.
+__pycache__/
+
 # ai
 .workbuddy-ai/
 .opencode/index

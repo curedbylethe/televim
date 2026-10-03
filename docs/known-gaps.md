@@ -71,10 +71,14 @@ Real, and named so they are not mistaken for oversights:
   gets them back, and the status line names them for as long as it is up.
 - **A feed dropped without `finish` persists a stale update position.** See
   [`decisions.md`](./decisions.md).
-- **`tikv-jemallocator` is not installed.** No allocator work is done, and the
-  50 MB ceiling is unmeasured.
+- **`tikv-jemallocator` is not installed.** No allocator work is done. The
+  50 MB ceiling is now measured ([`memory.md`](./memory.md)), but no figure
+  measures the program under load: the two that exist bound it from either
+  side.
 - **No benchmarks and no working PTY tests.** `app/tests/tui_e2e.rs` is
-  `#[ignore]`d placeholders awaiting `termlens`.
+  `#[ignore]`d placeholders awaiting `termlens`. `make measure` is a
+  measurement harness, not a benchmark suite: it reports what a run costs, and
+  nothing compares two implementations.
 - **`tui/src/event.rs` is unwired.** `key_to_action` is not called.
 - **A peer with no bare identifier is skipped**, and the skip is unreachable
   today. See [`decisions.md`](./decisions.md) for why, and which test guards it.

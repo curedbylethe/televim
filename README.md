@@ -18,7 +18,7 @@ RSS at idle after loading 50+ chats.
 | [`docs/dependencies.md`](./docs/dependencies.md) | Why each dependency is chosen or pinned |
 | [`docs/decisions.md`](./docs/decisions.md) | Key Decisions — the ADRs |
 | [`docs/testing.md`](./docs/testing.md) | Quality harness, `Makefile`, CI, the test layers |
-| [`docs/memory.md`](./docs/memory.md) | The memory budget: built, declared, unmeasured |
+| [`docs/memory.md`](./docs/memory.md) | The memory budget: measured baseline, declared work, and what the harness does not measure |
 | [`docs/known-gaps.md`](./docs/known-gaps.md) | Known gaps and v2 hooks |
 | [`DESIGN.md`](./DESIGN.md) | The design system |
 
@@ -34,9 +34,9 @@ RSS at idle after loading 50+ chats.
 
 | Metric                   | Target                                                                                                             | Measurement Method                                          |
 | :----------------------- | :----------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------- |
-| **Memory Usage**         | < 50 MB RSS at idle after loading 50+ chats.                                                                       | `heaptrack` or `valgrind --tool=massif` on a release build. |
-| **Startup Time**         | < 500 ms from launch to the chat list rendering on screen.                                                         | Hyperfine benchmark on a warm cache.                        |
-| **Input Latency**        | < 16 ms (one frame) for a keypress to reflect in the UI.                                                           | Instrumented via `std::time::Instant` in the event loop.    |
+| **Memory Usage**         | < 50 MB RSS at idle after loading 50+ chats.                                                                       | `make measure`, RSS read in-process; see `docs/memory.md`.   |
+| **Startup Time**         | < 500 ms from launch to the chat list rendering on screen.                                                         | `make measure`, `Instant` probe to the first drawn frame (the empty frame; see `docs/memory.md`). |
+| **Input Latency**        | < 16 ms (one frame) for a keypress to reflect in the UI.                                                           | `make measure`, `Instant` probe from keypress to frame (excludes the terminal read and paint). |
 | **Binary Size**          | < 15 MB (stripped, `lto = "fat"`).                                                                                 | `ls -lh target/release/televim`.                            |
 | **Vim Fidelity**         | 95% of navigation commands from `vim-line` and common Normal-mode motions (hjkl, gg, G, /, n, N) work as expected. | Integration tests with `termlens`.                          |
 | **Protocol Correctness** | Successfully authenticate, fetch the private chat list, and send/receive messages via MTProto.                     | End-to-end test against a Telegram test DC.                 |

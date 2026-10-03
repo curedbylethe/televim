@@ -35,6 +35,10 @@
 4. `cargo test --all --all-features`
 5. `make design-check`
 6. `cargo build --release`
+7. `scripts/memory/measure.py`, described above
+
+Step 7 is **not** in `make ci`: it needs a release build and a pty, so it runs in
+CI on the artifact rather than on every commit.
 
 `libdbus-1-dev` and `pkg-config` are installed first, because `keyring`'s Linux
 backend links against DBus at build time.
@@ -78,13 +82,42 @@ below.
 
   Each test requests its own login code and Telegram throttles that hard, so run
   them sparingly.
-- **TUI E2E Tests:** `app/tests/tui_e2e.rs` holds eight `#[ignore]`d
+- **TUI E2E Tests:** `app/tests/tui_e2e.rs` holds seven `#[ignore]`d
   placeholders describing what a PTY harness should assert — the screen after
   launch, typing, `:q`, scrolling, and an arrival moving a pinned view. **None of
   them run**: `termlens` is not a dev-dependency, and the test bodies are `TODO`
   comments. Keystroke and rendering coverage today comes from the unit tests and
   the `TestBackend` assertions in `tui`'s conversation panel. Wiring this up means
   adding `termlens` to `app` and filling the bodies in.
-- **Memory Verification:** not implemented. The 50 MB ceiling is a target with no
-  measurement behind it; adding a `heaptrack` or `valgrind --tool=massif` step
-  that fails past it is the way to make it real.
+- **Memory Verification:** implemented as `make measure`, not as part of `ci`.
+  The driver (`scripts/memory/measure.py`) builds the release binary and
+  `crates/app/examples/memory_harness.rs`, runs the harness five times, launches
+  the release binary on a pty to read its probes, weighs the binary, and writes
+  `target/memory-report.json` beside a Markdown table on stdout. The stored
+  baseline is [`memory-baseline.json`](./memory-baseline.json) and the numbers
+  are quoted in [`memory.md`](./memory.md). It is not in `ci` because it needs a
+  release build (`lto = "fat"`, `codegen-units = 1`) and a pty, and neither
+  belongs in a per-commit gate.
+  - **The measured binary runs isolated.** It is launched in a temporary sandbox
+    *outside* the repository, with its own `HOME`, `TMPDIR`, session path and an
+    empty config, inheriting only `PATH`/`TERM`/`LANG`-class variables. Without
+    that it reads the root `.env` — `dotenvy::dotenv()` searches the working
+    directory **and every parent** — signs in with the developer's credentials,
+    fetches a real chat list, and its RSS becomes a property of that account
+    rather than of the program. The environment block in the report records what
+    was dropped and that no credential reached the run.
+  - **The compared harness never runs under a profiler.** RSS is read in-process
+    (`/proc/self/status` on Linux, `proc_pidinfo` on macOS) because the
+    development host has neither `valgrind` nor `heaptrack`, and because under
+    valgrind that reading would report *valgrind's* memory and every timing
+    would be valgrind's. A massif pass is available as an opt-in diagnostic
+    (`scripts/memory/measure.py --massif`), lands in the report as
+    `massif_diagnostic` with `compared: false`, and is never thresholded.
+- **Probes in the event loop:** `app/src/runtime.rs` records launch → first frame
+  and keypress → frame, gated on `TELEVIM_MEASURE` and written to the log file
+  beside the config, never to the terminal. An ordinary run reads an empty
+  `OnceLock` per frame and returns on one atomic load, with no environment
+  lookup and nothing to re-arm; the driver sets the variable. The first-frame
+  figure is the empty/sign-in frame (drawn before any round trip), and the
+  latency figure spans the loop taking the key to the draw completing — not the
+  reader thread's blocking read, and not the terminal's paint.

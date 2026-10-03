@@ -23,6 +23,10 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // Before the configuration is read, so a measured launch includes reading
+    // it. Off unless `TELEVIM_MEASURE` is set; see `runtime::note_launch`.
+    runtime::note_launch();
+
     let cli = Cli::parse();
 
     // `.env` is a convenience, not a requirement: a run with no such file is a
