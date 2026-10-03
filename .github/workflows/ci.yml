@@ -55,3 +55,28 @@ jobs:
 
       - name: build-release
         run: cargo build --release
+
+      # The memory regression budget: measure, then compare against the stored
+      # baseline and fail past it. This is a guard on *change*, not on the
+      # project's declared targets, which are unchanged.
+      #
+      # It is not part of `make ci` because it needs a release build and a pty,
+      # and neither belongs in a per-commit gate.
+      #
+      # On a host with no stored baseline it reports and does not enforce: a
+      # threshold cannot be calibrated on a machine it was never measured on.
+      # The first run on a new host therefore writes its report and exits zero,
+      # and a maintainer reviews that report and records it.
+      - name: memory-budget
+        run: |
+          scripts/memory/measure.py
+          scripts/memory/check.py
+
+      # Uploaded even when the comparison failed: the report is what says why.
+      - name: upload memory report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-report
+          path: target/memory-report.json
+          if-no-files-found: warn

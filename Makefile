@@ -41,7 +41,13 @@ build-release: ## Build the optimized release binary
 measure: ## Measure RSS at idle, startup, input latency, and binary size
 	scripts/memory/measure.py
 
-
+# The regression budget: compares the report `measure` wrote against the stored
+# baseline and fails past it. Separate from `measure` because it reads a report
+# rather than producing one, so CI can run them as two steps and keep the
+# artifact even when the comparison fails.
+.PHONY: measure-check
+measure-check: ## Check the last measurement against the stored baseline
+	scripts/memory/check.py
 
 # --- Quality Assurance ---
 .PHONY: fmt

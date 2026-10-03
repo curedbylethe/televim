@@ -35,10 +35,15 @@
 4. `cargo test --all --all-features`
 5. `make design-check`
 6. `cargo build --release`
-7. `scripts/memory/measure.py`, described above
+7. `scripts/memory/measure.py` then `scripts/memory/check.py` — the regression
+   budget, described above
+8. `actions/upload-artifact` for `target/memory-report.json`, with `if: always()`
+   so the report survives a failed comparison
 
-Step 7 is **not** in `make ci`: it needs a release build and a pty, so it runs in
-CI on the artifact rather than on every commit.
+Steps 7 and 8 are **not** in `make ci`: they need a release build and a pty, so
+they run in CI on the artifact rather than on every commit. Step 7 exits zero on
+a host with no stored baseline, which is why CI is green on its first run on a
+new machine and enforcing from the second.
 
 `libdbus-1-dev` and `pkg-config` are installed first, because `keyring`'s Linux
 backend links against DBus at build time.
@@ -113,6 +118,25 @@ below.
     would be valgrind's. A massif pass is available as an opt-in diagnostic
     (`scripts/memory/measure.py --massif`), lands in the report as
     `massif_diagnostic` with `compared: false`, and is never thresholded.
+- **Regression Budget:** `make measure-check`, which
+  `scripts/memory/check.py` implements. It reads the report `make measure`
+  wrote, the stored baseline, and the bands in
+  `scripts/memory/thresholds.json`, and fails when a figure rises past
+  `baseline + max(relative × baseline, absolute)`. Only an increase counts as a
+  regression. It is a guard on *change*; the README's declared targets are
+  untouched and remain the contract. The failure message names the metric, the
+  measured value, the baseline, the delta, and the threshold, and the same
+  numbers go to `$GITHUB_STEP_SUMMARY` as a markdown table so a breach is
+  visible in the run rather than only in a log line.
+  - **One baseline per host.** A stored baseline names its `platform`, and the
+    check enforces only when it matches the running host. On a host with no
+    baseline it reports and exits zero — a threshold cannot be calibrated on a
+    machine it was never measured on — so CI's first run on a new host is a
+    recording run. Record it with
+    `scripts/memory/check.py --record-baseline docs/memory-baseline.<host>.json`,
+    which takes the median across several reports.
+  - **Recording a baseline is deliberate.** The driver never writes one: someone
+    reads the report and decides what the tree costs.
 - **Probes in the event loop:** `app/src/runtime.rs` records launch → first frame
   and keypress → frame, gated on `TELEVIM_MEASURE` and written to the log file
   beside the config, never to the terminal. An ordinary run reads an empty

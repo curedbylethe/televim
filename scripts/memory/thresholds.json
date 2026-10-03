@@ -1,0 +1,58 @@
+{
+  "schema": "televim.memory-budget/1",
+  "note": "The regression budget: how far each measured figure may rise above the stored baseline before `make measure-check` fails. These are NOT the project's declared targets (README's <50 MB RSS, <500 ms startup, <16 ms input latency, <15 MB binary); those are the contract and are unchanged. These are a tighter guard, set from the noise floor recorded in docs/memory-baseline.json, so that a change which quietly costs memory fails the build rather than waiting to be noticed.",
+  "how_a_band_is_read": "allowed = max(relative * baseline_value, absolute). The threshold is baseline_value + allowed; the check fails when measured > threshold. `relative` is the share of the baseline, `absolute` is a floor for figures small enough that a percentage would be tighter than the machine. A metric that grows is the regression; one that shrinks is never a failure, which is why a run whose RSS lands low (a page-in artefact of macOS) passes rather than firing.",
+  "calibration": "Every band below was set to clear the measured cross-run spread with margin, and then confirmed by injecting a real regression and watching the check fail on the metric it moved. The trial is recorded in docs/memory.md.",
+  "platform": "bands are relative to whatever baseline the running platform has; a host with no stored baseline is reported but not enforced, because a threshold cannot be calibrated on a machine it was never measured on",
+  "rules": [
+    {
+      "metric": "rss_idle_harness_bytes",
+      "label": "RSS at idle, 60 chats (harness)",
+      "unit": "bytes",
+      "band": { "relative": 0.10, "absolute": 1048576 },
+      "why": "The loaded figure. Its spread upward is ~1%, because the low outliers stage 1 recorded land below the baseline and a shrink is never a failure. 10% plus a 1 MB floor catches a real per-chat or per-frame growth while leaving room for the page-in mode."
+    },
+    {
+      "metric": "rss_idle_binary_bytes",
+      "label": "RSS at idle, shipped binary",
+      "unit": "MB",
+      "band": { "relative": 0.30, "absolute": 3.0 },
+      "why": "The whole program with an empty chat list. Noisiest RSS figure: ~19% across ten runs, because what the network half has resident by the time it is sampled varies with the session. 30% plus a 3 MB floor is above that spread without becoming a licence."
+    },
+    {
+      "metric": "startup_first_frame_ms",
+      "label": "Startup, launch to first frame",
+      "unit": "ms",
+      "band": { "relative": 0.60, "absolute": 2.5 },
+      "why": "Measured over repeated launches and reported warm, because one cold launch measures the page cache (10-17 ms) rather than the program (~0.6 ms). Even warm the spread is ~1.6x the median, so the band is generous in both terms. Against the declared 500 ms target this still catches a genuine order-of-magnitude regression in the launch path."
+    },
+    {
+      "metric": "startup_populated_load_ms",
+      "label": "Startup, harness to populated screen",
+      "unit": "ms",
+      "band": { "relative": 0.50, "absolute": 2.5 },
+      "why": "Builds the 60-chat load and draws it. ~1.4x spread across runs, the same order as first-frame, so the same shape of band."
+    },
+    {
+      "metric": "harness_input_latency_ms",
+      "label": "Input latency, keypress to frame",
+      "unit": "ms",
+      "band": { "relative": 0.20, "absolute": 0.05 },
+      "why": "Median of 50 keypresses through the real event handling. The stable latency figure: ~3.5% spread, so 20% is six times the noise and still under a quarter of the declared 16 ms budget. This is the metric the budget can actually be tight on."
+    },
+    {
+      "metric": "input_latency_ms",
+      "label": "Input latency, shipped binary",
+      "unit": "ms",
+      "band": { "relative": 1.50, "absolute": 0.15 },
+      "why": "Only three keypresses reach the real binary per run, so the spread is ~2x the median. The band is wide on purpose: it catches the binary's latency going to a multiple of itself and nothing finer. The harness figure above is the one a tight band belongs on."
+    },
+    {
+      "metric": "binary_bytes",
+      "label": "Binary size, stripped release",
+      "unit": "bytes",
+      "band": { "relative": 0.01, "absolute": 32768 },
+      "why": "Reproducible to the byte on an unchanged tree - three clean release builds gave identical sizes - so this is the tightest band in the budget. 1% is about 56 KB, which is roughly what a small new dependency costs; nothing legitimate slips under it."
+    }
+  ]
+}

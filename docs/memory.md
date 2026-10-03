@@ -183,6 +183,119 @@ The frame-time and harness-latency figures are the stable ones. **Binary size is
 stable to the byte** — clean release builds from scratch produce identical sizes
 — which is why it carries the tightest band in the budget.
 
+## The regression budget
+
+The declared targets above are the contract and are unchanged. The budget is a
+separate, tighter guard: how far each measured figure may rise above the stored
+baseline before CI fails. It lives in
+[`scripts/memory/thresholds.json`](../scripts/memory/thresholds.json) and is
+enforced by `scripts/memory/check.py` (`make measure-check`), which reads the
+report `make measure` wrote, the stored baseline, and the thresholds, and
+writes a metric / measured / baseline / delta table to the job summary.
+
+A band reads as `allowed = max(relative × baseline, absolute)`, and the check
+fails when `measured > baseline + allowed`. **Only an increase is a
+regression** — a figure that shrinks is never a failure, which is why a run
+whose RSS lands low passes instead of firing.
+
+| Metric | Baseline | Allowed growth | Threshold |
+| :--- | ---: | ---: | ---: |
+| RSS@idle, harness (60 chats) | 3,571,712 B | +1.05 MB | 4.62 MB |
+| RSS@idle, shipped binary | 8.250 MB | +3.0 MB | 11.25 MB |
+| Startup, first frame | 0.728 ms | +2.5 ms | 3.23 ms |
+| Startup, populated load | 1.410 ms | +2.5 ms | 3.91 ms |
+| Input latency, harness | 0.515 ms | +0.103 ms | 0.618 ms |
+| Input latency, shipped binary | 0.066 ms | +0.15 ms | 0.216 ms |
+| Binary size | 5,610,320 B | +56,103 B | 5,666,423 B |
+
+Three of these are as tight as the noise allows and one is not, and the
+difference is the point:
+
+- **Binary size** is reproducible to the byte — three clean release builds gave
+  identical sizes — so its band is 1%, about what a small new dependency costs.
+  This is the budget's sharpest instrument.
+- **Input latency (harness)** has a ~3.5% spread, so a 20% band is six times the
+  noise and still under a quarter of the declared 16 ms budget.
+- **The two startup figures** carry a spread well above their medians, so their
+  bands are wide in both terms. They catch a genuine order-of-magnitude
+  regression in the launch path and nothing finer.
+- **The shipped binary's RSS** is the loosest in relative terms (+3.0 MB). It was
+  calibrated against a *connected* binary, where the spread was what the network
+  half happened to hold resident; the unauthorised binary is steadier, but the
+  band was not tightened on the strength of three runs, so it stays loose.
+
+### Calibration
+
+The bands were not asserted; each was checked by injecting a real regression,
+rebuilding, and watching the check fail on the figure it moved. These trials were
+**re-run after the two corrections above**, because the first set was calibrated
+against a baseline the audit had shown was a signed-in session:
+
+| Injected | Measured | Baseline | Delta | Threshold | Result |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| harness retains an extra 6 MB | 9,945,024 B | 2,965,504 B | **+235.4%** | 4,014,080 B | **fails** |
+| 5 ms of work before the first draw | 7.857 ms | 1.273 ms | **+517.2%** | 3.773 ms | **fails** |
+| 512 KB `#[used]` static in the binary | 6,138,704 B | 5,610,320 B | **+9.4%** | 5,666,423 B | **fails** |
+
+(The first two rows were measured against an intermediate three-run baseline
+taken before the five-run re-record; the injections and the verdicts are
+unaffected by the later change of anchor, and both figures are named above so
+the comparison is not mistaken for one against the current baseline.)
+
+Each failure message names the metric, the measured value, the baseline, the
+delta, and the threshold. Reverted after the trial: `grep` confirms no injection
+marker remained, and the binary returned to exactly 5,610,320 bytes.
+
+Against an unregressed tree, **nine consecutive `make measure` +
+`make measure-check` cycles passed and none failed**, with margins well clear of
+the thresholds: first frame 0.55–0.81 ms against a 3.23 ms threshold, populated
+load 1.27–1.48 ms against 3.91 ms, binary RSS 7.91–8.28 MB against 11.25 MB,
+harness latency 0.511–0.540 ms against 0.618 ms, and binary size exact every
+time.
+
+### What the re-baseline invalidated
+
+Stage 2's bands were anchored to figures the audit invalidated. The trials above
+were re-run against the corrected baseline, and these bands were left in place
+rather than re-tuned:
+
+- **`rss_idle_binary_bytes` fell from 12.02 MB to 8.25 MB** — the connected client
+  was nearly a third of the old figure. Its band (+3.0 MB) now yields an 11.25 MB
+  threshold, still loose.
+- **`startup_first_frame_ms` fell from 2.403 ms to 0.728 ms** on the warm median.
+  Its +2.5 ms floor was calibrated against a *cold* figure and is now several
+  times the warm value; that is deliberate, because the cold launch still happens
+  once per session and a band that tight would catch the page cache, not the code.
+- **`input_latency_ms` rose from 0.030 ms to 0.066 ms**, because the unauthorised
+  loop is not also doing MTProto work between the keypress and the draw.
+- **Harness RSS** moved from 3.41 MB to 3.41 MB — unchanged, and worth noting,
+  since the audit's correction was to a *different* process.
+
+No band was tightened on this evidence. Each remains the widest that passes the
+trials, and the cold-launch effect is the reason the two startup bands stay loose.
+
+### What the budget cannot see
+
+It is a change detector, not a memory model. It cannot tell a leak that grows
+slowly from a leak that grows quickly — a 1 MB/year drift sits inside every band
+here — and it only measures on the platform it was recorded on: see below.
+
+### One baseline per host
+
+A baseline is only comparable to a run on the platform it was taken on, and CI
+runs `ubuntu-latest` while this baseline was recorded on `darwin-arm64`. The
+stored baseline names its `platform`, and the check enforces only when that
+matches the running host. On a host with no stored baseline it **reports and
+does not fail**, because a threshold cannot be calibrated on a machine it was
+never measured on; the run still writes its report, which a maintainer reads and
+records with `check.py --record-baseline`. So CI's first run on a new host is a
+recording run, and enforcement begins once that baseline is committed.
+
+Each baseline is the **median across three `make measure` runs**, not one. Since
+the budget only fails on an increase, a baseline captured during a single
+unusually slow run would sit high and silently disable the rule anchored to it —
+which is exactly what happened while calibrating this one.
+
 ### What the harness does not measure
 
 - **Allocation counts.** No counting global allocator is installed; that is the
