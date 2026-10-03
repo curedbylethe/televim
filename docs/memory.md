@@ -10,19 +10,21 @@ quietly going backwards.
 ## Measured baseline
 
 Taken on a release build (`lto = "fat"`, `codegen-units = 1`, `strip = true`,
-`panic = "abort"`), median of three `make measure` runs — which is what
-`docs/memory-baseline.json` records.
+`panic = "abort"`), median of five `make measure` runs — which is what
+`docs/memory-baseline.json` records. The baseline was re-recorded when STAGE-03/04
+added `unicode-bidi`'s Unicode tables: binary size moved by +66,080 B and nothing
+else in the tree grew with it.
 
 | Metric | Target | Measured | Verdict |
 | :--- | :--- | ---: | :--- |
-| RSS at idle, harness at 60 chats | < 50 MB | **3.41 MB** | inside |
-| RSS at idle, shipped binary, unauthorised | < 50 MB | **8.25 MB** | inside |
-| Startup, launch → first frame (empty/sign-in frame) | < 500 ms | **0.728 ms** | inside |
-| Startup, harness launch → populated screen | — | **1.410 ms** | recorded |
-| Input latency, key→draw (real binary) | < 16 ms | **0.066 ms** | inside |
-| Input latency, key→draw (harness, 50 keypresses) | < 16 ms | **0.515 ms** | inside |
-| Frame time, harness | — | **0.518 ms** | recorded |
-| Binary size, stripped release | < 15 MB | **5,610,320 bytes** (5.35 MB) | inside |
+| RSS at idle, harness at 60 chats | < 50 MB | **3.06 MB** | inside |
+| RSS at idle, shipped binary, unauthorised | < 50 MB | **7.08 MB** | inside |
+| Startup, launch → first frame (empty/sign-in frame) | < 500 ms | **0.778 ms** | inside |
+| Startup, harness launch → populated screen | — | **1.058 ms** | recorded |
+| Input latency, key→draw (real binary) | < 16 ms | **0.063 ms** | inside |
+| Input latency, key→draw (harness, 50 keypresses) | < 16 ms | **0.509 ms** | inside |
+| Frame time, harness | — | **0.510 ms** | recorded |
+| Binary size, stripped release | < 15 MB | **5,676,400 bytes** (5.41 MB) | inside |
 
 ### Two corrections to how these figures were taken
 
@@ -70,7 +72,7 @@ opt-in diagnostic (`make measure` with `--massif`), reported separately as
 **Environment.** `Darwin arm64`, Darwin 25.5.0; `rustc 1.98.1
 (48a229cea 2026-09-01)`, host `aarch64-apple-darwin`, LLVM 22.1.8; toolchain pin
 `channel = "1.98.1"`; release profile as above; `Cargo.lock` sha256
-`5236e45bee285c01c…`; 8 CPUs. RSS read in-process from `proc_pidinfo`
+`8d313aba49edc58d…`; 8 CPUs. RSS read in-process from `proc_pidinfo`
 (`/proc/self/status` on Linux), and from `/proc/<pid>/status` (`ps rss`) for the
 binary. No `valgrind`, `heaptrack`, or `hyperfine` on this host. The block also
 records the confounds that decided the figures above: credential and session
@@ -156,28 +158,31 @@ from this file rather than trusted.
 
 | Metric | Typical | Range across 20 invocations |
 | :--- | ---: | ---: |
-| RSS, harness | 3.41 MB | 3.39 – 3.43 MB |
-| RSS, binary | 8.25 MB | 8.19 – 8.28 MB |
-| Startup, first frame | 0.728 ms | 0.70 – 0.81 ms |
-| Startup, populated load | 1.410 ms | 1.24 – 1.51 ms |
-| Input latency, harness | 0.515 ms | 0.511 – 0.522 ms |
-| Input latency, binary | 0.066 ms | 0.059 – 0.071 ms |
-| Frame time | 0.518 ms | 0.512 – 0.525 ms |
-| Binary size | 5,610,320 B | exact on every run |
+| RSS, harness | 3.06 MB | 2.52 – 3.47 MB |
+| RSS, binary | 7.08 MB | 6.97 – 8.23 MB |
+| Startup, first frame | 0.721 ms | 0.696 – 1.851 ms |
+| Startup, populated load | 1.058 ms | 0.993 – 2.748 ms |
+| Input latency, harness | 0.509 ms | 0.500 – 0.515 ms |
+| Input latency, binary | 0.057 ms | 0.053 – 0.141 ms |
+| Frame time | 0.511 ms | 0.502 – 0.513 ms |
+| Binary size | 5,676,400 B | exact on every run |
 
-On the **warm** figure this spread is small — under 8% on every metric, and zero
-on binary size. Two known effects sit outside it and are worth stating rather
-than folding into a number:
+On the **warm timings** this spread is small — under 3% on every latency and
+frame figure — and zero on binary size. The RSS figures and the two startup
+figures scatter wider, and are named as such in the bands below rather than
+folded into one number:
 
-- **Harness RSS has a low mode.** Most runs sit near 3.4 MB, but roughly one in
-  fifteen lands near 1.4–2.9 MB, with all five samples inside that run agreeing
-  exactly. The disagreement is between processes: macOS not faulting every page
-  in. It does not threaten the budget, which fails only on an *increase* and this
-  scatter is downward — but a rule that failed in either direction would be
-  reporting the page-in schedule.
-- **The first launch of a run is cold.** It pages the binary in from disk and
-  reads ~12.7 ms against the warm ~0.73 ms, which is why the figure is the median
-  of launches 2–5 and the cold one is recorded separately as `cold_ms`.
+- **Harness RSS has a low mode.** Most runs sit near 3.2–3.5 MB, but eight of the
+  twenty recorded invocations land between 2.5 and 2.9 MB, with all five samples
+  inside a run agreeing exactly. The disagreement is between processes: macOS not
+  faulting every page in. It does not threaten the budget, which fails only on an
+  *increase* and this scatter is downward — but a rule that failed in either
+  direction would be reporting the page-in schedule.
+- **The first launch of a run is cold.** It pages the binary in from disk, and
+  what that costs depends on the page cache: this recording read 1.93 ms cold
+  against 0.778 ms warm, while an earlier baseline taken with a cold cache read
+  12.7 ms against 0.728 ms. That is why the figure is the median of launches 2–5
+  and the cold one is recorded separately as `cold_ms`.
 
 The frame-time and harness-latency figures are the stable ones. **Binary size is
 stable to the byte** — clean release builds from scratch produce identical sizes
@@ -200,13 +205,13 @@ whose RSS lands low passes instead of firing.
 
 | Metric | Baseline | Allowed growth | Threshold |
 | :--- | ---: | ---: | ---: |
-| RSS@idle, harness (60 chats) | 3,571,712 B | +1.05 MB | 4.62 MB |
-| RSS@idle, shipped binary | 8.250 MB | +3.0 MB | 11.25 MB |
-| Startup, first frame | 0.728 ms | +2.5 ms | 3.23 ms |
-| Startup, populated load | 1.410 ms | +2.5 ms | 3.91 ms |
-| Input latency, harness | 0.515 ms | +0.103 ms | 0.618 ms |
-| Input latency, shipped binary | 0.066 ms | +0.15 ms | 0.216 ms |
-| Binary size | 5,610,320 B | +56,103 B | 5,666,423 B |
+| RSS@idle, harness (60 chats) | 3,211,264 B | +1.05 MB | 4.26 MB |
+| RSS@idle, shipped binary | 7.078 MB | +3.0 MB | 10.08 MB |
+| Startup, first frame | 0.778 ms | +2.5 ms | 3.28 ms |
+| Startup, populated load | 1.058 ms | +2.5 ms | 3.56 ms |
+| Input latency, harness | 0.509 ms | +0.102 ms | 0.611 ms |
+| Input latency, shipped binary | 0.063 ms | +0.15 ms | 0.213 ms |
+| Binary size | 5,676,400 B | +56,764 B | 5,733,164 B |
 
 Three of these are as tight as the noise allows and one is not, and the
 difference is the point:
@@ -214,7 +219,7 @@ difference is the point:
 - **Binary size** is reproducible to the byte — three clean release builds gave
   identical sizes — so its band is 1%, about what a small new dependency costs.
   This is the budget's sharpest instrument.
-- **Input latency (harness)** has a ~3.5% spread, so a 20% band is six times the
+- **Input latency (harness)** has a ~3% spread, so a 20% band is six times the
   noise and still under a quarter of the declared 16 ms budget.
 - **The two startup figures** carry a spread well above their medians, so their
   bands are wide in both terms. They catch a genuine order-of-magnitude
@@ -222,7 +227,7 @@ difference is the point:
 - **The shipped binary's RSS** is the loosest in relative terms (+3.0 MB). It was
   calibrated against a *connected* binary, where the spread was what the network
   half happened to hold resident; the unauthorised binary is steadier, but the
-  band was not tightened on the strength of three runs, so it stays loose.
+  band was not tightened on the strength of five runs, so it stays loose.
 
 ### Calibration
 
@@ -248,10 +253,11 @@ marker remained, and the binary returned to exactly 5,610,320 bytes.
 
 Against an unregressed tree, **nine consecutive `make measure` +
 `make measure-check` cycles passed and none failed**, with margins well clear of
-the thresholds: first frame 0.55–0.81 ms against a 3.23 ms threshold, populated
-load 1.27–1.48 ms against 3.91 ms, binary RSS 7.91–8.28 MB against 11.25 MB,
-harness latency 0.511–0.540 ms against 0.618 ms, and binary size exact every
-time.
+the thresholds *of the baseline in force then*: first frame 0.55–0.81 ms against a
+3.23 ms threshold, populated load 1.27–1.48 ms against 3.91 ms, binary RSS
+7.91–8.28 MB against 11.25 MB, harness latency 0.511–0.540 ms against 0.618 ms, and
+binary size exact every time. Those thresholds are the ones the table above has
+since moved with its baseline; the bands behind them are unchanged.
 
 ### What the re-baseline invalidated
 
@@ -259,9 +265,9 @@ Stage 2's bands were anchored to figures the audit invalidated. The trials above
 were re-run against the corrected baseline, and these bands were left in place
 rather than re-tuned:
 
-- **`rss_idle_binary_bytes` fell from 12.02 MB to 8.25 MB** — the connected client
-  was nearly a third of the old figure. Its band (+3.0 MB) now yields an 11.25 MB
-  threshold, still loose.
+- **`rss_idle_binary_bytes` fell from 12.02 MB to 8.25 MB**, and the CUR-28
+  re-record put it at 7.078 MB — the connected client was nearly a third of the
+  old figure. Its band (+3.0 MB) now yields a 10.08 MB threshold, still loose.
 - **`startup_first_frame_ms` fell from 2.403 ms to 0.728 ms** on the warm median.
   Its +2.5 ms floor was calibrated against a *cold* figure and is now several
   times the warm value; that is deliberate, because the cold launch still happens
@@ -291,10 +297,11 @@ never measured on; the run still writes its report, which a maintainer reads and
 records with `check.py --record-baseline`. So CI's first run on a new host is a
 recording run, and enforcement begins once that baseline is committed.
 
-Each baseline is the **median across three `make measure` runs**, not one. Since
-the budget only fails on an increase, a baseline captured during a single
-unusually slow run would sit high and silently disable the rule anchored to it —
-which is exactly what happened while calibrating this one.
+Each baseline is the **median across several `make measure` runs** (five in
+`docs/memory-baseline.json`), not one. Since the budget only fails on an
+increase, a baseline captured during a single unusually slow run would sit high
+and silently disable the rule anchored to it — which is exactly what happened
+while calibrating this one.
 
 ### What the harness does not measure
 
@@ -327,7 +334,7 @@ which is exactly what happened while calibrating this one.
 No arena allocator is used anywhere, and the baseline above is why rather than a
 preference. The render pass's allocations are transient — dropped at the end of
 the frame that made them — so they cannot move either RSS figure, which the
-long-lived window and the terminal buffers carry. A frame costs **0.518 ms**
+long-lived window and the terminal buffers carry. A frame costs **0.510 ms**
 against the 16 ms budget, so there is no time to recover either. And the arena
 cannot be threaded through `App::row_layout(&self) -> Vec<RowSpan>`
 (`tui/src/app.rs:4508`) or `conversation::render(..., &[RowSpan])`
@@ -350,7 +357,7 @@ what was actually found.
 
 Chosen against the baseline above, and the alternatives were `tikv-jemallocator`
 and `mimalloc`. The tree is already inside both ceilings with two to three times
-of margin — **5,610,320 B** stripped against < 15 MB, and **3.41 MB** / **8.25 MB**
+of margin — **5,676,400 B** stripped against < 15 MB, and **3.06 MB** / **7.08 MB**
 RSS@idle against < 50 MB — so a candidate would have to give some of it back to
 be worth adopting. The workload is not the one those allocators target: a
 single-threaded current-thread `tokio` plus one reader thread, not many threads
@@ -392,6 +399,6 @@ manifest for a decision nobody had made. Removing it changed nothing in the buil
    usual answer to long-tail fragmentation, so the candidate was evaluated against
    the baseline above instead of being waved off. Every render-pass allocation is
    dropped at the end of the frame that made it, so none of them is what the RSS
-   figures are made of, and the frame already costs 0.518 ms of a 16 ms budget.
+   figures are made of, and the frame already costs 0.510 ms of a 16 ms budget.
    The API would have to change to hand one over. A profile that later shows a
    fragmenting heap is what would reopen this.
