@@ -836,6 +836,215 @@ mod tests {
         }
     }
 
+    // ---- right-to-left fixtures -----------------------------------------
+
+    /// Hebrew, in the order it is stored: the word a reader reads first comes
+    /// first in the string.
+    ///
+    /// Logical order, which is what the message and the layout both hold. Whether
+    /// the screen shows it in this order is a separate question, and one only the
+    /// exact-column assertions below can answer — see [`body_cells`].
+    const HEBREW: &str = "שלום עולם";
+
+    /// Arabic, likewise logical: one word, four glyphs.
+    const ARABIC: &str = "سلام";
+
+    /// An application showing the Hebrew fixture and then the Arabic one, so the
+    /// two sit in one conversation and the screen has to carry both.
+    ///
+    /// The direction changes between them, so each opens its own group and each
+    /// carries its own sender tag — which is what makes the two rows comparable
+    /// at all: `[them] ` is seven columns and `[you] ` is six, so the body text
+    /// does not begin in the same column on both.
+    fn showing_rtl() -> App {
+        showing(vec![at(1, 0, false, HEBREW), at(2, 60, true, ARABIC)])
+    }
+
+    /// One row of the panel's body as `(column, symbol)` for every cell from
+    /// [`BODY_X`] to the scrollbar, in ascending column order.
+    ///
+    /// This exists because [`body_row`] is a blind spot rather than a helper: it
+    /// concatenates the cells in ascending column index, so `contains` on it
+    /// passes on a row whose glyphs are in the wrong columns — a reordered row
+    /// and an unreordered one read identically as a substring. Only a column
+    /// pinned to a symbol can tell them apart, which is the whole question for
+    /// right-to-left text.
+    fn body_cells(buffer: &Buffer, y: u16) -> Vec<(u16, String)> {
+        let last = usize::from(buffer.area.width) - 2;
+
+        (usize::from(BODY_X)..last)
+            .map(|x| (x as u16, cell(buffer, x as u16, y).symbol().to_owned()))
+            .collect()
+    }
+
+    /// The whole-screen column of the first cell of `y` holding `symbol`.
+    ///
+    /// A whole-screen column rather than an offset into the row, so that the
+    /// gutter and the text after it are pinned on one scale and can be compared.
+    fn column_holding(buffer: &Buffer, y: u16, symbol: &str) -> u16 {
+        body_cells(buffer, y)
+            .into_iter()
+            .find(|(_, drawn)| drawn == symbol)
+            .map_or_else(
+                || {
+                    panic!(
+                        "{symbol:?} is nowhere on row {y}: {:?}",
+                        body_row(buffer, y)
+                    )
+                },
+                |(column, _)| column,
+            )
+    }
+
+    /// The column the body text of a row begins in: one past the sender tag
+    /// `who` draws, as a whole-screen column.
+    ///
+    /// The tag is the message's own text, so its width is its own: `[them] ` is
+    /// seven columns and `[you] ` is six, and the layout reserves
+    /// [`rows::WHO_WIDTH`] for both — which is why the two kinds of row begin
+    /// their body text in different columns. That difference is the thing to pin,
+    /// not a constant to work around.
+    fn text_column(buffer: &Buffer, y: u16, who: &str) -> u16 {
+        let tag = format!("[{who}] ");
+        let tag_x = column_holding(buffer, y, &tag[..1]);
+        let tag_w = u16::try_from(columns(&tag)).expect("a tag's width fits a u16");
+
+        for (offset, drawn) in tag.chars().enumerate() {
+            let column = tag_x + u16::try_from(offset).expect("a tag is seven wide");
+            assert_eq!(
+                cell(buffer, column, y).symbol(),
+                drawn.to_string(),
+                "the tag is drawn whole before the text: {:?}",
+                body_row(buffer, y)
+            );
+        }
+
+        tag_x + tag_w
+    }
+
+    /// The glyph of `text` that is `n`th in the string, as it must appear on the
+    /// screen when the row is drawn in logical order.
+    ///
+    /// Returns the whole-screen column it belongs in and the symbol that belongs
+    /// there, so a caller can pin both and a reorder that moves one without the
+    /// other cannot pass.
+    fn nth_glyph(text: &str, n: usize, buffer: &Buffer, y: u16, who: &str) -> (u16, String) {
+        let column = text_column(buffer, y, who)
+            + u16::try_from(columns(&text.chars().take(n).collect::<String>()))
+                .expect("a glyph count fits a u16");
+
+        (
+            column,
+            text.chars()
+                .nth(n)
+                .expect("the glyph is in the string")
+                .into(),
+        )
+    }
+
+    // ---- right-to-left: the baseline ------------------------------------
+
+    /// A right-to-left message is laid out left-to-right, because no reorder
+    /// happens yet — so the glyph that comes first in the string is on the left.
+    ///
+    /// This is the baseline the reorder stages are measured against: it names the
+    /// exact column of the first glyph of the fixture, and it names three of them
+    /// rather than one, so a row that is half reordered does not pass.
+    #[test]
+    fn a_right_to_left_message_is_drawn_in_logical_order_and_the_baseline_pins_it() {
+        let app = showing_rtl();
+        let screen = screen(&app, 80, 24);
+
+        // Both fixtures name a sender that opens its own group, so each row is the
+        // message's first row and each carries the whole of its text.
+        let theirs = FIRST;
+        let yours = FIRST + 1;
+
+        // The Hebrew is drawn left-to-right, so the glyph that comes first in the
+        // string is on the left. Three of them, each pinned to its own column:
+        // a row that reordered only its tail would still pass on the first glyph,
+        // and the substring of the string is the same either way.
+        for (n, glyph) in ["ש", "ל", "ו"].into_iter().enumerate() {
+            let (column, expected) = nth_glyph(HEBREW, n, &screen, theirs, "them");
+
+            assert_eq!(
+                column_holding(&screen, theirs, glyph),
+                column,
+                "glyph {n} of the Hebrew is at column {column}, and the screen has it there"
+            );
+            assert_eq!(expected, glyph, "the fixture's own {n}th glyph");
+        }
+
+        // And the Arabic, on the reader's side, the same way.
+        for (n, glyph) in ["س", "ل", "ا"].into_iter().enumerate() {
+            let (column, _) = nth_glyph(ARABIC, n, &screen, yours, "you");
+
+            assert_eq!(
+                column_holding(&screen, yours, glyph),
+                column,
+                "glyph {n} of the Arabic is at column {column}"
+            );
+        }
+
+        // The two kinds of row do not begin their text in the same column, and
+        // that is not the test's arithmetic to correct: `[them] ` is seven
+        // columns of tag and `[you] ` is six, so the body text starts one earlier
+        // on the reader's own messages. Both are pinned against the screen, and
+        // against each other, because a gutter that is off by one here shifts
+        // every glyph after it.
+        let their_text = text_column(&screen, theirs, "them");
+        let your_text = text_column(&screen, yours, "you");
+
+        assert_eq!(
+            (your_text, their_text),
+            (31, 32),
+            "`[you] ` is one column narrower than `[them] `, so its text begins one \
+             column earlier — the row above is {:?} and the row below is {:?}",
+            body_row(&screen, yours),
+            body_row(&screen, theirs)
+        );
+        assert_eq!(
+            column_holding(&screen, yours, "س"),
+            your_text,
+            "and the Arabic's first glyph is the leftmost of its own body text"
+        );
+
+        // The columns are contiguous, so the whole word is where the first glyph
+        // is rather than three scattered glyphs that happen to be present.
+        assert_eq!(
+            body_cells(&screen, theirs)[usize::from(their_text - BODY_X)..]
+                .iter()
+                .take(3)
+                .map(|(_, symbol)| symbol.as_str())
+                .collect::<String>(),
+            "שלו",
+            "the first three columns of the Hebrew body are its own first three glyphs"
+        );
+    }
+
+    /// A substring assertion cannot see a reordered row, which is why the
+    /// baseline above pins columns. This is the same screen read the other way,
+    /// kept because it is the mistake the helper exists to prevent: `body_row`
+    /// concatenates the cells in ascending column order, so this passes on a row
+    /// whose glyphs are in the wrong columns.
+    #[test]
+    fn the_substring_of_a_reordered_row_would_still_pass() {
+        let screen = screen(&showing_rtl(), 80, 24);
+        let theirs = FIRST;
+
+        assert_eq!(
+            column_holding(&screen, theirs, "ש"),
+            text_column(&screen, theirs, "them"),
+            "today the logical-first glyph is the leftmost"
+        );
+        assert!(
+            body_row(&screen, theirs).contains(HEBREW),
+            "and the substring assertion — the one that cannot see order — also passes, \
+             which is why it is not what the baseline rests on: {:?}",
+            body_row(&screen, theirs)
+        );
+    }
+
     /// An application whose conversation has unread messages in front of what is
     /// loaded, with a jump asked for.
     ///
