@@ -40,6 +40,11 @@ unicode-width = "0.2"
 # One use: grapheme cluster edges, in `tui::grapheme`. A delete removes one
 # and a row is never cut inside one. Already in the lockfile via ratatui.
 unicode-segmentation = "1"
+# One use: which direction a run of characters reads, in `tui::bidi`. A
+# terminal reorders nothing, so the row has to be permuted into visual order
+# here; the UAX #9 implementation is the one thing that knows by what rule.
+# Already in the lockfile via ratatui.
+unicode-bidi = "0.3.18"
 # The GitHub gemoji catalog, for the input line's `:shortcode` completion. The
 # whole catalog rather than a curated subset: 1914 emoji, of which 1870 carry a
 # shortcode, at the cost of roughly 0.5 MB of binary and 2 MB of `phf` tables

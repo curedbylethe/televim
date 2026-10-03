@@ -11,6 +11,7 @@
 #![allow(clippy::cast_sign_loss)]
 
 pub mod app;
+pub mod bidi;
 pub mod card;
 pub mod date;
 pub mod emoji;
