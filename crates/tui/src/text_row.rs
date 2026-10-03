@@ -22,6 +22,12 @@
 //!   a decoration that participates in wrapping, a card's label is a fixed gutter.
 //! - **Whether the surface is a list, a card or a bar.** It takes an [`Ink`] and
 //!   nothing else, and an [`Ink`] is built by one of two constructors.
+//! - **What order the row is drawn in.** [`spans`] draws the row as it is
+//!   stored, which is every surface but one; [`spans_permuted`] draws it in the
+//!   order [`crate::bidi::visual_row`] names, which is a right-to-left row the
+//!   reader has asked this program to permute. The marks are clipped to each
+//!   piece in either case, so a selection follows its own characters across the
+//!   reorder rather than its columns.
 //!
 //! # The caret, and why it is not a fifth style
 //!
@@ -38,6 +44,7 @@ use std::ops::Range;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
+use crate::bidi::Chunk;
 use crate::rows;
 use crate::theme::Theme;
 
@@ -128,6 +135,10 @@ pub struct TextRow<'a> {
     pub text: &'a str,
 
     /// The slice of [`TextRow::text`] this row shows.
+    ///
+    /// In **logical** order, whatever order the row is drawn in: a row is a range
+    /// into the string its caller owns, and a reorder is something the painter
+    /// does to a row rather than something the row becomes.
     pub range: Range<usize>,
 
     /// The row is part of a search hit, so its text takes [`Ink::matched`].
@@ -197,13 +208,70 @@ enum Mark {
 
 #[must_use]
 pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
+    paint(row, std::slice::from_ref(&row.range))
+}
+
+/// The spans for one row drawn in the order [`Chunk`]s name, rather than the
+/// order the row is stored in.
+///
+/// Same three steps as [`spans`] — the text, a match on it, a selection split out
+/// of it — and the only difference is that a **piece** of the row is a logical
+/// byte range of its own rather than the whole row at once, so a permuted row
+/// draws its pieces in the order it is given and each piece's selection is
+/// clipped to that piece.
+///
+/// Which is the whole reason this is a second entry point rather than a field on
+/// [`TextRow`]: the order a row is drawn in is a property of the message it came
+/// from, not of the row, and a row that did not say so has exactly one answer.
+///
+/// A row whose chunks do not cover it draws nothing rather than drawing it twice:
+/// the pieces are the row's own claim about its text, and a row that makes a
+/// false one has nothing honest to fall back on.
+#[must_use]
+pub fn spans_permuted<'a>(row: &TextRow<'a>, chunks: &[Chunk]) -> Vec<Span<'a>> {
+    let pieces: Vec<Range<usize>> = chunks.iter().map(|chunk| chunk.logical.clone()).collect();
+
+    if is_the_whole_row(row.text, &pieces, &row.range) {
+        paint(row, &pieces)
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether `pieces` cover `row` exactly: every byte of the row once, no byte of it
+/// twice, and all of them inside the text.
+///
+/// The check is on bytes and not on columns, because the bytes are what the
+/// slices are taken with. A permutation that lost or duplicated a piece is not a
+/// row drawn in a different order — it is a row drawn wrong, and the only honest
+/// answer to that is no spans at all.
+fn is_the_whole_row(text: &str, pieces: &[Range<usize>], row: &Range<usize>) -> bool {
+    let mut covered = pieces.to_vec();
+    covered.sort_by_key(|piece| (piece.start, piece.end));
+    covered.dedup();
+
+    // Folded rather than compared as a whole, so the first gap is the one that
+    // fails: a piece out of order, a byte painted twice, a byte missing.
+    covered.iter().try_fold(row.start, |at, piece| {
+        text.get(piece.clone())?;
+        (piece.start == at).then_some(piece.end)
+    }) == Some(row.end)
+}
+
+/// The one paint, over however many pieces the row is drawn in.
+///
+/// A row is a list of logical byte ranges, in the order they reach the terminal.
+/// With one piece that is the row as stored, which is every surface but the
+/// conversation's; with several it is a right-to-left row the reader has asked
+/// this program to permute. Everything else — the match first, the selection on
+/// top of it, the caret as an overlay — is the same for both, and is per piece:
+/// a selection scattered across four pieces has four clipped slices of itself,
+/// not one.
+fn paint<'a>(row: &TextRow<'a>, pieces: &[Range<usize>]) -> Vec<Span<'a>> {
     // A row with no text has no cell to put a caret in, and a caret needs one:
     // it is a cell. A value the peer did not send is a row that is not here at
     // all, not a row drawn empty.
-    let Some(text) = row.text.get(row.range.clone()) else {
-        return Vec::new();
-    };
-    if text.is_empty() {
+    if row.text.get(row.range.clone()).is_none_or(str::is_empty) {
         return Vec::new();
     }
 
@@ -213,25 +281,62 @@ pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
         row.ink.plain
     };
 
+    // A permuted row's pieces are sub-ranges of the row, not of the whole text, so
+    // "the last row owns the offset one past its own end" is a question about the
+    // row: with one piece the answer must stay exactly what [`caret_lands_here`]
+    // says of the text, and with several there is no whole row left to ask of.
+    let len = if pieces.len() == 1 {
+        row.text.len()
+    } else {
+        row.text.get(row.range.clone()).map_or(0, str::len)
+    };
+
+    let mut out: Vec<Span<'a>> = Vec::new();
+    for piece in pieces {
+        let Some(text) = row.text.get(piece.clone()) else {
+            continue;
+        };
+        // Each piece is a row of its own for the length of this: it is painted in
+        // one go and the marks that fall in it are the ones that divide it.
+        paint_piece(row, &mut out, piece, text, base, len);
+    }
+
+    out
+}
+
+/// One piece of a row: its text, and whatever stands on it.
+///
+/// A selection is clipped to this piece and a caret is owned by the one piece it
+/// falls in, because a permuted row scatters both across pieces — a selection of
+/// four characters of a right-to-left word is four pieces and one of them is
+/// marked, not four marked cells in one span.
+fn paint_piece<'a>(
+    row: &TextRow<'a>,
+    out: &mut Vec<Span<'a>>,
+    piece: &Range<usize>,
+    text: &'a str,
+    base: Style,
+    len: usize,
+) {
     // A selection is split out of the row rather than styled where it is built,
     // because styling a slice of a row means splitting the row, and a row is only
     // splittable while its text is still one span.
     let (from, to) = row
         .selected
         .as_ref()
-        .map_or((0, 0), |range| rows::clip(range, &row.range));
-    let selected = from < to;
+        .map_or((0, 0), |range| rows::clip(range, piece));
+    let is_selected = from < to;
 
     let caret = row
         .caret
-        .filter(|at| caret_lands_here(&row.range, *at, row.text.len()))
-        .map(|at| at - row.range.start);
+        .filter(|at| caret_lands_here(piece, *at, len))
+        .map(|at| at - piece.start);
 
-    // What divides the row, in the order it divides it. The selection goes on
+    // What divides the piece, in the order it divides it. The selection goes on
     // first so that a caret sharing an offset with its edge is marked inside the
     // selection rather than beside it.
     let mut marks: Vec<(usize, Mark)> = Vec::with_capacity(4);
-    if selected {
+    if is_selected {
         marks.push((from, Mark::Selected));
         marks.push((to, Mark::Plain));
     }
@@ -258,24 +363,16 @@ pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
     }
     marks.sort_by_key(|(at, _)| *at);
 
-    let mut out: Vec<Span<'a>> = Vec::new();
     let mut at = 0;
     let mut style = base;
     let mut on_caret = false;
-    let effective = |style: Style, on_caret: bool| {
-        if on_caret {
-            caret_style(row, style)
-        } else {
-            style
-        }
-    };
 
     for (offset, mark) in marks {
         if at < offset {
             push(
-                &mut out,
+                out,
                 &text[at..offset],
-                effective(style, on_caret),
+                effective(row, style, on_caret),
                 row.ink.dot,
                 row.concealed,
             );
@@ -290,9 +387,9 @@ pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
     }
     if at < text.len() {
         push(
-            &mut out,
+            out,
             &text[at..],
-            effective(style, on_caret),
+            effective(row, style, on_caret),
             row.ink.dot,
             row.concealed,
         );
@@ -305,8 +402,16 @@ pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
     if caret.is_some_and(|at| at >= text.len()) {
         out.push(Span::styled(" ", caret_style(row, style)));
     }
+}
 
-    out
+/// The style a span is painted in: the caret's where the caret is, and its own
+/// everywhere else.
+fn effective(row: &TextRow<'_>, style: Style, on_caret: bool) -> Style {
+    if on_caret {
+        caret_style(row, style)
+    } else {
+        style
+    }
 }
 
 /// Whether a caret at byte offset `at` falls on the row `range` names.

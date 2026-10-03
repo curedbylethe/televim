@@ -21,6 +21,7 @@ use domain::vim::{CharMotion, Motion, VimState, char_motion};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 
+use crate::bidi::BidiMode;
 use crate::emoji;
 use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
@@ -1176,6 +1177,20 @@ pub struct App {
     /// memory of it. That is the "never claim more than was received" rule at the
     /// storage layer.
     read_receipts: RefCell<HashMap<i64, i64>>,
+
+    /// Who permutes a right-to-left row: this program, or the terminal.
+    ///
+    /// **Fixed at construction**, and private so that it stays that way: the
+    /// layout is a pure function of the window, the panel's width and the clock
+    /// ([`crate::rows`], invariant 4), and a mode read out of mutable state while
+    /// a frame is being drawn would make the same conversation two different
+    /// heights depending on when it was asked. [`App::with_bidi`] is the one way
+    /// in, so a caller that has read the configuration says so once and every
+    /// later frame draws the same rows.
+    ///
+    /// [`BidiMode::Terminal`] — the default — emits rows as they are stored and
+    /// lets the terminal rearrange them, which is what a shaping terminal needs.
+    bidi: BidiMode,
 }
 
 impl Default for App {
@@ -1241,7 +1256,31 @@ impl App {
             body_width: Cell::new(ASSUMED_BODY_WIDTH),
             now: Cell::new(0),
             read_receipts: RefCell::new(HashMap::new()),
+            bidi: BidiMode::Terminal,
         }
+    }
+
+    /// The same application, drawing right-to-left rows itself.
+    ///
+    /// By value and at construction rather than a setter, because the mode is an
+    /// input to the layout rather than a thing that changes while the window is
+    /// open: every row is then the same height whichever mode was asked for, and
+    /// [`App::row_layout`] stays a pure function of the window and the width. A
+    /// caller that has read the configuration calls this once, where it builds
+    /// the application; nothing else needs to say anything.
+    #[must_use]
+    pub fn with_bidi(mut self, bidi: BidiMode) -> Self {
+        self.bidi = bidi;
+        self
+    }
+
+    /// Who permutes a right-to-left row: this program, or the terminal.
+    ///
+    /// Asked once per row by the conversation panel, and never per frame by the
+    /// layout — see the field's doc.
+    #[must_use]
+    pub fn bidi(&self) -> BidiMode {
+        self.bidi
     }
 
     /// An application holding the sample conversation the tests read from.
@@ -4530,6 +4569,9 @@ impl App {
             }
             day = rows::day_of(message.timestamp).or(day);
 
+            // The row's own slice of the message, and its height. Neither reads
+            // the bidi mode: a row is broken logically and permuted at paint
+            // time, so the same window is the same height in either mode.
             let text = 0..message.text.len();
             let len = rows::message_rows(self, message, rows::group_of(self, index), width).len();
 
