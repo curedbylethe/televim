@@ -63,7 +63,7 @@ in one direction and wider in another:
 | Crate | Depends on |
 | :---- | :--------- |
 | `domain` | `thiserror` |
-| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation`, `emojis` |
+| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation`, `unicode-bidi`, `emojis` |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
 | `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
 
@@ -189,6 +189,8 @@ crates/tui/
 │                      #   drawing, and which rows exist
 │   ├── emoji.rs        # The `:query` under the caret, and its candidates
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
+│   ├── bidi.rs         # Which way a message reads, and the logical ranges one
+│                      #   wrapped row is drawn in, already permuted
 │   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break
 │   ├── line.rs         # The input line: owns the text, wraps vim-line
 │   ├── rows.rs         # One owner for the panel's geometry
@@ -208,7 +210,7 @@ crates/tui/
 │   │   └── status_bar.rs
 │   └── theme.rs        # Color schemes
 └── Cargo.toml          # deps: domain, ratatui, crossterm, vim-line,
-                       #        unicode-width, unicode-segmentation, emojis
+                       #        unicode-width, unicode-segmentation, unicode-bidi, emojis
 ```
 
 `app.rs` is the largest file in the workspace and holds the key dispatch, the
