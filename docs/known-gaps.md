@@ -88,6 +88,32 @@ Real, and named so they are not mistaken for oversights:
 - **A peer with no bare identifier is skipped**, and the skip is unreachable
   today. See [`decisions.md`](./decisions.md) for why, and which test guards it.
 
+- **xterm and alacritty render RTL wrong in the default mode.** The default emits
+  logical order and leaves the reordering to the terminal, which is the right
+  answer for a terminal that shapes — kitty, wezterm, foot, iTerm2, VTE — and the
+  wrong one for the two that do not, because nothing reverses the run for them.
+  The follow-up is the opt-in `BidiMode::Visual`, which applies the permutation
+  here instead; see [`decisions.md`](./decisions.md).
+- **Arabic and Persian letters are not contextually joined, and reordering cannot
+  join them.** Nothing in this program performs script shaping, so in the
+  opt-in `Visual` mode on a non-shaping terminal the letters render unjoined and
+  the text is still not right typographically. The follow-up is a shaping
+  library, which is a strictly larger piece of work than reordering and cannot
+  defeat a terminal shaper anyway — a terminal consumes code points into cells
+  and there is no glyph-placement protocol.
+- **Rule L4 glyph mirroring is absent.** Neither bidi direction applies it, so
+  `( ) [ ] { } < >` are not mirrored inside an RTL run; punctuation attaches by
+  *position*, which is what the bidi algorithm delivers. The follow-up is a
+  mirroring table added alongside a bidi pass, if a reader ever asks for the
+  glyphs and not only for the order.
+- **The default mode's correctness cannot be proved in this repository.**
+  `ratatui::TestBackend` has no bidi algorithm and no shaper, so a screen-level
+  test can show that a permutation reached the cells and nothing about how a real
+  terminal drew the emitted bytes. `Visual` is the machine-verifiable half and
+  `Terminal` rests on the terminal matrix in [`decisions.md`](./decisions.md);
+  the follow-up would be an end-to-end harness driving a real terminal, which
+  needs `app/tests/tui_e2e.rs` un-stubbed first.
+
 ## v2 Hooks
 
 The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers.
