@@ -71,7 +71,7 @@
       "height": 40
     }
   },
-  "idle_definition": null,
+  "idle_definition": "after the synthetic load is applied and drawn, settle_ms of quiet with no keypress pending and no frame in flight, then five RSS samples sample_gap_ms apart, of which the median is the figure reported. The shipped binary is sampled the same way on its own 250 ms idle tick, in a sandbox outside the repository so no credential reaches the run.",
   "metrics": {
     "rss_idle_harness_bytes": {
       "unit": "bytes",

@@ -75,8 +75,21 @@ INPUT_LATENCY = re.compile(r"input_latency_ms=(?P<ms>[\d.]+)")
 MASSIF_PEAK = re.compile(r"^mem_heap_B=(\d+)", re.M)
 MASSIF_SNAPSHOT = re.compile(r"^snapshot=(\d+)", re.M)
 
+# What "idle" means here, in the same words docs/memory.md uses. It travels in
+# the report so a recorded baseline carries the definition its figures were taken
+# under rather than the word alone -- without a value here `check.py` copies null
+# into the baseline and the number is unanchored.
+IDLE_DEFINITION = (
+    "after the synthetic load is applied and drawn, settle_ms of quiet with no "
+    "keypress pending and no frame in flight, then five RSS samples "
+    "sample_gap_ms apart, of which the median is the figure reported. The "
+    "shipped binary is sampled the same way on its own 250 ms idle tick, in a "
+    "sandbox outside the repository so no credential reaches the run."
+)
+
 NOT_MEASURED = [
-    "allocation counts (no counting global allocator is installed; that is a later stage)",
+    "allocation counts (no counting global allocator is installed; the report "
+    "names bytes and frames rather than a count of alloc calls)",
     "heap fragmentation (RSS does not distinguish a fragmented heap from a large one)",
     "cache behaviour",
     "anything inside grammers, including MTProto decoding",
@@ -589,6 +602,7 @@ def main() -> int:
             "settle_ms": first["settle_ms"],
             "terminal": first["terminal"],
         },
+        "idle_definition": IDLE_DEFINITION,
         "metrics": metrics,
         "target_rss_mb_50": dict(
             verdict(50, None, binary=binary_rss, harness=harness_rss),
