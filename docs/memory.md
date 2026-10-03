@@ -321,11 +321,30 @@ which is exactly what happened while calibrating this one.
 - Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = true`,
   `panic = "abort"`.
 
-What is declared but **not** in place, and so cannot be relied on:
+### No arena, by measurement
+
+No arena allocator is used anywhere, and the baseline above is why rather than a
+preference. The render pass's allocations are transient — dropped at the end of
+the frame that made them — so they cannot move either RSS figure, which the
+long-lived window and the terminal buffers carry. A frame costs **0.518 ms**
+against the 16 ms budget, so there is no time to recover either. And the arena
+cannot be threaded through `App::row_layout(&self) -> Vec<RowSpan>`
+(`tui/src/app.rs:4508`) or `conversation::render(..., &[RowSpan])`
+(`tui/src/widgets/conversation.rs:41`) without pushing a lifetime into the
+public widget API. The candidate sites it was evaluated against — the outer
+`Vec<RowSpan>` and one `Vec<Range<usize>>` per windowed message
+(`tui/src/app.rs:4508-4547`), the per-frame `Vec<ListItem>` and title strings,
+`rows::reply_prefix` twice per row (`tui/src/rows.rs:668-680`), and the
+fetch/translate triple `Vec<Message>` path (`telegram-framework/src/history.rs:172`,
+`proto/src/history.rs:151-164`, `domain/src/history.rs:182-192`) — are all
+outside an arena that cannot be handed one without that bleed. MTProto decoding
+is inside `grammers`. Recorded in [`decisions.md`](./decisions.md); `bumpalo` is
+not a dependency.
+
+### What is declared but **not** in place
 
 - `tikv-jemallocator` is not installed as the global allocator. The binary runs on
   the system allocator.
-- No arena allocator is used anywhere. `bumpalo` is not a dependency.
 
 ### Detailed Rationale
 
@@ -345,6 +364,10 @@ What is declared but **not** in place, and so cannot be relied on:
    them is the honest state of the measurement, and closing it needs an offline
    path to a populated chat list in the real binary — a product question, not a
    harness one.
-6. **Allocator work is still ahead.** An arena and a global allocator choice are
-   the intended answers to long-tail fragmentation; neither is built. The
-   baseline above is the evidence both will be judged against.
+6. **No arena, and it was measured rather than skipped.** Bump allocation is the
+   usual answer to long-tail fragmentation, so the candidate was evaluated against
+   the baseline above instead of being waved off. Every render-pass allocation is
+   dropped at the end of the frame that made it, so none of them is what the RSS
+   figures are made of, and the frame already costs 0.518 ms of a 16 ms budget.
+   The API would have to change to hand one over. A profile that later shows a
+   fragmenting heap is what would reopen this.
