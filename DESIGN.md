@@ -300,6 +300,77 @@ Notes, because they are the answers to questions a reader will have:
   protocol, and a shifted `Enter` is only distinguishable where the terminal
   volunteers it.
 
+### Text direction
+
+A message is stored in **logical order** — the order it is read, so the first
+word a reader reads is the first word in the string — and that is the order
+every layer above the pixels holds it in: the model's text, `Message.text`, the
+row ranges in the panel, selection, search and the register. **Which way a
+message reads is a rendering question, and the rendering layer is the only place
+that answers it.** `domain::Message` has no direction field and gets none, so
+nothing downstream of the domain can learn a message's direction from its type.
+
+- **Which way a message reads** is one answer for the whole message, asked of
+  the **first strongly-directional character anywhere in it** — not of its first
+  paragraph, because neutrals at the top cannot outvote what follows them. A
+  message that opens `--- 123 ---` and then says `שלום` is right-to-left. A
+  message with no strong character in it at all reads left-to-right, which is the
+  algorithm's own default and not a special case here.
+- **In what order a row's pieces are drawn** is a property of that one row, and
+  is the Unicode Bidirectional Algorithm over the row alone, at the base direction
+  the message was given. A row is not a reordered string: it stays the logical
+  slice it was, and what comes back is a list of *pieces* of it in the order they
+  are drawn. **A piece is always a whole number of grapheme clusters and always
+  a logical slice**, because a piece is text the painter slices, and a Hebrew word
+  is not written in the order it is read.
+- **An embedded left-to-right run stays whole and stays as written.** Digits, a
+  bracketed phrase, a file name in an otherwise right-to-left row: each is one
+  run and keeps its own order. A clock time reads `21:30`, not `30:12`.
+- **The reorder never changes a row's width.** The pieces partition the row — no
+  byte dropped, none drawn twice — and their cell widths sum to the row's, so the
+  two modes differ in the *order* of the cells and in nothing else. That is what
+  makes the mode a layout-independent fact and not a reflow.
+- **Rows are broken logically, in `wrap`, and only reordered at paint time.** The
+  line breaks of a right-to-left message are the breaks its logical order gives
+  it, which is not the break set a right-to-left layout would choose. This is a
+  known ceiling, not a claim: preserving the byte-offset geometry is what keeps
+  selection, search, scrolling and the register in logical space.
+- **The quoted prefix is chrome and stays put.** `> … ‖ ` is the conversation's
+  own decoration, drawn ahead of the text it introduces, and it is not part of
+  what gets permuted — only the message's own text is.
+- **The block is not right-aligned.** The sentence starts at the right of its own
+  run; the message body still lays out left to right from the `WHO_WIDTH` gutter.
+  Right-aligning the body would collide with the trailing note, which is already
+  at the far end of the row, and with the logical wrap geometry.
+
+**Who does the reordering is a setting, and the default is the terminal.**
+`BidiMode::Terminal` emits the row as it is stored and lets the terminal's shaper
+reverse a right-to-left run; `BidiMode::Visual` permutes the row here first. Both
+are correct programs, on different terminals: kitty, wezterm, foot, iTerm2 and VTE
+all shape and would reverse a second time if this program permuted as well, while
+xterm and alacritty draw the cells they are handed and do nothing else. **There is
+no detection**, because bidi and shaping are a setting on a terminal rather than
+an identity — `wezterm` ships `bidi_enabled=false`, VTE needs `CSI ? 2501 h` — and
+detection breaks under `tmux` and `ssh`. It is read once from configuration at
+start-up and never while a frame is being drawn, so the same conversation is the
+same height whichever way it is asked.
+
+**Not claimed here, and not delivered:** contextual shaping (Arabic joining is
+the terminal's, and a terminal that does not join renders unjoined), Rule L4
+glyph mirroring, and visual-order line breaking. Reading a right-to-left message
+correctly on a terminal that neither shapes nor applies the algorithm is the
+`Visual` mode's reason to exist, and it is a half of the feature: no assertion in
+this repository can prove how a given terminal renders the bytes emitted for it.
+
+**One thing the design model does not do, and the program does.** The model in
+`design/` implements the reorder per row and agrees with `unicode-bidi` on 3995 of
+4000 generated cases. The five it misses all need rule BD16 — bracket pairs
+matched by canonical equivalence across the whole paragraph and reordered by
+opening position, which is a paragraph-level pass rather than the per-row one a
+row is drawn in. They are adversarial bracket sequences (`א1]Z(漢!)ב`), not
+message text. `crates/tui/src/bidi.rs` asks `unicode-bidi` and is right on all of
+them; where the model and that file disagree, that file is the answer.
+
 ## Layout
 
 ```

@@ -5,7 +5,9 @@ repo's copy of the OpenDesign project `televim-app`; the two are kept in step by
 `scripts/design-sync.sh`, and `make design-check` fails if they are not.
 
 Open `design/index.html` in a browser, pick a screen, and press the keys. Every
-frame is exactly 24 rows by 80 columns, and the engine says so on every one.
+frame is exactly 24 rows by 80 **cells**, and the engine says so on every one. A
+cell is not a character — an emoji is two cells and a combining mark is none — so
+the model measures `cells`, the same count `wrap::columns` makes in the Rust.
 
 ## What it is, and what it is not
 
@@ -23,9 +25,24 @@ program does, run the program.
 
 The engine earns its place by being *drivable*: eight hand-written frames could
 only ever have shown eight states, and the three profile frames had already gone
-stale — silently, because nothing measured them. The engine has 43 scenes, and
+stale — silently, because nothing measured them. The engine has 63 scenes, and
 `design-system/build-specimen.js` regenerates the specimen from them so a frame
 cannot disagree with the model that produced it.
+
+It can also represent **text direction**, which is the other thing a frame that
+was drawn by hand cannot do: `baseDir` answers which way a message reads, and
+`visualCells` answers in what order one wrapped row's pieces reach the grid. The
+`rtl` scene group is one conversation in Hebrew shown in both modes, reached with
+the same keys as every other chat — a design model that could only show
+right-to-left text through a private entry point would not be showing the program.
+
+It is a model, and the rules it does not implement are named rather than left to
+be discovered: it lays out one row at a time, and it does not run the algorithm's
+BD16 bracket-pair pass, which matches brackets across a whole paragraph. That is
+5 of 4000 generated cases, all adversarial bracket sequences rather than message
+text, and `check-model.js` carries the two as a comment saying so.
+`DESIGN.md`'s "Text direction" clause is the spec; `crates/tui/src/bidi.rs` is the
+implementation, and where this model and that file disagree, that file is right.
 
 ## Layout
 
@@ -93,8 +110,9 @@ else.
 
 ```console
 $ node -e "const TV=require('./televim-engine.js');let n=0,b=0;\
-TV.SCENES.forEach((s,i)=>s.variants.forEach((v,j)=>{const r=TV.toText(TV.render(TV.scene(i,j)));\
-n++;if(r.length!==24||[...new Set(r.map(x=>[...x].length))].join()!=='80')b++}));\
-console.log((n-b)+'/'+n+' scenes are 24 rows x 80 columns')"
-43/43 scenes are 24 rows x 80 columns
+TV.SCENES.forEach((s,i)=>s.variants.forEach((v,j)=>{const g=TV.render(TV.scene(i,j));\
+n++;const w=[...new Set(g.map(r=>r.reduce((m,c)=>m+TV.cells(c[0]),0)))];\
+if(g.length!==24||w.length!==1||w[0]!==80)b++}));\
+console.log((n-b)+'/'+n+' scenes are 24 rows x 80 cells')"
+63/63 scenes are 24 rows x 80 cells
 ```
