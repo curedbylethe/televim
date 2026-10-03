@@ -24,12 +24,34 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use tui::bidi::BidiMode;
+
+/// Who arranges a right-to-left row: the terminal, or this program.
+///
+/// The two the terminal itself will not do for us, named as the configuration
+/// spells them.
+const BIDI_TERMINAL: &str = "terminal";
+const BIDI_VISUAL: &str = "visual";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub log_level: String,
     pub theme: String,
+
+    /// Who emits a right-to-left row: `terminal` or `visual`.
+    ///
+    /// `terminal` — the default — emits the row in logical order and leaves the
+    /// reordering to whatever is drawing it, which is what a terminal that
+    /// shapes Arabic or Hebrew needs. `visual` applies the permutation here
+    /// instead, for a terminal that does neither (xterm, alacritty); it is a
+    /// scramble on a shaping one. There is no detection, so this is a setting
+    /// and not a fact this program can go and read off the far end.
+    ///
+    /// **Per machine, not per terminal:** an ssh hop keeps the value it was
+    /// launched with, and `tmux` multiplexes one value over every pane. Whether
+    /// the right value followed you is the reader's to know.
+    pub bidi: String,
 
     /// Application identifier, from <https://my.telegram.org>.
     ///
@@ -74,6 +96,7 @@ impl Default for Config {
         Self {
             log_level: "info".to_owned(),
             theme: "default".to_owned(),
+            bidi: BIDI_TERMINAL.to_owned(),
             api_id: None,
             api_hash: None,
             phone: None,
@@ -88,7 +111,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let mut builder = config::Config::builder()
             .set_default("log_level", "info")?
-            .set_default("theme", "default")?;
+            .set_default("theme", "default")?
+            .set_default("bidi", BIDI_TERMINAL)?;
 
         if path.exists() {
             builder = builder.add_source(config::File::from(path));
@@ -116,6 +140,24 @@ impl Config {
     #[must_use]
     pub fn credentials(&self) -> Option<(i32, &str)> {
         Some((self.api_id?, self.api_hash.as_deref()?))
+    }
+
+    /// Who emits a right-to-left row, from [`Config::bidi`].
+    ///
+    /// Only the exact word `visual` asks for the permutation to be applied here.
+    /// Everything else — including a spelling this program does not know — is
+    /// [`BidiMode::Terminal`], because a value it cannot read that guessed
+    /// `Visual` would scramble a run on precisely the terminals whose shaper is
+    /// the reason `Terminal` is the default. The comparison is case-sensitive:
+    /// the value is a word from the documentation, not a path, and `config`
+    /// lowercases the *key* without touching the value.
+    #[must_use]
+    pub fn bidi_mode(&self) -> BidiMode {
+        if self.bidi == BIDI_VISUAL {
+            BidiMode::Visual
+        } else {
+            BidiMode::Terminal
+        }
     }
 }
 
@@ -155,6 +197,39 @@ mod tests {
         assert_eq!(cfg.credentials(), Some((1234, "hash")));
     }
 
+    /// The right-to-left mode is the terminal's job unless a reader says
+    /// otherwise, and saying otherwise is visible in the application it is built.
+    #[test]
+    fn the_terminal_permutes_right_to_left_rows_unless_asked_not_to() {
+        assert_eq!(
+            bare().bidi_mode(),
+            BidiMode::Terminal,
+            "and the default configuration says so"
+        );
+
+        let mut cfg = bare();
+        cfg.bidi = "visual".to_owned();
+
+        // Asserted through the application, which is where the value lands and
+        // is the only reader of it — no terminal is involved either way.
+        assert_eq!(
+            tui::app::App::new().with_bidi(cfg.bidi_mode()).bidi(),
+            BidiMode::Visual
+        );
+    }
+
+    /// A spelling the configuration does not know leaves the reordering to the
+    /// terminal, which is the safe answer on the terminals that shape.
+    #[test]
+    fn an_unknown_spelling_of_the_bidi_key_is_the_terminal_not_visual() {
+        let mut cfg = bare();
+        cfg.bidi = "Visual".to_owned();
+        assert_eq!(cfg.bidi_mode(), BidiMode::Terminal);
+
+        cfg.bidi = String::new();
+        assert_eq!(cfg.bidi_mode(), BidiMode::Terminal);
+    }
+
     /// The environment is read under the prefix the rest of the workspace
     /// already uses, and a missing file is not an error.
     #[test]
@@ -169,6 +244,7 @@ mod tests {
         unsafe {
             std::env::set_var("TELEVIM_API_ID", "4242");
             std::env::set_var("TELEVIM_API_HASH", "from-the-environment");
+            std::env::set_var("TELEVIM_BIDI", "visual");
         }
 
         let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
@@ -176,6 +252,11 @@ mod tests {
 
         assert_eq!(cfg.credentials(), Some((4242, "from-the-environment")));
         assert_eq!(cfg.log_level, "info", "and the defaults still apply");
+        assert_eq!(
+            cfg.bidi_mode(),
+            BidiMode::Visual,
+            "so the escape hatch is reachable from the environment alone"
+        );
     }
 
     /// The `TELEGRAM_*` prefix is read too, and the workspace's own prefix
@@ -219,6 +300,7 @@ mod tests {
         for name in [
             "TELEVIM_API_ID",
             "TELEVIM_API_HASH",
+            "TELEVIM_BIDI",
             "TELEGRAM_API_ID",
             "TELEGRAM_API_HASH",
         ] {

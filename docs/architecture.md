@@ -330,6 +330,13 @@ session opens the sign-in field with the phone already in the bar, and the flow
 asks for the code there, then for a two-factor password when Telegram says the
 account has one.
 
+`Config` also reads `TELEVIM_BIDI` — `terminal` (the default) or `visual` — which
+says whether this program or the terminal arranges a right-to-left row. It is
+read once in `runtime.rs` and handed to `tui` as a plain `tui::bidi::BidiMode`
+through `App::with_bidi`, which is the only path a configuration value takes into
+`App`; `tui` names no configuration type. The value is per machine rather than per
+terminal, so an ssh hop keeps it — see [`decisions.md`](./decisions.md).
+
 The log goes to a file beside the configuration (`televim.toml` → `televim.log`)
 and **never the terminal**: this program draws on the terminal, and `grammers`
 logs at `info` as a matter of course, so a logger that shares the screen with

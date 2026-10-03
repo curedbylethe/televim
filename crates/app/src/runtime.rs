@@ -252,7 +252,11 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
     // against it. Nothing to report in an ordinary run, hence the `Option`.
     let mut keypress_to_probe: Option<Instant> = None;
 
-    let mut app = App::new();
+    // The bidi mode is read once, here, and is fixed for the life of the
+    // application: it is an input to the layout, so a mode that could change
+    // while the window is open would make the same conversation two different
+    // heights depending on when it was asked.
+    let mut app = App::new().with_bidi(cfg.bidi_mode());
     "connecting…".clone_into(&mut app.status);
 
     // What the configuration carries goes into the sign-in flow as pre-fills,
