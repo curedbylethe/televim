@@ -105,22 +105,37 @@ html = replaceFrame(html, 'prompt-frame', sec05());
 html = replaceFrame(html, 'status-line-frame', sec06());
 html = replaceFrame(html, 'panel-light-frame', sec01());
 
-/* ---------- section 08 · every profile frame, in reading order ---------- */
+/* ---------- section 08 · every profile frame, in reading order ----------
+   Scenes are named, not numbered. A frame list written as `6, 0` is a claim
+   about the order of two arrays that nothing enforces, and it goes stale the
+   moment a scene is inserted before the one it points at — which is exactly what
+   had happened, and the failure was a `TypeError` rather than a wrong frame. */
+const sceneIndex = (id) => {
+  const i = TV.SCENES.findIndex((s) => s.id === id);
+  if (i < 0) throw new Error('no scene ' + id);
+  return i;
+};
+const variantIndex = (id, name) => {
+  const si = sceneIndex(id);
+  const vi = TV.SCENES[si].variants.findIndex((v) => v.name === name);
+  if (vi < 0) throw new Error(`scene ${id} has no variant ${name}`);
+  return [si, vi];
+};
 const CARD_FRAMES = [
-  ['profile-self-card-frame', 'self card', 'S', 'profile card, self card', 6, 0],
-  ['profile-add-account-frame', 'add account refuses', 'SGkd', 'profile card, add account refuses', 6, 1],
-  ['profile-logout-the-confirmation-frame', 'logout: the confirmation', 'SGd', 'profile card, logout: the confirmation', 6, 2],
-  ['profile-esc-ladder-frame', 'self card, mid Esc ladder', 'S:<Esc><Esc>', 'profile card, self card mid Esc ladder', 6, 5],
-  ['profile-esc-closes-frame', 'Esc Esc Esc: the card closes', 'S:<Esc><Esc><Esc>', 'profile card, Esc Esc Esc closes the card', 6, 6],
-  ['profile-contact-card-frame', 'contact card', 'A', 'profile card, contact card', 6, 7],
-  ['profile-charwise-selection-frame', 'charwise selection', 'Allllvlllllll', 'profile card, charwise selection', 6, 8],
-  ['profile-selection-of-rows-frame', 'selection of rows', 'Avjj', 'profile card, selection of rows', 6, 9],
-  ['profile-yy-the-register-fills-frame', 'yy: the register fills', 'Ayy', 'profile card, yy: the register fills', 6, 10],
-  ['profile-round-trip-frame', 'l h l: the card starts at the top', 'ljjjhl', 'profile card, l h l round trip', 6, 12],
-  ['profile-signed-out-frame', 'not signed in', 'none', 'profile card, not signed in', 6, 15],
-  ['profile-signin-frame', ':signin from the card', ':signin<CR>', 'profile card, :signin from the card', 6, 16],
-  ['profile-nothing-read-yet-frame', 'nothing read yet', 'none', 'profile card, nothing read yet', 6, 17]
-];
+  ['profile-self-card-frame', 'self card', 'S', 'profile card, self card', 'Profile · you'],
+  ['profile-add-account-frame', 'add account refuses', 'SGkd', 'profile card, add account refuses', 'add account refuses'],
+  ['profile-logout-the-confirmation-frame', 'logout: the confirmation', 'SGd', 'profile card, logout: the confirmation', 'logout raises the confirmation'],
+  ['profile-esc-ladder-frame', 'self card, mid Esc ladder', 'S:<Esc><Esc>', 'profile card, self card mid Esc ladder', "Esc Esc: back on the card"],
+  ['profile-esc-closes-frame', 'Esc Esc Esc: the card closes', 'S:<Esc><Esc><Esc>', 'profile card, Esc Esc Esc closes the card', 'Esc Esc Esc: the card closes'],
+  ['profile-contact-card-frame', 'contact card', 'A', 'profile card, contact card', 'Profile · a person'],
+  ['profile-charwise-selection-frame', 'charwise selection', 'Allllvlllllll', 'profile card, charwise selection', 'character selection'],
+  ['profile-selection-of-rows-frame', 'selection of rows', 'Avjj', 'profile card, selection of rows', 'selection of rows'],
+  ['profile-yy-the-register-fills-frame', 'yy: the register fills', 'Ayy', 'profile card, yy: the register fills', 'yy: the register fills'],
+  ['profile-round-trip-frame', 'l h l: the card starts at the top', 'ljjjhl', 'profile card, l h l round trip', 'ljjjhl: the card starts at the top'],
+  ['profile-signed-out-frame', 'not signed in', 'none', 'profile card, not signed in', 'not signed in'],
+  ['profile-signin-frame', ':signin from the card', ':signin<CR>', 'profile card, :signin from the card', ':signin from the card'],
+  ['profile-nothing-read-yet-frame', 'nothing read yet', 'none', 'profile card, nothing read yet', 'nothing read yet']
+].map(([id, caption, keys, aria, variant]) => [id, caption, keys, aria, ...variantIndex('profile', variant)]);
 const removeBlock = (h, id) => h.replace(new RegExp('\\n[ \\t]*<div class="frame" data-od-id="' + id + '"[^>]*>[\\s\\S]*?</p>'), '');
 CARD_FRAMES.forEach(([id]) => { html = removeBlock(html, id); });
 const blocks = CARD_FRAMES.map(([id, caption, keys, aria, si, vi]) => frameBlock(id, caption, keys, aria, si, vi)).join('\n  ');

@@ -37,6 +37,328 @@
 
   const chars = (s) => Array.from(s).length;
 
+  /* ---------- cells, clusters, and the direction of a message ----------
+     A column is a cell and a character is not a column: an emoji is two, a
+     combining mark is none, a CJK ideograph is two. So every width here is a
+     count of CELLS, and `chars` above stays what it was — a count of code
+     points, which is what a hint budget and a caret offset are measured in.
+
+     The widths below are the ones `wrap::columns` gets from `unicode-width`,
+     which is the table the Rust measures with, so a row this engine lays out is
+     as wide as the row the binary lays out. A cluster carrying any wide
+     character is two cells whatever else is in it: that is what makes a ZWJ
+     family, a skin-tone sequence and a VS16 sequence each two columns, and what
+     the terminal draws. `Intl.Segmenter` is the cluster boundary, the same
+     extended cluster `grapheme::clusters` walks. */
+  const SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  const clusters = (s) => Array.from(SEGMENTER.segment(s), (x) => x.segment);
+
+  const WIDE = [
+    [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf],
+    [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3],
+    [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f], [0xff00, 0xff60],
+    [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff], [0x1f900, 0x1f9ff],
+    [0x20000, 0x3fffd]
+  ];
+  const ZERO_WIDTH = [
+    [0x0300, 0x036f], [0x0483, 0x0489], [0x0591, 0x05bd], [0x05bf, 0x05bf],
+    [0x05c1, 0x05c2], [0x0610, 0x061a], [0x064b, 0x065f], [0x0670, 0x0670],
+    [0x06d6, 0x06dc], [0x0711, 0x0711], [0x0730, 0x074a], [0x07a6, 0x07b0],
+    [0x0900, 0x0902], [0x093a, 0x093a], [0x0941, 0x0948], [0x0e31, 0x0e31],
+    [0x0e34, 0x0e3a], [0x0eb1, 0x0eb1], [0x200b, 0x200f], [0xfe00, 0xfe0f],
+    [0xfe20, 0xfe2f], [0x20d0, 0x20f0]
+  ];
+  const inRanges = (cp, ranges) => ranges.some(([lo, hi]) => cp >= lo && cp <= hi);
+  const cellsOf = (cluster) => {
+    if (Array.from(cluster).some((ch) => inRanges(ch.codePointAt(0), WIDE))) return 2;
+    return Array.from(cluster).reduce((n, ch) => n + (inRanges(ch.codePointAt(0), ZERO_WIDTH) ? 0 : 1), 0);
+  };
+  /* the cells a string occupies. This is the width every layout decision below
+     makes: the wrap, the box titles, the trailing note, the hint budget. */
+  const cells = (s) => clusters(s).reduce((n, c) => n + cellsOf(c), 0);
+  /* the code-unit index each cluster begins at, and the end of the last one, so
+     a cluster range can be sliced out of the string it came from. */
+  function clusterSpans(s) {
+    const spans = [];
+    let at = 0;
+    for (const c of clusters(s)) { spans.push({ s: at, e: at + c.length }); at += c.length; }
+    spans.push({ s: at, e: at });
+    return spans;
+  }
+
+  /* ---------- direction ----------
+     Two questions, asked of different things, and this is the same split
+     `crates/tui/src/bidi.rs` makes. WHICH WAY a message reads is a property of
+     the message as a whole and is answered by the first strongly-directional
+     character anywhere in it — not in its first paragraph, because the neutrals
+     at the top cannot outvote what follows them. IN WHAT ORDER a row's pieces
+     are drawn is a property of that one row and is answered by the algorithm
+     over the row alone, at the base direction the message was given.
+
+     `baseDir` returns 'ltr', 'rtl', or 'mixed' for a message with no strong
+     character in it at all — which the reader resolves as left-to-right, because
+     rule P3 leaves it alone.
+
+     `visualPieces` is the row's answer: the code-unit ranges of the row, in the
+     order the terminal is handed them. Left-to-right text comes back as one
+     piece covering the whole row, because nothing moved. Right-to-left text
+     comes back reversed, one piece per cluster, because a piece is a logical
+     slice drawn AS WRITTEN and a Hebrew word is not written in the order it is
+     read. An embedded left-to-right run — digits, a bracketed word in an
+     otherwise right-to-left row — stays whole, in the order it is written.
+
+     The pieces partition the row: no code unit is dropped, none is drawn twice,
+     and their widths sum to `cells(row)`, whatever the permutation did.
+
+     Not here, and not claimed: shaping (Arabic contextual joining is the
+     terminal's), Rule L4 glyph mirroring, and line breaking in visual order —
+     rows are broken logically, in `wrap`, which is the order the text is stored
+     in. `DESIGN.md` says all three under "Text direction". */
+  const RTL_RANGES = [
+    [0x0590, 0x08ff], [0xfb1d, 0xfdff], [0xfe70, 0xfeff],
+    [0x10800, 0x10fff], [0x1e800, 0x1efff]
+  ];
+  const ARABIC_NUMBER_RANGES = [[0x0660, 0x0669], [0x066b, 0x066c], [0x06f0, 0x06f9]];
+  /* ON — the neutrals: whitespace, punctuation, symbols and emoji. A pictograph
+     has no direction of its own, so it takes the direction of what surrounds it,
+     which is why `👨‍👩‍👧` at the top of a message does not decide its base. */
+  const NEUTRAL_RANGES = [
+    [0x0000, 0x002f], [0x003a, 0x0040], [0x005b, 0x0060], [0x007b, 0x007e],
+    [0x00a1, 0x00bf], [0x00d7, 0x00d7], [0x00f7, 0x00f7], [0x2010, 0x2027],
+    [0x2030, 0x205e], [0x2190, 0x2bff], [0xfb00, 0xfdff], [0xfe10, 0xfe6f],
+    [0x1f000, 0x1ffff], [0xe0000, 0xe01ef]
+  ];
+  /* L — the strongly left-to-letter scripts, named rather than assumed. The
+     default is NOT left-to-right: a code point in none of these tables is
+     unassigned as far as this model is concerned, and the algorithm's own default
+     for an unassigned character is its paragraph's direction. Getting this
+     backwards makes every emoji read as a left-to-letter character, which then
+     decides the base direction of any message that opens with one. */
+  const LTR_RANGES = [
+    [0x0041, 0x005a], [0x0061, 0x007a], [0x00c0, 0x02b8], [0x0370, 0x058f],
+    [0x0900, 0x1fff], [0x2c60, 0x2dff], [0x2e80, 0x2fdf], [0x3005, 0x3006],
+    [0x3041, 0x3096], [0x309d, 0x30ff], [0x3105, 0x312f], [0x3131, 0x318e],
+    [0x3190, 0x7fff], [0xa000, 0xf8ff], [0xfb00, 0xfb17], [0xff21, 0xff3a],
+    [0xff41, 0xff5a], [0x10000, 0x107ff], [0x11000, 0x1e7ff]
+  ];
+  /* a cluster that is nothing but marks takes the direction of the one it sits
+     on: a Hebrew letter with its vowel points is one letter, not a letter and a
+     neutral. */
+  const isMark = (ch) => inRanges(ch.codePointAt(0), ZERO_WIDTH) || ch === '‍';
+
+  function bidiType(ch) {
+    const cp = ch.codePointAt(0);
+    if (inRanges(cp, RTL_RANGES)) return 'R';
+    if (inRanges(cp, ARABIC_NUMBER_RANGES)) return 'AN';
+    if (cp >= 0x30 && cp <= 0x39) return 'EN';
+    if (inRanges(cp, NEUTRAL_RANGES)) return 'ON';
+    if (inRanges(cp, LTR_RANGES)) return 'L';
+    /* unassigned, and no direction of its own: the paragraph decides */
+    return 'ON';
+    return 'L';
+  }
+
+  function baseDir(text) {
+    for (const cluster of clusters(text)) {
+      for (const ch of cluster) {
+        const t = bidiType(ch);
+        if (t === 'L' || t === 'R') return t === 'L' ? 'ltr' : 'rtl';
+      }
+    }
+    return 'mixed';
+  }
+
+  /* the level of every cluster in a row, at the paragraph level the message was
+     given. The rules, in the order the algorithm applies them. */
+  function bidiLevels(text, base) {
+    const baseLevel = base === 'rtl' ? 1 : 0;
+    const cls = clusters(text);
+    /* rule W1: a cluster of marks is the direction of the one before it. */
+    const type = cls.map((cluster, i) => {
+      const first = Array.from(cluster)[0];
+      if (i > 0 && isMark(first)) return type[i - 1];
+      return bidiType(first);
+    });
+    /* Rules W4 and W5, which are what keep `21:30` one left-to-right run — a clock
+       time read as `30:21` is the failure this exists to prevent — and they have
+       to happen before the neutrals are resolved or the `:` is given a direction
+       of its own and the time is split around it.
+
+       W4: ONE separator *between* two numbers of the same kind becomes a number,
+       so `21:30` and `1,000` hold together. W5: a run of ET (currency signs and
+       the like) *next to* a number joins it, so a price does not come apart.
+       Neither applies to a separator with a number on only one side — a leading
+       `.2` and a trailing `12:` are a number and a punctuation mark, and gluing
+       them together is what reverses their order for the reader. */
+    const ch = (i) => Array.from(cls[i])[0];
+    const isSep = (c) => c === '+' || c === '-' || c === '/' || c === ',';
+    const isEt = (c) => c === '#' || c === '$' || c === '£' || c === '€' || c === '¥' || c === '₪';
+    const isCs = (c) => c === ',' || c === '.' || c === ':';
+    const isEs = (c) => c === '+' || c === '-';
+    /* W4 — a lone ES or CS between two like numbers */
+    for (let i = 1; i + 1 < type.length; i++) {
+      if (type[i] !== 'ON') continue;
+      const c = ch(i);
+      const before = type[i - 1], after = type[i + 1];
+      const cs = isCs(c), es = isEs(c);
+      if ((cs || es) && before === 'EN' && after === 'EN') type[i] = 'EN';
+      else if (cs && before === 'AN' && after === 'AN') type[i] = 'AN';
+    }
+    /* W5 — a run of ET adjacent to EN */
+    for (let i = 0; i < type.length; i++) {
+      if (type[i] !== 'ON' || !isEt(ch(i))) continue;
+      let j = i;
+      while (j < type.length && type[j] === 'ON' && isEt(ch(j))) j++;
+      if ((i > 0 && type[i - 1] === 'EN') || (j < type.length && type[j] === 'EN')) {
+        for (let k = i; k < j; k++) type[k] = 'EN';
+      }
+      i = j - 1;
+    }
+    /* the separators that did not become numbers are ordinary neutrals from here */
+    for (let i = 0; i < type.length; i++) {
+      if (type[i] === 'ON' && (isSep(ch(i)) || isCs(ch(i)) || isEs(ch(i)))) type[i] = 'CS';
+    }
+    /* Rule N0, before W7 and before the neutrals: a MATCHED pair of brackets is set
+       to the EMBEDDING direction — the paragraph's — and an unmatched one is left
+       as the neutral it is. So `(abc)`, `(1)` and `[س]` all keep their two halves
+       at the paragraph's level in a right-to-left row, with whatever they hold
+       one level in, which is what stops a bracket pair being torn off the
+       sentence it belongs to. This is bracket PAIRING and nothing else: the
+       glyph is not mirrored (see DESIGN.md).
+
+       A paired bracket is recorded rather than applied: the pair's CONTENTS are
+       skipped by W7 below, because a number outside a pair does not inherit the
+       direction of what the pair holds. `(abc) 42` in a right-to-left row is a
+       left-to-letter `(abc)`, a right-to-letter `42` and nothing in between —
+       without this the `42` would take the `c` and read `24`. */
+    const OPEN = { '(': ')', '[': ']', '{': '}', '<': '>' };
+    const CLOSE = { ')': '(', ']': '[', '}': '{', '>': '<' };
+    const embedding = baseLevel ? 'R' : 'L';
+    for (let i = 0; i < type.length; i++) {
+      const c = Array.from(cls[i])[0];
+      if (type[i] !== 'ON') continue;
+      /* A MATCHED pair takes the EMBEDDING direction, whatever it holds: `(abc)`
+         in a right-to-left row is a pair at the paragraph's level with its `abc`
+         one level inside it, and `(שלום)` is a pair at the paragraph's level with
+         a right-to-left word inside it. Whatever the pair holds is resolved on its
+         own afterwards, which is why the two read differently without the
+         brackets moving. An unmatched bracket is left to N1/N2 like any other
+         neutral. This is bracket PAIRING and nothing else — the glyph is not
+         mirrored (see DESIGN.md). */
+      if (!OPEN[c]) continue;
+      const stack = [c];
+      let end = -1;
+      for (let j = i + 1; j < type.length; j++) {
+        const k = Array.from(cls[j])[0];
+        if (OPEN[k]) stack.push(k);
+        else if (stack[stack.length - 1] === CLOSE[k]) {
+          stack.pop();
+          if (stack.length === 0) { end = j; break; }
+        }
+      }
+      if (end < 0) continue;
+      type[i] = embedding;
+      type[end] = embedding;
+    }
+    /* Rule W7: a European number takes the direction of the last STRONG character
+       before it, wherever that was — neutrals in between are skipped, because a
+       number and the punctuation beside it are one thing to a reader. So `Z0!0`
+       is one left-to-right piece and the second `0` does not start a run of its
+       own. A bracket pair is not strong, so the `42` of `(abc) 42` belongs to
+       the paragraph rather than to the `abc` inside it. */
+    let strong = baseLevel ? 'R' : 'L';
+    for (let i = 0; i < type.length; i++) {
+      if (type[i] === 'L' || type[i] === 'R') { strong = type[i]; continue; }
+      if (type[i] === 'EN' && strong === 'L') type[i] = 'L';
+    }
+    /* Rules N1 and N2: a run of NEUTRALS — every character that is not strongly
+       directional and not a number, including the separators W4 and W5 left
+       behind and every space — takes the direction of the two strong characters
+       it sits between when they agree, and the paragraph's when they do not or
+       when either end of the row is missing. A number counts as
+       right-to-letter here, which is why the space between a Hebrew word and a
+       number stays with the Hebrew and not with the number.
+
+       Treating the run as one run is the whole rule: a space and the punctuation
+       beside it are resolved together, so a `!` and the space after it cannot end
+       up on opposite sides of the run they belong to. */
+    const isNeutral = (t) => t === 'ON' || t === 'CS' || t === 'ET' || t === 'WS';
+    const leans = (t) => (t === 'L' ? 'L' : t === 'R' || t === 'EN' || t === 'AN' ? 'R' : null);
+    for (let i = 0; i < type.length; i++) {
+      if (!isNeutral(type[i])) continue;
+      let j = i;
+      while (j < type.length && isNeutral(type[j])) j++;
+      const before = i > 0 ? leans(type[i - 1]) : baseLevel ? 'R' : 'L';
+      const after = j < type.length ? leans(type[j]) : baseLevel ? 'R' : 'L';
+      const fill = before && before === after ? before : baseLevel ? 'R' : 'L';
+      for (let k = i; k < j; k++) type[k] = fill === 'L' ? 'L' : 'R';
+      i = j - 1;
+    }
+    /* rules I1 and I2: an even paragraph level lifts a right-to-letter and lifts a
+       number by two; an odd one lifts a left-to-letter and a number by one. That
+       is what leaves a number readable as written inside a right-to-left row. */
+    const level = type.map((t) => {
+      if (baseLevel % 2 === 0) {
+        if (t === 'R') return baseLevel + 1;
+        return t === 'AN' || t === 'EN' ? baseLevel + 2 : baseLevel;
+      }
+      return t === 'L' || t === 'EN' || t === 'AN' ? baseLevel + 1 : baseLevel;
+    });
+    /* rule L1: whitespace at the end of the line takes the paragraph's level, which
+       puts the space after a right-to-left word where a reader looks for it. */
+    for (let i = level.length - 1; i >= 0; i--) {
+      if (!/^\s$/.test(Array.from(cls[i])[0])) break;
+      level[i] = baseLevel;
+    }
+    return level;
+  }
+
+  /* rule L2: from the highest level down to the lowest odd one, reverse every
+     contiguous run of clusters at that level or above. The returned array is the
+     cluster index drawn at each visual position, left to right. */
+  function reorderVisual(level) {
+    let highest = 0, lowestOdd = Infinity;
+    for (const l of level) {
+      if (l > highest) highest = l;
+      if (l % 2 === 1 && l < lowestOdd) lowestOdd = l;
+    }
+    const order = level.map((_, i) => i);
+    if (lowestOdd === Infinity) return order;
+    for (let l = highest; l >= lowestOdd; l--) {
+      for (let i = 0; i < order.length; i++) {
+        if (level[order[i]] < l) continue;
+        let j = i;
+        while (j + 1 < order.length && level[order[j + 1]] >= l) j++;
+        for (let a = i, b = j; a < b; a++, b--) { const t = order[a]; order[a] = order[b]; order[b] = t; }
+        i = j;
+      }
+    }
+    return order;
+  }
+
+  /* the pieces of one row, in the order the terminal is handed them, as code-unit
+     ranges into `text`. A piece only grows while the visual order walks the
+     logical string forwards: a reversed run has no logical slice to hand the
+     painter, so it is a piece per cluster rather than a piece drawn backwards. */
+  function visualPieces(text, base) {
+    if (!text) return [];
+    const spans = clusterSpans(text);
+    const clustersOf = spans.slice(0, -1);
+    const order = reorderVisual(bidiLevels(text, base));
+    const pieces = [];
+    for (const index of order) {
+      const span = clustersOf[index];
+      const last = pieces[pieces.length - 1];
+      if (last && last.e === span.s) last.e = span.e;
+      else pieces.push({ s: span.s, e: span.e });
+    }
+    return pieces;
+  }
+  /* the same answer, already sliced: each piece as the text of it and the cells
+     it occupies. What the painter walks, and what a frame can be read back as. */
+  const visualCells = (text, base) =>
+    visualPieces(text, base).map((p) => ({ text: text.slice(p.s, p.e), cells: cells(text.slice(p.s, p.e)) }));
+
   /* the profile card's columns, inside the 56-column right panel: cue, label, value */
   const CUE_X = 2, LAB_X = 4, LAB_W = 12, VAL_X = 17, VAL_W = 37;
   const CUE = '·';
@@ -172,15 +494,49 @@
       C('Hedy Lamarr', 0, [y('Frequencies at nine?'), t('Nine works.')]),
       C('Donald Knuth', 3, [t('Volume four is late.')]),
       C('Radia Perlman', 0, [y('Spanning tree diagram attached.'), t('Loop free. Lovely.')]),
-      C('Frances Allen', 0, [t('Optimise the loop, not the line.')])
+      C('Frances Allen', 0, [t('Optimise the loop, not the line.')]),
+      /* The one conversation in a script that reads from the right. It is here to
+         be reached with the same keys as every other chat, because a design model
+         that could only show right-to-left text through a private entry point
+         would not be showing the program.
+
+         The fixtures are chosen to make the three things a direction has to get
+         right visible in one frame, rather than to be a translation of the other
+         conversations: a plain right-to-left sentence, which is one reversed run
+         with nothing embedded in it to hide a mistake behind; a clock time inside
+         one, which stays in the order it is written because a reader reads
+         21:30 and not 03:12; and a bracketed phrase, whose brackets travel with
+         what they hold. The chat's NAME is the one thing here left-to-right on
+         purpose — a peer's name is chrome, and the panel title and the list row
+         are not the message body. */
+      C('Noa Friedman', 2, [
+        t('הכרטיסים בתיק הכחול', { at: at(2, '18:04') }),
+        y('הבנתי, תודה.', { at: at(2, '18:06'), rcpt: 'read' }),
+        t('השער הצדדי נסגר בשעה 21:30', { at: at(0, '20:12') }),
+        t('(המקום שלך שמור)', { at: at(0, '20:13'), reply: { quote: 'הכרטיסים בתיק הכחול' } }),
+        t('תודה רבה! \u{1F468}‍\u{1F469}‍\u{1F467}', { at: at(0, '20:14') }),
+        y('אני בדרך.', { at: at(0, '21:40'), status: 'sending…' })
+      ], { cur: 2 })
     ];
   }
 
-  function fresh(view) {
+  /* Who arranges a right-to-left row: the terminal, or this program. Chosen once,
+     here, and never while a frame is being drawn — the layout below is a pure
+     function of the window and the panel's width, so a mode read out of mutable
+     state mid-draw would make the same conversation two different heights
+     depending on when it was asked. It is a fact about the terminal rather than
+     about the row: one terminal class reverses the run itself and one does not,
+     and only the reader knows which they are on. `terminal` is the default and
+     the right one for the terminals that shape, where permuting here would
+     reverse a right-to-left run a second time and scramble it. */
+  const BIDI_MODES = ['terminal', 'visual'];
+
+  function fresh(view, bidi) {
     const s = {
       view: 'chat', right: 'conv', focus: 'conv', chat: 0, chats: makeChats(),
       vis: null, search: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
       sset: 0, signin: null, card: null, count: 0,
+      bidi: BIDI_MODES.includes(bidi) ? bidi : 'terminal',
       profile: { name: 'Noor Haddad', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
     };
     if (view === 'signin') beginSignin(s);
@@ -199,21 +555,48 @@
   function range(s) { const c = chat(s); return [Math.min(s.vis.anchor, c.cur), Math.max(s.vis.anchor, c.cur)]; }
   function hitsOf(s) { return s.search ? s.search.hits : []; }
 
+  /* The rows a string occupies, as code-unit ranges into it — so a row is
+     `str.slice(r.s, r.e)` and nothing else, and a range that fell inside a
+     grapheme cluster would not be one that can be sliced.
+
+     A row is measured in CELLS, one cluster at a time, which is what makes a
+     row of emoji hold five of them in a ten-column panel and makes a break fall
+     where the terminal's would. A cluster that does not fit the room left ends
+     the row before it, so a row can finish short of its width; the one row
+     wider than the panel is a cluster wider than the row it starts.
+
+     Where a row is broken is the text's business and not the direction's: rows
+     are broken in logical order, at the last space that fits, and a
+     right-to-left message is broken exactly as a left-to-right one is. That is
+     the ceiling GAPS G8 records — the break points are logical even though the
+     row is read from the right. */
   function wrap(str, w0, w, keep) {
     const rows = [], parts = str.split('\n'); let off = 0;
     for (let pi = 0; pi < parts.length; pi++) {
       const p = parts[pi], last = pi === parts.length - 1; let st = 0;
       for (;;) {
         const width = rows.length === 0 ? w0 : w;
-        if (p.length - st <= width) { rows.push({ s: off + st, e: off + p.length, nl: !last }); break; }
+        /* One pass over the clusters from `st`, measuring cells: `used` is the
+           column this cluster starts in, so a cluster that does not fit the room
+           left begins the next row, and a space is breakable while the row still
+           has room after it — which is one column more on the arm that hands the
+           space to neither row than on the arm that leaves it on this one. */
+        let used = 0, cut = st, space = -1, ranOut = false;
+        for (const span of clusterSpans(p).slice(0, -1)) {
+          if (span.e <= st) continue;
+          const w2 = cellsOf(p.slice(span.s, span.e));
+          if (p.slice(span.s, span.e) === ' ' && used <= width - (keep ? 1 : 0)) space = span.s;
+          if (used > 0 && used + w2 > width) { cut = span.s; ranOut = true; break; }
+          used += w2;
+          cut = span.e;
+        }
+        if (!ranOut) { rows.push({ s: off + st, e: off + p.length, nl: !last }); break; }
         if (keep) {
-          const b = p.lastIndexOf(' ', st + width - 1);
-          const end = b > st ? b + 1 : st + width;
+          const end = space > st ? space + 1 : cut;
           rows.push({ s: off + st, e: off + end, nl: false }); st = end;
         } else {
-          const b = p.lastIndexOf(' ', st + width);
-          if (b > st) { rows.push({ s: off + st, e: off + b, nl: false }); st = b + 1; }
-          else { rows.push({ s: off + st, e: off + st + width, nl: false }); st += width; }
+          const end = space > st ? space : cut;
+          rows.push({ s: off + st, e: off + end, nl: false }); st = space > st ? space + 1 : cut;
         }
       }
       off += p.length + 1;
@@ -730,21 +1113,46 @@
 
   /* ---------- the grid ---------- */
   const newGrid = () => Array.from({ length: H }, () => Array.from({ length: W }, () => [' ', 't']));
+  /* The grid is 80 cells wide whatever is in it, so a two-cell cluster occupies
+     two of them: the cluster in the first, and an empty continuation in the
+     second, which is the cell the terminal draws the rest of the glyph across.
+     `cells` of an empty continuation is zero, which is what keeps a row of emoji
+     80 cells wide and 80 columns short of nothing. A cell is never cut inside a
+     cluster — a row that started on a lone `👨` would draw a stranger. */
+  const CONT = '';
   function put(g, x, y, str, a) {
     let i = 0;
-    for (const ch of str) { if (x + i >= 0 && x + i < W && y >= 0 && y < H) g[y][x + i] = [ch, a]; i++; }
+    for (const cluster of clusters(str)) {
+      const w = cellsOf(cluster);
+      if (x + i >= 0 && x + i < W && y >= 0 && y < H) g[y][x + i] = [cluster, a];
+      for (let k = 1; k < w; k++) if (x + i + k < W) g[y][x + i + k] = [CONT, a];
+      i += w;
+    }
     return i;
   }
   function fill(g, x, y, w, a) { for (let i = 0; i < w; i++) put(g, x + i, y, ' ', a); }
   function box(g, x, y, w, h, title, lit) {
     const a = lit ? 'f' : 'b';
     put(g, x, y, '┌─', a); put(g, x + 2, y, ' ' + title + ' ', 't');
-    const used = 2 + chars(title) + 2;
+    const used = 2 + cells(title) + 2;
     put(g, x + used, y, '─'.repeat(w - used - 1), a); put(g, x + w - 1, y, '┐', a);
     for (let r = 1; r < h - 1; r++) { put(g, x, y + r, '│', a); put(g, x + w - 1, y + r, '│', a); }
     put(g, x, y + h - 1, '└' + '─'.repeat(w - 2) + '┘', a);
   }
-  const trunc = (t, n) => (chars(t) > n ? Array.from(t).slice(0, n - 1).join('') + '…' : t);
+  /* Cut to `n` CELLS, never inside a cluster, and say so with an ellipsis that
+     takes the last of them. A two-cell cluster that would straddle the edge is
+     dropped whole rather than cut, which can leave the result a column short. */
+  function trunc(t, n) {
+    if (cells(t) <= n) return t;
+    let out = '', used = 0;
+    for (const c of clusters(t)) {
+      const w = cellsOf(c);
+      if (used + w > n - 1) break;
+      out += c;
+      used += w;
+    }
+    return out + '…';
+  }
 
   /* ---------- the bar ---------- */
   function kindTitle(s, L) {
@@ -870,8 +1278,14 @@
       const full = qp + m.text, mask = new Array(full.length).fill(false);
       if (q) { const lt = m.text.toLowerCase(); for (let i = lt.indexOf(q); i >= 0; i = lt.indexOf(q, i + q.length)) for (let j = 0; j < q.length; j++) mask[qp.length + i + j] = true; }
       const first = rows.length;
+      /* Which way this message reads is one answer for the whole message, asked
+         across every paragraph of it: a message that opens with `---` and then
+         says `שלום` is right-to-left, and the neutrals at the top cannot outvote
+         it. A row of the message then inherits that base — a row of an all-neutral
+         message carries no evidence of its own. */
+      const base = baseDir(m.text);
       /* the sender label is the group's, so only its first row carries it */
-      wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, s: r.s, e: r.e, from: m.from }));
+      wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, base, s: r.s, e: r.e, from: m.from }));
       /* the last row of a message carries its own status; the last row of a group also carries
          the peer's read state (outgoing only, never beside a status) and the group's time */
       const rcpt = tail && m.from === 'you' && !m.status && m.rcpt ? m.rcpt : '';
@@ -879,9 +1293,16 @@
       const tm = tail && m.at != null ? clock(m.at) : '';
       if (suf || tm) {
         const sufA = m.status && m.status.startsWith('failed') ? 't' : 'd', last = rows[rows.length - 1];
-        const need = chars(suf) + (suf && tm ? 1 : 0) + chars(tm);
-        if (last.e - last.s + 1 + need <= CW) Object.assign(last, { suf, sufA, tm });
-        else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], s: 0, e: 0, from: m.from, suf, sufA, tm });
+        const need = cells(suf) + (suf && tm ? 1 : 0) + cells(tm);
+        /* The trailing note goes on the last row when the text has left the room
+           for it, and that row is measured in cells — the note and the text are
+           drawn into the same 45 columns. The extra column is the engine's own
+           margin over `wrap_decorated`, which reserves the note's width before the
+           text is broken rather than after; it is kept because every row in this
+           model was laid out with it, and dropping it moves notes onto rows the
+           committed specimen shows elsewhere. */
+        if (cells(last.full.slice(last.s, last.e)) + 1 + need <= CW) Object.assign(last, { suf, sufA, tm });
+        else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, suf, sufA, tm });
       }
       rows[first].hasStart = true;
     });
@@ -907,7 +1328,7 @@
       if (r.load) { put(g, x0 + 2, y, r.load, 'd'); return; }
       if (r.sep) {
         /* a rule the width of the text with the day set into it: no tag column, no fill */
-        const lab = ' ' + r.sep + ' ', lx = Math.floor((52 - chars(lab)) / 2);
+        const lab = ' ' + r.sep + ' ', lx = Math.floor((52 - cells(lab)) / 2);
         put(g, x0 + 2, y, '─'.repeat(52), 'b');
         put(g, x0 + 2 + lx, y, lab, 'd');
         return;
@@ -916,13 +1337,40 @@
       const mod = cur ? 'r' : sel ? 's' : '';
       fill(g, x0 + 1, y, w - 2, 't' + mod);
       if (r.lab) put(g, x0 + 2, y, r.from === 'you' ? '[you]' : '[them]', (cur ? 't' : 'd') + mod);
-      for (let j = r.s; j < r.e; j++) {
-        const fg = r.mask[j] ? 'm' : (j < r.qlen && !cur ? 'd' : 't');
-        put(g, x0 + 9 + (j - r.s), y, r.full[j], fg + mod);
+      /* The row is still one string laid out left to right from the tag gutter,
+         whatever direction it reads — GAPS G12 reading (a): the sentence starts
+         at the right of its own run, and the block is not right-aligned to the
+         panel, because rows lay out from the gutter and the trailing note is
+         already at the far end. What the mode changes is the order the pieces
+         reach the grid in: `Terminal` hands the row over as it is stored and lets
+         the terminal's shaper reverse a right-to-left run, and `Visual` permutes
+         the row here. The row's WIDTH is identical either way, which is why one
+         wrap serves both. */
+      const ink = (j) => (r.mask[j] ? 'm' : (j < r.qlen && !cur ? 'd' : 't')) + mod;
+      if (r.base === 'rtl' && s.bidi === 'visual') {
+        /* The quoted prefix is the conversation's own chrome and is left where the
+           program leaves it — drawn first, as its own span, ahead of the text it
+           introduces — so only the message's own text is permuted. */
+        const head = r.full.slice(r.s, Math.min(r.e, r.qlen));
+        const body = r.full.slice(Math.max(r.s, r.qlen), r.e);
+        let x = x0 + 9;
+        put(g, x, y, head, ink(r.s));
+        x += cells(head);
+        for (const piece of visualPieces(body, r.base)) {
+          const t = body.slice(piece.s, piece.e);
+          put(g, x, y, t, ink(Math.max(r.s, r.qlen) + piece.s));
+          x += cells(t);
+        }
+      } else {
+        for (let j = r.s; j < r.e; ) {
+          const cl = clusters(r.full.slice(j, r.e))[0] || '';
+          put(g, x0 + 9 + cells(r.full.slice(r.s, j)), y, cl, ink(j));
+          j += cl.length;
+        }
       }
-      const tmw = r.tm ? chars(r.tm) : 0;
+      const tmw = r.tm ? cells(r.tm) : 0;
       if (r.tm) put(g, x0 + 2 + 52 - tmw, y, r.tm, (cur ? 't' : 'd') + mod);
-      if (r.suf) put(g, x0 + 2 + 52 - tmw - (tmw ? 1 : 0) - chars(r.suf), y, r.suf, (cur ? 't' : r.sufA) + mod);
+      if (r.suf) put(g, x0 + 2 + 52 - tmw - (tmw ? 1 : 0) - cells(r.suf), y, r.suf, (cur ? 't' : r.sufA) + mod);
     });
     /* the body gives up its last interior column, and only when that body is wide enough */
     if (w - 2 >= MIN_BODY_WIDTH) paintScroll(g, x0 + w - 2, 1, V, c.top, rows.length);
@@ -1204,7 +1652,7 @@
         put(g, x0 + 2 + 52 - 12, y, '[wrong code]', 't');
       } else if (i === 0 && S.action) {
         put(g, x0 + 16, y, trunc(val, 20), 't');
-        put(g, x0 + 2 + 52 - chars(S.action), y, S.action, 't');
+        put(g, x0 + 2 + 52 - cells(S.action), y, S.action, 't');
       } else if (done) {
         put(g, x0 + 16, y, i === 2 ? '•'.repeat(8) : trunc(val, 22), 't');
         put(g, x0 + 2 + 52 - 4, y, '[ok]', 'd');
@@ -1233,7 +1681,7 @@
     const c = activeComp(s.line);
     if (!c) return;
     const n = Math.min(5, c.hits.length);
-    const widest = c.hits.reduce((m, h) => Math.max(m, chars(h)), chars(':' + c.q));
+    const widest = c.hits.reduce((m, h) => Math.max(m, cells(h)), cells(':' + c.q));
     const bw = Math.min(36, Math.max(16, widest + 4));
     const bh = n + 2;
     const y = y0 - bh - 1; /* stay inside the pane; the row above the bar is its border */
@@ -1271,20 +1719,28 @@
   /* ---------- output ---------- */
   const SPECIAL = /[^\x20-\x7e┌┐└┘─│]/;
   const CLS = { t: 'ft', d: 'fd', m: 'fm', f: 'ff', b: 'fb', N: 'fN', I: 'fI', V: 'fV', X: 'fX', r: 'rv', s: 'sl', c: 'ci', n: 'cn' };
-  const esc = (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c);
+  const esc = (c) => Array.from(c).map((x) => (x === '&' ? '&amp;' : x === '<' ? '&lt;' : x === '>' ? '&gt;' : x)).join('');
   function toHTML(g) {
     return g.map((row) => {
       let out = '', run = '', ra = null;
       const flush = () => { if (run) out += '<span class="' + Array.from(ra).map((x) => CLS[x]).join(' ') + '">' + run + '</span>'; run = ''; };
       row.forEach(([ch, a]) => {
         if (a !== ra || /[cn]/.test(a)) { flush(); ra = a; }
-        run += SPECIAL.test(ch) ? '<i class="w">' + esc(ch) + '</i>' : esc(ch);
+        /* A two-cell cluster is one glyph in a box two columns wide, and the
+           continuation cell beside it is that second column — an empty one-ch
+           box, which is what keeps the row the width the grid says it is. */
+        if (ch === CONT) run += '<i class="w"></i>';
+        else run += SPECIAL.test(ch) ? '<i class="w">' + esc(ch) + '</i>' : esc(ch);
         if (/[cn]/.test(a)) flush();
       });
       flush();
       return out;
     }).join('\n');
   }
+  /* The row as text, for measuring and for reading a frame back. A continuation
+     cell contributes nothing, which is the whole reason a row of emoji is 80
+     CELLS wide and fewer than 80 characters: the check measures cells, because
+     that is what a terminal draws. */
   const toText = (g) => g.map((r) => r.map((c) => c[0]).join(''));
 
   /* ---------- scripted starts: real keystrokes through the real handler ---------- */
@@ -1299,6 +1755,8 @@
     }
     return s;
   }
+  /* the walk to the right-to-left chat: focus the list, then down to its last row */
+  const RTL_WALK = '<Tab>' + 'j'.repeat(12);
   const DRAFT = 'i' + 'I have the concert tickets and the blue folder. If the side gate is shut, I will ring the bell twice.<C-j>Ten minutes, not more.';
   const SCENES = [
     { id: 'conv', name: 'Conversation', variants: [
@@ -1372,13 +1830,28 @@
       { name: 'Signing back in: password', start: 'loggedout', keys: '<CR><wait>42424<CR><wait>' },
       { name: 'Signed back in: the chat list', start: 'loggedout', keys: '<CR><wait>42424<CR><wait>hunter2!<CR><wait>' }] },
     { id: 'nocreds', name: 'No credentials', variants: [
-      { name: 'No application credentials', start: 'nocreds', keys: '' }] }
+      { name: 'No application credentials', start: 'nocreds', keys: '' }] },
+    /* Right to left. Every frame is the same conversation reached with the same
+       keys, in the two modes, because the mode is the whole of what differs and a
+       scene that showed one of them would be showing a program that only exists
+       on one kind of terminal.
+
+       `<Tab>` then thirteen `j`s is the walk a reader makes to the last chat in
+       the list, which is the same walk every other scene makes to its own chat.
+       The mode is chosen by the scene rather than by a key, because in the
+       program it is read once from configuration at start-up and never while a
+       frame is drawn. */
+    { id: 'rtl', name: 'Right to left', variants: [
+      { name: 'Terminal mode: the row as stored', bidi: 'terminal', keys: RTL_WALK + 'l' },
+      { name: 'Visual mode: the same row, permuted', bidi: 'visual', keys: RTL_WALK + 'l' },
+      { name: 'Visual: a search hit inside a right-to-left row', bidi: 'visual', keys: RTL_WALK + 'l/כרטיסים<CR>' },
+      { name: 'Visual: two messages selected', bidi: 'visual', keys: RTL_WALK + 'lvk' }] }
   ];
   function scene(si, vi) {
-    const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start);
+    const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start, v.bidi);
     return feed(s, v.keys);
   }
 
-  root.TV = { W, H, HINT, ALL_HINTS, HINT_W, fresh, key, feed, render, toHTML, toText, modeName, setMode, scene, SCENES, FOCUS_NAME, chat, chars, answer };
+  root.TV = { W, H, HINT, ALL_HINTS, HINT_W, fresh, key, feed, render, toHTML, toText, modeName, setMode, scene, SCENES, FOCUS_NAME, chat, chars, cells, clusters, baseDir, visualPieces, visualCells, BIDI_MODES, answer };
   if (typeof module !== 'undefined') module.exports = root.TV;
 })(typeof window !== 'undefined' ? window : globalThis);
