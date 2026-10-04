@@ -20,7 +20,11 @@
  *   3. Every right-to-left row the model lays out is a permutation of the row as
  *      stored: no cluster dropped, none drawn twice, and the row no wider than it
  *      was. A reorder that lost or duplicated a piece is not a row drawn in
- *      another order, it is a row drawn wrong.
+ *      another order, it is a row drawn wrong. This is asked of the conversation
+ *      and of the input bar's draft, by the same check, because a bar that
+ *      permuted its draft by some other route would be a second set of rules and
+ *      the sentence "a right-to-left draft is drawn the way a right-to-left
+ *      message is drawn" would be two sentences.
  */
 
 'use strict';
@@ -123,6 +127,32 @@ const BASE = [
   ['👨‍👩‍👧(}.0]?]', 'mixed'], ['汉测 123 שלום', 'ltr'], ['- - - שלום', 'rtl'],
   ['שלום - - -', 'rtl'], ['مرحبا', 'rtl']
 ];
+/* What every right-to-left row owes its reader, whichever surface it is drawn on:
+   the pieces the terminal is handed are a permutation of the clusters the row is
+   stored as, and the permutation did not change how wide the row is.
+
+   One function, run against both paths below. A bar that permuted its own draft
+   by some other route would satisfy a check written for the bar, and "the bar
+   follows the same rules as an incoming message" is only worth anything while the
+   two surfaces are measured by the same measure. */
+function permutesCleanly(text, pieces, where) {
+  /* the permutation is a bijection over the row's clusters. Pieces may merge, so
+     the test is on the clusters each piece covers rather than on the number of
+     pieces: expanded to one entry per cluster, the pieces must tile the row's
+     clusters exactly once. */
+  const covered = pieces.flatMap((p) => TV.clusters(p.text));
+  const expected = TV.clusters(text);
+  const sortedCovered = covered.slice().sort();
+  const sortedExpected = expected.slice().sort();
+  const same = sortedCovered.length === sortedExpected.length &&
+    sortedCovered.every((c, i) => c === sortedExpected[i]);
+  if (!same) {
+    failures.push(`${where}: the pieces do not tile the row's clusters`);
+  }
+  if (pieces.reduce((n, p) => n + p.cells, 0) !== TV.cells(text)) {
+    failures.push(`${where}: the reorder changed the width of the row`);
+  }
+}
 for (const [text, base] of BASE) {
   const got = TV.baseDir(text);
   if (got !== base) failures.push(`base direction of ${JSON.stringify(text)}: ${got}, not ${base}`);
@@ -133,22 +163,78 @@ for (const [text, base, drawn] of RTL) {
   if (JSON.stringify(gotDrawn) !== JSON.stringify(drawn)) {
     failures.push(`${JSON.stringify(text)} at ${base} draws ${JSON.stringify(gotDrawn)}, not ${JSON.stringify(drawn)}`);
   }
-  /* the permutation is a bijection over the row's clusters, and it does not
-     change how wide the row is. Pieces may merge, so the test is on the clusters
-     each piece covers rather than on the number of pieces: expanded to one entry
-     per cluster, the pieces must tile the row's clusters exactly once. */
-  const covered = pieces.flatMap((p) => TV.clusters(p.text));
-  const expected = TV.clusters(text);
-  const sortedCovered = covered.slice().sort();
-  const sortedExpected = expected.slice().sort();
-  const same = sortedCovered.length === sortedExpected.length &&
-    sortedCovered.every((c, i) => c === sortedExpected[i]);
-  if (!same) {
-    failures.push(`${JSON.stringify(text)}: the pieces do not tile the row's clusters`);
+  permutesCleanly(text, pieces, JSON.stringify(text));
+}
+
+/* ---------- the input bar, which is a row like any other ----------
+
+   The acceptance criterion this file exists to prove is that a right-to-left
+   draft in the bar is permuted by the SAME functions the message path uses — the
+   base direction is `baseDir`, the order is `visualCells`, and the column the
+   caret lands on is `caretCol`. So nothing below re-derives a bar rule or takes
+   the bar's order on trust: the frame the engine draws is compared, cell for
+   cell, against what those three functions say about the bar's own row.
+
+   The state is reached through `scene`, from the keys and not by hand, because a
+   hand-built bar is a claim about the bar rather than the bar. The draft is one
+   row here, so `caretCol` is checked against the logical column counted from the
+   line's own `pos` and not against the bar's own answer. */
+const BAR_VARIANT = 'Visual: a right-to-left draft in the input bar';
+const rtlScene = TV.SCENES.findIndex((screen) => screen.id === 'rtl');
+const rtlBar = rtlScene < 0 ? -1
+  : TV.SCENES[rtlScene].variants.findIndex((v) => v.name === BAR_VARIANT);
+let barRows = 0;
+if (rtlBar < 0) {
+  failures.push(`no rtl scene variant "${BAR_VARIANT}" to permute the bar's draft with`);
+} else {
+  const s = TV.scene(rtlScene, rtlBar);
+  const b = TV.bar(s);
+  const draft = b.shown;
+  /* the bar asks the same base-direction question a message asks, of the same
+     thing: the draft as a whole, so the neutrals at its head cannot outvote the
+     Hebrew that follows them. */
+  if (b.base !== TV.baseDir(draft)) {
+    failures.push(`the bar's draft is laid out at ${b.base}, but \`baseDir\` says ${TV.baseDir(draft)}`);
   }
-  if (pieces.reduce((n, p) => n + p.cells, 0) !== TV.cells(text)) {
-    failures.push(`${JSON.stringify(text)}: the reorder changed the width of the row`);
+  if (b.base !== 'rtl') {
+    failures.push(`the bar's draft is laid out at ${b.base}, not rtl — this fixture would pass on a row nothing happened to`);
   }
+  const pos = s.line && s.line.pos;
+  const grid = TV.render(s);
+  /* the bar's box, laid out from the top of the frame down: `bar` says how many
+     rows it drew and which of the draft's rows the first of them is. */
+  const top = H - 1 - (b.n + 2);
+  b.rows.forEach((r, i) => {
+    if (i < b.start || i >= b.start + b.n) return;
+    const body = draft.slice(r.s, r.e);
+    if (!body) return;
+    barRows += 1;
+    const where = `the bar's row ${i} of the draft`;
+    const pieces = TV.visualCells(body, b.base);
+    permutesCleanly(body, pieces, where);
+    /* and the frame really is that permutation, drawn where the painter put it.
+       The bar shows a space as `·` wherever the caret is in, which is the only
+       difference between the drawn row and the row as stored; the draft here holds
+       no `·` of its own, so substituting the dot back is a lossless reading. */
+    const drawn = grid[top + 1 + i - b.start].slice(2, 2 + TV.cells(body))
+      .map(([ch]) => (ch === '·' ? ' ' : ch)).join('');
+    const want = pieces.map((p) => p.text).join('');
+    if (drawn !== want) {
+      failures.push(`${where} draws ${JSON.stringify(drawn)}, not the order \`visualCells\` gives (${JSON.stringify(want)})`);
+    }
+    /* the caret, which is where a reader expects it: a logical column counted from
+       the line, put through `caretCol`, and found in the frame wearing the bar's
+       caret attribute. */
+    if (i === b.cr[0] && pos != null) {
+      const wantCol = TV.caretCol(body, b.base, pos - r.s);
+      if (b.cr[1] !== wantCol) {
+        failures.push(`${where}: the caret sits at column ${b.cr[1]}, but \`caretCol\` puts logical column ${pos - r.s} at ${wantCol}`);
+      }
+      if (!/[cn]/.test(grid[top + 1 + i - b.start][2 + wantCol][1])) {
+        failures.push(`${where}: no caret drawn at column ${wantCol}`);
+      }
+    }
+  });
 }
 
 /* The width table, against the `unicode-width` the Rust measures with. */
@@ -182,5 +268,6 @@ console.log(
   `  ✓ ${scenes}/${scenes} scenes are ${H} rows x ${W} cells, ` +
     `all ${hints.length} hints fit ${TV.HINT_W}` +
     (tightest.key ? ` (tightest: ${tightest.key}, ${tightest.spare} spare)` : '') +
-    `, and ${RTL.length} right-to-left rows permute without changing width`,
+    `, and ${RTL.length} right-to-left rows permute without changing width` +
+    ` — conversation and input bar alike, the bar's ${barRows} draft row(s) through the same \`baseDir\`/\`visualCells\`/\`caretCol\``,
 );
