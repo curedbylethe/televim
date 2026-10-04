@@ -137,7 +137,9 @@ mod tests {
 
     #[test]
     fn an_arrival_becomes_a_message_that_names_its_conversation() {
-        let event = to_event(UpdateKind::NewMessage(info(42)));
+        let mut source = info(42);
+        source.media = Some(telegram_framework::media::MediaKind::Photo);
+        let event = to_event(UpdateKind::NewMessage(source));
 
         let UpdateEvent::NewMessage(message) = event else {
             panic!("an arrival is a new message");
@@ -148,6 +150,11 @@ mod tests {
         assert_eq!(message.text, "hello");
         assert_eq!(message.timestamp, 1_700_000_000);
         assert!(matches!(message.status, MessageStatus::Received));
+        assert_eq!(
+            message.media,
+            Some(domain::message::MediaKind::Photo),
+            "an arrival that carries something must not lose what it carries on the way in"
+        );
     }
 
     #[test]
