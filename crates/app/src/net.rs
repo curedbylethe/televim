@@ -1674,6 +1674,7 @@ mod tests {
                 status: MessageStatus::Received,
                 is_outgoing: false,
                 reply_to: None,
+                media: None,
             })
             .collect()
     }

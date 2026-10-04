@@ -509,6 +509,7 @@ impl ConversationView {
             status: MessageStatus::Sending,
             is_outgoing: true,
             reply_to,
+            media: None,
         };
         self.window.push_back(std::iter::once(message));
 
@@ -677,6 +678,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }
     }
 

@@ -793,6 +793,7 @@ mod tests {
                 status: MessageStatus::Received,
                 is_outgoing: false,
                 reply_to: None,
+                media: None,
             };
             let len = message_rows(&app, &message, Grouped::alone(), width).len();
             spans.push(RowSpan {
@@ -862,6 +863,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: outgoing,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -1721,6 +1723,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: Some(1),
+            media: None,
         }]);
 
         let quoted = reply_prefix(&app, 1, 39);
@@ -1907,6 +1910,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }]);
         let reply = Message {
             id: 91,
@@ -1916,6 +1920,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: true,
             reply_to: Some(90),
+            media: None,
         };
 
         let (prefix, suffix) = decoration_columns(&app, &reply, Grouped::alone(), 40);
