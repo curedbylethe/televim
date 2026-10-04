@@ -356,8 +356,13 @@ fn message_row<'m>(
     // same bytes. In [`BidiMode::Terminal`] there is no answer to ask for — the
     // terminal's shaper reverses a right-to-left run for us, and permuting here
     // would reverse it twice.
+    let placeholder = message.media.is_some() && message.text.is_empty();
     let row = text_row::TextRow {
-        ink: text_row::Ink::readonly(&app.theme),
+        ink: if placeholder {
+            text_row::Ink::placeholder(&app.theme)
+        } else {
+            text_row::Ink::readonly(&app.theme)
+        },
         text: message.display_body(),
         range: range.clone(),
         matched,

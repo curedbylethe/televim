@@ -21,7 +21,7 @@
 //!   wearing a trenchcoat, and they genuinely differ: a conversation's sender is
 //!   a decoration that participates in wrapping, a card's label is a fixed gutter.
 //! - **Whether the surface is a list, a card or a bar.** It takes an [`Ink`] and
-//!   nothing else, and an [`Ink`] is built by one of two constructors.
+//!   nothing else, and an [`Ink`] is built by one of three constructors.
 //! - **What order the row is drawn in.** [`spans`] draws the row as it is
 //!   stored, which is every surface but one; [`spans_permuted`] draws it in the
 //!   order [`crate::bidi::visual_row`] names, which is a right-to-left row the
@@ -50,7 +50,7 @@ use crate::theme::Theme;
 
 /// The inks one surface paints a text row with.
 ///
-/// Six styles, and the two constructors are the only place they are chosen, so
+/// Six styles, and the three constructors are the only place they are chosen, so
 /// "what colour is a selection inside a message" has one answer rather than one
 /// per call site.
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +87,21 @@ impl Ink {
             selected: theme.selection_bg,
             caret: theme.caret_normal,
             dot: None,
+        }
+    }
+
+    /// A message whose body is a stand-in for an attachment rather than prose.
+    ///
+    /// Everything a read-only row does, except the text itself reads dimmer:
+    /// the reader is being told what was sent, not what was written, so the
+    /// placeholder does not carry the weight of the peer's own words. A
+    /// selection, a match and a caret are unchanged — the row is still body
+    /// text and is still selectable, yankable and searchable.
+    #[must_use]
+    pub fn placeholder(theme: &Theme) -> Self {
+        Self {
+            plain: theme.text_dim,
+            ..Self::readonly(theme)
         }
     }
 
