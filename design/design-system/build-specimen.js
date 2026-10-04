@@ -146,6 +146,17 @@ const cue = '<ol class="notes"><li><b>The cue.';
 if (!html.includes(cue)) throw new Error('no section-08 notes anchor');
 html = html.replace(cue, blocks + '\n  ' + cue);
 
+/* ---------- section 01 · the peer's typing note, on the conversation's title ---------- */
+const TYPING_FRAMES = [
+  ['panel-typing-frame', 'the peer is typing', '<typing>', 'conversation panel, the peer is typing', 'The peer starts typing: a dim note on the title'],
+  ['panel-typing-composing-frame', 'composing a reply, the note stays', '<typing> + a draft', 'conversation panel, composing a reply while the peer types', 'Composing a reply: the note stays, the hint is the line\'s'],
+  ['panel-typing-yields-frame', 'selection and search: the note yields', '<typing>/tickets<CR>vj', 'conversation panel, the typing note yields to a selection and a search', 'Selection and search: the title has no room, the note yields']
+].map(([id, caption, keys, aria, variant]) => [id, caption, keys, aria, ...variantIndex('typing', variant)]);
+TYPING_FRAMES.forEach(([id]) => { html = removeBlock(html, id); });
+const typingAnchor = '<ol class="notes"><li><b>Four real screens, stacked.';
+if (!html.includes(typingAnchor)) throw new Error('no section-01 notes anchor');
+html = html.replace(typingAnchor, TYPING_FRAMES.map(([id, caption, keys, aria, si, vi]) => frameBlock(id, caption, keys.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'), aria, si, vi)).join('\n  ') + '\n  ' + typingAnchor);
+
 /* ---------- section 09 · the caret: the four states that matter, one per frame ---------- */
 const CARET_FRAMES = [
   ['caret-insert-frame', 'the line composing', 'iHello', 'the line composing, insert caret on a plain ground'],

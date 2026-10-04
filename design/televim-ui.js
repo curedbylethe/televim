@@ -55,6 +55,16 @@
       }, 1200);
       return;
     }
+    if (app.s.jump && !app.s.jumpTimer) {
+      const st = app.s;
+      st.jumpTimer = setTimeout(() => { st.jumpTimer = null; TV.answer(st); draw(); }, 900);
+    }
+    /* the peer's typing note runs out on the network tick, not on a clock of its own */
+    const open = app.s.chats[app.s.chat];
+    if (open && open.typing && !open.typingTimer) {
+      const st = app.s;
+      open.typingTimer = setTimeout(() => { open.typingTimer = null; if (app.s === st) { TV.answer(st); draw(); } }, 3000);
+    }
     if (app.s.view !== 'chat') return;
     app.s.chats.forEach((c) => c.msgs.forEach((m) => {
       if (m.live && m.status && !m.t) m.t = setTimeout(() => { m.status = null; m.live = false; draw(); }, 1400);
@@ -63,7 +73,7 @@
 
   function toKey(e) {
     if (e.metaKey || e.altKey) return null;
-    if (e.ctrlKey) { const c = e.key.toLowerCase(); return c.length === 1 && 'jwdu'.includes(c) ? 'C-' + c : null; }
+    if (e.ctrlKey) { const c = e.key.toLowerCase(); return c.length === 1 && 'jwduoi'.includes(c) ? 'C-' + c : null; }
     const named = { Escape: 'Escape', Enter: e.shiftKey ? 'S-Enter' : 'Enter', Tab: 'Tab', Backspace: 'Backspace', Delete: 'Delete', ArrowLeft: 'Left', ArrowRight: 'Right', ArrowUp: 'Up', ArrowDown: 'Down', Home: 'Home', End: 'End' };
     if (named[e.key]) return named[e.key];
     return e.key.length === 1 ? e.key : null;
@@ -84,7 +94,7 @@
   }, 'mode-' + MODE_CLASS[m]));
   ['dark', 'light', 'both'].forEach((t) => btn($('themes'), t, () => { app.theme = t; pressed($('themes'), ['dark', 'light', 'both'].indexOf(t)); draw(); }));
   [['Esc', 'Escape'], ['Tab', 'Tab'], ['Enter', 'Enter'], ['Shift+Enter', 'S-Enter'],
-   ['Ctrl+w h', ['C-w', 'h']], ['Ctrl+w l', ['C-w', 'l']],
+   ['gd', ['g', 'd']], ['Ctrl+o', 'C-o'], ['Ctrl+i', 'C-i'], ['Ctrl+w h', ['C-w', 'h']], ['Ctrl+w l', ['C-w', 'l']],
    ['A', 'A'], ['S', 'S'], ['l', 'l'], ['h', 'h'], ['v', 'v'], ['y', 'y'], ['yy', ['y', 'y']], ['d', 'd']
   ].forEach(([l, k]) => btn($('keys'), l, () => press(k)));
 
