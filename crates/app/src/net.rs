@@ -1887,6 +1887,82 @@ mod tests {
         );
     }
 
+    /// `Ctrl-o` after a jump that replaced the window is a fetch like any
+    /// other: the mark it walks to is a message the window no longer holds, so
+    /// the page has to come back for it.
+    #[test]
+    fn a_back_jump_reaches_the_network_and_lands() {
+        let mut app = app_with_unread_out_of_reach(2);
+        let quotes: Vec<Message> = messages(CHAT, 1..=8)
+            .into_iter()
+            .map(|mut message| {
+                message.reply_to = Some(19);
+                message
+            })
+            .collect();
+        app.apply_latest(quotes);
+        for key in [KeyCode::Char('g'), KeyCode::Char('d')] {
+            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+        }
+        let replied = app
+            .pending_jump()
+            .expect("the reader asked to be taken to the message it quoted");
+        apply(
+            &mut app,
+            &mut State {
+                history: opened(CHAT),
+                ..State::default()
+            },
+            Event::Jumped {
+                jump: replied,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+
+        let back = Jump {
+            peer_id: CHAT,
+            target_id: 8,
+            kind: JumpKind::Back,
+        };
+        assert_eq!(
+            app.pending_jump(),
+            Some(back),
+            "the message the reader left is not in the window that replaced it"
+        );
+        assert_eq!(
+            wanted(&app, opened(CHAT), Instant::now()),
+            Wanted::Jump(back),
+            "so the page around it is fetched like any other jump's"
+        );
+
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump: back,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 1..=8)),
+            },
+        );
+
+        assert_eq!(
+            app.conversation
+                .window
+                .get(app.vim.cursor())
+                .map(|message| message.id),
+            Some(8),
+            "and the reader is back on the message they left"
+        );
+        assert_eq!(app.pending_jump(), None);
+    }
+
     /// A jump's answer is reported to the cursor the conversation is described
     /// by, so it waits behind the first page rather than beside it.
     #[test]
