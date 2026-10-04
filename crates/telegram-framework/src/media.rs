@@ -313,7 +313,10 @@ impl Client {
                 message_id,
                 "a download was asked for a message identifier telegram could not have numbered"
             );
-            return Err(FrameworkError::MediaUnavailable { peer_id, message_id });
+            return Err(FrameworkError::MediaUnavailable {
+                peer_id,
+                message_id,
+            });
         };
 
         // The raw route `fetch_history` uses, rather than a `grammers` accessor:
@@ -372,7 +375,10 @@ impl Client {
 
         let Some(media) = media else {
             tracing::debug!(peer_id, message_id, "the message has no media to fetch");
-            return Err(FrameworkError::MediaUnavailable { peer_id, message_id });
+            return Err(FrameworkError::MediaUnavailable {
+                peer_id,
+                message_id,
+            });
         };
 
         let mut download = Download::new(peer_id, message_id);
@@ -621,7 +627,10 @@ mod tests {
             download.check_declared(Some(MEDIA_LIMIT)).is_ok(),
             "exactly the limit is within it"
         );
-        assert!(download.check_declared(None).is_ok(), "an unknown size is not a refusal");
+        assert!(
+            download.check_declared(None).is_ok(),
+            "an unknown size is not a refusal"
+        );
         assert!(download.check_declared(Some(0)).is_ok());
 
         let refused = download
@@ -650,7 +659,9 @@ mod tests {
         let mut download = Download::new(42, 7);
 
         let chunk = vec![0_u8; MEDIA_LIMIT];
-        download.push(chunk.clone()).expect("a chunk up to the limit lands");
+        download
+            .push(chunk.clone())
+            .expect("a chunk up to the limit lands");
         assert_eq!(download.into_bytes().len(), MEDIA_LIMIT);
 
         let mut download = Download::new(42, 7);

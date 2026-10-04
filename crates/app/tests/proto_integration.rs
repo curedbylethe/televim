@@ -400,7 +400,9 @@ async fn a_media_message_downloads_through_the_client() {
         assert!(
             matches!(
                 refused,
-                Err(ProtoError::Framework(FrameworkError::MediaUnavailable { .. }))
+                Err(ProtoError::Framework(
+                    FrameworkError::MediaUnavailable { .. }
+                ))
             ),
             "a message with nothing to fetch must be refused, got {refused:?}"
         );
