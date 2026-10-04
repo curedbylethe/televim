@@ -173,6 +173,12 @@ Working today:
   reported as how many went through rather than as a plain failure.
 - **Search:** `/` searches the loaded window, then asks the server and prefers
   its answer. `n` repeats or cycles.
+- **Typing indicator:** the conversation title grows a dim `· typing` note while
+  the peer is composing one. It ends when they cancel, when their message lands,
+  or six seconds after the last sign of it, and it is furniture on the title
+  rather than a message row, so it never displaces a message; when the title has
+  no room it is dropped whole rather than truncated. Advertising our own typing is
+  not built.
 - **Yank / paste:** `y` in Visual puts the selection in a register — the selected
   characters for a text selection, one line per message oldest-first for a set of
   them — and `p` in Normal opens the line with it. A yank is also offered to the

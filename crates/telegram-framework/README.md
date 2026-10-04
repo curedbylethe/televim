@@ -438,8 +438,17 @@ Three things are known gaps rather than deliberate scope cuts:
   the discard is never silent. The channel therefore cannot grow without bound,
   and nothing is lost either: the session's update position only advances while a
   feed is running, so `catch_up` replays from wherever it stopped. What the feed
-  does not model — reactions, pins, typing indicators — is discarded by the same
-  filter.
+  does not model — reactions, pins — is discarded by the same filter, and what it
+  does read out of that bucket it reads in one place: see the two entries below.
+- **A peer's typing is read out of the raw bucket, and is momentary.**
+  `grammers` models no named update for `updateUserTyping` either, so it arrives
+  in `Update::Raw` and is matched alongside the read acknowledgement. A composing
+  action becomes `UpdateKind::PeerTyping { typing: true }` and a cancelled one
+  `typing: false`, with the `user_id` standing for the conversation. Nothing in
+  this crate expires the signal: the peer may have stopped, or typed nothing
+  else, and only the update that says so clears it. A group and a channel report
+  typing through their own updates, which are not read, and an action that is
+  neither composing nor cancelled is dropped.
 - **Read receipts are read out of the raw bucket, and are best-effort.**
   `grammers` models no named update for `updateReadHistoryOutbox`, so it arrives
   in `Update::Raw` and is matched there: a per-conversation watermark saying every

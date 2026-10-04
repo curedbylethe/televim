@@ -158,6 +158,30 @@ pub enum UpdateKind {
         /// Every outgoing message in it up to this identifier has been read.
         max_id: i64,
     },
+
+    /// Someone in a conversation has started typing, or has stopped.
+    ///
+    /// A flag rather than a row, because that is what Telegram says it: the
+    /// action carried by `updateUserTyping` is composing or cancelled, and there
+    /// is no message in it to file anywhere. The other party stopped typing
+    /// whether they sent a message or simply gave up, so the cancel is a fact
+    /// about the peer rather than about a message this client may never see.
+    ///
+    /// Read from the raw update for the same reason as the receipt: `grammers`
+    /// models no named update for it, so it arrives as `Update::Raw`.
+    ///
+    /// Only private chats with a person. A group and a channel report typing
+    /// through their own updates, which are not read, because a group and a
+    /// channel are not conversations this client renders. An action that is
+    /// neither composing nor cancelled — a recording, an upload — is dropped,
+    /// because it says nothing about typing.
+    PeerTyping {
+        /// The conversation whose peer is typing.
+        chat_peer_id: i64,
+
+        /// Whether they are typing now; `false` is the cancel.
+        typing: bool,
+    },
 }
 
 impl Client {
@@ -223,6 +247,9 @@ impl Client {
     ///         UpdateKind::MessagesDeleted { message_ids } => println!("{message_ids:?}"),
     ///         UpdateKind::ReadReceipt { chat_peer_id, max_id } => {
     ///             println!("{chat_peer_id} read up to {max_id}")
+    ///         }
+    ///         UpdateKind::PeerTyping { chat_peer_id, typing } => {
+    ///             println!("{chat_peer_id} is typing: {typing}")
     ///         }
     ///     }
     /// }
@@ -506,33 +533,62 @@ fn update_to_kind(update: &Update) -> Option<UpdateKind> {
         Update::MessageDeleted(deletion) => deleted_ids(deletion.channel_id(), deletion.messages())
             .map(|message_ids| UpdateKind::MessagesDeleted { message_ids }),
         // Everything this crate does not model arrives here, and most of it is
-        // still not displayed. Matching the raw enum once, in `read_receipt`, is
+        // still not displayed. Matching the raw enum once, in `read_raw`, is
         // what keeps that judgement in one place — the same reasoning
         // `dialog_to_info` uses to rule folders out.
-        Update::Raw(raw) => read_receipt(raw),
+        Update::Raw(raw) => read_raw(raw),
         // Callback and inline queries only exist for bots.
         _ => None,
     }
 }
 
-/// Describes a read acknowledgement, or `None` if this update is not one.
+/// Describes an update read out of the raw bucket, or `None` if televim does
+/// not display it.
 ///
 /// The raw update is matched on its own variant rather than through a `grammers`
-/// wrapper because grammers has none for it: `updateReadHistoryOutbox` reaches
-/// the catch-all at the end of `Update::from_raw` and arrives as
-/// `Update::Raw`. Its `pts` and `pts_count` are the gap-tracking numbers this
-/// crate does not use — the update position is already in the session — so only
-/// the peer and the watermark are taken.
-fn read_receipt(raw: &grammers_client::update::Raw) -> Option<UpdateKind> {
-    let tl::enums::Update::ReadHistoryOutbox(read) = &raw.raw else {
-        return None;
-    };
-    let chat_peer_id = read_peer(&read.peer)?;
+/// wrapper because grammers models none of them: `updateReadHistoryOutbox` and
+/// `updateUserTyping` reach the catch-all at the end of `Update::from_raw` and
+/// arrive as `Update::Raw`. Both are matched here, in the one place the raw
+/// enum is matched at all, so what the bucket is read for is answerable by
+/// reading one function.
+///
+/// The `pts` and `pts_count` numbers are left behind in both cases: they are the
+/// gap-tracking this crate does not use — the update position is already in the
+/// session.
+fn read_raw(raw: &grammers_client::update::Raw) -> Option<UpdateKind> {
+    match &raw.raw {
+        tl::enums::Update::ReadHistoryOutbox(read) => {
+            let chat_peer_id = read_peer(&read.peer)?;
 
-    Some(UpdateKind::ReadReceipt {
-        chat_peer_id,
-        max_id: i64::from(read.max_id),
-    })
+            Some(UpdateKind::ReadReceipt {
+                chat_peer_id,
+                max_id: i64::from(read.max_id),
+            })
+        }
+        // `updateUserTyping` is a private chat with a person, so its `user_id` is
+        // the conversation's own identifier — there is no peer to resolve.
+        tl::enums::Update::UserTyping(typing) => Some(UpdateKind::PeerTyping {
+            chat_peer_id: typing.user_id,
+            typing: typing_action(&typing.action)?,
+        }),
+        // The inbox watermark, the group and channel forms of the same fact, and
+        // everything else grammers does not model. None of it is a message in a
+        // private conversation, which is all this feed carries.
+        _ => None,
+    }
+}
+
+/// Whether an action says the peer is composing, or `None` if it says neither way.
+///
+/// Telegram reports the whole action in one field, so a recording or an upload
+/// is not a typing update and must not be read as one — only the two actions
+/// that talk about composing text are modelled, and the rest are dropped.
+fn typing_action(action: &tl::enums::SendMessageAction) -> Option<bool> {
+    match action {
+        tl::enums::SendMessageAction::SendMessageTypingAction => Some(true),
+        tl::enums::SendMessageAction::SendMessageCancelAction => Some(false),
+        _ => None,
+    }
 }
 
 /// The conversation a read acknowledgement is about, if it is one this client
@@ -782,12 +838,12 @@ mod tests {
         assert_eq!(deleted_ids(None, &[]), Some(Vec::new()));
     }
 
-    /// The read acknowledgement is the one update this crate reads out of the raw
-    /// bucket, so the mapping off Telegram's own fields is worth pinning: the
-    /// peer it names and the watermark it carries, and nothing else.
+    /// The read acknowledgement is one of the few updates this crate reads out of
+    /// the raw bucket, so the mapping off Telegram's own fields is worth pinning:
+    /// the peer it names and the watermark it carries, and nothing else.
     #[test]
     fn a_read_acknowledgement_keeps_its_conversation_and_its_watermark() {
-        let receipt = read_receipt(&raw_outbox(user(42), 7));
+        let receipt = read_raw(&raw_outbox(user(42), 7));
 
         assert!(
             matches!(
@@ -814,8 +870,8 @@ mod tests {
             7,
         );
 
-        assert!(read_receipt(&group).is_none(), "a group is not displayed");
-        assert!(read_receipt(&channel).is_none(), "nor is a channel");
+        assert!(read_raw(&group).is_none(), "a group is not displayed");
+        assert!(read_raw(&channel).is_none(), "nor is a channel");
     }
 
     /// `Update::Raw` is the catch-all for everything `grammers` does not model, so
@@ -834,7 +890,51 @@ mod tests {
             pts_count: 1,
         });
 
-        assert!(read_receipt(&raw_update(inbox)).is_none());
+        assert!(read_raw(&raw_update(inbox)).is_none());
+    }
+
+    /// A typing action names the peer as a bare user identifier, which is the
+    /// conversation itself — there is no peer map to resolve it through — and the
+    /// `top_msg_id` it also carries is left behind.
+    #[test]
+    fn a_typing_update_becomes_the_conversation_typing() {
+        let typing = read_raw(&raw_user_typing(
+            42,
+            tl::enums::SendMessageAction::SendMessageTypingAction,
+        ));
+
+        assert!(
+            matches!(
+                typing,
+                Some(UpdateKind::PeerTyping {
+                    chat_peer_id: 42,
+                    typing: true
+                })
+            ),
+            "a composing action is the peer typing: {typing:?}"
+        );
+    }
+
+    /// The cancel is the other half of the same fact, and it arrives the same way:
+    /// as the same update with a different action. Reading it as anything else
+    /// would leave the peer typing forever.
+    #[test]
+    fn a_cancelled_typing_update_becomes_the_conversation_stopping() {
+        let cancelled = read_raw(&raw_user_typing(
+            42,
+            tl::enums::SendMessageAction::SendMessageCancelAction,
+        ));
+
+        assert!(
+            matches!(
+                cancelled,
+                Some(UpdateKind::PeerTyping {
+                    chat_peer_id: 42,
+                    typing: false
+                })
+            ),
+            "a cancelled action is the peer stopping: {cancelled:?}"
+        );
     }
 
     /// A watermark is an `i32` on the wire and an `i64` everywhere else, widened
@@ -843,7 +943,7 @@ mod tests {
     fn a_read_watermark_is_widened_without_changing_sign_or_order() {
         assert!(
             matches!(
-                read_receipt(&raw_outbox(user(1), i32::MAX)),
+                read_raw(&raw_outbox(user(1), i32::MAX)),
                 Some(UpdateKind::ReadReceipt { max_id, .. }) if max_id == i64::from(i32::MAX)
             ),
             "and the domain counts in the same units the rest of the workspace does"
@@ -865,6 +965,19 @@ mod tests {
                 pts_count: 1,
             },
         ))
+    }
+
+    /// A private peer's typing, in the same catch-all bucket and for the same
+    /// reason: `updateUserTyping` has no `grammers` wrapper either.
+    fn raw_user_typing(
+        user_id: i64,
+        action: tl::enums::SendMessageAction,
+    ) -> grammers_client::update::Raw {
+        raw_update(tl::enums::Update::UserTyping(tl::types::UpdateUserTyping {
+            user_id,
+            top_msg_id: None,
+            action,
+        }))
     }
 
     fn raw_update(update: tl::enums::Update) -> grammers_client::update::Raw {

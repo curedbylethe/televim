@@ -286,8 +286,10 @@ impl ConversationWindow {
 
             // The window holds messages and nothing else. Whether they have been
             // read is the conversation's fact, kept beside the window rather than
-            // in it — which is what lets it outlive the page on show.
-            UpdateEvent::ReadReceipt { .. } => false,
+            // in it — which is what lets it outlive the page on show — and a peer
+            // composing one is not a message. Nothing here expires a typing flag
+            // either: the update that says the peer stopped is what clears it.
+            UpdateEvent::ReadReceipt { .. } | UpdateEvent::PeerTyping { .. } => false,
         }
     }
 
