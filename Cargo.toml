@@ -85,6 +85,9 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[profile.dev]
+debug = "line-tables-only"
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = 10 }
 pedantic = { level = "warn", priority = 3 }
