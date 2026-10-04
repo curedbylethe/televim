@@ -400,7 +400,11 @@ them; where the model and that file disagree, that file is the answer.
 - **The bar is always a draft, never absent.** It holds what the reader last
   typed, or a hint. It grows to six rows (`INPUT_MAX_ROWS`) because a draft is
   the reader's own words and the bar is the only place they can be read back —
-  but past six, the conversation is what the reader is reading.
+  but past six, the conversation is what the reader is reading. Under
+  `BidiMode::Visual` a draft whose base direction is right-to-left is permuted in
+  the bar as a message row is: the row is still broken logically, the `: ` / `/ `
+  prefix stays chrome, and the caret is drawn at the visual position of the
+  logical one.
 - **The focused pane's border is the only thing on screen that says where a
   keystroke goes.** Two panes drawn alike are two panes the reader has to guess
   between. `lit_borders` in `conversation.rs` reads the three corners and asserts
@@ -501,6 +505,10 @@ code.
 | `[you]` `[them]` | which side a message is from, on its first row; in a group, on the group's first row only | `rows.rs` |
 | `> quoted ‖ body` | a reply: quote and body **on one row**, `‖` between | `rows::reply_prefix` |
 | `> [message not loaded] ‖ body` | a reply whose target the window does not hold | asserted in `rows.rs` |
+| `[image]` | **a message that carries a photo and no caption**: its whole body, in the ordinary body ink | `MediaKind::label` |
+| `[video]` `[gif]` `[voice]` | ditto for a video, an animated GIF, a voice note | ditto |
+| `[file]` | ditto, and the **catch-all**: a sticker, a contact, a document, or any kind this build does not model, which degrades rather than vanishing | ditto |
+| a caption beside a placeholder | never: `display_body()` returns the caption when there is one, so the label is drawn only for a message that says nothing | `Message::display_body` |
 | `[sending…]` | on the message's **last** row, which is the one with room | asserted |
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |
 | `[delivered]` | an outgoing group the peer's client has acknowledged and not read; the group's **last** row, beside any time | specified here; not yet in `rows.rs` |
@@ -570,6 +578,15 @@ say "you"; nothing else in the sign-in view does either.
 **No emoji in the chrome.** The emoji catalog is for the reader's *own text*, and
 `emojis` costs 0.5 MB of binary and 2 MB of RSS. A `👤` in a settings title is
 the one place that cost would be spent for nothing.
+
+**The media placeholders are specified, not styled.** `[image]`, `[video]`,
+`[gif]`, `[voice]` and `[file]` above are what the code prints today, in the same
+ink as any other body, and the row carries them like any other text: selectable,
+yankable, searchable, and never on a message that has a caption. Their wording
+and their styling are **CUR-6's** and no design run has been commissioned for
+them (**`DESIGN-TBD`**) — so this table records the vocabulary the binary speaks,
+not a decision about how an attachment should look. A scene for a media-only
+message, and any ink of its own, is what a design run would add.
 
 ## Components
 

@@ -30,6 +30,7 @@
 
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
+use crate::media::classify_raw;
 use crate::tl;
 use crate::updates::{MessageInfo, message_info};
 
@@ -260,9 +261,16 @@ impl Client {
 /// Nothing is lost by it, because every field read here is the same read
 /// `grammers` makes, off the same raw value:
 ///
-/// - an empty or service message carries no text, and
+/// - an empty or service message carries no text and no media, and
 /// - an empty message is not outgoing, while a service one is whatever
 ///   `out` says.
+///
+/// The media is read the same way, and the same is true of it: a message that
+/// carries media says so through `media`, and [`classify_raw`] is what
+/// `grammers`' own accessor reduces that field to. Reading the raw value is
+/// what lets a kind this build does not model still arrive as a kind rather
+/// than as nothing — `grammers` drops some variants before anything can look
+/// at them.
 ///
 /// A message read out of a conversation and the same message arriving over the
 /// feed are therefore still described identically, which is what lets the two
@@ -273,8 +281,8 @@ impl Client {
 /// number for every value that conversion accepts — and does not abort on a
 /// value it does not.
 fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> MessageInfo {
-    let (id, text, date, is_outgoing, reply_to_msg_id) = match raw {
-        tl::enums::Message::Empty(message) => (message.id, "", 0, false, None),
+    let (id, text, date, is_outgoing, reply_to_msg_id, media) = match raw {
+        tl::enums::Message::Empty(message) => (message.id, "", 0, false, None, None),
         tl::enums::Message::Message(message) => (
             message.id,
             message.message.as_str(),
@@ -284,8 +292,11 @@ fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> MessageInfo 
                 Some(tl::enums::MessageReplyHeader::Header(header)) => header.reply_to_msg_id,
                 _ => None,
             },
+            classify_raw(message.media.as_ref()),
         ),
-        tl::enums::Message::Service(message) => (message.id, "", message.date, message.out, None),
+        tl::enums::Message::Service(message) => {
+            (message.id, "", message.date, message.out, None, None)
+        }
     };
 
     message_info(
@@ -295,12 +306,15 @@ fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> MessageInfo 
         i64::from(date),
         is_outgoing,
         reply_to_msg_id,
+        media,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::MediaKind;
+    use crate::testing::{media_empty, media_photo, media_unmodelled, raw_message};
 
     #[test]
     fn the_newest_page_starts_from_nowhere_in_particular() {
@@ -377,5 +391,36 @@ mod tests {
 
         assert_eq!(args.limit, HISTORY_LIMIT);
         assert_eq!(args.add_offset, -HISTORY_LIMIT);
+    }
+
+    /// The raw path is the only one of the two that sees a media kind
+    /// `grammers` would not build, so the description it produces is the one
+    /// that must not lose it.
+    #[test]
+    fn a_raw_message_reports_the_media_it_carries() {
+        let photo = message_from_raw(&raw_message(Some(media_photo())), 42);
+
+        assert_eq!(
+            photo.media,
+            Some(MediaKind::Photo),
+            "the message carries a photo, so it is described as one"
+        );
+        assert_eq!(photo.chat_peer_id, 42);
+        assert_eq!(photo.id, 1);
+
+        let unknown = message_from_raw(&raw_message(Some(media_unmodelled())), 42);
+
+        assert_eq!(
+            unknown.media,
+            Some(MediaKind::File),
+            "a kind this build does not model is still something the message carries"
+        );
+
+        let bare = message_from_raw(&raw_message(Some(media_empty())), 42);
+
+        assert_eq!(
+            bare.media, None,
+            "and a message that carries nothing is the only one that says so"
+        );
     }
 }

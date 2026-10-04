@@ -246,9 +246,10 @@ fn coverage(
     // selection inside a single message is a text selection, and anything else is
     // a set of messages. `text_range` being `None` *is* the second case.
     match selection.text_range() {
-        Some((id, range)) if id == message.id => {
-            Some(Coverage::Text(rows::byte_span(&message.text, range)))
-        }
+        Some((id, range)) if id == message.id => Some(Coverage::Text(rows::byte_span(
+            message.display_body(),
+            range,
+        ))),
         Some(_) => None,
         None => covered.contains(&index).then_some(Coverage::Whole),
     }
@@ -349,7 +350,7 @@ fn message_row<'m>(
     // The text's own three steps — the text, a match on it, a selection split out
     // of it — are [`text_row`]'s, because the line and a card row want them too.
     //
-    // The row itself is `&message.text[range]` and stays that way: which of its
+    // The row itself is `&message.display_body()[range]` and stays that way: which of its
     // pieces reach the terminal first is a question about the order they are
     // *drawn* in, and [`crate::bidi`] answers that with logical slices of the very
     // same bytes. In [`BidiMode::Terminal`] there is no answer to ask for — the
@@ -357,7 +358,7 @@ fn message_row<'m>(
     // would reverse it twice.
     let row = text_row::TextRow {
         ink: text_row::Ink::readonly(&app.theme),
-        text: &message.text,
+        text: message.display_body(),
         range: range.clone(),
         matched,
         selected: match covered {
@@ -376,8 +377,8 @@ fn message_row<'m>(
             // One direction for the whole message, one permutation per row: the
             // base level is the message's, and a row of an all-neutral message
             // carries no evidence of its own.
-            let base = bidi::base_direction(&message.text);
-            let pieces = bidi::visual_row(&message.text[range.clone()], base);
+            let base = bidi::base_direction(message.display_body());
+            let pieces = bidi::visual_row(&message.display_body()[range.clone()], base);
             spans.extend(text_row::spans_permuted(&row, &pieces));
         }
     }
@@ -396,7 +397,7 @@ fn message_row<'m>(
         } else {
             0
         };
-        let drawn = prefix + columns(&message.text[range.clone()]);
+        let drawn = prefix + columns(&message.display_body()[range.clone()]);
         let gap = usize::from(width).saturating_sub(drawn + columns(&note));
         if gap > 0 {
             spans.push(Span::raw(" ".repeat(gap)));
@@ -509,6 +510,7 @@ mod tests {
     use crate::theme::Theme;
     use crate::wrap::columns;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use domain::message::MediaKind;
     use domain::selection::Mark;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -627,6 +629,7 @@ mod tests {
             status: domain::message::MessageStatus::Received,
             is_outgoing: outgoing,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -848,6 +851,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -1382,6 +1386,7 @@ mod tests {
                     status: MessageStatus::Received,
                     is_outgoing: false,
                     reply_to: None,
+                    media: None,
                 })
                 .collect(),
         );
@@ -1443,6 +1448,99 @@ mod tests {
     /// row below the frame's own.
     fn drawn_at(layout_row: usize) -> u16 {
         u16::try_from(layout_row + 1).expect("a row of the layout fits a frame")
+    }
+
+    /// A message that carries something and says nothing: the shape the
+    /// placeholder exists for.
+    fn attachment(id: i64, seconds: i64, outgoing: bool, media: MediaKind) -> Message {
+        Message {
+            media: Some(media),
+            ..at(id, seconds, outgoing, "")
+        }
+    }
+
+    #[test]
+    fn a_message_that_only_carries_something_draws_its_placeholder() {
+        let app = showing(vec![attachment(1, 0, false, MediaKind::Photo)]);
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            row(&screen, FIRST).contains("[image]"),
+            "a photo with no caption still says what it is: {}",
+            row(&screen, FIRST)
+        );
+        assert_cursor_stands_on_a_message(&app, &screen);
+    }
+
+    #[test]
+    fn every_kind_draws_its_own_placeholder() {
+        for (media, label) in [
+            (MediaKind::Photo, "[image]"),
+            (MediaKind::Video, "[video]"),
+            (MediaKind::Gif, "[gif]"),
+            (MediaKind::Voice, "[voice]"),
+            (MediaKind::File, "[file]"),
+        ] {
+            let app = showing(vec![attachment(1, 0, false, media)]);
+
+            let screen = screen(&app, 80, 24);
+
+            assert!(
+                row(&screen, FIRST).contains(label),
+                "{media:?} draws {label}: {}",
+                row(&screen, FIRST)
+            );
+        }
+    }
+
+    /// A placeholder that cannot be selected is not body text, it is decoration.
+    #[test]
+    fn a_placeholder_can_be_selected_and_yanked() {
+        let mut app = showing(vec![attachment(1, 0, false, MediaKind::File)]);
+
+        press(&mut app, KeyCode::Char('V'));
+        press(&mut app, KeyCode::Char('y'));
+
+        assert_eq!(
+            app.register().lines(),
+            std::slice::from_ref(&"[file]".to_owned()),
+            "the message yanks what it shows, label and all"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_never_replaces_a_caption() {
+        let mut media = at(1, 0, false, "the pier at six");
+        media.media = Some(MediaKind::Photo);
+        let app = showing(vec![media]);
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            row(&screen, FIRST).contains("the pier at six"),
+            "the caption is the body: {}",
+            row(&screen, FIRST)
+        );
+        assert!(
+            !row(&screen, FIRST).contains("[image]"),
+            "and the placeholder is not drawn beside it"
+        );
+    }
+
+    #[test]
+    fn an_empty_message_with_no_media_still_draws_nothing() {
+        let app = showing(vec![at(1, 0, false, "")]);
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            !["[image]", "[video]", "[gif]", "[voice]", "[file]"]
+                .iter()
+                .any(|label| row(&screen, FIRST).contains(label)),
+            "there is nothing to stand in for nothing: {}",
+            row(&screen, FIRST)
+        );
     }
 
     #[test]
@@ -2172,6 +2270,7 @@ mod tests {
                 status: MessageStatus::Received,
                 is_outgoing: false,
                 reply_to: None,
+                media: None,
             },
             Message {
                 id: 91,
@@ -2181,6 +2280,7 @@ mod tests {
                 status: MessageStatus::Received,
                 is_outgoing: true,
                 reply_to: Some(90),
+                media: None,
             },
         ]);
 
@@ -2352,6 +2452,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }]);
         press(&mut app, KeyCode::Char('/'));
         type_text(&mut app, "benchmarks");
@@ -2585,6 +2686,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }]);
 
         app

@@ -375,6 +375,7 @@ mod tests {
             status: domain::message::MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -557,6 +558,7 @@ mod live_tests {
             timestamp: 1_700_000_000 + id,
             is_outgoing,
             reply_to_msg_id: None,
+            media: None,
         }
     }
 

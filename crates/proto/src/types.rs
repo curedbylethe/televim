@@ -12,11 +12,19 @@
 //! produced, and one into the `domain` type. The first can only be compiled
 //! when the framework's client is — it is `live`-gated — while the second needs
 //! nothing but `domain`, so it is always compiled and always tested.
+//!
+//! # One mapping here is deliberately not exhaustive
+//!
+//! [`chat_kind`] matches the framework's peer taxonomy exhaustively, so a new
+//! peer kind stops the build. [`media_kind`] does not, and that is the point: a
+//! media kind this build has never heard of must still reach the user as
+//! something to open, so the catch-all is [`MediaKind::File`]. The choice of
+//! vocabulary belongs to the interface, not to this crate.
 
 use std::borrow::Cow;
 
 use domain::chat::{Chat, ChatKind};
-use domain::message::{Message, MessageStatus};
+use domain::message::{MediaKind, Message, MessageStatus};
 
 #[cfg(feature = "live")]
 use telegram_framework::{DialogInfo, DialogKind, MessageInfo};
@@ -74,6 +82,16 @@ pub(crate) struct ProtoMessage {
     /// A reply's target is another message of the same conversation, so this is
     /// already in the identifier space [`Message`] uses and needs no adjustment.
     pub reply_to: Option<i64>,
+
+    /// What the message carries, if anything.
+    ///
+    /// Already the domain's own kind rather than the framework's: this is the
+    /// one place the two are reconciled, and nothing downstream of the DTO
+    /// should have to know there was another vocabulary. `None` means Telegram
+    /// said the message carries no media, which is a different thing from a
+    /// kind this build does not model — that arrives as
+    /// [`MediaKind::File`].
+    pub media: Option<MediaKind>,
 }
 
 impl From<ProtoChat> for Chat {
@@ -100,6 +118,7 @@ impl From<ProtoMessage> for Message {
             status: status_of(message.is_outgoing),
             is_outgoing: message.is_outgoing,
             reply_to: message.reply_to,
+            media: message.media,
         }
     }
 }
@@ -157,7 +176,36 @@ impl From<MessageInfo> for ProtoMessage {
             // Telegram reports a reply target as an `i32`; the domain counts in
             // `i64`, and widening here is what keeps the two spaces joined.
             reply_to: message.reply_to_msg_id.map(i64::from),
+            media: message.media.map(media_kind),
         }
+    }
+}
+
+/// Maps the framework's media taxonomy onto the domain's, degrading rather than
+/// failing.
+///
+/// This is the one mapping in the crate that is **not** exhaustive, and the
+/// contrast with [`chat_kind`] is deliberate. A peer kind added to the framework
+/// should stop this compiling, because every peer kind has a consequence the
+/// client cannot avoid. A media kind added to the framework has none to avoid:
+/// the file is still a file, the user can still open it, and the only question
+/// is what to call it. So an unrecognised kind becomes [`MediaKind::File`]
+/// instead of `None` — a message that visibly carries something must not arrive
+/// looking as though it carries nothing — and the build stays green.
+#[cfg(feature = "live")]
+// The catch-all is the requirement here: an unrecognised kind must degrade to
+// a file, and a build failure is the one answer that cannot degrade. The lint
+// this silences asks for exhaustiveness, which is exactly what is wrong.
+#[allow(clippy::match_wildcard_for_single_variants)]
+fn media_kind(kind: telegram_framework::media::MediaKind) -> MediaKind {
+    match kind {
+        telegram_framework::media::MediaKind::Photo => MediaKind::Photo,
+        telegram_framework::media::MediaKind::Video => MediaKind::Video,
+        telegram_framework::media::MediaKind::Gif => MediaKind::Gif,
+        telegram_framework::media::MediaKind::Voice => MediaKind::Voice,
+        // The framework's own `File`, and every kind it has not heard of either:
+        // all of them are "a thing this message carries".
+        _ => MediaKind::File,
     }
 }
 
@@ -208,6 +256,7 @@ mod tests {
             timestamp: 1_700_000_000,
             is_outgoing,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -307,6 +356,25 @@ mod tests {
         assert_eq!(bare.reply_to, None, "an ordinary message answers nothing");
     }
 
+    #[test]
+    fn a_media_kind_survives_the_hop_into_the_domain() {
+        let mut source = proto_message(false);
+        source.media = Some(MediaKind::Photo);
+
+        let message: Message = source.into();
+        assert_eq!(
+            message.media,
+            Some(MediaKind::Photo),
+            "a message that carries something must not arrive reading as one that does not"
+        );
+
+        let bare: Message = proto_message(false).into();
+        assert_eq!(
+            bare.media, None,
+            "no media said is no media, which is not the same as an unknown kind"
+        );
+    }
+
     /// The two halves have to compose: a kind that reaches `domain` intact is
     /// what lets the filter drop a bot rather than mistake it for a person.
     #[test]
@@ -360,6 +428,7 @@ mod live_tests {
             timestamp: 1_700_000_000,
             is_outgoing: false,
             reply_to_msg_id: None,
+            media: None,
         }
     }
 
@@ -438,6 +507,65 @@ mod live_tests {
             message.reply_to,
             Some(5),
             "a reply target has to survive the widening, or the excerpt cannot find its message"
+        );
+    }
+
+    /// Every kind the framework can name reaches the domain as itself.
+    ///
+    /// The framework's `File` is also what it reports for a kind this build does
+    /// not model, so the row below is the catch-all's observable behaviour: a
+    /// message carrying an unrecognised thing still arrives as a file rather
+    /// than as nothing.
+    #[test]
+    fn every_media_kind_reaches_the_domain_unchanged() {
+        let cases = [
+            (
+                telegram_framework::media::MediaKind::Photo,
+                MediaKind::Photo,
+            ),
+            (
+                telegram_framework::media::MediaKind::Video,
+                MediaKind::Video,
+            ),
+            (telegram_framework::media::MediaKind::Gif, MediaKind::Gif),
+            (
+                telegram_framework::media::MediaKind::Voice,
+                MediaKind::Voice,
+            ),
+            (
+                // The catch-all, for every kind Telegram adds and this build has
+                // never heard of.
+                telegram_framework::media::MediaKind::File,
+                MediaKind::File,
+            ),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(media_kind(source), expected, "{source:?} was mistranslated");
+        }
+    }
+
+    /// A message that carries no media says so, and an unknown kind does not get
+    /// to make the same claim.
+    #[test]
+    fn only_a_message_without_media_arrives_without_a_kind() {
+        let mut bare = message_info(42);
+        bare.media = None;
+        let message: Message = ProtoMessage::from(bare).into();
+        assert_eq!(message.media, None, "telegram said there was nothing there");
+
+        let mut unknown = message_info(42);
+        unknown.media = Some(telegram_framework::media::MediaKind::File);
+        let message: Message = ProtoMessage::from(unknown).into();
+        assert_eq!(
+            message.media,
+            Some(MediaKind::File),
+            "an unmodelled kind degrades to a file; it must not degrade to nothing"
+        );
+        assert_eq!(
+            message.display_body(),
+            "hello",
+            "a caption still wins over the placeholder, which is what the label is for"
         );
     }
 

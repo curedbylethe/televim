@@ -468,7 +468,7 @@ pub fn message_rows(
     width: u16,
 ) -> Vec<Range<usize>> {
     let (prefix, suffix) = decoration_columns(app, message, grouped, width);
-    wrap_decorated(&message.text, prefix, suffix, width)
+    wrap_decorated(message.display_body(), prefix, suffix, width)
 }
 
 /// How many rows a layout occupies.
@@ -670,7 +670,9 @@ pub(crate) fn reply_prefix(app: &App, reply_to: i64, width: u16) -> String {
         Some(message) if matches!(message.status, MessageStatus::Sending) => {
             "[sending…]".to_owned()
         }
-        Some(message) => message.text.to_string(),
+        // The body, not the caption: a reply to a photo quotes "[image]", which
+        // is what the reader is answering, rather than quoting nothing.
+        Some(message) => message.display_body().to_owned(),
         None => "[message not loaded]".to_owned(),
     };
 
@@ -793,6 +795,7 @@ mod tests {
                 status: MessageStatus::Received,
                 is_outgoing: false,
                 reply_to: None,
+                media: None,
             };
             let len = message_rows(&app, &message, Grouped::alone(), width).len();
             spans.push(RowSpan {
@@ -862,6 +865,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: outgoing,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -1454,6 +1458,36 @@ mod tests {
         }
     }
 
+    /// A message that carries a thing and says nothing about it.
+    fn carrying(media: domain::message::MediaKind) -> Message {
+        Message {
+            id: 1,
+            chat_id: 1,
+            text: String::new().into(),
+            timestamp: 0,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+            media: Some(media),
+        }
+    }
+
+    #[test]
+    fn a_message_that_only_carries_something_is_one_row_of_its_placeholder() {
+        let app = App::mock();
+        let message = carrying(domain::message::MediaKind::Gif);
+
+        let rows = message_rows(&app, &message, Grouped::alone(), 40);
+
+        assert_eq!(rows.len(), 1, "a placeholder is a line, not a paragraph");
+        assert_eq!(
+            rows[0].end,
+            message.display_body().len(),
+            "and the range the panel paints indexes the very string it wraps"
+        );
+        assert_eq!(&message.display_body()[rows[0].clone()], "[gif]");
+    }
+
     #[test]
     fn the_layout_is_the_same_answer_twice_over() {
         let app = App::mock();
@@ -1721,6 +1755,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: Some(1),
+            media: None,
         }]);
 
         let quoted = reply_prefix(&app, 1, 39);
@@ -1907,6 +1942,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }]);
         let reply = Message {
             id: 91,
@@ -1916,6 +1952,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: true,
             reply_to: Some(90),
+            media: None,
         };
 
         let (prefix, suffix) = decoration_columns(&app, &reply, Grouped::alone(), 40);

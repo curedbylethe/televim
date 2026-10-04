@@ -66,6 +66,9 @@
 //!   the first account's feed carries the watermark once somebody opens that
 //!   conversation on the other side. It is the one test here that needs a person,
 //!   and the one that settles OQ-07 empirically.
+//! - **A message that carries media.** The text-only `send_message` cannot make
+//!   one, so the download test needs a conversation with an attachment seeded
+//!   before the run; without one it reports the gap and returns.
 //!
 //! Each is covered as far as one account allows. The fetched list's ordering and
 //! the history's are asserted directly, which is deterministic, and the counts —
@@ -333,6 +336,77 @@ async fn login_round_trip_yields_a_client_that_can_fetch_the_chat_list() {
         "the fetch must return only the conversations televim displays"
     );
     assert_newest_first(&chats);
+}
+
+/// Downloads a message's media through the client the application assembles.
+///
+/// This is the one place the transfer is exercised for real: the framework's
+/// unit tests settle the refusals without a datacenter, but only an account can
+/// prove that a byte vector comes back from the wire. It needs a conversation
+/// with a message that carries an attachment, which the text-only
+/// `send_message` cannot create — so a run without one seeded is reported and
+/// skipped rather than failed.
+///
+/// The other half is the refusal: a message with nothing to fetch must come
+/// back as [`FrameworkError::MediaUnavailable`] rather than a panic, because the
+/// release profile aborts and a misreported refusal would take the program down.
+#[tokio::test]
+async fn a_media_message_downloads_through_the_client() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+
+    let proto = ProtoClient::new(client);
+
+    let Some(chat) = conversation_with_history(&proto).await else {
+        return;
+    };
+    let page = proto
+        .fetch_latest(chat.id, PAGE)
+        .await
+        .expect("the newest page is fetched");
+
+    let Some(media_message) = page.iter().find(|message| message.media.is_some()) else {
+        eprintln!(
+            "skipped: conversation {} has no message carrying media; seed one with a photo",
+            chat.id
+        );
+        return;
+    };
+
+    let bytes = proto
+        .download_media(chat.id, media_message.id)
+        .await
+        .expect("a message that carries media downloads");
+    assert!(
+        !bytes.is_empty(),
+        "a message reported to carry media must yield bytes"
+    );
+
+    // And the refusal, on a message this account can be sure has no attachment.
+    if let Some(plain) = page.iter().find(|message| message.media.is_none()) {
+        let refused = proto.download_media(chat.id, plain.id).await;
+        assert!(
+            matches!(
+                refused,
+                Err(ProtoError::Framework(
+                    FrameworkError::MediaUnavailable { .. }
+                ))
+            ),
+            "a message with nothing to fetch must be refused, got {refused:?}"
+        );
+    }
 }
 
 /// Fetches the chat list, takes the feed, and checks that the two agree.
@@ -1538,6 +1612,7 @@ fn message(chat_id: i64, id: i64) -> Message {
         status: domain::message::MessageStatus::Received,
         is_outgoing: false,
         reply_to: None,
+        media: None,
     }
 }
 
