@@ -83,7 +83,7 @@ change.
 | `border` | `DarkGray` | `#545862` | `#3a4150` | `#b0b5c0` | present, not attention-drawing |
 | `border-focused` | `Cyan` | `#00afaf` | `#5ad4e6` | `#1a7f8c` | the *only* thing saying where keys go |
 | `text` | `White` | `#e5e5e5` | `#d7dce5` | `#1d2128` | body |
-| `text-dim` | `Gray` | `#8a8a8a` | `#7b8496` | `#6b7280` | decoration, hints, an unfocused draft |
+| `text-dim` | `Gray` | `#8a8a8a` | `#7b8496` | `#6b7280` | decoration, hints, an unfocused draft, a media placeholder |
 | `selection` | `REVERSED` | reverse video | reverse video | reverse video | the row the cursor is on, in a read-only surface; owned by it alone |
 | `caret-insert` | — | terminal's own | `#d7dce5` | `#1d2128` | the bar, while the line is composed; on the bar's plain ground |
 | `caret-normal` | — | terminal's own | `#d7dce5` | `#1d2128` | the hollow; `text` on a plain ground, `background` on the reversed row |
@@ -217,7 +217,8 @@ has one cell height and the reader chose the cell.
   space is a cell that paints nothing, and the insert caret is a two-column bar
   on a blank cell, so the key that typed one looked like the key that did
   nothing; the dot occupies the space's own cell, which is what keeps the caret
-  and the wrap in step. `·` also joins a panel's title to a note (`· 2 selected`).
+  and the wrap in step. `·` also joins a panel's title to a note (`· 2 selected`,
+  `· typing`).
   And it is a card row's cue: one column, present, dim, on the row's first line,
   saying the row carries something. **The conversation gets no dots** — a message
   is read as prose, and a sentence with its spaces dotted reads as something else.
@@ -262,6 +263,14 @@ Notes, because they are the answers to questions a reader will have:
   and `S:acct` is present. Eleven columns left the row and eight arrived, so the
   row the arithmetic starts from is three columns shorter than this document
   assumed.
+- **`gd` is not on the conversation's row, and nothing is cut to make room.** The
+  row is 67 of 71, so a hint for it (`  gd:quote`, ten columns) would not fit, and
+  paying with `A:card`, `S:acct` or `q`'s `:q` route would trade a key that is
+  always meaningful for one that is meaningful only when the cursor is on a reply. A
+  fixed hint cannot know that; a sixteenth, per-message hint row would. The key is
+  taught where it matters instead: on a message with no quote it answers with
+  `Not a reply: gd jumps to the message a reply quotes.`, and the reply row
+  already shows `> quote ‖`, the thing the key follows.
 - **`A:card` costs eight columns and `q:quit` pays for it: 67 − 8 + 8 = 67, four
   columns spare.** A hint is the only place a reader learns a key the rest of the
   screen is silent about, and `A` is one. `q` is the only one of the three keys
@@ -504,11 +513,11 @@ code.
 | :------ | :---- | :----- |
 | `[you]` `[them]` | which side a message is from, on its first row; in a group, on the group's first row only | `rows.rs` |
 | `> quoted ‖ body` | a reply: quote and body **on one row**, `‖` between | `rows::reply_prefix` |
-| `> [message not loaded] ‖ body` | a reply whose target the window does not hold | asserted in `rows.rs` |
-| `[image]` | **a message that carries a photo and no caption**: its whole body, in the ordinary body ink | `MediaKind::label` |
+| `> [message not loaded] ‖ body` | a reply whose target the window does not hold; `gd` on it fetches the target | asserted in `rows.rs` |
+| `[image]` | **a message that carries a photo and no caption**: its whole body, in `text-dim` | `MediaKind::label` |
 | `[video]` `[gif]` `[voice]` | ditto for a video, an animated GIF, a voice note | ditto |
 | `[file]` | ditto, and the **catch-all**: a sticker, a contact, a document, or any kind this build does not model, which degrades rather than vanishing | ditto |
-| a caption beside a placeholder | never: `display_body()` returns the caption when there is one, so the label is drawn only for a message that says nothing | `Message::display_body` |
+| a caption beside a placeholder | never: `display_body()` returns the caption when there is one, so the label is drawn only for a message that says nothing; the caption is body ink | `Message::display_body` |
 | `[sending…]` | on the message's **last** row, which is the one with room | asserted |
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |
 | `[delivered]` | an outgoing group the peer's client has acknowledged and not read; the group's **last** row, beside any time | specified here; not yet in `rows.rs` |
@@ -517,9 +526,14 @@ code.
 | `──── Today ────` | a day separator: a rule the width of the text with the day set into it | specified here; not yet in `rows.rs` |
 | `· 2 selected` | joined onto a panel title by `·` | `selection_note` |
 | `· 3 match(es)` | a search's count, in the title | `search_note` |
+| `· typing` | the peer is typing in the open conversation: a note on the conversation's title, in `text-dim`; the one title note that is not a count | `typing_note` |
 | `·` | a space in a draft being composed; a title-note joiner; a card row's cue | three meanings, all deliberate |
 | `Loading…` `Loading older…` `Loading newer…` | a fetch in flight | `FetchDirection::label` |
 | `Jumping to first unread…` | a jump the window could not answer | `JUMP_LABEL` |
+| `Jumping to the quoted message…` | `gd` on a reply whose target is not loaded: the page around it is in flight | specified here; not yet in the binary |
+| `Jumping back…` `Jumping forward…` | `Ctrl-o` / `Ctrl-i` to a position whose message is no longer loaded | ditto |
+| `Not a reply: gd jumps to the message a reply quotes.` | `gd` on a message with no quote: a refusal, a `flash` | ditto |
+| `That message is no longer available.` | `gd` on a reply whose target the client does not hold at all | ditto |
 | `televim` | the resting status line, when there is nothing to say | `IDLE_STATUS` |
 | `Quit televim? (y/n)` | a screen-wide confirmation | `QUIT_PROMPT` |
 | `Delete your message from both sides? (y/n)` | ditto, naming **which side** | `DELETE_OUTGOING_PROMPT` |
@@ -579,14 +593,151 @@ say "you"; nothing else in the sign-in view does either.
 `emojis` costs 0.5 MB of binary and 2 MB of RSS. A `👤` in a settings title is
 the one place that cost would be spent for nothing.
 
-**The media placeholders are specified, not styled.** `[image]`, `[video]`,
-`[gif]`, `[voice]` and `[file]` above are what the code prints today, in the same
-ink as any other body, and the row carries them like any other text: selectable,
-yankable, searchable, and never on a message that has a caption. Their wording
-and their styling are **CUR-6's** and no design run has been commissioned for
-them (**`DESIGN-TBD`**) — so this table records the vocabulary the binary speaks,
-not a decision about how an attachment should look. A scene for a media-only
-message, and any ink of its own, is what a design run would add.
+### Media placeholders
+
+Decided: the five tokens are **unchanged**. This section adds what the table above
+could not say, the ink, and the constraints the row vocabulary already implies.
+
+| `MediaKind` | Token | Carries | Ink |
+| :---------- | :---- | :------ | :-- |
+| `Photo` | `[image]` | a photo | `text-dim` |
+| `Video` | `[video]` | a video | `text-dim` |
+| `Gif` | `[gif]` | an animated GIF | `text-dim` |
+| `Voice` | `[voice]` | a voice note | `text-dim` |
+| `File` | `[file]` | a document, sticker, contact, or any kind the build does not model | `text-dim` |
+
+**The ink is `text-dim`, not body `text`.** One role for all five, no new token, and
+no bold, italic or underline (there is no second weight or slant in this surface).
+
+- *Why not body ink.* The token is the program's word for something the sender did
+  **not** write. In body ink it is indistinguishable from a person who typed
+  `[image]`, and a reader cannot tell a photo from a four-character message. Everything
+  else the program says inside a conversation row is already `text-dim`: the
+  `[you]`/`[them]` tag, a reply's `> quote ‖`, `[sending…]`, `[delivered]`, the time. A
+  placeholder is the same kind of speech, so it takes the same role. `text-dim` is
+  documented as "decoration, hints"; this widens it to "what the program says about a
+  message", which is the reading the quote prefix already relies on.
+- *Why not a new colour.* The palette has fifteen roles because the TUI has fifteen. A
+  placeholder is not a state, a mode or a match, and a sixteenth would be fiction.
+- *Contrast.* `#7b8496` on the dark ground is 5.17:1; `#6b7280` on a white light
+  ground is 4.83:1. Both clear the 4.5:1 body floor, so the dimming costs no legibility.
+- *The cost, stated.* A message with a placeholder is dim from tag to time, so a
+  media-only row reads quieter than its text neighbours. That is intended: the message
+  has no words to read. The tag and the token stay apart by position (the gutter is
+  seven columns, the body starts at column nine).
+- *A caption wins, and is body ink.* A captioned message shows the caption and nothing
+  else; nothing about it is dim.
+
+**Ink in each state** (the same rules as the quote prefix, which this follows):
+
+| State | The placeholder |
+| :---- | :-------------- |
+| plain | `text-dim` |
+| cursor row | the whole row is `selection` (reverse video); the token is `background` on `text`, like the tag. Never a dim reversed token |
+| char/message selected (Visual) | the token takes the selection's own ink, `#d7dce5` on `selection-bg`. The dimming is lost under the highlight, as the quote's already is: the selection owns the cell |
+| search match | `match` + bold on the matched characters; the rest stays dim. A placeholder is searchable (`/image` finds `[image]`) |
+| beside `[sending…]` / `[failed: …]` | the status keeps its own ink and its own (last) row rule |
+
+**Constraints** (each one is already true of the engine; this records them):
+
+1. **The placeholder sits on the message's first row, or its only row.** It is the
+   body, so it starts the body column on the row that carries `[you]`/`[them]` (when
+   the message opens its group) and a reply's quote prefix. It never moves to a row of
+   its own below a caption or a status.
+2. **Soft-wrap rules are unchanged.** Rows break by cell width, at a space, in logical
+   order. A token has no space and is seven cells at most, and the body panel is never
+   narrower than `MIN_BODY_WIDTH` (8), so a token is **never split**: it is one atomic
+   row. What can wrap is its neighbours: when the last row has no room for a trailing
+   note, the note takes a row of its own below it (the `[failed: file exceeds the 2 GB
+   limit]` scene), exactly as for text. The placeholder never takes a continuation
+   row's place and never carries a note's wrap.
+3. **The placeholder is selectable and yankable as text.** It is the message's `text`:
+   `v` selects it, `yy` copies the literal string `[image]` into the register (the
+   literal token, not a description), `r` quotes it as `> [image] ‖`, and `/` finds it.
+   It is not drawn from a separate field, so none of this needs a second code path.
+4. **A caption replaces the placeholder; the two are never on screen together.**
+5. **The wording is not localised** and does not change with the kind of file (no
+   filename, size or duration inside the brackets). That is a decision for another day,
+   not this one.
+
+Scenes: `media` in the engine (start `media`, a chat put first by the scene), eight
+frames at 80×24: `[image]` alone, `[voice]`, `[file]`, a caption suppressing the
+placeholder, the wrapped-note row, a Visual selection over a placeholder, the yank,
+and all five kinds in one window.
+
+### Jump to the quoted message
+
+A motion, not a component: nothing is drawn that was not drawn before. The
+cursor moves to the message a reply quotes; the window, the rows, the
+`> quote ‖ body` prefix, the colours and the status line's ink are unchanged.
+
+**The key is `gd`.** Normal mode in the conversation, on a message that carries a
+quote.
+
+- *Why `gd`.* It is Vim's "go to definition": from a use to the place it refers
+  to, which is what a quote is. `g` is already a prefix key here (`gg`), so
+  `gd` costs no new pending state and collides with none of `j k Ctrl-d Ctrl-u gg G
+  v i a r e dd D / n N Esc Enter Tab h l A S`. `d` after `g` is not `dd`: the pending
+  key decides, and `gd` is read the way `gg` is.
+- *Runner-up: `gf`*, Vim's "go to the file under the cursor", which is closer to
+  "follow" and has the same cost. It lost because a quote is a definition of
+  context rather than a path, and because `gd` reads as a pair with `Ctrl-o`,
+  which is how Vim teaches `gd` in the first place.
+- Rejected: `Enter` (bound, and means "discard a draft" here), `'` and `` ` `` (marks,
+  which this program does not have), and `K` (Vim's "look up", which a reader would
+  expect to show the quote rather than move).
+
+**Behaviour**
+
+1. The target is a message **id**, never text or a row. A reply carries `to`; the
+   quote shown is only what was said.
+2. **Target in the window:** the cursor moves to it. Nothing is fetched and nothing
+   else changes.
+3. **Target not in the window:** the status line says
+   `Jumping to the quoted message…`, a page around the target replaces the loaded
+   window, and the cursor lands on the target, in the middle of the page
+   (`Loading older…` / `Loading newer…` rows say which ends are still the server's).
+   The cursor does not move until the page arrives, and the old window is kept until
+   then. Any search is cleared, because its hits were rows of the old window.
+4. **In flight, only `Esc` answers**: it drops the fetch and the reader is where they
+   were. Every other key waits, as in the sign-in's *Checking…*.
+5. **A message that is not a reply**, or a reply whose target the client does not
+   hold at all, is a refusal written to the status line (`flash`, rank 7).
+
+**Jumplist (Ctrl-o, Ctrl-i)** follows Vim: every `gd` leaves a mark on the message
+the reader left, `Ctrl-o` goes back one mark, `Ctrl-i` goes forward, and a new jump
+discards the marks ahead of the position. The first `Ctrl-o` from the end of the
+list marks where the reader is, so `Ctrl-i` can return. A mark is a message id, so
+it survives the window being replaced; going back to a message the window no longer
+holds fetches it, and says `Jumping back…` (or `Jumping forward…`). Marks are per
+conversation. `Ctrl-o` with no marks, and `Ctrl-i` at the end, do nothing.
+
+> **Open decision: `Ctrl-i` is `Tab` on the wire.** A terminal sends the same byte
+> for both unless it speaks the kitty keyboard protocol or `modifyOtherKeys`. The
+> engine binds `C-i` and leaves `Tab` as the pane switch, which is what the binary
+> must keep doing, so on a terminal that does not report them apart **forward is
+> unreachable** and only `Ctrl-o` works. This needs a decision, not a workaround
+> invented here: either accept it, or give forward a second key.
+
+**The label.** `JUMP_LABEL` (`Jumping to first unread…`) is not reused: it names a
+destination, and this one is another. A reader who pressed `gd` and read "first
+unread" would be told the program had done something else. The three new labels
+follow its pattern, `Jumping to <where>…`, in the same ink as every other
+status-line sentence (`text`), at the same rank (5).
+
+| Label | When | Columns |
+| :---- | :--- | ------: |
+| `Jumping to the quoted message…` | `gd`, target not loaded | 31 |
+| `Jumping back…` | `Ctrl-o`, mark not loaded | 14 |
+| `Jumping forward…` | `Ctrl-i`, mark not loaded | 17 |
+
+All are well inside the 71 columns the status line has. **No hint row changes**:
+see the note under the hint table.
+
+Scenes: `jump` in the engine, eight frames at 80×24 on Ada Lovelace's chat: the
+loaded target, the fetch in flight, the page arrived with the cursor on the
+target, `Ctrl-o` back (loaded), `Ctrl-i` forward, `Ctrl-o` needing a fetch, that
+fetch landed, and `gd` on a message with no quote.
 
 ## Components
 
@@ -594,9 +745,11 @@ Eight, with their states, and the `TestBackend` assertion that would catch each
 regressing.
 
 1. **Panel** — `Chats`, `Conversation`, `Input`. States: focused, unfocused,
-   empty, titled with a count, titled with notes.
+   empty, titled with a count, titled with notes, titled with the peer's typing
+   note (see *Peer typing*).
 2. **Message row** — states: incoming, outgoing, reply, sending, failed, search
-   match, char-selected, message-selected, wrapped across rows. Also: first or
+   match, char-selected, message-selected, wrapped across rows, a reply whose
+   quote has been jumped to (nothing changes on the row; the cursor moves). Also: first or
    later in a group (the label on the first only), last of a group (the time, and
    for an outgoing one `[delivered]` or `[read]` in place of nothing, `[sending…]`
    or `[failed: …]` in place of both), and the **day separator** beside it, a row
@@ -630,10 +783,15 @@ regressing.
    | 2 | a confirmation | `Quit televim? (y/n)` |
    | 3 | a selection, **with its unit** | `2 message(s) selected — Esc clears`, or `3 row(s) selected — Esc clears` on a card |
    | 4 | an active search | `/bench — match 1 of 2` |
-   | 5 | a jump in flight | `Jumping to first unread…` |
+   | 5 | a jump in flight | `Jumping to first unread…`, `Jumping to the quoted message…` |
    | 6 | why the message under the cursor failed | the send's own reason |
    | 7 | a `flash` — a refusal, a status worth reading | anything just written |
    | 8 | the hint, or `televim` | the resting state. The editable profile and both cards use their own hint here, not `televim` |
+
+   Rank 5 is one rank with three sentences, because a jump in flight is one kind of
+   state and the sentence names where it is going; see *Jump to the quoted message*.
+   A search above it hides the label, which is the ranking working: the reader who
+   pressed `gd` with a search up still sees the search until the page lands.
 
    The unit in rank 3 is not decoration: three characters, three rows and three
    messages are all "3", and a reader who has just pressed `v` has to be able to
@@ -897,6 +1055,58 @@ aspirational: each is a decision the code makes and a test asserts.
    the declaration that once implied otherwise is gone. Declared-but-unused is
    named as a gap, never counted as a feature.
 
+## Peer typing
+
+A signal that the other person in the open private conversation is typing. It is
+not a message and not a row: the body of the conversation is the record, and a
+line that appears and then goes would be a row that is not one.
+
+**Surface: the conversation's title.** ` Conversation (3/48) · typing `. The
+status line was rejected, for three reasons. It is already the highest-ranked
+thing the reader is told while composing (rank 1, the line's own hint), which is
+exactly when a typing signal is most wanted, so it would be hidden when it
+matters. It is the reader's channel for their own state: a selection, a search,
+a jump, a refusal each outrank it, so it would also lose to every state the
+reader can be in. And adding a ninth rank to a table whose point is that it is
+short would make "typing" compete with confirmations. The title belongs to the
+panel the signal is about, is drawn in every state, and is not ranked against
+anything: the ranking table is unchanged.
+
+**Ink: `text-dim`.** The count notes (`· 2 selected`, `· 3 match(es)`) stay in
+`text`, because they are facts about the reader's own view. This one is the
+peer's state, furniture that comes and goes, so the whole note (joiner and word)
+is `text-dim`. No new token. There is no ellipsis and no cursor glyph: an
+ellipsis here would promise motion, and `…` already means work in flight.
+
+**Order and room.** The note comes after the count and any selection and search
+notes. When the title with every note would not fit the panel, the typing note is
+dropped whole and never cut: it is the one note that is not the reader's own, and
+a half-word is worse than none. In the worst case (a selection and a search
+together) the title is full, the note is absent, and the status line is already
+speaking for the selection. While composing neither is up, so the note is present.
+
+**Lifetime: state, never an animation.** The note is a counter on the open
+conversation, `typing`, set to `TYPING_TICKS` (2) by the peer's typing event and
+refreshed by every repeat of it. It ends on whichever comes first:
+
+1. **the peer's next message**, which is what the typing was for;
+2. **the conversation closing**: moving to another chat (the counter belongs to
+   the chat that was left and is zeroed there, so returning does not revive it);
+3. **a bounded deadline on the existing network tick**: each tick (`answer`, the
+   same one that lands a jump or a sign-in) decrements it, so a peer who stops
+   without a final event vanishes on the second tick.
+
+Nothing repaints on a schedule for it: the frame changes when an event or a tick
+arrives, as it does for every other state. The page's specimen drives the tick
+with a timer only because it stands in for the network. An event for a
+conversation that is not the open one is dropped: the counter would be zeroed on
+the reader's arrival anyway.
+
+Scenes: `typing` in the engine, eight frames on Ada Lovelace's chat: the note
+appearing, composing a reply with it still up, a selection with a search where it
+yields, one tick, the second tick, a repeat before the deadline, the peer's
+message arriving, and leaving the chat and coming back.
+
 ## Motion
 
 There is none, deliberately.
@@ -908,6 +1118,9 @@ scrollbar's thumb and the selection row's reverse video change only when the
 reader moves, and the carets are painted cells rather than the terminal's own. A
 spinner or a countdown would be the first thing in this programme that repainted
 on a schedule rather than on a change, and it is not worth it.
+
+The peer's typing note is not an exception: it is state that an event sets and an
+event or a tick clears; see *Peer typing*.
 
 ## What this document is for
 

@@ -25,7 +25,7 @@ program does, run the program.
 
 The engine earns its place by being *drivable*: eight hand-written frames could
 only ever have shown eight states, and the three profile frames had already gone
-stale — silently, because nothing measured them. The engine has 63 scenes, and
+stale — silently, because nothing measured them. The engine has 88 scenes, and
 `design-system/build-specimen.js` regenerates the specimen from them so a frame
 cannot disagree with the model that produced it.
 
@@ -114,5 +114,5 @@ TV.SCENES.forEach((s,i)=>s.variants.forEach((v,j)=>{const g=TV.render(TV.scene(i
 n++;const w=[...new Set(g.map(r=>r.reduce((m,c)=>m+TV.cells(c[0]),0)))];\
 if(g.length!==24||w.length!==1||w[0]!==80)b++}));\
 console.log((n-b)+'/'+n+' scenes are 24 rows x 80 cells')"
-63/63 scenes are 24 rows x 80 cells
+88/88 scenes are 24 rows x 80 cells
 ```
