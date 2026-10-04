@@ -378,7 +378,13 @@ fn message_row<'m>(
             // base level is the message's, and a row of an all-neutral message
             // carries no evidence of its own.
             let base = bidi::base_direction(message.display_body());
-            let pieces = bidi::visual_row(&message.display_body()[range.clone()], base);
+            // `visual_row_in`, and not `visual_row` over the row's own slice: the
+            // chunks are slices of the **text**, and `spans_permuted` slices it
+            // with them. Ranges counted from the row's start would be the wrong
+            // bytes of every row that does not begin at zero — which is every row
+            // of a wrapped message but the first, and the whole row would paint
+            // nothing rather than paint itself wrong.
+            let pieces = bidi::visual_row_in(message.display_body(), range.clone(), base);
             spans.extend(text_row::spans_permuted(&row, &pieces));
         }
     }
@@ -1245,6 +1251,80 @@ mod tests {
             row(&screen(&visual, 80, 24), FIRST),
             "one mode to draw it in"
         );
+    }
+
+    /// Every row of a wrapped right-to-left message paints its own text, in the
+    /// order it is read — including the rows that do not begin at the start of
+    /// the message.
+    ///
+    /// The defect this pins: a permuted row is painted from chunks that are
+    /// slices of the **message**, so a row's chunks have to carry offsets into
+    /// the message rather than into themselves. Counted from the row, every chunk
+    /// of every row but the first was the wrong bytes, the panel's own
+    /// whole-row check rejected them, and the row painted **nothing** — so a long
+    /// right-to-left message lost everything after its first row and said so with
+    /// a blank screen rather than with a visible fault.
+    ///
+    /// Read off the screen, one row at a time, and against the row ranges the
+    /// panel's own layout cut: the assertion that matters is that a row whose
+    /// `start` is not zero still has its glyphs, and that they are the glyphs of
+    /// *that* row.
+    #[test]
+    fn a_wrapped_right_to_left_message_paints_every_row_of_it() {
+        // Long enough to wrap, and one-directional throughout, so each row is one
+        // reversed run and the drawn order is the reverse of the stored one.
+        const LONG: &str = "שלום עולם ועוד כמה מילים כדי למלא את השורה במלואה";
+
+        let app = showing(vec![at(1, 0, false, LONG)]).with_bidi(BidiMode::Visual);
+        let screen = screen(&app, 80, 24);
+        let message = app
+            .conversation
+            .window
+            .get(0)
+            .expect("the fixture put one message in the window");
+        let rows_of_it = crate::rows::message_rows(
+            &app,
+            message,
+            crate::rows::group_of(&app, 0),
+            app.body_width(),
+        );
+
+        assert!(
+            rows_of_it.len() > 1,
+            "the fixture wraps, or this proves nothing: {rows_of_it:?}"
+        );
+        assert!(
+            rows_of_it[1].start > 0,
+            "and its second row does not begin at zero, which is the case that broke: \
+             {rows_of_it:?}"
+        );
+
+        // The sender tag is the first row's alone, so the text of every row after it
+        // begins a gutter earlier than the first row's does.
+        let tagged_x = text_column(&screen, FIRST, "them");
+
+        for (index, range) in rows_of_it.iter().enumerate() {
+            let y = FIRST + u16::try_from(index).expect("a row of a message fits a frame");
+            let text_x = if index == 0 { tagged_x } else { BODY_X };
+            let expected: String = LONG[range.clone()]
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .rev()
+                .collect();
+            let drawn: String = body_cells(&screen, y)
+                .iter()
+                .filter(|(x, _)| *x >= text_x)
+                .filter(|(_, symbol)| !symbol.is_empty() && symbol.chars().all(char::is_alphabetic))
+                .map(|(_, symbol)| symbol.as_str())
+                .collect();
+
+            assert_eq!(
+                drawn,
+                expected,
+                "row {index} ({range:?}) is drawn in the order it is read: {:?}",
+                body_row(&screen, y)
+            );
+        }
     }
 
     // ---- right-to-left: the baseline ------------------------------------

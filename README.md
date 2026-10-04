@@ -144,6 +144,13 @@ Working today:
   A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
   candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
   keeps typing into the draft. Reply with `r`, edit with `e`.
+- **Text direction:** the draft in the bar is drawn by the same rules as an
+  incoming message. In the default mode the row is emitted as it is stored and the
+  terminal's shaper reverses a right-to-left run; in the opt-in `BidiMode::Visual`
+  (`bidi = "visual"`) this program applies the permutation instead, for the whole
+  draft and every row of a wrapped one, and the caret and the selection are marked
+  on the cells their logical positions land on. The `: ` and `/` prefix is chrome
+  and is never permuted.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
   which side the messages are from, and says how many were left out because they
