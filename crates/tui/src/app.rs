@@ -3585,7 +3585,8 @@ impl App {
                 return Vec::new();
             };
 
-            return vec![message.text[rows::byte_span(&message.text, range)].to_owned()];
+            let body = message.display_body();
+            return vec![body[rows::byte_span(body, range)].to_owned()];
         }
 
         let covered = self.covered(Some(selection));
@@ -3594,7 +3595,7 @@ impl App {
             .iter()
             .skip(covered.start)
             .take(covered.len())
-            .map(|message| message.text.to_string())
+            .map(|message| message.display_body().to_owned())
             .collect()
     }
 
@@ -3695,7 +3696,7 @@ impl App {
             return;
         };
 
-        selection.focus.char = Some(char_motion(&message.text, at, motion));
+        selection.focus.char = Some(char_motion(message.display_body(), at, motion));
     }
 
     /// Moves the focus to the next or the previous message, and the cursor with it.
@@ -3725,7 +3726,7 @@ impl App {
         };
 
         let id = message.id;
-        let last = message.text.chars().count().saturating_sub(1);
+        let last = message.display_body().chars().count().saturating_sub(1);
         let char = focus.char.map(|at| at.min(last));
 
         if let Some(selection) = &mut self.selection {
@@ -3879,7 +3880,7 @@ impl App {
             .conversation
             .window
             .iter()
-            .filter(|message| word_prefix_match(&message.text, &query))
+            .filter(|message| word_prefix_match(message.display_body(), &query))
             .map(|message| message.id)
             .collect();
 
@@ -4618,7 +4619,7 @@ impl App {
             // The row's own slice of the message, and its height. Neither reads
             // the bidi mode: a row is broken logically and permuted at paint
             // time, so the same window is the same height in either mode.
-            let text = 0..message.text.len();
+            let text = 0..message.display_body().len();
             let len = rows::message_rows(self, message, rows::group_of(self, index), width).len();
 
             laid_out.push(RowSpan {
