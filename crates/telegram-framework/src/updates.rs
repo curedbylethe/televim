@@ -54,6 +54,7 @@ use tokio::task::JoinHandle;
 use crate::client::Client;
 use crate::dialogs::DialogKind;
 use crate::error::{FrameworkError, RequestError};
+use crate::media::{MediaKind, classify_typed};
 use crate::session::StoreSession;
 use crate::tl;
 
@@ -92,6 +93,19 @@ pub struct MessageInfo {
     /// Telegram numbers a reply's target within the same conversation, so this
     /// names a message by the same identifier space [`MessageInfo::id`] does.
     pub reply_to_msg_id: Option<i32>,
+
+    /// What the message carries, if anything.
+    ///
+    /// This is the framework's *reading of the wire*, not a type the rest of
+    /// the workspace shares: it names the kind and nothing else — where the
+    /// bytes are is re-derived from the message itself when one is fetched, so
+    /// no locator is carried here.
+    ///
+    /// A kind this build does not model is reported as [`MediaKind::File`]
+    /// rather than as nothing, because a message that carries something must
+    /// not read as one that does not. Only a message carrying no media at all
+    /// is `None`.
+    pub media: Option<MediaKind>,
 }
 
 /// Something that happened to a conversation televim displays.
@@ -562,6 +576,7 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
         message.date().timestamp(),
         message.outgoing(),
         message.reply_to_message_id(),
+        classify_typed(message.media().as_ref()),
     ))
 }
 
@@ -616,7 +631,9 @@ fn peer_kind_from_id(kind: PeerKind) -> DialogKind {
 ///
 /// Reused by the history fetch, so that a message read out of a conversation
 /// and the same message arriving over the feed are described identically —
-/// which is what lets the two be deduplicated against each other.
+/// which is what lets the two be deduplicated against each other. That is why
+/// `media` is passed in already classified: each path reads it off its own
+/// message type, and this is where the two answers are forced to agree.
 pub(crate) fn message_info(
     id: i32,
     chat_peer_id: i64,
@@ -624,6 +641,7 @@ pub(crate) fn message_info(
     timestamp: i64,
     is_outgoing: bool,
     reply_to_msg_id: Option<i32>,
+    media: Option<MediaKind>,
 ) -> MessageInfo {
     MessageInfo {
         id: i64::from(id),
@@ -632,6 +650,7 @@ pub(crate) fn message_info(
         timestamp,
         is_outgoing,
         reply_to_msg_id,
+        media,
     }
 }
 
@@ -873,7 +892,15 @@ mod tests {
 
     #[test]
     fn a_message_is_described_field_for_field() {
-        let info = message_info(7, 42, "hello", 1_700_000_000, true, Some(5));
+        let info = message_info(
+            7,
+            42,
+            "hello",
+            1_700_000_000,
+            true,
+            Some(5),
+            Some(MediaKind::Photo),
+        );
 
         assert_eq!(info.id, 7);
         assert_eq!(info.chat_peer_id, 42);
@@ -885,13 +912,19 @@ mod tests {
             Some(5),
             "a reply names the message it answers, or the reply context is lost"
         );
+        assert_eq!(info.media, Some(MediaKind::Photo));
     }
 
     #[test]
     fn a_message_without_text_is_still_described() {
-        let info = message_info(7, 42, "", 0, false, None);
+        let info = message_info(7, 42, "", 0, false, None, Some(MediaKind::Photo));
 
         assert!(info.text.is_empty(), "a photo and a sticker have no text");
+        assert_eq!(
+            info.media,
+            Some(MediaKind::Photo),
+            "no text is not no media: a photo arrives with nothing written on it"
+        );
         assert_eq!(
             info.timestamp, 0,
             "zero is grammers' 'no date', and the domain counts from the same epoch"

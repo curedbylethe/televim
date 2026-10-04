@@ -360,6 +360,7 @@ mod live_tests {
             timestamp: 1_700_000_000,
             is_outgoing: false,
             reply_to_msg_id: None,
+            media: None,
         }
     }
 
