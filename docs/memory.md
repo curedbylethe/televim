@@ -392,9 +392,12 @@ manifest for a decision nobody had made. Removing it changed nothing in the buil
    domain types stay lightweight DTOs.
 5. **Two RSS figures, deliberately.** A single number would have to claim to be
    the program under load, and neither candidate process is. The gap between
-   them is the honest state of the measurement, and closing it needs an offline
-   path to a populated chat list in the real binary — a product question, not a
-   harness one.
+   them is the honest state of the measurement. It is now closable rather than a
+   product question: the chat-list fetch retries and `:retry` re-runs the bring-up,
+   so a launch holding a session can populate the list — `make measure` still
+   weighs a binary launched with every credential name dropped, which is what makes
+   the figure reproducible, so closing the gap means a second launch that keeps
+   one. That has not been taken.
 6. **No arena, and it was measured rather than skipped.** Bump allocation is the
    usual answer to long-tail fragmentation, so the candidate was evaluated against
    the baseline above instead of being waved off. Every render-pass allocation is
