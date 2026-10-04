@@ -74,6 +74,7 @@ use grammers_client::message::InputMessage;
 
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
+use crate::media::classify_typed;
 use crate::updates::{MessageInfo, message_info};
 
 /// The most characters Telegram accepts in one message.
@@ -223,6 +224,9 @@ impl Client {
 
         tracing::debug!(peer_id, message_id = message.id(), "sent a message");
 
+        // The text is validated as text above, so a message sent through here
+        // carries no media — but it is read rather than assumed, so that the
+        // description cannot drift from the message if that ever changes.
         Ok(message_info(
             message.id(),
             peer_id,
@@ -230,6 +234,7 @@ impl Client {
             message.date().timestamp(),
             message.outgoing(),
             message.reply_to_message_id(),
+            classify_typed(message.media().as_ref()),
         ))
     }
 

@@ -82,6 +82,8 @@ pub mod dialogs;
 #[cfg(feature = "live")]
 pub mod history;
 #[cfg(feature = "live")]
+pub mod media;
+#[cfg(feature = "live")]
 pub mod messages;
 #[cfg(feature = "live")]
 pub mod raw;
@@ -112,6 +114,8 @@ pub use client::{Client, ClientBuilder};
 pub use dialogs::{DialogInfo, DialogKind};
 #[cfg(feature = "live")]
 pub use history::{HISTORY_LIMIT, HistoryArgs};
+#[cfg(feature = "live")]
+pub use media::MediaKind;
 #[cfg(feature = "live")]
 pub use messages::{TEXT_LIMIT, validate_text};
 #[cfg(feature = "live")]
