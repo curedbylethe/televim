@@ -337,6 +337,20 @@ through `App::with_bidi`, which is the only path a configuration value takes int
 `App`; `tui` names no configuration type. The value is per machine rather than per
 terminal, so an ssh hop keeps it — see [`decisions.md`](./decisions.md).
 
+`bidi.rs` is the authority and both consumers go through it: the conversation
+panel and the input bar each ask `base_direction` for the direction of the text
+as a whole, then `visual_row_in` for the pieces of one row of it — in the
+**text's** coordinates, which is what `text_row::spans_permuted` slices the text
+with, and the difference between a wrapped row drawn right-to-left and a row that
+paints nothing. Under `Visual` a row is drawn through `spans_permuted` with its
+caret and selection clipped to the piece that owns them; under `Terminal` the
+whole row goes through `spans`, which is the same paint over one piece. Nothing
+about a row's **geometry** reads the mode: the wrap, the bar's height and the
+panel's layout are pure functions of the text and the width, so the same draft is
+as tall in both modes. `LaidOut::visual_column` is the one place a column
+depends on it — where the caret is *painted*, for the emoji popup to anchor on —
+and it is `None` unless the caller passed `Visual`.
+
 The log goes to a file beside the configuration (`televim.toml` → `televim.log`)
 and **never the terminal**: this program draws on the terminal, and `grammers`
 logs at `info` as a matter of course, so a logger that shares the screen with

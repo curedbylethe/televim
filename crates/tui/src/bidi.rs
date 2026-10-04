@@ -169,6 +169,39 @@ pub fn visual_row(text: &str, base: Direction) -> Vec<Chunk> {
         .collect()
 }
 
+/// [`visual_row`] over one row of `text`, in **`text`'s own coordinates**.
+///
+/// [`visual_row`] answers for the string it is handed, and every caller here
+/// hands it a row — `&text[range]` — so its ranges come back counted from the
+/// row's own start. A painter does not want that: [`crate::text_row`] slices
+/// `text` with a chunk's range, so a chunk counted from zero would slice the
+/// wrong bytes of every row that does not begin at zero, and every row of a
+/// wrapped message but the first does not.
+///
+/// So this is the one entry point for "permute this row of that text", and both
+/// call sites use it: the offset is the whole difference between a row drawn
+/// right-to-left and a row drawn as nothing at all.
+///
+/// A row outside the text — which is a caller's bug, not a row — permutes to
+/// nothing, for the reason [`crate::text_row`] gives: a row that makes a false
+/// claim about its bytes has nothing honest to draw.
+#[allow(clippy::needless_pass_by_value)]
+#[must_use]
+pub fn visual_row_in(text: &str, row: Range<usize>, base: Direction) -> Vec<Chunk> {
+    let Some(row_text) = text.get(row.clone()) else {
+        return Vec::new();
+    };
+    let at = row.start;
+
+    visual_row(row_text, base)
+        .into_iter()
+        .map(|chunk| Chunk {
+            logical: (chunk.logical.start + at)..(chunk.logical.end + at),
+            cells: chunk.cells,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +327,66 @@ mod tests {
         assert_eq!(base_direction(text), Direction::Ltr);
 
         assert_eq!(shape_of(text), vec![(0, text.len(), columns(text))]);
+    }
+
+    /// The same shape, for a row at an offset in a longer text.
+    fn shape_in(text: &str, row: Range<usize>) -> Vec<(usize, usize, usize)> {
+        visual_row_in(text, row.clone(), base_direction(text))
+            .into_iter()
+            .map(|c| (c.logical.start, c.logical.end, c.cells))
+            .collect()
+    }
+
+    /// A row of a longer text permutes exactly as the same row on its own does,
+    /// with every range moved onto the text it came from.
+    ///
+    /// The offset is the whole difference between a wrapped row drawn
+    /// right-to-left and a row that paints nothing at all, so it is pinned for a
+    /// row that is neither the text nor at its start — and against the
+    /// row-relative form, which is what a caller that reached for [`visual_row`]
+    /// directly would have.
+    #[test]
+    fn a_row_at_an_offset_is_the_same_row_shifted_onto_the_text() {
+        let text = "abc שלום עולם";
+        let row = 4..text.len();
+
+        let shifted = shape_in(text, row.clone());
+        let expected: Vec<(usize, usize, usize)> =
+            visual_row(&text[row.clone()], base_direction(text))
+                .into_iter()
+                .map(|c| {
+                    (
+                        c.logical.start + row.start,
+                        c.logical.end + row.start,
+                        c.cells,
+                    )
+                })
+                .collect();
+
+        assert_eq!(
+            shifted, expected,
+            "the same permutation, on the text's own bytes"
+        );
+        assert!(row.start > 0, "a row that does not begin at zero");
+        assert_eq!(
+            shifted.iter().map(|(_, end, _)| *end).max(),
+            Some(text.len()),
+            "and the ranges index `text` itself rather than the row: {shifted:?}"
+        );
+        for (start, end, _) in &shifted {
+            assert!(
+                text.is_char_boundary(*start) && text.is_char_boundary(*end),
+                "{start}..{end} is not indexable in the text"
+            );
+        }
+    }
+
+    /// A row outside the text is a caller's bug, and it permutes to nothing
+    /// rather than to a panic: `panic = "abort"` is set.
+    #[test]
+    fn a_row_outside_the_text_permutes_to_nothing() {
+        let text = "שלום";
+        assert_eq!(visual_row_in(text, 0..99, base_direction(text)), Vec::new());
     }
 
     #[test]
