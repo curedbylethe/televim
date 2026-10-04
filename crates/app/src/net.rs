@@ -78,6 +78,16 @@ const PAGE: usize = 100;
 /// for a failure that will pass on its own.
 const RETRY: Duration = Duration::from_secs(5);
 
+/// How many times the launch chat-list fetch is asked for before the bring-up is
+/// called a failure.
+///
+/// A bound rather than an open loop because every attempt is another request
+/// Telegram may refuse: an unbounded retry against a session it has decided
+/// against is a client that never says it is offline. Three is the same bound
+/// the two-factor password gets, and it buys two waits — a transient refusal
+/// and a flood wait that fits inside one of them.
+const CHAT_LIST_ATTEMPTS: u8 = 3;
+
 /// Something that happened away from the keyboard.
 pub enum Event {
     /// The machine carries no application credentials, so there is nothing to
@@ -165,6 +175,16 @@ pub enum Event {
     /// Carries the reason, and the chain behind it: the screen has one line to
     /// say what went wrong, and the most specific answer is the useful one.
     Offline(anyhow::Error),
+
+    /// The launch chat-list fetch failed and is being asked again.
+    ///
+    /// Its own event rather than a second [`Event::Offline`] because nothing has
+    /// failed yet: the screen has one line to spend, and the reader watching a
+    /// launch they expect to end in a chat list is better told that the wait is
+    /// a wait with a reason and an end than shown an `offline:` they may not be
+    /// able to clear. The [`Event::Offline`] behind it comes only once the
+    /// attempts are spent.
+    ChatListRetrying(ChatListRetry),
 
     /// A page came back, or the fetch that asked for it failed.
     History {
@@ -292,6 +312,30 @@ pub enum Event {
         /// The matching identifiers, oldest first, or why there are none.
         result: Result<SearchResults, ProtoError>,
     },
+}
+
+/// What a chat-list retry in progress has to say about itself.
+///
+/// One type rather than four fields on the event, because the whole of it is one
+/// sentence: none of the reason, the wait, or the count is read apart from the
+/// others, and a reader told the client is retrying is owed all three at once.
+pub struct ChatListRetry {
+    /// Why the attempt that just failed failed.
+    reason: ProtoError,
+
+    /// How long until the next attempt, which is [`backoff`]'s answer: Telegram's
+    /// own wait when it gave one, the fixed `RETRY` otherwise.
+    delay: Duration,
+
+    /// The attempt that failed, of `attempts` in all.
+    ///
+    /// Counted as attempts *made*, so the last one to be reported is the second
+    /// — the third either succeeds, and its [`Event::Ready`] is the answer, or
+    /// fails, and its `offline:` is.
+    attempt: u8,
+
+    /// The bound those attempts are counted against.
+    attempts: u8,
 }
 
 /// What the loop knows about the network between events.
@@ -478,10 +522,33 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         return Ok(());
     }
 
-    let chats = client
-        .fetch_private_chats()
-        .await
-        .context("fetching the chat list")?;
+    // The one fetch the launch cannot do without, and the one request most
+    // likely to be refused on the way in: Telegram rate-limits a client that has
+    // been off for a while, and a single refusal would otherwise throw the
+    // reader a terminal `offline:` for something that passes on its own. So it
+    // is asked again while there is budget left, saying so each time, and only
+    // the last refusal is a failure of bring-up. Everything after it — the
+    // account, the feed, the `Ready` — still runs exactly once, on the attempt
+    // that worked.
+    let mut attempts_used: u8 = 0;
+    let chats = loop {
+        match client.fetch_private_chats().await {
+            Ok(chats) => break chats,
+            Err(error) => {
+                let Some(delay) = chat_list_retry(attempts_used, &error) else {
+                    return Err(anyhow::Error::new(error).context("fetching the chat list"));
+                };
+                attempts_used += 1;
+                let _ = tx.send(AppEvent::Net(Event::ChatListRetrying(ChatListRetry {
+                    reason: error,
+                    delay,
+                    attempt: attempts_used,
+                    attempts: CHAT_LIST_ATTEMPTS,
+                })));
+                tokio::time::sleep(delay).await;
+            }
+        }
+    };
     let account = read_account(&client).await;
 
     // The list is fetched before the feed is taken. Resolving what arrived while
@@ -1151,6 +1218,8 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             app.set_client_available(false);
         }
 
+        Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
+
         Event::LoggedOut { result } => {
             apply_logged_out(app, state, result);
             // The signed-out client is gone — and the fresh one below is not up
@@ -1613,6 +1682,35 @@ fn backoff(error: &ProtoError) -> Duration {
     }
 }
 
+/// What a chat-list retry in progress says on the status line.
+///
+/// Persistent, not a flash: the wait is the second-longest thing that happens
+/// during a launch, and a reader who looks away and back must not find an empty
+/// status line and no client — which is the `offline:` screen it is not yet. Both
+/// the wait and the count are here because a wait with no visible end of it is
+/// the thing this sentence exists to prevent.
+fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
+    // A wait shorter than a second still has to be announced as one: "retrying in
+    // 0s" reads as no retry at all.
+    let seconds = retry.delay.as_secs().max(1);
+    app.status = format!(
+        "fetching the chat list failed ({:#}); retrying in {}s (attempt {}/{})",
+        retry.reason, seconds, retry.attempt, retry.attempts
+    );
+}
+
+/// Whether the launch chat-list fetch may be asked again, and how long to wait.
+///
+/// `None` once [`CHAT_LIST_ATTEMPTS`] attempts have been spent, which is the one
+/// decision this makes and the only reason the bring-up loop is a loop rather
+/// than a recursion: past the bound the refusal is a failure of bring-up, and it
+/// goes back up as one. The wait is [`backoff`]'s — Telegram's own when it asked
+/// for one, the fixed `RETRY` otherwise — because a chat list refused for being
+/// asked too often has exactly the same answer as a page that was.
+fn chat_list_retry(attempts_used: u8, error: &ProtoError) -> Option<Duration> {
+    (attempts_used < CHAT_LIST_ATTEMPTS).then(|| backoff(error))
+}
+
 /// Whether a failure is Telegram asking the client to wait before trying again.
 fn is_flood_wait(error: &ProtoError) -> bool {
     matches!(
@@ -1896,6 +1994,74 @@ mod tests {
         )));
 
         assert_eq!(backoff(&error), RETRY);
+    }
+
+    // ---- what a chat-list failure costs ----------------------------------
+
+    #[test]
+    fn a_chat_list_refusal_waits_what_telegram_asked_for() {
+        let flood = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+
+        assert_eq!(chat_list_retry(0, &flood), Some(Duration::from_secs(31)));
+        assert_eq!(
+            chat_list_retry(CHAT_LIST_ATTEMPTS - 1, &flood),
+            Some(Duration::from_secs(31)),
+            "the last attempt still gets its wait"
+        );
+    }
+
+    #[test]
+    fn a_chat_list_refusal_of_another_kind_waits_the_fixed_time() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+            "connection reset".to_owned(),
+        )));
+
+        assert_eq!(chat_list_retry(1, &error), Some(RETRY));
+    }
+
+    /// The bound is what stops the retry; the delay is never consulted again
+    /// once it is reached, however willing the error is to wait.
+    #[test]
+    fn a_chat_list_that_will_not_answer_stops_at_the_bound() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+
+        assert_eq!(chat_list_retry(CHAT_LIST_ATTEMPTS, &error), None);
+        assert_eq!(chat_list_retry(CHAT_LIST_ATTEMPTS + 1, &error), None);
+    }
+
+    #[test]
+    fn a_chat_list_being_retried_says_so_on_the_status_line() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRetrying(ChatListRetry {
+                reason: ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+                    code: 420,
+                    name: "FLOOD_WAIT".to_owned(),
+                    value: Some(31),
+                })),
+                delay: Duration::from_secs(31),
+                attempt: 1,
+                attempts: CHAT_LIST_ATTEMPTS,
+            }),
+        );
+
+        assert!(
+            app.status.contains("31s") && app.status.contains("1/3"),
+            "got {:?}",
+            app.status
+        );
     }
 
     // ---- what a fetched list means --------------------------------------
