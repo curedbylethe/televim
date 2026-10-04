@@ -431,6 +431,12 @@
   /* SESSION_PASSWORD_NEEDED is not a refusal: it is the answer that puts the password row up. */
   const SIGNOUT_ROW = '[ ⏎: sign in again ]';
   const CHECKING = 'Checking…';
+  /* the peer is typing in the open conversation: a note on the title, in the dim ink, and state
+     rather than motion. It is set by the peer's typing event and ends on the peer's next message,
+     on the conversation closing, or when the network tick has come round TYPING_TICKS times
+     without the event being repeated. Nothing counts it down on a schedule of its own. */
+  const TYPING_NOTE = ' · typing';
+  const TYPING_TICKS = 2;
   const CANCEL_COST = 'cancelling discards the code Telegram sent; ⏎ asks for a new one';
   const LOST_CODE = 'the code did not survive; ⏎ asks for a new one';
   const NO_CREDENTIALS = 'televim has no application credentials. It needs an api_id and an api_hash in its config file before it can sign in to anything.';
@@ -466,19 +472,27 @@
 
   /* ---------- data ---------- */
   function makeChats() {
-    const C = (name, unread, msgs, extra) => Object.assign({ name, unread, msgs, cur: Math.max(0, msgs.length - 1), top: 0 }, extra || {});
+    /* every message has an id, the reply's `to` names one, and `all` (a chat that has one) is what
+       the server holds: the loaded window is a slice of it. */
+    const C = (name, unread, msgs, extra) => {
+      const base = (extra && extra.base) || 0;
+      msgs.forEach((m, i) => { if (m.id == null) m.id = base + i + 1; });
+      const c = Object.assign({ name, unread, msgs, cur: Math.max(0, msgs.length - 1), top: 0 }, extra || {});
+      if (c.history) { c.all = c.history.concat(msgs); delete c.history; }
+      return c;
+    };
     const t = (text, o) => Object.assign({ from: 'them', text }, o || {});
     const y = (text, o) => Object.assign({ from: 'you', text }, o || {});
     return [
       C('Ada Lovelace', 0, [
         t('Are you coming tonight?'),
         y('Running late. Save me a seat.'),
-        t('The one by the window.', { reply: { quote: 'Save me a seat.' } }),
+        t('The one by the window.', { reply: { quote: 'Save me a seat.', to: 102 } }),
         t('Bring the tickets, the tickets are in the blue folder.'),
         y('Which tickets? I have the train ones and the concert ones.'),
         t('The concert tickets. The train ones can stay on the fridge.'),
         y('Tickets are under the lamp. Folder found.'),
-        t('Sorry, I missed your earlier message.', { reply: { unloaded: true } }),
+        t('Sorry, I missed your earlier message.', { reply: { unloaded: true, to: 94 } }),
         t('Doors open at eight, and the side gate is shut after nine, so do not be later.'),
         y('Did that go through?', { status: 'failed: no route' }),
         y('On my way, ten minutes.', { status: 'sending…' }),
@@ -487,7 +501,18 @@
         y('Twice. I have both tickets in the blue folder, concert on top.'),
         t('Leave the train ones on the fridge. I only need the concert pair tonight.'),
         y('Understood. Saving the seat was the whole of the favour.')
-      ], { cur: 5, older: true }),
+      ], { cur: 5, older: true, base: 100, history: [
+        t('Morning. Has the programme arrived?', { id: 91 }),
+        y('Not yet. Which hall is it?', { id: 92 }),
+        t('The old hall on the canal.', { id: 93 }),
+        y('Same as last spring?', { id: 94 }),
+        t('Yes, the same hall, a different door.', { id: 95 }),
+        y('Then I will meet you at the bridge.', { id: 96 }),
+        t('The bridge, then.', { id: 97 }),
+        y('Bringing the umbrella.', { id: 98 }),
+        t('Bring a coat as well.', { id: 99 }),
+        y('Fine, a coat too.', { id: 100 })
+      ] }),
       /* the one chat with a clock: grouped runs, five days, every read state. `rcpt` is the peer's
          answer for an outgoing message; it is only drawn on a group's newest. */
       C('Grace Hopper', 2, [
@@ -544,6 +569,33 @@
     ];
   }
 
+  /* MediaKind::label. A media message with no caption has this as its whole `text` (so search, yank
+     and reply read it like any text) and `ph` marks it as the program's wording rather than the
+     sender's; a caption replaces it and clears `ph`. */
+  const MEDIA_LABEL = { Photo: '[image]', Video: '[video]', Gif: '[gif]', Voice: '[voice]', File: '[file]' };
+  const media = (from, kind, o) => {
+    const cap = o && o.caption;
+    return Object.assign({ from, text: cap || MEDIA_LABEL[kind], ph: !cap, kind }, o || {});
+  };
+  /* the chat the media scenes read. Sides alternate and times keep groups apart, so every message
+     is its own group and carries its own tag. */
+  function makeMediaChat() {
+    const t = (text, o) => Object.assign({ from: 'them', text }, o || {});
+    const y = (text, o) => Object.assign({ from: 'you', text }, o || {});
+    return { name: 'Ken Thompson', unread: 0, top: 0, cur: 9, msgs: [
+      y('Did the scan come out?', { at: at(0, '20:02') }),
+      media('them', 'Photo', { at: at(0, '20:04') }),
+      y('And the recording?', { at: at(0, '20:05') }),
+      media('them', 'Voice', { at: at(0, '20:06') }),
+      y('Send the score too.', { at: at(0, '20:07') }),
+      media('them', 'File', { at: at(0, '20:09') }),
+      media('you', 'Photo', { caption: 'Proof of the lamp.', at: at(0, '20:11'), rcpt: 'read' }),
+      media('them', 'Video', { at: at(0, '20:14') }),
+      media('you', 'Gif', { at: at(0, '20:15'), rcpt: 'read' }),
+      media('you', 'File', { at: at(0, '20:40'), status: 'failed: file exceeds the 2 GB limit' })
+    ] };
+  }
+
   /* Who arranges a right-to-left row: the terminal, or this program. Chosen once,
      here, and never while a frame is being drawn — the layout below is a pure
      function of the window and the panel's width, so a mode read out of mutable
@@ -568,6 +620,7 @@
     else if (view === 'nocreds') beginNoCreds(s);
     else if (view === 'loggedout') beginLoggedOut(s);
     else if (view === 'signedout' || view === 'reading') beginShell(s, view);
+    else if (view === 'media') s.chats.unshift(makeMediaChat());
     return s;
   }
 
@@ -638,8 +691,17 @@
 
   /* ---------- keys ---------- */
   function key(s, k) {
+    /* leaving a conversation closes it, and a closed conversation is no longer being typed in */
+    const was = s.chats && s.chats[s.chat];
+    keyIn(s, k);
+    if (was && s.chats[s.chat] !== was) was.typing = 0;
+    return s;
+  }
+  function keyIn(s, k) {
     if (s.view === 'quit') { const n = fresh(); Object.keys(s).forEach((x) => delete s[x]); Object.assign(s, n); return s; }
     if (s.confirm) { s.flash = ''; confirmKey(s, k); return s; }
+    /* a fetch is in flight: Esc drops it and every other key waits for the answer */
+    if (s.jump) { if (k === 'Escape') s.jump = null; return s; }
     if (s.view === 'signin') {
       const A = s.signin;
       /* a request is in flight: the first ⏎ is refused, and every later key does nothing. */
@@ -717,6 +779,54 @@
     }
   }
 
+  /* ---------- jump to the quoted message ----------
+     `gd` follows a reply's quote. A target the window holds only moves the cursor; one it does not
+     is fetched as a page around it, which replaces the window, and the cursor lands on it. Every
+     jump that moves the reader leaves a mark, and Ctrl-o / Ctrl-i walk the marks as Vim's jumplist
+     does. A mark is a message id, never a row: the window it was set in may be gone. */
+  const JUMP_QUOTE = 'Jumping to the quoted message…', JUMP_BACK = 'Jumping back…', JUMP_FORWARD = 'Jumping forward…';
+  const PAGE_RADIUS = 3;
+  const hereId = (c) => (c.msgs[c.cur] ? c.msgs[c.cur].id : null);
+  function mark(c, id) {
+    const jl = c.jl || (c.jl = { list: [], i: 0 });
+    if (id == null) return jl;
+    jl.list = jl.list.filter((x) => x !== id); jl.list.push(id); jl.i = jl.list.length;
+    return jl;
+  }
+  /* move to message `id`: the cursor if the window holds it, a fetch if the server does. `from` is
+     the mark to leave behind once the cursor has actually moved, or null for a walk of the list. */
+  function goTo(s, id, label, from) {
+    const c = chat(s), at = c.msgs.findIndex((m) => m.id === id);
+    if (at >= 0) { if (from != null) mark(c, from); c.cur = at; return; }
+    if (!c.all || !c.all.some((m) => m.id === id)) { refuse(s, 'That message is no longer available.'); return; }
+    s.jump = { chat: s.chat, id, label, from };
+  }
+  function landJump(s) {
+    const J = s.jump, c = s.chats[J.chat]; s.jump = null; s.search = null;
+    const at = c.all.findIndex((m) => m.id === J.id), lo = Math.max(0, at - PAGE_RADIUS), hi = Math.min(c.all.length - 1, at + PAGE_RADIUS);
+    c.msgs = c.all.slice(lo, hi + 1); c.cur = at - lo; c.top = 0; c.older = lo > 0; c.newer = hi < c.all.length - 1;
+    if (J.from != null) mark(c, J.from);
+    return s;
+  }
+  function jumpQuote(s) {
+    const c = chat(s), m = c.msgs[c.cur];
+    if (!m) return;
+    if (!m.reply || m.reply.to == null) { refuse(s, 'Not a reply: gd jumps to the message a reply quotes.'); return; }
+    goTo(s, m.reply.to, JUMP_QUOTE, hereId(c));
+  }
+  function jumpBack(s) {
+    const c = chat(s), jl = c.jl;
+    if (!jl || !jl.list.length) return;
+    if (jl.i === jl.list.length) { mark(c, hereId(c)); jl.i = jl.list.length - 1; }
+    if (jl.i <= 0) return;
+    jl.i--; goTo(s, jl.list[jl.i], JUMP_BACK, null);
+  }
+  function jumpForward(s) {
+    const c = chat(s), jl = c.jl;
+    if (!jl || jl.i >= jl.list.length - 1) return;
+    jl.i++; goTo(s, jl.list[jl.i], JUMP_FORWARD, null);
+  }
+
   function convKey(s, k, p) {
     if (common(s, k)) return;
     const c = chat(s), m = c.msgs[c.cur];
@@ -726,6 +836,8 @@
       case 'C-d': move(s, 5); break;
       case 'C-u': move(s, -5); break;
       case 'g': if (p === 'g') c.cur = 0; else s.pend = 'g'; break;
+      case 'C-o': jumpBack(s); break;
+      case 'C-i': jumpForward(s); break;
       case 'G': c.cur = Math.max(0, c.msgs.length - 1); break;
       case 'v': if (m) s.vis = { anchor: c.cur }; break;
       case 'i': case 'a': openLine(s, { kind: 'message' }); break;
@@ -736,6 +848,7 @@
         else openLine(s, { kind: 'edit', buf: m.text, ref: { idx: c.cur } });
         break;
       case 'd':
+        if (p === 'g') { jumpQuote(s); break; }
         if (p !== 'd') { s.pend = 'd'; break; }
         if (!m) break;
         if (m.from !== 'you') refuse(s, 'Not yours: dd deletes your own messages. D dismisses.');
@@ -1061,6 +1174,10 @@
   /* the answer to an in-flight request. In the app it arrives over the network; a scene walks it
      with <wait>, and the page's timer walks it live. */
   function answer(s) {
+    /* the same tick ages the peer's typing note: it is not repeated, so it runs out */
+    const open = s.chats && s.chats[s.chat];
+    if (open && open.typing) open.typing--;
+    if (s.jump) return landJump(s);
     const A = s.signin, p = A && A.pending;
     if (!A || !A.checking || !p) return s;
     A.checking = false; A.checkN = 0; A.pending = null; s.flash = '';
@@ -1082,6 +1199,25 @@
       s.flash = authSentence('PASSWORD_HASH_INVALID', A.attempts);
       openSigninLine(s, 'pw');
     }
+    return s;
+  }
+
+  /* the peer's events in the open conversation. A typing event sets the note and renews it; the
+     peer's next message ends it, because the message is what the typing was for. */
+  function peerTyping(s) {
+    const c = s.view === 'chat' && chat(s);
+    if (c) c.typing = TYPING_TICKS;
+    return s;
+  }
+  function peerSays(s, text) {
+    const c = s.view === 'chat' && chat(s);
+    if (!c) return s;
+    const rows = c.all || c.msgs, last = rows[rows.length - 1];
+    const m = { from: 'them', text, id: rows.reduce((n, x) => Math.max(n, x.id || 0), 0) + 1 };
+    if (last && last.at != null) m.at = NOW;
+    if (c.all) c.all.push(m);
+    if (!c.newer) c.msgs.push(m);
+    c.typing = 0;
     return s;
   }
 
@@ -1117,7 +1253,7 @@
   }
   function setMode(s, name) {
     if (s.view !== 'chat') return;
-    s.confirm = null; s.line = null; s.vis = null; s.search = null; s.pend = ''; s.flash = '';
+    s.confirm = null; s.line = null; s.vis = null; s.search = null; s.jump = null; s.pend = ''; s.flash = '';
     /* a card has no insert stage and its confirmation comes from d on the logout row */
     if (s.card) {
       s.card.vis = name === 'VISUAL' ? { mode: 'char', row: s.card.row, anchorCol: s.card.col } : null;
@@ -1155,10 +1291,12 @@
     return i;
   }
   function fill(g, x, y, w, a) { for (let i = 0; i < w; i++) put(g, x + i, y, ' ', a); }
-  function box(g, x, y, w, h, title, lit) {
-    const a = lit ? 'f' : 'b';
-    put(g, x, y, '┌─', a); put(g, x + 2, y, ' ' + title + ' ', 't');
-    const used = 2 + cells(title) + 2;
+  function box(g, x, y, w, h, title, lit, note) {
+    const a = lit ? 'f' : 'b', n = note || '';
+    put(g, x, y, '┌─', a); put(g, x + 2, y, ' ' + title, 't');
+    if (n) put(g, x + 3 + cells(title), y, n, 'd');
+    put(g, x + 3 + cells(title) + cells(n), y, ' ', 't');
+    const used = 2 + cells(title) + cells(n) + 2;
     put(g, x + used, y, '─'.repeat(w - used - 1), a); put(g, x + w - 1, y, '┐', a);
     for (let r = 1; r < h - 1; r++) { put(g, x, y + r, '│', a); put(g, x + w - 1, y + r, '│', a); }
     put(g, x, y + h - 1, '└' + '─'.repeat(w - 2) + '┘', a);
@@ -1278,6 +1416,8 @@
       const c = chat(s), h = s.search.hits, at = h.indexOf(c.cur), q = '/' + s.search.q;
       return { t: ' ' + (at >= 0 ? q + ' — match ' + (at + 1) + ' of ' + h.length : q + ' — ' + h.length + ' loaded'), a: 't' };
     }
+    /* a jump in flight sits below a search and above a failed send's reason */
+    if (s.jump) return { t: ' ' + s.jump.label, a: 't' };
     if (s.focus === 'settings') return { t: HINT.settings, a: 'd' };
     if (s.focus === 'profile') {
       const C = s.card;
@@ -1333,7 +1473,7 @@
          message carries no evidence of its own. */
       const base = baseDir(m.text);
       /* the sender label is the group's, so only its first row carries it */
-      wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, base, s: r.s, e: r.e, from: m.from }));
+      wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, base, s: r.s, e: r.e, from: m.from, ph: !!m.ph }));
       /* the last row of a message carries its own status; the last row of a group also carries
          the peer's read state (outgoing only, never beside a status) and the group's time */
       const rcpt = tail && m.from === 'you' && !m.status && m.rcpt ? m.rcpt : '';
@@ -1362,7 +1502,9 @@
     let title = 'Conversation (' + (c.msgs.length ? c.cur + 1 : 0) + '/' + c.msgs.length + ')';
     if (s.vis) { const [lo, hi] = range(s); title += ' · ' + (hi - lo + 1) + ' selected'; }
     if (s.search) title += ' · ' + s.search.hits.length + ' match(es)';
-    box(g, x0, 0, w, h, title, s.line ? false : s.focus === 'conv');
+    /* the peer's note comes last and is dropped whole, never cut, when the title has no room for it */
+    const typing = c.typing && cells(title) + cells(TYPING_NOTE) <= w - 5;
+    box(g, x0, 0, w, h, title, s.line ? false : s.focus === 'conv', typing ? TYPING_NOTE : '');
     const rows = convRows(s, c);
     let fr = rows.findIndex((r) => r.mi === c.cur), lr = -1;
     rows.forEach((r, i) => { if (r.mi === c.cur) lr = i; });
@@ -1394,7 +1536,9 @@
          the terminal's shaper reverse a right-to-left run, and `Visual` permutes
          the row here. The row's WIDTH is identical either way, which is why one
          wrap serves both. */
-      const ink = (j) => (r.mask[j] ? 'm' : (j < r.qlen && !cur ? 'd' : 't')) + mod;
+      /* a placeholder is the program's word for what the sender did not write, so it is dim like
+         the quote and the tag; a match still wins, and the cursor row is reversed whole */
+      const ink = (j) => (r.mask[j] ? 'm' : (!cur && (j < r.qlen || r.ph) ? 'd' : 't')) + mod;
       if (r.base === 'rtl' && s.bidi === 'visual') {
         /* The quoted prefix is the conversation's own chrome and is left where the
            program leaves it — drawn first, as its own span, ahead of the text it
@@ -1792,12 +1936,16 @@
   const toText = (g) => g.map((r) => r.map((c) => c[0]).join(''));
 
   /* ---------- scripted starts: real keystrokes through the real handler ---------- */
-  const TOK = { Esc: 'Escape', CR: 'Enter', Tab: 'Tab', BS: 'Backspace', 'C-j': 'C-j', 'C-w': 'C-w', 'S-CR': 'S-Enter' };
+  const PEER_SAYS = 'The side gate is open.';
+  const TOK = { Esc: 'Escape', CR: 'Enter', Tab: 'Tab', BS: 'Backspace', 'C-j': 'C-j', 'C-w': 'C-w', 'C-o': 'C-o', 'C-i': 'C-i', 'S-CR': 'S-Enter' };
   function feed(s, script) {
     for (let i = 0; i < script.length; i++) {
       if (script[i] === '<') {
         const e = script.indexOf('>', i), name = script.slice(i + 1, e);
-        if (name === 'wait') answer(s); else key(s, TOK[name]);
+        if (name === 'wait') answer(s);
+        else if (name === 'typing') peerTyping(s);
+        else if (name === 'peer') peerSays(s, PEER_SAYS);
+        else key(s, TOK[name]);
         i = e;
       } else key(s, script[i]);
     }
@@ -1821,8 +1969,31 @@
       { name: 'Newest: [read], [delivered], [sending…], [failed]', keys: '<Tab>j<Tab>' },
       { name: 'Cursor inside a group: one state, one time', keys: '<Tab>j<Tab>kk' },
       { name: 'Oldest: full date, weekday, Yesterday, Today', keys: '<Tab>j<Tab>kkkkkkkkkkkkkkk' }] },
+    /* gd follows a reply's quote. Ada's chat: the cursor starts on message 106; `kkk` is the reply
+       'The one by the window.', whose target is loaded, and `jj` is 'Sorry, I missed your earlier
+       message.', whose target the window does not hold, so it is fetched (<wait> is the answer). */
+    { id: 'jump', name: 'Jump to the quoted message', variants: [
+      { name: 'gd: the target is loaded, only the cursor moves', keys: 'kkkgd' },
+      { name: 'gd: the target is not loaded, a fetch is in flight', keys: 'jjgd' },
+      { name: 'gd: the page arrived, the cursor rests on the target', keys: 'jjgd<wait>' },
+      { name: 'Ctrl-o: back to where the reader left (loaded)', keys: 'kkkgd<C-o>' },
+      { name: 'Ctrl-i: forward again', keys: 'kkkgd<C-o><C-i>' },
+      { name: 'Ctrl-o: back needs a fetch too', keys: 'jjgd<wait><C-o>' },
+      { name: 'Ctrl-o: back on the reply that was left', keys: 'jjgd<wait><C-o><wait>' },
+      { name: 'gd on a message that is not a reply', keys: 'gd' }] },
     { id: 'visual', name: 'Visual', variants: [
       { name: 'Two messages, search live', keys: '/tickets<CR>vj' }] },
+    /* Media-only messages. The chat is Ken Thompson's, put first by the `media` start; the cursor
+       begins on the last message and `k` walks up to the one each frame is about. */
+    { id: 'media', name: 'Media placeholders', start: 'media', variants: [
+      { name: '[image] alone', keys: 'kkkkkkkk' },
+      { name: '[voice]', keys: 'kkkkkk' },
+      { name: '[file]', keys: 'kkkk' },
+      { name: 'A caption replaces the placeholder', keys: 'kkk' },
+      { name: 'Wrapped: the placeholder row yields its status to the next row', keys: '' },
+      { name: 'Visual: [voice] selected, [file] under the cursor', keys: 'kkkkkkvjj' },
+      { name: 'Visual, yanked: the placeholder is text', keys: 'kkkkkkvjjy' },
+      { name: 'All five kinds in one window', keys: 'kk' }] },
     { id: 'insert', name: 'Insert', variants: [
       { name: 'Composing', keys: DRAFT },
       { name: 'Esc: line Normal', keys: DRAFT + '<Esc>' },
@@ -1897,13 +2068,25 @@
       { name: 'Visual mode: the same row, permuted', bidi: 'visual', keys: RTL_WALK + 'l' },
       { name: 'Visual: a search hit inside a right-to-left row', bidi: 'visual', keys: RTL_WALK + 'l/כרטיסים<CR>' },
       { name: 'Visual: a right-to-left draft in the input bar', bidi: 'visual', keys: RTL_WALK + 'l' + RTL_LINE },
-      { name: 'Visual: two messages selected', bidi: 'visual', keys: RTL_WALK + 'lvk' }] }
+      { name: 'Visual: two messages selected', bidi: 'visual', keys: RTL_WALK + 'lvk' }] },
+    /* The peer is typing in Ada's chat (the first, so no walk). <typing> is the peer's event and
+       <wait> the network tick; the note is on the title, not in the body, and the status line is
+       the reader's own. */
+    { id: 'typing', name: 'Peer typing', variants: [
+      { name: 'The peer starts typing: a dim note on the title', keys: '<typing>' },
+      { name: 'Composing a reply: the note stays, the hint is the line\'s', keys: '<typing>' + DRAFT },
+      { name: 'Selection and search: the title has no room, the note yields', keys: '<typing>/tickets<CR>vj' },
+      { name: 'One tick: still there', keys: '<typing><wait>' },
+      { name: 'Second tick, no repeat: gone', keys: '<typing><wait><wait>' },
+      { name: 'Repeated before the deadline: renewed', keys: '<typing><wait><typing><wait>' },
+      { name: 'The peer\'s message arrives: gone', keys: '<typing><peer>' },
+      { name: 'Left for another chat and back: gone', keys: '<typing><Tab>jk<Tab>' }] }
   ];
   function scene(si, vi) {
     const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start, v.bidi);
     return feed(s, v.keys);
   }
 
-  root.TV = { W, H, HINT, ALL_HINTS, HINT_W, fresh, key, feed, render, toHTML, toText, modeName, setMode, scene, SCENES, FOCUS_NAME, chat, chars, cells, clusters, baseDir, visualPieces, visualCells, BIDI_MODES, answer };
+  root.TV = { W, H, HINT, ALL_HINTS, HINT_W, fresh, key, feed, render, toHTML, toText, modeName, setMode, scene, SCENES, FOCUS_NAME, chat, peerTyping, peerSays, chars, cells, clusters, baseDir, visualPieces, visualCells, caretCol, bar, BIDI_MODES, answer };
   if (typeof module !== 'undefined') module.exports = root.TV;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -90,9 +90,12 @@ function replaceFrame(html, id, grid) {
   if (!re.test(html)) throw new Error('no frame ' + id);
   return html.replace(re, (m, open) => open + '\n' + frameRows(grid) + '\n  </div>');
 }
+/* A key string in a caption is text, not markup: `i:th<CR>` written raw is an
+   unknown tag the browser swallows, and the caption then reads as `i:th`. */
+const escKeys = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function frameBlock(id, caption, keys, aria, si, vi) {
   const s = TV.scene(si, vi);
-  return '<div class="frame" data-od-id="' + id + '" data-terminal="dark" role="img" aria-label="' + aria + ', 80 by 24 cells">\n' + frameRows(TV.render(s)) + '\n  </div>\n  <p class="cap"><span class="d">↑</span> ' + caption + ' · keys <b>' + keys + '</b> · mode ' + TV.modeName(s) + '</p>';
+  return '<div class="frame" data-od-id="' + id + '" data-terminal="dark" role="img" aria-label="' + aria + ', 80 by 24 cells">\n' + frameRows(TV.render(s)) + '\n  </div>\n  <p class="cap"><span class="d">↑</span> ' + caption + ' · keys <b>' + escKeys(keys) + '</b> · mode ' + TV.modeName(s) + '</p>';
 }
 
 let html = fs.readFileSync(FILE, 'utf8');
@@ -143,6 +146,17 @@ const cue = '<ol class="notes"><li><b>The cue.';
 if (!html.includes(cue)) throw new Error('no section-08 notes anchor');
 html = html.replace(cue, blocks + '\n  ' + cue);
 
+/* ---------- section 01 · the peer's typing note, on the conversation's title ---------- */
+const TYPING_FRAMES = [
+  ['panel-typing-frame', 'the peer is typing', '<typing>', 'conversation panel, the peer is typing', 'The peer starts typing: a dim note on the title'],
+  ['panel-typing-composing-frame', 'composing a reply, the note stays', '<typing> + a draft', 'conversation panel, composing a reply while the peer types', 'Composing a reply: the note stays, the hint is the line\'s'],
+  ['panel-typing-yields-frame', 'selection and search: the note yields', '<typing>/tickets<CR>vj', 'conversation panel, the typing note yields to a selection and a search', 'Selection and search: the title has no room, the note yields']
+].map(([id, caption, keys, aria, variant]) => [id, caption, keys, aria, ...variantIndex('typing', variant)]);
+TYPING_FRAMES.forEach(([id]) => { html = removeBlock(html, id); });
+const typingAnchor = '<ol class="notes"><li><b>Four real screens, stacked.';
+if (!html.includes(typingAnchor)) throw new Error('no section-01 notes anchor');
+html = html.replace(typingAnchor, TYPING_FRAMES.map(([id, caption, keys, aria, si, vi]) => frameBlock(id, caption, keys.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'), aria, si, vi)).join('\n  ') + '\n  ' + typingAnchor);
+
 /* ---------- section 09 · the caret: the four states that matter, one per frame ---------- */
 const CARET_FRAMES = [
   ['caret-insert-frame', 'the line composing', 'iHello', 'the line composing, insert caret on a plain ground'],
@@ -150,7 +164,6 @@ const CARET_FRAMES = [
   ['caret-inline-frame', 'the card’s inline position', 'Allll', 'the contact card, inline position, normal caret on the selection row'],
   ['caret-row-frame', 'the card, no inline position', 'Sjjjjj', 'the self card on its add account row, the selection row with no caret']
 ];
-const escKeys = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const caretBlock = ([id, caption, keys, aria]) => {
   const s = st(keys);
   return '<div class="frame" data-od-id="' + id + '" data-terminal="dark" role="img" aria-label="' + aria + ', 80 by 24 cells">\n' + frameRows(TV.render(s)) + '\n  </div>\n  <p class="cap"><span class="d">↑</span> ' + caption + ' · keys <b>' + escKeys(keys) + '</b> · mode ' + TV.modeName(s) + '</p>';
@@ -159,6 +172,31 @@ CARET_FRAMES.forEach(([id]) => { html = removeBlock(html, id); });
 const caretAnchor = '<ol class="notes" data-od-id="caret-notes">';
 if (!html.includes(caretAnchor)) throw new Error('no section-09 notes anchor');
 html = html.replace(caretAnchor, CARET_FRAMES.map(caretBlock).join('\n  ') + '\n  ' + caretAnchor);
+
+/* ---------- section 10 · text direction: the mode, then the bar ----------
+   Its own section rather than a seventh bar in section 05, because direction is
+   not a line kind: section 05's frame and prose are organised by kind, and its
+   states are reached through a helper that takes no direction at all. Direction
+   has no other home either — 02 lays out a message row and 09 names the caret's
+   two shapes, and neither is about the order characters are handed over in.
+
+   The engine already models it this way, as a whole `rtl` scene group whose every
+   variant is the same thing in a different mode, so the frames come from that
+   group by name through `frameBlock` — the same helper section 08 uses. The keys
+   shown are the variant's own `keys`, read back off the scene rather than written
+   out again here, so the caption cannot drift from the keys that drew the frame. */
+const BIDI_FRAMES = [
+  ['bidi-terminal-frame', 'the row as stored', 'right-to-left chat, terminal mode, the row as it is stored', 'Terminal mode: the row as stored'],
+  ['bidi-visual-frame', 'the same row, permuted', 'right-to-left chat, visual mode, the same row permuted', 'Visual mode: the same row, permuted'],
+  ['bidi-bar-frame', 'a right-to-left draft in the input bar', 'right-to-left chat, visual mode, a right-to-left draft permuted in the bar, the caret on its visual cell', 'Visual: a right-to-left draft in the input bar']
+].map(([id, caption, aria, variant]) => {
+  const [si, vi] = variantIndex('rtl', variant);
+  return [id, caption, TV.SCENES[si].variants[vi].keys, aria, si, vi];
+});
+BIDI_FRAMES.forEach(([id]) => { html = removeBlock(html, id); });
+const bidiAnchor = '<ol class="notes" data-od-id="bidi-notes">';
+if (!html.includes(bidiAnchor)) throw new Error('no section-10 notes anchor');
+html = html.replace(bidiAnchor, BIDI_FRAMES.map((f) => frameBlock(...f)).join('\n  ') + '\n  ' + bidiAnchor);
 
 fs.writeFileSync(FILE, html);
 console.log('regenerated every frame in components.html from the engine');
