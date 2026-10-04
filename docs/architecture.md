@@ -316,9 +316,9 @@ up (build, fetch the chat list, take the feed — it does **not** sign in; see
 show is near one
 of its ends, drives the sign-in flow the panel asks for, and folds in whatever
 arrives. Everything with a rule in it is a function over the state — `wanted`,
-`open_first_chat`, `backoff` — so the part that can be wrong is tested without a
-client or a datacenter; the rest is the calls. A `HistoryCursor` lives beside the
-loop rather than in `tui`, because `tui` may not name `proto`.
+`open_first_chat`, `backoff`, `chat_list_retry` — so the part that can be wrong is
+tested without a client or a datacenter; the rest is the calls. A `HistoryCursor`
+lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
 
 Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
 `TELEVIM_API_HASH`, `TELEVIM_PHONE`, `TELEVIM_CODE`, `TELEVIM_PASSWORD` and
