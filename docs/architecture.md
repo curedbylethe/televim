@@ -315,9 +315,19 @@ up (build, fetch the chat list, take the feed — it does **not** sign in; see
 [`decisions.md`](./decisions.md)), asks for a page whenever the conversation on
 show is near one
 of its ends, drives the sign-in flow the panel asks for, and folds in whatever
-arrives. Everything with a rule in it is a function over the state — `wanted`,
-`open_first_chat`, `backoff`, `chat_list_retry` — so the part that can be wrong is
-tested without a client or a datacenter; the rest is the calls. A `HistoryCursor`
+arrives. When the update feed ends mid-session, `pump` records the position with
+`UpdateSubscription::finish` and reports `Event::FeedEnded`; `drive` then rebuilds
+the client from the stored session and takes a new feed in-process, through the
+same `state.bringing_up` single-flight guard `:retry` uses. The relay is
+single-shot, so a rebuild is the only way to re-subscribe (see
+[`decisions.md`](./decisions.md)). One automatic reconnect is allowed per working
+feed, and the re-`Ready` is place-preserving — the open conversation and its
+cursor, the chat-list highlight restored by id, the jumplist, the selection, the
+register and the draft all survive — because the reader did not navigate.
+Everything with a rule in it is a function over the state — `wanted`,
+`auto_reconnect`, `open_first_chat`, `backoff`, `chat_list_retry` — so the part
+that can be wrong is tested without a client or a datacenter; the rest is the
+calls. A `HistoryCursor`
 lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
 
 Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,

@@ -195,6 +195,13 @@ Working today:
   keystroke away from a key that types nothing else. `y` quits, `n` or `Esc`
   stays. `Ctrl-C` does **not** ask: it is the way out when the program is wedged,
   and a terminal that is not answering cannot draw the question either.
+- **Reconnect:** if the update feed stops mid-session, televim rebuilds the client
+  from the stored session in-process and takes a new feed — no restart and no
+  re-login — while keeping the reader's place: the open conversation and its
+  cursor, the chat-list highlight, the jumplist, the selection, the register and
+  the draft all survive. The status line says `reconnecting` while it happens, and
+  one automatic reconnect is tried; if the feed stops again before any update
+  arrives, the status line says `offline:` and `:retry` asks again.
 
 Not built, and named here so nobody reads the roadmap below as current:
 
