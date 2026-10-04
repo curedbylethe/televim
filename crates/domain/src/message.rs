@@ -30,9 +30,8 @@ pub enum MediaKind {
 impl MediaKind {
     /// The placeholder shown for an attachment that has no caption.
     ///
-    /// **These labels are provisional.** CUR-6 owns their final wording and
-    /// their styling; nothing here is the presentation decision, only the model
-    /// half of it, and the interface is free to paint something else.
+    /// The words are decided here; how they are painted is the interface's
+    /// business, not this model's.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {

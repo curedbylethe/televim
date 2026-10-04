@@ -129,9 +129,8 @@ Working today:
   Fetching the bytes is a client-level operation today
   (`ProtoClient::download_media`, capped at 16 MiB, refused rather than
   truncated when it is over): the attachment is re-read by identifier, because a
-  description is rebuilt on every page and a cached locator would be stale. The
-  wording and the styling of the placeholder are provisional; a key that opens an
-  attachment is not built.
+  description is rebuilt on every page and a cached locator would be stale. A key
+  that opens an attachment is not built.
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
   typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.
   The line is a real editor (`vim-line`, wrapped in `tui::line`): caret

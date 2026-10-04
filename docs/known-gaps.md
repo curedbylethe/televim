@@ -23,12 +23,6 @@ Real, and named so they are not mistaken for oversights:
   the other half: streaming, and a cache on disk, are CUR-9 and CUR-10, and the
   16 MiB `MEDIA_LIMIT` is what a viewer will have to do something about rather
   than merely report.
-- **The placeholder vocabulary is shipped, its styling is not.** `[image]`,
-  `[video]`, `[gif]`, `[voice]` and `[file]` are what a media-only message shows
-  today, in the body ink every other body uses. Their final wording and their ink
-  are CUR-6's, and no design scene has been commissioned for them
-  (**`DESIGN-TBD`**) — `DESIGN.md`'s vocabulary table records what the code
-  prints, not a decision about how it should look.
 - **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
   between a contact's `name` and `username`, draws nothing, is not selectable, is
   not something `d` can act on, is skipped by a yank, and is neither counted nor

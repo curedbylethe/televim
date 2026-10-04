@@ -262,9 +262,11 @@ are in [`../AGENTS.md`](../AGENTS.md).
 
   The visible token is the same decision applied to the screen: a media-only
   message shows `[image]`, `[video]`, `[gif]`, `[voice]` or `[file]` through
-  `Message::display_body()`, and a caption always wins over it. That wording and
-  its styling are **provisional** — CUR-6 owns both, and no design run has been
-  commissioned for them (`DESIGN-TBD`).
+  `Message::display_body()`, and a caption always wins over it. Both halves are
+  decided. The wording is final, and all five tokens are drawn in
+  `Theme::text_dim`: a placeholder stands in for something the peer sent rather
+  than for something they wrote, so it does not carry the weight of their words.
+  A caption is the peer's own text and keeps the body ink.
 - **Why a download returns owned bytes for now:** `Client::download_media`
   answers `Vec<u8>` rather than writing to a file or handing back a stream. The
   caller today is a test and a caller that wants to know whether the fetch works,
