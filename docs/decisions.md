@@ -257,6 +257,22 @@ are in [`../AGENTS.md`](../AGENTS.md).
   `Esc` that returns before any dispatch happens, which is the one key that could
   otherwise leave a prefix standing behind a mode the reader had left.
 - **Why the input line is a wrapper rather than the crate:** `vim-line` never stores the buffer, so somebody has to apply its edits — and that somebody is where the decisions live that the crate must not be asked about. `Enter` (send) and `Esc` (two stages, nothing lost) never reach it, because its own answers differ by mode; `:` and `/` get insert only, because a newline in either is a submission nobody asked for. The wrapper also snaps every position to a character boundary — the cursor around every key, and every index an edit carries on its way into the string — then widens a delete to the grapheme cluster that index falls in, and refuses the byte-counted motions *behind an operator* on non-ASCII text, because two of the crate's behaviours split multi-byte characters and this binary sets `panic = "abort"`. That is the only place a motion is refused: elsewhere a motion can only move a cursor, which is re-snapped before anything can slice on it.
+- **Why drafts are per conversation:** a draft belongs to the conversation it was
+  typed in, so leaving one parks its `LineEditor` on `App` under the outgoing peer
+  id and selecting a chat restores it — no words cross between readers, and
+  re-entry finds the bar as it was left. It is a `tui` view-state map keyed by
+  peer id, like `read_receipts`, not a `domain` history structure: `domain` keeps
+  one flat message window and no per-conversation list, and a store that must
+  reach disk would have to live in `app`, which owns the configuration path
+  (AGENTS.md dependency rule) — so the map stays in `tui` and is in-memory only,
+  for the process lifetime. It has no fixed cap, because evicting a live draft to
+  satisfy one would lose the reader's words, the failure the feature exists to
+  prevent; instead an entry is dropped when its draft becomes empty, so the map
+  holds only peers with text in the bar. The draft's subject (`reply_to`,
+  `editing`) is still dropped on a switch, because it lives on `App` rather than
+  in the `LineEditor` and restoring a reply target is a separate product decision;
+  only text, caret, mode and selection travel. On-disk persistence across restarts
+  is deferred.
 - **Why the measurement harness is an `[[example]]` and not a binary or a test:** `cargo build --release` does not build examples, so a harness that is one cannot reach the shipped artifact, and `app` is bin-only so its own event loop is unreachable from `app/tests` anyway. An example is also the only vehicle that needed no change to `[profile.release]`, which is load-bearing for the binary-size budget and out of bounds for measurement work. The fixture is built through `tui`'s public API rather than its `#[cfg(test)]` sample data because that data is invisible to every dependent crate: a harness that compiled only under `cfg(test)` could not be measured as a release build.
 - **Why RSS is read in-process rather than by a profiler:** neither `valgrind`, `heaptrack`, nor `hyperfine` is installed on the development host, so a harness that required one could only be run in CI. Reading the process's own resident size — `proc_pidinfo` on macOS, `/proc/self/status` on Linux — is the kernel's number for this process rather than a profiler's estimate, needs no dependency, and makes the harness a build target rather than a machine with tools on it. `valgrind --tool=massif` is still used automatically where it exists, and the choice of source is recorded in the report so two hosts' figures are not silently compared. The cost is that the macOS figure carries the VM's page-in schedule with it — one run in fifteen lands near 1.5 MB rather than 3.4 MB, with all five samples inside a run agreeing exactly — so a threshold taken from it alone would report the OS rather than the program. The noise floor is recorded so that is visible before anyone draws one.
 - **Why the harness records both a within-run and a cross-run spread:** the two answer different questions and only one of them is about this program. Within a run the samples measure the process settling; across runs they measure the machine the process started on. Quoting the first as the noise floor would understate it by a factor of two, and a threshold drawn from it would fire on the host.

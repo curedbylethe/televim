@@ -182,6 +182,11 @@ Real, and named so they are not mistaken for oversights:
   tests inherit the same ceiling whole: they drive `BidiMode::Visual` only, and
   the default path is pinned by the ASCII tests beside them, which cannot tell a
   shaper's reorder from no reorder at all.
+- **Drafts are not persisted across restarts.** The per-conversation draft map is
+  in-memory for the process lifetime: quitting and relaunching opens every
+  conversation with an empty bar again, even though Telegram's own clients keep
+  drafts server-side. Persisting it would need a store in `app` — which owns the
+  configuration path — and is deferred; see [`decisions.md`](./decisions.md).
 
 ## v2 Hooks
 

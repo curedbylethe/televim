@@ -150,8 +150,10 @@ Working today:
   `d` and `y`, and multi-line messages with `Ctrl+J` (`Shift+Enter` where the
   terminal volunteers the distinction). `gg` and `G` are the wrapper's, not the
   library's — see [`docs/decisions.md`](./docs/decisions.md). The bar is always a draft: it grows to six
-  rows, survives a conversation switch, and is drawn with a painted caret that
-  `TestBackend` can assert, which the real terminal's could not.
+  rows, and each conversation keeps its own: leaving parks it, re-entering
+  restores it, and another conversation starts with its own bar. It is drawn with
+  a painted caret that `TestBackend` can assert, which the real terminal's could
+  not.
   A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
   candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
   keeps typing into the draft. Reply with `r`, edit with `e` — and since a
