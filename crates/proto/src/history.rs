@@ -375,6 +375,7 @@ mod tests {
             status: domain::message::MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }
     }
 

@@ -4947,6 +4947,7 @@ fn mock_messages() -> Vec<Message> {
             status: MessageStatus::Received,
             is_outgoing: i % 2 == 0,
             reply_to: None,
+            media: None,
         })
         .collect()
 }
@@ -4967,6 +4968,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -6449,6 +6451,7 @@ mod tests {
                     status: MessageStatus::Received,
                     is_outgoing: *outgoing,
                     reply_to: None,
+                    media: None,
                 })
                 .collect(),
         );
@@ -7990,6 +7993,7 @@ mod tests {
                 status: MessageStatus::Sent,
                 is_outgoing: true,
                 reply_to: None,
+                media: None,
             },
             Message {
                 id: 21,
@@ -7999,6 +8003,7 @@ mod tests {
                 status: MessageStatus::Sent,
                 is_outgoing: true,
                 reply_to: None,
+                media: None,
             },
         ]);
         let before = (
@@ -8353,6 +8358,7 @@ mod tests {
             status: MessageStatus::Sent,
             is_outgoing: true,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -8387,6 +8393,7 @@ mod tests {
                     status: MessageStatus::Sent,
                     is_outgoing: true,
                     reply_to: None,
+                    media: None,
                 }
             }));
         app.vim.set_total(CONVERSATION_WINDOW);
@@ -8490,6 +8497,7 @@ mod tests {
                 status: MessageStatus::Sent,
                 is_outgoing: true,
                 reply_to: None,
+                media: None,
             })
             .collect()
     }

@@ -1538,6 +1538,7 @@ fn message(chat_id: i64, id: i64) -> Message {
         status: domain::message::MessageStatus::Received,
         is_outgoing: false,
         reply_to: None,
+        media: None,
     }
 }
 

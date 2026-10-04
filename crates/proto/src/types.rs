@@ -100,6 +100,9 @@ impl From<ProtoMessage> for Message {
             status: status_of(message.is_outgoing),
             is_outgoing: message.is_outgoing,
             reply_to: message.reply_to,
+            // ProtoMessage carries no media kind yet; the wire shape and this
+            // line are filled in together once it does.
+            media: None,
         }
     }
 }

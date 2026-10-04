@@ -627,6 +627,7 @@ mod tests {
             status: domain::message::MessageStatus::Received,
             is_outgoing: outgoing,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -848,6 +849,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }
     }
 
@@ -1382,6 +1384,7 @@ mod tests {
                     status: MessageStatus::Received,
                     is_outgoing: false,
                     reply_to: None,
+                    media: None,
                 })
                 .collect(),
         );
@@ -2172,6 +2175,7 @@ mod tests {
                 status: MessageStatus::Received,
                 is_outgoing: false,
                 reply_to: None,
+                media: None,
             },
             Message {
                 id: 91,
@@ -2181,6 +2185,7 @@ mod tests {
                 status: MessageStatus::Received,
                 is_outgoing: true,
                 reply_to: Some(90),
+                media: None,
             },
         ]);
 
@@ -2352,6 +2357,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }]);
         press(&mut app, KeyCode::Char('/'));
         type_text(&mut app, "benchmarks");
@@ -2585,6 +2591,7 @@ mod tests {
             status: MessageStatus::Received,
             is_outgoing: false,
             reply_to: None,
+            media: None,
         }]);
 
         app
