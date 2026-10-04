@@ -113,11 +113,21 @@ Working today:
   drawn in `Theme::border_focused`; `h`/`l` and `Tab` move between the two panes,
   and `Ctrl+w` steps back out of the line.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
-  screenful, `gg` to the first unread, `n` to cycle search matches. Messages
-  soft-wrap to the panel's width — at whitespace where there is whitespace to
-  break at, and at the panel's edge where there is not — so a message is as many
-  rows as its text needs. Everything that measures the conversation counts those
-  rows rather than messages: the slice, the scrollbar beside it, a page, and the
+  screenful, `gg` to the first unread, `n` to cycle search matches. `gd` on a
+  message that quotes another goes to the quoted message: a cursor move when it
+  is loaded, and otherwise a page fetched around it that replaces the window,
+  with `Jumping to the quoted message…` said while that page is in flight.
+  `Ctrl-o` goes back to the message the jump left and `Ctrl-i` forward again —
+  a return to a message the window no longer holds is fetched the same way, and
+  says `Jumping back…` or `Jumping forward…`. While a page is in flight only
+  `Esc` answers, and it leaves the reader where they were. `gd` on a message
+  that quotes nothing refuses with `Not a reply: gd jumps to the message a reply
+  quotes.`, and a quote the client cannot fetch at all with `That message is no
+  longer available.` Messages soft-wrap to the panel's width — at whitespace
+  where there is whitespace to break at, and at the panel's edge where there is
+  not — so a message is as many rows as its text needs. Everything that measures
+  the conversation counts those rows rather than messages: the slice, the
+  scrollbar beside it, a page, and the
   `FETCH_MARGIN` (20) that asks for a page. `[you]`/`[them]` and a reply's quoted
   target are on the first row of a message, `[sending…]`/`[failed: …]` on the
   last.
@@ -143,7 +153,9 @@ Working today:
   `TestBackend` can assert, which the real terminal's could not.
   A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
   candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
-  keeps typing into the draft. Reply with `r`, edit with `e`.
+  keeps typing into the draft. Reply with `r`, edit with `e` — and since a
+  reply carries the message it quotes, `gd` on one goes to that message and
+  `Ctrl-o` brings the reader back.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
   which side the messages are from, and says how many were left out because they

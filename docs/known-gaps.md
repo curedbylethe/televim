@@ -101,6 +101,26 @@ Real, and named so they are not mistaken for oversights:
   `Tab`, `Enter` and `↑`/`↓` choose or accept a candidate instead of walking a
   pane, sending the message, or moving the caret. `Esc` closes the popup and
   gets them back, and the status line names them for as long as it is up.
+- **A jump cannot return to a not-yet-sent placeholder.** `domain::history`
+  numbers an outgoing placeholder below zero, and `proto::history`'s `narrow`
+  rejects an identifier the wire could not carry, so a page fetched around one
+  comes back empty and `apply_jump` refuses it. A reader who jumps away from a
+  message that has not been sent and presses `Ctrl-o` therefore cannot land on it:
+  the return is armed anyway — nothing on this side of the boundary can know a
+  fetch will come back empty — and the landing says `That message is no longer
+  available.` and leaves the cursor where it was. This is a missing identity
+  rather than a missing fetch, since a placeholder has no server-side identifier
+  to fetch around, so it is pinned by a test
+  (`a_return_to_a_placeholder_says_so_and_leaves_the_reader_put`) rather than
+  worked around.
+- **`Ctrl-i` is `Tab` on the wire, so forward navigation needs a terminal that
+  reports the two apart.** `Ctrl-i` and `Tab` are the same byte unless the
+  terminal speaks the kitty keyboard protocol or `modifyOtherKeys`; crossterm then
+  delivers `KeyCode::Tab`, which is the pane switch and is answered before the
+  conversation sees a key. Only a CONTROL-modified `i` moves forward, so on such a
+  terminal `Ctrl-i` does not navigate and `Ctrl-o` alone returns — see
+  [`decisions.md`](./decisions.md). `Tab` is not rebound: a key that is a motion
+  in one place and a pane in the next is a key a reader has to learn twice.
 - **A feed dropped without `finish` persists a stale update position.** See
   [`decisions.md`](./decisions.md).
 - **No figure measures the program under load.** The 50 MB ceiling is

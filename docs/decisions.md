@@ -277,3 +277,61 @@ are in [`../AGENTS.md`](../AGENTS.md).
   different work. Streaming and a cache directory are CUR-9 and CUR-10; `proto`
   narrows the two identifiers to the `i32` the wire uses on the way through, and
   says so with `ProtoError::MessageIdOutOfRange` rather than truncating.
+- **Why the reply jump rides the first-unread pipeline, and why the key is `gd`:** a
+  reply's quote is a message in the same conversation, and `gg` had already
+  answered "a message the reader asked for by name, which the window does not
+  hold": `pending_jump` → `net::wanted` → `request_jump` → `fetch_around` →
+  `Event::Jumped` → `apply_jump`. A second fetch path would have been the same
+  path twice, so `Jump` grew one field — a `JumpKind`, which exists so the status
+  line can say where the reader is going — and nothing else in that chain moved.
+  The in-window case is `gg`'s: a cursor move and `None`. The key is `gd`, Vim's
+  *go to definition*: from a use to the place it refers to, which is what a quote
+  is. `g` is already a prefix (`gg`), so `gd` costs no new pending state, and `d`
+  after a `g` is not `dd` because the pending key decides. `gf` was the runner-up
+  and lost for two reasons: a quote is a definition of context rather than a path,
+  and `gd` reads as a pair with `Ctrl-o`, which is how Vim teaches it. `Enter` is
+  bound and means "discard a draft" here, `'` and `` ` `` are marks this program
+  does not have, and `K` would be expected to *show* a quote rather than move to
+  it. The refusals are `flash`es because a refusal is the status line's to say,
+  not the hint's, and the first one names the key as well as the refusal — a key
+  that refuses in silence teaches nothing. `JUMP_LABEL` is reused for neither: it
+  names a destination ("first unread"), and a reader who pressed `gd` and read
+  "first unread" would have been told the program did something else. Hence
+  `Jumping to the quoted message…`, `Jumping back…` and `Jumping forward…` at the
+  same rank and the same ink.
+- **Why the return is a bounded per-conversation jumplist, and why `Tab` still
+  cycles panes:** the criterion asks for `Ctrl-o` or `Ctrl-i` to return to where
+  the reader was, so CUR-34 builds that pair and leaves CUR-35 the general thing —
+  no `gg`/`n`/`N` producers and no configurable depth, because only a reply jump
+  records. `jumplist::Jumplist` is two `VecDeque` stacks per conversation, capped
+  at `DEPTH` (100, against Vim's own `'jumplist'` depth of 50): unbounded, a
+  reader who keeps jumping keeps every message they have ever been at, in a
+  program whose whole memory budget is a few megabytes. A mark is a **message
+  identifier**, not a row, which is the whole reason a return works at all after a
+  jump replaced the window — a row means a different message on either side of
+  that — and the stacks are keyed by peer id so one conversation's history cannot
+  put `Ctrl-o` in another. Vim's move is kept as Vim has it: the entry walked off
+  one stack is marked on the other, so a new jump discards what was ahead and the
+  first `Ctrl-o` from the end of the list marks where the reader was standing.
+
+  The precedence is the harder half. `Ctrl-i` and `Tab` are the same byte unless
+  the terminal speaks the kitty keyboard protocol or `modifyOtherKeys`, and
+  crossterm then delivers `KeyCode::Tab` — which is the pane switch here, answered
+  globally and ahead of the conversation. So `Tab` is **not** rebound: forward
+  navigation is bound to a CONTROL-modified `i` only. The consequence is recorded
+  rather than worked around. On a terminal that cannot report the two apart,
+  forward is unreachable and `Ctrl-o` carries the criterion alone, which the
+  criterion's "or" allows; a second forward key would be a new decision with a new
+  design entry, not a workaround invented here.
+- **Why a jump keeps the search:** the design engine's `landJump` sets
+  `s.search = null` — its hits were rows of the old window — and `DESIGN.md`
+  records that. The Rust does the opposite on purpose. `apply_jump` does not touch
+  `SearchState` because it is shared with `gg`, and two tests assert the match
+  list survives both a jump and a jump page (`a_jump_keeps_the_match_list`,
+  `a_search_survives_a_jump_page`); clearing it there would regress `gg` to
+  satisfy a sentence about a reply jump. A match here is a message identifier
+  rather than a position in the window that was on screen, so it survives the
+  window being replaced for the same reason a jumplist mark does. Under this
+  repository's own rule — when the engine and the Rust disagree the Rust is right
+  — the divergence is recorded in prose rather than changed in code, and the
+  design's sentence stands as a record of what the model does.
