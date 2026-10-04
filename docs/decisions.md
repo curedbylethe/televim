@@ -236,3 +236,44 @@ are in [`../AGENTS.md`](../AGENTS.md).
 - **Why the global allocator is the system allocator:** measurement left nothing to buy. The alternatives were `tikv-jemallocator` and `mimalloc`, and against the ceilings they are already inside with room: the stripped release binary is 5,610,320 bytes against < 15 MB, and RSS at idle is 3.41 MB for the harness and 8.25 MB for the shipped binary against < 50 MB — two to three times of margin on each, so a candidate would have to give some of it back to be chosen. Neither the runtime nor the workload is the one those allocators are for: the runtime is a single-threaded current-thread `tokio` plus one reader thread, and what they target is many threads allocating against a fragmenting heap, which this is not. And the choice could not be measured here: macOS RSS moves by roughly a factor of two between runs with no code change, so a candidate's delta on this host is inside the noise rather than a result. `std::alloc::System` is the one choice that is the same on macOS, Linux and Windows and needs no C toolchain on any of them, which is what makes it consistent across every supported platform (AC-16); a bundled-jemalloc build is a different story on each. The declaration that would have wired this — `tikv-jemallocator` in `[workspace.dependencies]` — had no dependents in any crate and no entry in `Cargo.lock`, so it was a name in a manifest for a decision nobody had made, and it is gone rather than left to imply one. Were a `#[global_allocator]` ever warranted it would live in the composition root (`app/src/main.rs`), because an allocator is a property of the binary and a library that chose one would choose it for every dependent: the arena and allocator decisions belong at the composition root, not in a crate others link.
 - **Why RTL word order is terminal-delegated by default and visual reordering is opt-in:** no mainstream terminal applies the Unicode Bidirectional Algorithm to displayed cells by default — not xterm, not alacritty, not kitty; wezterm carries `bidi_enabled=false`, VTE waits for `CSI ? 2501 h`, and Windows Terminal needs AtlasEngine and a setting turned on. The hazard is not the algorithm but the **shaper**: every terminal that renders Arabic or Hebrew at all runs HarfBuzz, CoreText, DirectWrite or Pango, and shaping reverses RTL runs. Logical emission is therefore correct on the shaping terminals a reader of those scripts must already be on, while visual emission reverses a second time there and scrambles the run. terminal-wg's "explicit mode", `CSI 8 l`, tells a UBA-aware terminal that the application did the bidi itself, and it does **not** disable the shaper, so it cannot make visual emission safe either. The default is `BidiMode::Terminal` — logical order, byte-for-byte what this binary already emits — and `BidiMode::Visual` is the opt-in escape hatch for the terminals that shape nothing (xterm, alacritty), where the application's own permutation is the only reordering that will happen. Terminal detection was rejected rather than offered as a third answer: bidi and shaping are settings rather than identity, and no probe of the far end survives tmux or ssh. What that leaves is named rather than claimed: in the default mode xterm and alacritty render RTL wrong, neither mode joins Arabic or Persian letters, Rule L4 glyph mirroring is absent, and the default's correctness rests on the terminal matrix above rather than on any assertion in this repository — `ratatui::TestBackend` has no bidi and no shaper, so it can prove that a permutation reached the cells and cannot prove how a terminal drew them.
 - **Why the bidi mode is one configuration key rather than a per-terminal setting:** the escape hatch is reachable through the same key surface as everything else in `app/src/config.rs` — `bidi = "terminal"` or `bidi = "visual"`, `TELEVIM_BIDI` from the environment, default `terminal` — read once at composition and handed to `tui` as a plain `BidiMode`, so the `tui` crate names no configuration type and `make boundary` still holds. It is **per machine, not per terminal**: an ssh hop keeps whatever the session was launched with and `tmux` multiplexes one value over every pane it holds, so a reader whose terminals differ cannot have both answers at once. Per-`TERM` is the v2 hook, and it is the reason the value is a setting rather than a probe. Only the exact word `visual` selects it; any other spelling leaves the terminal in charge, because an unrecognised value that guessed `Visual` would scramble a run on precisely the terminals whose shaper is the reason `Terminal` is the default.
+- **Why a media kind is a plain `domain` DTO and the unknown case degrades:**
+  `domain::MediaKind` is `Photo`, `Video`, `Gif`, `Voice`, `File` — five `Copy`
+  variants and nothing else. It is deliberately payload-free: no filename, no
+  path, no access hash, no locator. A description is rebuilt on every history
+  page, so anything cached on it goes stale, and a stale locator is worse than
+  none: the bytes are re-derived from the message when something is actually
+  fetched. That makes the field cost nothing per message beyond the byte it
+  occupies, and it puts the vocabulary where the rendering lives — `domain`
+  already names `ChatKind` and `MessageStatus`, and the interface is the only
+  layer that can decide what a kind is *called*.
+
+  The conversion in `proto` breaks the convention `chat_kind` sets. `chat_kind`
+  matches the framework's peer taxonomy exhaustively, so a new peer kind stops the
+  build; `media_kind` ends in a plain `_ => MediaKind::File`. The asymmetry is
+  the requirement: a peer kind always has a consequence the client cannot avoid
+  (a group must not be shown as a person), whereas an unmodelled media kind has
+  none — the attachment is still a file somebody expects to open, so degrading is
+  always safe and failing the build is not. Telegram adds media kinds faster than
+  clients catch up, and an exhaustive match would turn every one of them into a
+  release blocker for a cosmetic distinction. The framework's own classifiers
+  already collapse anything unmodelled to `File` for the same reason; the
+  catch-all at the `proto` boundary is what keeps that answer from being lost in
+  translation.
+
+  The visible token is the same decision applied to the screen: a media-only
+  message shows `[image]`, `[video]`, `[gif]`, `[voice]` or `[file]` through
+  `Message::display_body()`, and a caption always wins over it. That wording and
+  its styling are **provisional** — CUR-6 owns both, and no design run has been
+  commissioned for them (`DESIGN-TBD`).
+- **Why a download returns owned bytes for now:** `Client::download_media`
+  answers `Vec<u8>` rather than writing to a file or handing back a stream. The
+  caller today is a test and a caller that wants to know whether the fetch works,
+  and both want one value; a path, a cache directory, or a chunked reader would
+  each impose a storage decision on a program that has none yet. The transfer is
+  already streamed at the wire (`iter_download`) and already bounded
+  (`MEDIA_LIMIT`, 16 MiB, checked against the declared size and again against what
+  arrives, so an oversized attachment is reported rather than truncated), so what
+  a viewer needs later is a different return type over the same work, not
+  different work. Streaming and a cache directory are CUR-9 and CUR-10; `proto`
+  narrows the two identifiers to the `i32` the wire uses on the way through, and
+  says so with `ProtoError::MessageIdOutOfRange` rather than truncating.

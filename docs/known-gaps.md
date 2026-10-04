@@ -2,6 +2,33 @@
 
 Real, and named so they are not mistaken for oversights:
 
+- **The typed update path cannot say "media `grammers` did not decode".** Every
+  message description carries `media: Option<MediaKind>`, and the classification
+  is tested on both paths as free functions (`classify_raw` for the raw
+  `GetHistory` fetch, `classify_typed` for the `grammers` feed). On the typed
+  path there is still one hole: `grammers`' `Media::from_raw` returns `None` for
+  a handful of variants, and this build reads no wire type behind that `None`. So
+  a message whose media `grammers` declines to build arrives as *no media at all*,
+  where the raw history path would have said `File`. The two answers are the same
+  for everything modelled and disagree only for media `grammers` itself does not
+  carry. Closing it means classifying the raw field on the feed path as well,
+  which the crate's two-path split exists to avoid — the update feed arrives as a
+  built `grammers` `Message`, and there is no raw variant to match on there
+  without re-deriving one.
+- **A media download is a whole `Vec<u8>`, and nothing in the interface calls it.**
+  `Client::download_media` and `ProtoClient::download_media` exist and are tested,
+  but no key is bound to them: a fetched attachment has nowhere to go yet — no
+  cache directory, no viewer, no save path — and a program that asked for one
+  before it could put the bytes somewhere would be guessing. The return type is
+  the other half: streaming, and a cache on disk, are CUR-9 and CUR-10, and the
+  16 MiB `MEDIA_LIMIT` is what a viewer will have to do something about rather
+  than merely report.
+- **The placeholder vocabulary is shipped, its styling is not.** `[image]`,
+  `[video]`, `[gif]`, `[voice]` and `[file]` are what a media-only message shows
+  today, in the body ink every other body uses. Their final wording and their ink
+  are CUR-6's, and no design scene has been commissioned for them
+  (**`DESIGN-TBD`**) — `DESIGN.md`'s vocabulary table records what the code
+  prints, not a decision about how it should look.
 - **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
   between a contact's `name` and `username`, draws nothing, is not selectable, is
   not something `d` can act on, is skipped by a yank, and is neither counted nor
@@ -124,4 +151,4 @@ Real, and named so they are not mistaken for oversights:
 
 ## v2 Hooks
 
-The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers.
+The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists and returns bytes, and the `tokio::fs` cache and any viewer are what is still ahead of it.
