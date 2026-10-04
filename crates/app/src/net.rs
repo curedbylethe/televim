@@ -1093,6 +1093,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         } => {
             apply_ready_to_screen(app, state, chats, account, session_store);
             state.client = Some(client);
+            // The client is there, so the sign-in flow's `waiting` flag means
+            // what it says: a request a client is carrying.
+            app.set_client_available(true);
         }
 
         // Nothing failed, so nothing is an `Offline`: the screen's answer is a
@@ -1143,10 +1146,16 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             let reason = format!("{reason:#}");
             app.set_account(Err(reason.clone()));
             app.status = format!("offline: {reason}");
+            // No client to carry anything, so an in-flight sign-in is not in
+            // flight: the flag would only keep the panel saying "Checking…".
+            app.set_client_available(false);
         }
 
         Event::LoggedOut { result } => {
             apply_logged_out(app, state, result);
+            // The signed-out client is gone — and the fresh one below is not up
+            // yet, so the screen is client-less until its `Ready` says otherwise.
+            app.set_client_available(false);
 
             // A fresh client, because the one that just signed out cannot be
             // reused — see [`State::cfg`]. Its `Ready` carries
