@@ -101,6 +101,16 @@ fn to_event(kind: UpdateKind) -> UpdateEvent {
             chat_id: chat_peer_id,
             max_id,
         },
+
+        // A rename again, and the flag is the whole event: there is no message
+        // to convert and no position to keep, so nothing else happens here.
+        UpdateKind::PeerTyping {
+            chat_peer_id,
+            typing,
+        } => UpdateEvent::PeerTyping {
+            chat_id: chat_peer_id,
+            typing,
+        },
     }
 }
 
@@ -218,5 +228,29 @@ mod tests {
 
         assert_eq!(chat_id, 42);
         assert_eq!(max_id, 7);
+    }
+
+    /// The same rename carries the typing flag in both directions: a composing
+    /// action arrives as `true` and its cancel as `false`, and neither loses the
+    /// conversation it was about on the way.
+    #[test]
+    fn a_typing_update_becomes_the_conversation_and_the_flag() {
+        for typing in [true, false] {
+            let event = to_event(UpdateKind::PeerTyping {
+                chat_peer_id: 42,
+                typing,
+            });
+
+            let UpdateEvent::PeerTyping {
+                chat_id,
+                typing: flag,
+            } = event
+            else {
+                panic!("a typing update is a conversation and a flag");
+            };
+
+            assert_eq!(chat_id, 42);
+            assert_eq!(flag, typing);
+        }
     }
 }

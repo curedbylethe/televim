@@ -28,7 +28,7 @@ use ratatui::widgets::{
 
 use domain::message::Message;
 
-use crate::app::{App, FetchDirection, Focus, JUMP_LABEL};
+use crate::app::{App, FetchDirection, Focus};
 use crate::bidi::{self, BidiMode};
 use crate::rows::{self, RowSpan};
 use crate::text_row;
@@ -60,7 +60,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border)
-        .title(conversation_title(app));
+        .title(conversation_title(app, area.width));
 
     // Drawn apart from the list so that the bar can have a column of its own
     // rather than being painted over the end of a message.
@@ -85,8 +85,9 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     if reserved.jumping {
         // A jump replaces the window rather than extending it, so it is said
         // where the messages are: the page it is waiting for has no edge of the
-        // window on show to sit at.
-        items.push(loading(app, JUMP_LABEL));
+        // window on show to sit at. Which jump it is comes from the request
+        // itself, so the row and the status line cannot disagree.
+        items.push(loading(app, app.jump_label()));
     }
     // Said in place of the messages rather than at an edge of the window, which
     // an empty one does not have. It is not one of the reserved rows either: a
@@ -180,19 +181,74 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
 }
 
 /// The panel's title: where in what is loaded the reader is, what a search found
-/// there, and what they have selected.
+/// there, what they have selected, and whether the peer is typing.
 ///
 /// Counted in messages, because that is where in the conversation the reader is:
 /// the cursor stands on a message however many rows that message is, and a
 /// message number is the one position that survives a page landing.
-fn conversation_title(app: &App) -> String {
+///
+/// A [`Line`] rather than a [`String`], because the notes do not all want the
+/// same ink: the count, selection and search notes are facts about the reader's
+/// own view and stay in the text's ink, while the typing note is the peer's
+/// state — furniture that comes and goes — so it is dim whole.
+///
+/// `width` is the panel's own width, because the title decides for itself whether
+/// the note fits: see [`title_note_fits`].
+fn conversation_title(app: &App, width: u16) -> Line<'static> {
     let notes = format!("{}{}", search_note(app), selection_note(app));
     let total = app.conversation.window.len();
-    if total == 0 {
-        return format!(" Conversation{notes} ");
-    }
+    let count = if total == 0 {
+        String::new()
+    } else {
+        format!(" ({}/{total})", app.vim.cursor() + 1)
+    };
+    let head = format!(" Conversation{count}{notes}");
 
-    format!(" Conversation ({}/{total}){notes} ", app.vim.cursor() + 1)
+    // Dropped whole rather than cut, which is the one outcome the design refuses:
+    // a half-written `· typ` is worse than no note, and this is the only note that
+    // is not about the reader's own view.
+    let mut spans = vec![Span::raw(head.clone())];
+    if let Some(note) = typing_note(app)
+        && title_note_fits(&head, note, width)
+    {
+        spans.push(Span::styled(note, app.theme.text_dim));
+    }
+    // The panel's title is padded on both sides rather than starting hard against
+    // the corner, so the closing pad is here rather than at the end of the last
+    // note: with no notes at all there is nothing to pad after.
+    spans.push(Span::raw(" "));
+
+    Line::from(spans)
+}
+
+/// Whether `title` and `note` together fit the panel's top border.
+///
+/// Measured rather than left to the renderer, because ratatui truncates a title
+/// that overruns and a cut note is the one thing the design refuses. The margin
+/// is the same one the design's own frame uses: the corner, the dash, the space
+/// either side of the title and the closing corner, so the check answers the same
+/// question at every terminal size rather than only at the widths its scenes were
+/// drawn at.
+fn title_note_fits(title: &str, note: &str, width: u16) -> bool {
+    u16::try_from(title.chars().count() + note.chars().count())
+        .is_ok_and(|needed| needed <= width.saturating_sub(TITLE_MARGIN))
+}
+
+/// The columns a panel's title cannot use: the two corners, the dash after the
+/// first, and the space either side of the title.
+///
+/// The same figure the design's frame subtracts, so a note this keeps is a note
+/// the design would have drawn and one it drops is one it would not.
+const TITLE_MARGIN: u16 = 5;
+
+/// What the title says about the peer, if they are typing.
+///
+/// A whole note, joiner included, so the ink the design gives it covers the whole
+/// of it. Pure: liveness is [`App::peer_is_typing`], which is a deadline being
+/// set rather than a clock being read — a frame cannot expire the note, because
+/// the loop does that on its tick.
+fn typing_note(app: &App) -> Option<&'static str> {
+    app.peer_is_typing().then_some(" · typing")
 }
 
 /// What the title says about a search, if one is running.
@@ -383,7 +439,13 @@ fn message_row<'m>(
             // base level is the message's, and a row of an all-neutral message
             // carries no evidence of its own.
             let base = bidi::base_direction(message.display_body());
-            let pieces = bidi::visual_row(&message.display_body()[range.clone()], base);
+            // `visual_row_in`, and not `visual_row` over the row's own slice: the
+            // chunks are slices of the **text**, and `spans_permuted` slices it
+            // with them. Ranges counted from the row's start would be the wrong
+            // bytes of every row that does not begin at zero — which is every row
+            // of a wrapped message but the first, and the whole row would paint
+            // nothing rather than paint itself wrong.
+            let pieces = bidi::visual_row_in(message.display_body(), range.clone(), base);
             spans.extend(text_row::spans_permuted(&row, &pieces));
         }
     }
@@ -511,16 +573,19 @@ fn render_scrollbar(app: &App, area: Rect, frame: &mut Frame<'_>, view: &rows::S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::App;
+    use crate::app::JumpKind;
+    use crate::app::{App, TYPING_FOR};
     use crate::theme::Theme;
     use crate::wrap::columns;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use domain::message::MediaKind;
     use domain::selection::Mark;
+    use domain::updates::UpdateEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::style::Color;
+    use std::time::Instant;
 
     /// The theme's own values, so a palette change does not have to touch a test.
     ///
@@ -1252,6 +1317,80 @@ mod tests {
         );
     }
 
+    /// Every row of a wrapped right-to-left message paints its own text, in the
+    /// order it is read — including the rows that do not begin at the start of
+    /// the message.
+    ///
+    /// The defect this pins: a permuted row is painted from chunks that are
+    /// slices of the **message**, so a row's chunks have to carry offsets into
+    /// the message rather than into themselves. Counted from the row, every chunk
+    /// of every row but the first was the wrong bytes, the panel's own
+    /// whole-row check rejected them, and the row painted **nothing** — so a long
+    /// right-to-left message lost everything after its first row and said so with
+    /// a blank screen rather than with a visible fault.
+    ///
+    /// Read off the screen, one row at a time, and against the row ranges the
+    /// panel's own layout cut: the assertion that matters is that a row whose
+    /// `start` is not zero still has its glyphs, and that they are the glyphs of
+    /// *that* row.
+    #[test]
+    fn a_wrapped_right_to_left_message_paints_every_row_of_it() {
+        // Long enough to wrap, and one-directional throughout, so each row is one
+        // reversed run and the drawn order is the reverse of the stored one.
+        const LONG: &str = "שלום עולם ועוד כמה מילים כדי למלא את השורה במלואה";
+
+        let app = showing(vec![at(1, 0, false, LONG)]).with_bidi(BidiMode::Visual);
+        let screen = screen(&app, 80, 24);
+        let message = app
+            .conversation
+            .window
+            .get(0)
+            .expect("the fixture put one message in the window");
+        let rows_of_it = crate::rows::message_rows(
+            &app,
+            message,
+            crate::rows::group_of(&app, 0),
+            app.body_width(),
+        );
+
+        assert!(
+            rows_of_it.len() > 1,
+            "the fixture wraps, or this proves nothing: {rows_of_it:?}"
+        );
+        assert!(
+            rows_of_it[1].start > 0,
+            "and its second row does not begin at zero, which is the case that broke: \
+             {rows_of_it:?}"
+        );
+
+        // The sender tag is the first row's alone, so the text of every row after it
+        // begins a gutter earlier than the first row's does.
+        let tagged_x = text_column(&screen, FIRST, "them");
+
+        for (index, range) in rows_of_it.iter().enumerate() {
+            let y = FIRST + u16::try_from(index).expect("a row of a message fits a frame");
+            let text_x = if index == 0 { tagged_x } else { BODY_X };
+            let expected: String = LONG[range.clone()]
+                .chars()
+                .filter(|c| c.is_alphabetic())
+                .rev()
+                .collect();
+            let drawn: String = body_cells(&screen, y)
+                .iter()
+                .filter(|(x, _)| *x >= text_x)
+                .filter(|(_, symbol)| !symbol.is_empty() && symbol.chars().all(char::is_alphabetic))
+                .map(|(_, symbol)| symbol.as_str())
+                .collect();
+
+            assert_eq!(
+                drawn,
+                expected,
+                "row {index} ({range:?}) is drawn in the order it is read: {:?}",
+                body_row(&screen, y)
+            );
+        }
+    }
+
     // ---- right-to-left: the baseline ------------------------------------
 
     /// A right-to-left message is laid out left-to-right, because no reorder
@@ -1362,6 +1501,19 @@ mod tests {
     /// it, because what is under test is what a reader's keystroke puts on the
     /// screen.
     fn jumping() -> App {
+        let mut app = unread_out_of_reach();
+
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+
+        app
+    }
+
+    /// The application [`jumping`] starts from: the conversation runs to 20 and
+    /// the window stops at 5, so there is something to be taken to and nothing
+    /// has asked to be taken to it yet.
+    fn unread_out_of_reach() -> App {
         use std::borrow::Cow;
 
         use domain::chat::{Chat, ChatKind};
@@ -1396,9 +1548,49 @@ mod tests {
                 .collect(),
         );
 
-        for _ in 0..2 {
-            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        }
+        app
+    }
+
+    /// The same, for a jump to the message a reply quotes: the row in the
+    /// messages says which jump this is, because `Jumping to first unread…`
+    /// would be a claim about a fetch the reader never asked for.
+    #[test]
+    fn a_reply_jump_is_announced_as_a_reply_jump() {
+        let app = reply_jumping();
+        assert_eq!(
+            app.pending_jump().map(|jump| jump.kind),
+            Some(JumpKind::Reply)
+        );
+
+        let screen = screen(&app, 80, 10);
+
+        assert!(
+            row(&screen, 1).contains("Jumping to the quoted message"),
+            "the panel's first row: {}",
+            row(&screen, 1)
+        );
+    }
+
+    /// An application with a reply whose quote is nowhere near what is loaded,
+    /// with the reader asking to be taken to it.
+    fn reply_jumping() -> App {
+        use domain::message::Message;
+
+        let mut app = unread_out_of_reach();
+        // The reply is the newest message on show and it quotes 19, which the
+        // window stops well short of.
+        app.apply_latest(
+            app.conversation
+                .window
+                .iter()
+                .map(|message| Message {
+                    reply_to: Some(19),
+                    ..message.clone()
+                })
+                .collect(),
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
 
         app
     }
@@ -3045,6 +3237,170 @@ mod tests {
             row(&screen, 0).contains("· 2 selected"),
             "the title carries the count: {}",
             row(&screen, 0)
+        );
+    }
+
+    // ---- the peer is typing ----------------------------------------------
+
+    /// The sample conversation with the peer typing in it.
+    ///
+    /// Built through [`App::apply_update`] rather than by setting the deadline,
+    /// because the event is the only thing that arms it and a fixture that
+    /// reached past that would test a state the program cannot produce.
+    fn peer_typing() -> App {
+        let mut app = App::mock();
+        let redraw = app.apply_update(&UpdateEvent::PeerTyping {
+            chat_id: mock_chat_id(),
+            typing: true,
+        });
+        assert!(redraw, "the note is on the title now, so a redraw is owed");
+        assert!(app.peer_is_typing(), "and the fixture is a typing one");
+
+        app
+    }
+
+    /// The ink the design gives furniture, which is what the typing note is.
+    fn dim_fg() -> Color {
+        theme()
+            .text_dim
+            .fg
+            .expect("the dim ink is a colour rather than a default")
+    }
+
+    /// Where the note begins on the title, given the part drawn before it.
+    ///
+    /// Counted from the panel's own border rather than hard-coded, so the
+    /// assertion is about the note's ink and not about a column.
+    fn note_x(title: &str) -> u16 {
+        BODY_X + u16::try_from(title.chars().count()).expect("a title fits a terminal")
+    }
+
+    #[test]
+    fn the_peer_typing_is_said_on_the_panel_title() {
+        let title = " Conversation (10/10)";
+        let screen = screen(&peer_typing(), 80, 24);
+
+        assert!(
+            row(&screen, 0).contains("· typing"),
+            "the note is on the title: {}",
+            row(&screen, 0)
+        );
+        let ink = cell(&screen, note_x(title), 0);
+        assert_eq!(
+            ink.fg,
+            dim_fg(),
+            "and it is dim: it is the peer's state, not the reader's ({:?} at {})",
+            ink.fg,
+            ink.symbol()
+        );
+    }
+
+    /// The deadline is the only thing that ends a typing that was never
+    /// cancelled, and the loop's tick is the only thing that can pass it — so
+    /// the note is gone by the tick after it rather than by a frame of its own.
+    #[test]
+    fn the_typing_note_is_gone_once_its_deadline_has_passed() {
+        let mut app = peer_typing();
+
+        assert!(
+            !app.expire_typing(Instant::now()),
+            "the deadline has not been reached yet"
+        );
+        assert!(
+            app.expire_typing(Instant::now() + TYPING_FOR),
+            "and it has now, so a redraw is owed"
+        );
+        assert!(!app.peer_is_typing());
+
+        let screen = screen(&app, 80, 24);
+        assert!(
+            !row(&screen, 0).contains("· typing"),
+            "the note went whole rather than lingering: {}",
+            row(&screen, 0)
+        );
+    }
+
+    /// A cancel is the peer saying they stopped, so it ends the note there and
+    /// then rather than waiting out a deadline nothing will confirm.
+
+    #[test]
+    fn a_cancelled_typing_ends_the_note_before_its_time_is_up() {
+        let mut app = peer_typing();
+
+        let redraw = app.apply_update(&UpdateEvent::PeerTyping {
+            chat_id: mock_chat_id(),
+            typing: false,
+        });
+
+        assert!(redraw, "the note was on the title, so it is owed a redraw");
+        assert!(!app.peer_is_typing());
+        assert!(
+            !row(&screen(&app, 80, 24), 0).contains("· typing"),
+            "and it is gone: {}",
+            row(&screen(&app, 80, 24), 0)
+        );
+    }
+
+    /// A conversation the reader is not in has no title to carry the note, and
+    /// the counter would be zeroed on their arrival anyway — so the event is
+    /// dropped rather than remembered for a chat nobody is shown.
+    #[test]
+    fn typing_in_another_conversation_changes_nothing() {
+        let mut app = App::mock();
+        let elsewhere = app
+            .chats()
+            .iter()
+            .map(|chat| chat.id)
+            .find(|id| *id != mock_chat_id())
+            .expect("the sample account holds more than one conversation");
+
+        let redraw = app.apply_update(&UpdateEvent::PeerTyping {
+            chat_id: elsewhere,
+            typing: true,
+        });
+
+        assert!(!redraw, "nothing about this conversation moved");
+        assert!(!app.peer_is_typing());
+        assert!(
+            !row(&screen(&app, 80, 24), 0).contains("· typing"),
+            "and the open conversation's title is untouched: {}",
+            row(&screen(&app, 80, 24), 0)
+        );
+    }
+
+    /// The title full is the one case the note yields in, and it yields whole:
+    /// `· 2 selected · 5 match(es)` is the reader's own view, and a half-written
+    /// `· typ` would be worse than no note at all.
+    #[test]
+    fn a_full_title_drops_the_typing_note_whole() {
+        let mut app = showing(vec![
+            at(10, 0, false, "benchmarks are green"),
+            at(11, 60, false, "ship it"),
+        ]);
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "ship");
+        press(&mut app, KeyCode::Enter);
+        selecting_chars(&mut app, 10, 0, 9);
+        assert!(
+            app.apply_update(&UpdateEvent::PeerTyping {
+                chat_id: mock_chat_id(),
+                typing: true,
+            }),
+            "the note is on the title now"
+        );
+        assert!(app.peer_is_typing(), "the fixture is a typing one");
+
+        let screen = screen(&app, 80, 24);
+        let title = row(&screen, 0);
+
+        assert!(title.contains("· 9 selected"), "the title is full: {title}");
+        assert!(
+            title.contains("1 match(es)"),
+            "with both notes on it: {title}"
+        );
+        assert!(
+            !title.contains("typing"),
+            "and the note that is not the reader's is gone rather than cut: {title}"
         );
     }
 

@@ -103,7 +103,9 @@ Working today:
   stored in the OS keyring (or a file, per `session_path`), written atomically, and
   a stored session that cannot be read is discarded at launch: the status line says
   so and the sign-in field opens, rather than the launch ending at an `offline:`
-  the reader can do nothing with.
+  the reader can do nothing with. A launch that does end at `offline:` has asked
+  for the chat list three times and waited between them, naming the reason, the
+  wait and the count on the status line each time — and `:retry` asks again.
 - **Chat List:** private chats only, filtered to exclude bots, groups and
   channels, with unread counts and last-message previews. `j`/`k` move the
   highlight, `gg`/`G` reach both ends, and `Enter` opens the highlighted
@@ -113,11 +115,21 @@ Working today:
   drawn in `Theme::border_focused`; `h`/`l` and `Tab` move between the two panes,
   and `Ctrl+w` steps back out of the line.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
-  screenful, `gg` to the first unread, `n` to cycle search matches. Messages
-  soft-wrap to the panel's width — at whitespace where there is whitespace to
-  break at, and at the panel's edge where there is not — so a message is as many
-  rows as its text needs. Everything that measures the conversation counts those
-  rows rather than messages: the slice, the scrollbar beside it, a page, and the
+  screenful, `gg` to the first unread, `n` to cycle search matches. `gd` on a
+  message that quotes another goes to the quoted message: a cursor move when it
+  is loaded, and otherwise a page fetched around it that replaces the window,
+  with `Jumping to the quoted message…` said while that page is in flight.
+  `Ctrl-o` goes back to the message the jump left and `Ctrl-i` forward again —
+  a return to a message the window no longer holds is fetched the same way, and
+  says `Jumping back…` or `Jumping forward…`. While a page is in flight only
+  `Esc` answers, and it leaves the reader where they were. `gd` on a message
+  that quotes nothing refuses with `Not a reply: gd jumps to the message a reply
+  quotes.`, and a quote the client cannot fetch at all with `That message is no
+  longer available.` Messages soft-wrap to the panel's width — at whitespace
+  where there is whitespace to break at, and at the panel's edge where there is
+  not — so a message is as many rows as its text needs. Everything that measures
+  the conversation counts those rows rather than messages: the slice, the
+  scrollbar beside it, a page, and the
   `FETCH_MARGIN` (20) that asks for a page. `[you]`/`[them]` and a reply's quoted
   target are on the first row of a message, `[sending…]`/`[failed: …]` on the
   last.
@@ -142,7 +154,16 @@ Working today:
   `TestBackend` can assert, which the real terminal's could not.
   A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
   candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
-  keeps typing into the draft. Reply with `r`, edit with `e`.
+  keeps typing into the draft. Reply with `r`, edit with `e` — and since a
+  reply carries the message it quotes, `gd` on one goes to that message and
+  `Ctrl-o` brings the reader back.
+- **Text direction:** the draft in the bar is drawn by the same rules as an
+  incoming message. In the default mode the row is emitted as it is stored and the
+  terminal's shaper reverses a right-to-left run; in the opt-in `BidiMode::Visual`
+  (`bidi = "visual"`) this program applies the permutation instead, for the whole
+  draft and every row of a wrapped one, and the caret and the selection are marked
+  on the cells their logical positions land on. The `: ` and `/` prefix is chrome
+  and is never permuted.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
   which side the messages are from, and says how many were left out because they
@@ -151,6 +172,12 @@ Working today:
   reported as how many went through rather than as a plain failure.
 - **Search:** `/` searches the loaded window, then asks the server and prefers
   its answer. `n` repeats or cycles.
+- **Typing indicator:** the conversation title grows a dim `· typing` note while
+  the peer is composing one. It ends when they cancel, when their message lands,
+  or six seconds after the last sign of it, and it is furniture on the title
+  rather than a message row, so it never displaces a message; when the title has
+  no room it is dropped whole rather than truncated. Advertising our own typing is
+  not built.
 - **Yank / paste:** `y` in Visual puts the selection in a register — the selected
   characters for a text selection, one line per message oldest-first for a set of
   them — and `p` in Normal opens the line with it. A yank is also offered to the
@@ -159,12 +186,15 @@ Working today:
   another conversation. `p` is not bound in Visual. The line keeps its own
   internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
   registers are deliberately not shared, because their formats differ.
-- **Commands:** `:q`/`:quit` and `:chat <id>`. `q` in the conversation and `:q`/
-  `:quit` both raise `Quit televim? (y/n)` first — the same screen-wide
-  confirmation a deletion uses — because `q` is one keystroke away from a key
-  that types nothing else. `y` quits, `n` or `Esc` stays. `Ctrl-C` does **not**
-  ask: it is the way out when the program is wedged, and a terminal that is not
-  answering cannot draw the question either.
+- **Commands:** `:q`/`:quit`, `:chat <id>`, `:settings`, `:signin` and `:retry`.
+  `:retry` re-runs the bring-up — the client, the chat list, the feed — and is how
+  a launch that exhausted its three chat-list attempts is cleared without a
+  restart; while a bring-up is already in flight it says so and does nothing.
+  `q` in the conversation and `:q`/`:quit` both raise `Quit televim? (y/n)` first
+  — the same screen-wide confirmation a deletion uses — because `q` is one
+  keystroke away from a key that types nothing else. `y` quits, `n` or `Esc`
+  stays. `Ctrl-C` does **not** ask: it is the way out when the program is wedged,
+  and a terminal that is not answering cannot draw the question either.
 
 Not built, and named here so nobody reads the roadmap below as current:
 
@@ -178,8 +208,8 @@ Not built, and named here so nobody reads the roadmap below as current:
   `d` with no second press to distinguish. `p` is unbound in Visual — replacing a
   selection with the reader's own text is a destructive reading of a key that
   looks additive.
-- **`:w`** — not a command. The commands are `q`/`quit`, `chat <id>`, `settings`
-  and `signin`.
+- **`:w`** — not a command. The commands are `q`/`quit`, `chat <id>`, `settings`,
+  `signin` and `retry`.
 - **Word motions *behind an operator* on non-ASCII text in the input** — refused
   with a message. `vim-line`'s word motions index bytes rather than characters,
   and behind `d`/`c`/`y` the motion and the slice to apply it happen inside one

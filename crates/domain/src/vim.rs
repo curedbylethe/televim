@@ -20,6 +20,8 @@ pub enum Motion {
     Last,
     NextMatch,
     PrevMatch,
+    /// `gd`: the message the one under the cursor quotes.
+    GotoReply,
 }
 
 /// A motion *within* one message's text, rather than between messages.
@@ -346,13 +348,20 @@ impl VimState {
     /// otherwise hide behind an unchanged cursor. `n` and `N` are the same case
     /// for a different reason: a match is a place in a conversation, which this
     /// state cannot see, so it reports the motion and leaves the walking to the
-    /// caller.
+    /// caller. `gd` is the same case for the same reason: which message the one
+    /// under the cursor quotes is a fact about the conversation.
     pub fn handle_char(&mut self, c: char) -> Option<Motion> {
         if self.pending_g {
             self.pending_g = false;
             if c == 'g' {
                 self.apply_motion(Motion::First);
                 return Some(Motion::First);
+            }
+            // Reported and not answered, like the two match motions: which
+            // message this one quotes is a fact about the conversation, and this
+            // state holds nothing but positions.
+            if c == 'd' {
+                return Some(Motion::GotoReply);
             }
             return None;
         }
@@ -383,7 +392,7 @@ impl VimState {
             // The two match motions are reported, not answered: what the next
             // match *is* is a list this state does not hold. The caller walks
             // its own list and moves the cursor to the message it names.
-            Motion::NextMatch | Motion::PrevMatch => {}
+            Motion::NextMatch | Motion::PrevMatch | Motion::GotoReply => {}
         }
     }
 
@@ -482,6 +491,54 @@ mod tests {
         assert_eq!(v.cursor(), before, "the matches are the caller's to walk");
         assert_eq!(v.handle_char('N'), Some(Motion::PrevMatch));
         assert_eq!(v.cursor(), before);
+    }
+
+    /// `gd` is reported rather than answered for the same reason: the quoted
+    /// message is a place in the conversation, and this state holds no
+    /// conversation. The cursor must not move on its own for it.
+    #[test]
+    fn gd_reports_the_quoted_message_without_asking_where_it_is() {
+        let mut v = VimState::new(10);
+        let before = v.cursor();
+
+        assert_eq!(v.handle_char('g'), None, "the first `g` moves nothing yet");
+        assert_eq!(v.handle_char('d'), Some(Motion::GotoReply));
+        assert_eq!(v.cursor(), before, "the quote is the caller's to look up");
+    }
+
+    /// The prefix is a prefix: a character that is not the second key of a
+    /// sequence ends it, so `g` then `d` then `g` then `d` is two jumps rather
+    /// than one `gg` in the middle of them.
+    #[test]
+    fn a_character_that_is_not_the_second_key_clears_the_prefix() {
+        let mut v = VimState::new(10);
+        v.handle_char('G');
+
+        v.handle_char('g');
+        assert_eq!(v.handle_char('x'), None);
+        v.handle_char('g');
+        assert_eq!(
+            v.handle_char('d'),
+            Some(Motion::GotoReply),
+            "the `g` before `x` did not survive to make `gd` here"
+        );
+
+        v.handle_char('g');
+        assert_eq!(
+            v.handle_char('g'),
+            Some(Motion::First),
+            "and the sequence starts over"
+        );
+    }
+
+    /// `d` on its own is the delete key, and the motion table does not get to
+    /// take it: only a `d` that ends a `g` is a jump to a quote.
+    #[test]
+    fn a_lone_d_reports_no_motion() {
+        let mut v = VimState::new(10);
+
+        assert_eq!(v.handle_char('d'), None);
+        assert_eq!(v.cursor(), 0);
     }
 
     #[test]

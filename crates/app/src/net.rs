@@ -78,6 +78,16 @@ const PAGE: usize = 100;
 /// for a failure that will pass on its own.
 const RETRY: Duration = Duration::from_secs(5);
 
+/// How many times the launch chat-list fetch is asked for before the bring-up is
+/// called a failure.
+///
+/// A bound rather than an open loop because every attempt is another request
+/// Telegram may refuse: an unbounded retry against a session it has decided
+/// against is a client that never says it is offline. Three is the same bound
+/// the two-factor password gets, and it buys two waits — a transient refusal
+/// and a flood wait that fits inside one of them.
+const CHAT_LIST_ATTEMPTS: u8 = 3;
+
 /// Something that happened away from the keyboard.
 pub enum Event {
     /// The machine carries no application credentials, so there is nothing to
@@ -165,6 +175,16 @@ pub enum Event {
     /// Carries the reason, and the chain behind it: the screen has one line to
     /// say what went wrong, and the most specific answer is the useful one.
     Offline(anyhow::Error),
+
+    /// The launch chat-list fetch failed and is being asked again.
+    ///
+    /// Its own event rather than a second [`Event::Offline`] because nothing has
+    /// failed yet: the screen has one line to spend, and the reader watching a
+    /// launch they expect to end in a chat list is better told that the wait is
+    /// a wait with a reason and an end than shown an `offline:` they may not be
+    /// able to clear. The [`Event::Offline`] behind it comes only once the
+    /// attempts are spent.
+    ChatListRetrying(ChatListRetry),
 
     /// A page came back, or the fetch that asked for it failed.
     History {
@@ -294,6 +314,30 @@ pub enum Event {
     },
 }
 
+/// What a chat-list retry in progress has to say about itself.
+///
+/// One type rather than four fields on the event, because the whole of it is one
+/// sentence: none of the reason, the wait, or the count is read apart from the
+/// others, and a reader told the client is retrying is owed all three at once.
+pub struct ChatListRetry {
+    /// Why the attempt that just failed failed.
+    reason: ProtoError,
+
+    /// How long until the next attempt, which is [`backoff`]'s answer: Telegram's
+    /// own wait when it gave one, the fixed `RETRY` otherwise.
+    delay: Duration,
+
+    /// The attempt that failed, of `attempts` in all.
+    ///
+    /// Counted as attempts *made*, so the last one to be reported is the second
+    /// — the third either succeeds, and its [`Event::Ready`] is the answer, or
+    /// fails, and its `offline:` is.
+    attempt: u8,
+
+    /// The bound those attempts are counted against.
+    attempts: u8,
+}
+
 /// What the loop knows about the network between events.
 #[derive(Default)]
 pub struct State {
@@ -332,6 +376,21 @@ pub struct State {
 
     /// The channel bring-up answers on. Read only beside [`State::cfg`].
     tx: Option<UnboundedSender<AppEvent>>,
+
+    /// Whether a bring-up is in flight, so a second one is not started over it.
+    ///
+    /// Set where a bring-up is *issued* rather than where it is wanted, because
+    /// the window that matters is the whole of one — including the retry loop's
+    /// own waits, where a reader's `:retry` would otherwise start a second client
+    /// beside the first and let two of them fight over one update relay. Cleared
+    /// by the two events that end a bring-up, [`Event::Ready`] and
+    /// [`Event::Offline`], because those are the only answers it can come back
+    /// with.
+    ///
+    /// `true` from [`State::new`]: the state that can bring the client up is
+    /// built immediately before the launch bring-up is issued, so the launch
+    /// needs no separate marking.
+    bringing_up: bool,
 }
 
 impl State {
@@ -346,6 +405,10 @@ impl State {
         Self {
             cfg: Some(cfg),
             tx: Some(tx),
+            // The launch bring-up is issued immediately after this is built, and
+            // it has to be counted as in flight before the reader can ask for a
+            // second one.
+            bringing_up: true,
             ..Self::default()
         }
     }
@@ -478,10 +541,33 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         return Ok(());
     }
 
-    let chats = client
-        .fetch_private_chats()
-        .await
-        .context("fetching the chat list")?;
+    // The one fetch the launch cannot do without, and the one request most
+    // likely to be refused on the way in: Telegram rate-limits a client that has
+    // been off for a while, and a single refusal would otherwise throw the
+    // reader a terminal `offline:` for something that passes on its own. So it
+    // is asked again while there is budget left, saying so each time, and only
+    // the last refusal is a failure of bring-up. Everything after it — the
+    // account, the feed, the `Ready` — still runs exactly once, on the attempt
+    // that worked.
+    let mut attempts_used: u8 = 0;
+    let chats = loop {
+        match client.fetch_private_chats().await {
+            Ok(chats) => break chats,
+            Err(error) => {
+                let Some(delay) = chat_list_retry(attempts_used, &error) else {
+                    return Err(anyhow::Error::new(error).context("fetching the chat list"));
+                };
+                attempts_used += 1;
+                let _ = tx.send(AppEvent::Net(Event::ChatListRetrying(ChatListRetry {
+                    reason: error,
+                    delay,
+                    attempt: attempts_used,
+                    attempts: CHAT_LIST_ATTEMPTS,
+                })));
+                tokio::time::sleep(delay).await;
+            }
+        }
+    };
     let account = read_account(&client).await;
 
     // The list is fetched before the feed is taken. Resolving what arrived while
@@ -622,6 +708,10 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // frame cannot expire it: `status_text` is read from a shared reference.
     // This runs every pass, so it is the natural clock.
     app.expire_status(Instant::now());
+    // The peer's typing note expires the same way and for the same reason: it is
+    // state an event set, and the loop's tick is the only thing that can take it
+    // back, because a frame is drawn from a shared reference.
+    app.expire_typing(Instant::now());
 
     // Nothing is open, so there is no conversation for a cursor to describe —
     // nor a jump to be waiting on, because closing a conversation forgets one.
@@ -637,6 +727,18 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     if let Some(index) = app.take_pending_chat(Instant::now()) {
         app.select_chat(index);
         state.history.cursor = None;
+    }
+
+    // Read here, before the client is looked up, and not as an action: the state a
+    // retry is asked for in is the state with no client, where the action drain
+    // below never runs.
+    if app.take_retry_request() {
+        if state.bringing_up {
+            app.flash("already trying to connect");
+        } else if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+            state.bringing_up = true;
+            spawn_bring_up(cfg, tx);
+        }
     }
 
     let Some(client) = state.client.clone() else {
@@ -1093,6 +1195,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         } => {
             apply_ready_to_screen(app, state, chats, account, session_store);
             state.client = Some(client);
+            state.bringing_up = false;
             // The client is there, so the sign-in flow's `waiting` flag means
             // what it says: a request a client is carrying.
             app.set_client_available(true);
@@ -1138,18 +1241,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             app.set_contact(peer_id, result.map_err(|error| format!("{error:#}")));
         }
 
-        // The panel is told too, not only the status line. A status is a flash:
-        // it is gone within seconds, and a reader who opens the profile a minute
-        // later must still be told why it is empty rather than shown a blank
-        // panel they cannot tell from a broken one.
-        Event::Offline(reason) => {
-            let reason = format!("{reason:#}");
-            app.set_account(Err(reason.clone()));
-            app.status = format!("offline: {reason}");
-            // No client to carry anything, so an in-flight sign-in is not in
-            // flight: the flag would only keep the panel saying "Checking…".
-            app.set_client_available(false);
-        }
+        Event::Offline(reason) => apply_offline(app, state, &reason),
+
+        Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
 
         Event::LoggedOut { result } => {
             apply_logged_out(app, state, result);
@@ -1162,6 +1256,10 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // `Err(String::new())`, and `apply_ready_to_screen` is what opens
             // the phone field off the back of it.
             if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+                // Counted as in flight from here rather than from the `Ready` it
+                // will send, so a `:retry` typed while it is on its way is refused
+                // rather than answered with a second client.
+                state.bringing_up = true;
                 spawn_bring_up(cfg, tx);
             }
         }
@@ -1293,6 +1391,26 @@ fn apply_history(
             }
         }
     }
+}
+
+/// What a bring-up that failed says, everywhere it has to be said.
+///
+/// The panel is told as well as the status line. A status is a flash: it is gone
+/// within seconds, and a reader who opens the profile a minute later must still
+/// be told why it is empty rather than shown a blank panel they cannot tell from
+/// a broken one.
+///
+/// **This also ends the bring-up**, which is why it takes the state: a bring-up
+/// that answered is not in flight, and a `:retry` from the `offline:` screen it
+/// just wrote is a retry of nothing.
+fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
+    let reason = format!("{reason:#}");
+    app.set_account(Err(reason.clone()));
+    app.status = format!("offline: {reason}");
+    // No client to carry anything, so an in-flight sign-in is not in flight: the
+    // flag would only keep the panel saying "Checking…".
+    app.set_client_available(false);
+    state.bringing_up = false;
 }
 
 /// Puts a client that is up on screen: its conversations, its store, and its
@@ -1613,6 +1731,35 @@ fn backoff(error: &ProtoError) -> Duration {
     }
 }
 
+/// What a chat-list retry in progress says on the status line.
+///
+/// Persistent, not a flash: the wait is the second-longest thing that happens
+/// during a launch, and a reader who looks away and back must not find an empty
+/// status line and no client — which is the `offline:` screen it is not yet. Both
+/// the wait and the count are here because a wait with no visible end of it is
+/// the thing this sentence exists to prevent.
+fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
+    // A wait shorter than a second still has to be announced as one: "retrying in
+    // 0s" reads as no retry at all.
+    let seconds = retry.delay.as_secs().max(1);
+    app.status = format!(
+        "fetching the chat list failed ({:#}); retrying in {}s (attempt {}/{})",
+        retry.reason, seconds, retry.attempt, retry.attempts
+    );
+}
+
+/// Whether the launch chat-list fetch may be asked again, and how long to wait.
+///
+/// `None` once [`CHAT_LIST_ATTEMPTS`] attempts have been spent, which is the one
+/// decision this makes and the only reason the bring-up loop is a loop rather
+/// than a recursion: past the bound the refusal is a failure of bring-up, and it
+/// goes back up as one. The wait is [`backoff`]'s — Telegram's own when it asked
+/// for one, the fixed `RETRY` otherwise — because a chat list refused for being
+/// asked too often has exactly the same answer as a page that was.
+fn chat_list_retry(attempts_used: u8, error: &ProtoError) -> Option<Duration> {
+    (attempts_used < CHAT_LIST_ATTEMPTS).then(|| backoff(error))
+}
+
 /// Whether a failure is Telegram asking the client to wait before trying again.
 fn is_flood_wait(error: &ProtoError) -> bool {
     matches!(
@@ -1648,6 +1795,7 @@ mod tests {
     use super::*;
     use tui::app::AccountState;
     use tui::app::CHAT_SWITCH_DELAY;
+    use tui::app::JumpKind;
 
     /// The conversation the sample messages belong to.
     const CHAT: i64 = 7;
@@ -1811,6 +1959,7 @@ mod tests {
         let jump = Jump {
             peer_id: CHAT,
             target_id: 19,
+            kind: JumpKind::Unread,
         };
         assert_eq!(app.pending_jump(), Some(jump), "counting back two from 20");
         assert_eq!(
@@ -1828,6 +1977,137 @@ mod tests {
             Wanted::Nothing,
             "one jump at a time"
         );
+    }
+
+    /// A jump to the message a reply quotes takes the same road as `gg`'s, and
+    /// the page that comes back replaces the window as it does for any other
+    /// jump: one fetch path, asked for by two keys.
+    #[test]
+    fn a_reply_jump_reaches_the_network_and_replaces_the_window() {
+        let mut app = app_with_unread_out_of_reach(2);
+        let quotes: Vec<Message> = messages(CHAT, 1..=8)
+            .into_iter()
+            .map(|mut message| {
+                message.reply_to = Some(19);
+                message
+            })
+            .collect();
+        app.apply_latest(quotes);
+        for key in [KeyCode::Char('g'), KeyCode::Char('d')] {
+            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+        }
+
+        let jump = Jump {
+            peer_id: CHAT,
+            target_id: 19,
+            kind: JumpKind::Reply,
+        };
+        assert_eq!(app.pending_jump(), Some(jump));
+        assert_eq!(
+            wanted(&app, opened(CHAT), Instant::now()),
+            Wanted::Jump(jump),
+            "a reply the client does not hold is a fetch like any other"
+        );
+
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        assert_eq!(app.conversation.window.len(), 5, "the window was replaced");
+        assert_eq!(
+            app.conversation
+                .window
+                .get(app.vim.cursor())
+                .map(|message| message.id),
+            Some(19),
+            "and the reader is on the message that was quoted"
+        );
+    }
+
+    /// `Ctrl-o` after a jump that replaced the window is a fetch like any
+    /// other: the mark it walks to is a message the window no longer holds, so
+    /// the page has to come back for it.
+    #[test]
+    fn a_back_jump_reaches_the_network_and_lands() {
+        let mut app = app_with_unread_out_of_reach(2);
+        let quotes: Vec<Message> = messages(CHAT, 1..=8)
+            .into_iter()
+            .map(|mut message| {
+                message.reply_to = Some(19);
+                message
+            })
+            .collect();
+        app.apply_latest(quotes);
+        for key in [KeyCode::Char('g'), KeyCode::Char('d')] {
+            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+        }
+        let replied = app
+            .pending_jump()
+            .expect("the reader asked to be taken to the message it quoted");
+        apply(
+            &mut app,
+            &mut State {
+                history: opened(CHAT),
+                ..State::default()
+            },
+            Event::Jumped {
+                jump: replied,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+
+        let back = Jump {
+            peer_id: CHAT,
+            target_id: 8,
+            kind: JumpKind::Back,
+        };
+        assert_eq!(
+            app.pending_jump(),
+            Some(back),
+            "the message the reader left is not in the window that replaced it"
+        );
+        assert_eq!(
+            wanted(&app, opened(CHAT), Instant::now()),
+            Wanted::Jump(back),
+            "so the page around it is fetched like any other jump's"
+        );
+
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump: back,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 1..=8)),
+            },
+        );
+
+        assert_eq!(
+            app.conversation
+                .window
+                .get(app.vim.cursor())
+                .map(|message| message.id),
+            Some(8),
+            "and the reader is back on the message they left"
+        );
+        assert_eq!(app.pending_jump(), None);
     }
 
     /// A jump's answer is reported to the cursor the conversation is described
@@ -1896,6 +2176,74 @@ mod tests {
         )));
 
         assert_eq!(backoff(&error), RETRY);
+    }
+
+    // ---- what a chat-list failure costs ----------------------------------
+
+    #[test]
+    fn a_chat_list_refusal_waits_what_telegram_asked_for() {
+        let flood = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+
+        assert_eq!(chat_list_retry(0, &flood), Some(Duration::from_secs(31)));
+        assert_eq!(
+            chat_list_retry(CHAT_LIST_ATTEMPTS - 1, &flood),
+            Some(Duration::from_secs(31)),
+            "the last attempt still gets its wait"
+        );
+    }
+
+    #[test]
+    fn a_chat_list_refusal_of_another_kind_waits_the_fixed_time() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+            "connection reset".to_owned(),
+        )));
+
+        assert_eq!(chat_list_retry(1, &error), Some(RETRY));
+    }
+
+    /// The bound is what stops the retry; the delay is never consulted again
+    /// once it is reached, however willing the error is to wait.
+    #[test]
+    fn a_chat_list_that_will_not_answer_stops_at_the_bound() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+
+        assert_eq!(chat_list_retry(CHAT_LIST_ATTEMPTS, &error), None);
+        assert_eq!(chat_list_retry(CHAT_LIST_ATTEMPTS + 1, &error), None);
+    }
+
+    #[test]
+    fn a_chat_list_being_retried_says_so_on_the_status_line() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRetrying(ChatListRetry {
+                reason: ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+                    code: 420,
+                    name: "FLOOD_WAIT".to_owned(),
+                    value: Some(31),
+                })),
+                delay: Duration::from_secs(31),
+                attempt: 1,
+                attempts: CHAT_LIST_ATTEMPTS,
+            }),
+        );
+
+        assert!(
+            app.status.contains("31s") && app.status.contains("1/3"),
+            "got {:?}",
+            app.status
+        );
     }
 
     // ---- what a fetched list means --------------------------------------
@@ -2121,7 +2469,7 @@ mod tests {
         );
     }
 
-    /// A jump the reader overrode — `G`, take me to the end instead — leaves the
+    /// A jump the reader abandoned — `Esc`, not that any more — leaves the
     /// cursor describing what is still on screen.
     #[test]
     fn an_abandoned_jump_leaves_the_cursor_alone() {
@@ -2131,7 +2479,7 @@ mod tests {
             .pending_jump()
             .expect("the reader asked to be taken to the unread messages");
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.pending_jump(), None);
 
         let mut state = State {
@@ -2235,6 +2583,93 @@ mod tests {
 
         assert!(
             app.status.starts_with("offline:") && app.status.contains("credentials"),
+            "got {:?}",
+            app.status
+        );
+    }
+
+    /// The launch bring-up is counted as in flight before it is issued: the state
+    /// that can bring the client up is built for exactly that bring-up.
+    #[test]
+    fn a_state_that_can_bring_the_client_up_starts_with_one_in_flight() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let state = State::new(Config::default(), tx);
+
+        assert!(
+            state.bringing_up,
+            "a `:retry` before the launch answered would be a second client"
+        );
+    }
+
+    /// An `offline:` is the end of a bring-up, so the retry the reader types at it
+    /// is a retry of a bring-up that has stopped.
+    #[test]
+    fn an_offline_bring_up_is_no_longer_in_flight() {
+        let mut app = App::new();
+        let mut state = State {
+            bringing_up: true,
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("connection reset")),
+        );
+
+        assert!(!state.bringing_up, "got the offline screen");
+    }
+
+    /// The request is read before the client is looked up, because the state a
+    /// retry is needed in is the state with no client — where the action drain
+    /// never runs. The bring-up is issued, which is what the guard records.
+    ///
+    /// On a runtime because that is where a bring-up can be spawned at all: it is
+    /// `tokio::spawn`, and a bring-up issued off one is a panic rather than a
+    /// request.
+    #[tokio::test]
+    async fn a_retry_request_brings_the_client_up_again() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            ..State::default()
+        };
+        app.request_retry();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(
+            state.bringing_up,
+            "nothing else sets it on this path, so this is the bring-up"
+        );
+        assert!(
+            !app.take_retry_request(),
+            "and the request was taken, so a second pass asks for nothing"
+        );
+    }
+
+    /// A bring-up already in flight — the launch, or a retry's own attempt loop —
+    /// is not restarted by a second `:retry`. The reader is told, transiently:
+    /// the refusal is about this second press, not about the state of the client.
+    #[tokio::test]
+    async fn a_retry_asked_for_during_a_bring_up_is_refused() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            bringing_up: true,
+            ..State::default()
+        };
+        app.request_retry();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(
+            app.status.contains("already trying to connect"),
             "got {:?}",
             app.status
         );

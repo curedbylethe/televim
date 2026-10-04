@@ -300,10 +300,16 @@ fn paint<'a>(row: &TextRow<'a>, pieces: &[Range<usize>]) -> Vec<Span<'a>> {
     // "the last row owns the offset one past its own end" is a question about the
     // row: with one piece the answer must stay exactly what [`caret_lands_here`]
     // says of the text, and with several there is no whole row left to ask of.
+    // It is `row.range.end` and not the row's *length*, because `caret_lands_here`
+    // compares a piece's `end` against it, and a piece's end is an offset into the
+    // text rather than a distance from where the row began. A length would only
+    // equal an offset for a row that starts at zero, so on any other row the
+    // caret at the row's end — the one a reader is most often looking at — would
+    // belong to no piece and be painted nowhere.
     let len = if pieces.len() == 1 {
         row.text.len()
     } else {
-        row.text.get(row.range.clone()).map_or(0, str::len)
+        row.range.end
     };
 
     let mut out: Vec<Span<'a>> = Vec::new();
@@ -509,6 +515,7 @@ fn push<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bidi;
     use ratatui::style::Modifier;
 
     fn theme() -> Theme {
@@ -959,6 +966,69 @@ mod tests {
             assert_eq!(
                 out[index].style.fg, theme.text.fg,
                 "a caret is never painted in a colour of its own"
+            );
+        }
+    }
+
+    /// A permuted row, with a caret on it for the first time.
+    ///
+    /// The caret is a byte offset into the **logical** row, so the piece that
+    /// carries it is the one whose logical range holds that offset — the order
+    /// the pieces are drawn in has nothing to say about it. At the row's end
+    /// there is no character left to mark, so the piece that *ends* there owns
+    /// it, on the same terms a whole row owns the byte past it. That is the
+    /// case the ownership bound is measured against the row's end for: a caret
+    /// painted by no piece is a caret nobody can see.
+    ///
+    /// The row is the text's second row rather than its first, so `range.start`
+    /// is not zero: a piece's `end` is an offset into the text, and the row's
+    /// **end** is an offset too where its length is not one.
+    #[test]
+    fn a_caret_on_a_permuted_row_is_owned_by_the_piece_whose_logical_range_holds_it() {
+        let theme = theme();
+        let text = "abc שלום עולם";
+        // The pieces of the row, in the text's own coordinates.
+        let pieces: Vec<Chunk> = bidi::visual_row(&text[4..], bidi::base_direction(text))
+            .into_iter()
+            .map(|chunk| Chunk {
+                logical: (chunk.logical.start + 4)..(chunk.logical.end + 4),
+                cells: chunk.cells,
+            })
+            .collect();
+        assert!(
+            pieces.len() > 1,
+            "a right-to-left row is drawn in pieces: {pieces:?}"
+        );
+
+        // (caret, what it marks): past the end of the row there is no character,
+        // so it takes the cell of its own; byte 13 is the seam between the space
+        // and the second word, and the piece that *starts* there is the owner —
+        // a seam belongs to the piece it opens, never to both.
+        for (caret, marks) in [(text.len(), " "), (13, &text[13..15])] {
+            let row = TextRow {
+                text,
+                range: 4..text.len(),
+                matched: false,
+                selected: None,
+                caret: Some(caret),
+                concealed: false,
+                reversed: false,
+                ink: ink(),
+            };
+
+            let out = spans_permuted(&row, &pieces);
+            let owners: Vec<&Span<'_>> = out
+                .iter()
+                .filter(|span| span.style == theme.caret_normal)
+                .collect();
+            assert_eq!(
+                owners.len(),
+                1,
+                "exactly one piece owns the caret at byte {caret}: {out:?}"
+            );
+            assert_eq!(
+                owners[0].content, marks,
+                "and it is the piece holding byte {caret}: {out:?}"
             );
         }
     }

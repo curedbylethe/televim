@@ -19,6 +19,14 @@
 //! mark, because a space typed between two words is as invisible as one typed at
 //! the end. The conversation does not do this: a message is read as prose, and
 //! a sentence with its spaces dotted is not a sentence any more.
+//!
+//! A draft reads in the direction it was written in, and under
+//! [`BidiMode::Visual`] it is **drawn** in it too: the body row goes through the
+//! same [`crate::bidi`] + [`text_row`] pair the conversation panel uses, so a
+//! right-to-left draft arrives at the terminal already permuted and its caret
+//! and selection land on the cells they belong to. The `: ` and `/` prefix is
+//! chrome and stays unpermuted, exactly as a sender tag and a clock are — see
+//! [`body_row`].
 
 use std::ops::Range;
 
@@ -29,6 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{AccountState, App, Focus, Mode, PromptKind, SignIn};
+use crate::bidi::{self, BidiMode};
 use crate::text_row;
 
 /// How many content rows the bar may take before it starts scrolling.
@@ -373,7 +382,8 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let width = area.width.saturating_sub(2).max(1);
     let height = usize::from(area.height).saturating_sub(2).max(1);
 
-    let laid_out = app.line.laid_out(width);
+    let mode = app.bidi();
+    let laid_out = app.line.laid_out_in(width, mode);
     let first = laid_out.first_row(height);
 
     let prefix = app.prompt_prefix();
@@ -393,7 +403,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
             } else {
                 None
             };
-            body_row(app, range, row == laid_out.row, focused, lead)
+            body_row(app, range, row == laid_out.row, focused, lead, mode)
         })
         .collect();
 
@@ -423,12 +433,28 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 /// wants the same three and doing them here alone is how two panels come to
 /// disagree about what a selection looks like. Only the prompt's prefix is this
 /// panel's.
+///
+/// Which of [`text_row`]'s two entry points paints the row is
+/// [`BidiMode`]'s answer, and it is the same one the conversation panel asks:
+/// under [`BidiMode::Visual`] the row is drawn in the order it is read, by way of
+/// the pieces [`bidi::visual_row_in`] names, and the caret and the selection are
+/// marked on the piece that owns them rather than on a column. Under the default
+/// the row is handed over as it is stored and the terminal's shaper reverses the
+/// run, which is why the two paths have to agree about everything else — the
+/// match, the selection's ink, and the caret as a style overlay rather than a
+/// cell of its own.
+///
+/// The prefix is **not** permuted with it. `: ` and `/` name the line rather
+/// than belonging to it, which is the same reason a message's sender tag and
+/// clock are left alone: a row that read its own prompt right-to-left would be a
+/// prompt in the wrong place.
 fn body_row<'a>(
     app: &'a App,
     range: &Range<usize>,
     caret_row: bool,
     focused: bool,
     lead: Option<&'a str>,
+    mode: BidiMode,
 ) -> Line<'a> {
     let text = app.line.text();
     // The prefix is drawn in front of the first row, so the text on it has that
@@ -442,9 +468,9 @@ fn body_row<'a>(
         spans.push(Span::styled(lead, app.theme.text_dim));
     }
 
-    spans.extend(text_row::spans(&text_row::TextRow {
+    let row = text_row::TextRow {
         text,
-        range: body,
+        range: body.clone(),
         // A draft is not a search result: `/` searches the window and the server,
         // never the line the reader is typing in.
         matched: false,
@@ -461,7 +487,23 @@ fn body_row<'a>(
         // `status()` rather than a mode of this panel's own, because the line's
         // mode is the line's and the bar already reads it to pick its hint.
         ink: text_row::Ink::draft(&app.theme, focused, app.line.status() == "NORMAL"),
-    }));
+    };
+
+    spans.extend(match mode {
+        // The pieces are slices of the **text** and the row's range is too, so a
+        // row that does not begin at zero is permuted the same way a message row
+        // is — which is why this asks `visual_row_in` and not `visual_row`.
+        BidiMode::Visual => {
+            // The direction is the draft's, asked per row for the same reason
+            // the conversation panel asks it per row: `Direction` is neither
+            // `Copy` nor `Clone`, so a frame's one answer cannot be handed to
+            // every row of it. What *is* shared across the rows is the wrap —
+            // `laid_out_in` cut them once, above, and a row is a slice of that.
+            let base = bidi::base_direction(text);
+            text_row::spans_permuted(&row, &bidi::visual_row_in(text, body.clone(), base))
+        }
+        BidiMode::Terminal => text_row::spans(&row),
+    });
 
     Line::from(spans)
 }
@@ -1029,6 +1071,157 @@ mod tests {
             app.line.text().chars().count(),
             "two spaces are two columns, and the trailing one is on show: {drawn:?}"
         );
+    }
+
+    // ---- the draft's direction ---------------------------------------------
+
+    /// The interior of the bar's content row `y`, without its borders.
+    fn bar_body(buffer: &Buffer, y: u16) -> String {
+        (1..buffer.area.width - 1)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// A draft is written in a direction, and under [`BidiMode::Visual`] it is
+    /// drawn in that direction: the glyph the reader reads first is drawn first,
+    /// which on a right-to-left draft is its **leftmost**.
+    ///
+    /// The bar and the conversation panel now go through the same three
+    /// functions — `bidi::base_direction`, `bidi::visual_row_in` and
+    /// `text_row::spans_permuted` — so a right-to-left draft and a right-to-left
+    /// message of the same words come out in the same order, which is what "the
+    /// bar draws a draft by the same rules as an incoming message" has to mean.
+    ///
+    /// `TestBackend` has no bidi shaper, so this exercises the
+    /// [`BidiMode::Visual`] path and says nothing about the default one — see
+    /// `docs/known-gaps.md`.
+    #[test]
+    fn a_right_to_left_draft_is_drawn_in_the_order_it_is_read() {
+        const DRAFT: &str = "שלום";
+
+        let mut app = App::mock().with_bidi(BidiMode::Visual);
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, DRAFT);
+
+        let buffer = screen(&app, 80, 24);
+        let top = bar_top(&rows_of(&buffer)) as u16;
+        let drawn = bar_body(&buffer, top + 1);
+        // The caret's own cell is a space in the caret's ink, and it is on the
+        // row — so the glyphs are read without it, and the caret is the subject
+        // of the next test rather than of this one.
+        let glyphs: String = drawn.chars().filter(|c| !c.is_whitespace()).collect();
+
+        assert_eq!(
+            glyphs,
+            in_reading_order(DRAFT, true),
+            "the draft is drawn right-to-left: {drawn:?}"
+        );
+        assert_eq!(
+            glyphs.chars().next(),
+            DRAFT.chars().last(),
+            "and the glyph the reader reads last is the leftmost of the run: {drawn:?}"
+        );
+        // The bar's geometry is not the mode's: rows are broken logically, in
+        // `wrap`, and a mode that moved a break would make the same draft a
+        // different height on two terminals in the same window.
+        assert_eq!(
+            app.line.laid_out(78).rows,
+            app.line.laid_out_in(78, BidiMode::Visual).rows,
+            "the rows break the same way in both modes"
+        );
+    }
+
+    /// The caret is at the cell of the draft it belongs to, not at the column it
+    /// would have in the string.
+    ///
+    /// The caret one past the end of a right-to-left draft is owned by the piece
+    /// that ends there, and that piece is drawn **first** — so the cell is the
+    /// one the paint put it on, and [`crate::line::LaidOut::visual_column`] is
+    /// the same number, which is what the emoji popup anchors itself on
+    /// (STAGE-03).
+    ///
+    /// The default is the other end of the row: under [`BidiMode::Terminal`] the
+    /// row goes to the terminal as it is stored and the shaper reverses the run
+    /// itself, so the same draft's caret is at the logical end.
+    #[test]
+    fn a_caret_in_a_right_to_left_draft_is_painted_at_the_cell_it_belongs_to() {
+        let mut visual = App::mock().with_bidi(BidiMode::Visual);
+        let mut terminal = App::mock();
+        for app in [&mut visual, &mut terminal] {
+            press(app, KeyCode::Char('i'));
+            type_text(app, "שלום");
+        }
+
+        let visual_screen = screen(&visual, 80, 24);
+        let visual_top = bar_top(&rows_of(&visual_screen)) as u16;
+        let terminal_screen = screen(&terminal, 80, 24);
+        let terminal_top = bar_top(&rows_of(&terminal_screen)) as u16;
+
+        // The draft is drawn at column 1 of the bar, so its own columns are the
+        // cells' x less one.
+        assert_eq!(
+            carets(&visual_screen, visual_top)[0].0,
+            1 + u16::try_from(
+                visual
+                    .line
+                    .laid_out_in(78, BidiMode::Visual)
+                    .visual_column
+                    .expect("a visual column under Visual mode")
+            )
+            .expect("a column fits a u16"),
+            "the painted caret is at the column the layout reports: {:?}",
+            carets(&visual_screen, visual_top)
+        );
+        assert_eq!(
+            carets(&terminal_screen, terminal_top)[0].0,
+            1 + u16::try_from(terminal.line.laid_out(78).column).expect("a column fits a u16"),
+            "and under the default the same caret is at the logical end of the draft"
+        );
+        assert_eq!(
+            terminal.line.laid_out(78).visual_column,
+            None,
+            "which is a question this program does not answer in the default mode"
+        );
+    }
+
+    /// A draft that reads left to right is the same row whichever mode draws it:
+    /// the permutation is a no-op on left-to-right text, so the bar is not asked
+    /// to do anything different and the default path is untouched.
+    #[test]
+    fn a_left_to_right_draft_is_drawn_alike_in_both_modes() {
+        let mut visual = App::mock().with_bidi(BidiMode::Visual);
+        let mut terminal = App::mock();
+        for app in [&mut visual, &mut terminal] {
+            press(app, KeyCode::Char('i'));
+            type_text(app, "half a th");
+        }
+
+        let read = |buffer: &Buffer| {
+            let top = bar_top(&rows_of(buffer)) as u16;
+            bar_body(buffer, top + 1)
+        };
+
+        assert_eq!(
+            read(&screen(&visual, 80, 24)),
+            read(&screen(&terminal, 80, 24)),
+            "one mode to draw it in"
+        );
+    }
+
+    /// The glyphs of `text` as a right-to-left row draws them, left to right.
+    ///
+    /// The reverse of the string, for a fixture with no embedded left-to-right
+    /// run — a property of these words rather than a claim about the algorithm,
+    /// which [`crate::bidi`]'s own tests pin over the cases a reverse is not the
+    /// answer to.
+    fn in_reading_order(text: &str, visual: bool) -> String {
+        if visual {
+            text.chars().rev().collect()
+        } else {
+            text.to_owned()
+        }
     }
 
     // ---- the caret --------------------------------------------------------

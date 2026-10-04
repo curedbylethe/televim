@@ -23,6 +23,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 
 use crate::bidi::BidiMode;
 use crate::emoji;
+use crate::jumplist::Jumplist;
 use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
 use crate::theme::Theme;
@@ -76,6 +77,16 @@ pub const CHAT_SWITCH_DELAY: Duration = Duration::from_millis(150);
 /// a refusal. State the reader must not lose is written straight to the status
 /// and never carries a deadline.
 const FLASH_FOR: Duration = Duration::from_secs(5);
+
+/// How long the peer is shown as typing after the last sign of it.
+///
+/// The design's `TYPING_TICKS` re-expressed as a wall-clock window, because the
+/// tick it was counted on is the network's and says nothing about time. Bounded
+/// so a peer who stops without a final event vanishes rather than typing forever.
+///
+/// Re-armed by every repeat of the event, which is how a peer who keeps typing
+/// past this stays shown.
+pub(crate) const TYPING_FOR: Duration = Duration::from_secs(6);
 
 /// How many operations the reader may have queued at once.
 ///
@@ -194,6 +205,52 @@ impl FetchDirection {
 /// status line, because it is the one fetch the reader asked for by name.
 pub const JUMP_LABEL: &str = "Jumping to first unread…";
 
+/// What is said while a jump to the message a reply quotes is on its way.
+pub const JUMP_REPLY_LABEL: &str = "Jumping to the quoted message…";
+
+/// What is said while a jump back through the conversation's jumplist is on its
+/// way.
+pub const JUMP_BACK_LABEL: &str = "Jumping back…";
+
+/// What is said while a jump forward through it is.
+pub const JUMP_FORWARD_LABEL: &str = "Jumping forward…";
+
+/// `gd` on a message that quotes nothing.
+pub const NOT_A_REPLY: &str = "Not a reply: gd jumps to the message a reply quotes.";
+
+/// A jump whose fetch came back without the message it was for.
+pub const JUMP_UNAVAILABLE: &str = "That message is no longer available.";
+
+/// Which jump the reader asked for, which is what the label says.
+///
+/// `Unread` is `gg` and a match `n` walked to; the other two are the jumplist's,
+/// and are named here so that this match is complete rather than because anything
+/// produces them yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpKind {
+    Unread,
+    Reply,
+    Back,
+    Forward,
+}
+
+impl JumpKind {
+    /// What the panel and the status line say while this jump is on its way.
+    ///
+    /// One answer per kind, so the two places that say it cannot disagree: a
+    /// reader who was told "first unread" and then shown "the quoted message"
+    /// has been told two different things about the same keystroke.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unread => JUMP_LABEL,
+            Self::Reply => JUMP_REPLY_LABEL,
+            Self::Back => JUMP_BACK_LABEL,
+            Self::Forward => JUMP_FORWARD_LABEL,
+        }
+    }
+}
+
 /// A place in a conversation the reader asked to be taken to.
 ///
 /// `gg` means the first unread message, and that message is only sometimes
@@ -207,6 +264,9 @@ pub struct Jump {
 
     /// The message to centre the page on.
     pub target_id: i64,
+
+    /// Which jump this is, so the screen can say where it is going.
+    pub kind: JumpKind,
 }
 
 /// What the conversation on show is in the middle of.
@@ -1106,6 +1166,18 @@ pub struct App {
     /// When a transient status stops applying, if it is transient.
     status_until: Option<Instant>,
 
+    /// When the peer stops being shown as typing, and in which conversation.
+    ///
+    /// One conversation rather than one per chat, because the note is drawn on
+    /// the open conversation's title and nowhere else: an event for a chat the
+    /// reader is not in is dropped, and a note for a chat left behind belongs to
+    /// the chat that was left.
+    ///
+    /// The same deadline shape as [`App::status_until`] — an instant compared
+    /// only where the loop supplies one — because a frame is drawn from a shared
+    /// reference and cannot expire anything itself.
+    typing_until: Option<(i64, Instant)>,
+
     /// The pages on their way from the network.
     fetching: Fetching,
 
@@ -1118,6 +1190,13 @@ pub struct App {
     /// already on its way.
     pending_jump: Option<Jump>,
 
+    /// Where the reader was before each jump they have taken.
+    ///
+    /// What `Ctrl-o` and `Ctrl-i` walk. It is per conversation and keyed by
+    /// message identifier rather than by row, because a jump replaces the window
+    /// and a row means a different message on either side of that.
+    jumplist: Jumplist,
+
     /// The conversation the highlight has moved onto but has not been taken to.
     ///
     /// The same hand-over as [`App::pending_jump`] — recorded here because
@@ -1126,6 +1205,17 @@ pub struct App {
     /// scrolled past, and one page per chat as fast as a key repeats is how a
     /// scroll through the list becomes a flood wait.
     pending_chat: Option<ChatChoice>,
+
+    /// Whether the reader has asked for the client to be brought up again.
+    ///
+    /// Recorded here because `tui` cannot reach the network, and taken by the
+    /// one caller that can. **Not an [`Action`]**, and the reason is the state a
+    /// retry is needed in: actions are drained only while there is a client, so a
+    /// queued one would be invisible at exactly the moment it matters — a launch
+    /// that came up `offline:`. One slot rather than a queue, because a second
+    /// retry while one is on its way is the same retry; the caller says so with
+    /// a transient status rather than asking twice.
+    retry_requested: bool,
 
     /// Whether a `g` was just pressed in the chat list and a second one would
     /// take the reader to the top of it.
@@ -1259,9 +1349,12 @@ impl App {
             clipboard: None,
             actions: VecDeque::new(),
             status_until: None,
+            typing_until: None,
             fetching: Fetching::default(),
             pending_jump: None,
+            jumplist: Jumplist::default(),
             pending_chat: None,
+            retry_requested: false,
             pending_g: false,
             pending_find: None,
             rows: Cell::new(ASSUMED_ROWS),
@@ -1512,9 +1605,16 @@ impl App {
     /// message.
     fn select_chat_none(&mut self) {
         self.conversation = ConversationView::new(0);
+        // The note belongs to the chat being left: returning must not revive it,
+        // so the deadline goes with the view rather than with the reader's memory.
+        self.typing_until = None;
         self.vim = VimState::new(0);
         self.fetching.clear();
         self.pending_jump = None;
+        // The marks are per conversation, and this is the path every switch goes
+        // through, so this is where they go too: a reader who has closed the
+        // conversation has nowhere to walk back to.
+        self.jumplist = Jumplist::default();
         self.search.clear();
         self.reply_to = None;
         self.editing = None;
@@ -2398,7 +2498,123 @@ impl App {
         Some(Jump {
             peer_id: self.conversation.window.chat_id,
             target_id: target,
+            kind: JumpKind::Unread,
         })
+    }
+
+    /// Takes the reader to the message the one under the cursor quotes.
+    ///
+    /// `gd`, and the second producer of a jump: a reply's quote is a message in
+    /// the same conversation, which is loaded or is not. A target the window
+    /// holds is a cursor move and nothing else — no round trip for a message
+    /// already on screen. A target it does not hold is a jump, on the same terms
+    /// as `gg`'s.
+    ///
+    /// A message that quotes nothing refuses, because there is nowhere to go:
+    /// the sentence names the key and what it does, which is more use to a
+    /// reader than silence.
+    ///
+    /// Where the reader was is recorded before the cursor moves and before the
+    /// jump is armed, and in the in-window case too: that is the same place to
+    /// come back to as any other, and `Ctrl-o` after a jump that needed no fetch
+    /// is the case where the reader most expects to be able to undo it.
+    #[must_use]
+    pub fn jump_to_reply(&mut self) -> Option<Jump> {
+        if !self.has_conversation() {
+            return None;
+        }
+
+        let Some(target) = self.cursor_message().and_then(|message| message.reply_to) else {
+            self.flash(NOT_A_REPLY);
+            return None;
+        };
+
+        if let Some(origin) = self.cursor_message_id() {
+            self.jumplist
+                .record(self.conversation.window.chat_id, origin);
+        }
+
+        if let Some(index) = self.conversation.window.position_of(target) {
+            self.vim.set_cursor(index);
+            return None;
+        }
+
+        Some(Jump {
+            peer_id: self.conversation.window.chat_id,
+            target_id: target,
+            kind: JumpKind::Reply,
+        })
+    }
+
+    /// Takes the reader back to where they were before the last jump.
+    ///
+    /// `Ctrl-o`. A mark the window still holds is a cursor move; one it does not
+    /// is a jump of its own, on the same terms as any other, because the jump
+    /// that took the reader away replaced the window the mark was in.
+    pub fn jump_back(&mut self) {
+        // Asked before the stack is walked: a walk moves a mark between the two
+        // stacks, and a reader who presses `Ctrl-o` while a page is on its way
+        // must not have moved one for a return that did not happen.
+        if self.pending_jump.is_some() || !self.has_conversation() {
+            return;
+        }
+
+        let Some(from) = self.cursor_message_id() else {
+            return;
+        };
+        let Some(target) = self.jumplist.back(self.conversation.window.chat_id, from) else {
+            return;
+        };
+
+        self.go_to(target, JumpKind::Back);
+    }
+
+    /// Takes the reader forward to the place a `Ctrl-o` walked them away from.
+    ///
+    /// `Ctrl-i`, and nothing else: a terminal that cannot report it apart from
+    /// `Tab` sends `Tab` instead, and `Tab` is the pane switch here — so on such
+    /// a terminal only `Ctrl-o` works, which is what the design accepted.
+    pub fn jump_forward(&mut self) {
+        if self.pending_jump.is_some() || !self.has_conversation() {
+            return;
+        }
+
+        let Some(from) = self.cursor_message_id() else {
+            return;
+        };
+        let Some(target) = self
+            .jumplist
+            .forward(self.conversation.window.chat_id, from)
+        else {
+            return;
+        };
+
+        self.go_to(target, JumpKind::Forward);
+    }
+
+    /// Goes to `id`, moving the cursor when the window holds it and asking for a
+    /// page centred on it when it does not.
+    ///
+    /// One answer for a return in either direction, because the two differ only
+    /// in which stack was walked — and in what the status line says while the
+    /// page is on its way, which is `kind`'s whole job.
+    fn go_to(&mut self, id: i64, kind: JumpKind) {
+        if self.pending_jump.is_some() {
+            return;
+        }
+
+        if let Some(index) = self.conversation.window.position_of(id) {
+            self.vim.set_cursor(index);
+            self.settle_follow();
+            return;
+        }
+
+        self.pending_jump = Some(Jump {
+            peer_id: self.conversation.window.chat_id,
+            target_id: id,
+            kind,
+        });
+        self.settle_follow();
     }
 
     /// Ends the reader's wait for a jump, reporting whether it was still the one
@@ -2433,11 +2649,25 @@ impl App {
     /// A selection does not survive, for the same reason it does not survive
     /// [`App::apply_latest`]: the page replaced the window.
     pub fn apply_jump(&mut self, page: &[Message], target_id: i64) -> bool {
+        // Which jump this page answers, read before `clear_jump` ends the wait.
+        // A jump the reader asked for by name says so when its message cannot be
+        // found; `gg`'s first-unread jump keeps its old silence, because its key
+        // means "take me to the unread" and not "take me to message 19", and its
+        // behaviour does not change here.
+        let kind = self.pending_jump.map(|jump| jump.kind);
         if !self.clear_jump(target_id) {
             return false;
         }
 
         if !self.page_belongs_to_open_chat(page) {
+            // A page that came back with nothing in it is the fetch's answer:
+            // the client does not hold the message the reader was taken to, so
+            // there is nowhere for the window to go. Said as a refusal because
+            // the jump is over and the key is free, and the status line is
+            // where a refusal belongs.
+            if page.is_empty() && kind.is_some_and(|kind| kind != JumpKind::Unread) {
+                self.flash(JUMP_UNAVAILABLE);
+            }
             return false;
         }
 
@@ -2500,7 +2730,27 @@ impl App {
     /// the price of a single event reaching both.
     #[must_use]
     pub fn apply_update(&mut self, event: &UpdateEvent) -> bool {
+        // The peer's typing is the title's business and nothing else's: no
+        // message arrived, changed or left, so there is no window to re-anchor
+        // and the reader's place in it is untouched. It answers for the open
+        // conversation only, because the note is drawn on that conversation's
+        // title — an event about a chat the reader is not in would be zeroed on
+        // their arrival anyway.
+        if let UpdateEvent::PeerTyping { chat_id, typing } = event {
+            return self.apply_typing(*chat_id, *typing);
+        }
+
         let listed = self.list.apply_update(event.clone());
+
+        // The message is what the typing was for, so it ends it. Cleared here
+        // rather than on the cancel action alone because the cancel is not sent
+        // reliably: a peer who sends instead of cancelling would otherwise be
+        // shown as typing with their own message on screen.
+        if let UpdateEvent::NewMessage(message) = event
+            && message.chat_id == self.conversation.window.chat_id
+        {
+            self.typing_until = None;
+        }
 
         // A read acknowledgement is not a window change. It moves the watermark
         // and nothing else — no message arrived, changed or left — so there is
@@ -2785,6 +3035,60 @@ impl App {
         true
     }
 
+    // ---- the peer's typing -----------------------------------------------
+
+    /// Records or drops the peer's typing for the conversation on show.
+    ///
+    /// Reports whether a redraw is owed. A conversation other than the open one
+    /// is dropped rather than remembered: the note is drawn on one title, and a
+    /// deadline kept for a chat the reader has left would be one nobody is shown
+    /// and the reader has not been told about.
+    fn apply_typing(&mut self, chat_id: i64, typing: bool) -> bool {
+        if chat_id != self.conversation.window.chat_id {
+            return false;
+        }
+
+        self.typing_until = if typing {
+            // Re-armed rather than set once, because a peer who keeps typing past
+            // the deadline is still typing.
+            Some((chat_id, Instant::now() + TYPING_FOR))
+        } else {
+            None
+        };
+        true
+    }
+
+    /// Whether the peer in the conversation on show is being shown as typing.
+    ///
+    /// Pure: liveness is the deadline being set, and it is
+    /// [`App::expire_typing`] that clears it once the deadline has passed. A
+    /// frame cannot read a clock, and it does not need to — the loop calls the
+    /// expiry on its tick, so by the time a frame is drawn the deadline is
+    /// either still in the future or already gone.
+    #[must_use]
+    pub fn peer_is_typing(&self) -> bool {
+        self.typing_until
+            .is_some_and(|(chat, _)| chat == self.conversation.window.chat_id)
+    }
+
+    /// Stops showing the peer as typing once its deadline has passed.
+    ///
+    /// Reports whether a redraw is owed. Called from the loop beside
+    /// [`App::expire_status`], which already runs on a timer: nothing repaints on
+    /// a schedule for this, so a peer who stops without a final event is gone by
+    /// the tick after the deadline rather than by a frame of its own.
+    pub fn expire_typing(&mut self, now: Instant) -> bool {
+        let Some((_, at)) = self.typing_until else {
+            return false;
+        };
+        if now < at {
+            return false;
+        }
+
+        self.typing_until = None;
+        true
+    }
+
     // ---- key handling --------------------------------------------------
 
     /// Puts the focus somewhere, leaving whatever the pane it came from was in.
@@ -2862,6 +3166,19 @@ impl App {
         // phone number cannot quit the program out from under themselves.
         if self.signin.is_some() {
             self.handle_signin(key);
+            return;
+        }
+
+        // A jump in flight is a page on its way to replace the window under the
+        // reader, so nothing else acts until it lands: every other key is
+        // swallowed rather than answered, because a key that moves the cursor
+        // would move it out from under the page. `Esc` is the one answer — it
+        // drops the jump and leaves the reader where they were. The page may
+        // still land, and is dropped when it does: nobody is waiting for it.
+        if self.pending_jump.is_some() {
+            if key.code == KeyCode::Esc {
+                self.pending_jump = None;
+            }
             return;
         }
 
@@ -2991,63 +3308,86 @@ impl App {
             match key.code {
                 KeyCode::Char('d') => self.page(true),
                 KeyCode::Char('u') => self.page(false),
+                // `Ctrl-o` and `Ctrl-i`: back and forward through the places the
+                // reader has jumped from. Not while a jump is on its way — one
+                // fetch is in flight and the reader may have escaped it, and a
+                // second jump would replace the one they are still waiting for.
+                KeyCode::Char('o') if self.pending_jump.is_none() => self.jump_back(),
+                KeyCode::Char('i') if self.pending_jump.is_none() => self.jump_forward(),
                 _ => {}
             }
             return;
         }
 
-        match key.code {
-            KeyCode::Char(c) if matches!(c, 'j' | 'k' | 'g' | 'G' | 'n' | 'N') => {
-                let motion = self.vim.handle_char(c);
+        // Every plain character goes to the motion table before anything else:
+        // `gd` is a two-key sequence built on the same `g` as `gg`, and the
+        // table owns that prefix. A character that never reached it left the `g`
+        // armed for whatever key came next, so `g` then `d` then `G` deleted a
+        // message instead of going to the end.
+        let KeyCode::Char(c) = key.code else {
+            return;
+        };
 
-                match motion {
-                    // `gg` is where the unread messages start when there are
-                    // any, and the top of what is loaded when there are not. A
-                    // jump the window can answer is taken here; one it cannot is
-                    // left for the caller to fetch. Either way the reader has
-                    // asked for something, so whatever they asked for before is
-                    // replaced by it.
-                    Some(Motion::First) => self.pending_jump = self.jump_to_unread(),
+        if let Some(motion) = self.vim.handle_char(c) {
+            match motion {
+                // `gg` is where the unread messages start when there are
+                // any, and the top of what is loaded when there are not. A
+                // jump the window can answer is taken here; one it cannot is
+                // left for the caller to fetch. Either way the reader has
+                // asked for something, so whatever they asked for before is
+                // replaced by it.
+                Motion::First => self.pending_jump = self.jump_to_unread(),
 
-                    // `G` is the reader overriding a jump with "take me to the
-                    // end". The page on its way is for a place they no longer
-                    // want to be, and it is dropped when it lands.
-                    Some(Motion::Last) => self.pending_jump = None,
+                // `G` is the reader overriding a jump with "take me to the
+                // end". The page on its way is for a place they no longer
+                // want to be, and it is dropped when it lands.
+                Motion::Last => self.pending_jump = None,
 
-                    // `n` and `N` walk the search's matches. `VimState` reports
-                    // the motion but cannot answer it, because a match is a
-                    // place in a conversation and the list of them lives here.
-                    Some(Motion::NextMatch) => self.walk_search(true),
-                    Some(Motion::PrevMatch) => self.walk_search(false),
+                // `n` and `N` walk the search's matches. `VimState` reports
+                // the motion but cannot answer it, because a match is a
+                // place in a conversation and the list of them lives here.
+                Motion::NextMatch => self.walk_search(true),
+                Motion::PrevMatch => self.walk_search(false),
 
-                    _ => {}
-                }
+                // `gd`, likewise: which message this one quotes is a fact
+                // about the conversation, and the window is what holds it.
+                Motion::GotoReply => self.pending_jump = self.jump_to_reply(),
 
-                self.settle_follow();
+                // `j` and `k` are the motions themselves, and the table has
+                // already applied them.
+                Motion::Down | Motion::Up => {}
             }
-            KeyCode::Char('i' | 'a') => self.start_compose(),
-            KeyCode::Char('r') => self.start_reply(),
-            KeyCode::Char('e') => self.start_edit(),
-            KeyCode::Char('d') => self.request_delete(),
-            KeyCode::Char('p') => self.paste(),
-            KeyCode::Char('D') => self.dismiss_failed_at_cursor(),
-            KeyCode::Char('v') => self.begin_selection(Some(0)),
-            KeyCode::Char('V') => self.begin_selection(None),
+
+            self.settle_follow();
+            return;
+        }
+
+        match c {
+            'i' | 'a' => self.start_compose(),
+            'r' => self.start_reply(),
+            'e' => self.start_edit(),
+            // A plain `d`: the table reports nothing for it, so a `d` that does
+            // not follow a `g` deletes here.
+            'd' => self.request_delete(),
+            'p' => self.paste(),
+            'D' => self.dismiss_failed_at_cursor(),
+            'v' => self.begin_selection(Some(0)),
+            'V' => self.begin_selection(None),
             // The list is beside the conversation, so `h` is how the reader gets
             // to it. `l` has nothing to move to from here and is left unbound
             // rather than made to wrap.
-            KeyCode::Char('h') => self.set_focus(Focus::ChatList),
-            KeyCode::Char('/') => {
+            'h' => self.set_focus(Focus::ChatList),
+            '/' => {
                 self.focus = Focus::Input;
                 self.line.open(PromptKind::Search);
             }
-            KeyCode::Char(':') => {
+            ':' => {
                 self.focus = Focus::Input;
                 self.line.open(PromptKind::Command);
             }
-            KeyCode::Char('q') => self.request_quit(),
-            KeyCode::Char('S') => self.open_profile(),
-            KeyCode::Char('A') => self.open_contact(),
+            'q' => self.request_quit(),
+            'S' => self.open_profile(),
+            'A' => self.open_contact(),
             _ => {}
         }
     }
@@ -3849,6 +4189,7 @@ impl App {
             // session: they are the same question, and two entry points would be
             // two flows that could come to differ.
             "signin" => self.begin_signin(),
+            "retry" => self.request_retry(),
             _ if cmd.starts_with("chat ") => {
                 if let Ok(id) = cmd[5..].trim().parse::<i64>()
                     && let Some(pos) = self.list.chats.iter().position(|c| c.id == id)
@@ -3959,6 +4300,7 @@ impl App {
             self.pending_jump = Some(Jump {
                 peer_id: self.conversation.window.chat_id,
                 target_id: id,
+                kind: JumpKind::Unread,
             });
         }
 
@@ -4039,6 +4381,30 @@ impl App {
                 domain::session::SessionState::LoggedIn { .. } => None,
             },
         }
+    }
+
+    /// Records that the client is to be brought up again.
+    ///
+    /// The `offline:` sentence is answered the moment it is read, so the status
+    /// line says the retry is under way rather than leaving a sentence about a
+    /// failed launch up beside one in flight — and what the network side writes
+    /// next (the retry sentence, or the next `offline:`) replaces it.
+    pub fn request_retry(&mut self) {
+        self.retry_requested = true;
+        "reconnecting".clone_into(&mut self.status);
+        // Written straight to `status` rather than through `flash`, because a
+        // bring-up is not a thing that passes on its own: it ends in an event, and
+        // that event brings its own sentence.
+        self.status_until = None;
+    }
+
+    /// The retry the reader asked for, once.
+    ///
+    /// Forgotten on the way out, the way [`App::take_pending_chat`] is: a request
+    /// taken is a request being carried out, and a caller that asks again on the
+    /// next pass gets `None` rather than a second bring-up.
+    pub fn take_retry_request(&mut self) -> bool {
+        std::mem::take(&mut self.retry_requested)
     }
 
     /// Puts the sign-in flow up, with the phone field open and the configured
@@ -4649,6 +5015,17 @@ impl App {
         }
     }
 
+    /// What a jump in flight is called, on the panel and on the status line.
+    ///
+    /// `JUMP_LABEL` names a destination — the first unread message — and a jump
+    /// to a reply is not going there, so each kind has its own sentence and both
+    /// places that say one read this.
+    #[must_use]
+    pub fn jump_label(&self) -> &'static str {
+        self.pending_jump
+            .map_or(JUMP_LABEL, |jump| jump.kind.label())
+    }
+
     /// The rows the conversation panel shows, given a `budget` of room for
     /// messages and the `layout` it is drawing from.
     ///
@@ -4756,7 +5133,7 @@ impl App {
             return self.search.label();
         }
         if self.pending_jump.is_some() {
-            return JUMP_LABEL.to_owned();
+            return self.jump_label().to_owned();
         }
         if let Some(message) = self.cursor_message()
             && let Some(reason) = self.conversation.failure(message.id)
@@ -7391,6 +7768,56 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
     }
 
+    /// `:retry` asks for the client again and takes the `offline:` line down with
+    /// it: the sentence left up would be a failure that has just been acted on.
+    #[test]
+    fn retry_command_asks_for_the_client_again() {
+        let mut app = App::mock();
+        app.status = "offline: connection reset".to_owned();
+
+        run_command_line(&mut app, "retry");
+
+        assert!(
+            app.take_retry_request(),
+            "the request is what the network side acts on"
+        );
+        assert_ne!(app.status, IDLE_STATUS, "got {:?}", app.status);
+        assert!(
+            !app.status.contains("offline:"),
+            "the failure it answers must not still be up: {:?}",
+            app.status
+        );
+    }
+
+    /// One slot rather than a queue: a request taken is a request being carried out,
+    /// so the pass after the one that took it finds nothing. What stops a *second*
+    /// bring-up is not this slot — pressing `:retry` twice before either is taken
+    /// is still one request — but the network side's own in-flight guard.
+    #[test]
+    fn a_retry_request_is_spent_once_taken() {
+        let mut app = App::mock();
+
+        run_command_line(&mut app, "retry");
+        assert!(app.take_retry_request(), "the command records the request");
+        assert!(!app.take_retry_request(), "and taking it spends it");
+    }
+
+    /// Not a flash: a bring-up does not pass on its own, it ends in an event that
+    /// brings its own sentence — so this one must not expire back to idle while
+    /// the client is still being built.
+    #[test]
+    fn a_retry_outlives_a_transient_status() {
+        let mut app = App::mock();
+        run_command_line(&mut app, "retry");
+
+        assert!(
+            !app.expire_status(Instant::now() + FLASH_FOR),
+            "got {:?}",
+            app.status
+        );
+        assert_ne!(app.status, IDLE_STATUS);
+    }
+
     fn run_search_line(app: &mut App, query: &str) {
         app.handle_key(press(KeyCode::Char('/')));
         type_text(app, query);
@@ -8833,6 +9260,7 @@ mod tests {
         let expected = Jump {
             peer_id: MOCK_CHAT,
             target_id: 19,
+            kind: JumpKind::Unread,
         };
         assert_eq!(
             app.pending_jump(),
@@ -8954,31 +9382,53 @@ mod tests {
             Some(Jump {
                 peer_id: MOCK_CHAT,
                 target_id: 19,
+                kind: JumpKind::Unread,
             }),
             "the jump the reader did ask for is still the one being waited on"
         );
     }
 
-    /// `G` is the reader overriding a jump with "take me to the end": the page on
-    /// its way is for a place they no longer want to be, and it is dropped when
-    /// it lands.
+    /// While a jump is on its way only `Esc` answers: a key that moved the cursor
+    /// would move it out from under the page that is coming, so `G` no longer
+    /// gets to say "take me to the end instead". `Esc` drops the jump and leaves
+    /// the reader where they were, and the page is dropped when it lands.
     #[test]
-    fn the_end_of_the_conversation_cancels_a_jump() {
+    fn escape_is_the_only_answer_while_a_jump_is_in_flight() {
         let mut app = with_unread_out_of_reach(2);
         go_to_top(&mut app);
         assert!(app.pending_jump().is_some());
+        let before = app.vim.cursor();
 
         app.handle_key(press(KeyCode::Char('G')));
 
-        assert_eq!(app.pending_jump(), None);
-        assert!(
-            app.conversation.auto_follow(),
-            "and the view is pinned to the newest message"
+        assert_eq!(
+            app.pending_jump().map(|jump| jump.target_id),
+            Some(19),
+            "another key is swallowed rather than answered"
         );
+        assert_eq!(app.vim.cursor(), before, "and moves nothing");
+
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(app.pending_jump(), None, "`Esc` drops the jump");
+        assert_eq!(app.vim.cursor(), before, "and leaves the reader put");
         assert!(
             !app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19),
             "the page that was on its way has nobody waiting for it"
         );
+    }
+
+    /// `G` after the jump is over still means what it always meant.
+    #[test]
+    fn the_end_of_the_conversation_still_follows_the_reader() {
+        let mut app = with_unread_out_of_reach(2);
+        go_to_top(&mut app);
+        go_to_top(&mut app);
+        assert!(app.pending_jump().is_some());
+
+        app.handle_key(press(KeyCode::Esc));
+
+        app.handle_key(press(KeyCode::Char('G')));
+        assert!(app.conversation.auto_follow());
     }
 
     /// The contrapositive of what used to hold: a window that was replaced no
@@ -9039,6 +9489,7 @@ mod tests {
             Some(Jump {
                 peer_id: MOCK_CHAT,
                 target_id: 19,
+                kind: JumpKind::Unread,
             }),
             "an unloaded match is a jump, the same path `gg` takes"
         );
@@ -9070,6 +9521,279 @@ mod tests {
             "3 conversation(s)",
             "the line goes back to what it was saying once the jump is over"
         );
+    }
+
+    // ---- `gd`, the message a reply quotes ------------------------------
+
+    /// A message of the sample conversation that quotes `reply_to`.
+    fn reply(id: i64, reply_to: i64) -> Message {
+        Message {
+            reply_to: Some(reply_to),
+            ..message(id, "text")
+        }
+    }
+
+    /// A window whose middle message quotes 19, which is nowhere near it.
+    fn with_a_reply_to_19() -> App {
+        let mut app = App::mock();
+        app.apply_latest(vec![message(1, "text"), reply(2, 19), message(3, "text")]);
+        app.handle_key(press(KeyCode::Char('k')));
+        app
+    }
+
+    /// `gd`, as a reader types it.
+    fn go_to_reply(app: &mut App) {
+        app.handle_key(press(KeyCode::Char('g')));
+        app.handle_key(press(KeyCode::Char('d')));
+    }
+
+    /// A window whose middle message quotes the one before it, which is on
+    /// screen: `gd` here is a cursor move and nothing else, and `Ctrl-o` is the
+    /// way back.
+    fn with_a_loaded_quote() -> App {
+        let mut app = App::mock();
+        app.apply_latest(vec![message(1, "text"), reply(2, 1), message(3, "text")]);
+        app.handle_key(press(KeyCode::Char('k')));
+        app
+    }
+
+    /// A quote the window already holds is a cursor move and nothing else: a
+    /// round trip for a message on screen would put the reader through the same
+    /// window twice to arrive where they already were.
+    #[test]
+    fn gd_on_a_loaded_quote_is_a_cursor_move() {
+        let mut app = App::mock();
+        app.apply_latest(vec![message(1, "text"), reply(2, 1), message(3, "text")]);
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(reading(&app), Some(2), "the reply is under the cursor");
+
+        go_to_reply(&mut app);
+
+        assert_eq!(
+            reading(&app),
+            Some(1),
+            "and the reader is on what it quotes"
+        );
+        assert_eq!(
+            app.pending_jump(),
+            None,
+            "so nothing was asked of the network"
+        );
+    }
+
+    /// A quote the window does not hold is the same jump `gg` makes, and says so.
+    #[test]
+    fn gd_on_a_quote_out_of_the_window_asks_for_it() {
+        let mut app = with_a_reply_to_19();
+
+        go_to_reply(&mut app);
+
+        assert_eq!(
+            app.pending_jump(),
+            Some(Jump {
+                peer_id: MOCK_CHAT,
+                target_id: 19,
+                kind: JumpKind::Reply,
+            })
+        );
+    }
+
+    /// A message that quotes nothing has nowhere to go, and the refusal says
+    /// which key would have gone somewhere.
+    #[test]
+    fn gd_on_a_message_that_quotes_nothing_refuses() {
+        let mut app = App::mock();
+        app.apply_latest(page(&[1, 2, 3]));
+        app.handle_key(press(KeyCode::Char('k')));
+
+        go_to_reply(&mut app);
+
+        assert_eq!(app.status_text(), NOT_A_REPLY);
+        assert_eq!(app.pending_jump(), None);
+        assert_eq!(reading(&app), Some(2), "and the reader stays put");
+    }
+
+    /// A quote the client does not hold at all: the fetch came back with
+    /// nothing, so there is no page to land in and the reader is told why the
+    /// jump ended rather than left waiting for a key that will never work again.
+    #[test]
+    fn a_reply_jump_that_came_back_empty_says_the_message_is_gone() {
+        let mut app = with_a_reply_to_19();
+        go_to_reply(&mut app);
+        let before = app.conversation.window.len();
+
+        assert!(!app.apply_jump(&[], 19));
+
+        assert_eq!(app.status_text(), JUMP_UNAVAILABLE);
+        assert_eq!(app.pending_jump(), None, "and the key is free again");
+        assert_eq!(app.conversation.window.len(), before);
+    }
+
+    /// The label names where the reader is going, so it differs by jump: a jump
+    /// to a reply is not a jump to the first unread message, and saying so is
+    /// the difference between a fetch that was asked for and one that was not.
+    #[test]
+    fn the_label_says_which_jump_is_in_flight() {
+        let mut app = with_unread_out_of_reach(2);
+
+        go_to_top(&mut app);
+        assert_eq!(app.status_text(), JUMP_LABEL, "`gg` is the first unread");
+
+        app.handle_key(press(KeyCode::Esc));
+
+        let mut app = with_a_reply_to_19();
+        go_to_reply(&mut app);
+        assert_eq!(app.status_text(), JUMP_REPLY_LABEL);
+        assert_eq!(
+            app.jump_label(),
+            JUMP_REPLY_LABEL,
+            "the panel says the same"
+        );
+    }
+
+    // ---- `Ctrl-o` and `Ctrl-i`, back and forward -------------------------
+
+    /// A reply jump the window can answer, remembered: `gd` on a quote that is
+    /// on screen still moves the reader away from where they were standing, and
+    /// `Ctrl-o` is how they get back.
+    #[test]
+    fn a_reply_jump_records_where_the_reader_was() {
+        let mut app = with_a_loaded_quote();
+
+        go_to_reply(&mut app);
+        assert_eq!(reading(&app), Some(1), "the reader is on the quote");
+
+        app.handle_key(press_ctrl('o'));
+
+        assert_eq!(reading(&app), Some(2), "and back where they were standing");
+        assert_eq!(app.pending_jump(), None, "which needed no page");
+    }
+
+    /// And forward again, which is the other half of the same walk.
+    #[test]
+    fn ctrl_i_takes_the_reader_forward_again() {
+        let mut app = with_a_loaded_quote();
+        go_to_reply(&mut app);
+        app.handle_key(press_ctrl('o'));
+
+        app.handle_key(press_ctrl('i'));
+
+        assert_eq!(reading(&app), Some(1), "back to the quoted message");
+        assert_eq!(app.pending_jump(), None);
+    }
+
+    /// The jump that took the reader away replaced the window, so the mark they
+    /// left behind is not on screen any more: a return is then a jump of its own,
+    /// on the same terms as the one they asked for, and it says so.
+    #[test]
+    fn a_return_across_a_replaced_window_is_a_jump_of_its_own() {
+        let mut app = with_a_reply_to_19();
+        go_to_reply(&mut app);
+        assert!(app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
+
+        app.handle_key(press_ctrl('o'));
+
+        assert_eq!(
+            app.pending_jump(),
+            Some(Jump {
+                peer_id: MOCK_CHAT,
+                target_id: 2,
+                kind: JumpKind::Back,
+            }),
+            "message 2 is not in the window the jump replaced"
+        );
+        assert_eq!(app.status_text(), JUMP_BACK_LABEL);
+
+        assert!(app.apply_jump(&page(&[1, 2, 3, 4, 5]), 2));
+        assert_eq!(reading(&app), Some(2), "the reader is back where they were");
+
+        app.handle_key(press_ctrl('i'));
+        assert_eq!(
+            app.pending_jump(),
+            Some(Jump {
+                peer_id: MOCK_CHAT,
+                target_id: 19,
+                kind: JumpKind::Forward,
+            })
+        );
+        assert_eq!(app.status_text(), JUMP_FORWARD_LABEL);
+    }
+
+    /// One fetch at a time: a return asked for while a page is on its way is
+    /// swallowed rather than replacing the jump the reader is still waiting for.
+    #[test]
+    fn a_return_asked_for_while_a_jump_is_on_its_way_is_ignored() {
+        let mut app = with_a_reply_to_19();
+        go_to_reply(&mut app);
+        let waiting = app.pending_jump();
+
+        app.handle_key(press_ctrl('o'));
+        assert_eq!(app.pending_jump(), waiting, "the key is swallowed");
+
+        app.jump_back();
+        assert_eq!(
+            app.pending_jump(),
+            waiting,
+            "and calling it directly does not walk the list either"
+        );
+    }
+
+    /// A placeholder is a message the server has not seen, so a jump to one has
+    /// nothing to fetch: the reader is told the message cannot be reached and
+    /// left where they were, rather than watching a page arrive for an id that
+    /// does not exist. Recorded as a known limitation rather than fixed — a
+    /// placeholder has no server-side identity to fetch around.
+    #[test]
+    fn a_return_to_a_placeholder_says_so_and_leaves_the_reader_put() {
+        let mut app = App::mock();
+        // Numbered below zero, which is what an outgoing message looks like
+        // before the server has given it an id. The window is in message order,
+        // so the placeholder is the oldest row and two steps up from the newest.
+        app.apply_latest(vec![reply(-7, 19), message(1, "text"), message(3, "text")]);
+        app.handle_key(press(KeyCode::Char('k')));
+        app.handle_key(press(KeyCode::Char('k')));
+        go_to_reply(&mut app);
+        assert!(app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
+        assert_eq!(reading(&app), Some(19));
+
+        app.handle_key(press_ctrl('o'));
+        assert_eq!(
+            app.pending_jump().map(|jump| jump.target_id),
+            Some(-7),
+            "it was asked for: nothing here can say it will not land"
+        );
+
+        assert!(!app.apply_jump(&[], -7));
+        assert_eq!(app.status_text(), JUMP_UNAVAILABLE);
+        assert_eq!(reading(&app), Some(19), "and the reader is where they were");
+    }
+
+    /// Q5: `Ctrl-i` is the same byte as `Tab` on a terminal that does not report
+    /// modifiers. Bare `Tab` stays the pane switch — and stays *only* that, so
+    /// forward navigation is unreachable there and `Ctrl-o` carries the criterion
+    /// alone.
+    #[test]
+    fn a_bare_tab_cycles_panes_and_is_not_forward_navigation() {
+        let mut app = with_a_loaded_quote();
+        go_to_reply(&mut app);
+        app.handle_key(press_ctrl('o'));
+        assert_eq!(app.focus, Focus::Conversation);
+
+        app.handle_key(press(KeyCode::Tab));
+
+        assert_eq!(
+            app.focus,
+            Focus::Input,
+            "`Tab` is the pane switch, whatever byte a terminal sent"
+        );
+        assert_eq!(reading(&app), Some(2), "and it walked nothing");
+
+        app.handle_key(press(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(reading(&app), Some(2), "nor did the other way");
+
+        app.handle_key(press_ctrl('i'));
+        assert_eq!(reading(&app), Some(1), "a reported `Ctrl-i` still walks");
     }
 
     // ---- the :shortcode completion --------------------------------------
