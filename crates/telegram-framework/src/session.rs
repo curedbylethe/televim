@@ -432,14 +432,7 @@ impl SessionStore for FileStore {
         if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             fs::create_dir_all(parent).map_err(|error| SessionError::Save(error.to_string()))?;
         }
-        // Created empty and restricted *before* a byte is in it. A plain
-        // `fs::write` leaves a window between creating the file and the
-        // `chmod`, and what is in that window is a permanent authorisation key
-        // at whatever the umask allowed.
-        fs::File::create(&self.path).map_err(|error| SessionError::Save(error.to_string()))?;
-        restrict_permissions(&self.path);
-        fs::write(&self.path, &bytes).map_err(|error| SessionError::Save(error.to_string()))?;
-        Ok(())
+        write_atomically(&self.path, &bytes)
     }
 
     fn clear(&self) -> Result<(), SessionError> {
@@ -449,6 +442,50 @@ impl SessionStore for FileStore {
             Err(error) => Err(SessionError::Clear(error.to_string())),
         }
     }
+}
+
+/// Writes `bytes` so that `path` only ever appears as a whole file.
+///
+/// The bytes go to a sibling temp file in the *same* directory and the temp is
+/// then renamed over the target. An interrupted write — a kill, a full disk, a
+/// permission refusal — therefore leaves the previous session intact instead of
+/// a truncated or 0-byte one, because the target is only ever replaced by the
+/// finished file. The temp has to be a rename rather than a copy for that, and
+/// it has to be in the same directory because a cross-filesystem rename is not
+/// atomic and would degrade to a non-atomic copy.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), SessionError> {
+    let temp = temp_sibling(path);
+
+    let result = (|| -> Result<(), SessionError> {
+        // Created empty and restricted *before* a byte is in it. A plain
+        // `fs::write` leaves a window between creating the file and the
+        // `chmod`, and what is in that window is a permanent authorisation key
+        // at whatever the umask allowed.
+        fs::File::create(&temp).map_err(|error| SessionError::Save(error.to_string()))?;
+        restrict_permissions(&temp);
+        fs::write(&temp, bytes).map_err(|error| SessionError::Save(error.to_string()))?;
+        // A rename keeps the source inode, so the target inherits the mode the
+        // temp was restricted to rather than being a fresh, umask-behind file.
+        fs::rename(&temp, path).map_err(|error| SessionError::Save(error.to_string()))
+    })();
+
+    if result.is_err() {
+        // A half-written temp is not a session file, and nothing would ever
+        // clean it up.
+        let _ = fs::remove_file(&temp);
+    }
+
+    result
+}
+
+/// The temp file [`write_atomically`] writes through.
+///
+/// A sibling, tagged with the process id so two processes sharing a session
+/// path do not write the same temp.
+fn temp_sibling(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.tmp", std::process::id()));
+    path.with_file_name(name)
 }
 
 /// Restricts a freshly written session file to its owner.
@@ -1137,6 +1174,80 @@ mod tests {
     fn file_store_reports_its_path() {
         let store = FileStore::new("/tmp/televim-session.json");
         assert_eq!(store.path(), Path::new("/tmp/televim-session.json"));
+    }
+
+    /// Every entry in the session directory that is not the session file itself
+    /// — the leftovers of the atomic write, if the rename never happened.
+    fn siblings(path: &Path) -> Vec<String> {
+        let target = path
+            .file_name()
+            .expect("the file has a name")
+            .to_string_lossy()
+            .into_owned();
+        let mut left: Vec<String> =
+            std::fs::read_dir(path.parent().expect("the file has a parent"))
+                .expect("the directory is readable")
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| *name != target)
+                .collect();
+        left.sort();
+        left
+    }
+
+    /// The write goes through a temp file, so a successful save must have left
+    /// nothing of it behind — the rename consumes the temp, and a leftover
+    /// would sit next to the session forever.
+    #[test]
+    fn file_store_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let session = sample_session();
+        FileStore::new(&path).save(&session).expect("save succeeds");
+
+        assert_eq!(
+            siblings(&path),
+            Vec::<String>::new(),
+            "the atomic write left something behind next to the session"
+        );
+        assert_eq!(
+            SessionData::from_bytes(&fs::read(&path).expect("the file is there"))
+                .expect("it parses"),
+            session
+        );
+    }
+
+    /// The point of the temp file: a write that fails cannot damage what is
+    /// already there. The failure is provoked for real — the temp's own path is
+    /// occupied by a directory, so the write is refused for any user, root
+    /// included — rather than asserted by reaching into the store.
+    #[test]
+    fn a_failed_save_leaves_the_previous_session_intact() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let store = FileStore::new(&path);
+        let first = sample_session();
+        store.save(&first).expect("the first save succeeds");
+
+        fs::create_dir(temp_sibling(&path)).expect("the temp's path is taken");
+
+        let mut second = sample_session();
+        second.user_id = Some(43);
+        let error = store
+            .save(&second)
+            .expect_err("a save that cannot write its temp fails");
+        assert!(matches!(error, SessionError::Save(_)), "got {error:?}");
+
+        assert_eq!(
+            store.load().expect("the previous session loads"),
+            Some(first.clone()),
+            "a failed write must not disturb the session that is already stored"
+        );
+        assert_eq!(
+            fs::read(&path).expect("the file is still there"),
+            first.to_bytes().expect("the first snapshot serialises"),
+            "not one byte of it may have changed"
+        );
     }
 
     /// The file holds a permanent authorisation key in plaintext, so it is
