@@ -11,7 +11,8 @@
 //!   [`Client::fetch_dialogs`] chat list, the `fetch_history` message history,
 //!   [`Client::fetch_account`] for the account's own profile,
 //!   [`Client::search_messages`], [`Client::send_message`],
-//!   [`Client::edit_message`] and [`Client::delete_messages`], the
+//!   [`Client::edit_message`] and [`Client::delete_messages`],
+//!   [`Client::download_media`] for a message's attachment, the
 //!   [`Client::subscribe_updates`] feed, and [`Client::invoke`] as a raw escape
 //!   hatch. These need `grammers`, so they sit behind the `live` feature.
 //!
@@ -115,7 +116,7 @@ pub use dialogs::{DialogInfo, DialogKind};
 #[cfg(feature = "live")]
 pub use history::{HISTORY_LIMIT, HistoryArgs};
 #[cfg(feature = "live")]
-pub use media::MediaKind;
+pub use media::{MEDIA_LIMIT, MediaKind};
 #[cfg(feature = "live")]
 pub use messages::{TEXT_LIMIT, validate_text};
 #[cfg(feature = "live")]
