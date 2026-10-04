@@ -98,8 +98,12 @@ Working today:
   `two-factor password (n attempts left)` row **only** when Telegram answers
   `SESSION_PASSWORD_NEEDED`. A refusal is a sentence that stays up rather than a
   flash. `⏎` sends the field once — a second `⏎` while `Checking…` says so and
-  sends nothing. The session is stored in the OS keyring (or a file, per
-  `session_path`).
+  sends nothing, and `⏎` with no client up flashes
+  `not connected yet — the client is not up` and keeps the draft. The session is
+  stored in the OS keyring (or a file, per `session_path`), written atomically, and
+  a stored session that cannot be read is discarded at launch: the status line says
+  so and the sign-in field opens, rather than the launch ending at an `offline:`
+  the reader can do nothing with.
 - **Chat List:** private chats only, filtered to exclude bots, groups and
   channels, with unread counts and last-message previews. `j`/`k` move the
   highlight, `gg`/`G` reach both ends, and `Enter` opens the highlighted
