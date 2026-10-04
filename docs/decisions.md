@@ -307,3 +307,36 @@ are in [`../AGENTS.md`](../AGENTS.md).
   different work. Streaming and a cache directory are CUR-9 and CUR-10; `proto`
   narrows the two identifiers to the `i32` the wire uses on the way through, and
   says so with `ProtoError::MessageIdOutOfRange` rather than truncating.
+- **Why typing is a deadline in `tui`, not a message row:** the signal is not a
+  message and has no place in the window. `domain` learns it —
+  `UpdateEvent::PeerTyping { chat_id, typing }` — and both `ChatList::apply_update`
+  and `ConversationWindow::apply_event` acknowledge it as a no-window change,
+  because nothing arrived, changed or left and a reader scrolled back up must not
+  be moved. What the event carries is a fact about the peer, not about the
+  conversation's contents, so the window is the wrong home for it.
+
+  The deadline is the interface's, and it is a deadline rather than a flag. A flag
+  set by the event would have to be unset by another event, and the cancel is not
+  sent reliably: a peer who sends instead of cancelling, or who stops without
+  either, would be shown as typing forever. So `tui` holds `typing_until:
+  Option<(i64, Instant)>` and re-arms it on every repeat (`TYPING_FOR`, six
+  seconds) — the same deadline shape as `status_until` beside it. It is cleared
+  three ways: a cancel, the peer's next message, and the deadline passing. The
+  last is the only one that needs a clock, which is exactly why the field is a
+  deadline and not a bool. `domain` never reads that clock: the event arrives
+  clock-free and the crate stays free of `Instant`, so the whole time-dependent
+  half lives in one layer.
+
+  Expiry runs on the loop's existing tick, not on a repaint schedule. `net::drive`
+  already calls `expire_status` every pass for the same reason — a frame is drawn
+  from a shared reference and cannot expire anything itself — so `expire_typing`
+  sits beside it and the note is gone by the tick after its deadline. A repaint
+  timer would be a second clock the program schedules for one note, where the tick
+  it already runs at 250 ms is finer than the six seconds the note lives for, and
+  the draw reads no clock at all: liveness is the deadline being set, and the loop
+  is what clears it. A `RowKind` was the other candidate and is worse for the same
+  reason it is tempting: it would enter the window, the layout, the scroll
+  arithmetic and the selection for transient state that can come and go between
+  two frames. The note is drawn on the conversation title instead, so it cannot
+  displace a message, and it is dropped whole rather than truncated when the title
+  has no room — a half-written `· typ` is worse than no note.
