@@ -1,4 +1,4 @@
-//! What a message carries, read off the wire.
+//! What a message carries, read off the wire — and how to fetch it.
 //!
 //! # Why the classification is a free function over primitives
 //!
@@ -15,9 +15,24 @@
 //! So anything present that is not modelled here becomes [`MediaKind::File`]
 //! rather than disappearing: the residue is visible in the description, and a
 //! caller can act on it. Only Telegram saying *no* media produces `None`.
+//!
+//! # Fetching the bytes
+//!
+//! [`Client::download_media`] re-reads the message by identifier and hands the
+//! bytes over in one piece. The locator is re-derived from the message on the
+//! way rather than kept on the description, because a description is rebuilt on
+//! every history page and a stale access hash is worse than none.
+//!
+//! Everything the transfer decides — whether the media can be fetched at all,
+//! and whether it fits under [`MEDIA_LIMIT`] — sits in [`Download`] and
+//! [`fetchable_media`], free functions over values rather than over a client,
+//! so that the refusals are tested on every CI job rather than only against a
+//! live account.
 
-use grammers_client::media::Media;
+use grammers_client::media::{Downloadable, Media};
 
+use crate::client::Client;
+use crate::error::{FrameworkError, RequestError};
 use crate::tl;
 
 /// The kind of thing a message carries.
@@ -134,6 +149,256 @@ fn classify_document(document: &tl::types::MessageMediaDocument) -> MediaKind {
     }
 
     MediaKind::File
+}
+
+/// The largest media this crate will fetch into memory in one piece.
+///
+/// A download here is held whole, and the workspace's budget is 50 MB of RSS
+/// (see `docs/memory.md`), so an unbounded `Vec` is a licence to spend most of
+/// it on one attachment. Telegram's own media ceiling is far above this, so the
+/// refusal is real rather than theoretical — and it is a refusal, not a
+/// truncation: a caller that is told a download was too large can say so, and
+/// one handed a short file would not.
+///
+/// The value is not tuned. Streaming and a bounded cache replace this whole
+/// shape, and they do not need this number to have been right first.
+pub const MEDIA_LIMIT: usize = 16 * 1024 * 1024;
+
+/// The media a message carries, if it is something that can be fetched.
+///
+/// `None` covers all three ways a fetch ends before a byte moves, and the caller
+/// reports one answer for them because they are one thing to a reader: this
+/// message has no attachment to open. They are:
+///
+/// - there is no media at all, or Telegram sent [`MessageMedia::Empty`];
+/// - the media is a kind `grammers` will not build, so there is no way to ask
+///   for its bytes; and
+/// - the media builds but names no file — a contact, a poll, a web page, or a
+///   photo whose own record the response did not carry.
+///
+/// The last is what `grammers` reports as `PreFailed`, and it is asked here
+/// instead of there: the question has an answer before a client exists, so it
+/// can be tested without a datacenter.
+fn fetchable_media(media: Option<&tl::enums::MessageMedia>) -> Option<Media> {
+    let media = match media {
+        Some(tl::enums::MessageMedia::Empty) | None => return None,
+        Some(media) => Media::from_raw(media.clone())?,
+    };
+
+    // The two things `iter_download` accepts, asked in the order it asks them:
+    // an embedded thumbnail needs no request, and a locator is the request.
+    (media.to_data().is_some() || media.to_raw_input_location().is_some()).then_some(media)
+}
+
+/// A download being collected, with the ceiling applied as it fills.
+///
+/// Its own type rather than a `Vec` and a running length, because the refusal
+/// is the interesting half: a download that has already fetched four chunks and
+/// is over the limit has to give the bytes back rather than hand on a file that
+/// is quietly short.
+#[derive(Debug)]
+struct Download {
+    bytes: Vec<u8>,
+    peer_id: i64,
+    message_id: i64,
+}
+
+impl Download {
+    /// Starts an empty download of one message.
+    fn new(peer_id: i64, message_id: i64) -> Self {
+        Self {
+            bytes: Vec::new(),
+            peer_id,
+            message_id,
+        }
+    }
+
+    /// Refuses before a chunk is transferred, when Telegram has already said how
+    /// big the media is.
+    ///
+    /// [`DownloadIter::size`](grammers_client::client::DownloadIter) knows the
+    /// length for a document, and a download that is going to be refused is
+    /// better refused before the first request than on the last.
+    fn check_declared(&self, declared: Option<usize>) -> Result<(), FrameworkError> {
+        match declared {
+            Some(size) if size > MEDIA_LIMIT => Err(FrameworkError::MediaTooLarge {
+                peer_id: self.peer_id,
+                message_id: self.message_id,
+                size,
+                limit: MEDIA_LIMIT,
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// Adds one chunk, or refuses the whole download if it would cross the
+    /// ceiling.
+    ///
+    /// A photo or a sticker reports no size, so this is the only thing standing
+    /// between them and an unbounded buffer — which is why it checks the total
+    /// rather than the chunk.
+    fn push(&mut self, chunk: Vec<u8>) -> Result<(), FrameworkError> {
+        let size = self.bytes.len().saturating_add(chunk.len());
+
+        if size > MEDIA_LIMIT {
+            return Err(FrameworkError::MediaTooLarge {
+                peer_id: self.peer_id,
+                message_id: self.message_id,
+                size,
+                limit: MEDIA_LIMIT,
+            });
+        }
+
+        self.bytes.extend(chunk);
+
+        Ok(())
+    }
+
+    /// The bytes, once the whole transfer has landed.
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Client {
+    /// Fetches the bytes of the media a message carries.
+    ///
+    /// `peer_id` is the bare identifier of the conversation, the same number
+    /// [`fetch_history`](crate::Client::fetch_history) takes, and the message
+    /// must be in that conversation's peer cache.
+    ///
+    /// # Why the message is fetched again
+    ///
+    /// Addressing a file takes the `access_hash` Telegram handed out with it,
+    /// and [`MessageInfo`] does not carry one: it is rebuilt on every history
+    /// page, so any locator kept on it would be stale the moment the window
+    /// moved. Re-reading the message costs one request and is always right — and
+    /// it keeps this a typed method, so `proto` never builds a request.
+    ///
+    /// `iter_download` is used rather than `download_media`, which is behind
+    /// `grammers-client`'s `fs` feature: turning that on would be a
+    /// workspace-level dependency change for a method that writes to a path,
+    /// which nothing here wants.
+    ///
+    /// # Errors
+    ///
+    /// - [`FrameworkError::UnknownPeer`] — the conversation is not in the peer
+    ///   cache, so no request can address it.
+    /// - [`FrameworkError::MediaUnavailable`] — the message carries no media,
+    ///   carries media that cannot be fetched, or names no message at all.
+    /// - [`FrameworkError::MediaTooLarge`] — the media is larger than
+    ///   [`MEDIA_LIMIT`], reported rather than truncated.
+    /// - [`FrameworkError::Request`] — Telegram refused a request, the
+    ///   connection failed, or a chunk could not be decoded.
+    pub async fn download_media(
+        &self,
+        peer_id: i64,
+        message_id: i64,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        let Some(peer) = self.peer_ref(peer_id) else {
+            tracing::warn!(
+                peer_id,
+                message_id,
+                "a download was asked for in a conversation that is not in the peer cache"
+            );
+            return Err(FrameworkError::UnknownPeer(peer_id));
+        };
+
+        // Telegram numbers messages with an `i32`, so an identifier outside that
+        // range names no message — and there is then nothing to fetch, which is
+        // the same answer a message with no attachment gets.
+        let Ok(offset_id) = i32::try_from(message_id) else {
+            tracing::warn!(
+                peer_id,
+                message_id,
+                "a download was asked for a message identifier telegram could not have numbered"
+            );
+            return Err(FrameworkError::MediaUnavailable { peer_id, message_id });
+        };
+
+        // The raw route `fetch_history` uses, rather than a `grammers` accessor:
+        // the media's own record — the photo, the document and its access hash —
+        // is only on the raw message, and it is the thing being fetched.
+        let request = tl::functions::messages::GetHistory {
+            peer: peer.into(),
+            offset_id,
+            offset_date: 0,
+            // Zero in both directions and a page of one: Telegram counts a page
+            // from an anchor downwards, so this is exactly the named message and
+            // nothing before it.
+            add_offset: 0,
+            limit: 1,
+            max_id: 0,
+            min_id: 0,
+            hash: 0,
+        };
+
+        let response = self
+            .inner()
+            .invoke(&request)
+            .await
+            .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
+
+        // Only reachable with a non-zero `hash`, and this request always sends
+        // zero. Reported rather than unwrapped: the release profile aborts on a
+        // panic, so an answer this build cannot read must not be the end of the
+        // process.
+        let (raw, _users, _chats) = match response {
+            tl::enums::messages::Messages::Messages(page) => {
+                (page.messages, page.users, page.chats)
+            }
+            tl::enums::messages::Messages::Slice(page) => (page.messages, page.users, page.chats),
+            tl::enums::messages::Messages::ChannelMessages(page) => {
+                (page.messages, page.users, page.chats)
+            }
+            tl::enums::messages::Messages::NotModified(_) => {
+                return Err(FrameworkError::Request(RequestError::Deserialize(
+                    "telegram answered a media fetch with NotModified".to_owned(),
+                )));
+            }
+        };
+
+        // Reading a message can cache a peer or move the datacenter, and that
+        // only reaches the store if it is written back.
+        self.flush_session();
+
+        let media = raw
+            .iter()
+            .find_map(|message| match message {
+                tl::enums::Message::Message(message) => Some(message.media.as_ref()),
+                tl::enums::Message::Empty(_) | tl::enums::Message::Service(_) => None,
+            })
+            .and_then(fetchable_media);
+
+        let Some(media) = media else {
+            tracing::debug!(peer_id, message_id, "the message has no media to fetch");
+            return Err(FrameworkError::MediaUnavailable { peer_id, message_id });
+        };
+
+        let mut download = Download::new(peer_id, message_id);
+        download.check_declared(media.size())?;
+
+        let mut chunks = self.inner().iter_download(&media);
+
+        while let Some(chunk) = chunks
+            .next()
+            .await
+            .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?
+        {
+            download.push(chunk)?;
+        }
+
+        let bytes = download.into_bytes();
+
+        tracing::debug!(
+            peer_id,
+            message_id,
+            bytes = bytes.len(),
+            "downloaded a message's media"
+        );
+
+        Ok(bytes)
+    }
 }
 
 #[cfg(test)]
@@ -297,5 +562,119 @@ mod tests {
             None,
             "this is the residue the raw path does not have"
         );
+    }
+
+    /// The three ways a fetch ends before a byte moves, all of which are one
+    /// thing to a reader: this message has no attachment to open. Each is
+    /// refused rather than panicked on, which the release profile makes the
+    /// only option — it aborts, so nothing here may unwind.
+    #[test]
+    fn a_message_with_nothing_to_fetch_is_refused_not_panicked_on() {
+        assert_eq!(fetchable_media(None), None, "no media field at all");
+        assert_eq!(
+            fetchable_media(Some(&media_empty())),
+            None,
+            "and the empty media value is the same answer"
+        );
+        assert_eq!(
+            fetchable_media(Some(&media_refused_by_grammers())),
+            None,
+            "a kind grammers will not build has no bytes to ask for"
+        );
+        assert_eq!(
+            fetchable_media(Some(&media_unmodelled())),
+            None,
+            "and neither has one that builds but names no file — a dice reads as \
+             a file and still has nothing to fetch, which is the gap between what \
+             the description says and what the wire can hand over"
+        );
+        assert_eq!(
+            fetchable_media(Some(&media_photo())),
+            None,
+            "a photo whose own record the response did not carry names no file — \
+             which is the case grammers reports as PreFailed"
+        );
+    }
+
+    /// The case a download exists for: media that names a file is fetchable,
+    /// and it is asked for off the media rather than off the client.
+    #[test]
+    fn a_document_that_names_a_file_can_be_fetched() {
+        let document = media_document(vec![attribute_filename("notes.txt")], false);
+
+        let media = fetchable_media(Some(&document)).expect("a document names a file");
+
+        assert!(
+            media.to_raw_input_location().is_some(),
+            "the locator is what the request is built from"
+        );
+    }
+
+    /// A refusal, not a truncation: the caller has to be able to say the
+    /// download was too large rather than write out a file that is quietly
+    /// short.
+    #[test]
+    fn a_declared_size_over_the_ceiling_is_refused_before_any_chunk() {
+        let download = Download::new(42, 7);
+
+        assert!(
+            download.check_declared(Some(MEDIA_LIMIT)).is_ok(),
+            "exactly the limit is within it"
+        );
+        assert!(download.check_declared(None).is_ok(), "an unknown size is not a refusal");
+        assert!(download.check_declared(Some(0)).is_ok());
+
+        let refused = download
+            .check_declared(Some(MEDIA_LIMIT + 1))
+            .expect_err("one byte over the limit is over it");
+
+        assert!(
+            matches!(
+                refused,
+                FrameworkError::MediaTooLarge {
+                    peer_id: 42,
+                    message_id: 7,
+                    size,
+                    limit,
+                } if size == MEDIA_LIMIT + 1 && limit == MEDIA_LIMIT
+            ),
+            "the caller is told what was too big and what the limit was"
+        );
+    }
+
+    /// A photo or a sticker reports no size at all, so the ceiling has to be
+    /// applied to what has been collected — otherwise an unknown size is the way
+    /// round it.
+    #[test]
+    fn chunks_are_measured_as_they_arrive_not_only_up_front() {
+        let mut download = Download::new(42, 7);
+
+        let chunk = vec![0_u8; MEDIA_LIMIT];
+        download.push(chunk.clone()).expect("a chunk up to the limit lands");
+        assert_eq!(download.into_bytes().len(), MEDIA_LIMIT);
+
+        let mut download = Download::new(42, 7);
+        let refused = download
+            .push(vec![0_u8; MEDIA_LIMIT + 1])
+            .expect_err("one byte over the limit is over it");
+
+        assert!(
+            matches!(
+                refused,
+                FrameworkError::MediaTooLarge {
+                    size,
+                    limit,
+                    ..
+                } if size == MEDIA_LIMIT + 1 && limit == MEDIA_LIMIT
+            ),
+            "the size reported is the total, not the chunk"
+        );
+    }
+
+    /// The ceiling is a real number, not a placeholder: Telegram's media is far
+    /// larger, so this refuses downloads a client would happily make.
+    #[test]
+    fn the_ceiling_leaves_room_inside_the_memory_budget() {
+        const { assert!(MEDIA_LIMIT < 50 * 1024 * 1024) };
     }
 }

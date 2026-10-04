@@ -259,6 +259,62 @@ pub enum FrameworkError {
         #[source]
         source: Box<RequestError>,
     },
+
+    /// The message carries nothing that can be fetched.
+    ///
+    /// A fact about the answer rather than a failure of the request, so it gets
+    /// its own variant for the same reason [`FrameworkError::ProfileMissing`]
+    /// does: a reader told the connection failed would go and check a connection
+    /// that is fine, and a reader told the response was unreadable would be
+    /// looking for a bug in a client that did nothing wrong.
+    ///
+    /// One answer covers three situations, because they are one thing to the
+    /// reader — there is no attachment to open:
+    ///
+    /// - the message carries no media at all;
+    /// - it carries a kind this build cannot name, or media that names no file
+    ///   (a contact, a poll, a web page); and
+    /// - the identifier names no message, because it is outside the range
+    ///   Telegram numbers messages in.
+    ///
+    /// Both numbers travel with it, so a caller can say which message it could
+    /// not fetch without holding the request that asked.
+    #[error("message {message_id} in conversation {peer_id} has no media to fetch")]
+    MediaUnavailable {
+        /// Bare identifier of the conversation the message belongs to.
+        peer_id: i64,
+
+        /// Identifier of the message.
+        message_id: i64,
+    },
+
+    /// The media is larger than this crate will hold in one piece.
+    ///
+    /// A refusal rather than a truncation, deliberately: a caller handed a short
+    /// file cannot tell it is short, and would write it out as though it were
+    /// whole. The limit is [`MEDIA_LIMIT`](crate::MEDIA_LIMIT), and it exists
+    /// because a download here is held whole while the program's memory budget
+    /// is not large enough to hold an arbitrary attachment.
+    ///
+    /// The reported size is what Telegram declared, which for a photo or a
+    /// sticker is the size of what has been collected so far — the smallest
+    /// figure known to be over the line, and the one that refuses the download.
+    #[error(
+        "the media on message {message_id} in conversation {peer_id} is {size} byte(s); the limit is {limit}"
+    )]
+    MediaTooLarge {
+        /// Bare identifier of the conversation the message belongs to.
+        peer_id: i64,
+
+        /// Identifier of the message.
+        message_id: i64,
+
+        /// How many bytes the media has, or the number known to be too many.
+        size: usize,
+
+        /// The most bytes a download may hold.
+        limit: usize,
+    },
 }
 
 #[cfg(feature = "live")]
