@@ -1593,6 +1593,33 @@ impl App {
         }
     }
 
+    /// Installs a freshly fetched chat list while keeping the open conversation.
+    ///
+    /// The other half of [`App::set_chats`], and the one a client that has been
+    /// brought back up needs: the list is replaced wholesale, but the reader's
+    /// place in it is not. The conversation, its window, the cursor in it, the
+    /// jumplist, the selection, the register and the draft are left exactly as
+    /// they were, because a re-fetch is not the reader changing conversations —
+    /// so none of [`App::select_chat_none`]'s resets run here.
+    ///
+    /// The highlight is restored by the open conversation's own id, never by
+    /// index: the list comes back ordered by recency, and an index means a
+    /// different conversation on either side of the fetch. An id the new list
+    /// does not hold falls back to the top and reports `false`, so the caller
+    /// can say where the reader landed.
+    pub fn refresh_chats(&mut self, chats: Vec<Chat>) -> bool {
+        let open = self.conversation.window.chat_id;
+        self.list = ChatList::with_chats(chats);
+
+        if let Some(index) = self.list.chats.iter().position(|chat| chat.id == open) {
+            self.selected_chat = index;
+            true
+        } else {
+            self.selected_chat = 0;
+            false
+        }
+    }
+
     /// Closes the conversation on show.
     ///
     /// Every other act of this function is a reset, and the draft is the one
@@ -5520,6 +5547,50 @@ mod tests {
         assert!(app.chats().is_empty());
         assert_eq!(app.current_chat_id(), 0);
         assert!(app.conversation.window.is_empty());
+    }
+
+    /// A refresh installs a new list around the reader's place, rather than
+    /// through the reset a chat switch runs: the conversation, the selection and
+    /// the draft stay, and the highlight follows the open conversation's id into
+    /// a list whose order has changed.
+    #[test]
+    fn a_refresh_keeps_the_conversation_selection_and_draft_purpose() {
+        let mut app = App::mock();
+        app.start_reply();
+        let reply_to = app.reply_to.expect("the sample cursor is on a message");
+        spanning(&mut app, 3, 5);
+
+        // The same conversations, reversed: an index would point at a different
+        // one, so only restoring by id can keep the highlight where it was.
+        let reversed: Vec<_> = app.chats().iter().rev().cloned().collect();
+        let restored = app.refresh_chats(reversed);
+
+        assert!(
+            restored,
+            "the open conversation is still in the fetched list"
+        );
+        assert_eq!(
+            app.current_chat_id(),
+            MOCK_CHAT,
+            "the conversation on show is untouched"
+        );
+        assert!(!app.conversation.window.is_empty(), "and so is its window");
+        assert_eq!(
+            app.selected_chat, 2,
+            "the highlight followed the id to the end of the reversed list"
+        );
+        assert_eq!(
+            app.line.purpose(),
+            PromptKind::Reply,
+            "the draft is still a reply, not reset to a plain message"
+        );
+        assert_eq!(app.reply_to, Some(reply_to));
+        assert_eq!(
+            app.selection()
+                .map(|selection| (selection.anchor.message_id, selection.focus.message_id)),
+            Some((3, 5)),
+            "the selection survives the list being replaced"
+        );
     }
 
     /// Regression: every keystroke must be applied exactly once. Previously

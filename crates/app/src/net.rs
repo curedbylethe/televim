@@ -1449,7 +1449,24 @@ fn apply_ready_to_screen(
     account: Result<domain::account::Account, String>,
     session_store: tui::SessionStore,
 ) {
-    open_first_chat(app, chats);
+    // A conversation already on screen is the reader's place, and a `Ready` that
+    // lands on top of one is the client being brought back up — so the list is
+    // refreshed around that place rather than the reader being moved to the top
+    // of it. A launch with nothing open keeps the old landing. Either way the
+    // stale network anchors go: the cursor, the in-flight jump and the retry
+    // gate all described the list and the feed that are gone, and holding them
+    // makes `wanted` fall to a paging direction whose page can never arrive
+    // (G5), because the preserved window is not empty.
+    let restored = if app.conversation.window.chat_id != 0 {
+        state.history.cursor = None;
+        state.history.jump = None;
+        state.history.retry_at = None;
+        app.refresh_chats(chats)
+    } else {
+        open_first_chat(app, chats);
+        true
+    };
+
     app.set_session_store(session_store.clone());
     state.session_store = Some(session_store);
     let no_session = matches!(&account, Err(reason) if reason.is_empty());
@@ -1460,6 +1477,12 @@ fn apply_ready_to_screen(
     app.set_account(account);
     if no_session && !interrupted {
         app.begin_signin();
+    }
+
+    // Said last, because `login_complete` is what puts the status line back to
+    // its resting sentence and would otherwise overwrite this.
+    if !restored {
+        "the open conversation is no longer in the chat list".clone_into(&mut app.status);
     }
 }
 
@@ -3267,6 +3290,149 @@ mod tests {
         );
 
         assert!(app.signin().is_none(), "the account is signed in");
+    }
+
+    // ---- a client brought back up over an open conversation --------------
+
+    /// A `Ready` landing while a conversation is open is the client being
+    /// brought back up, not a launch: the list is refreshed around the reader's
+    /// place rather than the reader being moved to the top of it. The highlight
+    /// comes back by id, because the re-fetched list is ordered by recency and
+    /// an index means a different conversation on either side of the fetch.
+    #[test]
+    fn a_ready_over_an_open_conversation_keeps_it_and_restores_the_highlight_by_id() {
+        let mut app = app_with_unread_out_of_reach(2);
+        let read_at = app.vim.cursor();
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1), chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.window.chat_id, CHAT,
+            "the conversation the reader was in is still the one on screen"
+        );
+        assert_eq!(
+            app.conversation.window.len(),
+            8,
+            "with its loaded window intact"
+        );
+        assert_eq!(app.vim.cursor(), read_at, "and the reader where they were");
+        assert_eq!(
+            app.selected_chat, 1,
+            "the highlight followed the conversation's id into the reordered list"
+        );
+    }
+
+    /// The stale network anchors describe a list and a feed that are gone, so
+    /// they go with the `Ready`: a cursor whose page will never arrive is what
+    /// wedges `wanted` on a preserved window (G5).
+    #[test]
+    fn a_ready_over_an_open_conversation_clears_the_stale_network_anchors() {
+        let mut app = app_with_a_conversation(CHAT, 5);
+        let mut state = State {
+            history: History {
+                cursor: Some(HistoryCursor::new(CHAT)),
+                jump: Some(Jump {
+                    peer_id: CHAT,
+                    target_id: 20,
+                    kind: JumpKind::Unread,
+                }),
+                retry_at: Some(Instant::now() + RETRY),
+            },
+            ..State::default()
+        };
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(state.history.cursor, None, "the cursor goes");
+        assert_eq!(state.history.jump, None, "and the jump on its way");
+        assert_eq!(state.history.retry_at, None, "and the retry gate");
+    }
+
+    /// With the cursor cleared, a preserved window re-anchors from its own
+    /// newest message: a paging direction, rather than the `Wanted::Nothing`
+    /// that a stale cursor naming an empty window would leave forever.
+    #[test]
+    fn paging_re_anchors_after_a_ready_over_an_open_conversation() {
+        let mut app = app_with_a_conversation(CHAT, 5);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Latest(CHAT),
+            "the preserved conversation asks for its newest page again"
+        );
+    }
+
+    /// A re-fetch that no longer holds the reader's conversation keeps the
+    /// window and falls back to the top of the list, saying so, rather than
+    /// silently opening whichever conversation now happens to be first.
+    #[test]
+    fn a_ready_whose_conversation_is_gone_keeps_the_window_and_says_so() {
+        let mut app = app_with_a_conversation(CHAT, 5);
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.window.chat_id, CHAT,
+            "the window the reader was reading is preserved"
+        );
+        assert_eq!(app.selected_chat, 0, "the highlight falls back to the top");
+        assert!(
+            app.status.contains("no longer"),
+            "and the reader is told where they landed: {:?}",
+            app.status
+        );
+    }
+
+    /// A launch has nothing open, so the old landing is untouched: the reader
+    /// is still put into the newest conversation rather than left on an empty
+    /// screen.
+    #[test]
+    fn a_ready_with_no_conversation_open_still_selects_the_first_chat() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.conversation.window.chat_id, CHAT);
     }
 
     // ---- a stored session that cannot be read --------------------------
