@@ -2087,6 +2087,6 @@
     return feed(s, v.keys);
   }
 
-  root.TV = { W, H, HINT, ALL_HINTS, HINT_W, fresh, key, feed, render, toHTML, toText, modeName, setMode, scene, SCENES, FOCUS_NAME, chat, peerTyping, peerSays, chars, cells, clusters, baseDir, visualPieces, visualCells, BIDI_MODES, answer };
+  root.TV = { W, H, HINT, ALL_HINTS, HINT_W, fresh, key, feed, render, toHTML, toText, modeName, setMode, scene, SCENES, FOCUS_NAME, chat, peerTyping, peerSays, chars, cells, clusters, baseDir, visualPieces, visualCells, caretCol, bar, BIDI_MODES, answer };
   if (typeof module !== 'undefined') module.exports = root.TV;
 })(typeof window !== 'undefined' ? window : globalThis);
