@@ -1127,6 +1127,17 @@ pub struct App {
     /// scroll through the list becomes a flood wait.
     pending_chat: Option<ChatChoice>,
 
+    /// Whether the reader has asked for the client to be brought up again.
+    ///
+    /// Recorded here because `tui` cannot reach the network, and taken by the
+    /// one caller that can. **Not an [`Action`]**, and the reason is the state a
+    /// retry is needed in: actions are drained only while there is a client, so a
+    /// queued one would be invisible at exactly the moment it matters — a launch
+    /// that came up `offline:`. One slot rather than a queue, because a second
+    /// retry while one is on its way is the same retry; the caller says so with
+    /// a transient status rather than asking twice.
+    retry_requested: bool,
+
     /// Whether a `g` was just pressed in the chat list and a second one would
     /// take the reader to the top of it.
     ///
@@ -1262,6 +1273,7 @@ impl App {
             fetching: Fetching::default(),
             pending_jump: None,
             pending_chat: None,
+            retry_requested: false,
             pending_g: false,
             pending_find: None,
             rows: Cell::new(ASSUMED_ROWS),
@@ -3849,6 +3861,7 @@ impl App {
             // session: they are the same question, and two entry points would be
             // two flows that could come to differ.
             "signin" => self.begin_signin(),
+            "retry" => self.request_retry(),
             _ if cmd.starts_with("chat ") => {
                 if let Ok(id) = cmd[5..].trim().parse::<i64>()
                     && let Some(pos) = self.list.chats.iter().position(|c| c.id == id)
@@ -4039,6 +4052,30 @@ impl App {
                 domain::session::SessionState::LoggedIn { .. } => None,
             },
         }
+    }
+
+    /// Records that the client is to be brought up again.
+    ///
+    /// The `offline:` sentence is answered the moment it is read, so the status
+    /// line says the retry is under way rather than leaving a sentence about a
+    /// failed launch up beside one in flight — and what the network side writes
+    /// next (the retry sentence, or the next `offline:`) replaces it.
+    pub fn request_retry(&mut self) {
+        self.retry_requested = true;
+        "reconnecting".clone_into(&mut self.status);
+        // Written straight to `status` rather than through `flash`, because a
+        // bring-up is not a thing that passes on its own: it ends in an event, and
+        // that event brings its own sentence.
+        self.status_until = None;
+    }
+
+    /// The retry the reader asked for, once.
+    ///
+    /// Forgotten on the way out, the way [`App::take_pending_chat`] is: a request
+    /// taken is a request being carried out, and a caller that asks again on the
+    /// next pass gets `None` rather than a second bring-up.
+    pub fn take_retry_request(&mut self) -> bool {
+        std::mem::take(&mut self.retry_requested)
     }
 
     /// Puts the sign-in flow up, with the phone field open and the configured
@@ -7389,6 +7426,56 @@ mod tests {
 
         assert!(app.status.contains("unknown command"));
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    /// `:retry` asks for the client again and takes the `offline:` line down with
+    /// it: the sentence left up would be a failure that has just been acted on.
+    #[test]
+    fn retry_command_asks_for_the_client_again() {
+        let mut app = App::mock();
+        app.status = "offline: connection reset".to_owned();
+
+        run_command_line(&mut app, "retry");
+
+        assert!(
+            app.take_retry_request(),
+            "the request is what the network side acts on"
+        );
+        assert_ne!(app.status, IDLE_STATUS, "got {:?}", app.status);
+        assert!(
+            !app.status.contains("offline:"),
+            "the failure it answers must not still be up: {:?}",
+            app.status
+        );
+    }
+
+    /// One slot rather than a queue: a request taken is a request being carried out,
+    /// so the pass after the one that took it finds nothing. What stops a *second*
+    /// bring-up is not this slot — pressing `:retry` twice before either is taken
+    /// is still one request — but the network side's own in-flight guard.
+    #[test]
+    fn a_retry_request_is_spent_once_taken() {
+        let mut app = App::mock();
+
+        run_command_line(&mut app, "retry");
+        assert!(app.take_retry_request(), "the command records the request");
+        assert!(!app.take_retry_request(), "and taking it spends it");
+    }
+
+    /// Not a flash: a bring-up does not pass on its own, it ends in an event that
+    /// brings its own sentence — so this one must not expire back to idle while
+    /// the client is still being built.
+    #[test]
+    fn a_retry_outlives_a_transient_status() {
+        let mut app = App::mock();
+        run_command_line(&mut app, "retry");
+
+        assert!(
+            !app.expire_status(Instant::now() + FLASH_FOR),
+            "got {:?}",
+            app.status
+        );
+        assert_ne!(app.status, IDLE_STATUS);
     }
 
     fn run_search_line(app: &mut App, query: &str) {
