@@ -376,6 +376,21 @@ pub struct State {
 
     /// The channel bring-up answers on. Read only beside [`State::cfg`].
     tx: Option<UnboundedSender<AppEvent>>,
+
+    /// Whether a bring-up is in flight, so a second one is not started over it.
+    ///
+    /// Set where a bring-up is *issued* rather than where it is wanted, because
+    /// the window that matters is the whole of one — including the retry loop's
+    /// own waits, where a reader's `:retry` would otherwise start a second client
+    /// beside the first and let two of them fight over one update relay. Cleared
+    /// by the two events that end a bring-up, [`Event::Ready`] and
+    /// [`Event::Offline`], because those are the only answers it can come back
+    /// with.
+    ///
+    /// `true` from [`State::new`]: the state that can bring the client up is
+    /// built immediately before the launch bring-up is issued, so the launch
+    /// needs no separate marking.
+    bringing_up: bool,
 }
 
 impl State {
@@ -390,6 +405,10 @@ impl State {
         Self {
             cfg: Some(cfg),
             tx: Some(tx),
+            // The launch bring-up is issued immediately after this is built, and
+            // it has to be counted as in flight before the reader can ask for a
+            // second one.
+            bringing_up: true,
             ..Self::default()
         }
     }
@@ -704,6 +723,18 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     if let Some(index) = app.take_pending_chat(Instant::now()) {
         app.select_chat(index);
         state.history.cursor = None;
+    }
+
+    // Read here, before the client is looked up, and not as an action: the state a
+    // retry is asked for in is the state with no client, where the action drain
+    // below never runs.
+    if app.take_retry_request() {
+        if state.bringing_up {
+            app.flash("already trying to connect");
+        } else if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+            state.bringing_up = true;
+            spawn_bring_up(cfg, tx);
+        }
     }
 
     let Some(client) = state.client.clone() else {
@@ -1160,6 +1191,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         } => {
             apply_ready_to_screen(app, state, chats, account, session_store);
             state.client = Some(client);
+            state.bringing_up = false;
             // The client is there, so the sign-in flow's `waiting` flag means
             // what it says: a request a client is carrying.
             app.set_client_available(true);
@@ -1205,18 +1237,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             app.set_contact(peer_id, result.map_err(|error| format!("{error:#}")));
         }
 
-        // The panel is told too, not only the status line. A status is a flash:
-        // it is gone within seconds, and a reader who opens the profile a minute
-        // later must still be told why it is empty rather than shown a blank
-        // panel they cannot tell from a broken one.
-        Event::Offline(reason) => {
-            let reason = format!("{reason:#}");
-            app.set_account(Err(reason.clone()));
-            app.status = format!("offline: {reason}");
-            // No client to carry anything, so an in-flight sign-in is not in
-            // flight: the flag would only keep the panel saying "Checking…".
-            app.set_client_available(false);
-        }
+        Event::Offline(reason) => apply_offline(app, state, &reason),
 
         Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
 
@@ -1231,6 +1252,10 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // `Err(String::new())`, and `apply_ready_to_screen` is what opens
             // the phone field off the back of it.
             if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+                // Counted as in flight from here rather than from the `Ready` it
+                // will send, so a `:retry` typed while it is on its way is refused
+                // rather than answered with a second client.
+                state.bringing_up = true;
                 spawn_bring_up(cfg, tx);
             }
         }
@@ -1362,6 +1387,26 @@ fn apply_history(
             }
         }
     }
+}
+
+/// What a bring-up that failed says, everywhere it has to be said.
+///
+/// The panel is told as well as the status line. A status is a flash: it is gone
+/// within seconds, and a reader who opens the profile a minute later must still
+/// be told why it is empty rather than shown a blank panel they cannot tell from
+/// a broken one.
+///
+/// **This also ends the bring-up**, which is why it takes the state: a bring-up
+/// that answered is not in flight, and a `:retry` from the `offline:` screen it
+/// just wrote is a retry of nothing.
+fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
+    let reason = format!("{reason:#}");
+    app.set_account(Err(reason.clone()));
+    app.status = format!("offline: {reason}");
+    // No client to carry anything, so an in-flight sign-in is not in flight: the
+    // flag would only keep the panel saying "Checking…".
+    app.set_client_available(false);
+    state.bringing_up = false;
 }
 
 /// Puts a client that is up on screen: its conversations, its store, and its
@@ -2401,6 +2446,93 @@ mod tests {
 
         assert!(
             app.status.starts_with("offline:") && app.status.contains("credentials"),
+            "got {:?}",
+            app.status
+        );
+    }
+
+    /// The launch bring-up is counted as in flight before it is issued: the state
+    /// that can bring the client up is built for exactly that bring-up.
+    #[test]
+    fn a_state_that_can_bring_the_client_up_starts_with_one_in_flight() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let state = State::new(Config::default(), tx);
+
+        assert!(
+            state.bringing_up,
+            "a `:retry` before the launch answered would be a second client"
+        );
+    }
+
+    /// An `offline:` is the end of a bring-up, so the retry the reader types at it
+    /// is a retry of a bring-up that has stopped.
+    #[test]
+    fn an_offline_bring_up_is_no_longer_in_flight() {
+        let mut app = App::new();
+        let mut state = State {
+            bringing_up: true,
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("connection reset")),
+        );
+
+        assert!(!state.bringing_up, "got the offline screen");
+    }
+
+    /// The request is read before the client is looked up, because the state a
+    /// retry is needed in is the state with no client — where the action drain
+    /// never runs. The bring-up is issued, which is what the guard records.
+    ///
+    /// On a runtime because that is where a bring-up can be spawned at all: it is
+    /// `tokio::spawn`, and a bring-up issued off one is a panic rather than a
+    /// request.
+    #[tokio::test]
+    async fn a_retry_request_brings_the_client_up_again() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            ..State::default()
+        };
+        app.request_retry();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(
+            state.bringing_up,
+            "nothing else sets it on this path, so this is the bring-up"
+        );
+        assert!(
+            !app.take_retry_request(),
+            "and the request was taken, so a second pass asks for nothing"
+        );
+    }
+
+    /// A bring-up already in flight — the launch, or a retry's own attempt loop —
+    /// is not restarted by a second `:retry`. The reader is told, transiently:
+    /// the refusal is about this second press, not about the state of the client.
+    #[tokio::test]
+    async fn a_retry_asked_for_during_a_bring_up_is_refused() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            bringing_up: true,
+            ..State::default()
+        };
+        app.request_retry();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(
+            app.status.contains("already trying to connect"),
             "got {:?}",
             app.status
         );
