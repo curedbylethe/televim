@@ -96,6 +96,28 @@ pub enum UpdateEvent {
         /// Every outgoing message in it up to this identifier has been read.
         max_id: i64,
     },
+
+    /// Someone in a conversation has started typing, or has stopped.
+    ///
+    /// A flag and a conversation, which is all the protocol carries: the peer
+    /// composing is one update and the peer cancelling is the same update with
+    /// the other flag, and there is no message in either to file anywhere.
+    ///
+    /// Incoming only, and only for a conversation with a person. This account's
+    /// own typing is never an event — the reader already knows they typed it —
+    /// and a group reports typing through a different update the framework does
+    /// not read.
+    ///
+    /// The event carries no timestamp and expires nothing. Whether the peer is
+    /// still typing is decided by whatever has happened since, not by elapsed
+    /// time, and this crate has no clock to decide it with.
+    PeerTyping {
+        /// The conversation whose peer is typing.
+        chat_id: i64,
+
+        /// Whether they are typing now; `false` is the cancel.
+        typing: bool,
+    },
 }
 
 /// How many messages [`ChatList`] holds before the oldest is dropped.
@@ -154,11 +176,13 @@ impl ChatList {
                 new_text,
             } => self.apply_edit(chat_id, message_id, new_text),
             UpdateEvent::MessagesDeleted { message_ids } => self.apply_deletion(&message_ids),
-            // The list counts what has *not* been read, and this says what has:
-            // a chat list entry would need the inbox watermark to correct an
-            // unread count, and that is a different update entirely. Nothing here
-            // observes a read, so nothing changes.
-            UpdateEvent::ReadReceipt { .. } => false,
+            // Neither of these is part of a list entry: the list counts what has *not*
+            // been read, and this says what has, and a peer composing a message is
+            // not a message at all. Nothing here observes either, so nothing
+            // changes — and storing a typing flag would mean deciding when it
+            // lapses, which is a question for whoever draws the conversation and
+            // a clock this crate does not have.
+            UpdateEvent::ReadReceipt { .. } | UpdateEvent::PeerTyping { .. } => false,
         }
     }
 
@@ -362,6 +386,26 @@ mod tests {
                 max_id: 9
             }),
             "the list has no use for an outgoing read watermark"
+        );
+        assert_eq!(list.chats[0].unread_count, 1, "and the count is untouched");
+        assert_eq!(list.messages.len(), 1, "as is the window");
+    }
+
+    /// The same answer for the same reason: a list entry holds a preview and an
+    /// unread count, neither of which is a message, so a peer composing one has
+    /// nothing to change here. Storing the flag would mean deciding when it
+    /// lapses, and this crate has no clock.
+    #[test]
+    fn a_typing_update_changes_nothing_in_the_list() {
+        let mut list = list();
+        applied(&mut list, arrival(1, 10, "hello", 2_000));
+
+        assert!(
+            !list.apply_update(UpdateEvent::PeerTyping {
+                chat_id: 1,
+                typing: true
+            }),
+            "the list has no use for a typing flag"
         );
         assert_eq!(list.chats[0].unread_count, 1, "and the count is untouched");
         assert_eq!(list.messages.len(), 1, "as is the window");
