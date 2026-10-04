@@ -316,9 +316,9 @@ up (build, fetch the chat list, take the feed — it does **not** sign in; see
 show is near one
 of its ends, drives the sign-in flow the panel asks for, and folds in whatever
 arrives. Everything with a rule in it is a function over the state — `wanted`,
-`open_first_chat`, `backoff` — so the part that can be wrong is tested without a
-client or a datacenter; the rest is the calls. A `HistoryCursor` lives beside the
-loop rather than in `tui`, because `tui` may not name `proto`.
+`open_first_chat`, `backoff`, `chat_list_retry` — so the part that can be wrong is
+tested without a client or a datacenter; the rest is the calls. A `HistoryCursor`
+lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
 
 Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
 `TELEVIM_API_HASH`, `TELEVIM_PHONE`, `TELEVIM_CODE`, `TELEVIM_PASSWORD` and
@@ -336,6 +336,20 @@ read once in `runtime.rs` and handed to `tui` as a plain `tui::bidi::BidiMode`
 through `App::with_bidi`, which is the only path a configuration value takes into
 `App`; `tui` names no configuration type. The value is per machine rather than per
 terminal, so an ssh hop keeps it — see [`decisions.md`](./decisions.md).
+
+`bidi.rs` is the authority and both consumers go through it: the conversation
+panel and the input bar each ask `base_direction` for the direction of the text
+as a whole, then `visual_row_in` for the pieces of one row of it — in the
+**text's** coordinates, which is what `text_row::spans_permuted` slices the text
+with, and the difference between a wrapped row drawn right-to-left and a row that
+paints nothing. Under `Visual` a row is drawn through `spans_permuted` with its
+caret and selection clipped to the piece that owns them; under `Terminal` the
+whole row goes through `spans`, which is the same paint over one piece. Nothing
+about a row's **geometry** reads the mode: the wrap, the bar's height and the
+panel's layout are pure functions of the text and the width, so the same draft is
+as tall in both modes. `LaidOut::visual_column` is the one place a column
+depends on it — where the caret is *painted*, for the emoji popup to anchor on —
+and it is `None` unless the caller passed `Visual`.
 
 The log goes to a file beside the configuration (`televim.toml` → `televim.log`)
 and **never the terminal**: this program draws on the terminal, and `grammers`

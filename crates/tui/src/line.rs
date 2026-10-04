@@ -129,6 +129,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vim_line::{Key, KeyCode as VKey, LineEditor as _, TextEdit, VimLineEditor};
 
 use crate::app::PromptKind;
+use crate::bidi::{self, BidiMode};
 use crate::grapheme;
 use crate::wrap::{columns, wrap_keeping_whitespace};
 
@@ -339,8 +340,34 @@ impl LineEditor {
     /// typed keeps the cell it has to be seen in. The rows and their count are
     /// the same either way; a run of spaces is only ever recorded while the row
     /// still has room after it, so nothing is wider for it.
+    ///
+    /// The caret is answered in **logical** columns, which is the order the text
+    /// is stored in and the order this module's own motions move through. A
+    /// reader on a terminal that shapes sees the row reordered and a caret to
+    /// match, and that reordering is the terminal's — see
+    /// [`LineEditor::laid_out_in`].
     #[must_use]
     pub fn laid_out(&self, width: u16) -> LaidOut {
+        self.laid_out_in(width, BidiMode::Terminal)
+    }
+
+    /// The same measurement, with the draft's direction resolved.
+    ///
+    /// Two columns and one answer about a right-to-left row: [`LaidOut::column`]
+    /// stays logical — it is the one every motion in this module is counted in,
+    /// and the one that is right whatever order the row is drawn in — and
+    /// [`LaidOut::visual_column`] is `Some` only under [`BidiMode::Visual`],
+    /// where this program draws the row permuted and something outside the line
+    /// (the emoji popup) has to anchor itself where the caret is actually
+    /// painted.
+    ///
+    /// It is the same rows and the same row the same `column` names either way.
+    /// `BidiMode` is a fact about the terminal, not about the text, and nothing
+    /// about where the text breaks may depend on it: a draft that wrapped
+    /// differently in the two modes would be a different height in two terminals
+    /// on the same window.
+    #[must_use]
+    pub fn laid_out_in(&self, width: u16, mode: BidiMode) -> LaidOut {
         let rows = wrap_keeping_whitespace(&self.text, width);
         let caret = self.caret();
 
@@ -365,8 +392,16 @@ impl LineEditor {
         // same `columns` the row was measured with, over the slice in front of
         // the caret.
         let column = columns(&self.text[range.start..at]);
+        let visual_column = mode
+            .is_visual()
+            .then(|| caret_visual_column(&self.text, range, at));
 
-        LaidOut { rows, row, column }
+        LaidOut {
+            rows,
+            row,
+            column,
+            visual_column,
+        }
     }
 
     /// The caret, as a byte offset into [`LineEditor::text`].
@@ -944,8 +979,60 @@ pub struct LaidOut {
     /// Which of them the caret is on, counted from the first.
     pub row: usize,
 
-    /// How many columns into that row the caret is.
+    /// How many columns into that row the caret is, in **logical** order.
+    ///
+    /// The order the text is stored in, which is the order every motion in
+    /// [`LineEditor`] counts in and the order the terminal is handed the row in
+    /// under [`BidiMode::Terminal`]. Where a permuted row puts the caret is
+    /// [`LaidOut::visual_column`] instead, and the two are the same number on a
+    /// left-to-right draft.
     pub column: usize,
+
+    /// How many columns into that row the caret is **painted**, where the row is
+    /// drawn permuted.
+    ///
+    /// `None` unless [`LineEditor::laid_out_in`] was given
+    /// [`BidiMode::Visual`]: under the default the terminal does the reordering
+    /// and this program has no answer, so it says none rather than a number that
+    /// would be right on a different terminal than the one it is drawn on.
+    ///
+    /// Cluster-level, by the same mapping the paint uses: the caret is a byte
+    /// offset, the row is drawn a cluster at a time, and a caret inside a
+    /// cluster is painted at the cluster that holds it.
+    pub visual_column: Option<usize>,
+}
+
+/// The column the caret at `at` is **painted** in, on the row `row` of `text`
+/// drawn permuted.
+///
+/// The row's pieces reach the terminal in the order [`bidi::visual_row_in`]
+/// names, so the answer is the width of everything drawn before the piece that
+/// owns the caret, plus how far into that piece the caret sits. Ownership is
+/// the paint's own rule — the piece holding the byte, or, for a caret one past
+/// the end of the row, the piece that *ends* there — so this is the column the
+/// caret is on rather than a second opinion about where it ought to be. A
+/// terminal that mirrors a caret past the end of a right-to-left row is a
+/// question about terminals, and not this function's.
+///
+/// `at` is widened to the cluster that holds it first, because a cluster is the
+/// smallest thing the row is drawn as and a caret inside one has no column of
+/// its own. `h` and `l` still step one code point; nothing here moves them.
+fn caret_visual_column(text: &str, row: &Range<usize>, at: usize) -> usize {
+    let cluster = grapheme::cluster_start(text, at);
+    let pieces = bidi::visual_row_in(text, row.clone(), bidi::base_direction(text));
+
+    let mut column = 0;
+    for piece in &pieces {
+        let owns = piece.logical.start <= cluster
+            && (cluster < piece.logical.end
+                || (cluster == piece.logical.end && piece.logical.end == row.end));
+        if owns {
+            return column + text.get(piece.logical.start..cluster).map_or(0, columns);
+        }
+        column += piece.cells;
+    }
+
+    column
 }
 
 impl LaidOut {

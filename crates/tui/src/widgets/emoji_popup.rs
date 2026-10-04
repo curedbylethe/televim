@@ -13,10 +13,12 @@
 //! there is something to clear.
 //!
 //! The anchor — the caret's column, and its row, within the bar — is asked of
-//! [`LineEditor::laid_out`], the same measurement `input_bar::render` uses, so
+//! [`LineEditor::laid_out_in`], the same measurement `input_bar::render` uses, so
 //! the popup sits under the `:query` rather than under the middle of the draft.
-//! Nothing here computes the caret again, and nothing is cached: the trigger is
-//! a live view of the line.
+//! Under [`crate::bidi::BidiMode::Visual`] the column it anchors to is the
+//! caret's **visual** one, because the bar's row is drawn permuted there and the
+//! logical column is a cell the caret is not on. Nothing here computes the caret
+//! again, and nothing is cached: the trigger is a live view of the line.
 //!
 //! The highlight is `theme.selection`, the same reverse video the chat list and
 //! the conversation use, and there is no `highlight_symbol`: nothing else in
@@ -47,7 +49,14 @@ fn popup_area(app: &App, above: Rect, bar: Rect, frame: Rect) -> Option<Rect> {
     app.completion()?;
 
     let width = bar.width.saturating_sub(2).max(1);
-    let laid_out = app.line.laid_out(width);
+    let laid_out = app.line.laid_out_in(width, app.bidi());
+    // Where the caret is **painted**, which under [`crate::bidi::BidiMode::Visual`]
+    // is not where it sits in the string: the row reaches the terminal permuted,
+    // so a right-to-left draft puts the caret among the cells rather than after
+    // the bytes. `visual_column` is `None` in every other mode, and the logical
+    // column is then the only answer this program has — which is the right one,
+    // because the terminal is doing the reordering in that mode.
+    let caret = laid_out.visual_column.unwrap_or(laid_out.column);
 
     let rows = app
         .completion()
@@ -62,7 +71,7 @@ fn popup_area(app: &App, above: Rect, bar: Rect, frame: Rect) -> Option<Rect> {
 
     let y = bar.y.saturating_sub(height as u16);
     let popup_width = POPUP_WIDTH.min(frame.width);
-    let x = (bar.x + 1 + app.prompt_prefix().len() as u16 + laid_out.column as u16)
+    let x = (bar.x + 1 + app.prompt_prefix().len() as u16 + caret as u16)
         .min(frame.width.saturating_sub(popup_width));
 
     Some(Rect::new(x, y, popup_width, height as u16))
@@ -114,6 +123,7 @@ pub fn render(app: &App, above: Rect, bar: Rect, frame: &mut Frame<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bidi::BidiMode;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -328,10 +338,83 @@ mod tests {
         let laid_out = app.line.laid_out(28);
         assert_eq!(laid_out.row, 1, "the draft wrapped and the caret is below");
         assert_eq!(laid_out.column, 3, "`:cr` starts a fresh row");
+        // The default mode is the terminal's to reorder, so this program has one
+        // column to name and `laid_out_in` names the same one.
+        assert_eq!(
+            app.line.laid_out_in(28, BidiMode::Terminal),
+            laid_out,
+            "and the default mode is the measurement this test already pinned"
+        );
 
         let rect = drawn_area(&app, 30, 20);
 
         assert_eq!(rect.x, 4, "the popup is under the caret's own row");
         assert!(rect.right() <= 30, "and inside the frame: {}", rect.right());
+    }
+
+    /// The popup follows the caret to the cell the caret is **painted** on, which
+    /// on a right-to-left draft drawn here is not the cell it would occupy in the
+    /// string.
+    ///
+    /// The draft is Hebrew with a `:cry` at the end, so the row is one reversed
+    /// run: the logical end of the draft is drawn at the **left** of it and the
+    /// two columns differ, which is what makes this test bite — a popup anchored
+    /// to `column` lands under the middle of the draft rather than under the
+    /// caret. `TestBackend` has no shaper, so this proves the
+    /// [`BidiMode::Visual`] path only (see `docs/known-gaps.md`).
+    #[test]
+    fn the_popup_follows_the_caret_to_its_visual_column_on_a_right_to_left_draft() {
+        let app = composing("שלום :cry").with_bidi(BidiMode::Visual);
+
+        let laid_out = app.line.laid_out_in(78, BidiMode::Visual);
+        let visual = laid_out
+            .visual_column
+            .expect("a visual column under Visual mode");
+        assert_ne!(
+            visual, laid_out.column,
+            "the draft reads right-to-left, so the painted caret is not at the \
+             logical column: {laid_out:?}"
+        );
+        assert_eq!(
+            app.line.laid_out(78).visual_column,
+            None,
+            "and the default mode has no visual column to give"
+        );
+
+        let rect = drawn_area(&app, 80, 24);
+        let (_, bar) = panes(&app, 80, 24);
+
+        assert_eq!(
+            rect.x,
+            bar.x
+                + 1
+                + u16::try_from(app.prompt_prefix().len()).expect("a prefix fits a u16")
+                + u16::try_from(visual).expect("a column fits a u16"),
+            "the popup is under the cell the caret is painted on: {rect:?}"
+        );
+        assert!(
+            laid_out.row == 0,
+            "the draft is one row, so this is not the across-rows case wearing a hat"
+        );
+    }
+
+    /// The default mode is unchanged: the terminal does the reordering there, so
+    /// the logical column is the cell the caret is drawn in and the popup stands
+    /// where it always has.
+    #[test]
+    fn the_popup_stands_where_it_did_in_the_default_mode() {
+        let app = composing("שלום :cry");
+        let rect = drawn_area(&app, 80, 24);
+        let (_, bar) = panes(&app, 80, 24);
+        let column = app.line.laid_out(78).column;
+
+        assert_eq!(
+            rect.x,
+            bar.x
+                + 1
+                + u16::try_from(app.prompt_prefix().len()).expect("a prefix fits a u16")
+                + u16::try_from(column).expect("a column fits a u16"),
+            "the popup is under the logical caret's column: {rect:?}"
+        );
     }
 }

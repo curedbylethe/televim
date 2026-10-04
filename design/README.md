@@ -33,8 +33,14 @@ It can also represent **text direction**, which is the other thing a frame that
 was drawn by hand cannot do: `baseDir` answers which way a message reads, and
 `visualCells` answers in what order one wrapped row's pieces reach the grid. The
 `rtl` scene group is one conversation in Hebrew shown in both modes, reached with
-the same keys as every other chat — a design model that could only show
-right-to-left text through a private entry point would not be showing the program.
+the same keys as every other chat, and its last variant is a right-to-left draft
+in the **input bar** as well as in the conversation: the bar is a row like any
+other, so it is permuted by those same two functions and its caret is put on the
+column it is drawn at rather than the one it was typed in. A design model that
+could only show right-to-left text through a private entry point would not be
+showing the program, and `check-model.js` puts the bar through `visualCells` and
+compares the frame against it cell for cell, so "the bar follows the same rules as
+a message" is a check rather than a claim.
 
 It is a model, and the rules it does not implement are named rather than left to
 be discovered: it lays out one row at a time, and it does not run the algorithm's

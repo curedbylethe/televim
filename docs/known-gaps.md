@@ -71,13 +71,27 @@ Real, and named so they are not mistaken for oversights:
 - **`Config::code` and `Config::password` are pre-fills, not a way in.** They
   fill the code and the password fields when a flow reaches them; the flow is the
   only path that writes a session, and the phone has to reach the bar once.
-- **A failed chat-list fetch has no retry.** Bring-up sends `Event::Offline` and
-  the screen says so. The update feed backs off; this does not. A *corrupt stored
-  session* is the one bring-up failure that is recovered rather than reported:
-  `bring_up` discards it and carries on to the sign-in path with a status sentence,
-  so an unreadable session ends at ` Phone ` rather than at `offline:`.
-  An unreachable store, and a chat list that will not fetch, is still the
-  `offline:` line, and still has no retry.
+- **A chat-list fetch that runs out of retries is still the reader's to clear.**
+  The launch fetch is bounded at `CHAT_LIST_ATTEMPTS` = 3 and waits
+  `backoff(&error)` between attempts — Telegram's own flood wait when it gave one,
+  the fixed `RETRY` = 5s otherwise — so a transient refusal no longer ends the
+  launch at `offline:`, and the status line names the reason, the wait and the
+  count while it waits. What is left is the exhaustion: past the bound the
+  bring-up is a failure again, and the only way out is `:retry`, which re-runs it
+  with a fresh budget. A launch that spends all three attempts before the reader
+  can type anything still needs a restart. A *corrupt stored session* remains the
+  one bring-up failure recovered rather than reported: `bring_up` discards it and
+  carries on to the sign-in path with a status sentence, so an unreadable session
+  ends at ` Phone ` rather than at `offline:`. An unreachable store is still the
+  `offline:` line and has never been recoverable.
+- **The update feed neither backs off nor re-subscribes.** `pump` loops on
+  `updates.next()`, and an `Err` is `tracing::warn!`ed and carried past — no sleep,
+  no attempt count; the feed stays usable and resumes where it left off. When the
+  stream *ends*, the task stops: the position it reached is recorded by
+  `finish()` and nothing asks for the feed again, so a launch that ends up in
+  `offline:` never reaches a feed and a session that stops mid-stream does not get
+  a new one. This is a separate request from the chat-list fetch, which is the one
+  thing a launch cannot start without.
 - **Two sign-in hints in the Rust differ from the engine's text.** The bar's field
   hint is ` ⏎: send  Esc: cancel` and the waiting hint is
   ` Checking… — the request is in flight`, where the design model reuses its
@@ -128,8 +142,11 @@ Real, and named so they are not mistaken for oversights:
   loaded one: the harness holds 60 chats and a drawn screen but none of the
   network half, and the binary is the whole program with an empty chat list.
   The figure for 50 chats in the real binary sits between 3.41 MB and 8.25 MB
-  and has not been taken, because reaching a populated list offline needs a
-  product change. The allocator question itself is closed rather than open: the
+  and has not been taken: the chat list now retries and `:retry` re-runs the
+  bring-up, so a launch with a session can populate it, but `make measure` drops
+  every `TELEVIM_*` and `TELEGRAM_*` name on purpose — the binary is launched
+  with no credentials, so it builds no client — and nothing has yet weighed it
+  with one. The allocator question itself is closed rather than open: the
   global allocator is the system allocator, chosen on the measured margins, and
   no arena pays — see [`decisions.md`](./decisions.md).
 - **No benchmarks and no working PTY tests.** `app/tests/tui_e2e.rs` is
@@ -167,7 +184,10 @@ Real, and named so they are not mistaken for oversights:
   terminal drew the emitted bytes. `Visual` is the machine-verifiable half and
   `Terminal` rests on the terminal matrix in [`decisions.md`](./decisions.md);
   the follow-up would be an end-to-end harness driving a real terminal, which
-  needs `app/tests/tui_e2e.rs` un-stubbed first.
+  needs `app/tests/tui_e2e.rs` un-stubbed first. The input bar's right-to-left
+  tests inherit the same ceiling whole: they drive `BidiMode::Visual` only, and
+  the default path is pinned by the ASCII tests beside them, which cannot tell a
+  shaper's reorder from no reorder at all.
 
 ## v2 Hooks
 
