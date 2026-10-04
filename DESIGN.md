@@ -501,6 +501,10 @@ code.
 | `[you]` `[them]` | which side a message is from, on its first row; in a group, on the group's first row only | `rows.rs` |
 | `> quoted ‖ body` | a reply: quote and body **on one row**, `‖` between | `rows::reply_prefix` |
 | `> [message not loaded] ‖ body` | a reply whose target the window does not hold | asserted in `rows.rs` |
+| `[image]` | **a message that carries a photo and no caption**: its whole body, in the ordinary body ink | `MediaKind::label` |
+| `[video]` `[gif]` `[voice]` | ditto for a video, an animated GIF, a voice note | ditto |
+| `[file]` | ditto, and the **catch-all**: a sticker, a contact, a document, or any kind this build does not model, which degrades rather than vanishing | ditto |
+| a caption beside a placeholder | never: `display_body()` returns the caption when there is one, so the label is drawn only for a message that says nothing | `Message::display_body` |
 | `[sending…]` | on the message's **last** row, which is the one with room | asserted |
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |
 | `[delivered]` | an outgoing group the peer's client has acknowledged and not read; the group's **last** row, beside any time | specified here; not yet in `rows.rs` |
@@ -570,6 +574,15 @@ say "you"; nothing else in the sign-in view does either.
 **No emoji in the chrome.** The emoji catalog is for the reader's *own text*, and
 `emojis` costs 0.5 MB of binary and 2 MB of RSS. A `👤` in a settings title is
 the one place that cost would be spent for nothing.
+
+**The media placeholders are specified, not styled.** `[image]`, `[video]`,
+`[gif]`, `[voice]` and `[file]` above are what the code prints today, in the same
+ink as any other body, and the row carries them like any other text: selectable,
+yankable, searchable, and never on a message that has a caption. Their wording
+and their styling are **CUR-6's** and no design run has been commissioned for
+them (**`DESIGN-TBD`**) — so this table records the vocabulary the binary speaks,
+not a decision about how an attachment should look. A scene for a media-only
+message, and any ink of its own, is what a design run would add.
 
 ## Components
 
