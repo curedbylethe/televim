@@ -77,6 +77,16 @@ pub const CHAT_SWITCH_DELAY: Duration = Duration::from_millis(150);
 /// and never carries a deadline.
 const FLASH_FOR: Duration = Duration::from_secs(5);
 
+/// How long the peer is shown as typing after the last sign of it.
+///
+/// The design's `TYPING_TICKS` re-expressed as a wall-clock window, because the
+/// tick it was counted on is the network's and says nothing about time. Bounded
+/// so a peer who stops without a final event vanishes rather than typing forever.
+///
+/// Re-armed by every repeat of the event, which is how a peer who keeps typing
+/// past this stays shown.
+pub(crate) const TYPING_FOR: Duration = Duration::from_secs(6);
+
 /// How many operations the reader may have queued at once.
 ///
 /// The queue exists because a second request must not replace one that has not
@@ -1106,6 +1116,18 @@ pub struct App {
     /// When a transient status stops applying, if it is transient.
     status_until: Option<Instant>,
 
+    /// When the peer stops being shown as typing, and in which conversation.
+    ///
+    /// One conversation rather than one per chat, because the note is drawn on
+    /// the open conversation's title and nowhere else: an event for a chat the
+    /// reader is not in is dropped, and a note for a chat left behind belongs to
+    /// the chat that was left.
+    ///
+    /// The same deadline shape as [`App::status_until`] — an instant compared
+    /// only where the loop supplies one — because a frame is drawn from a shared
+    /// reference and cannot expire anything itself.
+    typing_until: Option<(i64, Instant)>,
+
     /// The pages on their way from the network.
     fetching: Fetching,
 
@@ -1259,6 +1281,7 @@ impl App {
             clipboard: None,
             actions: VecDeque::new(),
             status_until: None,
+            typing_until: None,
             fetching: Fetching::default(),
             pending_jump: None,
             pending_chat: None,
@@ -1512,6 +1535,9 @@ impl App {
     /// message.
     fn select_chat_none(&mut self) {
         self.conversation = ConversationView::new(0);
+        // The note belongs to the chat being left: returning must not revive it,
+        // so the deadline goes with the view rather than with the reader's memory.
+        self.typing_until = None;
         self.vim = VimState::new(0);
         self.fetching.clear();
         self.pending_jump = None;
@@ -2500,7 +2526,27 @@ impl App {
     /// the price of a single event reaching both.
     #[must_use]
     pub fn apply_update(&mut self, event: &UpdateEvent) -> bool {
+        // The peer's typing is the title's business and nothing else's: no
+        // message arrived, changed or left, so there is no window to re-anchor
+        // and the reader's place in it is untouched. It answers for the open
+        // conversation only, because the note is drawn on that conversation's
+        // title — an event about a chat the reader is not in would be zeroed on
+        // their arrival anyway.
+        if let UpdateEvent::PeerTyping { chat_id, typing } = event {
+            return self.apply_typing(*chat_id, *typing);
+        }
+
         let listed = self.list.apply_update(event.clone());
+
+        // The message is what the typing was for, so it ends it. Cleared here
+        // rather than on the cancel action alone because the cancel is not sent
+        // reliably: a peer who sends instead of cancelling would otherwise be
+        // shown as typing with their own message on screen.
+        if let UpdateEvent::NewMessage(message) = event
+            && message.chat_id == self.conversation.window.chat_id
+        {
+            self.typing_until = None;
+        }
 
         // A read acknowledgement is not a window change. It moves the watermark
         // and nothing else — no message arrived, changed or left — so there is
@@ -2782,6 +2828,60 @@ impl App {
 
         self.status_until = None;
         IDLE_STATUS.clone_into(&mut self.status);
+        true
+    }
+
+    // ---- the peer's typing -----------------------------------------------
+
+    /// Records or drops the peer's typing for the conversation on show.
+    ///
+    /// Reports whether a redraw is owed. A conversation other than the open one
+    /// is dropped rather than remembered: the note is drawn on one title, and a
+    /// deadline kept for a chat the reader has left would be one nobody is shown
+    /// and the reader has not been told about.
+    fn apply_typing(&mut self, chat_id: i64, typing: bool) -> bool {
+        if chat_id != self.conversation.window.chat_id {
+            return false;
+        }
+
+        self.typing_until = if typing {
+            // Re-armed rather than set once, because a peer who keeps typing past
+            // the deadline is still typing.
+            Some((chat_id, Instant::now() + TYPING_FOR))
+        } else {
+            None
+        };
+        true
+    }
+
+    /// Whether the peer in the conversation on show is being shown as typing.
+    ///
+    /// Pure: liveness is the deadline being set, and it is
+    /// [`App::expire_typing`] that clears it once the deadline has passed. A
+    /// frame cannot read a clock, and it does not need to — the loop calls the
+    /// expiry on its tick, so by the time a frame is drawn the deadline is
+    /// either still in the future or already gone.
+    #[must_use]
+    pub fn peer_is_typing(&self) -> bool {
+        self.typing_until
+            .is_some_and(|(chat, _)| chat == self.conversation.window.chat_id)
+    }
+
+    /// Stops showing the peer as typing once its deadline has passed.
+    ///
+    /// Reports whether a redraw is owed. Called from the loop beside
+    /// [`App::expire_status`], which already runs on a timer: nothing repaints on
+    /// a schedule for this, so a peer who stops without a final event is gone by
+    /// the tick after the deadline rather than by a frame of its own.
+    pub fn expire_typing(&mut self, now: Instant) -> bool {
+        let Some((_, at)) = self.typing_until else {
+            return false;
+        };
+        if now < at {
+            return false;
+        }
+
+        self.typing_until = None;
         true
     }
 
