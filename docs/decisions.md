@@ -416,3 +416,29 @@ are in [`../AGENTS.md`](../AGENTS.md).
   two frames. The note is drawn on the conversation title instead, so it cannot
   displace a message, and it is dropped whole rather than truncated when the title
   has no room — a half-written `· typ` is worse than no note.
+- **Why a reconnect rebuilds the client and preserves the reader's place:** the
+  update feed is single-shot — the relay hands its receiver to a subscriber once
+  (`UpdateRelay::take`), and a second `subscribe_updates` on the same client
+  refuses with `UpdatesAlreadySubscribed` before it touches the network — so
+  taking a new feed means building a new `Client`, exactly as signing out does.
+  The rebuild reuses the stored session, so there is no re-login. The end of the
+  feed is reported only after `UpdateSubscription::finish` has recorded the
+  position, and the old `Arc<Client>` is left in `state.client` until the rebuilt
+  one's `Ready` replaces it: dropping it first would sync a position behind the
+  one the feed reached, and the next launch would replay updates the reader has
+  already seen. A reconnect is also not the reader navigating — nothing they did
+  moved them — so the `Ready` that lands must keep the place they were in. That is
+  `App::refresh_chats`: it replaces the chat list but not the open conversation,
+  restoring the highlight by the conversation's own id rather than by an index the
+  re-fetch has reordered, and leaving the window, its cursor, the jumplist, the
+  selection, the register and the draft untouched. The stale
+  `state.history.{cursor,jump,retry_at}` anchors are cleared on that `Ready` so
+  `wanted` re-anchors from the preserved window instead of wedging on a cursor
+  whose page will never arrive. The automatic reconnect is bounded to one per
+  working feed by `auto_reconnect` over `State` — an `Event::Update` clears the
+  spent flag, so a rebuild that reaches a feed which immediately ends again becomes
+  the reader-visible `offline:` rather than a loop — and it shares the
+  `state.bringing_up` single-flight guard with `:retry`, so the two cannot start
+  two clients. What it deliberately does **not** do is back off: a recoverable
+  `Some(Err)` is logged and carried past exactly as before, and a schedule for
+  those errors is CUR-98's decision, not this one's.

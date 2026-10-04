@@ -78,14 +78,33 @@ Real, and named so they are not mistaken for oversights:
   carries on to the sign-in path with a status sentence, so an unreadable session
   ends at ` Phone ` rather than at `offline:`. An unreachable store is still the
   `offline:` line and has never been recoverable.
-- **The update feed neither backs off nor re-subscribes.** `pump` loops on
-  `updates.next()`, and an `Err` is `tracing::warn!`ed and carried past — no sleep,
-  no attempt count; the feed stays usable and resumes where it left off. When the
-  stream *ends*, the task stops: the position it reached is recorded by
-  `finish()` and nothing asks for the feed again, so a launch that ends up in
-  `offline:` never reaches a feed and a session that stops mid-stream does not get
-  a new one. This is a separate request from the chat-list fetch, which is the one
-  thing a launch cannot start without.
+- **The update feed's stream end reconnects; a recoverable feed error neither
+  backs off nor re-subscribes.** `pump` loops on `updates.next()`. When the stream
+  *ends* (`None`) it records the position with `UpdateSubscription::finish` and
+  reports `Event::FeedEnded`, and `net::drive` rebuilds the client from the same
+  stored session and takes a new feed in-process — no restart and no re-login —
+  through the `state.bringing_up` single-flight guard the reader's `:retry` already
+  uses. The rebuild is a new `Client` because the update relay is single-shot (see
+  [`decisions.md`](./decisions.md)); the resulting `Ready` is place-preserving, so
+  the open conversation and its cursor, the chat-list highlight restored by id, the
+  jumplist, the selection, the register and the draft all survive, and the stale
+  `state.history` anchors are cleared so paging re-anchors from the preserved
+  window rather than wedging. One automatic reconnect is allowed per working feed:
+  a feed that ends again before any update has arrived is a persistent `offline:`
+  the reader clears with `:retry`. What remains is the recoverable-error half — a
+  `Some(Err)` is still `tracing::warn!`ed and carried past, with no sleep and no
+  attempt count, so the feed stays usable and resumes where it left off — and a
+  backoff policy for it is **CUR-98's**, not this build's. The live feed-end path
+  is not tested: a real end cannot be provoked from the repository and the opt-in
+  datacenter suite cannot tell a dead feed from a quiet one, so the reconnect is
+  verified by unit tests over `App` and `State`. The boundary with the overlapping
+  reliability issues, recorded so they cannot silently re-tread each other:
+  **CUR-98** owns a backoff policy on recoverable feed errors; **CUR-45** owns a
+  connection-state indicator (this build writes only the existing persistent status
+  string); **CUR-49** owns a manual `:reconnect` command (there is none);
+  **CUR-47** owns queued in-flight sends (none are queued). This is a separate
+  request from the chat-list fetch, which is the one thing a launch cannot start
+  without.
 - **Two sign-in hints in the Rust differ from the engine's text.** The bar's field
   hint is ` ⏎: send  Esc: cancel` and the waiting hint is
   ` Checking… — the request is in flight`, where the design model reuses its
