@@ -49,6 +49,7 @@ crates/telegram-framework/
 │   ├── auth.rs       # LoginToken, PasswordToken, SignInResult     (`live`)
 │   ├── raw.rs        # Client::invoke                              (`live`)
 │   ├── search.rs     # Client::search_messages                     (`live`)
+│   ├── media.rs      # MediaKind, and Client::download_media        (`live`)
 │   └── testing.rs    # Fixtures shared by the unit tests   (`test` + `live`)
 └── tests/
     └── auth_integration.rs   # Opt-in tests against a real datacenter
@@ -369,6 +370,39 @@ Two facts about the answer are load-bearing:
 This is the same reasoning as history's, and it is why the crate invokes
 `messages.search` itself: `grammers`' own `search_messages` builder cannot set
 `add_offset`, `min_id` or `max_id`, and it buffers whole messages.
+
+## Media
+
+Every message description carries **what** the message holds, if anything:
+`MessageInfo.media` is `Option<telegram_framework::MediaKind>` — `Photo`, `Video`,
+`Gif`, `Voice`, or `File`. `None` means Telegram said there is no media at all;
+`File` is the catch-all, so a sticker, a contact, a poll, and any kind a newer
+Telegram invents all arrive as *something this message carries* rather than as
+nothing. Two classifiers produce it — `classify_raw` for the hand-built
+`GetHistory` path and `classify_typed` for the `grammers` update feed — and they
+are tested on every job because the decision can be, unlike the paths that reach
+it.
+
+The kind names a thing; it does not locate one. `Client::download_media(peer_id,
+message_id)` is the locator: it re-fetches the message by identifier through the
+same raw `GetHistory` request `fetch_history` builds, and streams the bytes out
+through `iter_download`. `grammers`' own `download_media` is behind an `fs`
+feature this crate never enables, and it takes a filesystem path, which is not a
+shape a terminal client wants.
+
+```rust
+match client.download_media(peer_id, message_id).await {
+    Ok(bytes) => { /* the attachment, whole */ }
+    Err(FrameworkError::MediaUnavailable { .. }) => { /* no media, or not this message */ }
+    Err(FrameworkError::MediaTooLarge { size, limit, .. }) => { /* size over MEDIA_LIMIT */ }
+}
+```
+
+`MEDIA_LIMIT` is 16 MiB, checked against the size Telegram declares and again
+against what actually arrives, so an oversized attachment is **reported**
+(`MediaTooLarge`) rather than truncated or streamed to the end first. The bytes
+come back owned: this is a `Vec<u8>` for now, and the streaming-and-cache shape
+that a viewer needs is CUR-9/CUR-10's.
 
 ## Not here yet
 

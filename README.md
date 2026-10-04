@@ -121,6 +121,17 @@ Working today:
   `FETCH_MARGIN` (20) that asks for a page. `[you]`/`[them]` and a reply's quoted
   target are on the first row of a message, `[sending…]`/`[failed: …]` on the
   last.
+- **Media:** a message that carries something and says nothing about it still has
+  a body — `[image]`, `[video]`, `[gif]`, `[voice]` or `[file]` — so an
+  attachment does not render as an empty row. A message with a caption shows the
+  caption and nothing else, and a kind this build does not model becomes
+  `[file]` rather than disappearing; a message with no media at all is unchanged.
+  Fetching the bytes is a client-level operation today
+  (`ProtoClient::download_media`, capped at 16 MiB, refused rather than
+  truncated when it is over): the attachment is re-read by identifier, because a
+  description is rebuilt on every page and a cached locator would be stale. The
+  wording and the styling of the placeholder are provisional; a key that opens an
+  attachment is not built.
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
   typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.
   The line is a real editor (`vim-line`, wrapped in `tui::line`): caret

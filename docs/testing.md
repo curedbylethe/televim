@@ -87,6 +87,20 @@ below.
 
   Each test requests its own login code and Telegram throttles that hard, so run
   them sparingly.
+
+  One of them, `a_media_message_downloads_through_the_client`, is the only
+  assertion anywhere that a message's bytes can actually be fetched: it drives
+  `ProtoClient::download_media` against a live conversation and checks the
+  attachment comes back. It **cannot provision its own media** — it cannot send
+  itself a photo, and the account it signs in with has no conversation carrying a
+  known attachment — so it reads the newest messages of a conversation it is
+  pointed at and skips, with its reason printed, when none of them carries
+  anything. The parts of the media path that *can* be provoked without an account
+  are not left to it: `classify_raw`/`classify_typed`, the `MEDIA_LIMIT` check,
+  and the `proto` mapping are all ordinary unit tests that run on every job, and
+  the placeholder body is asserted in `tui`'s `TestBackend` tests. What only a
+  datacenter can answer is whether Telegram hands over the bytes, which is why
+  that one assertion is here and not in CI.
 - **TUI E2E Tests:** `app/tests/tui_e2e.rs` holds seven `#[ignore]`d
   placeholders describing what a PTY harness should assert — the screen after
   launch, typing, `:q`, scrolling, and an arrival moving a pinned view. **None of
