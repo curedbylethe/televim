@@ -359,6 +359,30 @@
   const visualCells = (text, base) =>
     visualPieces(text, base).map((p) => ({ text: text.slice(p.s, p.e), cells: cells(text.slice(p.s, p.e)) }));
 
+  /* The drawn column of a caret at logical column `col` of one row's body, once
+     that body is handed to the terminal in visual order. A piece is drawn AS
+     WRITTEN, so its logical start sits at its left edge — unless the run it
+     belongs to reads right to left, where the logical start sits at its right
+     edge. The caret therefore counts the pieces drawn to its left and, in the one
+     piece it sits in, the part of that piece drawn before it. */
+  function caretCol(text, base, col) {
+    const spans = clusterSpans(text).slice(0, -1);
+    const level = bidiLevels(text, base);
+    let drawn = 0;
+    for (const piece of visualPieces(text, base)) {
+      const ci = spans.findIndex((sp) => sp.s === piece.s);
+      const rtl = ci >= 0 && level[ci] % 2 === 1;
+      if (rtl) {
+        if (col <= piece.s) drawn += cells(text.slice(piece.s, piece.e));
+        else if (col < piece.e) drawn += cells(text.slice(col, piece.e));
+      } else {
+        if (col >= piece.e) drawn += cells(text.slice(piece.s, piece.e));
+        else if (col > piece.s) drawn += cells(text.slice(piece.s, col));
+      }
+    }
+    return drawn;
+  }
+
   /* the profile card's columns, inside the 56-column right panel: cue, label, value */
   const CUE_X = 2, LAB_X = 4, LAB_W = 12, VAL_X = 17, VAL_W = 37;
   const CUE = '·';
@@ -1174,33 +1198,57 @@
       const rows = wrap(shown, 76, 76, true), cr = caretRC(rows, shown.length);
       const n = Math.min(BAR_MAX, Math.max(1, rows.length));
       const start = rows.length > n ? clamp(cr[0] - n + 1, 0, rows.length - n) : 0;
-      return { title: kindTitle(s, { kind: p.kind }), shown, rows, cr, n, start, lit: false, prefix: '', conceal };
+      return { title: kindTitle(s, { kind: p.kind }), shown, rows, cr, n, start, lit: false, prefix: '', conceal, base: 'ltr' };
     }
     let title = 'Input', buf = '', pos = 0, lit = false, prefix = '', conceal = false;
     if (L) { lit = true; title = kindTitle(s, L); buf = L.buf; pos = L.pos; prefix = L.kind === 'command' ? ': ' : L.kind === 'find' ? '/ ' : ''; conceal = L.kind === 'pw'; }
     else if (d && d.ctx === ctx(s) && s.view === 'chat') { title = 'draft'; buf = d.buf; pos = d.pos; }
     const shown = conceal ? '•'.repeat(buf.length) : buf;
     const rows = wrap(shown, prefix ? 74 : 76, 76, true);
-    const cr = caretRC(rows, pos);
+    /* A draft that reads right to left is permuted as a message row is: the row is
+       still broken logically, the prefix stays chrome, and the caret moves onto the
+       column it is drawn at. */
+    const base = !conceal && s.bidi === 'visual' ? baseDir(shown) : 'ltr';
+    let cr = caretRC(rows, pos);
+    if (base === 'rtl') { const r = rows[cr[0]]; cr = [cr[0], caretCol(shown.slice(r.s, r.e), base, cr[1])]; }
     const n = Math.min(BAR_MAX, Math.max(1, rows.length));
     const start = rows.length > n ? clamp(cr[0] - n + 1, 0, rows.length - n) : 0;
-    return { title, shown, rows, cr, n, start, lit, prefix, conceal };
+    return { title, shown, rows, cr, n, start, lit, prefix, conceal, base };
   }
   function drawBar(g, s, b, y0) {
     const L = s.line;
     box(g, 0, y0, W, b.n + 2, b.title, b.lit);
     let lo = -1, hi = -2;
     if (L && L.mode === 'visual') { lo = Math.min(L.anchor, L.pos); hi = Math.max(L.anchor, L.pos); }
+    const permute = b.base === 'rtl';
+    const ink = (j) => {
+      const ch = b.shown[j];
+      let ce = ch, a = b.lit ? 't' : 'd';
+      if (b.lit && !b.conceal && ch === ' ') { ce = '·'; a = 'd'; }
+      if (j >= lo && j <= hi) a += 's';
+      return [ce, a];
+    };
     for (let i = 0; i < b.n; i++) {
       const ri = b.start + i, r = b.rows[ri], y = y0 + 1 + i; if (!r) continue;
       let x = 2;
       if (ri === 0 && b.prefix) { put(g, 2, y, b.prefix, 't'); x = 4; }
-      for (let j = r.s; j < r.e; j++) {
-        const ch = b.shown[j];
-        let ce = ch, a = b.lit ? 't' : 'd';
-        if (b.lit && !b.conceal && ch === ' ') { ce = '·'; a = 'd'; }
-        if (j >= lo && j <= hi) a += 's';
-        put(g, x + (j - r.s), y, ce, a);
+      if (permute) {
+        /* the row's own text, in the order the terminal is handed it; the prefix
+           above is the bar's chrome and is not permuted. */
+        const body = b.shown.slice(r.s, r.e);
+        let col = 0;
+        for (const piece of visualPieces(body, b.base)) {
+          for (let k = piece.s; k < piece.e; k++) {
+            const [ce, a] = ink(r.s + k);
+            put(g, x + col, y, ce, a);
+            col += cells(ce);
+          }
+        }
+      } else {
+        for (let j = r.s; j < r.e; j++) {
+          const [ce, a] = ink(j);
+          put(g, x + (j - r.s), y, ce, a);
+        }
       }
       if (b.lit && ri === b.cr[0]) {
         const cx = x + b.cr[1], cell = g[y][cx];
@@ -1758,6 +1806,9 @@
   /* the walk to the right-to-left chat: focus the list, then down to its last row */
   const RTL_WALK = '<Tab>' + 'j'.repeat(12);
   const DRAFT = 'i' + 'I have the concert tickets and the blue folder. If the side gate is shut, I will ring the bell twice.<C-j>Ten minutes, not more.';
+  /* a Hebrew draft for the input bar: it reads right to left, so the bar permutes
+     it and the caret after it lands on the visual end of the line. */
+  const RTL_LINE = 'i' + 'שלום, אני בדרך הביתה בעוד עשר דקות';
   const SCENES = [
     { id: 'conv', name: 'Conversation', variants: [
       { name: 'Normal', keys: '' },
@@ -1845,6 +1896,7 @@
       { name: 'Terminal mode: the row as stored', bidi: 'terminal', keys: RTL_WALK + 'l' },
       { name: 'Visual mode: the same row, permuted', bidi: 'visual', keys: RTL_WALK + 'l' },
       { name: 'Visual: a search hit inside a right-to-left row', bidi: 'visual', keys: RTL_WALK + 'l/כרטיסים<CR>' },
+      { name: 'Visual: a right-to-left draft in the input bar', bidi: 'visual', keys: RTL_WALK + 'l' + RTL_LINE },
       { name: 'Visual: two messages selected', bidi: 'visual', keys: RTL_WALK + 'lvk' }] }
   ];
   function scene(si, vi) {
