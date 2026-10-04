@@ -515,6 +515,46 @@ mod tests {
         );
     }
 
+    /// `signin` / no client: the request is reported, not announced.
+    ///
+    /// The panel that matters here is the one drawn *after* the `⏎`, because a
+    /// `waiting` that outlives the client would be a "Checking…" row and a
+    /// dotted value for an answer nobody is fetching — with the status line's
+    /// in-flight hint above it as well.
+    #[test]
+    fn signin_without_a_client_does_not_draw_a_request_in_flight() {
+        let mut app = App::mock();
+        app.set_client_available(false);
+        app.begin_signin();
+
+        press(&mut app, KeyCode::Enter);
+
+        let rows = column(&screen(&app));
+        assert!(
+            !flat(&rows).contains(CHECKING),
+            "no answer is on its way: {rows:#?}"
+        );
+        assert!(
+            !row_with(&rows, "│ Phone").contains(IN_FLIGHT),
+            "and the value is the number, not dots: {rows:#?}"
+        );
+        assert!(
+            !crate::widgets::input_bar::hint(&app).contains("in flight"),
+            "nor does the status row claim one: {:?}",
+            crate::widgets::input_bar::hint(&app)
+        );
+
+        // The same row with a client up is what makes the assertion above mean
+        // something: the in-flight hint exists, and this is not it.
+        let mut up = App::mock();
+        up.begin_signin();
+        press(&mut up, KeyCode::Enter);
+        assert!(
+            crate::widgets::input_bar::hint(&up).contains("in flight"),
+            "the hint is reachable at all"
+        );
+    }
+
     /// `signin` / `Login code`: the phone accepted, the code being asked for.
     #[test]
     fn signin_login_code() {

@@ -943,6 +943,15 @@ pub struct App {
     /// says so is a better screen than a form that cannot be finished.
     pub credentials_configured: bool,
 
+    /// Whether a client is there to carry a request.
+    ///
+    /// **The gate on the sign-in's `waiting` flag.** A request no client will
+    /// take is not a request on its way, so the flow must not be told one is:
+    /// the panel would say "Checking…" for an answer that is never coming, and
+    /// nothing else on the screen can put it right. `false` until the caller
+    /// says otherwise — this side of the boundary cannot see a client.
+    client_available: bool,
+
     /// The highlight on the profile panel's rows.
     ///
     /// A second [`VimState`] rather than a share of the conversation's, because
@@ -1207,6 +1216,9 @@ impl App {
             // has read the configuration says so, and a launch without one gets
             // the sentence rather than a form.
             credentials_configured: false,
+            // A program that is handed nothing has no client either, and a
+            // sign-in it accepts now would be a request nobody carries.
+            client_available: false,
             profile_vim: VimState::new(0),
             profile_subject: ProfileId::SelfAccount,
             profile_caret: 0,
@@ -1265,6 +1277,11 @@ impl App {
         // cannot is its own scene, and it sets this back rather than inheriting
         // the other answer.
         app.credentials_configured = true;
+        // And one with a client up, which is what the sample account above is: a
+        // fetched account is what a `Ready` brings, and a `Ready` brings a
+        // client. Without it every `⏎` in these scenes would report the
+        // client-less sentence instead of the request under test.
+        app.client_available = true;
         app
     }
 
@@ -3987,6 +4004,22 @@ impl App {
     /// Puts the sign-in flow up, with the phone field open and the configured
     /// number in it.
     ///
+    /// Records whether a client is there to carry a request, and ends the wait
+    /// when one is not.
+    ///
+    /// The wait is cleared here rather than left to time: an in-flight flag
+    /// with no client behind it is a sentence on the panel that nothing will
+    /// ever answer, so losing the client takes the flow out of "Checking…" and
+    /// lets the reader press `⏎` again. The draft is untouched — the reader
+    /// typed it, and a client that comes back is not a reason to type it twice.
+    pub fn set_client_available(&mut self, available: bool) {
+        self.client_available = available;
+
+        if !available && let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+            flow.waiting = false;
+        }
+    }
+
     /// The one way in, whatever the reader came from: the signed-out card's
     /// `:signin`, and a launch with no session are the same flow, because they
     /// are the same question. The card is closed rather than covered — a
@@ -4174,6 +4207,19 @@ impl App {
                 LoginField::Code => "there is no login code to send".to_owned(),
                 LoginField::Password => "there is no password to check".to_owned(),
             });
+            return;
+        }
+
+        // **The client-less branch.** A request nobody will carry is not a
+        // request on its way, so the flow is not told one is: that would put
+        // "Checking…" on the panel for an answer that is never coming, and the
+        // key after it would be swallowed by the guard as a second press. The
+        // sentence is the whole answer, the draft stays in the line because the
+        // client coming up is not the reader typing it again, and nothing is
+        // queued — a queued login would fire on its own if a client appeared
+        // later, which is a sign-in attempt nobody asked for.
+        if !self.client_available {
+            self.flash("not connected yet — the client is not up");
             return;
         }
 
@@ -9342,6 +9388,87 @@ mod tests {
         assert_eq!(
             app.status,
             "cancelling discards the code Telegram sent; ⏎ asks for a new one"
+        );
+    }
+
+    // ---- the flow against a client, or the lack of one -------------------
+
+    /// A `⏎` with no client up reports itself instead of claiming to be in
+    /// flight.
+    ///
+    /// The flag is the whole subject: with nothing to carry the request, a
+    /// `waiting` of `true` is a panel saying "Checking…" for an answer that is
+    /// never coming, and the guard behind it then swallows every later `⏎` as a
+    /// second press. So nothing is queued, the draft stays, and the sentence is
+    /// what the key earns.
+    #[test]
+    fn a_signin_with_no_client_reports_rather_than_waits() {
+        let mut app = App::mock();
+        app.set_client_available(false);
+        run_command_line(&mut app, "signin");
+        type_text(&mut app, "7");
+        let draft = app.line.text().to_owned();
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert!(
+            !app.signin()
+                .and_then(SignIn::flow)
+                .expect("the flow is up")
+                .waiting,
+            "nothing is on its way, so nothing is in flight"
+        );
+        assert!(
+            app.take_action().is_none(),
+            "and nothing was queued: a login fired by a client arriving later \
+             is an attempt nobody asked for"
+        );
+        assert_eq!(app.line.text(), draft, "the draft is the reader's");
+        assert_eq!(app.focus, Focus::Input, "and the field keeps the keys");
+        assert_eq!(app.status, "not connected yet — the client is not up");
+    }
+
+    /// With a client up the same key is the request it always was: queued, and
+    /// the flow told a request is on its way.
+    #[test]
+    fn a_signin_with_a_client_queues_and_waits() {
+        let mut app = App::mock();
+        app.set_client_available(true);
+        run_command_line(&mut app, "signin");
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert!(
+            matches!(app.take_action(), Some(Action::Login { .. })),
+            "a client is there to carry it"
+        );
+        assert!(
+            app.signin()
+                .and_then(SignIn::flow)
+                .expect("the flow is up")
+                .waiting,
+            "and the panel may say so"
+        );
+    }
+
+    /// Losing the client takes the flow out of the wait, rather than leaving a
+    /// flag that outlived the thing it was about.
+    #[test]
+    fn losing_the_client_ends_the_wait() {
+        let mut app = App::mock();
+        app.set_client_available(true);
+        run_command_line(&mut app, "signin");
+        app.handle_key(press(KeyCode::Enter));
+        app.take_action();
+
+        app.set_client_available(false);
+
+        assert!(
+            !app.signin()
+                .and_then(SignIn::flow)
+                .expect("the flow is up")
+                .waiting,
+            "no client, no in-flight request"
         );
     }
 }
