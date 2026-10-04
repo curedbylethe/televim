@@ -39,6 +39,54 @@ are in [`../AGENTS.md`](../AGENTS.md).
   nor `AccountState` grew a case for it. `AccountState`'s fourth case would have
   been redundant besides: the account's card already says `not signed in` and
   names `:signin`.
+- **Why the session file is written atomically:** a session file is a permanent
+  authorisation key, and a plain `fs::write` over it is a window where the file on
+  disk is the *new* session truncated to however many bytes reached the disk — a
+  kill, a full disk or a closed terminal in that window leaves a 0-byte file that
+  the next launch cannot tell from a real one. So `FileStore::save` writes to a
+  sibling temp (`<file_name>.<pid>.tmp`), restricts it to `0600` *before* a byte is
+  in it, and `fs::rename`s it over the target: the target only ever appears as a
+  whole file, replaced by a finished one, so a kill mid-write leaves the previous
+  session or no session and never a partial one. The temp is a sibling rather than
+  a scratch directory because a cross-filesystem rename is not atomic and degrades
+  to a copy, and it is tagged with the process id so two processes sharing a
+  session path do not write the same temp. Renaming rather than writing in place is
+  also what keeps the mode: the target inherits the temp's inode and the
+  permissions it was restricted to instead of being a fresh file behind the umask.
+  A failed write removes the temp, since a half-written one is not a session file
+  and nothing else would clean it up. It is `std` only — no temporary-file crate,
+  no dependency, and nothing to audit beyond four calls.
+- **Why a corrupt session is discarded at bring-up and the store is not asked to
+  reset:** the store's contract is to *report* corruption rather than paper over it —
+  `a_truncated_snapshot_is_reported_rather_than_reset` in `session.rs` is the test
+  that holds it, and a store that silently dropped what it could not parse would be
+  a store saying a session is gone when it is not, which is the one thing a
+  credential store cannot afford to get wrong. So recovery is the app layer's
+  decision: `bring_up` resolves `session_store(cfg)` *once*, probes it with
+  `discard_corrupt_session`, and hands that same value to the client, so a reader
+  cannot be told their session came from one store while a different file is the
+  one being cleared. Only `SessionError::Corrupt` is recovered. `Load` and
+  `Unavailable` stay fatal, because a store that could not be *reached* is a
+  failure of the machine rather than bytes to throw away, and a sign-in prompt
+  would be offering an answer that could not work — that reader is better served by
+  the `offline:` line that names what happened. The answer they do get is a
+  persistent status sentence, sent as `Event::SessionDiscarded` **after**
+  `Event::Ready`: `Ready`'s sign-in path clears the status line, so a sentence sent
+  first would be overwritten before it was ever drawn, and the one account of what
+  happened to the session they were signed in with has to survive a minute.
+- **Why sign-in cannot report itself in flight without a client:** `waiting` is the
+  panel's claim that a request is on its way, and it is a claim about something
+  outside the screen: it puts `Checking… — the request is in flight` on the panel,
+  makes a second `⏎` say so and send nothing, and leaves a reader no way to tell a
+  slow answer from a request nobody is carrying. So it follows the *dispatch*, and
+  `App::client_available` (default `false`) records whether there is a client to
+  carry one — `net.rs` sets it on `Ready` and clears it on `Offline` and
+  `LoggedOut`. Without a client, `submit_signin_field` flashes `not connected yet —
+  the client is not up` and returns: the draft stays in the line, because a client
+  coming up is not a reason to type it twice, and nothing is queued, because a
+  queued login would fire on its own if a client appeared later and that is a
+  sign-in attempt nobody asked for. Losing the client clears `waiting` for the same
+  reason, and touches the draft not at all.
 - **Why a first-party `telegram-framework` instead of `ferogram`:** The `ferogram` crate has a small contributor base and pins specific `grammers` revisions, which couples `televim` to an external maintainer's release cadence. By writing our own thin wrapper over `grammers-client`, we own the abstraction, keep the dependency surface minimal, and can tailor the API exactly to `televim`'s needs. The wrapper lives in `crates/telegram-framework` and is the only crate that touches `grammers`; `proto`, `domain`, and `tui` never see a `grammers` type.
 - **Why `grammers` from crates.io rather than git:** this used to be the other way round, and the reason it changed is that upstream stopped tagging. The newest tag is `v0.8.0`; 0.8.1, 0.9.0 and 0.10.0 exist only on the registry, so a `tag =` pin cannot name the current version at all. The registry artefact is checksummed, is what upstream publishes, and a `rev` pin in place of it would make every consumer track `master` by hand to get a patch.
 - **Why a peer with no bare identifier is skipped rather than given a number:** `grammers` reports none only for the account's own sentinel peer, and the account's real user identifier is only ever disclosed by asking Telegram for the account's own user. Substituting a constant would put a number in the chat list that addresses no conversation, so the conversation is dropped instead. It is unreachable for anything Telegram named — a received peer is a user, a group or a channel, and only `InputPeerSelf` yields the sentinel — and `every_real_user_keeps_its_identifier` in `updates.rs` is the test that would catch it becoming reachable, because the skip would then swallow real conversations in silence. `Client::fetch_account` is that call, and it does not change the skip: naming the account is not filing a conversation under it, and Saved Messages still has no bare peer to file it under.

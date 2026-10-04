@@ -207,6 +207,21 @@ written back has no authorisation key for the datacenter it moved to.
   be written, the client logs at `warn` — the login stands, and the user finds
   out why they will have to sign in again rather than being logged out for no
   apparent reason.
+- **`FileStore` writes through a temp and renames.** The bytes go to a sibling
+  `<file_name>.<pid>.tmp` in the same directory, restricted to `0600` before a
+  byte is in it, and the temp is renamed over the target. A kill, a full disk or
+  a closed terminal mid-write therefore leaves the previous session intact
+  rather than a truncated or 0-byte one, and the target only ever appears as a
+  whole file. The temp has to be a sibling because a cross-filesystem rename is
+  not atomic, and renaming is also what keeps the `0600`: the target inherits
+  the temp's inode. A failed write removes the temp. `std` only — no dependency.
+- **The store reports corruption; it does not reset it.** `load` returns
+  `SessionError::Corrupt` for bytes it cannot parse and leaves the file alone —
+  `a_truncated_snapshot_is_reported_rather_than_reset` is the test, because a
+  store that silently dropped what it could not parse would be a store claiming
+  a session is gone when it is not. Recovery is the caller's decision: `app`
+  resolves the store once at bring-up, discards a corrupt session, and tells the
+  reader on the status line.
 
 ## The raw escape hatch
 

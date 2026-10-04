@@ -45,7 +45,12 @@ Real, and named so they are not mistaken for oversights:
   fill the code and the password fields when a flow reaches them; the flow is the
   only path that writes a session, and the phone has to reach the bar once.
 - **A failed chat-list fetch has no retry.** Bring-up sends `Event::Offline` and
-  the screen says so. The update feed backs off; this does not.
+  the screen says so. The update feed backs off; this does not. A *corrupt stored
+  session* is the one bring-up failure that is recovered rather than reported:
+  `bring_up` discards it and carries on to the sign-in path with a status sentence,
+  so an unreadable session ends at ` Phone ` rather than at `offline:`.
+  An unreachable store, and a chat list that will not fetch, is still the
+  `offline:` line, and still has no retry.
 - **Two sign-in hints in the Rust differ from the engine's text.** The bar's field
   hint is ` ⏎: send  Esc: cancel` and the waiting hint is
   ` Checking… — the request is in flight`, where the design model reuses its
