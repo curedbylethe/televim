@@ -622,6 +622,10 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // frame cannot expire it: `status_text` is read from a shared reference.
     // This runs every pass, so it is the natural clock.
     app.expire_status(Instant::now());
+    // The peer's typing note expires the same way and for the same reason: it is
+    // state an event set, and the loop's tick is the only thing that can take it
+    // back, because a frame is drawn from a shared reference.
+    app.expire_typing(Instant::now());
 
     // Nothing is open, so there is no conversation for a cursor to describe —
     // nor a jump to be waiting on, because closing a conversation forgets one.
