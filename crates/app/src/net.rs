@@ -1648,6 +1648,7 @@ mod tests {
     use super::*;
     use tui::app::AccountState;
     use tui::app::CHAT_SWITCH_DELAY;
+    use tui::app::JumpKind;
 
     /// The conversation the sample messages belong to.
     const CHAT: i64 = 7;
@@ -1811,6 +1812,7 @@ mod tests {
         let jump = Jump {
             peer_id: CHAT,
             target_id: 19,
+            kind: JumpKind::Unread,
         };
         assert_eq!(app.pending_jump(), Some(jump), "counting back two from 20");
         assert_eq!(
@@ -1827,6 +1829,61 @@ mod tests {
             wanted(&app, on_its_way, Instant::now()),
             Wanted::Nothing,
             "one jump at a time"
+        );
+    }
+
+    /// A jump to the message a reply quotes takes the same road as `gg`'s, and
+    /// the page that comes back replaces the window as it does for any other
+    /// jump: one fetch path, asked for by two keys.
+    #[test]
+    fn a_reply_jump_reaches_the_network_and_replaces_the_window() {
+        let mut app = app_with_unread_out_of_reach(2);
+        let quotes: Vec<Message> = messages(CHAT, 1..=8)
+            .into_iter()
+            .map(|mut message| {
+                message.reply_to = Some(19);
+                message
+            })
+            .collect();
+        app.apply_latest(quotes);
+        for key in [KeyCode::Char('g'), KeyCode::Char('d')] {
+            app.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+        }
+
+        let jump = Jump {
+            peer_id: CHAT,
+            target_id: 19,
+            kind: JumpKind::Reply,
+        };
+        assert_eq!(app.pending_jump(), Some(jump));
+        assert_eq!(
+            wanted(&app, opened(CHAT), Instant::now()),
+            Wanted::Jump(jump),
+            "a reply the client does not hold is a fetch like any other"
+        );
+
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        assert_eq!(app.conversation.window.len(), 5, "the window was replaced");
+        assert_eq!(
+            app.conversation
+                .window
+                .get(app.vim.cursor())
+                .map(|message| message.id),
+            Some(19),
+            "and the reader is on the message that was quoted"
         );
     }
 
@@ -2121,7 +2178,7 @@ mod tests {
         );
     }
 
-    /// A jump the reader overrode — `G`, take me to the end instead — leaves the
+    /// A jump the reader abandoned — `Esc`, not that any more — leaves the
     /// cursor describing what is still on screen.
     #[test]
     fn an_abandoned_jump_leaves_the_cursor_alone() {
@@ -2131,7 +2188,7 @@ mod tests {
             .pending_jump()
             .expect("the reader asked to be taken to the unread messages");
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.pending_jump(), None);
 
         let mut state = State {

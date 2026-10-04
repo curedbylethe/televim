@@ -28,7 +28,7 @@ use ratatui::widgets::{
 
 use domain::message::Message;
 
-use crate::app::{App, FetchDirection, Focus, JUMP_LABEL};
+use crate::app::{App, FetchDirection, Focus};
 use crate::bidi::{self, BidiMode};
 use crate::rows::{self, RowSpan};
 use crate::text_row;
@@ -85,8 +85,9 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     if reserved.jumping {
         // A jump replaces the window rather than extending it, so it is said
         // where the messages are: the page it is waiting for has no edge of the
-        // window on show to sit at.
-        items.push(loading(app, JUMP_LABEL));
+        // window on show to sit at. Which jump it is comes from the request
+        // itself, so the row and the status line cannot disagree.
+        items.push(loading(app, app.jump_label()));
     }
     // Said in place of the messages rather than at an edge of the window, which
     // an empty one does not have. It is not one of the reserved rows either: a
@@ -507,6 +508,7 @@ fn render_scrollbar(app: &App, area: Rect, frame: &mut Frame<'_>, view: &rows::S
 mod tests {
     use super::*;
     use crate::app::App;
+    use crate::app::JumpKind;
     use crate::theme::Theme;
     use crate::wrap::columns;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1357,6 +1359,19 @@ mod tests {
     /// it, because what is under test is what a reader's keystroke puts on the
     /// screen.
     fn jumping() -> App {
+        let mut app = unread_out_of_reach();
+
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+
+        app
+    }
+
+    /// The application [`jumping`] starts from: the conversation runs to 20 and
+    /// the window stops at 5, so there is something to be taken to and nothing
+    /// has asked to be taken to it yet.
+    fn unread_out_of_reach() -> App {
         use std::borrow::Cow;
 
         use domain::chat::{Chat, ChatKind};
@@ -1391,9 +1406,49 @@ mod tests {
                 .collect(),
         );
 
-        for _ in 0..2 {
-            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        }
+        app
+    }
+
+    /// The same, for a jump to the message a reply quotes: the row in the
+    /// messages says which jump this is, because `Jumping to first unread…`
+    /// would be a claim about a fetch the reader never asked for.
+    #[test]
+    fn a_reply_jump_is_announced_as_a_reply_jump() {
+        let app = reply_jumping();
+        assert_eq!(
+            app.pending_jump().map(|jump| jump.kind),
+            Some(JumpKind::Reply)
+        );
+
+        let screen = screen(&app, 80, 10);
+
+        assert!(
+            row(&screen, 1).contains("Jumping to the quoted message"),
+            "the panel's first row: {}",
+            row(&screen, 1)
+        );
+    }
+
+    /// An application with a reply whose quote is nowhere near what is loaded,
+    /// with the reader asking to be taken to it.
+    fn reply_jumping() -> App {
+        use domain::message::Message;
+
+        let mut app = unread_out_of_reach();
+        // The reply is the newest message on show and it quotes 19, which the
+        // window stops well short of.
+        app.apply_latest(
+            app.conversation
+                .window
+                .iter()
+                .map(|message| Message {
+                    reply_to: Some(19),
+                    ..message.clone()
+                })
+                .collect(),
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
 
         app
     }
