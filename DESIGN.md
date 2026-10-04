@@ -400,7 +400,11 @@ them; where the model and that file disagree, that file is the answer.
 - **The bar is always a draft, never absent.** It holds what the reader last
   typed, or a hint. It grows to six rows (`INPUT_MAX_ROWS`) because a draft is
   the reader's own words and the bar is the only place they can be read back —
-  but past six, the conversation is what the reader is reading.
+  but past six, the conversation is what the reader is reading. Under
+  `BidiMode::Visual` a draft whose base direction is right-to-left is permuted in
+  the bar as a message row is: the row is still broken logically, the `: ` / `/ `
+  prefix stays chrome, and the caret is drawn at the visual position of the
+  logical one.
 - **The focused pane's border is the only thing on screen that says where a
   keystroke goes.** Two panes drawn alike are two panes the reader has to guess
   between. `lit_borders` in `conversation.rs` reads the three corners and asserts
