@@ -346,11 +346,11 @@ pub fn content_rows(app: &App, width: u16) -> usize {
 /// The title on the bar while the reader is composing, or while there is a draft
 /// they are not composing.
 ///
-/// The chat's name rather than the prompt's alone, because a draft belongs to no
-/// conversation (see [`App::select_chat_none`]) and the one thing a reader
-/// cannot work out for themselves is where it will be sent. A reply says what it
-/// answers, because a reply the reader cannot see the target of is a reply they
-/// have to guess at.
+/// The chat's name rather than the prompt's alone, because the one thing a reader
+/// cannot work out from the bar itself is where the words in it will be sent —
+/// each conversation keeps its own draft, so the draft no longer names one. A
+/// reply says what it answers, because a reply the reader cannot see the target
+/// of is a reply they have to guess at.
 #[must_use]
 pub fn title(app: &App) -> String {
     // A sign-in field names itself whatever the focus is, the draft row included:
@@ -759,8 +759,8 @@ mod tests {
 
     // ---- the draft's subject --------------------------------------------
 
-    /// A draft belongs to no conversation, so the one thing a reader cannot work
-    /// out is where it will be sent. The title has to say.
+    /// A draft keeps its own conversation now, so the bar alone no longer says
+    /// where the words in it will be sent. The title has to.
     #[test]
     fn the_title_names_the_conversation_a_message_would_be_sent_to() {
         let mut app = App::mock();
