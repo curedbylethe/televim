@@ -55,7 +55,7 @@ use proto::{
 };
 use telegram_framework::{
     ClientBuilder, FileStore, FrameworkError, KeyringStore, PASSWORD_ATTEMPTS, Refusal,
-    RequestError, SessionStore,
+    RequestError, SessionError, SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tui::app::{Action, App, FetchDirection, Jump, LoginField};
@@ -148,6 +148,17 @@ pub enum Event {
         /// The account, or why it is not signed in.
         result: Result<SignIn, ProtoError>,
     },
+
+    /// A stored session that could not be read has been discarded, and the
+    /// startup is carrying on without one.
+    ///
+    /// Its own event rather than an [`Event::Offline`] because nothing failed:
+    /// the bytes were unusable, the reader is being asked to sign in again, and
+    /// the [`Event::Ready`] that follows is the signed-out screen doing its
+    /// ordinary work. A sentence of its own rather than a reason on the account,
+    /// because the empty account already means "no session at all" and a reason
+    /// there would turn the sign-in form into an error card.
+    SessionDiscarded(String),
 
     /// The client could not be brought up.
     ///
@@ -432,8 +443,15 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         "no telegram application credentials configured; set TELEVIM_API_ID and TELEVIM_API_HASH",
     )?;
 
+    // Resolved once, probed, and then handed on as the same value: the session
+    // is described to the reader out of `session_store(cfg)`, and a store
+    // resolved a second time could be a second store — so a reader could be told
+    // where their session is while a different file is the one being cleared.
+    let store = session_store(cfg);
+    let discarded = discard_corrupt_session(&*store);
+
     let client = ClientBuilder::new(api_id, api_hash)
-        .session_store(session_store(cfg))
+        .session_store(store)
         .build()
         .await
         .context("building the client")?;
@@ -456,6 +474,7 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
             account: Err(String::new()),
             session_store,
         }));
+        report_discarded(discarded, tx);
         return Ok(());
     }
 
@@ -479,9 +498,48 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         account,
         session_store,
     }));
+    report_discarded(discarded, tx);
     tokio::spawn(pump(updates, tx.clone()));
 
     Ok(())
+}
+
+/// A stored session that was unreadable is gone, so the reader has to sign in
+/// again — and there is a sentence for that on the status line.
+///
+/// Placed **above** the store rather than in it: `clear` is part of the store's
+/// own report-not-reset contract, and a store that silently dropped what it
+/// could not parse would be a store that says a session is gone when it is not.
+///
+/// `None` for everything else, deliberately: a store that could not be reached
+/// or read for any other reason is a failure of the machine, not bytes to throw
+/// away, and the reader is better served by the `offline:` line that says so
+/// than by a sign-in that was never going to work.
+fn discard_corrupt_session(store: &dyn SessionStore) -> Option<String> {
+    let Err(SessionError::Corrupt(reason)) = store.load() else {
+        return None;
+    };
+
+    tracing::warn!(%reason, "discarding an unreadable stored session");
+    if let Err(error) = store.clear() {
+        tracing::warn!(%error, "the discarded stored session could not be removed");
+    }
+
+    Some(format!(
+        "the stored session could not be read ({reason}) and has been discarded — \
+         sign in again"
+    ))
+}
+
+/// Says, if a stored session was discarded, why the reader is being signed out.
+///
+/// Behind the [`Event::Ready`] it belongs to rather than in front of it: the
+/// screen's own answer to a client that is up is a status line of its own, so a
+/// sentence sent first would be overwritten before it was ever drawn.
+fn report_discarded(discarded: Option<String>, tx: &UnboundedSender<AppEvent>) {
+    if let Some(sentence) = discarded {
+        let _ = tx.send(AppEvent::Net(Event::SessionDiscarded(sentence)));
+    }
 }
 
 /// The account's own profile, or why there is not one.
@@ -1042,6 +1100,16 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         Event::NoCredentials => {
             app.begin_no_credentials();
             "televim has no application credentials".clone_into(&mut app.status);
+        }
+
+        // A flash would be the wrong lifetime here. The sentence is the only
+        // account of what happened to the session a reader was signed in with,
+        // and a reader who reaches the sign-in form a minute later is looking at
+        // a screen they did not expect and has to be told why. It says nothing
+        // about the client: there is one either way, and the `Ready` beside it is
+        // what puts the screen up.
+        Event::SessionDiscarded(sentence) => {
+            app.status = sentence;
         }
 
         Event::CodeRequested { phone, result } => match result {
@@ -2754,6 +2822,88 @@ mod tests {
         );
 
         assert!(app.signin().is_none(), "the account is signed in");
+    }
+
+    // ---- a stored session that cannot be read --------------------------
+
+    #[test]
+    fn a_stored_session_that_cannot_be_read_is_discarded_and_the_startup_carries_on() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.json");
+        // Bytes that are not a session: what a truncated write, or a file that
+        // belongs to something else, looks like.
+        std::fs::write(&path, b"not json").expect("the corrupt bytes are written");
+        let store = FileStore::new(&path);
+
+        let sentence = discard_corrupt_session(&store).expect("corrupt bytes are discarded");
+        assert!(!sentence.is_empty(), "the reader is told what happened");
+
+        assert!(
+            matches!(store.load(), Ok(None)),
+            "so the store is the one a reader with no session has, rather than an \
+             unreadable file that refuses every build"
+        );
+        assert!(
+            !path.exists(),
+            "and the unusable file is gone, rather than left to fail again"
+        );
+    }
+
+    /// The other answer, and the one that must not touch anything: a store with
+    /// a session in it is left exactly as it was found.
+    #[test]
+    fn a_healthy_stored_session_is_left_alone() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.json");
+        let store = FileStore::new(&path);
+        store
+            .save(&telegram_framework::SessionData::default())
+            .expect("a session is written");
+
+        assert_eq!(discard_corrupt_session(&store), None);
+        assert!(
+            store.load().expect("the session still reads").is_some(),
+            "the reader's session is still there"
+        );
+    }
+
+    /// Nothing stored is not corruption, and neither is a store that could not
+    /// be reached: only `Corrupt` is a session to throw away, so every other
+    /// answer leaves the store alone and leaves a failure where it was.
+    #[test]
+    fn a_store_with_nothing_in_it_is_not_a_corrupt_session() {
+        let store = telegram_framework::MemoryStore::new();
+
+        assert_eq!(discard_corrupt_session(&store), None);
+        assert!(matches!(store.load(), Ok(None)), "and nothing was cleared");
+    }
+
+    /// The sentence is what the reader is left with, and it is the *status*
+    /// line rather than a flash: a reader who reaches the sign-in form a minute
+    /// later has to be able to read why their session is gone.
+    #[test]
+    fn a_discarded_session_says_so_on_the_status_line() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::SessionDiscarded("the stored session could not be read".to_owned()),
+        );
+
+        assert_eq!(app.status, "the stored session could not be read");
+        assert!(
+            state.client.is_none(),
+            "the sentence is about a session, not about a client"
+        );
+
+        // No deadline on it: `expire_status` is the clock a flash carries.
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "the sentence does not go away on its own"
+        );
+        assert_eq!(app.status, "the stored session could not be read");
     }
 
     // ---- signing out ---------------------------------------------------
