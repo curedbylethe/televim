@@ -1499,6 +1499,174 @@ mod tests {
         }
     }
 
+    /// The frame column `label` begins at on row `y`, if it is on it at all.
+    ///
+    /// Read off the drawn row rather than computed from the layout, because what
+    /// these assertions are about is the cell a reader is looking at.
+    fn label_column(screen: &Buffer, y: u16, label: &str) -> u16 {
+        let found = body_row(screen, y)
+            .find(label)
+            .unwrap_or_else(|| panic!("{label:?} is on row {y}: {}", body_row(screen, y)));
+
+        BODY_X + u16::try_from(found).expect("a column fits a frame")
+    }
+
+    /// A placeholder is dim and prose is not, read off the cells rather than off
+    /// the row: the row says the words are there, and the cell says what weight
+    /// they carry.
+    #[test]
+    fn a_placeholder_is_drawn_in_the_dim_ink_and_words_are_not() {
+        let dim = theme().text_dim.fg.expect("dim text has an ink");
+        let prose = theme().text.fg.expect("body text has an ink");
+
+        for (media, label) in [
+            (MediaKind::Photo, "[image]"),
+            (MediaKind::Video, "[video]"),
+            (MediaKind::Gif, "[gif]"),
+            (MediaKind::Voice, "[voice]"),
+            (MediaKind::File, "[file]"),
+        ] {
+            let app = showing(vec![attachment(1, 0, false, media)]);
+            let screen = screen(&app, 80, 24);
+            let at = label_column(&screen, FIRST, label);
+
+            assert_eq!(
+                cell(&screen, at, FIRST).fg,
+                dim,
+                "{media:?} says what it is in the dim ink"
+            );
+            assert_eq!(
+                cell(&screen, at + 1, FIRST).fg,
+                dim,
+                "and not only its first letter: {label}"
+            );
+        }
+
+        let app = showing(vec![at(1, 0, false, "the pier at six")]);
+        let prose_screen = screen(&app, 80, 24);
+
+        assert_eq!(
+            cell(
+                &prose_screen,
+                label_column(&prose_screen, FIRST, "the pier"),
+                FIRST
+            )
+            .fg,
+            prose,
+            "what the peer wrote carries the body's own ink"
+        );
+
+        let mut captioned = at(1, 0, false, "the pier at six");
+        captioned.media = Some(MediaKind::Photo);
+        let app = showing(vec![captioned]);
+        let captioned_screen = screen(&app, 80, 24);
+
+        assert_eq!(
+            cell(
+                &captioned_screen,
+                label_column(&captioned_screen, FIRST, "the pier"),
+                FIRST
+            )
+            .fg,
+            prose,
+            "a caption is prose, and prose is not dimmed: a placeholder is only for a message that says nothing"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_is_on_the_first_row_behind_the_sender_tag() {
+        let app = showing(vec![attachment(1, 0, false, MediaKind::Photo)]);
+
+        let screen = screen(&app, 80, 24);
+        let line = body_row(&screen, FIRST);
+        let tag = line
+            .find("[them]")
+            .unwrap_or_else(|| panic!("a message that opens its group names its sender: {line}"));
+        let token = label_column(&screen, FIRST, "[image]");
+
+        let tag_at = BODY_X + u16::try_from(tag).expect("a column of the row fits a frame");
+
+        assert!(
+            tag_at < token,
+            "the tag is in front of the token, not on a row of its own: {line}"
+        );
+        assert!(
+            !drawn(&screen, FIRST + 1),
+            "and the placeholder is the message's only row: {}",
+            row(&screen, FIRST + 1)
+        );
+    }
+
+    #[test]
+    fn a_trailing_note_does_not_push_the_placeholder_down() {
+        // The second message continues the first one's group, so it carries no
+        // tag, and it closes the group, so it carries the group's time.
+        let app = showing(vec![
+            at(1, 0, false, "hello"),
+            attachment(2, 60, false, MediaKind::Video),
+        ]);
+
+        let screen = screen(&app, 80, 24);
+        // The window holds two one-row messages, so the second is on the row
+        // below the first rather than on [`FIRST`].
+        let first = FIRST + 1;
+
+        assert!(
+            row(&screen, first).contains("[video]"),
+            "the placeholder is still on the message's own first row: {}",
+            row(&screen, first)
+        );
+        assert!(
+            row(&screen, first).contains(&clock_at(60)),
+            "with the group's time on show beside it, not on a row that pushed it down: {}",
+            row(&screen, first)
+        );
+    }
+
+    #[test]
+    fn a_placeholder_can_be_yanked_a_character_at_a_time() {
+        let mut app = showing(vec![attachment(1, 0, false, MediaKind::File)]);
+
+        press(&mut app, KeyCode::Char('v'));
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('l'));
+        }
+        press(&mut app, KeyCode::Char('y'));
+
+        assert_eq!(
+            app.register().lines(),
+            std::slice::from_ref(&"[fi".to_owned()),
+            "a charwise selection inside the placeholder yanks the placeholder's own characters"
+        );
+    }
+
+    #[test]
+    fn a_selected_placeholder_is_painted_in_the_selection_ink() {
+        let mut app = showing(vec![attachment(1, 0, false, MediaKind::File)]);
+
+        press(&mut app, KeyCode::Char('V'));
+        let screen = screen(&app, 80, 24);
+        let at = label_column(&screen, FIRST, "[file]");
+
+        for offset in 0.."[file]".len() {
+            let offset = u16::try_from(offset).expect("an offset fits a frame");
+            let marked = cell(&screen, at + offset, FIRST);
+
+            assert_eq!(
+                marked.bg,
+                selection_bg(),
+                "[file]'s {}th cell is inside the selection",
+                offset + 1
+            );
+            assert_eq!(
+                marked.fg,
+                selection_fg(),
+                "[file]'s {}th cell follows the selection's ink",
+                offset + 1
+            );
+        }
+    }
+
     /// A placeholder that cannot be selected is not body text, it is decoration.
     #[test]
     fn a_placeholder_can_be_selected_and_yanked() {

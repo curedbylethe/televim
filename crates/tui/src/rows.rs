@@ -1488,6 +1488,49 @@ mod tests {
         assert_eq!(&message.display_body()[rows[0].clone()], "[gif]");
     }
 
+    /// The soft-wrap rule, stated as a range: whatever the label is, the body is
+    /// one row and that row indexes the whole of `display_body()` and nothing else.
+    #[test]
+    fn every_placeholder_is_one_row_spanning_the_whole_body() {
+        for media in [
+            domain::message::MediaKind::Photo,
+            domain::message::MediaKind::Video,
+            domain::message::MediaKind::Gif,
+            domain::message::MediaKind::Voice,
+            domain::message::MediaKind::File,
+        ] {
+            let app = App::mock();
+            let message = carrying(media);
+
+            let rows = message_rows(&app, &message, Grouped::alone(), 40);
+
+            assert_eq!(
+                rows,
+                vec![0..message.display_body().len()],
+                "{media:?} is one row of the very string the panel wraps"
+            );
+        }
+    }
+
+    /// The columns a note takes are subtracted before the body is cut, so a note
+    /// cannot turn a one-line body into two.
+    #[test]
+    fn a_trailing_note_does_not_add_a_row_to_a_placeholder() {
+        let app = App::mock();
+        let mut message = carrying(domain::message::MediaKind::Photo);
+        message.timestamp = 1_730_000_000;
+        let grouped = Grouped::alone();
+        let note = trailing_note(&app, &message, grouped).expect("the group's time is on show");
+
+        let rows = message_rows(&app, &message, grouped, 40);
+
+        assert_eq!(
+            rows,
+            vec![0..message.display_body().len()],
+            "{note:?} took columns from the row rather than a row of its own"
+        );
+    }
+
     #[test]
     fn the_layout_is_the_same_answer_twice_over() {
         let app = App::mock();
