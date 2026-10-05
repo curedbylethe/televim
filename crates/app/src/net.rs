@@ -187,6 +187,15 @@ pub enum Event {
     /// attempts are spent.
     ChatListRetrying(ChatListRetry),
 
+    /// The update feed has been read to its end.
+    ///
+    /// The feed ends when the client shuts down, and `None` is that. Its own
+    /// event rather than an [`Event::Offline`] because nothing has failed yet:
+    /// the app rebuilds the client from the stored session and takes a new feed,
+    /// and only when that reconnect cannot be made — or the feed ends again
+    /// before any update has arrived — does the reader see an `offline:`.
+    FeedEnded,
+
     /// A page came back, or the fetch that asked for it failed.
     History {
         /// What was asked for.
@@ -436,6 +445,26 @@ pub struct State {
     /// built immediately before the launch bring-up is issued, so the launch
     /// needs no separate marking.
     bringing_up: bool,
+
+    /// A reconnect the feed's end asked for, waiting for the driver to carry it
+    /// out.
+    ///
+    /// A one-slot request rather than a call into bring-up from [`apply`], for
+    /// the same reason the reader's `:retry` is: the driver owns the
+    /// configuration and the channel a bring-up needs, and it is the only place
+    /// the single-flight guard can be read. Taken once, like a retry: a request
+    /// taken is a request being carried out.
+    reconnect_requested: bool,
+
+    /// Whether the one automatic reconnect has been spent.
+    ///
+    /// **One per working feed.** Issuing the reconnect sets it, and an
+    /// [`Event::Update`] clears it, because an update is the feed proving it
+    /// works — without that, a reconnect that re-subscribes to a feed that
+    /// immediately ends again would rebuild the client for ever. A second feed
+    /// end while this is set is the reader-visible [`Event::Offline`] rather
+    /// than another rebuild.
+    auto_reconnect_used: bool,
 }
 
 impl State {
@@ -456,6 +485,15 @@ impl State {
             bringing_up: true,
             ..Self::default()
         }
+    }
+
+    /// The reconnect the feed's end asked for, once.
+    ///
+    /// Forgotten on the way out, the way [`App::take_retry_request`] is: a
+    /// request taken is a request being carried out, and a caller that asks
+    /// again on the next pass gets `false` rather than a second bring-up.
+    fn take_reconnect_request(&mut self) -> bool {
+        std::mem::take(&mut self.reconnect_requested)
     }
 }
 
@@ -714,10 +752,10 @@ fn session_store(cfg: &Config) -> Box<dyn SessionStore> {
 
 /// Forwards the feed to the loop for as long as it lasts.
 ///
-/// The feed ends when the client shuts down, and `None` is that: the task stops
-/// rather than retrying. A failure while resolving a gap in the sequence is
-/// logged and carried on with — the feed stays usable, and it resumes where it
-/// left off.
+/// The feed ends when the client shuts down, and `None` is that: the task stops,
+/// and the loop is told so it can rebuild the client and take a new feed. A
+/// failure while resolving a gap in the sequence is logged and carried on with —
+/// the feed stays usable, and it resumes where it left off.
 async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
     while let Some(result) = updates.next().await {
         match result {
@@ -741,6 +779,13 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
     if let Err(error) = updates.finish().await {
         tracing::warn!(%error, "the update position could not be recorded");
     }
+
+    // The end is reported **after** the position is recorded: the app rebuilds
+    // the client and only drops the old one when the new `Ready` replaces it, so
+    // this ordering is what keeps the position syncing against the client whose
+    // store it belongs to (G9). If the loop is already gone there is nowhere to
+    // report it to.
+    let _ = tx.send(AppEvent::Net(Event::FeedEnded));
 }
 
 /// Asks for whatever page the screen is about to need.
@@ -783,6 +828,24 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         } else if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
             state.bringing_up = true;
             spawn_bring_up(cfg, tx);
+        }
+    }
+
+    // The feed ended, so the client is rebuilt and a new feed taken. Read in the
+    // same place as the reader's retry and for the same reason — the state a
+    // reconnect is needed in has no feed at all. A bring-up already in flight is
+    // not stacked on, and the one automatic reconnect is bounded: a second feed
+    // end before an update has cleared the flag is the reader-visible failure,
+    // exactly as a launch that spent every chat-list attempt is.
+    if state.take_reconnect_request() {
+        if auto_reconnect(state) {
+            state.auto_reconnect_used = true;
+            if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+                state.bringing_up = true;
+                spawn_bring_up(cfg, tx);
+            }
+        } else if !state.bringing_up {
+            apply_offline(app, state, &anyhow::anyhow!("the update feed ended again"));
         }
     }
 
@@ -831,6 +894,18 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             request_jump(&client, jump, cursor, tx);
         }
     }
+}
+
+/// Whether a feed that has just ended may be reconnected, or has spent its one
+/// automatic attempt.
+///
+/// A pure answer over [`State`], so the bound can be checked without a client or
+/// a runtime, the way [`chat_list_retry`]'s is. Two refusals, and they mean
+/// different things to the caller: `bringing_up` says a bring-up is already on
+/// its way and will answer for itself, while [`State::auto_reconnect_used`] says
+/// the one attempt is gone and this feed's end is the failure.
+fn auto_reconnect(state: &State) -> bool {
+    !state.bringing_up && !state.auto_reconnect_used
 }
 
 /// Decides which page to ask for, from what the screen and the cursor say.
@@ -1356,9 +1431,15 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
 
+        Event::FeedEnded => apply_feed_ended(app, state),
+
         Event::LoggedOut { result } => apply_logged_out_and_reconnect(app, state, result),
 
         Event::Update(event) => {
+            // An update is the feed working, so it earns the next automatic
+            // reconnect: without this, a reconnect that re-subscribes to a feed
+            // that immediately ends again would rebuild the client for ever.
+            state.auto_reconnect_used = false;
             // Whether it moved anything is not acted on: the loop redraws on
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
@@ -1553,6 +1634,25 @@ fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
     state.bringing_up = false;
 }
 
+/// What the feed's end says to the screen, and what it leaves for the driver.
+///
+/// The request is recorded rather than carried out here: the driver owns the
+/// configuration and the channel a bring-up needs, and it is the only place the
+/// single-flight guard can be read.
+///
+/// The status is written straight rather than through `flash`, because a
+/// reconnect is not a thing that passes on its own — it ends in an event, and
+/// that event brings its own sentence. The wording is the manual `:retry` path's,
+/// so the two cannot disagree about what "reconnecting" looks like.
+fn apply_feed_ended(app: &mut App, state: &mut State) {
+    state.reconnect_requested = true;
+    "reconnecting".clone_into(&mut app.status);
+
+    // Nothing has a client until the rebuilt one's `Ready`: the flag says so to
+    // every surface that would otherwise claim a request can be carried.
+    app.set_client_available(false);
+}
+
 /// Puts a client that is up on screen: its conversations, its store, and its
 /// account.
 ///
@@ -1589,7 +1689,24 @@ fn apply_ready_to_screen(
     account: Result<domain::account::Account, String>,
     session_store: tui::SessionStore,
 ) {
-    open_first_chat(app, chats);
+    // A conversation already on screen is the reader's place, and a `Ready` that
+    // lands on top of one is the client being brought back up — so the list is
+    // refreshed around that place rather than the reader being moved to the top
+    // of it. A launch with nothing open keeps the old landing. Either way the
+    // stale network anchors go: the cursor, the in-flight jump and the retry
+    // gate all described the list and the feed that are gone, and holding them
+    // makes `wanted` fall to a paging direction whose page can never arrive
+    // (G5), because the preserved window is not empty.
+    let restored = if app.conversation.window.chat_id != 0 {
+        state.history.cursor = None;
+        state.history.jump = None;
+        state.history.retry_at = None;
+        app.refresh_chats(chats)
+    } else {
+        open_first_chat(app, chats);
+        true
+    };
+
     app.set_session_store(session_store.clone());
     state.session_store = Some(session_store);
     let no_session = matches!(&account, Err(reason) if reason.is_empty());
@@ -1600,6 +1717,12 @@ fn apply_ready_to_screen(
     app.set_account(account);
     if no_session && !interrupted {
         app.begin_signin();
+    }
+
+    // Said last, because `login_complete` is what puts the status line back to
+    // its resting sentence and would otherwise overwrite this.
+    if !restored {
+        "the open conversation is no longer in the chat list".clone_into(&mut app.status);
     }
 }
 
@@ -2863,6 +2986,142 @@ mod tests {
         );
     }
 
+    // ---- reconnecting when the feed ends --------------------------------
+
+    /// One automatic reconnect, and only while nothing else is being brought up:
+    /// the caller can tell the two refusals apart by [`State::bringing_up`], so a
+    /// bring-up already on its way is left to answer for itself while the spent
+    /// attempt is the failure.
+    #[test]
+    fn the_automatic_reconnect_is_allowed_once_and_never_over_a_bring_up() {
+        assert!(
+            auto_reconnect(&State::default()),
+            "the first feed end may rebuild the client"
+        );
+        assert!(
+            !auto_reconnect(&State {
+                bringing_up: true,
+                ..State::default()
+            }),
+            "a bring-up already in flight is not stacked on"
+        );
+        assert!(
+            !auto_reconnect(&State {
+                auto_reconnect_used: true,
+                ..State::default()
+            }),
+            "the one attempt is spent"
+        );
+    }
+
+    /// The feed's end says a reconnect is under way and gives up the client. The
+    /// sentence is persistent and not a flash: it is replaced by the reconnect's
+    /// own answer, not by a clock.
+    #[test]
+    fn the_feed_ending_says_it_is_reconnecting_and_gives_up_the_client() {
+        let mut app = App::new();
+        app.credentials_configured = true;
+        let mut state = State::default();
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+
+        assert_eq!(app.status, "reconnecting");
+        assert!(
+            state.reconnect_requested,
+            "the driver is told to carry the reconnect out"
+        );
+
+        // The client flag is observable through the sign-in path, which reports
+        // rather than claiming a request is on its way when there is no client.
+        app.begin_signin();
+        for ch in "123".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(
+            app.take_action().is_none(),
+            "nothing was queued against a client that is gone"
+        );
+        assert_eq!(
+            app.status, "not connected yet — the client is not up",
+            "the client flag was cleared"
+        );
+    }
+
+    /// The request is read at the top of the pass and issued through the same
+    /// single-flight guard the reader's retry uses. On a runtime because a
+    /// bring-up is `tokio::spawn`, and a bring-up issued off one is a panic
+    /// rather than a request.
+    #[tokio::test]
+    async fn a_feed_end_brings_the_client_up_again_once() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            ..State::default()
+        };
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert!(state.bringing_up, "the bring-up was issued");
+        assert!(
+            state.auto_reconnect_used,
+            "and the one automatic attempt is spent"
+        );
+        assert!(
+            !state.take_reconnect_request(),
+            "the request was taken, so a second pass asks for nothing"
+        );
+    }
+
+    /// The second feed end before any update has arrived is not another rebuild:
+    /// the one attempt is gone, so it lands on the reader-visible failure.
+    #[test]
+    fn a_second_feed_end_without_an_update_says_offline() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert!(
+            app.status.starts_with("offline:") && app.status.contains("feed"),
+            "got {:?}",
+            app.status
+        );
+        assert!(!state.bringing_up, "and it is not a bring-up");
+    }
+
+    /// An update is the feed working, so it earns the next automatic reconnect:
+    /// otherwise a reconnect to a feed that immediately ends again would rebuild
+    /// the client for ever.
+    #[test]
+    fn an_update_earns_the_next_automatic_reconnect() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State {
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0))),
+        );
+
+        assert!(
+            !state.auto_reconnect_used,
+            "a working feed re-arms the one reconnect"
+        );
+    }
+
     /// The feed's event reaches the windows through the same call the screen's
     /// own tests pin, so this is only that the wiring is there at all.
     #[test]
@@ -3455,6 +3714,149 @@ mod tests {
         );
 
         assert!(app.signin().is_none(), "the account is signed in");
+    }
+
+    // ---- a client brought back up over an open conversation --------------
+
+    /// A `Ready` landing while a conversation is open is the client being
+    /// brought back up, not a launch: the list is refreshed around the reader's
+    /// place rather than the reader being moved to the top of it. The highlight
+    /// comes back by id, because the re-fetched list is ordered by recency and
+    /// an index means a different conversation on either side of the fetch.
+    #[test]
+    fn a_ready_over_an_open_conversation_keeps_it_and_restores_the_highlight_by_id() {
+        let mut app = app_with_unread_out_of_reach(2);
+        let read_at = app.vim.cursor();
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1), chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.window.chat_id, CHAT,
+            "the conversation the reader was in is still the one on screen"
+        );
+        assert_eq!(
+            app.conversation.window.len(),
+            8,
+            "with its loaded window intact"
+        );
+        assert_eq!(app.vim.cursor(), read_at, "and the reader where they were");
+        assert_eq!(
+            app.selected_chat, 1,
+            "the highlight followed the conversation's id into the reordered list"
+        );
+    }
+
+    /// The stale network anchors describe a list and a feed that are gone, so
+    /// they go with the `Ready`: a cursor whose page will never arrive is what
+    /// wedges `wanted` on a preserved window (G5).
+    #[test]
+    fn a_ready_over_an_open_conversation_clears_the_stale_network_anchors() {
+        let mut app = app_with_a_conversation(CHAT, 5);
+        let mut state = State {
+            history: History {
+                cursor: Some(HistoryCursor::new(CHAT)),
+                jump: Some(Jump {
+                    peer_id: CHAT,
+                    target_id: 20,
+                    kind: JumpKind::Unread,
+                }),
+                retry_at: Some(Instant::now() + RETRY),
+            },
+            ..State::default()
+        };
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(state.history.cursor, None, "the cursor goes");
+        assert_eq!(state.history.jump, None, "and the jump on its way");
+        assert_eq!(state.history.retry_at, None, "and the retry gate");
+    }
+
+    /// With the cursor cleared, a preserved window re-anchors from its own
+    /// newest message: a paging direction, rather than the `Wanted::Nothing`
+    /// that a stale cursor naming an empty window would leave forever.
+    #[test]
+    fn paging_re_anchors_after_a_ready_over_an_open_conversation() {
+        let mut app = app_with_a_conversation(CHAT, 5);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Latest(CHAT),
+            "the preserved conversation asks for its newest page again"
+        );
+    }
+
+    /// A re-fetch that no longer holds the reader's conversation keeps the
+    /// window and falls back to the top of the list, saying so, rather than
+    /// silently opening whichever conversation now happens to be first.
+    #[test]
+    fn a_ready_whose_conversation_is_gone_keeps_the_window_and_says_so() {
+        let mut app = app_with_a_conversation(CHAT, 5);
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.window.chat_id, CHAT,
+            "the window the reader was reading is preserved"
+        );
+        assert_eq!(app.selected_chat, 0, "the highlight falls back to the top");
+        assert!(
+            app.status.contains("no longer"),
+            "and the reader is told where they landed: {:?}",
+            app.status
+        );
+    }
+
+    /// A launch has nothing open, so the old landing is untouched: the reader
+    /// is still put into the newest conversation rather than left on an empty
+    /// screen.
+    #[test]
+    fn a_ready_with_no_conversation_open_still_selects_the_first_chat() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.conversation.window.chat_id, CHAT);
     }
 
     // ---- a stored session that cannot be read --------------------------

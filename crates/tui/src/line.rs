@@ -464,9 +464,9 @@ impl LineEditor {
 
     /// Keeps the text and forgets what it was for.
     ///
-    /// What closing a conversation does to the draft. The words are the
-    /// reader's and belong to no conversation; the subject they were written
-    /// against does not survive one being closed, and a draft that kept its
+    /// What closing a conversation does to the draft, and what parking does to it
+    /// on the way into the per-peer store: the words are kept, but the subject
+    /// they were written against does not survive, and a draft that kept its
     /// purpose would submit as a reply to a message in a chat that is no longer
     /// open.
     pub fn forget_purpose(&mut self) {

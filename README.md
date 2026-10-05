@@ -166,8 +166,10 @@ Working today:
   `d` and `y`, and multi-line messages with `Ctrl+J` (`Shift+Enter` where the
   terminal volunteers the distinction). `gg` and `G` are the wrapper's, not the
   library's — see [`docs/decisions.md`](./docs/decisions.md). The bar is always a draft: it grows to six
-  rows, survives a conversation switch, and is drawn with a painted caret that
-  `TestBackend` can assert, which the real terminal's could not.
+  rows, and each conversation keeps its own: leaving parks it, re-entering
+  restores it, and another conversation starts with its own bar. It is drawn with
+  a painted caret that `TestBackend` can assert, which the real terminal's could
+  not.
   A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
   candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
   keeps typing into the draft. Reply with `r`, edit with `e` — and since a
@@ -214,6 +216,13 @@ Working today:
   keystroke away from a key that types nothing else. `y` quits, `n` or `Esc`
   stays. `Ctrl-C` does **not** ask: it is the way out when the program is wedged,
   and a terminal that is not answering cannot draw the question either.
+- **Reconnect:** if the update feed stops mid-session, televim rebuilds the client
+  from the stored session in-process and takes a new feed — no restart and no
+  re-login — while keeping the reader's place: the open conversation and its
+  cursor, the chat-list highlight, the jumplist, the selection, the register and
+  the draft all survive. The status line says `reconnecting` while it happens, and
+  one automatic reconnect is tried; if the feed stops again before any update
+  arrives, the status line says `offline:` and `:retry` asks again.
 
 Not built, and named here so nobody reads the roadmap below as current:
 

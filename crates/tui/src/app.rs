@@ -1108,6 +1108,10 @@ pub struct App {
     /// append-only, no caret, and cleared by the key every reader presses
     /// reflexively. A line is a buffer with a caret in it, and it is the
     /// wrapper's whole job.
+    ///
+    /// This is the *open* conversation's draft; the drafts of the rest are
+    /// parked in [`App::drafts`], and every conversation switch moves one out of
+    /// here and the next one in.
     pub line: LineEditor,
 
     /// The `:query` being completed, if there is one.
@@ -1306,6 +1310,23 @@ pub struct App {
     /// storage layer.
     read_receipts: RefCell<HashMap<i64, i64>>,
 
+    /// The drafts of the conversations the reader is not in.
+    ///
+    /// The open conversation's draft is [`App::line`]; this holds the rest,
+    /// parked under their peer id, so a reader who looks away and comes back
+    /// finds the sentence they had started. The same seam as
+    /// [`App::read_receipts`]: the view is replaced on every switch, and what
+    /// belongs to the conversation rather than to the page on show is kept here.
+    ///
+    /// Only a plain message draft is stored — [`App::park_draft`] forgets the
+    /// reply or edit subject on the way in — and a peer's entry is dropped when
+    /// its draft is empty, so the map holds only peers with words in them.
+    ///
+    /// Not written to disk, for the same reason as [`App::read_receipts`]: a
+    /// launch starts empty, and an account change clears it ([`App::set_chats`])
+    /// so no words cross an account boundary.
+    drafts: HashMap<i64, LineEditor>,
+
     /// Who permutes a right-to-left row: this program, or the terminal.
     ///
     /// **Fixed at construction**, and private so that it stays that way: the
@@ -1391,6 +1412,7 @@ impl App {
             body_width: Cell::new(ASSUMED_BODY_WIDTH),
             now: Cell::new(0),
             read_receipts: RefCell::new(HashMap::new()),
+            drafts: HashMap::new(),
             bidi: BidiMode::Terminal,
         }
     }
@@ -1627,20 +1649,55 @@ impl App {
 
         if self.list.chats.is_empty() {
             self.select_chat_none();
+            // The account's drafts go with its list: a peer id can be reused by
+            // another account, and inheriting a stranger's words is worse than
+            // losing one's own.
+            self.drafts.clear();
+        }
+    }
+
+    /// Installs a freshly fetched chat list while keeping the open conversation.
+    ///
+    /// The other half of [`App::set_chats`], and the one a client that has been
+    /// brought back up needs: the list is replaced wholesale, but the reader's
+    /// place in it is not. The conversation, its window, the cursor in it, the
+    /// jumplist, the selection, the register and the draft are left exactly as
+    /// they were, because a re-fetch is not the reader changing conversations —
+    /// so none of [`App::select_chat_none`]'s resets run here.
+    ///
+    /// The highlight is restored by the open conversation's own id, never by
+    /// index: the list comes back ordered by recency, and an index means a
+    /// different conversation on either side of the fetch. An id the new list
+    /// does not hold falls back to the top and reports `false`, so the caller
+    /// can say where the reader landed.
+    pub fn refresh_chats(&mut self, chats: Vec<Chat>) -> bool {
+        let open = self.conversation.window.chat_id;
+        self.list = ChatList::with_chats(chats);
+
+        if let Some(index) = self.list.chats.iter().position(|chat| chat.id == open) {
+            self.selected_chat = index;
+            true
+        } else {
+            self.selected_chat = 0;
+            false
         }
     }
 
     /// Closes the conversation on show.
     ///
-    /// Every other act of this function is a reset, and the draft is the one
-    /// thing it does not touch: a reader who switches chats mid-sentence does
-    /// not lose the sentence. What *is* forgotten is the draft's subject — the
-    /// reply it answers and the message it edits — because those name something
-    /// in the conversation that has just closed, and a reply sent into a
-    /// different chat to a message that is not in it is not a reply at all. The
-    /// words survive; what they were for does not, and the draft becomes a
-    /// message.
+    /// The outgoing conversation's draft is parked under its peer id first, so a
+    /// reader who switches chats mid-sentence finds the sentence again on their
+    /// return — [`App::select_chat`] restores it with [`App::resume_draft`]. The
+    /// other acts of this function are resets. What is *not* kept is the draft's
+    /// subject: the reply it answers and the message it edits are dropped here,
+    /// because they name something in the conversation that has just closed, and
+    /// a reply sent into a different chat to a message that is not in it is not a
+    /// reply at all. The words survive per conversation; what they were for does
+    /// not, and the draft becomes a message when it comes back.
     fn select_chat_none(&mut self) {
+        // Before the conversation below is zeroed: parking needs the peer id the
+        // page on show still names.
+        self.park_draft();
         self.conversation = ConversationView::new(0);
         // The note belongs to the chat being left: returning must not revive it,
         // so the deadline goes with the view rather than with the reader's memory.
@@ -1659,6 +1716,44 @@ impl App {
         self.selection = None;
         self.register = Register::default();
         self.line.forget_purpose();
+    }
+
+    /// Parks the open conversation's draft under its peer id.
+    ///
+    /// Called while [`App::conversation`] still names the peer the words belong
+    /// to, before [`App::select_chat_none`] zeroes it. The draft is moved out
+    /// rather than copied, and its purpose is forgotten on the way into the map,
+    /// so the stored copy is always a plain message: the reply or edit subject
+    /// names a message in the conversation being left. An empty buffer drops the
+    /// peer's entry rather than storing a blank, so the map holds only peers
+    /// with a live draft.
+    ///
+    /// Only a buffer draft is parked. A sign-in field or a `:`/`/` prompt is a
+    /// question mid-answer, not words the reader is writing, and the caller's own
+    /// reset is what finishes with those.
+    fn park_draft(&mut self) {
+        let chat_id = self.conversation.window.chat_id;
+        if chat_id == 0 || !self.line.purpose().is_buffer() {
+            return;
+        }
+
+        if self.line.is_empty() {
+            self.drafts.remove(&chat_id);
+            return;
+        }
+
+        let mut draft = std::mem::take(&mut self.line);
+        draft.forget_purpose();
+        self.drafts.insert(chat_id, draft);
+    }
+
+    /// Puts a conversation's parked draft back on the line.
+    ///
+    /// The mirror of [`App::park_draft`]: the value is moved out of the map, so
+    /// the map never holds the open conversation's draft, and a peer with no
+    /// entry gets a fresh line.
+    fn resume_draft(&mut self, chat_id: i64) {
+        self.line = self.drafts.remove(&chat_id).unwrap_or_default();
     }
 
     // ---- the profile panel ----------------------------------------------
@@ -2302,6 +2397,9 @@ impl App {
         // without. How far this conversation has been read is not a fact about
         // the page on show, so it is put back from what the feed has said.
         self.restore_read_watermark(chat_id);
+        // And with it the draft the reader left in this conversation, for the
+        // same reason: the words are not a fact about the page on show.
+        self.resume_draft(chat_id);
     }
 
     /// Puts the conversation's recorded read watermark on the view just opened.
@@ -2356,10 +2454,10 @@ impl App {
 
     /// The name of the conversation on show, for the input bar's title.
     ///
-    /// A draft belongs to no conversation, so this is the one thing a reader
-    /// cannot work out for themselves: where the words in the bar will be
-    /// sent. `None` when nothing is open, which is the one case in which
-    /// composing does nothing at all.
+    /// The one thing a reader cannot work out from the bar alone is where the
+    /// words in it will be sent: each conversation keeps its own draft, so the
+    /// draft itself no longer names one. `None` when nothing is open, which is
+    /// the one case in which composing does nothing at all.
     #[must_use]
     pub fn open_chat_name(&self) -> Option<&str> {
         self.open_chat().map(|chat| chat.title.as_str())
@@ -5734,6 +5832,50 @@ mod tests {
         assert!(app.conversation.window.is_empty());
     }
 
+    /// A refresh installs a new list around the reader's place, rather than
+    /// through the reset a chat switch runs: the conversation, the selection and
+    /// the draft stay, and the highlight follows the open conversation's id into
+    /// a list whose order has changed.
+    #[test]
+    fn a_refresh_keeps_the_conversation_selection_and_draft_purpose() {
+        let mut app = App::mock();
+        app.start_reply();
+        let reply_to = app.reply_to.expect("the sample cursor is on a message");
+        spanning(&mut app, 3, 5);
+
+        // The same conversations, reversed: an index would point at a different
+        // one, so only restoring by id can keep the highlight where it was.
+        let reversed: Vec<_> = app.chats().iter().rev().cloned().collect();
+        let restored = app.refresh_chats(reversed);
+
+        assert!(
+            restored,
+            "the open conversation is still in the fetched list"
+        );
+        assert_eq!(
+            app.current_chat_id(),
+            MOCK_CHAT,
+            "the conversation on show is untouched"
+        );
+        assert!(!app.conversation.window.is_empty(), "and so is its window");
+        assert_eq!(
+            app.selected_chat, 2,
+            "the highlight followed the id to the end of the reversed list"
+        );
+        assert_eq!(
+            app.line.purpose(),
+            PromptKind::Reply,
+            "the draft is still a reply, not reset to a plain message"
+        );
+        assert_eq!(app.reply_to, Some(reply_to));
+        assert_eq!(
+            app.selection()
+                .map(|selection| (selection.anchor.message_id, selection.focus.message_id)),
+            Some((3, 5)),
+            "the selection survives the list being replaced"
+        );
+    }
+
     /// Regression: every keystroke must be applied exactly once. Previously
     /// the reader thread in `runtime.rs` dropped every other event, so typing
     /// `s` then `q` produced only `q`.
@@ -5799,6 +5941,9 @@ mod tests {
         );
     }
 
+    /// A draft is per conversation: leaving one behind does not leak its words
+    /// into the next, which starts with whatever that conversation was left with,
+    /// and the reader's own conversation has its sentence back on return.
     #[test]
     fn a_draft_survives_a_conversation_switch() {
         let mut app = App::mock();
@@ -5809,10 +5954,35 @@ mod tests {
 
         app.select_chat(1);
 
+        assert!(
+            app.line.is_empty(),
+            "another conversation starts with its own draft, and has none"
+        );
+
+        app.select_chat(0);
+
         assert_eq!(
             app.line.text(),
             "half a th",
-            "a reader who switches chats mid-sentence does not lose the sentence"
+            "and the reader's own conversation has theirs again"
+        );
+    }
+
+    /// A conversation nobody has typed in starts empty, rather than inheriting
+    /// the words of the one before it.
+    #[test]
+    fn another_conversation_starts_with_its_own_draft() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('i')));
+        type_text(&mut app, "half a th");
+        app.handle_key(press(KeyCode::Esc));
+        app.handle_key(press(KeyCode::Esc));
+
+        app.select_chat(1);
+
+        assert!(
+            app.line.is_empty(),
+            "the next conversation's own draft is nothing yet"
         );
     }
 
@@ -5830,6 +6000,7 @@ mod tests {
         type_text(&mut app, "sure");
 
         app.select_chat(1);
+        app.select_chat(0);
 
         assert_eq!(app.line.text(), "sure", "the words");
         assert_eq!(

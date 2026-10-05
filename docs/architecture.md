@@ -191,6 +191,9 @@ keeps.
 seen, not one list per conversation, because a single flat cap is what stops an
 edit or a deletion from needing to find the conversation it belongs to, and what
 stops that from becoming the largest allocation in the process under a live feed.
+The per-peer draft map is a different thing one layer up: `tui` view state keyed
+by peer id, like `read_receipts`, not a `domain` history structure, so it does
+not reopen this decision.
 
 ### `tui`
 
@@ -209,7 +212,8 @@ crates/tui/
 │   ├── bidi.rs         # Which way a message reads, and the logical ranges one
 │                      #   wrapped row is drawn in, already permuted
 │   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break
-│   ├── line.rs         # The input line: owns the text, wraps vim-line
+│   ├── line.rs         # The input line: owns the text, wraps vim-line; the
+│                      #   value `App` parks under a peer id
 │   ├── rows.rs         # One owner for the panel's geometry
 │   ├── text_row.rs     # A run of text the reader can put a cursor in: the
 │                      #   text, a match on it, a selection split out of it, and
@@ -232,7 +236,10 @@ crates/tui/
 ```
 
 `app.rs` is the largest file in the workspace and holds the key dispatch, the
-scroll arithmetic, the paging decision, and the prompt state. Key dispatch is
+scroll arithmetic, the paging decision, the prompt state, and the per-peer draft
+map: each conversation's `LineEditor` is parked under its outgoing peer id when
+the reader leaves and restored when they return, the way `read_receipts` keys
+view state by peer. Key dispatch is
 `Focus` first and `Mode` second: the conversation owns a mode (Normal, Visual,
 Confirm) and the input line owns a mode of its own inside `tui::line` — having
 the line at all used to be its insert mode, until the line grew a normal mode
@@ -265,7 +272,9 @@ wrapper lays out with `wrap_keeping_whitespace` — the conversation's `wrap`,
 except that a run of
 spaces stays on the row it ends with rather than being given to neither, so that
 a space the reader typed has a cell to be seen in — grown to six rows, with a
-**painted** caret. While the
+**painted** caret. The bar keeps one draft per conversation: leaving parks the
+buffer's `LineEditor` under the outgoing peer id and selecting a chat resumes
+that peer's, so another conversation starts with its own bar. While the
 reader is composing, the bar stands a dim `·` in for every space in the draft:
 a space is a cell that paints nothing, and a caret on a blank cell is a bar on a
 blank cell, so the key that typed one looked like the key that did nothing. The
@@ -342,9 +351,19 @@ up (build, fetch the chat list, take the feed — it does **not** sign in; see
 [`decisions.md`](./decisions.md)), asks for a page whenever the conversation on
 show is near one
 of its ends, drives the sign-in flow the panel asks for, and folds in whatever
-arrives. Everything with a rule in it is a function over the state — `wanted`,
-`open_first_chat`, `backoff`, `chat_list_retry` — so the part that can be wrong is
-tested without a client or a datacenter; the rest is the calls. A `HistoryCursor`
+arrives. When the update feed ends mid-session, `pump` records the position with
+`UpdateSubscription::finish` and reports `Event::FeedEnded`; `drive` then rebuilds
+the client from the stored session and takes a new feed in-process, through the
+same `state.bringing_up` single-flight guard `:retry` uses. The relay is
+single-shot, so a rebuild is the only way to re-subscribe (see
+[`decisions.md`](./decisions.md)). One automatic reconnect is allowed per working
+feed, and the re-`Ready` is place-preserving — the open conversation and its
+cursor, the chat-list highlight restored by id, the jumplist, the selection, the
+register and the draft all survive — because the reader did not navigate.
+Everything with a rule in it is a function over the state — `wanted`,
+`auto_reconnect`, `open_first_chat`, `backoff`, `chat_list_retry` — so the part
+that can be wrong is tested without a client or a datacenter; the rest is the
+calls. A `HistoryCursor`
 lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
 
 Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
