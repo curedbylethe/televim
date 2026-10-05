@@ -5,3 +5,4 @@ pub mod input_bar;
 pub mod profile;
 pub mod signin;
 pub mod status_bar;
+pub mod user_list;

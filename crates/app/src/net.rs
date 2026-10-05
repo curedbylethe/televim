@@ -1144,6 +1144,14 @@ fn request_plain(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender
             // Unreachable rather than wrong: a value is one of the three, never
             // two.
             Action::Login { .. } | Action::LoginCancelled | Action::Logout => {}
+
+            // A person lookup is queued by `tui` and performed by STAGE-05. This
+            // stage draws the surface only, so it is a no-op kept as its own arm
+            // rather than folded in with the sign-in arms above: STAGE-05
+            // replaces it in place with the real dispatch.
+            Action::ResolveUser { query } => {
+                let _ = query;
+            }
         }
     });
 }
