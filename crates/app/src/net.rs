@@ -187,6 +187,14 @@ pub enum Event {
     /// attempts are spent.
     ChatListRetrying(ChatListRetry),
 
+    /// A feed read failed and is being waited out.
+    ///
+    /// Its own event rather than silence because the reader watching a live
+    /// feed is owed the same account a launch gets: the wait is a wait with a
+    /// reason and an end. The [`Event::FeedEnded`] behind it comes only once
+    /// the errors are past their bound.
+    FeedRetrying(FeedRetry),
+
     /// The update feed has been read to its end.
     ///
     /// The feed ends when the client shuts down, and `None` is that. Its own
@@ -389,6 +397,31 @@ pub struct ChatListRetry {
     attempt: u8,
 
     /// The bound those attempts are counted against.
+    attempts: u8,
+}
+
+/// What a feed retry in progress has to say about itself.
+///
+/// One type rather than four fields on the event, because the whole of it is one
+/// sentence: none of the reason, the wait, or the count is read apart from the
+/// others, and a reader watching a live feed is owed all three at once — the
+/// same account a launch gets from [`ChatListRetry`].
+pub struct FeedRetry {
+    /// Why the read that just failed failed.
+    reason: ProtoError,
+
+    /// How long until the next read, which is [`backoff`]'s answer: Telegram's
+    /// own wait when it gave one, the fixed `RETRY` otherwise.
+    delay: Duration,
+
+    /// The failure being waited out, of `attempts` in all.
+    ///
+    /// Counted as failures *seen*, so the first one to be reported is the
+    /// first — every wait inside the bound is slept, and only the error past
+    /// it ends the feed.
+    attempt: u8,
+
+    /// The bound those failures are counted against.
     attempts: u8,
 }
 
@@ -774,6 +807,16 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
                 if let Some(delay) = feed_error_retry(errors_seen, &error) {
                     errors_seen += 1;
                     tracing::warn!(%error, "the update feed reported a failure it can recover from");
+                    let retry = FeedRetry {
+                        reason: error,
+                        delay,
+                        attempt: errors_seen,
+                        attempts: CHAT_LIST_ATTEMPTS,
+                    };
+                    if tx.send(AppEvent::Net(Event::FeedRetrying(retry))).is_err() {
+                        // The loop is gone, so there is nothing left to tell.
+                        break;
+                    }
                     tokio::time::sleep(delay).await;
                 } else {
                     tracing::warn!(%error, "the update feed kept failing past its bound; ending it so the client is rebuilt");
@@ -1443,6 +1486,8 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
 
+        Event::FeedRetrying(retry) => apply_feed_retrying(app, &retry),
+
         Event::FeedEnded => apply_feed_ended(app, state),
 
         Event::LoggedOut { result } => apply_logged_out_and_reconnect(app, state, result),
@@ -1639,7 +1684,10 @@ fn apply_history(
 fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
     let reason = format!("{reason:#}");
     app.set_account(Err(reason.clone()));
-    app.ui.status = format!("offline: {reason}");
+    // A persistent sentence, so the flash deadline goes with it: `expire_status`
+    // is the clock a flash carries, and a failure must not revert to idle
+    // while the reader is still looking at it.
+    app.set_status(format!("offline: {reason}"));
     // No client to carry anything, so an in-flight sign-in is not in flight: the
     // flag would only keep the panel saying "Checking…".
     app.set_client_available(false);
@@ -1658,7 +1706,9 @@ fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
 /// so the two cannot disagree about what "reconnecting" looks like.
 fn apply_feed_ended(app: &mut App, state: &mut State) {
     state.reconnect_requested = true;
-    "reconnecting".clone_into(&mut app.ui.status);
+    // Persistent rather than a flash, for the same reason as the retry
+    // sentence: a pending flash deadline must not take it down.
+    app.set_status("reconnecting");
 
     // Nothing has a client until the rebuilt one's `Ready`: the flag says so to
     // every surface that would otherwise claim a request can be carried.
@@ -2087,6 +2137,24 @@ fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
         "fetching the chat list failed ({:#}); retrying in {}s (attempt {}/{})",
         retry.reason, seconds, retry.attempt, retry.attempts
     );
+}
+
+/// What a feed retry in progress says on the status line.
+///
+/// Persistent, not a flash, for the same reason as the chat-list sentence: a
+/// reader who looks away and back must find the wait with its reason and its
+/// end, not an empty status line — and never above a confirmation, which is
+/// what the rank in `status_text` guarantees. Both the wait and the count are
+/// here because a wait with no visible end of it is the thing this sentence
+/// exists to prevent.
+fn apply_feed_retrying(app: &mut App, retry: &FeedRetry) {
+    // A wait shorter than a second still has to be announced as one: "retrying in
+    // 0s" reads as no retry at all.
+    let seconds = retry.delay.as_secs().max(1);
+    app.set_status(format!(
+        "the update feed failed ({:#}); retrying in {}s (attempt {}/{})",
+        retry.reason, seconds, retry.attempt, retry.attempts
+    ));
 }
 
 /// Whether the launch chat-list fetch may be asked again, and how long to wait.
@@ -2641,6 +2709,44 @@ mod tests {
         assert!(
             app.ui.status.contains("31s") && app.ui.status.contains("1/3"),
             "got {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The feed's wait names the same three things the launch's does: the
+    /// reason, the wait, and the count. Persistent too — a flash deadline left
+    /// over from something transient must not take it down on the next tick.
+    #[test]
+    fn a_feed_retry_says_so_on_the_status_line() {
+        let mut app = App::new();
+        let mut state = State::default();
+        app.flash("something went wrong");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::FeedRetrying(FeedRetry {
+                reason: ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+                    code: 420,
+                    name: "FLOOD_WAIT".to_owned(),
+                    value: Some(31),
+                })),
+                delay: Duration::from_secs(31),
+                attempt: 1,
+                attempts: CHAT_LIST_ATTEMPTS,
+            }),
+        );
+
+        assert!(
+            app.ui.status.contains("FLOOD_WAIT")
+                && app.ui.status.contains("31s")
+                && app.ui.status.contains("1/3"),
+            "got {:?}",
+            app.ui.status
+        );
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "the sentence does not go away on its own: {:?}",
             app.ui.status
         );
     }
@@ -3400,6 +3506,135 @@ mod tests {
             app.ui.status
         );
         assert!(!state.bringing_up, "and it is not a bring-up");
+    }
+
+    // ---- feed sentences that stay up ------------------------------------
+
+    /// The regression `status_until` is: a flash deadline left over from
+    /// something transient must not take a persistent feed sentence down on the
+    /// next tick. Fired through `drive`, which is the clock that would do it.
+    #[test]
+    fn a_reconnecting_feed_sentence_survives_the_tick() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::default();
+        app.flash("something went wrong");
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(app.ui.status, "reconnecting", "got {:?}", app.ui.status);
+    }
+
+    /// The same deadline, cleared the same way, on the failure slot: an
+    /// `offline:` is not a thing that passes on its own either.
+    #[test]
+    fn an_offline_sentence_survives_longer_than_a_flash() {
+        let mut app = App::new();
+        let mut state = State::default();
+        app.flash("something went wrong");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("connection reset")),
+        );
+
+        assert_eq!(app.ui.status, "offline: connection reset");
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "the sentence does not go away on its own: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The whole visible sequence of an exhaustion with no reconnect left: the
+    /// waits name their reason, wait and count, and the end past the bound is
+    /// the reader-visible failure rather than another rebuild.
+    #[test]
+    fn an_exhausted_feed_end_with_no_reconnect_left_says_offline() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            // A previous rebuild spent the one attempt, and no update has
+            // arrived since to re-arm it.
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+        let retry = || FeedRetry {
+            reason: ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+                "connection reset".to_owned(),
+            ))),
+            delay: RETRY,
+            attempt: 0,
+            attempts: CHAT_LIST_ATTEMPTS,
+        };
+        app.flash("something went wrong");
+
+        for attempt in 1..=CHAT_LIST_ATTEMPTS {
+            apply(
+                &mut app,
+                &mut state,
+                Event::FeedRetrying(FeedRetry { attempt, ..retry() }),
+            );
+        }
+
+        assert!(
+            app.ui.status.contains("connection reset")
+                && app
+                    .ui
+                    .status
+                    .contains(&format!("{CHAT_LIST_ATTEMPTS}/{CHAT_LIST_ATTEMPTS}")),
+            "the last wait is still waited out loud: {:?}",
+            app.ui.status
+        );
+
+        // Past the bound the pump records the position and reports the end.
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(
+            app.ui.status, "offline: the update feed ended again",
+            "got {:?}",
+            app.ui.status
+        );
+        assert!(!state.bringing_up, "and it is not a bring-up");
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "and the failure stays up: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The way out of that failure is the reader's own `:retry`: unlike the
+    /// automatic reconnect it is not a budgeted attempt, so it re-runs the
+    /// bring-up — whose chat-list budget starts over inside it — and leaves
+    /// the spent flag for the next update to clear.
+    #[tokio::test]
+    async fn a_retry_after_an_exhausted_feed_brings_the_client_up_again() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+        app.ui.status = "offline: the update feed ended again".to_owned();
+
+        app.request_retry();
+        drive(&mut app, &mut state, &tx);
+
+        assert!(state.bringing_up, "the bring-up was issued");
+        assert!(
+            !app.take_retry_request(),
+            "the request was taken, so a second pass asks for nothing"
+        );
+        assert!(
+            state.auto_reconnect_used,
+            "the manual retry spends nothing of the automatic one"
+        );
+        assert_eq!(app.ui.status, "reconnecting", "got {:?}", app.ui.status);
     }
 
     /// The feed's event reaches the windows through the same call the screen's
