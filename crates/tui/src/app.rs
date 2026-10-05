@@ -27,6 +27,7 @@ use crate::emoji;
 use crate::jumplist::Jumplist;
 use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
+use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
 use crate::theme::Theme;
 use crate::widgets;
@@ -982,54 +983,8 @@ pub struct App {
     /// The account's session and the sign-in surface.
     pub session: SessionState,
 
-    /// The highlight on the profile panel's rows.
-    ///
-    /// A second [`VimState`] rather than a share of the conversation's, because
-    /// that one's total is the conversation window's length: driving two lists
-    /// from one value means each resize moves the other's cursor. `VimState`
-    /// knows nothing about what an item is, which is what makes the second one
-    /// free.
-    profile_vim: VimState,
-
-    /// The subject the card is about: the account, or a contact by chat.
-    ///
-    /// A `ProfileId::User` already existed and was unreachable, and a chat is the
-    /// handle a reader can actually name — a conversation on show is a person, and
-    /// the chat list is where they were found.
-    profile_subject: ProfileId,
-
-    /// Where the inline position is within the cursor row's value.
-    ///
-    /// A **character** count, because every motion that produces one counts
-    /// characters; it becomes a byte offset only where it is drawn, by
-    /// [`rows::byte_span`]. Separate from [`VimState`] because that moves between
-    /// rows and knows nothing about what a row is.
-    profile_caret: usize,
-
-    /// A card selection's fixed end, when there is one.
-    ///
-    /// A [`Mark`] and not a row index, because the card's two ends are the same
-    /// two ends the conversation has: a row and a position within it, or the whole
-    /// of it. Reusing the type is what makes `v` one keystroke here as it is
-    /// there, rather than a second selection model beside the first.
-    profile_visual: Option<domain::selection::Mark>,
-
-    /// The contact whose profile the card on show is about, if it is about one.
-    ///
-    /// One at a time rather than one per person: a card is opened, read and
-    /// closed, so a map would be a cache with no reader. The `peer_id` is what
-    /// lets an answer be matched back to the card that asked for it.
-    contact: Option<ContactProfile>,
-
-    /// A count typed before a motion, as `12j` means twelve.
-    profile_count: Option<u32>,
-
-    /// `Ctrl-w` was pressed on a card and the next key is its argument.
-    ///
-    /// The pane's `h`/`l` became an inline motion, so pane navigation moved under
-    /// a prefix. Bare `Ctrl-w` keeps its existing meaning — leaving the input line
-    /// — which is the same prefix-with-a-bare-fallback shape `g`/`gg` has.
-    profile_pending_w: bool,
+    /// The profile card's buffer and its per-keystroke state.
+    pub profile: ProfileCard,
 
     /// The conversations, and the messages the client has seen in them.
     ///
@@ -1299,13 +1254,7 @@ impl App {
             theme: Theme::default(),
             pane: Pane::Conversation,
             session: SessionState::new(),
-            profile_vim: VimState::new(0),
-            profile_subject: ProfileId::SelfAccount,
-            profile_caret: 0,
-            profile_visual: None,
-            profile_count: None,
-            contact: None,
-            profile_pending_w: false,
+            profile: ProfileCard::new(),
             list: ChatList::default(),
             selected_chat: 0,
             conversation: ConversationView::new(0),
@@ -1699,7 +1648,7 @@ impl App {
     /// there is a second subject's data at all.
     #[must_use]
     pub fn contact(&self) -> Option<&ContactProfile> {
-        self.contact.as_ref()
+        self.profile.contact.as_ref()
     }
 
     /// Records what a contact's profile read came back with.
@@ -1712,10 +1661,15 @@ impl App {
     /// reader may open a second card while the first read is in flight, and the
     /// second card's fields are not the first one's.
     pub fn set_contact(&mut self, peer_id: i64, profile: Result<Account, String>) {
-        let Some(open) = self.contact.as_ref().filter(|open| open.peer_id == peer_id) else {
+        let Some(open) = self
+            .profile
+            .contact
+            .as_ref()
+            .filter(|open| open.peer_id == peer_id)
+        else {
             return;
         };
-        self.contact = Some(ContactProfile {
+        self.profile.contact = Some(ContactProfile {
             peer_id: open.peer_id,
             state: match profile {
                 Ok(account) => AccountState::Known(account),
@@ -1728,7 +1682,8 @@ impl App {
         // this answer arrives, and a highlight bounded over zero rows can never be
         // moved afterwards — `j` clamps to a buffer of nothing. Re-clamping rather
         // than resetting keeps the reader where they were, which here is the top.
-        self.profile_vim
+        self.profile
+            .profile_vim
             .set_total(crate::card::navigable(&crate::card::rows(self)));
     }
 
@@ -1745,7 +1700,7 @@ impl App {
     /// Where the profile's highlight is, for the panel to draw.
     #[must_use]
     pub fn profile_cursor(&self) -> usize {
-        self.profile_vim.cursor()
+        self.profile.profile_vim.cursor()
     }
 
     /// Whom the card is about.
@@ -1755,7 +1710,7 @@ impl App {
     /// gone should not read as somebody else's, and there is nobody else.
     #[must_use]
     pub fn card_subject(&self) -> crate::card::CardSubject<'_> {
-        match self.profile_subject {
+        match self.profile.profile_subject {
             ProfileId::SelfAccount => crate::card::CardSubject::SelfAccount,
             ProfileId::User(id) => self.list.chats.iter().find(|chat| chat.id == id).map_or(
                 crate::card::CardSubject::SelfAccount,
@@ -1767,7 +1722,7 @@ impl App {
     /// The row the inline position is in, as a character count within its value.
     #[must_use]
     pub fn card_caret(&self) -> usize {
-        self.profile_caret
+        self.profile.profile_caret
     }
 
     /// The inline position as a byte offset into `value`.
@@ -1780,7 +1735,7 @@ impl App {
     #[must_use]
     pub fn card_caret_byte(&self, value: &str) -> usize {
         let chars = value.chars().count();
-        let at = self.profile_caret.min(chars);
+        let at = self.profile.profile_caret.min(chars);
         if at >= chars {
             return value.len();
         }
@@ -1797,7 +1752,7 @@ impl App {
     /// quotes half of each.
     #[must_use]
     pub fn card_selection(&self) -> Option<Selection> {
-        let anchor = self.profile_visual?;
+        let anchor = self.profile.profile_visual?;
         let focus = self.card_mark();
 
         // `char: None` whenever the selection covers whole rows, which is what `V`
@@ -1824,7 +1779,7 @@ impl App {
     /// second has to walk to the first to get there.
     #[cfg(test)]
     pub(crate) fn handle_card_row(&mut self, row: usize) {
-        self.profile_vim.set_cursor(row);
+        self.profile.profile_vim.set_cursor(row);
     }
 
     /// One charwise motion within the cursor row's value.
@@ -1865,10 +1820,11 @@ impl App {
     /// of rows and the position within the first is not what it covers.
     fn card_mark(&self) -> Mark {
         let inside = self
+            .profile
             .profile_visual
             .is_some_and(|anchor| anchor.message_id == self.card_row_id());
         if inside {
-            Mark::text(self.card_row_id(), self.profile_caret)
+            Mark::text(self.card_row_id(), self.profile.profile_caret)
         } else {
             Mark::whole(self.card_row_id())
         }
@@ -1876,13 +1832,14 @@ impl App {
 
     /// The cursor row as the identifier a [`Mark`] names.
     fn card_row_id(&self) -> i64 {
-        i64::try_from(self.profile_vim.cursor()).unwrap_or(i64::MAX)
+        i64::try_from(self.profile.profile_vim.cursor()).unwrap_or(i64::MAX)
     }
 
     /// Starts a card selection at the inline position, or extends the one there is.
     fn start_card_visual(&mut self) {
-        if self.profile_visual.is_none() {
-            self.profile_visual = Some(Mark::text(self.card_row_id(), self.profile_caret));
+        if self.profile.profile_visual.is_none() {
+            self.profile.profile_visual =
+                Some(Mark::text(self.card_row_id(), self.profile.profile_caret));
         }
     }
 
@@ -1922,10 +1879,10 @@ impl App {
     /// a place in, and restoring the row they looked at last time would answer a
     /// question they did not ask.
     pub(crate) fn open_card(&mut self, subject: ProfileId) {
-        self.profile_subject = subject;
+        self.profile.profile_subject = subject;
         // One read per card opened, asked for here rather than by the panel: the
         // panel draws what it has, and the reader asked a question by pressing `A`.
-        self.contact = match subject {
+        self.profile.contact = match subject {
             ProfileId::User(peer_id) => {
                 self.queue_action(Action::FetchContact { peer_id });
                 Some(ContactProfile {
@@ -1937,10 +1894,10 @@ impl App {
         };
         // Over the rows that are drawn, not over every row there is: a held slot
         // at the end of a card is not somewhere the highlight goes.
-        self.profile_vim = VimState::new(crate::card::navigable(&crate::card::rows(self)));
-        self.profile_caret = 0;
-        self.profile_visual = None;
-        self.profile_count = None;
+        self.profile.profile_vim = VimState::new(crate::card::navigable(&crate::card::rows(self)));
+        self.profile.profile_caret = 0;
+        self.profile.profile_visual = None;
+        self.profile.profile_count = None;
         self.pane = Pane::Profile(subject);
         self.focus = Focus::Conversation;
         self.mode = Mode::Normal;
@@ -1950,7 +1907,7 @@ impl App {
     /// Puts the conversation back in the right-hand pane.
     fn close_profile(&mut self) {
         self.pane = Pane::Conversation;
-        self.profile_vim = VimState::new(0);
+        self.profile.profile_vim = VimState::new(0);
     }
 
     /// Leaves a card, for the way back rather than for `Esc`.
@@ -1960,9 +1917,9 @@ impl App {
     /// value means nothing in a conversation, and leaving it behind would be a
     /// caret waiting to be drawn on the wrong surface.
     fn close_card(&mut self) {
-        self.profile_visual = None;
-        self.profile_caret = 0;
-        self.profile_count = None;
+        self.profile.profile_visual = None;
+        self.profile.profile_caret = 0;
+        self.profile.profile_count = None;
         self.close_profile();
     }
 
@@ -1996,8 +1953,8 @@ impl App {
     fn handle_profile(&mut self, key: KeyEvent) {
         // `Ctrl-w` is a prefix here, and bare it still leaves the input line: the
         // same prefix-with-a-bare-fallback shape `g`/`gg` already has.
-        if self.profile_pending_w {
-            self.profile_pending_w = false;
+        if self.profile.profile_pending_w {
+            self.profile.profile_pending_w = false;
             match key.code {
                 KeyCode::Char('h') => return self.set_focus(Focus::ChatList),
                 // Nothing is drawn to the right of a card, so `Ctrl-w l` has no
@@ -2052,7 +2009,7 @@ impl App {
     /// reported as one.
     fn yank_card(&mut self) {
         let lines = self.card_yanked();
-        self.profile_visual = None;
+        self.profile.profile_visual = None;
 
         if lines.iter().all(String::is_empty) {
             self.flash("nothing to yank — move the selection first");
@@ -2071,7 +2028,7 @@ impl App {
             // No selection: the whole value of the row the cursor is on. A card
             // has no buffer, so there is no linewise equivalent to reach for.
             return rows
-                .get(self.profile_vim.cursor())
+                .get(self.profile.profile_vim.cursor())
                 .map(|row| vec![row.value.clone()])
                 .unwrap_or_default();
         };
@@ -2108,7 +2065,7 @@ impl App {
     /// next is a key a reader has to learn twice, and `Esc` is the one key every
     /// reader already reaches for.
     fn escape_card(&mut self) {
-        if self.profile_visual.take().is_some() {
+        if self.profile.profile_visual.take().is_some() {
             return;
         }
         self.close_card();
@@ -2118,7 +2075,7 @@ impl App {
     /// `h` leaves the card rather than moving.
     #[must_use]
     fn card_caret_at_start(&self) -> bool {
-        self.profile_caret == 0
+        self.profile.profile_caret == 0
     }
 
     /// A motion within the cursor row's value: `l`/`h`, a word motion, or a bound.
@@ -2134,7 +2091,7 @@ impl App {
         let Some(value) = self.card_value() else {
             return;
         };
-        self.profile_caret = char_motion(&value, self.profile_caret, motion);
+        self.profile.profile_caret = char_motion(&value, self.profile.profile_caret, motion);
     }
 
     /// A motion between rows, which resets the inline position.
@@ -2146,9 +2103,9 @@ impl App {
         // `handle_char` applies the motion *and* returns it, so calling
         // `apply_motion` on the result would move the row twice — which is a bug
         // that looks like a card with one more row than it has.
-        self.profile_vim.handle_char(c);
+        self.profile.profile_vim.handle_char(c);
         self.off_reserved(matches!(c, 'j' | 'G'));
-        self.profile_caret = 0;
+        self.profile.profile_caret = 0;
     }
 
     /// Steps the row cursor off a held slot.
@@ -2166,7 +2123,7 @@ impl App {
     fn off_reserved(&mut self, forward: bool) {
         let rows = crate::card::rows(self);
         let last = rows.len().saturating_sub(1);
-        let start = self.profile_vim.cursor().min(last);
+        let start = self.profile.profile_vim.cursor().min(last);
         if !rows
             .get(start)
             .is_some_and(crate::card::CardRow::is_reserved)
@@ -2181,7 +2138,7 @@ impl App {
                     .get(cursor)
                     .is_some_and(crate::card::CardRow::is_reserved)
                 {
-                    self.profile_vim.set_cursor(cursor);
+                    self.profile.profile_vim.set_cursor(cursor);
                     return;
                 }
                 cursor = if ahead {
@@ -2199,13 +2156,13 @@ impl App {
     /// than shadowing a key that means something else.
     fn card_count(&mut self, c: char) {
         let digit = u32::from(c);
-        self.profile_count = Some(self.profile_count.unwrap_or(0) * 10 + digit);
+        self.profile.profile_count = Some(self.profile.profile_count.unwrap_or(0) * 10 + digit);
     }
 
     /// The cursor row's value, if the card has one on show.
     fn card_value(&self) -> Option<String> {
         crate::card::rows(self)
-            .get(self.profile_vim.cursor())
+            .get(self.profile.profile_vim.cursor())
             .map(|row| row.value.clone())
     }
 
@@ -3278,7 +3235,7 @@ impl App {
                 && key.code == KeyCode::Char('w') =>
             {
                 if self.pane.is_profile() {
-                    self.profile_pending_w = true;
+                    self.profile.profile_pending_w = true;
                 } else {
                     self.leave_line();
                 }
