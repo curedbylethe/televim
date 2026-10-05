@@ -49,14 +49,13 @@
 //!
 //! # It is not drawn while the prompt has the focus
 //!
-//! The design's list is live: it is drawn while the query line is open and
-//! narrows with each keystroke. This build has no local directory to narrow
-//! against — the query goes to the server on `⏎` — so the only list it can hold
-//! belongs to the *submitted* query, not the draft. Re-opening `/` therefore
-//! hides the previous answer until the reader asks the new question: a list
-//! under a query it was not asked for would say the screen answers a question it
-//! is not being asked. This is a deliberate divergence from the design model,
-//! recorded in [`docs/known-gaps.md`](../../../../docs/known-gaps.md).
+//! The prompt is a line and a submission: the query goes to the server on `⏎`
+//! and the candidates are the network's answer, not a filter the prompt keeps, so
+//! there is no list to draw while the line has the focus. The design model states
+//! the same rule — "there is no live narrowing: the query is sent on `⏎` and the
+//! candidates arrive afterwards" — and re-opening `/` hides the previous answer
+//! for the same reason: a list under a query it was not asked for would say the
+//! screen answers a question it is not being asked.
 //!
 //! [`UserSearchState::label`]: domain::user::UserSearchState::label
 
@@ -139,11 +138,10 @@ pub fn render(app: &App, chat_list: Rect, frame: &mut Frame<'_>) {
 /// right, and the fragment the reader typed inked `match`.
 ///
 /// The standing's columns are reserved before the label is laid out, and the
-/// label is truncated to what is left: a name that lost cells to a standing
-/// would hide the thing the reader is choosing between, and the standing is the
-/// one fact the choice turns on. The design's box is wider than the chat-list
-/// column this overlay is bounded to, so a long name and a handle together are
-/// the pair that gives way first — handle before name, name's tail last.
+/// label is truncated to what is left — the design model does the same, so the
+/// standing is always shown: a name that lost cells to a standing would hide the
+/// thing the reader is choosing between. The handle gives way before the name,
+/// and the name's tail last.
 fn candidate_row<'a>(
     app: &'a App,
     candidate: &'a UserCandidate,

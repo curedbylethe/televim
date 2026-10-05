@@ -28,11 +28,7 @@
     cardSelf: ' j/k: row  h/l: within  v: vis  y: yank  d: act  Esc: back',
     cardContact: ' j/k: row  h/l: within  v: vis  y/yy: yank  Esc: back',
     cardSignedOut: ' ::signin  q:quit',
-    cardReading: ' q:quit',
-    /* starting a conversation with someone new: the prompt while the query is being typed,
-       and the results list once the network has answered an ambiguous query. */
-    newchat: ' New message — name or @username, ⏎: search',
-    newchatList: ' j/k: choose  ⏎: open  Esc: close'
+    cardReading: ' q:quit'
   };
   const ALL_HINTS = Object.values(HINT);
   /* reader's own text. The popup lists these; the chrome never paints the glyph. */
@@ -785,8 +781,7 @@
       case 'Enter': s.card = null; s.right = 'conv'; togglePane(s); break;
       case 'l': case 'h': case 'Tab': togglePane(s); break;
       case 'i': case 'a': s.focus = 'conv'; convKey(s, k, ''); break;
-      case 'n': openLine(s, { kind: 'newchat' }); break;
-      case '/': s.focus = 'conv'; convKey(s, k, ''); break;
+      case '/': openNewChat(s, ''); break;
       case 'A': openCard(s, 'person'); break;
       case 'S': openCard(s, 'self'); break;
     }
@@ -935,10 +930,12 @@
   /* ---------- starting a conversation with someone new ----------
      The directory is everyone the account knows, and a person is a person whether or not a
      conversation already exists: the search runs over display names and usernames the same way,
-     and each result carries the fact the choice turns on. An exact username, or a query with a
-     single answer, opens the conversation at once; anything else is a list the reader walks. When
-     the chosen person already has a chat, that chat is focused, because a second conversation with
-     the same person would not be a new one. */
+     and each result carries the fact the choice turns on. The query is not filtered as the reader
+     types: it goes out on ⏎ and the candidates arrive afterwards, so the list is a thing the
+     network answers, not a thing the prompt draws. An exact username, or a single answer, opens
+     the conversation at once; anything else is a list the reader walks. When the chosen person
+     already has a chat, that chat is focused, because a second conversation with the same person
+     would not be a new one. */
   function dirEntries() {
     return Object.keys(PERSON).map((name) => ({ name, username: PERSON[name].username || '' }));
   }
@@ -960,7 +957,7 @@
       out.push({ name: e.name, username: e.username, has: hasChat(s, e.name), score, exact: uname && u === lq });
     });
     out.sort((a, b) => (a.has ? 1 : 0) - (b.has ? 1 : 0) || a.score - b.score || a.name.localeCompare(b.name));
-    return out.slice(0, 8);
+    return out;
   }
   /* Opening is the one place a chat is created: an existing conversation is focused, and only a
      person with none gets a new, empty one at the top of the list. */
@@ -970,28 +967,45 @@
     s.chat = i; s.right = 'conv'; s.focus = 'conv';
     s.line = null; s.newchat = null; s.search = null; s.vis = null;
   }
-  /* ⏎ from the prompt: the exact username wins, a single result opens, and anything else becomes
-     the transient results list the reader walks with j/k. */
-  function runNewChat(s, q) {
-    const hits = newChatHits(s, q);
-    s.line = null;
-    if (!hits.length) { s.focus = 'list'; s.flash = 'No user: ' + (q || '').trim(); return; }
-    const exact = hits.find((h) => h.exact);
-    if (exact || hits.length === 1) { openPersonChat(s, (exact || hits[0]).name); return; }
-    s.newchat = { q: (q || '').trim(), hits, at: 0 }; s.focus = 'newchat';
+  /* The prompt's two openings: `/` on the chat list, and `:new <query>` prefilled from anywhere. */
+  function openNewChat(s, prefill) {
+    openLine(s, { kind: 'newchat' });
+    const p = prefill || '';
+    s.line.buf = p; s.line.pos = p.length;
   }
-  /* the results list's own keys: move, open, close. `:` and `q` still mean what they mean
-     everywhere, so the prompt's list can hand straight back to a command. */
-  function newchatKey(s, k, p) {
-    const N = s.newchat ? Math.min(8, s.newchat.hits.length) : 0;
+  /* ⏎ from the prompt: the query goes out, and the candidates come back on the network tick. A
+     single answer, or an exact username, opens at once and never becomes a list. A query opening
+     with `!` stands in for a failed search, so the failure sentence has a frame to be seen in. */
+  function runNewChat(s, q) {
+    const raw = (q || '').trim();
+    s.line = null;
+    const failed = raw[0] === '!';
+    const hits = failed ? [] : newChatHits(s, raw);
+    if (!failed && (hits.length === 1 || hits.some((h) => h.exact))) {
+      openPersonChat(s, (hits.find((h) => h.exact) || hits[0]).name);
+      return;
+    }
+    s.newchat = { q: raw, hits, at: 0, pending: true, failed: failed ? 'timeout' : '' };
+    s.focus = 'newchat';
+  }
+  /* The status line's sentence while the prompt's list is up: the query, then where the request is.
+     The candidate count and the failure sit here rather than in a flash, because the list is a
+     state the reader is looking at. */
+  function newChatStatus(s) {
+    const n = s.newchat, q = '/' + n.q;
+    if (n.pending) return q + ' - searching...';
+    if (n.failed) return q + ' - no candidates (search failed: ' + n.failed + ')';
+    if (!n.hits.length) return q + ' - no candidates';
+    return q + ' - ' + n.hits.length + ' candidate' + (n.hits.length === 1 ? '' : 's');
+  }
+  /* the results list's own keys: move and wrap, open, close. */
+  function newchatKey(s, k) {
     if (common(s, k)) return;
+    const n = s.newchat && !s.newchat.pending ? s.newchat.hits.length : 0;
     if (k === 'Escape') { s.newchat = null; s.focus = 'list'; return; }
-    if (k === 'j' || k === 'Down') { if (N) s.newchat.at = (s.newchat.at + 1) % N; return; }
-    if (k === 'k' || k === 'Up') { if (N) s.newchat.at = (s.newchat.at + N - 1) % N; return; }
-    if (k === 'g') { if (p === 'g') { if (N) s.newchat.at = 0; } else s.pend = 'g'; return; }
-    if (k === 'G') { if (N) s.newchat.at = N - 1; return; }
-    if (k === 'Enter' || k === 'l') { const h = s.newchat && s.newchat.hits[s.newchat.at]; if (h) openPersonChat(s, h.name); return; }
-    s.flash = 'New message: j/k choose, ⏎ to open, Esc to close.';
+    if (k === 'j' || k === 'Down') { if (n) s.newchat.at = (s.newchat.at + 1) % n; return; }
+    if (k === 'k' || k === 'Up') { if (n) s.newchat.at = (s.newchat.at + n - 1) % n; return; }
+    if (k === 'Enter') { const h = s.newchat && s.newchat.hits[s.newchat.at]; if (h) openPersonChat(s, h.name); return; }
   }
 
   /* ---------- the line: the one input bar ---------- */
@@ -1159,7 +1173,7 @@
       case 'command': {
         const c = buf.trim().replace(/^:/, ''); closeLine(s);
         if (c === 'settings') openSettings(s);
-        else if (c === 'new' || c === 'newchat') openLine(s, { kind: 'newchat' });
+        else if (c === 'new' || c.startsWith('new ')) openNewChat(s, c.replace(/^new\s*/, ''));
         else if (c === 'signin') beginSignin(s);
         else if (c === 'q' || c === 'quit') common(s, 'q');
         else if (c) refuse(s, 'Not a command: ' + c);
@@ -1254,6 +1268,7 @@
     /* the same tick ages the peer's typing note: it is not repeated, so it runs out */
     const open = s.chats && s.chats[s.chat];
     if (open && open.typing) open.typing--;
+    if (s.newchat && s.newchat.pending) { s.newchat.pending = false; return s; }
     if (s.jump) return landJump(s);
     const A = s.signin, p = A && A.pending;
     if (!A || !A.checking || !p) return s;
@@ -1346,7 +1361,7 @@
       if (i >= 0) { c.cur = i; key(s, 'd'); key(s, 'd'); } else { key(s, 'q'); }
     }
   }
-  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', newchat: 'new-message results', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell' };
+  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', newchat: 'new-chat results', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell' };
 
   /* ---------- the grid ---------- */
   const newGrid = () => Array.from({ length: H }, () => Array.from({ length: W }, () => [' ', 't']));
@@ -1396,7 +1411,7 @@
   /* ---------- the bar ---------- */
   function kindTitle(s, L) {
     if (L.kind === 'message') { const c = chat(s); return 'Message to ' + (c ? c.name : ''); }
-    return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', newchat: 'New message', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password' }[L.kind];
+    return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', newchat: 'New chat', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password' }[L.kind];
   }
   function barRows(L) {
     const prefix = L.kind === 'command' || L.kind === 'find';
@@ -1483,14 +1498,13 @@
     if (L && s.view === 'signin' && s.signin.out && s.signin.step === 0 && L.from === 'signin')
       return { t: ' ' + SIGNED_OUT, a: 'd' };
     if (L) {
-      if (L.kind === 'newchat') return { t: HINT.newchat, a: 'd' };
       if (L.mode === 'insert' && activeComp(L)) return { t: HINT.complete, a: 'd' };
       return { t: L.mode === 'insert' ? HINT.typing : L.mode === 'normal' ? HINT.lnormal : HINT.lvisual, a: 'd' };
     }
     if (s.view === 'signin' && s.signin && s.signin.away) return { t: ' sign-in paused; Tab brings it back', a: 'd' };
     if (s.view === 'nocreds') return { t: HINT.cardReading, a: 'd' };
     if (s.vis) return { t: HINT.visual, a: 'd' };
-    if (s.focus === 'newchat' && s.newchat) return { t: HINT.newchatList, a: 'd' };
+    if (s.focus === 'newchat' && s.newchat) return { t: ' ' + newChatStatus(s), a: 't' };
     if (s.search) {
       const c = chat(s), h = s.search.hits, at = h.indexOf(c.cur), q = '/' + s.search.q;
       return { t: ' ' + (at >= 0 ? q + ' — match ' + (at + 1) + ' of ' + h.length : q + ' — ' + h.length + ' loaded'), a: 't' };
@@ -1982,29 +1996,36 @@
     }
     let col = 0;
     parts.forEach((p, i) => { col += put(g, x + col, y, p, marks[i] ? mark : base); });
+    return col;
   }
-  /* The new-chat results overlay: the emoji completion's shape, over the pane like it. It is drawn
-     while the query line is open (the list narrows as the reader types) and after ⏎ has resolved an
-     ambiguous query (the reader walks it). Each row carries the display name, the username, and
-     whether a conversation already exists, which is the one fact the choice turns on. */
+  /* The new-chat results overlay: the completion's shape, but drawn over the chat-list column
+     alone, growing up from that column's bottom and never taller than it. It is drawn only after
+     ⏎ has gone out — never while the prompt line has the focus — because the candidates are the
+     network's answer, not a filter the prompt keeps. Each row carries the display name, the handle
+     when there is one, and whether a conversation already exists. */
   function drawNewChat(g, s, y0) {
-    let q, hits, at;
-    if (s.line && s.line.kind === 'newchat') { q = s.line.buf; hits = newChatHits(s, q); at = 0; }
-    else if (s.focus === 'newchat' && s.newchat) { q = s.newchat.q; hits = s.newchat.hits; at = s.newchat.at; }
-    else return;
-    const n = Math.min(8, hits.length);
-    if (!n) return;
-    const bw = 56, bh = n + 2, y = y0 - bh - 1;
-    if (y < 1) return;
-    const x = 2, byU = q[0] === '@', frag = byU ? q.slice(1) : q;
-    box(g, x, y, bw, bh, trunc(q || 'new message', 24) + ' — ' + n + ' result(s)', false);
-    for (let i = 0; i < n; i++) {
-      const h = hits[i], on = i === at, a = on ? 'ts' : 't', yy = y + 1 + i;
-      fill(g, x + 1, yy, bw - 2, a);
-      const un = h.username ? '@' + h.username : '(no username)';
-      putMark(g, x + 2, yy, trunc(h.name, 20), byU ? '' : frag, a, on ? 'ms' : 'm');
-      putMark(g, x + 25, yy, trunc(un, 22), byU ? frag : '', on ? 'ts' : 'd', on ? 'ms' : 'm');
-      put(g, x + bw - 2 - cells(h.has ? 'chat' : 'new'), yy, h.has ? 'chat' : 'new', on ? 'ts' : 'd');
+    const n = s.newchat;
+    if (s.focus !== 'newchat' || !n || n.pending || !n.hits.length) return;
+    const rows = Math.min(n.hits.length, Math.max(0, y0 - 2)); /* the column is only so tall */
+    if (!rows) return;
+    const bw = LW, bh = rows + 2, y = y0 - bh;
+    if (y < 0) return;
+    box(g, 0, y, bw, bh, 'New chat', false);
+    const byU = n.q[0] === '@', frag = byU ? n.q.slice(1) : n.q;
+    for (let i = 0; i < rows; i++) {
+      const h = n.hits[i], on = i === n.at, yy = y + 1 + i;
+      const stand = h.has ? 'chat' : 'new', sw = cells(stand);
+      /* reverse video is the highlight; on it the quieter text takes body ink, because a dim
+         foreground under reverse video would become a dim background. */
+      const base = on ? 'tr' : 't', quiet = on ? 'tr' : 'd', mark = on ? 'mr' : 'm';
+      fill(g, 1, yy, bw - 2, base);
+      const handle = h.username ? ' @' + h.username : '';
+      const budget = bw - 4 - sw; /* the left field, less the standing and the gap before it */
+      const name = trunc(h.name, Math.max(1, budget - cells(handle)));
+      let col = putMark(g, 2, yy, name, byU ? '' : frag, base, mark);
+      const room = Math.max(0, budget - col);
+      if (handle && room) col += putMark(g, 2 + col, yy, trunc(handle, room), byU ? frag : '', quiet, mark);
+      put(g, bw - 1 - sw, yy, stand, quiet);
     }
   }
 
@@ -2205,14 +2226,16 @@
       { name: 'Left for another chat and back: gone', keys: '<typing><Tab>jk<Tab>' }] },
     /* Starting a conversation with someone the reader is not yet chatting with. The same search
        idiom as the conversation's find: a prompt line and a status label, with the results as a
-       transient list over the pane. `n` from the chat list, or `:new` from anywhere, opens the
-       prompt; `/` is untouched, because inside a conversation it still means message search. */
+       transient list over the pane. `/` on the chat list, or `:new <query>` from anywhere, opens
+       the prompt. Inside a conversation `/` is untouched: it still means message search. */
     { id: 'newchat', name: 'New chat', variants: [
-      { name: 'Typing a query', keys: '<Tab>nma' },
-      { name: 'Ambiguous results: j/k chooses, one row highlighted', keys: '<Tab>n@a<CR>' },
-      { name: 'A query narrows to one row', keys: '<Tab>n@sh' },
-      { name: 'Exact username: the new conversation opens', keys: '<Tab>n@torvalds<CR>' },
-      { name: 'The person already has a chat: it is focused, not duplicated', keys: '<Tab>n@adalovelace<CR>' }] }
+      { name: 'Typing a query', keys: '<Tab>/ad' },
+      { name: 'Searching: the query is in flight', keys: '<Tab>/ad<CR>' },
+      { name: 'Candidates: j/k walks the list', keys: '<Tab>/ad<CR><wait>' },
+      { name: 'No candidates', keys: '<Tab>/zz<CR><wait>' },
+      { name: 'Search failed', keys: '<Tab>/!net<CR><wait>' },
+      { name: 'Exact username: the new conversation opens', keys: '<Tab>/@torvalds<CR>' },
+      { name: 'The person already has a chat: it is focused, not duplicated', keys: '<Tab>/@adalovelace<CR>' }] }
   ];
   function scene(si, vi) {
     const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start, v.bidi);
