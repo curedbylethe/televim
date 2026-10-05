@@ -28,7 +28,11 @@
     cardSelf: ' j/k: row  h/l: within  v: vis  y: yank  d: act  Esc: back',
     cardContact: ' j/k: row  h/l: within  v: vis  y/yy: yank  Esc: back',
     cardSignedOut: ' ::signin  q:quit',
-    cardReading: ' q:quit'
+    cardReading: ' q:quit',
+    /* starting a conversation with someone new: the prompt while the query is being typed,
+       and the results list once the network has answered an ambiguous query. */
+    newchat: ' New message — name or @username, ⏎: search',
+    newchatList: ' j/k: choose  ⏎: open  Esc: close'
   };
   const ALL_HINTS = Object.values(HINT);
   /* reader's own text. The popup lists these; the chrome never paints the glyph. */
@@ -401,7 +405,14 @@
     'Hedy Lamarr': { username: 'hedyl', bio: 'Frequencies at nine.' },
     'Donald Knuth': { username: 'taocp', bio: 'Volume four is late.' },
     'Radia Perlman': { username: 'radia', bio: 'Loop free. Lovely.' },
-    'Frances Allen': { username: 'fallen', bio: 'Optimise the loop, not the line.' }
+    'Frances Allen': { username: 'fallen', bio: 'Optimise the loop, not the line.' },
+    /* people the reader is not chatting with: the new-chat search's directory. A name here and
+       nowhere in makeChats() is a person with no conversation to focus, which is the only state
+       in which opening creates a chat rather than moving to one. */
+    'Linus Torvalds': { username: 'torvalds', bio: 'Talk is cheap. Show me the code.' },
+    'Shafi Goldwasser': { username: 'shafig', bio: 'Randomness is a tool, not a flaw.' },
+    'Vint Cerf': { username: 'vint', bio: 'The protocol was the easy part.' },
+    'Tim Berners-Lee': { username: 'timbl', bio: 'This is for everyone.' }
   };
   /* a birthday with no year: a year is a disclosure the account was not required to make */
   PERSON['Ada Lovelace'].birthday = '10 December';
@@ -610,7 +621,7 @@
   function fresh(view, bidi) {
     const s = {
       view: 'chat', right: 'conv', focus: 'conv', chat: 0, chats: makeChats(),
-      vis: null, search: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
+      vis: null, search: null, newchat: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
       sset: 0, signin: null, card: null, count: 0,
       bidi: BIDI_MODES.includes(bidi) ? bidi : 'terminal',
       profile: { name: 'Noor Haddad', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
@@ -724,6 +735,7 @@
     if (s.view === 'nocreds') { common(s, k); return s; }
     if (s.focus === 'settings') settingsKey(s, k, p);
     else if (s.focus === 'profile') cardKey(s, k, p);
+    else if (s.focus === 'newchat') newchatKey(s, k, p);
     else if (s.focus === 'list') listKey(s, k, p);
     else if (s.vis) visKey(s, k, p);
     else convKey(s, k, p);
@@ -773,6 +785,7 @@
       case 'Enter': s.card = null; s.right = 'conv'; togglePane(s); break;
       case 'l': case 'h': case 'Tab': togglePane(s); break;
       case 'i': case 'a': s.focus = 'conv'; convKey(s, k, ''); break;
+      case 'n': openLine(s, { kind: 'newchat' }); break;
       case '/': s.focus = 'conv'; convKey(s, k, ''); break;
       case 'A': openCard(s, 'person'); break;
       case 'S': openCard(s, 'self'); break;
@@ -917,6 +930,68 @@
     if (!h.length) return;
     const nxt = d > 0 ? h.find((i) => i > c.cur) : h.slice().reverse().find((i) => i < c.cur);
     c.cur = nxt === undefined ? (d > 0 ? h[0] : h[h.length - 1]) : nxt;
+  }
+
+  /* ---------- starting a conversation with someone new ----------
+     The directory is everyone the account knows, and a person is a person whether or not a
+     conversation already exists: the search runs over display names and usernames the same way,
+     and each result carries the fact the choice turns on. An exact username, or a query with a
+     single answer, opens the conversation at once; anything else is a list the reader walks. When
+     the chosen person already has a chat, that chat is focused, because a second conversation with
+     the same person would not be a new one. */
+  function dirEntries() {
+    return Object.keys(PERSON).map((name) => ({ name, username: PERSON[name].username || '' }));
+  }
+  function hasChat(s, name) { return s.chats.some((c) => c.name === name); }
+  /* The query is a username when it opens with @, a display name otherwise; a name query falls
+     back to the username so `gracer` still finds Grace Hopper. Scored so the closest match sorts
+     first, then no-conversation-first, then by name. */
+  function newChatHits(s, q) {
+    const raw = (q || '').trim(), uname = raw[0] === '@';
+    const lq = (uname ? raw.slice(1) : raw).toLowerCase();
+    if (!lq) return [];
+    const out = [];
+    dirEntries().forEach((e) => {
+      const u = e.username.toLowerCase(), n = e.name.toLowerCase();
+      let score = -1;
+      if (uname) { if (u === lq) score = 0; else if (u.startsWith(lq)) score = 1; else if (u.includes(lq)) score = 2; }
+      else { if (n.startsWith(lq)) score = 0; else if (n.includes(lq)) score = 1; else if (u.startsWith(lq)) score = 2; else if (u.includes(lq)) score = 3; }
+      if (score < 0) return;
+      out.push({ name: e.name, username: e.username, has: hasChat(s, e.name), score, exact: uname && u === lq });
+    });
+    out.sort((a, b) => (a.has ? 1 : 0) - (b.has ? 1 : 0) || a.score - b.score || a.name.localeCompare(b.name));
+    return out.slice(0, 8);
+  }
+  /* Opening is the one place a chat is created: an existing conversation is focused, and only a
+     person with none gets a new, empty one at the top of the list. */
+  function openPersonChat(s, name) {
+    let i = s.chats.findIndex((c) => c.name === name);
+    if (i === -1) { s.chats.unshift({ name, unread: 0, msgs: [], cur: 0, top: 0 }); i = 0; }
+    s.chat = i; s.right = 'conv'; s.focus = 'conv';
+    s.line = null; s.newchat = null; s.search = null; s.vis = null;
+  }
+  /* ⏎ from the prompt: the exact username wins, a single result opens, and anything else becomes
+     the transient results list the reader walks with j/k. */
+  function runNewChat(s, q) {
+    const hits = newChatHits(s, q);
+    s.line = null;
+    if (!hits.length) { s.focus = 'list'; s.flash = 'No user: ' + (q || '').trim(); return; }
+    const exact = hits.find((h) => h.exact);
+    if (exact || hits.length === 1) { openPersonChat(s, (exact || hits[0]).name); return; }
+    s.newchat = { q: (q || '').trim(), hits, at: 0 }; s.focus = 'newchat';
+  }
+  /* the results list's own keys: move, open, close. `:` and `q` still mean what they mean
+     everywhere, so the prompt's list can hand straight back to a command. */
+  function newchatKey(s, k, p) {
+    const N = s.newchat ? Math.min(8, s.newchat.hits.length) : 0;
+    if (common(s, k)) return;
+    if (k === 'Escape') { s.newchat = null; s.focus = 'list'; return; }
+    if (k === 'j' || k === 'Down') { if (N) s.newchat.at = (s.newchat.at + 1) % N; return; }
+    if (k === 'k' || k === 'Up') { if (N) s.newchat.at = (s.newchat.at + N - 1) % N; return; }
+    if (k === 'g') { if (p === 'g') { if (N) s.newchat.at = 0; } else s.pend = 'g'; return; }
+    if (k === 'G') { if (N) s.newchat.at = N - 1; return; }
+    if (k === 'Enter' || k === 'l') { const h = s.newchat && s.newchat.hits[s.newchat.at]; if (h) openPersonChat(s, h.name); return; }
+    s.flash = 'New message: j/k choose, ⏎ to open, Esc to close.';
   }
 
   /* ---------- the line: the one input bar ---------- */
@@ -1080,9 +1155,11 @@
       }
       case 'edit': chat(s).msgs[L.ref.idx].text = buf; s.draft = null; closeLine(s); return;
       case 'find': closeLine(s); runSearch(s, buf); return;
+      case 'newchat': runNewChat(s, buf); return;
       case 'command': {
         const c = buf.trim().replace(/^:/, ''); closeLine(s);
         if (c === 'settings') openSettings(s);
+        else if (c === 'new' || c === 'newchat') openLine(s, { kind: 'newchat' });
         else if (c === 'signin') beginSignin(s);
         else if (c === 'q' || c === 'quit') common(s, 'q');
         else if (c) refuse(s, 'Not a command: ' + c);
@@ -1253,7 +1330,7 @@
   }
   function setMode(s, name) {
     if (s.view !== 'chat') return;
-    s.confirm = null; s.line = null; s.vis = null; s.search = null; s.jump = null; s.pend = ''; s.flash = '';
+    s.confirm = null; s.line = null; s.vis = null; s.search = null; s.newchat = null; s.jump = null; s.pend = ''; s.flash = '';
     /* a card has no insert stage and its confirmation comes from d on the logout row */
     if (s.card) {
       s.card.vis = name === 'VISUAL' ? { mode: 'char', row: s.card.row, anchorCol: s.card.col } : null;
@@ -1269,7 +1346,7 @@
       if (i >= 0) { c.cur = i; key(s, 'd'); key(s, 'd'); } else { key(s, 'q'); }
     }
   }
-  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell' };
+  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', newchat: 'new-message results', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell' };
 
   /* ---------- the grid ---------- */
   const newGrid = () => Array.from({ length: H }, () => Array.from({ length: W }, () => [' ', 't']));
@@ -1319,7 +1396,7 @@
   /* ---------- the bar ---------- */
   function kindTitle(s, L) {
     if (L.kind === 'message') { const c = chat(s); return 'Message to ' + (c ? c.name : ''); }
-    return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password' }[L.kind];
+    return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', newchat: 'New message', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password' }[L.kind];
   }
   function barRows(L) {
     const prefix = L.kind === 'command' || L.kind === 'find';
@@ -1406,12 +1483,14 @@
     if (L && s.view === 'signin' && s.signin.out && s.signin.step === 0 && L.from === 'signin')
       return { t: ' ' + SIGNED_OUT, a: 'd' };
     if (L) {
+      if (L.kind === 'newchat') return { t: HINT.newchat, a: 'd' };
       if (L.mode === 'insert' && activeComp(L)) return { t: HINT.complete, a: 'd' };
       return { t: L.mode === 'insert' ? HINT.typing : L.mode === 'normal' ? HINT.lnormal : HINT.lvisual, a: 'd' };
     }
     if (s.view === 'signin' && s.signin && s.signin.away) return { t: ' sign-in paused; Tab brings it back', a: 'd' };
     if (s.view === 'nocreds') return { t: HINT.cardReading, a: 'd' };
     if (s.vis) return { t: HINT.visual, a: 'd' };
+    if (s.focus === 'newchat' && s.newchat) return { t: HINT.newchatList, a: 'd' };
     if (s.search) {
       const c = chat(s), h = s.search.hits, at = h.indexOf(c.cur), q = '/' + s.search.q;
       return { t: ' ' + (at >= 0 ? q + ' — match ' + (at + 1) + ' of ' + h.length : q + ' — ' + h.length + ' loaded'), a: 't' };
@@ -1886,6 +1965,48 @@
       put(g, x + 2, y + 1 + i, trunc(c.hits[i], bw - 4), a);
     }
   }
+  /* Draw `text` at x,y with every case-insensitive occurrence of `frag` in the match ink; the rest
+     takes `base`. A match under the highlighted row keeps the selection background and takes the
+     match ink (the palette's a_match_under_a_selection), which is what `mark` is passed. */
+  function putMark(g, x, y, text, frag, base, mark) {
+    const parts = clusters(text), bounds = [];
+    let acc = '';
+    parts.forEach((p) => { bounds.push([acc.length, acc.length + p.length]); acc += p; });
+    const marks = new Array(parts.length).fill(false), lc = acc.toLowerCase(), lf = (frag || '').toLowerCase();
+    if (lf) {
+      let from = 0, idx;
+      while ((idx = lc.indexOf(lf, from)) !== -1) {
+        for (let i = 0; i < bounds.length; i++) if (bounds[i][1] > idx && bounds[i][0] < idx + lf.length) marks[i] = true;
+        from = idx + lf.length;
+      }
+    }
+    let col = 0;
+    parts.forEach((p, i) => { col += put(g, x + col, y, p, marks[i] ? mark : base); });
+  }
+  /* The new-chat results overlay: the emoji completion's shape, over the pane like it. It is drawn
+     while the query line is open (the list narrows as the reader types) and after ⏎ has resolved an
+     ambiguous query (the reader walks it). Each row carries the display name, the username, and
+     whether a conversation already exists, which is the one fact the choice turns on. */
+  function drawNewChat(g, s, y0) {
+    let q, hits, at;
+    if (s.line && s.line.kind === 'newchat') { q = s.line.buf; hits = newChatHits(s, q); at = 0; }
+    else if (s.focus === 'newchat' && s.newchat) { q = s.newchat.q; hits = s.newchat.hits; at = s.newchat.at; }
+    else return;
+    const n = Math.min(8, hits.length);
+    if (!n) return;
+    const bw = 56, bh = n + 2, y = y0 - bh - 1;
+    if (y < 1) return;
+    const x = 2, byU = q[0] === '@', frag = byU ? q.slice(1) : q;
+    box(g, x, y, bw, bh, trunc(q || 'new message', 24) + ' — ' + n + ' result(s)', false);
+    for (let i = 0; i < n; i++) {
+      const h = hits[i], on = i === at, a = on ? 'ts' : 't', yy = y + 1 + i;
+      fill(g, x + 1, yy, bw - 2, a);
+      const un = h.username ? '@' + h.username : '(no username)';
+      putMark(g, x + 2, yy, trunc(h.name, 20), byU ? '' : frag, a, on ? 'ms' : 'm');
+      putMark(g, x + 25, yy, trunc(un, 22), byU ? frag : '', on ? 'ts' : 'd', on ? 'ms' : 'm');
+      put(g, x + bw - 2 - cells(h.has ? 'chat' : 'new'), yy, h.has ? 'chat' : 'new', on ? 'ts' : 'd');
+    }
+  }
 
   /* ---------- frame ---------- */
   function render(s) {
@@ -1903,6 +2024,7 @@
     else if (s.right === 'profile') drawCard(g, s, LW, top);
     else drawConv(g, s, LW, top);
     drawComplete(g, s, top);
+    drawNewChat(g, s, top);
     drawBar(g, s, b, top);
     drawStatus(g, s);
     return g;
@@ -2080,7 +2202,17 @@
       { name: 'Second tick, no repeat: gone', keys: '<typing><wait><wait>' },
       { name: 'Repeated before the deadline: renewed', keys: '<typing><wait><typing><wait>' },
       { name: 'The peer\'s message arrives: gone', keys: '<typing><peer>' },
-      { name: 'Left for another chat and back: gone', keys: '<typing><Tab>jk<Tab>' }] }
+      { name: 'Left for another chat and back: gone', keys: '<typing><Tab>jk<Tab>' }] },
+    /* Starting a conversation with someone the reader is not yet chatting with. The same search
+       idiom as the conversation's find: a prompt line and a status label, with the results as a
+       transient list over the pane. `n` from the chat list, or `:new` from anywhere, opens the
+       prompt; `/` is untouched, because inside a conversation it still means message search. */
+    { id: 'newchat', name: 'New chat', variants: [
+      { name: 'Typing a query', keys: '<Tab>nma' },
+      { name: 'Ambiguous results: j/k chooses, one row highlighted', keys: '<Tab>n@a<CR>' },
+      { name: 'A query narrows to one row', keys: '<Tab>n@sh' },
+      { name: 'Exact username: the new conversation opens', keys: '<Tab>n@torvalds<CR>' },
+      { name: 'The person already has a chat: it is focused, not duplicated', keys: '<Tab>n@adalovelace<CR>' }] }
   ];
   function scene(si, vi) {
     const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start, v.bidi);

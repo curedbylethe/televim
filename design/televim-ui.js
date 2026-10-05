@@ -95,7 +95,8 @@
   ['dark', 'light', 'both'].forEach((t) => btn($('themes'), t, () => { app.theme = t; pressed($('themes'), ['dark', 'light', 'both'].indexOf(t)); draw(); }));
   [['Esc', 'Escape'], ['Tab', 'Tab'], ['Enter', 'Enter'], ['Shift+Enter', 'S-Enter'],
    ['gd', ['g', 'd']], ['Ctrl+o', 'C-o'], ['Ctrl+i', 'C-i'], ['Ctrl+w h', ['C-w', 'h']], ['Ctrl+w l', ['C-w', 'l']],
-   ['A', 'A'], ['S', 'S'], ['l', 'l'], ['h', 'h'], ['v', 'v'], ['y', 'y'], ['yy', ['y', 'y']], ['d', 'd']
+   ['A', 'A'], ['S', 'S'], ['l', 'l'], ['h', 'h'], ['v', 'v'], ['y', 'y'], ['yy', ['y', 'y']], ['d', 'd'],
+   ['n', 'n'], [':new', [':', 'n', 'e', 'w', 'Enter']]
   ].forEach(([l, k]) => btn($('keys'), l, () => press(k)));
 
   pressed($('themes'), 0);

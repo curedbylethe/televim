@@ -204,7 +204,7 @@ has one cell height and the reader chose the cell.
   `MODE_LABEL_WIDTH = 9` — the widest label is `NORMAL`, and a `Confirm` never
   shares the row with a hint, so it is one number rather than a case per label.
   `ASSUMED_WIDTH = 80` — every hint must fit an 80-column terminal less the
-  label and its gap, which leaves 71. `ALL_HINTS` is the array of all fourteen,
+  label and its gap, which leaves 71. `ALL_HINTS` is the array of all sixteen,
   and a test iterates it, so a hint left out of the array is a hint the check
   never sees. **A hint that does not fit fails the build; the fix is a shorter
   sentence, not a wider budget.**
@@ -230,10 +230,10 @@ has one cell height and the reader chose the cell.
   caret in here right now* — the reason the dot exists is that a caret is
   standing on a blank cell, and that is true of a search query too.
 
-### The fourteen hint rows
+### The sixteen hint rows
 
-`ALL_HINTS` is the array of all fourteen and a test iterates it. These are the
-fourteen, verbatim, with the width each one measures. The width is
+`ALL_HINTS` is the array a test iterates. These are the sixteen, verbatim, with
+the width each one measures. The width is
 `chars().count()`, the same count the test makes, and the array is the authority:
 the numbers below were re-measured from it.
 
@@ -253,6 +253,8 @@ the numbers below were re-measured from it.
 | a contact's card has the focus | ` j/k: row  h/l: within  v: vis  y/yy: yank  Esc: back` | 53 |
 | the session is not signed in | ` ::signin  q:quit` | 17 |
 | nothing has been read yet | ` q:quit` | 7 |
+| starting a conversation, the prompt is open | ` New message — name or @username, ⏎: search` | 43 |
+| the new-chat results have the focus | ` j/k: choose  ⏎: open  Esc: close` | 33 |
 
 Notes, because they are the answers to questions a reader will have:
 
@@ -539,7 +541,7 @@ code.
 | `Delete your message from both sides? (y/n)` | ditto, naming **which side** | `DELETE_OUTGOING_PROMPT` |
 | `Delete 3 of your messages? (y/n)` | a count, and pluralisation | `delete_yours_prompt` |
 | `NORMAL` `INSERT` `VISUAL` `CONFIRM` | upper case, in a filled label | `status_bar.rs` |
-| ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the fourteen rows above |
+| ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the sixteen rows above |
 | `: ` `/ ` | a prompt's prefix, on its first row only | `App::prompt_prefix` |
 | `3 message(s) selected — Esc clears` | the status line's sentence for a selection, **stating the unit** | `selection_note` |
 | `3 character(s) selected — Esc clears` | ditto for a selection inside one message | ditto |
@@ -547,6 +549,12 @@ code.
 | `/query — 2 loaded` | a **local** search, which is never an answer | `local_position` |
 | `/query — 2 loaded — searching…` | a local search with the server still working | ditto |
 | `/query — match 1 of 5 (first 2)` | a server walk that is still capped | `server_position` |
+| `New message` | the new-chat prompt's bar title | `kindTitle` |
+| `query — 8 result(s)` | the results overlay's title: the query, then the count | `drawNewChat` |
+| `new` `chat` | a result row's standing: no conversation yet, or one to focus | `newChatHits` |
+| `New message — name or @username, ⏎: search` | the prompt's hint | the sixteen rows above |
+| `j/k: choose  ⏎: open  Esc: close` | the results list's hint | ditto |
+| `No user: query` | `⏎` on a query that matched nobody, a `flash` | `runNewChat` |
 | `Profile · you` `Profile · Ada Lovelace` | a card's title; the `(n/m)` is the row the cursor is on | `cardTitle` |
 | `Profile` | a card with no subject: not signed in, or nothing read yet | `cardTitle` |
 | `· name        Noor Haddad` | a card row: the cue, the label, the value | `CUE` |
@@ -739,9 +747,64 @@ loaded target, the fetch in flight, the page arrived with the cursor on the
 target, `Ctrl-o` back (loaded), `Ctrl-i` forward, `Ctrl-o` needing a fetch, that
 fetch landed, and `gd` on a message with no quote.
 
+## Starting a conversation with someone new
+
+The chat list holds private conversations, and until now there was no way to
+begin one: a person the reader had never messaged had no row, so `/` — which is
+the conversation's find and only the conversation's — could not reach them.
+This surface adds that second question without touching the first.
+
+**Invocation.** `n` from the chat list, and `:new` (or `:newchat`) from anywhere
+`:` reaches. There is no new global key. `/` keeps meaning *search the open
+conversation*, because the reader who presses it is looking at messages, and a
+key that answered "start a chat" there would answer a different question from
+the one the screen is about. `n` is free in the list and taken in the
+conversation (`n`/`N` walk search hits), which is why the list is where it
+lives; `:new` is the route from the conversation, the settings screen and the
+cards.
+
+**The prompt.** A line like `Find` and `Command`: bar title `New message`, no
+prefix, the reader's query in `text`, the caret in the bar. Its hint is
+` New message — name or @username, ⏎: search`. While the line is open the
+results list is drawn live and narrows with each keystroke.
+
+**The results list.** A transient overlay, the shape of the `:shortcode`
+completion: a box over the pane, one row per candidate, drawn while the query
+line is open and after `⏎` has resolved an ambiguous query. Each row is the
+`display name` at the left, the `@username` beside it, and the standing at the
+right — `chat` when a conversation already exists and `new` when none does. Rows
+are ordered no-conversation-first, then closest match, then name, and capped at
+eight. `j`/`k` or `↑`/`↓` move the highlight, `gg`/`G` jump to the ends, `⏎` or
+`l` chooses, `Esc` closes. Choosing closes the list and opens the conversation;
+`:` and `q` still mean what they mean everywhere.
+
+**What a choice does.** A query is a username when it opens with `@` and a
+display name otherwise (a name query falls back to the username, so `gracer`
+finds Grace Hopper). An exact username match, or a query with a single result,
+opens at once, without a list; anything else is the list the reader walks. When
+the chosen person already has a conversation, that conversation is focused — the
+chat list does not grow a second row for the same person. When they have none, a
+new, empty conversation is created at the top of the list and opened; its title
+reads `Conversation (0/0)` and its body is empty, because there is nothing said
+yet.
+
+**Palette.** No new roles. The prompt and the overlay reuse exactly the roles
+the find prompt and the completion already use: the highlighted result row is
+`selection` reversed, a matched substring inside that row is `match` on the
+selection background (`a_match_under_a_selection`), the standing and the
+username are `text-dim`, and the box is the ordinary border. A colour that would
+have to be invented to say "this row is a new chat" is not used; the word `new`
+says it.
+
+Scenes: `newchat` in the engine, five frames: typing a query (the list narrowing
+live), an ambiguous query after `⏎` (eight rows, one highlighted), a query that
+has narrowed to one row, an exact username opening a new empty conversation, and
+an exact username that focuses an existing conversation instead of duplicating
+it.
+
 ## Components
 
-Eight, with their states, and the `TestBackend` assertion that would catch each
+Nine, with their states, and the `TestBackend` assertion that would catch each
 regressing.
 
 1. **Panel** — `Chats`, `Conversation`, `Input`. States: focused, unfocused,
@@ -758,13 +821,13 @@ regressing.
    which are *different modes that share a word*. The label belongs to whichever
    mode the keys about to be pressed will mean, and a confirmation is a question
    about the whole screen.
-4. **Hint row** — fourteen variants, one per state of the screen, all under
+4. **Hint row** — sixteen variants, one per state of the screen, all under
    `ASSUMED_WIDTH - MODE_LABEL_WIDTH`. Three keys mean something else while a
    `:shortcode` completion is up, and the status line names them for as long as
    it is. The settings hint and the card hints lose to a confirmation and to an
    active search, the same way the other hints do.
-5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, and the bar's own title
-   switching between `Message to …` and ` draft `.
+5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, `New message`, and the bar's
+   own title switching between `Message to …` and ` draft `.
 6. **Status line** — the ranking, which is the whole of it: a **confirmation**
    outranks a **selection** outranks a **search**, and a `flash` is not a state
    at all. A refusal written while any of the three is up is a line the reader
@@ -819,6 +882,15 @@ regressing.
    row, because a field the reader cannot use is worse than no field. What would catch it
    regressing: the password row is absent at steps 0 and 1, and the `(n attempts left)` on it is
    the same three the refusals decrement.
+
+9. **New-chat results** — the transient list over the pane that the new-chat
+   prompt raises. Drawn while the query line is open (the list narrows as the
+   reader types) and after `⏎` has resolved an ambiguous query (the reader walks
+   it). States: one row, several rows, a row standing for an existing
+   conversation (`chat`), a row standing for a person with none (`new`), the
+   highlighted row, and a matched substring inside the highlighted row. Not a
+   panel and not a mode: it is an overlay dismissed by `Esc`, and the
+   conversation behind it is unchanged.
 
 ## Profile
 
