@@ -754,9 +754,14 @@ fn session_store(cfg: &Config) -> Box<dyn SessionStore> {
 ///
 /// The feed ends when the client shuts down, and `None` is that: the task stops,
 /// and the loop is told so it can rebuild the client and take a new feed. A
-/// failure while resolving a gap in the sequence is logged and carried on with —
-/// the feed stays usable, and it resumes where it left off.
+/// failure while resolving a gap in the sequence is waited out up to
+/// [`CHAT_LIST_ATTEMPTS`] times — [`feed_error_retry`]'s answer, slept here in
+/// the pump's task so the driver's 250 ms tick never waits on it — and read
+/// past while the feed stays usable. Past the bound the feed is ended instead:
+/// the loop below records its position and reports it, which is the feed's end
+/// asking for the one rebuild.
 async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
+    let mut errors_seen: u8 = 0;
     while let Some(result) = updates.next().await {
         match result {
             Ok(event) => {
@@ -766,7 +771,14 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
                 }
             }
             Err(error) => {
-                tracing::warn!(%error, "the update feed reported a failure it can recover from");
+                if let Some(delay) = feed_error_retry(errors_seen, &error) {
+                    errors_seen += 1;
+                    tracing::warn!(%error, "the update feed reported a failure it can recover from");
+                    tokio::time::sleep(delay).await;
+                } else {
+                    tracing::warn!(%error, "the update feed kept failing past its bound; ending it so the client is rebuilt");
+                    break;
+                }
             }
         }
     }
@@ -3187,6 +3199,188 @@ mod tests {
             !state.auto_reconnect_used,
             "a working feed re-arms the one reconnect"
         );
+    }
+
+    // ---- feed errors that recover, then exhaust ---------------------------
+
+    /// A feed failure below the bound is waited out on the feed, not escalated:
+    /// the policy answers `Some`, which is the pump sleeping and reading on —
+    /// so no rebuild is asked for and nothing says `offline:`.
+    #[test]
+    fn a_feed_error_below_the_bound_schedules_a_wait_not_a_rebuild() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+            "connection reset".to_owned(),
+        )));
+
+        assert!(
+            feed_error_retry(0, &error).is_some(),
+            "the first failure is waited out"
+        );
+        assert!(
+            feed_error_retry(CHAT_LIST_ATTEMPTS - 1, &error).is_some(),
+            "and so is the last one inside the bound"
+        );
+
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::default();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(!state.reconnect_requested, "no rebuild is asked for");
+        assert!(!state.bringing_up, "and none is in flight");
+        assert!(
+            !app.ui.status.starts_with("offline:"),
+            "and nothing says it: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// Past the bound the pump gives up the feed — `None` is what sends it to
+    /// record the position and report the end — which is the feed's end asking
+    /// for the one rebuild. The retries before it spend nothing of the
+    /// reconnect; only the rebuild the driver issues consumes it (Q4). The
+    /// `Ready` that answers keeps the reader's place and drops the stale
+    /// anchors.
+    #[tokio::test]
+    async fn a_feed_that_keeps_failing_is_rebuilt_around_the_reader() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+            "connection reset".to_owned(),
+        )));
+
+        assert_eq!(
+            feed_error_retry(CHAT_LIST_ATTEMPTS, &error),
+            None,
+            "the bound is what ends the feed"
+        );
+
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(1);
+        app.select_chat(0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        for character in "half a th".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // Leaving the conversation parks the draft under it; the window the
+        // reader is in is loaded after, so it is the one the rebuild finds.
+        app.select_chat(1);
+        app.apply_latest(messages(CHAT + 1, 1..=2));
+        let read_at = app.conversation.vim.cursor();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            history: History {
+                cursor: Some(HistoryCursor::new(CHAT + 1)),
+                jump: Some(Jump {
+                    peer_id: CHAT + 1,
+                    target_id: 20,
+                    kind: JumpKind::Unread,
+                }),
+                retry_at: Some(Instant::now() + RETRY),
+            },
+            ..State::default()
+        };
+
+        // What the pump sends on exhaustion, after recording the position.
+        apply(&mut app, &mut state, Event::FeedEnded);
+
+        assert!(
+            state.reconnect_requested,
+            "the driver is told to carry the reconnect out"
+        );
+        assert!(
+            !state.auto_reconnect_used,
+            "the retries and the request spend nothing of the one reconnect"
+        );
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(state.bringing_up, "the bring-up was issued");
+        assert!(
+            state.auto_reconnect_used,
+            "and only the rebuild consumes the one attempt"
+        );
+
+        // What the rebuild answers with. The old client is still the screen's
+        // until this lands; the re-fetch only reorders the list.
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1), chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id,
+            CHAT + 1,
+            "the conversation the reader was in is still the one on screen"
+        );
+        assert_eq!(
+            app.conversation.conversation.window.len(),
+            2,
+            "with its loaded window intact"
+        );
+        assert_eq!(
+            app.conversation.vim.cursor(),
+            read_at,
+            "and the reader where they were"
+        );
+        assert_eq!(
+            app.list.selected_chat, 0,
+            "the highlight followed the conversation's id into the reordered list"
+        );
+        assert_eq!(state.history.cursor, None, "the cursor goes");
+        assert_eq!(state.history.jump, None, "and the jump on its way");
+        assert_eq!(state.history.retry_at, None, "and the retry gate");
+
+        // The draft parked under the other conversation is not a fact about
+        // the page on show, so the rebuild leaves it alone.
+        app.select_chat(1);
+        assert_eq!(
+            app.input.line.text(),
+            "half a th",
+            "and the parked draft is still where it was left"
+        );
+    }
+
+    /// The rebuild the exhausted feed asked for is the one automatic attempt,
+    /// so a second feed end before any update has arrived is the
+    /// reader-visible failure rather than another rebuild.
+    #[tokio::test]
+    async fn a_second_exhausted_feed_end_before_any_update_says_the_feed_ended_again() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            ..State::default()
+        };
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+        assert!(state.auto_reconnect_used, "the one attempt is spent");
+
+        // The rebuild answers with its own failure rather than a client, and
+        // no update arrives to re-arm the reconnect.
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("connection reset")),
+        );
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(
+            app.ui.status, "offline: the update feed ended again",
+            "got {:?}",
+            app.ui.status
+        );
+        assert!(!state.bringing_up, "and it is not a bring-up");
     }
 
     /// The feed's event reaches the windows through the same call the screen's
