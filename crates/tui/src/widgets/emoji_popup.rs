@@ -49,7 +49,7 @@ fn popup_area(app: &App, above: Rect, bar: Rect, frame: Rect) -> Option<Rect> {
     app.completion()?;
 
     let width = bar.width.saturating_sub(2).max(1);
-    let laid_out = app.line.laid_out_in(width, app.bidi());
+    let laid_out = app.input.line.laid_out_in(width, app.bidi());
     // Where the caret is **painted**, which under [`crate::bidi::BidiMode::Visual`]
     // is not where it sits in the string: the row reaches the terminal permuted,
     // so a right-to-left draft puts the caret among the cells rather than after
@@ -335,13 +335,13 @@ mod tests {
         // if the whole draft were counted.
         let app = composing("abcdefghijklmnopqrstuvwxyz :cr");
 
-        let laid_out = app.line.laid_out(28);
+        let laid_out = app.input.line.laid_out(28);
         assert_eq!(laid_out.row, 1, "the draft wrapped and the caret is below");
         assert_eq!(laid_out.column, 3, "`:cr` starts a fresh row");
         // The default mode is the terminal's to reorder, so this program has one
         // column to name and `laid_out_in` names the same one.
         assert_eq!(
-            app.line.laid_out_in(28, BidiMode::Terminal),
+            app.input.line.laid_out_in(28, BidiMode::Terminal),
             laid_out,
             "and the default mode is the measurement this test already pinned"
         );
@@ -366,7 +366,7 @@ mod tests {
     fn the_popup_follows_the_caret_to_its_visual_column_on_a_right_to_left_draft() {
         let app = composing("שלום :cry").with_bidi(BidiMode::Visual);
 
-        let laid_out = app.line.laid_out_in(78, BidiMode::Visual);
+        let laid_out = app.input.line.laid_out_in(78, BidiMode::Visual);
         let visual = laid_out
             .visual_column
             .expect("a visual column under Visual mode");
@@ -376,7 +376,7 @@ mod tests {
              logical column: {laid_out:?}"
         );
         assert_eq!(
-            app.line.laid_out(78).visual_column,
+            app.input.line.laid_out(78).visual_column,
             None,
             "and the default mode has no visual column to give"
         );
@@ -406,7 +406,7 @@ mod tests {
         let app = composing("שלום :cry");
         let rect = drawn_area(&app, 80, 24);
         let (_, bar) = panes(&app, 80, 24);
-        let column = app.line.laid_out(78).column;
+        let column = app.input.line.laid_out(78).column;
 
         assert_eq!(
             rect.x,

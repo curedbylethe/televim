@@ -1,7 +1,6 @@
 //! Top-level TUI state.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cell::Cell;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -25,10 +24,12 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use crate::bidi::BidiMode;
 use crate::emoji;
 use crate::jumplist::Jumplist;
-use crate::line::{LineEditor, LineVerdict};
+use crate::line::LineVerdict;
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
 use crate::state::chat_list::ChatListState;
 use crate::state::conversation::ConversationState;
+use crate::state::drafts::DraftStore;
+use crate::state::input::InputState;
 use crate::state::outbox::Outbox;
 use crate::state::pending::Pending;
 use crate::state::profile::ProfileCard;
@@ -1003,25 +1004,8 @@ pub struct App {
     /// search surfaces.
     pub conversation: ConversationState,
 
-    /// What the reader is composing, and the editor working on it.
-    ///
-    /// Was a `String`, and was enough of a design not to notice it was wrong:
-    /// append-only, no caret, and cleared by the key every reader presses
-    /// reflexively. A line is a buffer with a caret in it, and it is the
-    /// wrapper's whole job.
-    ///
-    /// This is the *open* conversation's draft; the drafts of the rest are
-    /// parked in [`App::drafts`], and every conversation switch moves one out of
-    /// here and the next one in.
-    pub line: LineEditor,
-
-    /// The `:query` being completed, if there is one.
-    ///
-    /// `None` is the whole of "the popup is closed", and it is reached from five
-    /// places: a query that stopped being one, a query nobody matches, the focus
-    /// leaving the line, a submit, and an acceptance. There is no flag to fall
-    /// out of step with the state it describes.
-    emoji: Option<emoji::Trigger>,
+    /// The live input line and the emoji popup over it.
+    pub input: InputState,
 
     pub status: String,
     pub should_quit: bool,
@@ -1068,41 +1052,8 @@ pub struct App {
     /// rather than as 1970.
     now: Cell<i64>,
 
-    /// How far each conversation this client has been told about has been read.
-    ///
-    /// One number per conversation, kept here rather than on
-    /// [`ConversationView`] because the view is replaced on every chat switch:
-    /// a reader who looks away and comes back must find the reading of that
-    /// conversation as it was, not as a fresh view believes it. The view holds
-    /// the one on show; this holds the rest.
-    ///
-    /// Monotone per conversation, because the wire says so: `max_id` is a
-    /// watermark, and a read that has already been shown cannot be taken back by
-    /// a later, lower one. Grows with the conversations the client is told about,
-    /// which is no more than the chat list already holds.
-    ///
-    /// Not written to disk: a launch starts with nothing recorded, so a receipt
-    /// the reader has not been shown is never drawn from a previous session's
-    /// memory of it. That is the "never claim more than was received" rule at the
-    /// storage layer.
-    read_receipts: RefCell<HashMap<i64, i64>>,
-
-    /// The drafts of the conversations the reader is not in.
-    ///
-    /// The open conversation's draft is [`App::line`]; this holds the rest,
-    /// parked under their peer id, so a reader who looks away and comes back
-    /// finds the sentence they had started. The same seam as
-    /// [`App::read_receipts`]: the view is replaced on every switch, and what
-    /// belongs to the conversation rather than to the page on show is kept here.
-    ///
-    /// Only a plain message draft is stored — [`App::park_draft`] forgets the
-    /// reply or edit subject on the way in — and a peer's entry is dropped when
-    /// its draft is empty, so the map holds only peers with words in them.
-    ///
-    /// Not written to disk, for the same reason as [`App::read_receipts`]: a
-    /// launch starts empty, and an account change clears it ([`App::set_chats`])
-    /// so no words cross an account boundary.
-    drafts: HashMap<i64, LineEditor>,
+    /// Per-peer parked drafts and read receipts.
+    pub drafts: DraftStore,
 
     /// Who permutes a right-to-left row: this program, or the terminal.
     ///
@@ -1144,8 +1095,7 @@ impl App {
             outbox: Outbox::new(),
             pending: Pending::new(),
             conversation: ConversationState::new(),
-            line: LineEditor::new(),
-            emoji: None,
+            input: InputState::new(),
             status: IDLE_STATUS.to_string(),
             should_quit: false,
             status_until: None,
@@ -1153,8 +1103,7 @@ impl App {
             rows: Cell::new(ASSUMED_ROWS),
             body_width: Cell::new(ASSUMED_BODY_WIDTH),
             now: Cell::new(0),
-            read_receipts: RefCell::new(HashMap::new()),
-            drafts: HashMap::new(),
+            drafts: DraftStore::new(),
             bidi: BidiMode::Terminal,
         }
     }
@@ -1268,7 +1217,7 @@ impl App {
     /// The same shape as [`App::selection`]: one answer, read by both.
     #[must_use]
     pub fn completion(&self) -> Option<&emoji::Trigger> {
-        self.emoji.as_ref()
+        self.input.emoji.as_ref()
     }
 
     /// The window positions the selection covers, oldest first.
@@ -1400,7 +1349,7 @@ impl App {
             // The account's drafts go with its list: a peer id can be reused by
             // another account, and inheriting a stranger's words is worse than
             // losing one's own.
-            self.drafts.clear();
+            self.drafts.drafts.clear();
         }
     }
 
@@ -1463,7 +1412,7 @@ impl App {
         self.conversation.confirm = None;
         self.conversation.selection = None;
         self.conversation.register = Register::default();
-        self.line.forget_purpose();
+        self.input.line.forget_purpose();
     }
 
     /// Parks the open conversation's draft under its peer id.
@@ -1481,18 +1430,18 @@ impl App {
     /// reset is what finishes with those.
     fn park_draft(&mut self) {
         let chat_id = self.conversation.conversation.window.chat_id;
-        if chat_id == 0 || !self.line.purpose().is_buffer() {
+        if chat_id == 0 || !self.input.line.purpose().is_buffer() {
             return;
         }
 
-        if self.line.is_empty() {
-            self.drafts.remove(&chat_id);
+        if self.input.line.is_empty() {
+            self.drafts.drafts.remove(&chat_id);
             return;
         }
 
-        let mut draft = std::mem::take(&mut self.line);
+        let mut draft = std::mem::take(&mut self.input.line);
         draft.forget_purpose();
-        self.drafts.insert(chat_id, draft);
+        self.drafts.drafts.insert(chat_id, draft);
     }
 
     /// Puts a conversation's parked draft back on the line.
@@ -1501,7 +1450,7 @@ impl App {
     /// the map never holds the open conversation's draft, and a peer with no
     /// entry gets a fresh line.
     fn resume_draft(&mut self, chat_id: i64) {
-        self.line = self.drafts.remove(&chat_id).unwrap_or_default();
+        self.input.line = self.drafts.drafts.remove(&chat_id).unwrap_or_default();
     }
 
     // ---- the profile panel ----------------------------------------------
@@ -2169,7 +2118,7 @@ impl App {
     /// Reports whether there was one to put back, which is what a reader switching
     /// to a conversation nobody has read yet gets.
     fn restore_read_watermark(&mut self, chat_id: i64) -> bool {
-        let recorded = self.read_receipts.borrow().get(&chat_id).copied();
+        let recorded = self.drafts.read_receipts.borrow().get(&chat_id).copied();
         match recorded {
             Some(max_id) => self.conversation.conversation.set_read_watermark(max_id),
             None => false,
@@ -2187,7 +2136,7 @@ impl App {
             return false;
         }
 
-        let mut recorded = self.read_receipts.borrow_mut();
+        let mut recorded = self.drafts.read_receipts.borrow_mut();
         let moved = recorded.get(&chat_id).is_none_or(|read| max_id > *read);
         if moved {
             recorded.insert(chat_id, max_id);
@@ -3035,7 +2984,7 @@ impl App {
         // `BackTab`, `Ctrl+w` and `Esc`-to-leave all pass through here, so the
         // completion does not need a case in each of them.
         if focus != Focus::Input {
-            self.emoji = None;
+            self.input.emoji = None;
         }
         self.focus = focus;
     }
@@ -3328,11 +3277,11 @@ impl App {
             'h' => self.set_focus(Focus::ChatList),
             '/' => {
                 self.focus = Focus::Input;
-                self.line.open(PromptKind::Search);
+                self.input.line.open(PromptKind::Search);
             }
             ':' => {
                 self.focus = Focus::Input;
-                self.line.open(PromptKind::Command);
+                self.input.line.open(PromptKind::Command);
             }
             'q' => self.request_quit(),
             'S' => self.open_profile(),
@@ -3364,7 +3313,7 @@ impl App {
     /// they were writing.
     fn start_compose(&mut self) {
         self.focus = Focus::Input;
-        self.line.open(PromptKind::Message);
+        self.input.line.open(PromptKind::Message);
         self.conversation.reply_to = None;
         self.conversation.editing = None;
     }
@@ -3379,7 +3328,7 @@ impl App {
         };
 
         self.focus = Focus::Input;
-        self.line.open(PromptKind::Reply);
+        self.input.line.open(PromptKind::Reply);
         self.conversation.reply_to = Some(id);
         self.conversation.editing = None;
     }
@@ -3392,7 +3341,9 @@ impl App {
     /// starts clean.
     fn begin_new_chat(&mut self, query: &str) {
         self.focus = Focus::Input;
-        self.line.open_with(PromptKind::NewChat, query.to_owned());
+        self.input
+            .line
+            .open_with(PromptKind::NewChat, query.to_owned());
     }
 
     /// Opens the buffer with the cursor's own message in it, for editing.
@@ -3423,7 +3374,7 @@ impl App {
         let id = message.id;
 
         self.focus = Focus::Input;
-        self.line.open_with(PromptKind::Edit, text);
+        self.input.line.open_with(PromptKind::Edit, text);
         self.conversation.editing = Some(id);
         self.conversation.reply_to = None;
     }
@@ -3637,7 +3588,7 @@ impl App {
     /// answered inside [`LineEditor`], and is the reason the line is a wrapper
     /// rather than a `String`.
     fn handle_line(&mut self, key: KeyEvent) {
-        match self.line.feed(key) {
+        match self.input.line.feed(key) {
             LineVerdict::Submit => self.submit(),
             LineVerdict::LeftEditing => self.leave_line(),
             LineVerdict::TooLong => self.flash("message is too long"),
@@ -3648,7 +3599,7 @@ impl App {
         // A yank in the line is a yank: the same slot, the same drain, and the
         // same OSC 52 write the conversation's goes through. One seam, two
         // producers.
-        if let Some(yanked) = self.line.take_yanked() {
+        if let Some(yanked) = self.input.line.take_yanked() {
             self.outbox.clipboard = Some(yanked);
         }
 
@@ -3671,7 +3622,7 @@ impl App {
     /// `Enter` arrives with nothing up and submits. No debounce, because the
     /// state already gives the right answer.
     fn handle_completion(&mut self, key: KeyEvent) -> bool {
-        if self.emoji.is_none() || key.modifiers != KeyModifiers::NONE {
+        if self.input.emoji.is_none() || key.modifiers != KeyModifiers::NONE {
             return false;
         }
 
@@ -3679,7 +3630,7 @@ impl App {
             KeyCode::Up => self.move_completion(false),
             KeyCode::Down => self.move_completion(true),
             KeyCode::Tab | KeyCode::Enter => self.accept_completion(),
-            KeyCode::Esc => self.emoji = None,
+            KeyCode::Esc => self.input.emoji = None,
             _ => return false,
         }
 
@@ -3766,7 +3717,7 @@ impl App {
 
     /// Moves the selected candidate one place, wrapping.
     fn move_completion(&mut self, forward: bool) {
-        if let Some(trigger) = &mut self.emoji {
+        if let Some(trigger) = &mut self.input.emoji {
             trigger.move_selection(forward);
         }
     }
@@ -3778,7 +3729,7 @@ impl App {
     /// delete. The range comes from the trigger, so what is replaced is what
     /// the popup was describing.
     fn accept_completion(&mut self) {
-        let Some(trigger) = self.emoji.as_ref() else {
+        let Some(trigger) = self.input.emoji.as_ref() else {
             return;
         };
         let Some(chosen) = trigger.chosen() else {
@@ -3787,9 +3738,9 @@ impl App {
         let range = trigger.range.clone();
         let text = chosen.as_str();
 
-        match self.line.replace(range, text) {
+        match self.input.line.replace(range, text) {
             LineVerdict::TooLong => self.flash("message is too long"),
-            _ => self.emoji = None,
+            _ => self.input.emoji = None,
         }
     }
 
@@ -3809,16 +3760,20 @@ impl App {
     /// still there.
     fn refresh_completion(&mut self) {
         if self.focus != Focus::Input
-            || !self.line.purpose().is_buffer()
-            || self.line.status() != "INSERT"
+            || !self.input.line.purpose().is_buffer()
+            || self.input.line.status() != "INSERT"
         {
-            self.emoji = None;
+            self.input.emoji = None;
             return;
         }
 
-        let selected = self.emoji.as_ref().map_or(0, |trigger| trigger.selected);
-        self.emoji = emoji::detect(self.line.text(), self.line.caret());
-        if let Some(trigger) = &mut self.emoji {
+        let selected = self
+            .input
+            .emoji
+            .as_ref()
+            .map_or(0, |trigger| trigger.selected);
+        self.input.emoji = emoji::detect(self.input.line.text(), self.input.line.caret());
+        if let Some(trigger) = &mut self.input.emoji {
             trigger.reselect(selected);
         }
     }
@@ -4044,7 +3999,7 @@ impl App {
         }
 
         self.start_compose();
-        self.line.insert(&self.conversation.register.text());
+        self.input.line.insert(&self.conversation.register.text());
     }
 
     /// Starts a selection at the cursor's message, character-wise or whole.    ///
@@ -4153,19 +4108,19 @@ impl App {
     /// which opens a field rather than finishing on the conversation: that one
     /// returns before the reset, because the reset is what would empty it.
     fn submit(&mut self) {
-        match self.line.purpose() {
+        match self.input.line.purpose() {
             PromptKind::Message | PromptKind::Reply => self.submit_message(),
             PromptKind::Edit => self.submit_edit(),
             PromptKind::Command => {
-                let cmd = self.line.take();
+                let cmd = self.input.line.take();
                 self.run_command(cmd.trim());
             }
             PromptKind::Search => {
-                let query = self.line.take();
+                let query = self.input.line.take();
                 self.run_search(query.trim());
             }
             PromptKind::NewChat => {
-                let query = self.line.take();
+                let query = self.input.line.take();
                 self.submit_new_chat(query.trim());
             }
             // Unreachable: a sign-in field answers `Enter` itself, so that its
@@ -4181,14 +4136,14 @@ impl App {
         // their keys to an arm with nothing to say about a flow in progress.
         // `:new` keeps its query line for the same reason: the reader is about
         // to type into it, and the reset below would empty it.
-        if self.signin_field().is_some() || self.line.purpose() == PromptKind::NewChat {
+        if self.signin_field().is_some() || self.input.line.purpose() == PromptKind::NewChat {
             self.conversation.reply_to = None;
             self.conversation.editing = None;
             return;
         }
 
         self.focus = Focus::Conversation;
-        self.line.clear();
+        self.input.line.clear();
         self.conversation.reply_to = None;
         self.conversation.editing = None;
     }
@@ -4205,13 +4160,13 @@ impl App {
             self.flash("a message is already on its way");
             return;
         }
-        if !self.has_conversation() || self.line.text().trim().is_empty() {
+        if !self.has_conversation() || self.input.line.text().trim().is_empty() {
             return;
         }
 
         let anchor = self.cursor_message_id();
         let chat_id = self.conversation.conversation.window.chat_id;
-        let text = self.line.take();
+        let text = self.input.line.take();
         let temp_id = self
             .conversation
             .conversation
@@ -4235,12 +4190,12 @@ impl App {
         let Some(message_id) = self.conversation.editing else {
             return;
         };
-        if !self.has_conversation() || self.line.text().trim().is_empty() {
+        if !self.has_conversation() || self.input.line.text().trim().is_empty() {
             return;
         }
 
         let chat_id = self.conversation.conversation.window.chat_id;
-        let text = self.line.take();
+        let text = self.input.line.take();
         self.queue_action(Action::Edit {
             chat_id,
             message_id,
@@ -4634,7 +4589,7 @@ impl App {
             LoginField::Password if prefill => self.session.password_prefill.clone(),
             _ => String::new(),
         };
-        self.line.open_with(prompt, text);
+        self.input.line.open_with(prompt, text);
     }
 
     /// Steps away from the flow, keeping the step.
@@ -4647,7 +4602,7 @@ impl App {
     /// as bullets whether it has the focus or not.
     fn signin_away(&mut self) {
         if self.signin_field() == Some(LoginField::Code) {
-            self.line.clear();
+            self.input.line.clear();
             if let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) {
                 flow.lost_code = true;
             }
@@ -4726,7 +4681,7 @@ impl App {
             return;
         }
 
-        let value = self.line.text().trim().to_owned();
+        let value = self.input.line.text().trim().to_owned();
 
         // An empty field is refused here rather than sent. A blank phone number
         // is a request Telegram throttles, a blank code is a login attempt the
@@ -4788,7 +4743,7 @@ impl App {
                         // rather than in a focus that does not exist yet.
                         KeyCode::Char(':') => {
                             self.session.signin = None;
-                            self.line.open(PromptKind::Command);
+                            self.input.line.open(PromptKind::Command);
                             self.set_focus(Focus::Input);
                         }
                         _ => {}
@@ -4939,7 +4894,7 @@ impl App {
     /// is the whole program again — which is what signing in is for.
     pub fn login_complete(&mut self) {
         self.session.signin = None;
-        self.line.clear();
+        self.input.line.clear();
         self.set_focus(Focus::Conversation);
         self.clear_status();
     }
@@ -5199,7 +5154,7 @@ impl App {
     /// is not a command and a code is not a query.
     #[must_use]
     pub fn prompt_prefix(&self) -> &'static str {
-        match self.line.purpose() {
+        match self.input.line.purpose() {
             // Everything that is text rather than a question: a message, a
             // reply, an edit, and the three sign-in fields, which are the
             // reader's own words for the same reason a message is.
@@ -5712,7 +5667,7 @@ mod tests {
             "the highlight followed the id to the end of the reversed list"
         );
         assert_eq!(
-            app.line.purpose(),
+            app.input.line.purpose(),
             PromptKind::Reply,
             "the draft is still a reply, not reset to a plain message"
         );
@@ -5735,7 +5690,7 @@ mod tests {
         assert_eq!(app.focus, Focus::Input);
 
         type_text(&mut app, "hello");
-        assert_eq!(app.line.text(), "hello");
+        assert_eq!(app.input.line.text(), "hello");
     }
 
     #[test]
@@ -5751,7 +5706,11 @@ mod tests {
             Focus::Input,
             "one escape stops typing, and the reader is still in the line"
         );
-        assert_eq!(app.line.text(), "hi", "and the text is not thrown away");
+        assert_eq!(
+            app.input.line.text(),
+            "hi",
+            "and the text is not thrown away"
+        );
     }
 
     #[test]
@@ -5761,7 +5720,7 @@ mod tests {
         type_text(&mut app, "abc");
         app.handle_key(press(KeyCode::Backspace));
 
-        assert_eq!(app.line.text(), "ab");
+        assert_eq!(app.input.line.text(), "ab");
     }
 
     /// The headline behaviour, in the reader's words. Every Vim user presses
@@ -5784,7 +5743,7 @@ mod tests {
         app.handle_key(press(KeyCode::Esc));
         assert_eq!(app.focus, Focus::Conversation, "and the second looks away");
         assert_eq!(
-            app.line.text(),
+            app.input.line.text(),
             "half a thought\nand the rest of it",
             "with every word of it"
         );
@@ -5804,14 +5763,14 @@ mod tests {
         app.select_chat(1);
 
         assert!(
-            app.line.is_empty(),
+            app.input.line.is_empty(),
             "another conversation starts with its own draft, and has none"
         );
 
         app.select_chat(0);
 
         assert_eq!(
-            app.line.text(),
+            app.input.line.text(),
             "half a th",
             "and the reader's own conversation has theirs again"
         );
@@ -5830,7 +5789,7 @@ mod tests {
         app.select_chat(1);
 
         assert!(
-            app.line.is_empty(),
+            app.input.line.is_empty(),
             "the next conversation's own draft is nothing yet"
         );
     }
@@ -5846,15 +5805,15 @@ mod tests {
             .conversation
             .reply_to
             .expect("a reply answers the message on the cursor");
-        assert_eq!(app.line.purpose(), PromptKind::Reply);
+        assert_eq!(app.input.line.purpose(), PromptKind::Reply);
         type_text(&mut app, "sure");
 
         app.select_chat(1);
         app.select_chat(0);
 
-        assert_eq!(app.line.text(), "sure", "the words");
+        assert_eq!(app.input.line.text(), "sure", "the words");
         assert_eq!(
-            app.line.purpose(),
+            app.input.line.purpose(),
             PromptKind::Message,
             "but not the subject"
         );
@@ -5872,14 +5831,18 @@ mod tests {
         submit(&mut app, "ping");
 
         assert!(
-            app.line.is_empty(),
+            app.input.line.is_empty(),
             "a sent message leaves nothing behind, or `Enter` would send it twice"
         );
 
         app.handle_key(press(KeyCode::Char('i')));
         type_text(&mut app, "next");
 
-        assert_eq!(app.line.text(), "next", "and the next one starts clean");
+        assert_eq!(
+            app.input.line.text(),
+            "next",
+            "and the next one starts clean"
+        );
     }
 
     /// Types `text` and submits it, leaving a placeholder in flight.
@@ -6053,11 +6016,15 @@ mod tests {
         app.handle_key(press_ctrl('w'));
 
         assert_eq!(app.focus, Focus::Conversation);
-        assert_eq!(app.line.text(), "half a th", "the line is not thrown away");
+        assert_eq!(
+            app.input.line.text(),
+            "half a th",
+            "the line is not thrown away"
+        );
 
         // And it is still there to come back to, rather than lost.
         app.handle_key(press(KeyCode::Tab));
-        assert_eq!(app.line.text(), "half a th");
+        assert_eq!(app.input.line.text(), "half a th");
     }
 
     #[test]
@@ -6814,9 +6781,9 @@ mod tests {
         key(&mut app, 'p');
 
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.line.purpose(), PromptKind::Message);
+        assert_eq!(app.input.line.purpose(), PromptKind::Message);
         assert_eq!(
-            app.line.text(),
+            app.input.line.text(),
             "Hey, is the build green?\nYes — clippy is happy.",
             "two messages, pasted as two lines"
         );
@@ -6838,7 +6805,7 @@ mod tests {
         key(&mut app, 'p');
 
         assert_eq!(yanked(&app), before, "and the paste is the same text");
-        assert_eq!(app.line.text(), before.join("\n"));
+        assert_eq!(app.input.line.text(), before.join("\n"));
     }
 
     #[test]
@@ -6921,11 +6888,14 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('w')));
 
-        assert_eq!(app.line.text(), "héllo wörld", "and it only moved");
+        assert_eq!(app.input.line.text(), "héllo wörld", "and it only moved");
         assert!(
-            app.line.text().is_char_boundary(app.line.caret()),
+            app.input
+                .line
+                .text()
+                .is_char_boundary(app.input.line.caret()),
             "onto a character: {:?}",
-            app.line.caret()
+            app.input.line.caret()
         );
         assert!(
             !app.status.contains("not built yet"),
@@ -6947,7 +6917,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('w')));
 
-        assert_eq!(app.line.text(), "héllo wörld", "nothing ran");
+        assert_eq!(app.input.line.text(), "héllo wörld", "nothing ran");
         assert!(
             app.status.contains("not built yet"),
             "and the refusal says so: {:?}",
@@ -7022,7 +6992,7 @@ mod tests {
         key(&mut app, 'r');
 
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.line.purpose(), PromptKind::Reply);
+        assert_eq!(app.input.line.purpose(), PromptKind::Reply);
         assert_eq!(app.conversation.reply_to, Some(1));
     }
 
@@ -7499,7 +7469,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('r')));
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.line.purpose(), PromptKind::Reply);
+        assert_eq!(app.input.line.purpose(), PromptKind::Reply);
         assert_eq!(app.conversation.reply_to, Some(9));
 
         type_text(&mut app, "sure");
@@ -7524,12 +7494,12 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('e')));
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.line.purpose(), PromptKind::Edit);
+        assert_eq!(app.input.line.purpose(), PromptKind::Edit);
         assert_eq!(app.conversation.editing, Some(9));
         assert!(
-            app.line.text().starts_with("No pressure then :)"),
+            app.input.line.text().starts_with("No pressure then :)"),
             "the buffer opens with the message's text: {:?}",
-            app.line.text()
+            app.input.line.text()
         );
 
         type_text(&mut app, "!");
@@ -9117,7 +9087,7 @@ mod tests {
             }
         }
         assert_eq!(
-            app.read_receipts.borrow().len(),
+            app.drafts.read_receipts.borrow().len(),
             2,
             "four acknowledgements for each of two conversations, and two numbers"
         );
@@ -10129,7 +10099,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('k')));
 
-        assert_eq!(app.line.text(), ":ok", "`k` went to the draft");
+        assert_eq!(app.input.line.text(), ":ok", "`k` went to the draft");
         let trigger = app.completion().expect("and the list keeps filtering");
         assert_eq!(trigger.query, "ok");
         assert_eq!(trigger.selected, 0, "and `k` did not move the candidate");
@@ -10139,7 +10109,7 @@ mod tests {
         let mut app = typing(":cr");
         app.handle_key(press(KeyCode::Char('j')));
 
-        assert_eq!(app.line.text(), ":crj", "`j` went to the draft too");
+        assert_eq!(app.input.line.text(), ":crj", "`j` went to the draft too");
     }
 
     #[test]
@@ -10174,9 +10144,9 @@ mod tests {
 
         app.handle_key(press(KeyCode::Up));
 
-        assert_eq!(app.line.caret(), 3, "the arrow moved the caret");
+        assert_eq!(app.input.line.caret(), 3, "the arrow moved the caret");
         assert_eq!(
-            app.line.laid_out(78).row,
+            app.input.line.laid_out(78).row,
             0,
             "to the first row of the draft, not to a candidate"
         );
@@ -10188,8 +10158,8 @@ mod tests {
 
         app.handle_key(press(KeyCode::Tab));
 
-        assert_eq!(app.line.text(), "😢");
-        assert_eq!(app.line.caret(), 4, "after the glyph");
+        assert_eq!(app.input.line.text(), "😢");
+        assert_eq!(app.input.line.caret(), 4, "after the glyph");
         assert!(app.completion().is_none(), "and the popup is away");
     }
 
@@ -10202,7 +10172,7 @@ mod tests {
         app.handle_key(press(KeyCode::Enter));
 
         assert_eq!(app.take_action(), None, "accepting did not send");
-        assert_eq!(app.line.text(), "😢");
+        assert_eq!(app.input.line.text(), "😢");
         assert_eq!(
             app.focus,
             Focus::Input,
@@ -10228,7 +10198,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Esc));
 
-        assert_eq!(app.line.text(), ":cry", "the words are the reader's");
+        assert_eq!(app.input.line.text(), ":cry", "the words are the reader's");
         assert!(app.completion().is_none());
     }
 
@@ -10280,7 +10250,7 @@ mod tests {
         app.handle_key(press_ctrl('j'));
 
         assert!(app.completion().is_none());
-        assert_eq!(app.line.text(), ":cry\n");
+        assert_eq!(app.input.line.text(), ":cry\n");
     }
 
     #[test]
@@ -10306,7 +10276,7 @@ mod tests {
     fn a_command_line_never_completes() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char(':')));
-        assert_eq!(app.line.purpose(), PromptKind::Command);
+        assert_eq!(app.input.line.purpose(), PromptKind::Command);
 
         type_text(&mut app, "cr");
 
@@ -10317,7 +10287,7 @@ mod tests {
     fn a_search_line_never_completes() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('/')));
-        assert_eq!(app.line.purpose(), PromptKind::Search);
+        assert_eq!(app.input.line.purpose(), PromptKind::Search);
 
         type_text(&mut app, "cr");
 
@@ -10330,7 +10300,7 @@ mod tests {
     fn a_reply_and_an_edit_do_complete() {
         let mut reply = App::mock();
         reply.handle_key(press(KeyCode::Char('r')));
-        assert_eq!(reply.line.purpose(), PromptKind::Reply);
+        assert_eq!(reply.input.line.purpose(), PromptKind::Reply);
         type_text(&mut reply, ":cr");
         assert!(reply.completion().is_some(), "a reply completes");
 
@@ -10339,7 +10309,7 @@ mod tests {
         let mut edit = App::mock();
         edit.handle_key(press(KeyCode::Char('k')));
         edit.handle_key(press(KeyCode::Char('e')));
-        assert_eq!(edit.line.purpose(), PromptKind::Edit);
+        assert_eq!(edit.input.line.purpose(), PromptKind::Edit);
         type_text(&mut edit, ":cr");
         assert!(edit.completion().is_some(), "an edit completes");
     }
@@ -10364,7 +10334,7 @@ mod tests {
         assert_eq!(app.signin_field(), Some(LoginField::Phone));
         assert_eq!(app.focus, Focus::Input, "the field is what has the keys");
         assert_eq!(
-            app.line.text(),
+            app.input.line.text(),
             "+44 7700 900142",
             "the number the configuration carries is still in the bar"
         );
@@ -10372,7 +10342,7 @@ mod tests {
         app.handle_key(press(KeyCode::Char('4')));
 
         assert_eq!(
-            app.line.text(),
+            app.input.line.text(),
             "+44 7700 9001424",
             "a digit lands in the field rather than being swallowed"
         );
@@ -10396,7 +10366,11 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('4')));
 
-        assert_eq!(app.line.text(), "4", "the code is what they are typing");
+        assert_eq!(
+            app.input.line.text(),
+            "4",
+            "the code is what they are typing"
+        );
     }
 
     /// `Esc` at the phone step is `cancel`, which is what the hint calls it —
@@ -10465,7 +10439,7 @@ mod tests {
         app.set_client_available(false);
         run_command_line(&mut app, "signin");
         type_text(&mut app, "7");
-        let draft = app.line.text().to_owned();
+        let draft = app.input.line.text().to_owned();
 
         app.handle_key(press(KeyCode::Enter));
 
@@ -10481,7 +10455,7 @@ mod tests {
             "and nothing was queued: a login fired by a client arriving later \
              is an attempt nobody asked for"
         );
-        assert_eq!(app.line.text(), draft, "the draft is the reader's");
+        assert_eq!(app.input.line.text(), draft, "the draft is the reader's");
         assert_eq!(app.focus, Focus::Input, "and the field keeps the keys");
         assert_eq!(app.status, "not connected yet — the client is not up");
     }
@@ -10560,9 +10534,12 @@ mod tests {
         app.handle_key(press(KeyCode::Char('/')));
 
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.line.purpose(), PromptKind::NewChat);
+        assert_eq!(app.input.line.purpose(), PromptKind::NewChat);
         assert_eq!(app.prompt_prefix(), "/", "it reads as a query");
-        assert!(!app.line.purpose().is_buffer(), "one line, insert only");
+        assert!(
+            !app.input.line.purpose().is_buffer(),
+            "one line, insert only"
+        );
     }
 
     /// The conversation's own `/` is unchanged: it still searches the window.
@@ -10572,7 +10549,7 @@ mod tests {
         app.handle_key(press(KeyCode::Char('/')));
 
         assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.line.purpose(), PromptKind::Search);
+        assert_eq!(app.input.line.purpose(), PromptKind::Search);
     }
 
     /// Letters that are list keys on the overlay must still type into the query
@@ -10585,7 +10562,7 @@ mod tests {
 
         type_text(&mut app, "jk");
 
-        assert_eq!(app.line.text(), "jk", "the letters are the reader's");
+        assert_eq!(app.input.line.text(), "jk", "the letters are the reader's");
     }
 
     /// Submitting queues one lookup and nothing else: the network is the
@@ -10608,7 +10585,10 @@ mod tests {
         );
         assert_eq!(app.take_action(), None, "an action is taken once");
         assert_eq!(app.focus, Focus::Conversation);
-        assert!(app.line.is_empty(), "the prompt has given up its query");
+        assert!(
+            app.input.line.is_empty(),
+            "the prompt has given up its query"
+        );
         assert!(app.user_search().is_active(), "and the search is on show");
         assert_eq!(app.user_search().query(), Some("ada"));
     }
@@ -10636,12 +10616,12 @@ mod tests {
         let mut app = App::mock();
         run_command_line(&mut app, "new ada");
 
-        assert_eq!(app.line.purpose(), PromptKind::NewChat);
+        assert_eq!(app.input.line.purpose(), PromptKind::NewChat);
         assert_eq!(app.focus, Focus::Input, "the line keeps the keys");
-        assert_eq!(app.line.text(), "ada", "the query is pre-filled");
+        assert_eq!(app.input.line.text(), "ada", "the query is pre-filled");
 
         app.handle_key(press(KeyCode::Char(' ')));
-        assert_eq!(app.line.text(), "ada ", "and typing continues in it");
+        assert_eq!(app.input.line.text(), "ada ", "and typing continues in it");
     }
 
     /// The status line names the query and the count while an answer is in

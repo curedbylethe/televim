@@ -819,10 +819,14 @@ mod tests {
             },
             None,
         );
-        assert_eq!(app.line.text(), "42424", "the configuration filled it in");
+        assert_eq!(
+            app.input.line.text(),
+            "42424",
+            "the configuration filled it in"
+        );
 
         app.login_refused("that code is not the one Telegram sent".to_owned(), 0);
-        assert_eq!(app.line.text(), "", "a refused code is not put back");
+        assert_eq!(app.input.line.text(), "", "a refused code is not put back");
     }
 
     /// An empty field asks for nothing, because nothing can be done with it.
@@ -895,13 +899,13 @@ mod tests {
         assert_eq!(app.focus, Focus::ChatList);
         assert_eq!(app.signin_field(), Some(LoginField::Code));
         assert_eq!(app.status, "sign-in paused; Tab brings it back");
-        assert_eq!(app.line.text(), "", "the code is dropped on the way");
+        assert_eq!(app.input.line.text(), "", "the code is dropped on the way");
 
         // And back: the step is still the code's, and the return says what went.
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Focus::Input);
         assert_eq!(app.signin_field(), Some(LoginField::Code));
-        assert_eq!(app.line.purpose(), PromptKind::Code);
+        assert_eq!(app.input.line.purpose(), PromptKind::Code);
         assert_eq!(app.status, "the code did not survive; ⏎ asks for a new one");
     }
 
@@ -920,7 +924,7 @@ mod tests {
         press(&mut app, KeyCode::Esc);
 
         assert_eq!(app.signin_field(), Some(LoginField::Phone));
-        assert_eq!(app.line.purpose(), PromptKind::Phone);
+        assert_eq!(app.input.line.purpose(), PromptKind::Phone);
         assert!(matches!(app.take_action(), Some(Action::LoginCancelled)));
         assert_eq!(
             app.status,
@@ -979,7 +983,7 @@ mod tests {
         );
         // The text itself is untouched, which is why the caret can still move
         // over it: concealment is paint and nothing else.
-        assert_eq!(app.line.text(), "hunter2!");
-        assert_eq!(app.line.caret(), 8);
+        assert_eq!(app.input.line.text(), "hunter2!");
+        assert_eq!(app.input.line.caret(), 8);
     }
 }
