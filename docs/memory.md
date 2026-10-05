@@ -337,11 +337,11 @@ the frame that made them — so they cannot move either RSS figure, which the
 long-lived window and the terminal buffers carry. A frame costs **0.510 ms**
 against the 16 ms budget, so there is no time to recover either. And the arena
 cannot be threaded through `App::row_layout(&self) -> Vec<RowSpan>`
-(`tui/src/app.rs:4508`) or `conversation::render(..., &[RowSpan])`
+(`tui/src/app.rs:4950`) or `conversation::render(..., &[RowSpan])`
 (`tui/src/widgets/conversation.rs:41`) without pushing a lifetime into the
 public widget API. The candidate sites it was evaluated against — the outer
 `Vec<RowSpan>` and one `Vec<Range<usize>>` per windowed message
-(`tui/src/app.rs:4508-4547`), the per-frame `Vec<ListItem>` and title strings,
+(`tui/src/app.rs:4950-4993`), the per-frame `Vec<ListItem>` and title strings,
 `rows::reply_prefix` twice per row (`tui/src/rows.rs:668-680`), and the
 fetch/translate triple `Vec<Message>` path (`telegram-framework/src/history.rs:172`,
 `proto/src/history.rs:151-164`, `domain/src/history.rs:182-192`) — are all

@@ -949,6 +949,12 @@ impl Fetching {
 }
 
 /// Every piece of the screen's state, and the only thing that draws.
+///
+/// Nine fields, one concern each: [`UiState`], [`SessionState`],
+/// [`ProfileCard`], [`ChatListState`], [`Outbox`], [`Pending`],
+/// [`ConversationState`], [`InputState`] and [`DraftStore`]. Dispatch mode,
+/// focus and the frame-measurement cells live in `state/ui.rs`, on [`UiState`]
+/// and its `FrameMetrics`.
 pub struct App {
     /// Dispatch mode, focus, chrome, and the frame's measurements.
     pub ui: UiState,
