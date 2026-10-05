@@ -65,6 +65,10 @@
       const st = app.s;
       open.typingTimer = setTimeout(() => { open.typingTimer = null; if (app.s === st) { TV.answer(st); draw(); } }, 3000);
     }
+    if (app.s.newchat && app.s.newchat.pending && !app.s.newchatTimer) {
+      const st = app.s;
+      st.newchatTimer = setTimeout(() => { st.newchatTimer = null; if (app.s === st) { TV.answer(st); draw(); } }, 1200);
+    }
     if (app.s.view !== 'chat') return;
     app.s.chats.forEach((c) => c.msgs.forEach((m) => {
       if (m.live && m.status && !m.t) m.t = setTimeout(() => { m.status = null; m.live = false; draw(); }, 1400);
@@ -95,7 +99,8 @@
   ['dark', 'light', 'both'].forEach((t) => btn($('themes'), t, () => { app.theme = t; pressed($('themes'), ['dark', 'light', 'both'].indexOf(t)); draw(); }));
   [['Esc', 'Escape'], ['Tab', 'Tab'], ['Enter', 'Enter'], ['Shift+Enter', 'S-Enter'],
    ['gd', ['g', 'd']], ['Ctrl+o', 'C-o'], ['Ctrl+i', 'C-i'], ['Ctrl+w h', ['C-w', 'h']], ['Ctrl+w l', ['C-w', 'l']],
-   ['A', 'A'], ['S', 'S'], ['l', 'l'], ['h', 'h'], ['v', 'v'], ['y', 'y'], ['yy', ['y', 'y']], ['d', 'd']
+   ['A', 'A'], ['S', 'S'], ['l', 'l'], ['h', 'h'], ['v', 'v'], ['y', 'y'], ['yy', ['y', 'y']], ['d', 'd'],
+   ['/', ['Tab', '/']], [':new', [':', 'n', 'e', 'w', 'Enter']]
   ].forEach(([l, k]) => btn($('keys'), l, () => press(k)));
 
   pressed($('themes'), 0);

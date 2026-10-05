@@ -92,6 +92,8 @@ pub mod raw;
 pub mod search;
 #[cfg(feature = "live")]
 pub mod updates;
+#[cfg(feature = "live")]
+pub mod users;
 
 // Fixtures shared by the unit tests. Compiled only under `cargo test`.
 #[cfg(all(test, feature = "live"))]

@@ -232,8 +232,8 @@ has one cell height and the reader chose the cell.
 
 ### The fourteen hint rows
 
-`ALL_HINTS` is the array of all fourteen and a test iterates it. These are the
-fourteen, verbatim, with the width each one measures. The width is
+`ALL_HINTS` is the array a test iterates. These are the fourteen, verbatim, with
+the width each one measures. The width is
 `chars().count()`, the same count the test makes, and the array is the authority:
 the numbers below were re-measured from it.
 
@@ -547,6 +547,12 @@ code.
 | `/query — 2 loaded` | a **local** search, which is never an answer | `local_position` |
 | `/query — 2 loaded — searching…` | a local search with the server still working | ditto |
 | `/query — match 1 of 5 (first 2)` | a server walk that is still capped | `server_position` |
+| `New chat` | the new-chat prompt's bar title, and the results box's title | `kindTitle`, `drawNewChat` |
+| `/query - searching...` | the new-chat list while the query is in flight | `newChatStatus` |
+| `/query - N candidates` | the new-chat list once the answer lands, singular and plural | `newChatStatus` |
+| `/query - no candidates` | the answer was nobody | `newChatStatus` |
+| `/query - no candidates (search failed: reason)` | the request itself failed | `newChatStatus` |
+| `new` `chat` | a result row's standing: no conversation yet, or one to focus | `newChatHits` |
 | `Profile · you` `Profile · Ada Lovelace` | a card's title; the `(n/m)` is the row the cursor is on | `cardTitle` |
 | `Profile` | a card with no subject: not signed in, or nothing read yet | `cardTitle` |
 | `· name        Noor Haddad` | a card row: the cue, the label, the value | `CUE` |
@@ -739,9 +745,74 @@ loaded target, the fetch in flight, the page arrived with the cursor on the
 target, `Ctrl-o` back (loaded), `Ctrl-i` forward, `Ctrl-o` needing a fetch, that
 fetch landed, and `gd` on a message with no quote.
 
+## Starting a conversation with someone new
+
+The chat list holds private conversations, and until now there was no way to
+begin one: a person the reader had never messaged had no row, so `/` — which is
+the conversation's find and only the conversation's — could not reach them.
+This surface adds that second question without touching the first.
+
+**Invocation.** `/` while the chat list has the focus, and `:new <query>` from
+anywhere `:` reaches, which opens the same prompt already holding the query.
+There is no new global key. Inside a conversation `/` keeps meaning *search the
+open conversation*, because the reader who presses it is looking at messages,
+and a key that answered "start a chat" there would answer a different question
+from the one the screen is about. On the chat list `/` is the only question the
+pane is about.
+
+**The prompt.** A line like `Find` and `Command`: bar title `New chat`, no
+prefix, the reader's query in `text`, the caret in the bar. There is no live
+narrowing: the query is sent on `⏎` and the candidates arrive afterwards, so the
+prompt draws no list while it has the focus.
+
+**The results list.** Drawn only after `⏎`, a transient overlay over the
+chat-list column alone: a bordered box titled `New chat`, growing up from that
+column's bottom and never taller than the column itself. Each row is the
+`display name` at the left in body ink, the `@username` beside it in dim ink when
+there is one — and nothing at all when there is not — and the standing at the
+right in dim ink: `chat` when a conversation with that person already exists,
+`new` when choosing them would create one. The fragment the reader typed is inked
+with `match`: inside the display name for a name query, inside the handle for a
+`@username` query. The highlighted row is reverse video; on it the quieter text
+takes body ink, never dim, because a dim foreground under reverse video would
+become a dim background. Rows are ordered closest match, then
+no-conversation-first, then by name. `j`/`k` or `↑`/`↓` move the highlight and
+wrap; `⏎` opens the highlighted person; `Esc` dismisses. Long names truncate at a
+character boundary, and the standing is always shown.
+
+**The status.** While the list is up the status line carries the query and the
+request's state, just under a selection and above the conversation's own find:
+`/query - searching...` in flight, `/query - N candidates` once the answer lands,
+`/query - no candidates` when it was nobody, and `/query - no candidates (search
+failed: reason)` when the request itself failed.
+
+**What a choice does.** A query is a username when it opens with `@` and a
+display name otherwise (a name query falls back to the username, so `gracer`
+finds Grace Hopper). An exact username match, or a query with a single result,
+opens at once, without a list; anything else is the list the reader walks. When
+the chosen person already has a conversation, that conversation is focused — the
+chat list does not grow a second row for the same person. When they have none, a
+new, empty conversation is created at the top of the list and opened; its title
+reads `Conversation (0/0)` and its body is empty, because there is nothing said
+yet.
+
+**Palette.** No new roles. The prompt and the overlay reuse exactly the roles
+the find prompt and the completion already use: the highlighted result row is
+reverse video, a matched substring inside that row is `match` on the reversed
+row, the standing and the username are `text-dim`, the name is the body ink, and
+the box is the ordinary border. A colour that would have to be invented to say
+"this row is a new chat" is not used; the word `new` says it.
+
+Scenes: `newchat` in the engine, seven frames: the prompt holding a query, the
+query in flight after `⏎`, the candidates with one highlighted, no candidates, a
+failed search, an exact username opening a new empty conversation, and an exact
+username that focuses an existing conversation instead of duplicating it. A query
+opening with `!` stands in for the failed search, so the failure sentence has a
+frame to be seen in.
+
 ## Components
 
-Eight, with their states, and the `TestBackend` assertion that would catch each
+Nine, with their states, and the `TestBackend` assertion that would catch each
 regressing.
 
 1. **Panel** — `Chats`, `Conversation`, `Input`. States: focused, unfocused,
@@ -763,8 +834,8 @@ regressing.
    `:shortcode` completion is up, and the status line names them for as long as
    it is. The settings hint and the card hints lose to a confirmation and to an
    active search, the same way the other hints do.
-5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, and the bar's own title
-   switching between `Message to …` and ` draft `.
+5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, `New chat`, and the bar's
+   own title switching between `Message to …` and ` draft `.
 6. **Status line** — the ranking, which is the whole of it: a **confirmation**
    outranks a **selection** outranks a **search**, and a `flash` is not a state
    at all. A refusal written while any of the three is up is a line the reader
@@ -782,13 +853,14 @@ regressing.
    | 1 | a key inside the line — the line's own hint | ` i/a: ins  w/b/e  …` |
    | 2 | a confirmation | `Quit televim? (y/n)` |
    | 3 | a selection, **with its unit** | `2 message(s) selected — Esc clears`, or `3 row(s) selected — Esc clears` on a card |
-   | 4 | an active search | `/bench — match 1 of 2` |
-   | 5 | a jump in flight | `Jumping to first unread…`, `Jumping to the quoted message…` |
-   | 6 | why the message under the cursor failed | the send's own reason |
-   | 7 | a `flash` — a refusal, a status worth reading | anything just written |
-   | 8 | the hint, or `televim` | the resting state. The editable profile and both cards use their own hint here, not `televim` |
+   | 4 | the new-chat list, while it is up | `/ad - searching...`, `/ad - 2 candidates` |
+   | 5 | an active search | `/bench — match 1 of 2` |
+   | 6 | a jump in flight | `Jumping to first unread…`, `Jumping to the quoted message…` |
+   | 7 | why the message under the cursor failed | the send's own reason |
+   | 8 | a `flash` — a refusal, a status worth reading | anything just written |
+   | 9 | the hint, or `televim` | the resting state. The editable profile and both cards use their own hint here, not `televim` |
 
-   Rank 5 is one rank with three sentences, because a jump in flight is one kind of
+   Rank 6 is one rank with three sentences, because a jump in flight is one kind of
    state and the sentence names where it is going; see *Jump to the quoted message*.
    A search above it hides the label, which is the ranking working: the reader who
    pressed `gd` with a search up still sees the search until the page lands.
@@ -819,6 +891,16 @@ regressing.
    row, because a field the reader cannot use is worse than no field. What would catch it
    regressing: the password row is absent at steps 0 and 1, and the `(n attempts left)` on it is
    the same three the refusals decrement.
+
+9. **New-chat results** — the transient list over the chat-list column that the
+   new-chat prompt raises. Drawn only after `⏎` has sent the query; never while
+   the prompt line has the focus. States: the query in flight, no candidates, a
+   failed search, several rows, one row standing for an existing conversation
+   (`chat`), a row standing for a person with none (`new`), the highlighted row,
+   and a matched substring inside it. Not a panel and not a mode: it is an overlay
+   dismissed by `Esc`, and the conversation behind it is unchanged. What would
+   catch it regressing: the box never leaves the chat-list column, and the
+   highlighted row is reverse video with its quieter text in body ink.
 
 ## Profile
 

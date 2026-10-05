@@ -17,6 +17,7 @@ use domain::message::{Message, MessageStatus};
 use domain::search::{SearchState, word_prefix_match};
 use domain::selection::{Mark, Selection};
 use domain::updates::{ChatList, UpdateEvent};
+use domain::user::{UserCandidate, UserSearchState};
 use domain::vim::{CharMotion, Motion, VimState, char_motion};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -474,6 +475,13 @@ pub enum PromptKind {
     Message,
     Command,
     Search,
+    /// Finding a person to start a conversation with, from the chat-list pane.
+    ///
+    /// Its own prompt rather than [`PromptKind::Search`], which searches the
+    /// open conversation's messages: the two answer different questions, and a
+    /// query that matched a message must not be mistaken for one that names a
+    /// person.
+    NewChat,
     Reply,
     Edit,
     Phone,
@@ -487,9 +495,10 @@ impl PromptKind {
     ///
     /// A message, a reply and an edit are text the reader is writing, and get
     /// the full editor: caret movement, visual selection, quick edits. A
-    /// command, a search and the three sign-in fields are a single line the
-    /// reader types and submits, and get insert only — `Esc` returns to the
-    /// conversation with the text kept, and there is no normal mode to leave.
+    /// command, a search, a new-conversation query and the three sign-in fields
+    /// are a single line the reader types and submits, and get insert only —
+    /// `Esc` returns to the conversation with the text kept, and there is no
+    /// normal mode to leave.
     ///
     /// One method, one axis. [`crate::line::LineEditor`] consults it in exactly
     /// two places: whether to allow a newline, and whether to treat `Esc` as
@@ -810,6 +819,18 @@ pub enum Action {
         query: String,
     },
 
+    /// Find a person named or handle-matching `query`, to start a conversation
+    /// with.
+    ///
+    /// The same hand-over as [`Action::Search`] and [`Action::FetchContact`]:
+    /// `tui` cannot reach the network, so the lookup is recorded here and taken
+    /// once by the caller that can. The answer is matched back to the query it
+    /// was asked for, so a late result cannot replace a newer one's list.
+    ResolveUser {
+        /// What the reader typed: a `@username` or a display name.
+        query: String,
+    },
+
     /// Ask Telegram to move the sign-in flow on with `value`.
     ///
     /// The same hand-over as every other action, and for the same reason: a
@@ -1111,6 +1132,14 @@ pub struct App {
     /// three disagree about which list is on screen.
     search: SearchState,
 
+    /// Set by a new-conversation search: the query, the people found, and where
+    /// the reader is among them.
+    ///
+    /// Its own state rather than reusing [`App::search`], which is scoped to the
+    /// open conversation: this one is about the chat list, and the two can be
+    /// live at once without either overwriting the other.
+    user_search: UserSearchState,
+
     /// The message the next composed message answers, if it is a reply.
     pub reply_to: Option<i64>,
 
@@ -1361,6 +1390,7 @@ impl App {
             status: IDLE_STATUS.to_string(),
             should_quit: false,
             search: SearchState::default(),
+            user_search: UserSearchState::default(),
             reply_to: None,
             editing: None,
             sending: None,
@@ -1470,6 +1500,13 @@ impl App {
     #[must_use]
     pub fn search(&self) -> &SearchState {
         &self.search
+    }
+
+    /// The new-conversation search, for the overlay to draw and the status line
+    /// to name.
+    #[must_use]
+    pub fn user_search(&self) -> &UserSearchState {
+        &self.user_search
     }
 
     /// What the reader has selected, for the panel to mark and the operations to
@@ -3287,6 +3324,16 @@ impl App {
             return;
         }
 
+        // The new-conversation overlay owns the keys that would otherwise move
+        // the pane under it, for as long as it is open: `j`/`k` and the arrows
+        // walk the candidates, `Enter` accepts one, and `Esc` puts the list away.
+        // It is skipped while the line has the focus, because the same letters
+        // have to type into a fresh query. Every other key is passed through:
+        // the overlay is a short list drawn over the chat list, not a mode.
+        if self.focus != Focus::Input && self.handle_user_search(key) {
+            return;
+        }
+
         // Pane movement is the one thing every pane answers the same way, so it
         // is read here rather than bound in each of them.
         match key.code {
@@ -3348,6 +3395,15 @@ impl App {
             // The list is the only pane beside this one, so both keys are the
             // way into it.
             KeyCode::Char('h' | 'l') => self.set_focus(Focus::Conversation),
+
+            // `/` here finds a person rather than a message: the conversation's
+            // own `/` searches the window, and there is no window to hand this
+            // one to, so the list gets its own search instead of borrowing a
+            // scope it does not have.
+            KeyCode::Char('/') => {
+                self.pending_g = false;
+                self.begin_new_chat("");
+            }
 
             // The account's own card, from the list as well as from the
             // conversation: a reader looking for settings has usually not opened a
@@ -3531,6 +3587,17 @@ impl App {
         self.line.open(PromptKind::Reply);
         self.reply_to = Some(id);
         self.editing = None;
+    }
+
+    /// Opens the line to find a person to talk to, with `query` already in it.
+    ///
+    /// The one opener for this prompt, from `/` on the chat list and from
+    /// `:new`, so the two routes cannot drift apart. A draft is not carried in:
+    /// the previous query is not the reader's words to keep, and a fresh search
+    /// starts clean.
+    fn begin_new_chat(&mut self, query: &str) {
+        self.focus = Focus::Input;
+        self.line.open_with(PromptKind::NewChat, query.to_owned());
     }
 
     /// Opens the buffer with the cursor's own message in it, for editing.
@@ -3820,6 +3887,82 @@ impl App {
         }
 
         true
+    }
+
+    /// Handles the keys the new-conversation overlay takes while it is open.
+    ///
+    /// Answers whether the key was consumed. Only the list's own keys are: the
+    /// arrows and `j`/`k` move the highlight, `Enter` accepts the person on it,
+    /// and `Esc` puts the list away. Everything else — a letter, `Tab`, `:` — is
+    /// passed through to the pane, because the overlay is a short list drawn
+    /// over the chat list and not a mode of its own.
+    fn handle_user_search(&mut self, key: KeyEvent) -> bool {
+        if !self.user_search.is_active() || key.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_user_selection(false),
+            KeyCode::Down | KeyCode::Char('j') => self.move_user_selection(true),
+            KeyCode::Enter => self.accept_user_search(),
+            KeyCode::Esc => self.dismiss_user_search(),
+            _ => return false,
+        }
+
+        true
+    }
+
+    /// Moves the user-search highlight one candidate, wrapping.
+    fn move_user_selection(&mut self, forward: bool) {
+        self.user_search
+            .move_selection(if forward { 1 } else { -1 });
+    }
+
+    /// Puts the new-conversation overlay away and forgets the search.
+    ///
+    /// Forgetting rather than hiding: the query and its results belong to one
+    /// question, and a list left behind would reappear under the next search
+    /// before that search had asked anything.
+    fn dismiss_user_search(&mut self) {
+        self.user_search.clear();
+    }
+
+    /// Accepts the person the overlay is on.
+    ///
+    /// With nothing to accept this does nothing, which is what an empty list
+    /// means. Otherwise the choice goes to [`App::open_user`].
+    fn accept_user_search(&mut self) {
+        let Some(candidate) = self.user_search.selected_candidate().cloned() else {
+            return;
+        };
+
+        self.open_user(&candidate);
+    }
+
+    /// Opens the conversation with a person the search found, or focuses the one
+    /// already there.
+    ///
+    /// **A person the chat list already holds is focused**, which is the local
+    /// half of "already-existing chats focus rather than duplicate": the match is
+    /// by identifier, because a private chat's identifier *is* the peer's, and
+    /// [`ChatList::ensure_private_chat`] returns that existing index untouched.
+    /// **Someone it does not hold is listed and opened**: the helper appends a
+    /// private chat in the candidate's name without disturbing the order, and
+    /// returns the new index.
+    ///
+    /// From there the open mirrors every other one — [`App::select_chat`] sets
+    /// the view and the read watermark up, the focus moves to the conversation,
+    /// and the overlay is forgotten — so an opened chat behaves like any other.
+    /// No dialog reload is needed for a single person: the candidate already
+    /// carries the name to list, which is Q6's recommended insertion path.
+    pub fn open_user(&mut self, user: &UserCandidate) {
+        let index = self
+            .list
+            .ensure_private_chat(user.user_id, user.display_name.clone());
+
+        self.select_chat(index);
+        self.set_focus(Focus::Conversation);
+        self.user_search.clear();
     }
 
     /// Moves the selected candidate one place, wrapping.
@@ -4204,6 +4347,10 @@ impl App {
                 let query = self.line.take();
                 self.run_search(query.trim());
             }
+            PromptKind::NewChat => {
+                let query = self.line.take();
+                self.submit_new_chat(query.trim());
+            }
             // Unreachable: a sign-in field answers `Enter` itself, so that its
             // `⏎` can be refused while a request is on its way — which a submit
             // with no way to refuse is.
@@ -4215,7 +4362,9 @@ impl App {
         // on the conversation. Clearing it would empty the field the reader
         // came for, and handing the focus to the conversation would route
         // their keys to an arm with nothing to say about a flow in progress.
-        if self.signin_field().is_some() {
+        // `:new` keeps its query line for the same reason: the reader is about
+        // to type into it, and the reset below would empty it.
+        if self.signin_field().is_some() || self.line.purpose() == PromptKind::NewChat {
             self.reply_to = None;
             self.editing = None;
             return;
@@ -4279,6 +4428,24 @@ impl App {
         });
     }
 
+    /// Starts a search for a person, purely locally.
+    ///
+    /// The list is cleared and marked in flight, and the lookup is queued: `tui`
+    /// cannot reach the network, so the caller performs it and answers with
+    /// [`App::apply_users`] or [`App::fail_users`]. An empty query asks nothing,
+    /// and a key that did nothing silently reads as a hang, so it says so.
+    fn submit_new_chat(&mut self, query: &str) {
+        if query.is_empty() {
+            self.flash("type a name or @username to search for");
+            return;
+        }
+
+        self.user_search.begin(query);
+        self.queue_action(Action::ResolveUser {
+            query: query.to_owned(),
+        });
+    }
+
     fn run_command(&mut self, cmd: &str) {
         match cmd {
             "q" | "quit" => self.request_quit(),
@@ -4288,6 +4455,11 @@ impl App {
             // two flows that could come to differ.
             "signin" => self.begin_signin(),
             "retry" => self.request_retry(),
+            // The explicit route to the same prompt `/` opens from the chat
+            // list. It opens the line rather than searching at once, so the
+            // reader can edit the query before it goes anywhere.
+            "new" => self.begin_new_chat(""),
+            _ if cmd.starts_with("new ") => self.begin_new_chat(cmd[4..].trim()),
             _ if cmd.starts_with("chat ") => {
                 if let Ok(id) = cmd[5..].trim().parse::<i64>()
                     && let Some(pos) = self.list.chats.iter().position(|c| c.id == id)
@@ -4448,6 +4620,30 @@ impl App {
         }
 
         self.search.fail(reason);
+    }
+
+    /// Fills the new-conversation list with the answer to `query`, if it is still
+    /// wanted.
+    ///
+    /// The stale-query refusal is the state's own, so a result for a query the
+    /// reader has replaced is dropped without the caller having to check.
+    /// Returns whether the answer landed.
+    pub fn apply_users(&mut self, query: &str, candidates: Vec<UserCandidate>) -> bool {
+        self.user_search.adopt(query, candidates)
+    }
+
+    /// Records that the lookup for `query` failed.
+    ///
+    /// Refused for a query the reader has replaced, for the same reason a result
+    /// is: a late failure must not close a list that belongs to a newer search.
+    /// Returns whether it landed.
+    pub fn fail_users(&mut self, query: &str, reason: String) -> bool {
+        if self.user_search.query() != Some(query) {
+            return false;
+        }
+
+        self.user_search.fail(reason);
+        true
     }
 
     // ---- the sign-in flow -----------------------------------------------
@@ -4983,6 +5179,10 @@ impl App {
         }
         widgets::input_bar::render(self, vertical[1], frame);
         widgets::emoji_popup::render(self, vertical[0], vertical[1], frame);
+        // The new-conversation choices are drawn over the chat list they were
+        // asked from, and above it — the `Clear` inside the widget is what makes
+        // the list a panel rather than a smear of two lists.
+        widgets::user_list::render(self, horizontal[0], frame);
         widgets::status_bar::render(self, vertical[2], frame);
     }
 
@@ -5172,7 +5372,11 @@ impl App {
             | PromptKind::Code
             | PromptKind::Password => "",
             PromptKind::Command => ":",
-            PromptKind::Search => "/",
+            // A message search and a person search are both queries, so they
+            // share the prefix. They are told apart by what answers them — the
+            // status label and the pane the list is drawn over — not by a
+            // second glyph.
+            PromptKind::Search | PromptKind::NewChat => "/",
         }
     }
 
@@ -5181,12 +5385,13 @@ impl App {
     /// A confirmation outranks everything: it is a question waiting for an
     /// answer, and it is over as soon as one is given. A selection comes next —
     /// also state the reader must not lose, and the one thing on screen whose
-    /// extent is not otherwise visible. A search's label is below it, and outranks
-    /// a transient status, because it describes state the reader must not lose: it
-    /// is not a `flash`, so `expire_status` must not be able to take it away.
-    /// Below both, a jump in flight — what the reader has just asked for — and
-    /// then the full reason a failed message failed while the cursor is on it, and
-    /// finally whatever was written to the status.
+    /// extent is not otherwise visible. The new-conversation search is below it,
+    /// and the conversation's own search below that; both outrank a transient
+    /// status, because each describes state the reader must not lose: neither is
+    /// a `flash`, so `expire_status` must not be able to take one away. Below
+    /// them, a jump in flight — what the reader has just asked for — and then the
+    /// full reason a failed message failed while the cursor is on it, and finally
+    /// whatever was written to the status.
     ///
     /// A key inside the line is above all of them, because a keystroke cannot be
     /// deferred and none of the rest is a question waiting for a reply: a reader
@@ -5226,6 +5431,13 @@ impl App {
         }
         if let Some(selection) = &self.selection {
             return selection_note(selection, self.selection_len().unwrap_or(0));
+        }
+        // The new-conversation search outranks the conversation's own, and both
+        // describe state the reader must not lose, so both sit above the flash.
+        // A reader who asked for a person is asking the wider question, and its
+        // label names where the answer stands.
+        if self.user_search.is_active() {
+            return self.user_search.label();
         }
         if self.search.is_active() {
             return self.search.label();
@@ -10416,5 +10628,245 @@ mod tests {
                 .waiting,
             "no client, no in-flight request"
         );
+    }
+
+    // ---- finding a person to start a conversation with --------------------
+
+    /// A person a user search offered.
+    fn candidate(user_id: i64) -> UserCandidate {
+        UserCandidate {
+            user_id,
+            display_name: format!("user-{user_id}"),
+            username: Some(format!("user{user_id}")),
+        }
+    }
+
+    /// Runs `/`-on-the-chat-list and submits `query`, leaving the search open.
+    fn start_user_search(app: &mut App, query: &str) {
+        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('/')));
+        type_text(app, query);
+        app.handle_key(press(KeyCode::Enter));
+    }
+
+    /// `/` on the chat list opens the new-conversation query, not the message
+    /// search: the two are different questions and must not share a prompt.
+    #[test]
+    fn a_slash_on_the_chat_list_opens_the_new_chat_prompt() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('h')));
+        assert_eq!(app.focus, Focus::ChatList, "the list has the keys");
+
+        app.handle_key(press(KeyCode::Char('/')));
+
+        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.line.purpose(), PromptKind::NewChat);
+        assert_eq!(app.prompt_prefix(), "/", "it reads as a query");
+        assert!(!app.line.purpose().is_buffer(), "one line, insert only");
+    }
+
+    /// The conversation's own `/` is unchanged: it still searches the window.
+    #[test]
+    fn a_slash_on_the_conversation_still_opens_the_message_search() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('/')));
+
+        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.line.purpose(), PromptKind::Search);
+    }
+
+    /// Letters that are list keys on the overlay must still type into the query
+    /// while the prompt has the focus.
+    #[test]
+    fn j_and_k_type_into_the_new_chat_query() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('/')));
+
+        type_text(&mut app, "jk");
+
+        assert_eq!(app.line.text(), "jk", "the letters are the reader's");
+    }
+
+    /// Submitting queues one lookup and nothing else: the network is the
+    /// caller's, and `tui` does not reach it.
+    #[test]
+    fn submitting_a_new_chat_query_queues_exactly_one_lookup() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('/')));
+        type_text(&mut app, "  ada  ");
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(
+            app.take_action(),
+            Some(Action::ResolveUser {
+                query: "ada".to_owned()
+            }),
+            "the query is trimmed on its way out"
+        );
+        assert_eq!(app.take_action(), None, "an action is taken once");
+        assert_eq!(app.focus, Focus::Conversation);
+        assert!(app.line.is_empty(), "the prompt has given up its query");
+        assert!(app.user_search().is_active(), "and the search is on show");
+        assert_eq!(app.user_search().query(), Some("ada"));
+    }
+
+    /// An empty query asks nothing and says so, rather than leaving the reader
+    /// on a line that looks like it did something.
+    #[test]
+    fn submitting_an_empty_new_chat_query_says_so() {
+        let mut app = App::mock();
+        app.handle_key(press(KeyCode::Char('h')));
+        app.handle_key(press(KeyCode::Char('/')));
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert!(app.take_action().is_none(), "nothing was asked");
+        assert!(!app.user_search().is_active());
+        assert!(app.status_text().contains("name"), "{}", app.status_text());
+    }
+
+    /// `:new` opens the same prompt with the query already in it, and the line
+    /// keeps the keys: the submit reset must not wipe what the reader came to
+    /// type into.
+    #[test]
+    fn the_new_command_leaves_the_query_line_open_and_typed_into() {
+        let mut app = App::mock();
+        run_command_line(&mut app, "new ada");
+
+        assert_eq!(app.line.purpose(), PromptKind::NewChat);
+        assert_eq!(app.focus, Focus::Input, "the line keeps the keys");
+        assert_eq!(app.line.text(), "ada", "the query is pre-filled");
+
+        app.handle_key(press(KeyCode::Char(' ')));
+        assert_eq!(app.line.text(), "ada ", "and typing continues in it");
+    }
+
+    /// The status line names the query and the count while an answer is in
+    /// flight, after it lands, and when it fails.
+    #[test]
+    fn the_status_line_names_the_user_search_through_every_state() {
+        let mut app = App::mock();
+        start_user_search(&mut app, "ada");
+        assert_eq!(app.status_text(), "/ada — searching…");
+
+        assert!(app.apply_users("ada", vec![candidate(1), candidate(2)]));
+        assert_eq!(app.status_text(), "/ada — 2 candidates");
+
+        assert!(app.fail_users("ada", "flood wait".to_owned()));
+        assert_eq!(
+            app.status_text(),
+            "/ada — 2 candidates (search failed: flood wait)"
+        );
+    }
+
+    /// A user search outranks the conversation's own, the rank the design gives
+    /// it: the wider question wins while both are live.
+    #[test]
+    fn the_user_search_label_outranks_the_message_search_label() {
+        let mut app = App::mock();
+        start_user_search(&mut app, "ada");
+        assert!(app.apply_users("ada", vec![candidate(1)]));
+
+        // A conversation search, so both states are live at once.
+        app.handle_key(press(KeyCode::Char('/')));
+        type_text(&mut app, "the");
+        app.handle_key(press(KeyCode::Enter));
+        assert!(app.search().is_active(), "the message search is running");
+
+        assert_eq!(app.status_text(), "/ada — 1 candidate");
+    }
+
+    /// A result for a query the reader has replaced is dropped, the same
+    /// discipline the message search's server pass gets.
+    #[test]
+    fn a_user_result_for_a_replaced_query_is_refused() {
+        let mut app = App::mock();
+        start_user_search(&mut app, "bar");
+
+        assert!(!app.apply_users("foo", vec![candidate(2)]));
+        assert!(!app.fail_users("foo", "too late".to_owned()));
+        assert_eq!(app.user_search().query(), Some("bar"));
+    }
+
+    /// The arrows and `j`/`k` walk the list while it is open, and it wraps at
+    /// both ends.
+    #[test]
+    fn the_user_search_selection_wraps_in_both_directions() {
+        let mut app = App::mock();
+        start_user_search(&mut app, "x");
+        assert!(app.apply_users("x", vec![candidate(1), candidate(2), candidate(3)]));
+
+        app.handle_key(press(KeyCode::Char('j')));
+        assert_eq!(app.user_search().selected(), 1, "`j` moves the list down");
+        app.handle_key(press(KeyCode::Down));
+        assert_eq!(app.user_search().selected(), 2);
+        app.handle_key(press(KeyCode::Down));
+        assert_eq!(
+            app.user_search().selected(),
+            0,
+            "and the last wraps to the first"
+        );
+        app.handle_key(press(KeyCode::Char('k')));
+        assert_eq!(
+            app.user_search().selected(),
+            2,
+            "`k` wraps back the other way"
+        );
+    }
+
+    /// `Esc` puts the list away and forgets it, so the next search starts from
+    /// nothing rather than under the last one's results.
+    #[test]
+    fn escape_clears_the_user_search_overlay() {
+        let mut app = App::mock();
+        start_user_search(&mut app, "x");
+        assert!(app.apply_users("x", vec![candidate(1)]));
+
+        app.handle_key(press(KeyCode::Esc));
+
+        assert!(!app.user_search().is_active());
+        assert_eq!(app.user_search().candidates().len(), 0);
+    }
+
+    /// Accepting a person the list already holds focuses that chat rather than
+    /// opening a second one.
+    #[test]
+    fn accepting_a_candidate_that_is_already_a_chat_focuses_it() {
+        let mut app = App::mock();
+        let before = app.chats().len();
+        start_user_search(&mut app, "ada");
+        assert!(app.apply_users("ada", vec![candidate(MOCK_CHAT)]));
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.current_chat_id(), MOCK_CHAT);
+        assert_eq!(app.chats().len(), before, "no duplicate chat was made");
+        assert!(!app.user_search().is_active(), "and the list is put away");
+    }
+
+    /// Accepting a person the list does not hold lists them once and opens the
+    /// conversation on them — the new-chat path, not a duplicate.
+    #[test]
+    fn accepting_a_candidate_that_is_not_a_chat_lists_and_opens_them() {
+        let mut app = App::mock();
+        let before = app.chats().len();
+        let person = candidate(MOCK_CHAT + 99);
+        start_user_search(&mut app, "ada");
+        assert!(app.apply_users("ada", vec![person.clone()]));
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.current_chat_id(), person.user_id, "their chat is open");
+        assert_eq!(app.chats().len(), before + 1, "and listed exactly once");
+        assert!(
+            app.chats().iter().any(|chat| chat.id == person.user_id),
+            "the listed chat is them"
+        );
+        assert!(!app.user_search().is_active(), "and the list is put away");
     }
 }

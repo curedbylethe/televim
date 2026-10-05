@@ -17,6 +17,7 @@ pub mod search;
 pub mod selection;
 pub mod session;
 pub mod updates;
+pub mod user;
 pub mod vim;
 
 pub use message::{MediaKind, Message, MessageStatus};

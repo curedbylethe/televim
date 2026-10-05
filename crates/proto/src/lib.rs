@@ -70,6 +70,7 @@ pub mod media;
 pub mod messages;
 pub mod search;
 mod types;
+pub mod users;
 
 #[cfg(feature = "live")]
 pub mod client;

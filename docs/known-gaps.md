@@ -207,6 +207,29 @@ Real, and named so they are not mistaken for oversights:
   drafts server-side. Persisting it would need a store in `app` — which owns the
   configuration path — and is deferred; see [`decisions.md`](./decisions.md).
 
+- **The new-chat prompt's prefix and the status sentence's punctuation differ
+  between the model and the binary.** The revised design run agrees with the
+  binary on the invocation (`/` on the chat list, `:new <query>`), the
+  submit-time list, the `New chat` titles, the `j`/`k`/`↑`/`↓`/`⏎`/`Esc` keys,
+  the `chat`/`new` standing, and the `match` ink — but two small drawing details
+  remain. The model draws the prompt line with **no prefix**, beside `Find`'s `/`
+  and `Command`'s `:`; the binary draws the shared `/` prefix, because the person
+  search is the message search's idiom and the two are told apart by what answers
+  them rather than by a second glyph (`App::prompt_prefix`). And the model writes
+  the status sentence with an ASCII hyphen and three dots — `/query -
+  searching...` — where the binary uses the design system's own em dash and
+  ellipsis — `/query — searching…` — the punctuation the conversation's search
+  label has always used (`SearchState::label`). Each is a one-line change in the
+  binary, but neither is a hand edit to `DESIGN.md` or the engine
+  (`design/README.md`); a design run settles them.
+- **The new-chat row order and a new chat's place in the list are the binary's
+  own.** The model sorts its local candidates closest-match, then
+  no-conversation-first, then by name, and inserts a new conversation at the top
+  of the list; the binary draws the candidates in the order the lookup returned
+  them and appends a new chat (`ChatList::ensure_private_chat`, which leaves the
+  existing order alone rather than guessing a comparator). Both are properties of
+  the lookup and the chat list rather than of the widget.
+
 ## v2 Hooks
 
 The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists and returns bytes, and the `tokio::fs` cache and any viewer are what is still ahead of it.
