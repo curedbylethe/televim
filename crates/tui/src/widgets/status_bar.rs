@@ -16,23 +16,23 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     // has the focus is the border's to say, not this row's.
     let label = input_bar::mode_label(app);
 
-    let style = match (app.focus == crate::app::Focus::Input, app.mode) {
+    let style = match (app.ui.focus == crate::app::Focus::Input, app.ui.mode) {
         // Named rather than wildcarded, for the same reason `mode_label` names
         // them: a mode that only the conversation can be in should say so.
-        (false, Mode::Visual) => app.theme.mode_visual,
-        (false, Mode::Confirm) => app.theme.mode_confirm,
+        (false, Mode::Visual) => app.ui.theme.mode_visual,
+        (false, Mode::Confirm) => app.ui.theme.mode_confirm,
         // The line's insert is the one mode that is not the conversation's, and
         // it is the one the bar's border is on as well — a reader who cannot
         // see where the caret is should at least be able to see which mode the
         // keys they are about to press will mean.
-        (true, Mode::Normal) if label != Mode::Normal.label() => app.theme.mode_insert,
-        _ => app.theme.mode_normal,
+        (true, Mode::Normal) if label != Mode::Normal.label() => app.ui.theme.mode_insert,
+        _ => app.ui.theme.mode_normal,
     };
 
     let line = Line::from(vec![
         Span::styled(format!(" {label} "), style),
         Span::raw(" "),
-        Span::styled(app.status_text(), app.theme.text_dim),
+        Span::styled(app.status_text(), app.ui.theme.text_dim),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);

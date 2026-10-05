@@ -246,7 +246,7 @@ const ALL_HINTS: [&str; 15] = [
 /// look like output.
 #[must_use]
 pub fn hint(app: &App) -> &'static str {
-    match (app.focus, app.mode) {
+    match (app.ui.focus, app.ui.mode) {
         // The sign-in surface, above every other row: it is not a pane and it is
         // not a card, so nothing about the pair describes it. The keys are the
         // field's while one is open and the flow's while it is not.
@@ -279,7 +279,8 @@ pub fn hint(app: &App) -> &'static str {
         // the mode: a card is in the right-hand column with the focus on it, so
         // without this the pair below would answer for it. Two rows, because the
         // two subjects do not have the same keys.
-        (Focus::Conversation, Mode::Normal) if app.pane.is_profile() => match app.card_subject() {
+        (Focus::Conversation, Mode::Normal) if app.ui.pane.is_profile() => match app.card_subject()
+        {
             crate::card::CardSubject::SelfAccount => match app.session.account {
                 // The signed-out shell has no rows to move over and no draft to
                 // continue, so its row names the command that fixes it and `q`.
@@ -312,7 +313,7 @@ pub fn hint(app: &App) -> &'static str {
 /// whole of what the line is doing.
 #[must_use]
 pub fn mode_label(app: &App) -> &'static str {
-    match (app.focus, app.mode) {
+    match (app.ui.focus, app.ui.mode) {
         (Focus::Input, _) if app.input.line.purpose().is_buffer() => {
             match app.input.line.status() {
                 "VISUAL" => Mode::Visual.label(),
@@ -338,7 +339,7 @@ pub fn mode_label(app: &App) -> &'static str {
 /// the conversation for nothing.
 #[must_use]
 pub fn content_rows(app: &App, width: u16) -> usize {
-    if app.focus != Focus::Input || app.input.line.text().is_empty() {
+    if app.ui.focus != Focus::Input || app.input.line.text().is_empty() {
         return 1;
     }
 
@@ -365,7 +366,7 @@ pub fn title(app: &App) -> String {
         PromptKind::Code => " Login code ".to_owned(),
         PromptKind::Password => " Password ".to_owned(),
         _ => match (
-            app.focus,
+            app.ui.focus,
             app.input.line.purpose(),
             app.input.line.is_empty(),
         ) {
@@ -385,7 +386,7 @@ pub fn title(app: &App) -> String {
 }
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
-    let focused = app.focus == Focus::Input;
+    let focused = app.ui.focus == Focus::Input;
 
     // The columns and rows the text has, which is the area less the border.
     let width = area.width.saturating_sub(2).max(1);
@@ -474,7 +475,7 @@ fn body_row<'a>(
 
     let mut spans = Vec::new();
     if let Some(lead) = lead {
-        spans.push(Span::styled(lead, app.theme.text_dim));
+        spans.push(Span::styled(lead, app.ui.theme.text_dim));
     }
 
     let row = text_row::TextRow {
@@ -495,7 +496,7 @@ fn body_row<'a>(
         concealed: app.input.line.concealed(),
         // `status()` rather than a mode of this panel's own, because the line's
         // mode is the line's and the bar already reads it to pick its hint.
-        ink: text_row::Ink::draft(&app.theme, focused, app.input.line.status() == "NORMAL"),
+        ink: text_row::Ink::draft(&app.ui.theme, focused, app.input.line.status() == "NORMAL"),
     };
 
     spans.extend(match mode {
@@ -522,10 +523,10 @@ fn body_row<'a>(
 /// The bar does not take the focus visually, it *is* the focus, so it is the
 /// one pane whose border is on exactly when the line is.
 fn border(app: &App) -> Style {
-    if app.focus == Focus::Input {
-        app.theme.border_focused
+    if app.ui.focus == Focus::Input {
+        app.ui.theme.border_focused
     } else {
-        app.theme.border
+        app.ui.theme.border
     }
 }
 

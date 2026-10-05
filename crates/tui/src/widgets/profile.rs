@@ -72,10 +72,10 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 
 /// The panel's border, focused when the keys are going here.
 fn border(app: &App) -> Style {
-    if app.focus.is_profile(app.pane) {
-        app.theme.border_focused
+    if app.ui.focus.is_profile(app.ui.pane) {
+        app.ui.theme.border_focused
     } else {
-        app.theme.border
+        app.ui.theme.border
     }
 }
 
@@ -92,7 +92,7 @@ fn shell(app: &App, width: u16) -> Vec<Line<'_>> {
         return match &contact.state {
             AccountState::Unfetched => vec![Line::from(Span::styled(
                 "reading their profile…",
-                app.theme.text_dim,
+                app.ui.theme.text_dim,
             ))],
             // The reason for the same reason the account's is, and more so here: a
             // clipped reason is a reason the reader cannot act on, and the whole
@@ -100,9 +100,9 @@ fn shell(app: &App, width: u16) -> Vec<Line<'_>> {
             AccountState::Unavailable(reason) => {
                 let mut lines = vec![Line::from(Span::styled(
                     "could not read this profile",
-                    app.theme.text,
+                    app.ui.theme.text,
                 ))];
-                lines.extend(wrapped(&app.theme.text_dim, reason, width));
+                lines.extend(wrapped(&app.ui.theme.text_dim, reason, width));
                 lines
             }
             // Known, so `card::rows` had rows and this was never called.
@@ -113,7 +113,7 @@ fn shell(app: &App, width: u16) -> Vec<Line<'_>> {
     match &app.session.account {
         AccountState::Unfetched => vec![Line::from(Span::styled(
             "reading the account…",
-            app.theme.text_dim,
+            app.ui.theme.text_dim,
         ))],
         // The reason wraps for the same reason a bio does, and it matters more
         // that it does: a reason clipped at the panel's edge is a reason the
@@ -126,11 +126,11 @@ fn shell(app: &App, width: u16) -> Vec<Line<'_>> {
         // card is two lines — that there is no session, and where to put the
         // credentials back. A blank row between them is a row saying nothing.
         AccountState::Unavailable(reason) => {
-            let mut lines = vec![Line::from(Span::styled("not signed in", app.theme.text))];
+            let mut lines = vec![Line::from(Span::styled("not signed in", app.ui.theme.text))];
             if !reason.is_empty() {
-                lines.extend(wrapped(&app.theme.text_dim, reason, width));
+                lines.extend(wrapped(&app.ui.theme.text_dim, reason, width));
             }
-            lines.extend(wrapped(&app.theme.text_dim, SET_CREDENTIALS, width));
+            lines.extend(wrapped(&app.ui.theme.text_dim, SET_CREDENTIALS, width));
             lines
         }
         AccountState::Known(_) => Vec::new(),

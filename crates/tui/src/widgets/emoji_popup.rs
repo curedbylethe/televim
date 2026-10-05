@@ -99,8 +99,8 @@ pub fn render(app: &App, above: Rect, bar: Rect, frame: &mut Frame<'_>) {
                 .shortcode()
                 .map_or_else(String::new, |code| format!(" {code}"));
             ListItem::new(Line::from(vec![
-                Span::styled(emoji.as_str(), app.theme.text),
-                Span::styled(code, app.theme.text_dim),
+                Span::styled(emoji.as_str(), app.ui.theme.text),
+                Span::styled(code, app.ui.theme.text_dim),
             ]))
         })
         .collect();
@@ -109,9 +109,9 @@ pub fn render(app: &App, above: Rect, bar: Rect, frame: &mut Frame<'_>) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(app.theme.border),
+                .border_style(app.ui.theme.border),
         )
-        .highlight_style(app.theme.selection);
+        .highlight_style(app.ui.theme.selection);
 
     // The real index, and `List` scrolls it into view itself — the same as the
     // conversation panel, and the reason this widget has no offset arithmetic.

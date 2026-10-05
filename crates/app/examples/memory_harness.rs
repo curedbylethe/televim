@@ -76,7 +76,7 @@ fn main() {
 
     let mut app = App::new();
     app.record_now(FIXED_NOW);
-    "measuring".clone_into(&mut app.status);
+    "measuring".clone_into(&mut app.ui.status);
     app.set_chats(fixture_chats());
     app.select_chat(0);
 

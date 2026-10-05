@@ -257,7 +257,7 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
     // while the window is open would make the same conversation two different
     // heights depending on when it was asked.
     let mut app = App::new().with_bidi(cfg.bidi_mode());
-    "connecting…".clone_into(&mut app.status);
+    "connecting…".clone_into(&mut app.ui.status);
 
     // What the configuration carries goes into the sign-in flow as pre-fills,
     // and nothing more: the flow is where a phone number, a code and a password
@@ -300,7 +300,7 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
             keypress_to_probe = None;
         }
 
-        if app.should_quit {
+        if app.ui.should_quit {
             break;
         }
 

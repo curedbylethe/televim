@@ -512,16 +512,16 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
 /// is a hole in it. An action is dim whether or not the cursor is on it, because it
 /// is a promise rather than a value and dimming is how the panel says so.
 fn ink_for(app: &App, row: &CardRow, on_cursor: bool) -> Ink {
-    let base = Ink::readonly(&app.theme);
+    let base = Ink::readonly(&app.ui.theme);
     if on_cursor {
         return Ink {
-            plain: app.theme.selection,
+            plain: app.ui.theme.selection,
             ..base
         };
     }
     if row.is_action() {
         return Ink {
-            plain: app.theme.text_dim,
+            plain: app.ui.theme.text_dim,
             ..base
         };
     }

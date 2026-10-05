@@ -1368,12 +1368,12 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             // reader chose this, so a line saying why it could not read a
             // profile would be an excuse nobody asked for.
             app.set_account(Err(String::new()));
-            "signed out".clone_into(&mut app.status);
+            "signed out".clone_into(&mut app.ui.status);
         }
 
         // A real failure, so the real-failure wording. The deliberate-refusal
         // words are gone with the refusal they belonged to.
-        Err(reason) => app.status = format!("could not sign out: {reason}"),
+        Err(reason) => app.ui.status = format!("could not sign out: {reason}"),
     }
 }
 
@@ -1391,7 +1391,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // sentence about the configuration, which is what the flow draws.
         Event::NoCredentials => {
             app.begin_no_credentials();
-            "televim has no application credentials".clone_into(&mut app.status);
+            "televim has no application credentials".clone_into(&mut app.ui.status);
         }
 
         // A flash would be the wrong lifetime here. The sentence is the only
@@ -1401,7 +1401,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // about the client: there is one either way, and the `Ready` beside it is
         // what puts the screen up.
         Event::SessionDiscarded(sentence) => {
-            app.status = sentence;
+            app.ui.status = sentence;
         }
 
         Event::CodeRequested { phone, result } => match result {
@@ -1564,7 +1564,7 @@ fn apply_jumped(
         // not interrupt.
         Err(error) => {
             app.clear_jump(jump.target_id);
-            app.status = format!("history: {error}");
+            app.ui.status = format!("history: {error}");
         }
     }
 }
@@ -1601,7 +1601,7 @@ fn apply_history(
         }
 
         Err(error) => {
-            app.status = format!("history: {error}");
+            app.ui.status = format!("history: {error}");
             state.history.retry_at = Some(Instant::now() + backoff(&error));
 
             // A first page that failed leaves nothing to count from, so
@@ -1627,7 +1627,7 @@ fn apply_history(
 fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
     let reason = format!("{reason:#}");
     app.set_account(Err(reason.clone()));
-    app.status = format!("offline: {reason}");
+    app.ui.status = format!("offline: {reason}");
     // No client to carry anything, so an in-flight sign-in is not in flight: the
     // flag would only keep the panel saying "Checking…".
     app.set_client_available(false);
@@ -1646,7 +1646,7 @@ fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
 /// so the two cannot disagree about what "reconnecting" looks like.
 fn apply_feed_ended(app: &mut App, state: &mut State) {
     state.reconnect_requested = true;
-    "reconnecting".clone_into(&mut app.status);
+    "reconnecting".clone_into(&mut app.ui.status);
 
     // Nothing has a client until the rebuilt one's `Ready`: the flag says so to
     // every surface that would otherwise claim a request can be carried.
@@ -1722,7 +1722,7 @@ fn apply_ready_to_screen(
     // Said last, because `login_complete` is what puts the status line back to
     // its resting sentence and would otherwise overwrite this.
     if !restored {
-        "the open conversation is no longer in the chat list".clone_into(&mut app.status);
+        "the open conversation is no longer in the chat list".clone_into(&mut app.ui.status);
     }
 }
 
@@ -1986,7 +1986,7 @@ fn apply_user_lookup_failed(app: &mut App, query: &str, reason: String) {
 fn open_first_chat(app: &mut App, chats: Vec<Chat>) {
     let count = chats.len();
     app.set_chats(chats);
-    app.status = format!("{count} conversation(s)");
+    app.ui.status = format!("{count} conversation(s)");
 
     if count > 0 {
         app.select_chat(0);
@@ -2052,7 +2052,7 @@ fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
     // A wait shorter than a second still has to be announced as one: "retrying in
     // 0s" reads as no retry at all.
     let seconds = retry.delay.as_secs().max(1);
-    app.status = format!(
+    app.ui.status = format!(
         "fetching the chat list failed ({:#}); retrying in {}s (attempt {}/{})",
         retry.reason, seconds, retry.attempt, retry.attempts
     );
@@ -2557,9 +2557,9 @@ mod tests {
         );
 
         assert!(
-            app.status.contains("31s") && app.status.contains("1/3"),
+            app.ui.status.contains("31s") && app.ui.status.contains("1/3"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -2577,7 +2577,7 @@ mod tests {
             app.conversation.conversation.window.chat_id, CHAT,
             "the list is newest first, so the first entry is the one to open"
         );
-        assert!(app.status.contains('2'), "got {:?}", app.status);
+        assert!(app.ui.status.contains('2'), "got {:?}", app.ui.status);
     }
 
     #[test]
@@ -2733,7 +2733,11 @@ mod tests {
             },
         );
 
-        assert!(app.status.contains("history:"), "got {:?}", app.status);
+        assert!(
+            app.ui.status.contains("history:"),
+            "got {:?}",
+            app.ui.status
+        );
         assert_eq!(
             app.pending_jump(),
             None,
@@ -2879,7 +2883,11 @@ mod tests {
             },
         );
 
-        assert!(app.status.contains("history:"), "got {:?}", app.status);
+        assert!(
+            app.ui.status.contains("history:"),
+            "got {:?}",
+            app.ui.status
+        );
         assert!(
             state.history.cursor.is_none(),
             "nothing was loaded, so the next pass opens the conversation again"
@@ -2901,9 +2909,9 @@ mod tests {
         );
 
         assert!(
-            app.status.starts_with("offline:") && app.status.contains("credentials"),
+            app.ui.status.starts_with("offline:") && app.ui.status.contains("credentials"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -2988,9 +2996,9 @@ mod tests {
         drive(&mut app, &mut state, &tx);
 
         assert!(
-            app.status.contains("already trying to connect"),
+            app.ui.status.contains("already trying to connect"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3033,7 +3041,7 @@ mod tests {
 
         apply(&mut app, &mut state, Event::FeedEnded);
 
-        assert_eq!(app.status, "reconnecting");
+        assert_eq!(app.ui.status, "reconnecting");
         assert!(
             state.reconnect_requested,
             "the driver is told to carry the reconnect out"
@@ -3052,7 +3060,7 @@ mod tests {
             "nothing was queued against a client that is gone"
         );
         assert_eq!(
-            app.status, "not connected yet — the client is not up",
+            app.ui.status, "not connected yet — the client is not up",
             "the client flag was cleared"
         );
     }
@@ -3100,9 +3108,9 @@ mod tests {
         drive(&mut app, &mut state, &tx);
 
         assert!(
-            app.status.starts_with("offline:") && app.status.contains("feed"),
+            app.ui.status.starts_with("offline:") && app.ui.status.contains("feed"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
         assert!(!state.bringing_up, "and it is not a bring-up");
     }
@@ -3164,9 +3172,9 @@ mod tests {
         apply_deleted(&mut app, CHAT, &[1, 2, 3], Err(partial()));
 
         assert_eq!(
-            app.status, "delete: 200 of 3 went through, the rest did not",
+            app.ui.status, "delete: 200 of 3 went through, the rest did not",
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3184,9 +3192,9 @@ mod tests {
         apply_deleted(&mut app, CHAT, &[1], Err(failed()));
 
         assert_eq!(
-            app.status, "delete: network error: reset",
+            app.ui.status, "delete: network error: reset",
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3206,7 +3214,7 @@ mod tests {
             })),
         );
 
-        assert_eq!(app.status, "televim", "got {:?}", app.status);
+        assert_eq!(app.ui.status, "televim", "got {:?}", app.ui.status);
     }
 
     // ---- what a send answers --------------------------------------------
@@ -3295,9 +3303,9 @@ mod tests {
             "the in-flight send holds the key, so the new conversation is not given the id"
         );
         assert!(
-            app.status.contains("already on its way"),
+            app.ui.status.contains("already on its way"),
             "and the refusal is visible: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3710,7 +3718,7 @@ mod tests {
         );
 
         assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
-        assert_eq!(app.focus, tui::Focus::Input, "the field has the keys");
+        assert_eq!(app.ui.focus, tui::Focus::Input, "the field has the keys");
     }
 
     /// A reason is not a sign-in. A session that authorizes with a profile this
@@ -3857,9 +3865,9 @@ mod tests {
             "the highlight falls back to the top"
         );
         assert!(
-            app.status.contains("no longer"),
+            app.ui.status.contains("no longer"),
             "and the reader is told where they landed: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3951,7 +3959,7 @@ mod tests {
             Event::SessionDiscarded("the stored session could not be read".to_owned()),
         );
 
-        assert_eq!(app.status, "the stored session could not be read");
+        assert_eq!(app.ui.status, "the stored session could not be read");
         assert!(
             state.client.is_none(),
             "the sentence is about a session, not about a client"
@@ -3962,7 +3970,7 @@ mod tests {
             !app.expire_status(Instant::now() + Duration::from_secs(10)),
             "the sentence does not go away on its own"
         );
-        assert_eq!(app.status, "the stored session could not be read");
+        assert_eq!(app.ui.status, "the stored session could not be read");
     }
 
     // ---- signing out ---------------------------------------------------
@@ -3993,7 +4001,7 @@ mod tests {
         );
         assert!(state.client.is_none(), "and so did the client behind it");
         assert!(app.signin().is_none(), "the field is the next event's job");
-        assert_eq!(app.status, "signed out");
+        assert_eq!(app.ui.status, "signed out");
     }
 
     /// The whole sequence in two events: the sign-out empties the screen, and
@@ -4015,7 +4023,11 @@ mod tests {
         );
 
         assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
-        assert_eq!(app.focus, tui::Focus::Input, "and the keys are going there");
+        assert_eq!(
+            app.ui.focus,
+            tui::Focus::Input,
+            "and the keys are going there"
+        );
     }
 
     /// A failure is a failure, and the reader is still signed in: the framework
@@ -4042,7 +4054,7 @@ mod tests {
 
         assert!(matches!(app.session.account, AccountState::Known(_)));
         assert_eq!(
-            app.status,
+            app.ui.status,
             "could not sign out: the session could not be cleared"
         );
     }
@@ -4136,7 +4148,7 @@ mod tests {
         apply(&mut app, &mut state, Event::NoCredentials);
 
         assert_eq!(app.signin(), Some(&tui::app::SignIn::NoCredentials));
-        assert_eq!(app.status, "televim has no application credentials");
+        assert_eq!(app.ui.status, "televim has no application credentials");
         assert!(
             state.client.is_none(),
             "there is no client to have asked for anything"
@@ -4159,7 +4171,7 @@ mod tests {
     /// The lookup the `⏎` queues is the caller's, not this test's, so it is
     /// drained rather than left to surprise the next read.
     fn begin_user_query(app: &mut App, query: &str) {
-        app.focus = Focus::ChatList;
+        app.ui.focus = Focus::ChatList;
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in query.chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));

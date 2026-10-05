@@ -80,7 +80,7 @@ use domain::user::UserCandidate;
 /// room in it.
 fn overlay_area(app: &App, chat_list: Rect) -> Option<Rect> {
     let search = app.user_search();
-    if app.focus == Focus::Input || !search.is_active() || search.is_empty() {
+    if app.ui.focus == Focus::Input || !search.is_active() || search.is_empty() {
         return None;
     }
 
@@ -122,10 +122,10 @@ pub fn render(app: &App, chat_list: Rect, frame: &mut Frame<'_>) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(app.theme.border)
+                .border_style(app.ui.theme.border)
                 .title(" New chat "),
         )
-        .highlight_style(app.theme.selection);
+        .highlight_style(app.ui.theme.selection);
 
     // The real index, and `List` scrolls it into view itself — the same as the
     // emoji popup, and the reason this widget has no offset arithmetic.
@@ -159,12 +159,12 @@ fn candidate_row<'a>(
     // The ink the row's quieter parts take. On the cursor row it is the body ink,
     // because reverse video turns a dim foreground into a dim background.
     let quiet = if selected {
-        app.theme.text
+        app.ui.theme.text
     } else {
-        app.theme.text_dim
+        app.ui.theme.text_dim
     };
-    let base = app.theme.text;
-    let mark = app.theme.match_hit;
+    let base = app.ui.theme.text;
+    let mark = app.ui.theme.match_hit;
 
     let standing = if app.chats().iter().any(|chat| chat.id == candidate.user_id) {
         "chat"
@@ -586,7 +586,7 @@ mod tests {
 
         press(&mut app, KeyCode::Char('h'));
         press(&mut app, KeyCode::Char('/'));
-        assert_eq!(app.focus, Focus::Input, "the prompt is open again");
+        assert_eq!(app.ui.focus, Focus::Input, "the prompt is open again");
 
         let column = chat_list(&app, 80, 24);
         assert!(

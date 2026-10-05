@@ -51,10 +51,10 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     // The focused pane's border is the only thing on the screen that says where
     // a keystroke goes, so the two panes cannot both be drawn as though they had
     // it.
-    let border = if app.focus == Focus::Conversation {
-        app.theme.border_focused
+    let border = if app.ui.focus == Focus::Conversation {
+        app.ui.theme.border_focused
     } else {
-        app.theme.border
+        app.ui.theme.border
     };
 
     let block = Block::default()
@@ -172,7 +172,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     let mut state = ListState::default();
     state.select((!window.is_empty()).then(|| view.selection + above));
 
-    let list = List::new(items).highlight_style(app.theme.selection);
+    let list = List::new(items).highlight_style(app.ui.theme.selection);
     frame.render_stateful_widget(list, body, &mut state);
 
     if let Some(gutter) = gutter {
@@ -211,7 +211,7 @@ fn conversation_title(app: &App, width: u16) -> Line<'static> {
     if let Some(note) = typing_note(app)
         && title_note_fits(&head, note, width)
     {
-        spans.push(Span::styled(note, app.theme.text_dim));
+        spans.push(Span::styled(note, app.ui.theme.text_dim));
     }
     // The panel's title is padded on both sides rather than starting hard against
     // the corner, so the closing pad is here rather than at the end of the last
@@ -378,7 +378,7 @@ fn message_row<'m>(
     if place.first {
         if place.group.first {
             let who = if message.is_outgoing { "you" } else { "them" };
-            spans.push(Span::styled(format!("[{who}] "), app.theme.text_dim));
+            spans.push(Span::styled(format!("[{who}] "), app.ui.theme.text_dim));
         } else {
             // The tag is blank rather than absent, so this message's text begins
             // in the same column as the one that opened the group.
@@ -388,7 +388,7 @@ fn message_row<'m>(
         if let Some(reply_to) = message.reply_to {
             spans.push(Span::styled(
                 rows::reply_prefix(app, reply_to, width),
-                app.theme.text_dim,
+                app.ui.theme.text_dim,
             ));
         }
     }
@@ -399,7 +399,7 @@ fn message_row<'m>(
     let matched = app.search().is_match(message.id);
     if matched {
         for span in &mut spans {
-            span.style = span.style.patch(app.theme.match_hit);
+            span.style = span.style.patch(app.ui.theme.match_hit);
         }
     }
 
@@ -415,9 +415,9 @@ fn message_row<'m>(
     let placeholder = message.media.is_some() && message.text.is_empty();
     let row = text_row::TextRow {
         ink: if placeholder {
-            text_row::Ink::placeholder(&app.theme)
+            text_row::Ink::placeholder(&app.ui.theme)
         } else {
-            text_row::Ink::readonly(&app.theme)
+            text_row::Ink::readonly(&app.ui.theme)
         },
         text: message.display_body(),
         range: range.clone(),
@@ -469,10 +469,10 @@ fn message_row<'m>(
         if gap > 0 {
             spans.push(Span::raw(" ".repeat(gap)));
         }
-        spans.push(Span::styled(note, app.theme.text_dim));
+        spans.push(Span::styled(note, app.ui.theme.text_dim));
         if matched {
             let last_span = spans.len() - 1;
-            spans[last_span].style = spans[last_span].style.patch(app.theme.match_hit);
+            spans[last_span].style = spans[last_span].style.patch(app.ui.theme.match_hit);
         }
     }
 
@@ -482,7 +482,7 @@ fn message_row<'m>(
     // splitting it again would be splitting a row that is no longer one span.
     if let Some(Coverage::Whole) = covered {
         for span in &mut spans {
-            span.style = span.style.patch(app.theme.selection_bg);
+            span.style = span.style.patch(app.ui.theme.selection_bg);
         }
     }
 
@@ -494,7 +494,7 @@ fn message_row<'m>(
 /// The label is a `&'static str` rather than a borrow of anything: the row
 /// outlives the frame's own borrows, and every label here is a constant.
 fn loading(app: &App, label: &'static str) -> ListItem<'static> {
-    ListItem::new(Line::from(Span::styled(label, app.theme.text_dim)))
+    ListItem::new(Line::from(Span::styled(label, app.ui.theme.text_dim)))
 }
 
 /// A day separator: a rule across the panel with the day set into it.
@@ -522,9 +522,9 @@ fn separator(app: &App, label: &str, width: u16) -> ListItem<'static> {
     let left = rule / 2;
 
     ListItem::new(Line::from(vec![
-        Span::styled("─".repeat(left), app.theme.border),
-        Span::styled(format!(" {label} "), app.theme.text_dim),
-        Span::styled("─".repeat(rule - left), app.theme.border),
+        Span::styled("─".repeat(left), app.ui.theme.border),
+        Span::styled(format!(" {label} "), app.ui.theme.text_dim),
+        Span::styled("─".repeat(rule - left), app.ui.theme.border),
     ]))
 }
 
@@ -564,8 +564,8 @@ fn render_scrollbar(app: &App, area: Rect, frame: &mut Frame<'_>, view: &rows::S
         .viewport_content_length(view.budget);
 
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-        .thumb_style(app.theme.text)
-        .track_style(app.theme.text_dim);
+        .thumb_style(app.ui.theme.text)
+        .track_style(app.ui.theme.text_dim);
 
     frame.render_stateful_widget(scrollbar, area, &mut state);
 }
@@ -3423,9 +3423,10 @@ mod tests {
     /// that says nothing.
     fn lit_borders(focus: crate::app::Focus) -> [bool; 3] {
         let mut app = App::mock();
-        app.focus = focus;
+        app.ui.focus = focus;
         let screen = screen(&app, 80, 24);
         let focused = app
+            .ui
             .theme
             .border_focused
             .fg

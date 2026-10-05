@@ -8,3 +8,4 @@ pub mod outbox;
 pub mod pending;
 pub mod profile;
 pub mod session;
+pub mod ui;

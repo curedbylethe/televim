@@ -168,12 +168,12 @@ pub fn render(app: &App, signin: &SignIn, area: Rect, frame: &mut Frame<'_>) {
     // panel's to re-derive.
     let width = area.width.saturating_sub(3).max(1);
 
-    let mut lines: Vec<Line<'_>> = vec![Line::from(Span::styled(TITLE, app.theme.text))];
+    let mut lines: Vec<Line<'_>> = vec![Line::from(Span::styled(TITLE, app.ui.theme.text))];
 
     let flow = match signin {
         SignIn::NoCredentials => {
             lines.push(Line::from(""));
-            lines.extend(wrapped(&app.theme.text_dim, NO_CREDENTIALS, width));
+            lines.extend(wrapped(&app.ui.theme.text_dim, NO_CREDENTIALS, width));
             pad_all(&mut lines);
             frame.render_widget(Paragraph::new(lines).block(block), area);
             return;
@@ -181,7 +181,7 @@ pub fn render(app: &App, signin: &SignIn, area: Rect, frame: &mut Frame<'_>) {
         SignIn::Flow(flow) => flow,
     };
 
-    lines.extend(wrapped(&app.theme.text_dim, EXPLAIN, width));
+    lines.extend(wrapped(&app.ui.theme.text_dim, EXPLAIN, width));
     lines.push(Line::from(""));
 
     let at = row_of(app.signin_field());
@@ -227,9 +227,9 @@ fn field_row<'a>(
     // The row being asked for is the reader's ink and the others are dim, which
     // is how the reader knows which field the keys are for.
     let label_style = if asked && !flow.waiting {
-        app.theme.text
+        app.ui.theme.text
     } else {
-        app.theme.text_dim
+        app.ui.theme.text_dim
     };
     let label = clip(&row.label, width);
     spans.push(Span::styled(label.clone(), label_style));
@@ -243,11 +243,11 @@ fn field_row<'a>(
         columns = pad(&mut spans, columns, VALUE_OFFSET);
         let value = clip(value, width.saturating_sub(VALUE_OFFSET));
         columns += value.chars().count();
-        spans.push(Span::styled(value, app.theme.text));
+        spans.push(Span::styled(value, app.ui.theme.text));
     } else if waiting {
         columns = pad(&mut spans, columns, VALUE_OFFSET);
         columns += IN_FLIGHT.chars().count();
-        spans.push(Span::styled(IN_FLIGHT, app.theme.text_dim));
+        spans.push(Span::styled(IN_FLIGHT, app.ui.theme.text_dim));
     }
 
     if let Some(marker) = row.marker {
@@ -255,7 +255,7 @@ fn field_row<'a>(
         if columns + marker.chars().count() < width {
             pad(&mut spans, columns, width - marker.chars().count());
         }
-        spans.push(Span::styled(marker, app.theme.text));
+        spans.push(Span::styled(marker, app.ui.theme.text));
     }
 
     Line::from(spans)
@@ -288,11 +288,11 @@ fn password_hint(flow: &SignInFlow) -> Option<String> {
 /// and the status line is where such state lives — a sentence drawn inside the
 /// panel is a sentence that scrolls out of view.
 fn notes<'a>(app: &'a App, flow: &'a SignInFlow, at: usize, width: u16) -> Vec<Line<'a>> {
-    let dim = app.theme.text_dim;
+    let dim = app.ui.theme.text_dim;
     let mut out = vec![Line::from("")];
 
     if flow.waiting {
-        out.push(Line::from(Span::styled(CHECKING, app.theme.text)));
+        out.push(Line::from(Span::styled(CHECKING, app.ui.theme.text)));
         out.push(Line::from(Span::styled(
             "The request is in flight; ⏎ is refused.",
             dim,
@@ -322,7 +322,7 @@ fn notes<'a>(app: &'a App, flow: &'a SignInFlow, at: usize, width: u16) -> Vec<L
     if let Some(hint) = password_hint(flow) {
         out.push(Line::from(Span::styled(
             clip(&hint, usize::from(width)),
-            app.theme.text,
+            app.ui.theme.text,
         )));
     }
 
@@ -336,9 +336,9 @@ fn notes<'a>(app: &'a App, flow: &'a SignInFlow, at: usize, width: u16) -> Vec<L
 /// says so. Two lit borders would be two places claiming the same key.
 fn border(app: &App, signin: &SignIn) -> Style {
     if matches!(signin, SignIn::NoCredentials) {
-        app.theme.border_focused
+        app.ui.theme.border_focused
     } else {
-        app.theme.border
+        app.ui.theme.border
     }
 }
 
@@ -762,10 +762,10 @@ mod tests {
         // other: the row carries the way back and the sentence carries the why,
         // and it is the row that survives — a key pressed here writes over it.
         assert_eq!(
-            app.status,
+            app.ui.status,
             "the stored session is no longer valid — sign in again"
         );
-        app.focus = Focus::ChatList;
+        app.ui.focus = Focus::ChatList;
         assert!(
             flat(&rows_of(&screen(&app)))
                 .contains("the stored session is no longer valid — sign in again"),
@@ -847,7 +847,7 @@ mod tests {
             "and no action leaves for a caller"
         );
         assert_eq!(
-            app.status,
+            app.ui.status,
             "there is no phone number to ask for a code with"
         );
     }
@@ -869,14 +869,14 @@ mod tests {
 
         // Straight back to the field, as a caller reporting the request on every
         // pass would leave it: the guard is the point, not the focus.
-        app.focus = Focus::Input;
+        app.ui.focus = Focus::Input;
         press(&mut app, KeyCode::Enter);
         assert!(app.take_action().is_none(), "a second ⏎ must not ask twice");
-        assert_eq!(app.status, "still checking — the answer is on its way");
+        assert_eq!(app.ui.status, "still checking — the answer is on its way");
 
         press(&mut app, KeyCode::Enter);
         assert!(app.take_action().is_none(), "and it says it once");
-        assert_eq!(app.status, "still checking — the answer is on its way");
+        assert_eq!(app.ui.status, "still checking — the answer is on its way");
     }
 
     /// The step survives a trip away from the line; the code does not.
@@ -896,17 +896,20 @@ mod tests {
 
         // Away: paused, and the flow says so rather than vanishing.
         press(&mut app, KeyCode::Tab);
-        assert_eq!(app.focus, Focus::ChatList);
+        assert_eq!(app.ui.focus, Focus::ChatList);
         assert_eq!(app.signin_field(), Some(LoginField::Code));
-        assert_eq!(app.status, "sign-in paused; Tab brings it back");
+        assert_eq!(app.ui.status, "sign-in paused; Tab brings it back");
         assert_eq!(app.input.line.text(), "", "the code is dropped on the way");
 
         // And back: the step is still the code's, and the return says what went.
         press(&mut app, KeyCode::Tab);
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
         assert_eq!(app.signin_field(), Some(LoginField::Code));
         assert_eq!(app.input.line.purpose(), PromptKind::Code);
-        assert_eq!(app.status, "the code did not survive; ⏎ asks for a new one");
+        assert_eq!(
+            app.ui.status,
+            "the code did not survive; ⏎ asks for a new one"
+        );
     }
 
     /// `Esc` at the code asks for a new one and says what that cost.
@@ -927,7 +930,7 @@ mod tests {
         assert_eq!(app.input.line.purpose(), PromptKind::Phone);
         assert!(matches!(app.take_action(), Some(Action::LoginCancelled)));
         assert_eq!(
-            app.status,
+            app.ui.status,
             "cancelling discards the code Telegram sent; ⏎ asks for a new one"
         );
     }

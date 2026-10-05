@@ -1,6 +1,5 @@
 //! Top-level TUI state.
 
-use std::cell::Cell;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -34,7 +33,7 @@ use crate::state::outbox::Outbox;
 use crate::state::pending::Pending;
 use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
-use crate::theme::Theme;
+use crate::state::ui::{IDLE_STATUS, UiState};
 use crate::widgets;
 
 /// How close to an end of the loaded messages the cursor has to get before the
@@ -46,24 +45,6 @@ use crate::widgets;
 /// scrolling upwards is counting the screen: twenty messages that came to fill
 /// four rows is four rows from the top, not twenty.
 const FETCH_MARGIN: usize = 20;
-
-/// How many message rows the conversation panel is assumed to have before it
-/// has been drawn once.
-///
-/// Only the panel knows the real number, and only during a frame. This is what
-/// the key handling falls back on in between, and it is deliberately a normal
-/// size rather than a small one: a page that overshoots is clamped.
-const ASSUMED_ROWS: usize = 20;
-
-/// How many columns the conversation panel's messages are assumed to have
-/// before it has been drawn once.
-///
-/// The same fallback as [`ASSUMED_ROWS`] and for the same reason: the layout
-/// has to be answerable before the first frame.
-const ASSUMED_BODY_WIDTH: u16 = 80;
-
-/// What the status line shows before anything has happened.
-const IDLE_STATUS: &str = "televim";
 
 /// How long the highlight has to stay put before its conversation is opened.
 ///
@@ -968,22 +949,9 @@ impl Fetching {
 }
 
 /// Every piece of the screen's state, and the only thing that draws.
-///
-/// `struct_excessive_bools` is off deliberately: the booleans here are the
-/// screen's own facts rather than a state machine wearing a disguise — a
-/// [`Focus`] and a [`Mode`] already carry the two axes that could be enums.
-#[allow(clippy::struct_excessive_bools)]
 pub struct App {
-    pub mode: Mode,
-    pub focus: Focus,
-    pub theme: Theme,
-
-    /// What the right-hand pane is showing.
-    ///
-    /// A field rather than a variant of [`Focus`], because the two answer
-    /// different questions: this says what the right-hand column holds, and
-    /// `Focus` says where a keystroke lands. See [`Pane`].
-    pub pane: Pane,
+    /// Dispatch mode, focus, chrome, and the frame's measurements.
+    pub ui: UiState,
 
     /// The account's session and the sign-in surface.
     pub session: SessionState,
@@ -1007,67 +975,8 @@ pub struct App {
     /// The live input line and the emoji popup over it.
     pub input: InputState,
 
-    pub status: String,
-    pub should_quit: bool,
-
-    /// When a transient status stops applying, if it is transient.
-    status_until: Option<Instant>,
-
-    /// When the peer stops being shown as typing, and in which conversation.
-    ///
-    /// One conversation rather than one per chat, because the note is drawn on
-    /// the open conversation's title and nowhere else: an event for a chat the
-    /// reader is not in is dropped, and a note for a chat left behind belongs to
-    /// the chat that was left.
-    ///
-    /// The same deadline shape as [`App::status_until`] — an instant compared
-    /// only where the loop supplies one — because a frame is drawn from a shared
-    /// reference and cannot expire anything itself.
-    typing_until: Option<(i64, Instant)>,
-
-    /// How many message rows the conversation panel had room for as of the last
-    /// frame.
-    ///
-    /// A cell rather than a field because a frame is drawn from a shared
-    /// reference, and the panel is the only place that knows how tall the
-    /// terminal made it. It is a measurement rather than state anything decides,
-    /// so recording it late is the same as recording it at all.
-    rows: Cell<usize>,
-
-    /// How many columns the conversation panel's messages had room for as of
-    /// the last frame, which is the width the rows are laid out at.
-    ///
-    /// Recorded beside [`App::rows`] and for the same reason: only the panel
-    /// knows, and the layout cannot be worked out without it. What is given up
-    /// for the scrollbar is given up before this, so no message is ever laid
-    /// out — or drawn — under the bar.
-    body_width: Cell<u16>,
-
-    /// The unix second the reader's clock last read, as of the last frame.
-    ///
-    /// A measurement rather than state anything decides, for the same reason as
-    /// [`App::rows`] and [`App::body_width`]: only the host owns a clock, and this
-    /// crate reads none ([`crate::date`] is pure). Zero means no clock has been
-    /// recorded, which the day labels read as "say the date rather than `Today`"
-    /// rather than as 1970.
-    now: Cell<i64>,
-
     /// Per-peer parked drafts and read receipts.
     pub drafts: DraftStore,
-
-    /// Who permutes a right-to-left row: this program, or the terminal.
-    ///
-    /// **Fixed at construction**, and private so that it stays that way: the
-    /// layout is a pure function of the window, the panel's width and the clock
-    /// ([`crate::rows`], invariant 4), and a mode read out of mutable state while
-    /// a frame is being drawn would make the same conversation two different
-    /// heights depending on when it was asked. [`App::with_bidi`] is the one way
-    /// in, so a caller that has read the configuration says so once and every
-    /// later frame draws the same rows.
-    ///
-    /// [`BidiMode::Terminal`] — the default — emits rows as they are stored and
-    /// lets the terminal rearrange them, which is what a shaping terminal needs.
-    bidi: BidiMode,
 }
 
 impl Default for App {
@@ -1085,10 +994,7 @@ impl App {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            mode: Mode::Normal,
-            focus: Focus::Conversation,
-            theme: Theme::default(),
-            pane: Pane::Conversation,
+            ui: UiState::new(),
             session: SessionState::new(),
             profile: ProfileCard::new(),
             list: ChatListState::new(),
@@ -1096,15 +1002,7 @@ impl App {
             pending: Pending::new(),
             conversation: ConversationState::new(),
             input: InputState::new(),
-            status: IDLE_STATUS.to_string(),
-            should_quit: false,
-            status_until: None,
-            typing_until: None,
-            rows: Cell::new(ASSUMED_ROWS),
-            body_width: Cell::new(ASSUMED_BODY_WIDTH),
-            now: Cell::new(0),
             drafts: DraftStore::new(),
-            bidi: BidiMode::Terminal,
         }
     }
 
@@ -1118,7 +1016,7 @@ impl App {
     /// the application; nothing else needs to say anything.
     #[must_use]
     pub fn with_bidi(mut self, bidi: BidiMode) -> Self {
-        self.bidi = bidi;
+        self.ui.bidi = bidi;
         self
     }
 
@@ -1128,7 +1026,7 @@ impl App {
     /// layout — see the field's doc.
     #[must_use]
     pub fn bidi(&self) -> BidiMode {
-        self.bidi
+        self.ui.bidi
     }
 
     /// An application holding the sample conversation the tests read from.
@@ -1398,7 +1296,7 @@ impl App {
         self.conversation.conversation = ConversationView::new(0);
         // The note belongs to the chat being left: returning must not revive it,
         // so the deadline goes with the view rather than with the reader's memory.
-        self.typing_until = None;
+        self.ui.typing_until = None;
         self.conversation.vim = VimState::new(0);
         self.outbox.fetching.clear();
         self.pending.pending_jump = None;
@@ -1728,15 +1626,15 @@ impl App {
         self.profile.profile_caret = 0;
         self.profile.profile_visual = None;
         self.profile.profile_count = None;
-        self.pane = Pane::Profile(subject);
-        self.focus = Focus::Conversation;
-        self.mode = Mode::Normal;
+        self.ui.pane = Pane::Profile(subject);
+        self.ui.focus = Focus::Conversation;
+        self.ui.mode = Mode::Normal;
         self.conversation.selection = None;
     }
 
     /// Puts the conversation back in the right-hand pane.
     fn close_profile(&mut self) {
-        self.pane = Pane::Conversation;
+        self.ui.pane = Pane::Conversation;
         self.profile.profile_vim = VimState::new(0);
     }
 
@@ -2034,7 +1932,7 @@ impl App {
             // thing about a key that will eventually discard the one secret this
             // program holds.
             crate::card::LOGOUT => {
-                self.mode = Mode::Confirm;
+                self.ui.mode = Mode::Confirm;
                 self.conversation.confirm = Some(ConfirmKind::Logout);
             }
             _ => {}
@@ -2612,7 +2510,7 @@ impl App {
         if let UpdateEvent::NewMessage(message) = event
             && message.chat_id == self.conversation.conversation.window.chat_id
         {
-            self.typing_until = None;
+            self.ui.typing_until = None;
         }
 
         // A read acknowledgement is not a window change. It moves the watermark
@@ -2886,11 +2784,11 @@ impl App {
     /// Shows `text` on the status line for a while, then reverts.
     ///
     /// For things that pass on their own: a send that failed, a refusal. State
-    /// the reader must not lose is written straight to [`App::status`], which
+    /// the reader must not lose is written straight to [`UiState::status`], which
     /// never carries a deadline.
     pub fn flash(&mut self, text: impl Into<String>) {
-        self.status = text.into();
-        self.status_until = Some(Instant::now() + FLASH_FOR);
+        self.ui.status = text.into();
+        self.ui.status_until = Some(Instant::now() + FLASH_FOR);
     }
 
     /// Reverts a transient status once its time is up.
@@ -2899,12 +2797,12 @@ impl App {
     /// runs on a timer: a status cannot expire during a frame, because a frame
     /// is drawn from a shared reference.
     pub fn expire_status(&mut self, now: Instant) -> bool {
-        if self.status_until.is_none_or(|at| now < at) {
+        if self.ui.status_until.is_none_or(|at| now < at) {
             return false;
         }
 
-        self.status_until = None;
-        IDLE_STATUS.clone_into(&mut self.status);
+        self.ui.status_until = None;
+        IDLE_STATUS.clone_into(&mut self.ui.status);
         true
     }
 
@@ -2921,7 +2819,7 @@ impl App {
             return false;
         }
 
-        self.typing_until = if typing {
+        self.ui.typing_until = if typing {
             // Re-armed rather than set once, because a peer who keeps typing past
             // the deadline is still typing.
             Some((chat_id, Instant::now() + TYPING_FOR))
@@ -2940,7 +2838,8 @@ impl App {
     /// either still in the future or already gone.
     #[must_use]
     pub fn peer_is_typing(&self) -> bool {
-        self.typing_until
+        self.ui
+            .typing_until
             .is_some_and(|(chat, _)| chat == self.conversation.conversation.window.chat_id)
     }
 
@@ -2951,14 +2850,14 @@ impl App {
     /// a schedule for this, so a peer who stops without a final event is gone by
     /// the tick after the deadline rather than by a frame of its own.
     pub fn expire_typing(&mut self, now: Instant) -> bool {
-        let Some((_, at)) = self.typing_until else {
+        let Some((_, at)) = self.ui.typing_until else {
             return false;
         };
         if now < at {
             return false;
         }
 
-        self.typing_until = None;
+        self.ui.typing_until = None;
         true
     }
 
@@ -2972,7 +2871,7 @@ impl App {
     /// `d` holding something the reader cannot see.
     fn set_focus(&mut self, focus: Focus) {
         if focus != Focus::Conversation {
-            self.mode = Mode::Normal;
+            self.ui.mode = Mode::Normal;
             self.conversation.selection = None;
         }
         // The single clear point for every way out of a pane, beside the one
@@ -2986,7 +2885,7 @@ impl App {
         if focus != Focus::Input {
             self.input.emoji = None;
         }
-        self.focus = focus;
+        self.ui.focus = focus;
     }
 
     /// Moves the focus one pane on, in the direction given, wrapping.
@@ -2999,7 +2898,7 @@ impl App {
 
         let at = PANES
             .iter()
-            .position(|pane| *pane == self.focus)
+            .position(|pane| *pane == self.ui.focus)
             .unwrap_or(0);
 
         self.set_focus(PANES[(at + step) % PANES.len()]);
@@ -3013,7 +2912,7 @@ impl App {
     /// mode takes, and this one leaves from any of them. It only ever looks
     /// away — nothing typed is lost to it.
     fn leave_line(&mut self) {
-        if self.focus == Focus::Input {
+        if self.ui.focus == Focus::Input {
             self.set_focus(Focus::Conversation);
         }
     }
@@ -3021,14 +2920,14 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         // Ctrl-C always quits.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
+            self.ui.should_quit = true;
             return;
         }
 
         // A confirmation is a question about the whole screen rather than about
         // a pane, so it outranks the focus: it has to be answered before another
         // key is addressed anywhere.
-        if self.mode == Mode::Confirm {
+        if self.ui.mode == Mode::Confirm {
             self.handle_confirm(key);
             return;
         }
@@ -3068,7 +2967,7 @@ impl App {
         // It is skipped while the line has the focus, because the same letters
         // have to type into a fresh query. Every other key is passed through:
         // the overlay is a short list drawn over the chat list, not a mode.
-        if self.focus != Focus::Input && self.handle_user_search(key) {
+        if self.ui.focus != Focus::Input && self.handle_user_search(key) {
             return;
         }
 
@@ -3091,7 +2990,7 @@ impl App {
             _ if key.modifiers.contains(KeyModifiers::CONTROL)
                 && key.code == KeyCode::Char('w') =>
             {
-                if self.pane.is_profile() {
+                if self.ui.pane.is_profile() {
                     self.profile.profile_pending_w = true;
                 } else {
                     self.leave_line();
@@ -3101,13 +3000,13 @@ impl App {
             _ => {}
         }
 
-        match self.focus {
+        match self.ui.focus {
             Focus::ChatList => self.handle_chat_list(key),
             // Matched on both axes rather than on `mode` alone: the profile is a
             // content of this pane, not a pane, and the wildcard that would save
             // the tuple here is the kind of arm that is right until the day it
             // is not.
-            Focus::Conversation => match (self.mode, self.pane) {
+            Focus::Conversation => match (self.ui.mode, self.ui.pane) {
                 (Mode::Normal, Pane::Profile(_)) => self.handle_profile(key),
                 (Mode::Normal, Pane::Conversation) => self.handle_normal(key),
                 (Mode::Visual, _) => self.handle_visual(key),
@@ -3276,11 +3175,11 @@ impl App {
             // rather than made to wrap.
             'h' => self.set_focus(Focus::ChatList),
             '/' => {
-                self.focus = Focus::Input;
+                self.ui.focus = Focus::Input;
                 self.input.line.open(PromptKind::Search);
             }
             ':' => {
-                self.focus = Focus::Input;
+                self.ui.focus = Focus::Input;
                 self.input.line.open(PromptKind::Command);
             }
             'q' => self.request_quit(),
@@ -3302,7 +3201,7 @@ impl App {
     /// the reader cannot see, because a terminal that is not answering cannot
     /// draw one either.
     fn request_quit(&mut self) {
-        self.mode = Mode::Confirm;
+        self.ui.mode = Mode::Confirm;
         self.conversation.confirm = Some(ConfirmKind::Quit);
     }
 
@@ -3312,7 +3211,7 @@ impl App {
     /// thing a reader who pressed `i` by reflex should never lose is the thing
     /// they were writing.
     fn start_compose(&mut self) {
-        self.focus = Focus::Input;
+        self.ui.focus = Focus::Input;
         self.input.line.open(PromptKind::Message);
         self.conversation.reply_to = None;
         self.conversation.editing = None;
@@ -3327,7 +3226,7 @@ impl App {
             return;
         };
 
-        self.focus = Focus::Input;
+        self.ui.focus = Focus::Input;
         self.input.line.open(PromptKind::Reply);
         self.conversation.reply_to = Some(id);
         self.conversation.editing = None;
@@ -3340,7 +3239,7 @@ impl App {
     /// the previous query is not the reader's words to keep, and a fresh search
     /// starts clean.
     fn begin_new_chat(&mut self, query: &str) {
-        self.focus = Focus::Input;
+        self.ui.focus = Focus::Input;
         self.input
             .line
             .open_with(PromptKind::NewChat, query.to_owned());
@@ -3373,7 +3272,7 @@ impl App {
         let text = message.text.to_string();
         let id = message.id;
 
-        self.focus = Focus::Input;
+        self.ui.focus = Focus::Input;
         self.input.line.open_with(PromptKind::Edit, text);
         self.conversation.editing = Some(id);
         self.conversation.reply_to = None;
@@ -3418,12 +3317,12 @@ impl App {
 
         let Some(deletion) = self.deletion(&selection) else {
             self.conversation.selection = None;
-            self.mode = Mode::Normal;
+            self.ui.mode = Mode::Normal;
             self.flash(self.refuse_placeholders(&selection));
             return;
         };
 
-        self.mode = Mode::Confirm;
+        self.ui.mode = Mode::Confirm;
         self.conversation.confirm = Some(ConfirmKind::DeleteMessages {
             ids: deletion.ids,
             outgoing: deletion.outgoing,
@@ -3525,7 +3424,7 @@ impl App {
         match key.code {
             KeyCode::Char('y') => {
                 match &self.conversation.confirm {
-                    Some(ConfirmKind::Quit) => self.should_quit = true,
+                    Some(ConfirmKind::Quit) => self.ui.should_quit = true,
                     Some(ConfirmKind::Logout) => self.queue_action(Action::Logout),
                     Some(ConfirmKind::DeleteMessages { ids, .. }) => {
                         let chat_id = self.conversation.conversation.window.chat_id;
@@ -3538,12 +3437,12 @@ impl App {
                 }
                 self.conversation.confirm = None;
                 self.conversation.selection = None;
-                self.mode = Mode::Normal;
+                self.ui.mode = Mode::Normal;
             }
             KeyCode::Char('n') | KeyCode::Esc => {
                 self.conversation.confirm = None;
                 self.conversation.selection = None;
-                self.mode = Mode::Normal;
+                self.ui.mode = Mode::Normal;
             }
             _ => {}
         }
@@ -3560,7 +3459,7 @@ impl App {
     /// it disengages, on the same rule as `j` and `k`, so a page and a line
     /// cannot disagree about whether the view is pinned.
     fn page(&mut self, down: bool) {
-        let step = self.rows.get().max(1);
+        let step = self.ui.metrics.rows.get().max(1);
         let layout = self.row_layout();
         let total = rows::total_rows(&layout);
         let here = rows::first_row_of_message(&layout, self.conversation.vim.cursor()).unwrap_or(0);
@@ -3759,7 +3658,7 @@ impl App {
     /// so typing one more character does not move them off a candidate that is
     /// still there.
     fn refresh_completion(&mut self) {
-        if self.focus != Focus::Input
+        if self.ui.focus != Focus::Input
             || !self.input.line.purpose().is_buffer()
             || self.input.line.status() != "INSERT"
         {
@@ -3809,8 +3708,8 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.conversation.selection = None;
-                self.mode = Mode::Normal;
-                self.status = IDLE_STATUS.into();
+                self.ui.mode = Mode::Normal;
+                self.ui.status = IDLE_STATUS.into();
             }
 
             // Re-anchoring on the cursor's message is `v` again, which is what it
@@ -3890,7 +3789,7 @@ impl App {
 
         let lines = self.yanked(&selection);
         self.conversation.selection = None;
-        self.mode = Mode::Normal;
+        self.ui.mode = Mode::Normal;
 
         if lines.iter().all(String::is_empty) {
             // A charwise selection that has not been moved is a position rather
@@ -3977,7 +3876,7 @@ impl App {
         };
 
         self.conversation.selection = None;
-        self.mode = Mode::Normal;
+        self.ui.mode = Mode::Normal;
         self.flash(refused);
     }
 
@@ -4015,7 +3914,7 @@ impl App {
         };
 
         self.set_selection(Selection::at(id, char));
-        self.mode = Mode::Visual;
+        self.ui.mode = Mode::Visual;
     }
 
     /// Applies a character motion to the focus's position within its message.
@@ -4142,7 +4041,7 @@ impl App {
             return;
         }
 
-        self.focus = Focus::Conversation;
+        self.ui.focus = Focus::Conversation;
         self.input.line.clear();
         self.conversation.reply_to = None;
         self.conversation.editing = None;
@@ -4242,7 +4141,7 @@ impl App {
                     self.select_chat(pos);
                 }
             }
-            _ => self.status = format!("unknown command: :{cmd}"),
+            _ => self.ui.status = format!("unknown command: :{cmd}"),
         }
     }
 
@@ -4469,11 +4368,11 @@ impl App {
     /// next (the retry sentence, or the next `offline:`) replaces it.
     pub fn request_retry(&mut self) {
         self.session.retry_requested = true;
-        "reconnecting".clone_into(&mut self.status);
+        "reconnecting".clone_into(&mut self.ui.status);
         // Written straight to `status` rather than through `flash`, because a
         // bring-up is not a thing that passes on its own: it ends in an event, and
         // that event brings its own sentence.
-        self.status_until = None;
+        self.ui.status_until = None;
     }
 
     /// The retry the reader asked for, once.
@@ -4520,8 +4419,8 @@ impl App {
             return;
         }
 
-        self.pane = Pane::Conversation;
-        self.mode = Mode::Normal;
+        self.ui.pane = Pane::Conversation;
+        self.ui.mode = Mode::Normal;
         self.session.signin = Some(SignIn::Flow(SignInFlow::default()));
         self.open_signin_field(LoginField::Phone);
         self.set_focus(Focus::Input);
@@ -4533,8 +4432,8 @@ impl App {
     /// `api_id` and `api_hash` are in a file, and a phone field here would ask
     /// the reader for something the program still could not do with.
     pub fn begin_no_credentials(&mut self) {
-        self.pane = Pane::Conversation;
-        self.mode = Mode::Normal;
+        self.ui.pane = Pane::Conversation;
+        self.ui.mode = Mode::Normal;
         self.session.signin = Some(SignIn::NoCredentials);
         self.set_focus(Focus::Conversation);
     }
@@ -4727,7 +4626,7 @@ impl App {
     /// *walk*, and `q` is unbound, because a reader who types their phone number
     /// into a chat list should not be able to quit the program from it.
     fn handle_signin(&mut self, key: KeyEvent) {
-        match self.focus {
+        match self.ui.focus {
             Focus::Input => self.handle_signin_field(key),
             // Paused, or waiting for an answer. Nothing here answers anything
             // except the way back and the stale session's offer.
@@ -4905,8 +4804,8 @@ impl App {
     /// a flow that has said its sentence and moved on must not keep showing it
     /// over the next thing the reader does.
     fn clear_status(&mut self) {
-        IDLE_STATUS.clone_into(&mut self.status);
-        self.status_until = None;
+        IDLE_STATUS.clone_into(&mut self.ui.status);
+        self.ui.status_until = None;
     }
 
     // ---- rendering -----------------------------------------------------
@@ -4957,7 +4856,7 @@ impl App {
         // other column and it is always there.
         match self.session.signin.as_ref() {
             Some(signin) => widgets::signin::render(self, signin, horizontal[1], frame),
-            None => match self.pane {
+            None => match self.ui.pane {
                 Pane::Conversation => {
                     widgets::conversation::render(self, horizontal[1], frame, layout);
                 }
@@ -4984,7 +4883,7 @@ impl App {
     /// message is as tall as its text is, and how tall that is depends on the
     /// width the panel gave it.
     pub fn record_rows(&self, rows: usize) {
-        self.rows.set(rows.max(1));
+        self.ui.metrics.rows.set(rows.max(1));
     }
 
     /// The columns the conversation panel's messages have room for, as of the
@@ -4995,12 +4894,12 @@ impl App {
     /// drawn — under the bar.
     #[must_use]
     pub fn body_width(&self) -> u16 {
-        self.body_width.get()
+        self.ui.metrics.body_width.get()
     }
 
     /// Records how many columns the conversation panel's messages have room for.
     pub fn record_body(&self, width: u16) {
-        self.body_width.set(width);
+        self.ui.metrics.body_width.set(width);
     }
 
     /// The unix second the reader's clock last read.
@@ -5010,7 +4909,7 @@ impl App {
     /// would otherwise be a claim it cannot support.
     #[must_use]
     pub fn now(&self) -> i64 {
-        self.now.get()
+        self.ui.metrics.now.get()
     }
 
     /// Records what the reader's clock says, in unix seconds.
@@ -5019,7 +4918,7 @@ impl App {
     /// records: what a day is called depends on when it is being read, and
     /// nothing here can know that.
     pub fn record_now(&self, now: i64) {
-        self.now.set(now);
+        self.ui.metrics.now.set(now);
     }
 
     /// The rows every message in the window occupies, laid out at the panel's
@@ -5210,7 +5109,7 @@ impl App {
         {
             return refusal.clone();
         }
-        if self.focus == Focus::Input {
+        if self.ui.focus == Focus::Input {
             return widgets::input_bar::hint(self).to_owned();
         }
         match &self.conversation.confirm {
@@ -5248,8 +5147,8 @@ impl App {
         // resting state is the hint rather than the program's name, because the
         // name says nothing and a bar showing it looks like a bar with nothing
         // in it, which is exactly what a half-written message used to look like.
-        if self.status != IDLE_STATUS {
-            return self.status.clone();
+        if self.ui.status != IDLE_STATUS {
+            return self.ui.status.clone();
         }
 
         widgets::input_bar::hint(self).to_owned()
@@ -5687,7 +5586,7 @@ mod tests {
     fn entering_insert_mode_then_typing_records_every_key() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('i')));
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
 
         type_text(&mut app, "hello");
         assert_eq!(app.input.line.text(), "hello");
@@ -5702,7 +5601,7 @@ mod tests {
         app.handle_key(press(KeyCode::Esc));
 
         assert_eq!(
-            app.focus,
+            app.ui.focus,
             Focus::Input,
             "one escape stops typing, and the reader is still in the line"
         );
@@ -5735,13 +5634,17 @@ mod tests {
 
         app.handle_key(press(KeyCode::Esc));
         assert_eq!(
-            app.focus,
+            app.ui.focus,
             Focus::Input,
             "the first escape stops typing: the reader is still in the line"
         );
 
         app.handle_key(press(KeyCode::Esc));
-        assert_eq!(app.focus, Focus::Conversation, "and the second looks away");
+        assert_eq!(
+            app.ui.focus,
+            Focus::Conversation,
+            "and the second looks away"
+        );
         assert_eq!(
             app.input.line.text(),
             "half a thought\nand the rest of it",
@@ -5868,7 +5771,7 @@ mod tests {
             Some(id),
             "a message just typed is the one on screen"
         );
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
 
         assert_eq!(
             app.take_action(),
@@ -5906,9 +5809,9 @@ mod tests {
             "the second message is not shown, because it was not queued"
         );
         assert!(
-            app.status.contains("already on its way"),
+            app.ui.status.contains("already on its way"),
             "a refusal has to say so: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -5951,16 +5854,16 @@ mod tests {
 
     #[test]
     fn a_new_application_has_the_conversation_focused() {
-        assert_eq!(App::new().focus, Focus::Conversation);
+        assert_eq!(App::new().ui.focus, Focus::Conversation);
     }
 
     #[test]
     fn h_leaves_the_conversation_for_the_chat_list_and_l_comes_back() {
         let mut app = App::mock();
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
 
         app.handle_key(press(KeyCode::Char('h')));
-        assert_eq!(app.focus, Focus::ChatList);
+        assert_eq!(app.ui.focus, Focus::ChatList);
 
         // The conversation's own motions are not the list's: `k` up there moved
         // the cursor, and here it moves the highlight.
@@ -5969,17 +5872,17 @@ mod tests {
         assert_eq!(reading(&app), Some(10), "the cursor did not move");
 
         app.handle_key(press(KeyCode::Char('l')));
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
     }
 
     #[test]
     fn tab_walks_the_panes_in_the_order_they_are_drawn_and_wraps() {
         let mut app = App::mock();
 
-        let mut seen = vec![app.focus];
+        let mut seen = vec![app.ui.focus];
         for _ in 0..3 {
             app.handle_key(press(KeyCode::Tab));
-            seen.push(app.focus);
+            seen.push(app.ui.focus);
         }
 
         assert_eq!(
@@ -5999,10 +5902,10 @@ mod tests {
         let mut app = App::mock();
 
         app.handle_key(press(KeyCode::BackTab));
-        assert_eq!(app.focus, Focus::ChatList);
+        assert_eq!(app.ui.focus, Focus::ChatList);
 
         app.handle_key(press(KeyCode::BackTab));
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
     }
 
     /// `Esc` abandons the line and `Ctrl+w` only looks away from it, because a
@@ -6015,7 +5918,7 @@ mod tests {
 
         app.handle_key(press_ctrl('w'));
 
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
         assert_eq!(
             app.input.line.text(),
             "half a th",
@@ -6033,7 +5936,7 @@ mod tests {
 
         app.handle_key(press_ctrl('w'));
 
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
     }
 
     /// A selection belongs to the conversation, so a pane that is not the
@@ -6042,12 +5945,12 @@ mod tests {
     fn leaving_the_conversation_drops_a_visual_selection() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('v')));
-        assert_eq!(app.mode, Mode::Visual);
+        assert_eq!(app.ui.mode, Mode::Visual);
 
         app.handle_key(press(KeyCode::Tab));
 
-        assert_eq!(app.focus, Focus::Input);
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.focus, Focus::Input);
+        assert_eq!(app.ui.mode, Mode::Normal);
     }
 
     #[test]
@@ -6162,7 +6065,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Enter));
 
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
         assert_eq!(app.conversation.conversation.window.chat_id, 2);
         assert_eq!(app.list.selected_chat, 1);
         assert_eq!(
@@ -6347,7 +6250,7 @@ mod tests {
 
         key(&mut app, 'v');
 
-        assert_eq!(app.mode, Mode::Visual);
+        assert_eq!(app.ui.mode, Mode::Visual);
         assert_eq!(
             selected_chars(&app),
             Some((1, 0..0)),
@@ -6478,7 +6381,7 @@ mod tests {
 
         escape(&mut app);
 
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
         assert_eq!(app.selection(), None);
     }
 
@@ -6692,7 +6595,7 @@ mod tests {
         app.handle_key(press(KeyCode::Tab));
 
         assert_eq!(app.selection(), None);
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
     }
 
     // ---- yanking and pasting --------------------------------------------
@@ -6721,7 +6624,7 @@ mod tests {
 
         assert_eq!(yanked(&app), vec!["Hey, is ".to_owned()]);
         assert_eq!(
-            app.mode,
+            app.ui.mode,
             Mode::Normal,
             "a yank ends the selection, as in Vim"
         );
@@ -6756,18 +6659,18 @@ mod tests {
         key(&mut app, 'y');
 
         assert!(
-            app.status.contains("nothing to yank"),
+            app.ui.status.contains("nothing to yank"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
         assert_eq!(
             app.status_text(),
-            app.status,
+            app.ui.status,
             "and the refusal is on the screen: a selection's own note outranks a \
              transient status, so leaving Visual is what makes it visible at all"
         );
         assert!(yanked(&app).is_empty());
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
     }
 
     /// A yank with no paste is a one-way trip to the system clipboard, which is
@@ -6780,7 +6683,7 @@ mod tests {
 
         key(&mut app, 'p');
 
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
         assert_eq!(app.input.line.purpose(), PromptKind::Message);
         assert_eq!(
             app.input.line.text(),
@@ -6815,11 +6718,11 @@ mod tests {
         key(&mut app, 'p');
 
         assert!(
-            app.status.contains("nothing has been yanked"),
+            app.ui.status.contains("nothing has been yanked"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
-        assert_eq!(app.focus, Focus::Conversation, "and no line was opened");
+        assert_eq!(app.ui.focus, Focus::Conversation, "and no line was opened");
     }
 
     /// A yank is about this conversation, so opening another one forgets it —
@@ -6898,9 +6801,9 @@ mod tests {
             app.input.line.caret()
         );
         assert!(
-            !app.status.contains("not built yet"),
+            !app.ui.status.contains("not built yet"),
             "and nothing is owed the reader: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -6919,9 +6822,9 @@ mod tests {
 
         assert_eq!(app.input.line.text(), "héllo wörld", "nothing ran");
         assert!(
-            app.status.contains("not built yet"),
+            app.ui.status.contains("not built yet"),
             "and the refusal says so: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -6955,14 +6858,14 @@ mod tests {
 
         key(&mut app, 'r');
 
-        assert_eq!(app.mode, Mode::Normal, "a refusal still answers the key");
+        assert_eq!(app.ui.mode, Mode::Normal, "a refusal still answers the key");
         assert_eq!(app.selection(), None);
         assert_eq!(
             app.status_text(),
             "quoting a reply is not built yet",
             "a selection inside one message is the case a quote would serve"
         );
-        assert_eq!(app.focus, Focus::Conversation, "and no line was opened");
+        assert_eq!(app.ui.focus, Focus::Conversation, "and no line was opened");
     }
 
     #[test]
@@ -6974,7 +6877,7 @@ mod tests {
 
         key(&mut app, 'r');
 
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
         assert_eq!(
             app.status_text(),
             "a reply can only quote words inside one message",
@@ -6991,7 +6894,7 @@ mod tests {
 
         key(&mut app, 'r');
 
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
         assert_eq!(app.input.line.purpose(), PromptKind::Reply);
         assert_eq!(app.conversation.reply_to, Some(1));
     }
@@ -7003,13 +6906,13 @@ mod tests {
         key(&mut app, 'p');
 
         assert_eq!(
-            app.focus,
+            app.ui.focus,
             Focus::Conversation,
             "replacing a selection with the reader's own text is a destructive reading \
              of a key that looks additive, so it does nothing here"
         );
         assert!(yanked(&app).is_empty());
-        assert_eq!(app.mode, Mode::Visual, "and the selection is untouched");
+        assert_eq!(app.ui.mode, Mode::Visual, "and the selection is untouched");
     }
 
     // ---- deleting, and the confirm --------------------------------------
@@ -7091,9 +6994,9 @@ mod tests {
 
         key(&mut app, 'q');
 
-        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.ui.mode, Mode::Confirm);
         assert_eq!(app.conversation.confirm, Some(ConfirmKind::Quit));
-        assert!(!app.should_quit);
+        assert!(!app.ui.should_quit);
         assert_eq!(app.status_text(), QUIT_PROMPT);
     }
 
@@ -7105,9 +7008,9 @@ mod tests {
 
         run_command_line(&mut app, "q");
 
-        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.ui.mode, Mode::Confirm);
         assert_eq!(app.conversation.confirm, Some(ConfirmKind::Quit));
-        assert!(!app.should_quit);
+        assert!(!app.ui.should_quit);
     }
 
     #[test]
@@ -7117,9 +7020,9 @@ mod tests {
         key(&mut app, 'q');
         key(&mut app, 'y');
 
-        assert!(app.should_quit);
+        assert!(app.ui.should_quit);
         assert_eq!(app.conversation.confirm, None);
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
         assert!(app.outbox.actions.is_empty());
     }
 
@@ -7136,12 +7039,12 @@ mod tests {
             key(&mut app, 'q');
             app.handle_key(answer);
 
-            assert!(!app.should_quit, "{answer:?} quit");
+            assert!(!app.ui.should_quit, "{answer:?} quit");
             assert_eq!(
                 app.conversation.confirm, None,
                 "{answer:?} left the prompt up"
             );
-            assert_eq!(app.mode, Mode::Normal, "{answer:?} left the mode alone");
+            assert_eq!(app.ui.mode, Mode::Normal, "{answer:?} left the mode alone");
         }
     }
 
@@ -7152,7 +7055,7 @@ mod tests {
 
         app.handle_key(press_ctrl('c'));
 
-        assert!(app.should_quit);
+        assert!(app.ui.should_quit);
         assert_eq!(app.conversation.confirm, None);
     }
 
@@ -7164,7 +7067,7 @@ mod tests {
 
         key(&mut app, 'd');
 
-        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.ui.mode, Mode::Confirm);
         assert_eq!(asked_to_delete(&app), vec![10]);
         assert_eq!(app.status_text(), DELETE_INCOMING_PROMPT);
     }
@@ -7176,11 +7079,11 @@ mod tests {
         let mut app = App::mock();
 
         key(&mut app, 'd');
-        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.ui.mode, Mode::Confirm);
 
         app.handle_key(press(KeyCode::Char('n')));
         key(&mut app, 'd');
-        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.ui.mode, Mode::Confirm);
         key(&mut app, 'd');
 
         assert_eq!(asked_to_delete(&app), vec![10], "and so does `dd`");
@@ -7229,7 +7132,7 @@ mod tests {
 
         key(&mut app, 'x');
         assert_eq!(
-            app.mode,
+            app.ui.mode,
             Mode::Normal,
             "an unbound key is not half of a `dd`"
         );
@@ -7350,21 +7253,21 @@ mod tests {
 
         key(&mut app, 'd');
 
-        assert_eq!(app.mode, Mode::Normal, "no confirm is raised");
+        assert_eq!(app.ui.mode, Mode::Normal, "no confirm is raised");
         assert!(
-            app.status.contains("still on its way"),
+            app.ui.status.contains("still on its way"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
 
         app.fail_send(placeholder, "boom".to_owned());
         key(&mut app, 'd');
 
-        assert_eq!(app.mode, Mode::Normal, "and still none");
+        assert_eq!(app.ui.mode, Mode::Normal, "and still none");
         assert!(
-            app.status.contains("D dismisses"),
+            app.ui.status.contains("D dismisses"),
             "a failed message points at the key that clears it: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -7428,19 +7331,19 @@ mod tests {
         let id = app.conversation.sending.expect("the send is in flight");
 
         app.handle_key(press(KeyCode::Char('e')));
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
         assert!(
-            app.status.contains("hasn't been sent yet"),
+            app.ui.status.contains("hasn't been sent yet"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
 
         app.fail_send(id, "boom".to_owned());
         app.handle_key(press(KeyCode::Char('e')));
         assert!(
-            app.status.contains("hasn't been sent yet"),
+            app.ui.status.contains("hasn't been sent yet"),
             "a failed send is refused on the same fact: {:?}",
-            app.status
+            app.ui.status
         );
 
         // Step back off the placeholder to a message that came from them.
@@ -7451,11 +7354,11 @@ mod tests {
             "the newest sample message is incoming"
         );
         app.handle_key(press(KeyCode::Char('e')));
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
         assert!(
-            app.status.contains("only edit your own"),
+            app.ui.status.contains("only edit your own"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -7468,7 +7371,7 @@ mod tests {
         assert_eq!(reading(&app), Some(9));
 
         app.handle_key(press(KeyCode::Char('r')));
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
         assert_eq!(app.input.line.purpose(), PromptKind::Reply);
         assert_eq!(app.conversation.reply_to, Some(9));
 
@@ -7493,7 +7396,7 @@ mod tests {
         assert_eq!(reading(&app), Some(9), "an outgoing message");
 
         app.handle_key(press(KeyCode::Char('e')));
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
         assert_eq!(app.input.line.purpose(), PromptKind::Edit);
         assert_eq!(app.conversation.editing, Some(9));
         assert!(
@@ -7528,7 +7431,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('y')));
 
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
         assert_eq!(app.conversation.confirm, None);
         assert_eq!(
             app.take_action(),
@@ -7547,7 +7450,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Esc));
 
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
         assert_eq!(app.conversation.confirm, None);
         assert_eq!(app.take_action(), None);
     }
@@ -7583,15 +7486,15 @@ mod tests {
         let mut app = App::mock();
 
         app.flash("something went wrong");
-        assert_eq!(app.status, "something went wrong");
+        assert_eq!(app.ui.status, "something went wrong");
         assert!(
             !app.expire_status(Instant::now()),
             "the deadline has not passed"
         );
-        assert_eq!(app.status, "something went wrong");
+        assert_eq!(app.ui.status, "something went wrong");
 
         assert!(app.expire_status(Instant::now() + FLASH_FOR));
-        assert_eq!(app.status, IDLE_STATUS);
+        assert_eq!(app.ui.status, IDLE_STATUS);
         assert!(!app.expire_status(Instant::now() + FLASH_FOR), "only once");
     }
 
@@ -7615,7 +7518,7 @@ mod tests {
         let mut app = App::mock();
         run_command_line(&mut app, "settings");
 
-        assert_eq!(app.pane, Pane::Profile(ProfileId::SelfAccount));
+        assert_eq!(app.ui.pane, Pane::Profile(ProfileId::SelfAccount));
     }
 
     /// A `:` line is a command line, not a message, so it is not a buffer and
@@ -7638,11 +7541,11 @@ mod tests {
     fn the_profile_opens_from_the_chat_list_too() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('h')));
-        assert_eq!(app.focus, Focus::ChatList);
+        assert_eq!(app.ui.focus, Focus::ChatList);
 
         app.handle_key(press(KeyCode::Char('S')));
-        assert_eq!(app.pane, Pane::Profile(ProfileId::SelfAccount));
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.pane, Pane::Profile(ProfileId::SelfAccount));
+        assert_eq!(app.ui.focus, Focus::Conversation);
     }
 
     /// The hint row is the one thing that says which keys the panel answers, and
@@ -7672,7 +7575,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('d')));
 
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
         assert_eq!(app.conversation.confirm, None);
         assert!(app.take_action().is_none(), "nothing was queued");
     }
@@ -7770,7 +7673,7 @@ mod tests {
         // `Esc` with nothing selected: one press leaves.
         let mut app = profile();
         app.handle_key(press(KeyCode::Esc));
-        assert_eq!(app.pane, Pane::Conversation, "Esc closes the card");
+        assert_eq!(app.ui.pane, Pane::Conversation, "Esc closes the card");
 
         // `l` at the end of a value is not a way out, because it is a motion with
         // nowhere to go and saying otherwise would teach a key to lie.
@@ -7780,7 +7683,7 @@ mod tests {
         }
         app.handle_key(press(KeyCode::Char('l')));
         assert!(
-            app.pane.is_profile(),
+            app.ui.pane.is_profile(),
             "l past the end of a value is a motion, not a way out"
         );
 
@@ -7790,12 +7693,12 @@ mod tests {
         // a reader has to learn twice.
         let mut app = profile();
         app.handle_key(press(KeyCode::Char('h')));
-        assert_eq!(app.pane, Pane::Conversation, "h at the start goes back");
+        assert_eq!(app.ui.pane, Pane::Conversation, "h at the start goes back");
 
         let mut app = profile();
         app.handle_key(press_ctrl('w'));
         app.handle_key(press(KeyCode::Char('h')));
-        assert_eq!(app.focus, Focus::ChatList, "Ctrl-w h is the chat list");
+        assert_eq!(app.ui.focus, Focus::ChatList, "Ctrl-w h is the chat list");
 
         // Nothing is drawn to the right of a card, so `Ctrl-w l` has nowhere to
         // go and says so rather than doing nothing.
@@ -7803,14 +7706,14 @@ mod tests {
         app.handle_key(press_ctrl('w'));
         app.handle_key(press(KeyCode::Char('l')));
         assert!(
-            app.pane.is_profile(),
+            app.ui.pane.is_profile(),
             "the card stays, and the reason is on show"
         );
 
         let mut app = profile();
         app.handle_key(press(KeyCode::Tab));
-        assert_eq!(app.pane, Pane::Conversation, "Tab walks the panes");
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.pane, Pane::Conversation, "Tab walks the panes");
+        assert_eq!(app.ui.focus, Focus::Input);
     }
 
     /// `Esc` is a ladder and not a switch: a selection, then the card, then out.
@@ -7830,11 +7733,11 @@ mod tests {
         // One press drops the selection and keeps the card.
         app.handle_key(press(KeyCode::Esc));
         assert!(app.card_selection().is_none(), "the selection went");
-        assert!(app.pane.is_profile(), "and the card stayed");
+        assert!(app.ui.pane.is_profile(), "and the card stayed");
 
         // The next press leaves.
         app.handle_key(press(KeyCode::Esc));
-        assert_eq!(app.pane, Pane::Conversation, "and the next one leaves");
+        assert_eq!(app.ui.pane, Pane::Conversation, "and the next one leaves");
     }
 
     /// A key the panel does not answer is the conversation's, and taking it is
@@ -7844,8 +7747,8 @@ mod tests {
         let mut app = profile();
         app.handle_key(press(KeyCode::Char('i')));
 
-        assert_eq!(app.pane, Pane::Conversation);
-        assert_eq!(app.focus, Focus::Input, "and the line is open");
+        assert_eq!(app.ui.pane, Pane::Conversation);
+        assert_eq!(app.ui.focus, Focus::Input, "and the line is open");
     }
 
     #[test]
@@ -7856,9 +7759,9 @@ mod tests {
         }
         app.handle_key(press(KeyCode::Char('d')));
 
-        assert_eq!(app.status, ADD_ACCOUNT_REFUSAL);
+        assert_eq!(app.ui.status, ADD_ACCOUNT_REFUSAL);
         assert_eq!(
-            app.mode,
+            app.ui.mode,
             Mode::Normal,
             "and nothing was asked to be confirmed"
         );
@@ -7875,7 +7778,7 @@ mod tests {
         }
         app.handle_key(press(KeyCode::Char('d')));
 
-        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.ui.mode, Mode::Confirm);
         assert_eq!(app.conversation.confirm, Some(ConfirmKind::Logout));
         assert_eq!(app.status_text(), LOGOUT_PROMPT);
         assert_eq!(app.take_action(), None, "nothing is asked for yet");
@@ -7887,7 +7790,7 @@ mod tests {
             "`y` asks for the sign-out"
         );
         assert_eq!(app.conversation.confirm, None);
-        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.ui.mode, Mode::Normal);
     }
 
     /// `n` and `Esc` are the other half of a confirmation, and here they mean
@@ -7909,7 +7812,7 @@ mod tests {
                 app.conversation.confirm, None,
                 "{answer:?} drops the question"
             );
-            assert_eq!(app.mode, Mode::Normal);
+            assert_eq!(app.ui.mode, Mode::Normal);
             assert_eq!(app.take_action(), None, "{answer:?} asks for nothing");
         }
     }
@@ -7978,8 +7881,8 @@ mod tests {
         let mut app = App::mock();
         run_command_line(&mut app, "frobnicate");
 
-        assert!(app.status.contains("unknown command"));
-        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.ui.status.contains("unknown command"));
+        assert_eq!(app.ui.mode, Mode::Normal);
     }
 
     /// `:retry` asks for the client again and takes the `offline:` line down with
@@ -7987,7 +7890,7 @@ mod tests {
     #[test]
     fn retry_command_asks_for_the_client_again() {
         let mut app = App::mock();
-        app.status = "offline: connection reset".to_owned();
+        app.ui.status = "offline: connection reset".to_owned();
 
         run_command_line(&mut app, "retry");
 
@@ -7995,11 +7898,11 @@ mod tests {
             app.take_retry_request(),
             "the request is what the network side acts on"
         );
-        assert_ne!(app.status, IDLE_STATUS, "got {:?}", app.status);
+        assert_ne!(app.ui.status, IDLE_STATUS, "got {:?}", app.ui.status);
         assert!(
-            !app.status.contains("offline:"),
+            !app.ui.status.contains("offline:"),
             "the failure it answers must not still be up: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -8027,9 +7930,9 @@ mod tests {
         assert!(
             !app.expire_status(Instant::now() + FLASH_FOR),
             "got {:?}",
-            app.status
+            app.ui.status
         );
-        assert_ne!(app.status, IDLE_STATUS);
+        assert_ne!(app.ui.status, IDLE_STATUS);
     }
 
     fn run_search_line(app: &mut App, query: &str) {
@@ -8167,9 +8070,9 @@ mod tests {
 
         assert!(!app.search().is_active());
         assert!(
-            app.status.contains("no previous search"),
+            app.ui.status.contains("no previous search"),
             "a key that does nothing reads as a hang: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -8182,9 +8085,9 @@ mod tests {
 
         assert_eq!(reading(&app), before, "nothing moves");
         assert!(
-            app.status.contains("no previous search"),
+            app.ui.status.contains("no previous search"),
             "and the key explains itself: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -8220,7 +8123,7 @@ mod tests {
 
         app.expire_status(Instant::now() + FLASH_FOR);
 
-        assert_eq!(app.status, IDLE_STATUS, "the flash did expire");
+        assert_eq!(app.ui.status, IDLE_STATUS, "the flash did expire");
         assert!(
             app.status_text().contains("/benchmarks"),
             "and the search line is still there: {:?}",
@@ -9761,7 +9664,7 @@ mod tests {
     #[test]
     fn a_jump_in_flight_is_what_the_status_line_says() {
         let mut app = with_unread_out_of_reach(2);
-        app.status = "3 conversation(s)".to_string();
+        app.ui.status = "3 conversation(s)".to_string();
 
         assert_eq!(app.status_text(), "3 conversation(s)");
 
@@ -10030,19 +9933,19 @@ mod tests {
         let mut app = with_a_loaded_quote();
         go_to_reply(&mut app);
         app.handle_key(press_ctrl('o'));
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
 
         app.handle_key(press(KeyCode::Tab));
 
         assert_eq!(
-            app.focus,
+            app.ui.focus,
             Focus::Input,
             "`Tab` is the pane switch, whatever byte a terminal sent"
         );
         assert_eq!(reading(&app), Some(2), "and it walked nothing");
 
         app.handle_key(press(KeyCode::BackTab));
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
         assert_eq!(reading(&app), Some(2), "nor did the other way");
 
         app.handle_key(press_ctrl('i'));
@@ -10174,7 +10077,7 @@ mod tests {
         assert_eq!(app.take_action(), None, "accepting did not send");
         assert_eq!(app.input.line.text(), "😢");
         assert_eq!(
-            app.focus,
+            app.ui.focus,
             Focus::Input,
             "and the reader is still in the line"
         );
@@ -10209,19 +10112,23 @@ mod tests {
         let mut app = typing(":cry");
 
         app.handle_key(press(KeyCode::Esc));
-        assert_eq!(app.focus, Focus::Input, "the popup's escape only closes it");
+        assert_eq!(
+            app.ui.focus,
+            Focus::Input,
+            "the popup's escape only closes it"
+        );
         assert!(app.completion().is_none());
 
         app.handle_key(press(KeyCode::Esc));
         assert_eq!(
-            app.focus,
+            app.ui.focus,
             Focus::Input,
             "the line's own escape is still the first stage"
         );
 
         app.handle_key(press(KeyCode::Esc));
         assert_eq!(
-            app.focus,
+            app.ui.focus,
             Focus::Conversation,
             "and the second stage leaves"
         );
@@ -10268,7 +10175,7 @@ mod tests {
 
         app.handle_key(press_ctrl('w'));
 
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
         assert!(app.completion().is_none());
     }
 
@@ -10332,7 +10239,7 @@ mod tests {
         run_command_line(&mut app, "signin");
 
         assert_eq!(app.signin_field(), Some(LoginField::Phone));
-        assert_eq!(app.focus, Focus::Input, "the field is what has the keys");
+        assert_eq!(app.ui.focus, Focus::Input, "the field is what has the keys");
         assert_eq!(
             app.input.line.text(),
             "+44 7700 900142",
@@ -10362,7 +10269,7 @@ mod tests {
         );
 
         assert_eq!(app.signin_field(), Some(LoginField::Code));
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
 
         app.handle_key(press(KeyCode::Char('4')));
 
@@ -10386,7 +10293,7 @@ mod tests {
 
         assert!(app.signin().is_none(), "cancelled, not paused");
         assert_eq!(
-            app.focus,
+            app.ui.focus,
             Focus::Conversation,
             "and the keys are ours again"
         );
@@ -10416,9 +10323,9 @@ mod tests {
 
         assert!(app.signin().is_some(), "a code was sent, so the flow stays");
         assert_eq!(app.signin_field(), Some(LoginField::Phone));
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
         assert_eq!(
-            app.status,
+            app.ui.status,
             "cancelling discards the code Telegram sent; ⏎ asks for a new one"
         );
     }
@@ -10456,8 +10363,8 @@ mod tests {
              is an attempt nobody asked for"
         );
         assert_eq!(app.input.line.text(), draft, "the draft is the reader's");
-        assert_eq!(app.focus, Focus::Input, "and the field keeps the keys");
-        assert_eq!(app.status, "not connected yet — the client is not up");
+        assert_eq!(app.ui.focus, Focus::Input, "and the field keeps the keys");
+        assert_eq!(app.ui.status, "not connected yet — the client is not up");
     }
 
     /// With a client up the same key is the request it always was: queued, and
@@ -10529,11 +10436,11 @@ mod tests {
     fn a_slash_on_the_chat_list_opens_the_new_chat_prompt() {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('h')));
-        assert_eq!(app.focus, Focus::ChatList, "the list has the keys");
+        assert_eq!(app.ui.focus, Focus::ChatList, "the list has the keys");
 
         app.handle_key(press(KeyCode::Char('/')));
 
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
         assert_eq!(app.input.line.purpose(), PromptKind::NewChat);
         assert_eq!(app.prompt_prefix(), "/", "it reads as a query");
         assert!(
@@ -10548,7 +10455,7 @@ mod tests {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('/')));
 
-        assert_eq!(app.focus, Focus::Input);
+        assert_eq!(app.ui.focus, Focus::Input);
         assert_eq!(app.input.line.purpose(), PromptKind::Search);
     }
 
@@ -10584,7 +10491,7 @@ mod tests {
             "the query is trimmed on its way out"
         );
         assert_eq!(app.take_action(), None, "an action is taken once");
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
         assert!(
             app.input.line.is_empty(),
             "the prompt has given up its query"
@@ -10617,7 +10524,7 @@ mod tests {
         run_command_line(&mut app, "new ada");
 
         assert_eq!(app.input.line.purpose(), PromptKind::NewChat);
-        assert_eq!(app.focus, Focus::Input, "the line keeps the keys");
+        assert_eq!(app.ui.focus, Focus::Input, "the line keeps the keys");
         assert_eq!(app.input.line.text(), "ada", "the query is pre-filled");
 
         app.handle_key(press(KeyCode::Char(' ')));
@@ -10722,7 +10629,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Enter));
 
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
         assert_eq!(app.current_chat_id(), MOCK_CHAT);
         assert_eq!(app.chats().len(), before, "no duplicate chat was made");
         assert!(!app.user_search().is_active(), "and the list is put away");
@@ -10740,7 +10647,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Enter));
 
-        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.ui.focus, Focus::Conversation);
         assert_eq!(app.current_chat_id(), person.user_id, "their chat is open");
         assert_eq!(app.chats().len(), before + 1, "and listed exactly once");
         assert!(
