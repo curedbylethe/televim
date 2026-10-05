@@ -49,6 +49,7 @@ use domain::chat::Chat;
 use domain::message::Message;
 use domain::search::SEARCH_MATCHES;
 use domain::updates::UpdateEvent;
+use domain::user::UserCandidate;
 use proto::{
     HistoryCursor, LoginCode, PasswordChallenge, ProtoClient, ProtoError, SearchResults, SignIn,
     UpdateStream,
@@ -311,6 +312,50 @@ pub enum Event {
 
         /// The matching identifiers, oldest first, or why there are none.
         result: Result<SearchResults, ProtoError>,
+    },
+
+    /// A username resolved to the person who owns it, or found nobody.
+    ///
+    /// `user: None` is not an answer to show: the query was not a handle anyone
+    /// owns, and the caller's fallback — the name search — is what supplies a
+    /// list. That intermediate state travels as this event's own absence rather
+    /// than as a separate event, so the routing rule stays in `looks_like_username`
+    /// and the arm that reads it.
+    ///
+    /// Not an [`Event::Searched`]: a search asks a different question about a
+    /// conversation, and its answer writes only that window's match list.
+    UserResolved {
+        /// The query it was for, echoed back so a late answer can be refused.
+        query: String,
+
+        /// The person, or `None` when nobody owns the handle.
+        user: Option<UserCandidate>,
+    },
+
+    /// A name search listed the people it matched.
+    ///
+    /// The query is echoed back for the same reason as [`Event::Searched`]'s: a
+    /// result for a query the reader has replaced must not land on the newer
+    /// list's label.
+    UsersListed {
+        /// The query it was for, echoed back.
+        query: String,
+
+        /// The people the search offered, best first as the server ranked them.
+        users: Vec<UserCandidate>,
+    },
+
+    /// A user lookup failed.
+    ///
+    /// Its own event rather than a `Result` on one of the two above, because the
+    /// two success shapes differ and a failure is neither: it belongs to the
+    /// query, not to a list or to a person.
+    UserLookupFailed {
+        /// The query it was for, echoed back.
+        query: String,
+
+        /// Why the lookup failed, worded for the status line and the label.
+        reason: String,
     },
 }
 
@@ -893,6 +938,59 @@ fn request_jump(
     });
 }
 
+/// Whether a query is shaped like a `@username` rather than a name.
+///
+/// The rule is the framework's `normalize_username`, repeated here because it is
+/// private there and this module — not `tui` — is where the routing decision
+/// lives: a handle is what remains after an optional leading `@` and any
+/// surrounding whitespace, and a name is any query with whitespace left in it.
+/// An empty handle is not a handle, so a bare `@` falls to the name search.
+fn looks_like_username(query: &str) -> bool {
+    let trimmed = query.trim();
+    let name = trimmed.strip_prefix('@').unwrap_or(trimmed);
+    !name.is_empty() && !name.chars().any(char::is_whitespace)
+}
+
+/// The one person to open directly, when a result set is exactly one.
+///
+/// A single candidate — a resolved handle, or a name only one contact matches —
+/// is the answer the reader asked for rather than a list to choose from (Q4).
+/// Zero or many means the list is shown.
+fn sole_candidate(users: &[UserCandidate]) -> Option<&UserCandidate> {
+    match users {
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
+/// What a `ResolveUser` action found, before it becomes an event.
+enum Lookup {
+    /// The exact username resolved to one person.
+    Resolved(UserCandidate),
+
+    /// The name search listed the people it matched.
+    Listed(Vec<UserCandidate>),
+}
+
+/// Answers a `ResolveUser`: resolve a handle exactly, or search a name.
+///
+/// The routing is Q5's: a username-shaped query is tried through the exact
+/// resolver first, and only a handle nobody owns falls through to the contact
+/// search — a stranger is reachable by handle and by nothing else, while a name
+/// is never lost to the handle path because that path declines it first. A
+/// name-shaped query goes straight to the search.
+async fn lookup(client: &ProtoClient, query: &str) -> Result<Lookup, ProtoError> {
+    if looks_like_username(query)
+        && let Some(user) = client.resolve_user(query).await?
+    {
+        return Ok(Lookup::Resolved(user));
+    }
+
+    Ok(Lookup::Listed(
+        client.search_users(query, SEARCH_MATCHES).await?,
+    ))
+}
+
 /// Performs the operation the reader asked for, and hands the answer back.
 ///
 /// The same shape as the two above, and for the same reason: a round trip in the
@@ -1145,12 +1243,24 @@ fn request_plain(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender
             // two.
             Action::Login { .. } | Action::LoginCancelled | Action::Logout => {}
 
-            // A person lookup is queued by `tui` and performed by STAGE-05. This
-            // stage draws the surface only, so it is a no-op kept as its own arm
-            // rather than folded in with the sign-in arms above: STAGE-05
-            // replaces it in place with the real dispatch.
+            // A person lookup is a question about a person rather than an
+            // operation on a conversation, and it shares this task's shape for
+            // the same reason as the search above: a round trip here would stop
+            // the reader's keystrokes being read while it runs. The answer is
+            // one of three events, chosen by what the lookup found.
             Action::ResolveUser { query } => {
-                let _ = query;
+                let event = match lookup(client.as_ref(), &query).await {
+                    Ok(Lookup::Resolved(user)) => Event::UserResolved {
+                        query,
+                        user: Some(user),
+                    },
+                    Ok(Lookup::Listed(users)) => Event::UsersListed { query, users },
+                    Err(error) => Event::UserLookupFailed {
+                        query,
+                        reason: failure_reason(&error),
+                    },
+                };
+                let _ = tx.send(AppEvent::Net(event));
             }
         }
     });
@@ -1284,6 +1394,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             result,
         } => apply_searched(app, chat_id, &query, result),
 
+        Event::UserResolved { query, user } => apply_user_resolved(app, &query, user),
+        Event::UsersListed { query, users } => apply_users_listed(app, &query, users),
+        Event::UserLookupFailed { query, reason } => apply_user_lookup_failed(app, &query, reason),
         Event::Sent {
             chat_id,
             temp_id,
@@ -1677,6 +1790,53 @@ fn apply_searched(
     }
 }
 
+/// Opens the person a resolution named, when it is still the answer wanted.
+///
+/// A `None` is not an answer: the caller's fallback — the name search — will
+/// supply the list, so nothing is shown here. A resolution for a query the
+/// reader has replaced is dropped, exactly as a stale list would be, because the
+/// chat it would open is one nobody is looking for any more.
+fn apply_user_resolved(app: &mut App, query: &str, user: Option<UserCandidate>) {
+    let Some(user) = user else {
+        return;
+    };
+    if app.user_search().query() != Some(query) {
+        return;
+    }
+
+    app.open_user(&user);
+}
+
+/// Shows the people a name search listed, opening a lone one directly.
+///
+/// A single candidate is the reader's answer rather than a list (Q4); zero or
+/// more than one is a list to choose from, and [`App::apply_users`] refuses it
+/// if the query has been replaced.
+fn apply_users_listed(app: &mut App, query: &str, users: Vec<UserCandidate>) {
+    if app.user_search().query() != Some(query) {
+        return;
+    }
+
+    // One candidate is the answer; the rest are a list. The borrow of `users`
+    // ends before `open_user`, which needs the application mutably.
+    if let Some(only) = sole_candidate(&users) {
+        app.open_user(only);
+    } else {
+        app.apply_users(query, users);
+    }
+}
+
+/// Records a failed lookup on the search it belongs to, and says why.
+///
+/// A reason for a query the reader has replaced is not theirs to be told: only
+/// the search the failure belongs to is flashed, and [`App::fail_users`] is the
+/// one that decides that.
+fn apply_user_lookup_failed(app: &mut App, query: &str, reason: String) {
+    if app.fail_users(query, reason.clone()) {
+        app.flash(reason);
+    }
+}
+
 /// Puts a fetched chat list on screen, and the reader into it.
 ///
 /// The list is newest first, so the first entry is the conversation that last
@@ -1803,6 +1963,7 @@ mod tests {
     use super::*;
     use tui::app::AccountState;
     use tui::app::CHAT_SWITCH_DELAY;
+    use tui::app::Focus;
     use tui::app::JumpKind;
 
     /// The conversation the sample messages belong to.
@@ -3534,6 +3695,182 @@ mod tests {
         assert!(
             state.client.is_none(),
             "there is no client to have asked for anything"
+        );
+    }
+
+    // ---- finding a person to start a conversation with --------------------
+
+    /// A person a user search offered.
+    fn candidate(user_id: i64) -> UserCandidate {
+        UserCandidate {
+            user_id,
+            display_name: format!("user-{user_id}"),
+            username: Some(format!("user{user_id}")),
+        }
+    }
+
+    /// Runs `/`-on-the-chat-list and submits `query`, leaving the search open.
+    ///
+    /// The lookup the `⏎` queues is the caller's, not this test's, so it is
+    /// drained rather than left to surprise the next read.
+    fn begin_user_query(app: &mut App, query: &str) {
+        app.focus = Focus::ChatList;
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        for character in query.chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        while app.take_action().is_some() {}
+    }
+
+    /// An application with one conversation in the list and it open.
+    fn app_with_a_chat() -> App {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        app.select_chat(0);
+        app
+    }
+
+    /// A handle is a query with an optional leading `@` and no whitespace; a
+    /// name is anything else.
+    #[test]
+    fn a_username_looks_like_a_handle_and_a_name_does_not() {
+        assert!(looks_like_username("@alice"));
+        assert!(looks_like_username("alice"));
+        assert!(
+            looks_like_username("  @alice  "),
+            "the prompt's surrounding spaces are not part of the name"
+        );
+        assert!(
+            !looks_like_username("alice smith"),
+            "whitespace makes it a name"
+        );
+        assert!(!looks_like_username(""), "an empty query names nobody");
+        assert!(!looks_like_username("@"), "a bare at is not a handle");
+    }
+
+    /// One candidate is the answer to open; zero or many is a list to show.
+    #[test]
+    fn a_lone_candidate_is_opened_and_several_are_listed() {
+        assert_eq!(sole_candidate(&[candidate(1)]).map(|u| u.user_id), Some(1));
+        assert!(
+            sole_candidate(&[candidate(1), candidate(2)]).is_none(),
+            "two candidates are a list, not an answer"
+        );
+        assert!(
+            sole_candidate(&[]).is_none(),
+            "nobody is not an answer either"
+        );
+    }
+
+    /// A name search that listed exactly one person opens that person's chat.
+    #[test]
+    fn a_lone_listed_candidate_opens_the_chat() {
+        let mut app = app_with_a_chat();
+        let mut state = State::default();
+        begin_user_query(&mut app, "ada");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::UsersListed {
+                query: "ada".to_owned(),
+                users: vec![candidate(CHAT + 1)],
+            },
+        );
+
+        assert_eq!(
+            app.current_chat_id(),
+            CHAT + 1,
+            "the lone result is the answer"
+        );
+        assert_eq!(app.chats().len(), 2, "and it was listed");
+        assert!(!app.user_search().is_active(), "the overlay is put away");
+    }
+
+    /// A resolution that found nobody is not an answer to act on: the name
+    /// search it falls back to is still in flight, and its list lands after.
+    #[test]
+    fn a_resolution_without_a_person_defers_to_the_listed_candidates() {
+        let mut app = app_with_a_chat();
+        let mut state = State::default();
+        begin_user_query(&mut app, "ada");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::UserResolved {
+                query: "ada".to_owned(),
+                user: None,
+            },
+        );
+        assert!(
+            app.user_search().is_active(),
+            "the fallback is still on its way"
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::UsersListed {
+                query: "ada".to_owned(),
+                users: vec![candidate(CHAT + 1), candidate(CHAT + 2)],
+            },
+        );
+
+        assert!(
+            app.user_search().is_active(),
+            "two candidates are a list to choose from"
+        );
+        assert_eq!(app.user_search().candidates().len(), 2);
+        assert_eq!(
+            app.current_chat_id(),
+            CHAT,
+            "and no chat was opened outright"
+        );
+    }
+
+    /// A resolution for a query the reader has replaced opens nothing: the chat
+    /// it would open is one nobody is looking for any more.
+    #[test]
+    fn a_resolution_for_a_replaced_query_opens_nothing() {
+        let mut app = app_with_a_chat();
+        let mut state = State::default();
+        begin_user_query(&mut app, "bar");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::UserResolved {
+                query: "foo".to_owned(),
+                user: Some(candidate(CHAT + 1)),
+            },
+        );
+
+        assert_eq!(app.current_chat_id(), CHAT, "the stale answer is dropped");
+        assert!(app.user_search().is_active());
+    }
+
+    /// A lookup that failed records the reason on the search's own label.
+    #[test]
+    fn a_failed_lookup_lands_on_the_user_search() {
+        let mut app = app_with_a_chat();
+        let mut state = State::default();
+        begin_user_query(&mut app, "ada");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::UserLookupFailed {
+                query: "ada".to_owned(),
+                reason: "flood wait, retry in 5s".to_owned(),
+            },
+        );
+
+        assert!(app.user_search().is_active());
+        assert_eq!(
+            app.user_search().label(),
+            "/ada — no candidates (search failed: flood wait, retry in 5s)"
         );
     }
 }

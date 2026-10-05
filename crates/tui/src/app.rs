@@ -3844,26 +3844,27 @@ impl App {
     /// Opens the conversation with a person the search found, or focuses the one
     /// already there.
     ///
-    /// **STAGE-05's seam.** A person the chat list already holds is focused here,
-    /// which is the local half of "already-existing chats focus rather than
-    /// duplicate", and it defers to [`App::select_chat`] so the new view and the
-    /// read watermark are set up the way every other chat open sets them up.
-    /// Opening someone the list does not hold needs a history fetch only the
-    /// caller can make; STAGE-05 lands that branch.
-    fn open_user(&mut self, user: &UserCandidate) {
-        if let Some(index) = self
+    /// **A person the chat list already holds is focused**, which is the local
+    /// half of "already-existing chats focus rather than duplicate": the match is
+    /// by identifier, because a private chat's identifier *is* the peer's, and
+    /// [`ChatList::ensure_private_chat`] returns that existing index untouched.
+    /// **Someone it does not hold is listed and opened**: the helper appends a
+    /// private chat in the candidate's name without disturbing the order, and
+    /// returns the new index.
+    ///
+    /// From there the open mirrors every other one — [`App::select_chat`] sets
+    /// the view and the read watermark up, the focus moves to the conversation,
+    /// and the overlay is forgotten — so an opened chat behaves like any other.
+    /// No dialog reload is needed for a single person: the candidate already
+    /// carries the name to list, which is Q6's recommended insertion path.
+    pub fn open_user(&mut self, user: &UserCandidate) {
+        let index = self
             .list
-            .chats
-            .iter()
-            .position(|chat| chat.id == user.user_id)
-        {
-            self.select_chat(index);
-            self.set_focus(Focus::Conversation);
-            self.user_search.clear();
-            return;
-        }
+            .ensure_private_chat(user.user_id, user.display_name.clone());
 
-        self.flash("opening a new conversation is not built yet");
+        self.select_chat(index);
+        self.set_focus(Focus::Conversation);
+        self.user_search.clear();
     }
 
     /// Moves the selected candidate one place, wrapping.
@@ -10673,6 +10674,28 @@ mod tests {
         assert_eq!(app.focus, Focus::Conversation);
         assert_eq!(app.current_chat_id(), MOCK_CHAT);
         assert_eq!(app.chats().len(), before, "no duplicate chat was made");
+        assert!(!app.user_search().is_active(), "and the list is put away");
+    }
+
+    /// Accepting a person the list does not hold lists them once and opens the
+    /// conversation on them — the new-chat path, not a duplicate.
+    #[test]
+    fn accepting_a_candidate_that_is_not_a_chat_lists_and_opens_them() {
+        let mut app = App::mock();
+        let before = app.chats().len();
+        let person = candidate(MOCK_CHAT + 99);
+        start_user_search(&mut app, "ada");
+        assert!(app.apply_users("ada", vec![person.clone()]));
+
+        app.handle_key(press(KeyCode::Enter));
+
+        assert_eq!(app.focus, Focus::Conversation);
+        assert_eq!(app.current_chat_id(), person.user_id, "their chat is open");
+        assert_eq!(app.chats().len(), before + 1, "and listed exactly once");
+        assert!(
+            app.chats().iter().any(|chat| chat.id == person.user_id),
+            "the listed chat is them"
+        );
         assert!(!app.user_search().is_active(), "and the list is put away");
     }
 }
