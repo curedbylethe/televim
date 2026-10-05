@@ -22,6 +22,23 @@
 //! capped to the column's own height: it cannot spill into the conversation to
 //! its right or the bar below it.
 //!
+//! # Rows
+//!
+//! A row carries the three things the design's drawing does: the display name at
+//! the left, the `@username` beside it, and the **standing** at the right —
+//! `chat` when a conversation with that person already exists, `new` when
+//! choosing them makes one. The standing is a word rather than a colour because
+//! the palette has no role for it and the design says so; it is read off the
+//! chat list behind the overlay, so the two cannot disagree about who is already
+//! a chat. The fragment the reader typed is inked `match` inside the name (a
+//! name query) or the handle (a `@` query), the role a search match takes in a
+//! message.
+//!
+//! On the highlighted row the quiet ink is `text` rather than `text_dim`: a dim
+//! token under reverse video reverses into a dim *background*, which the design
+//! names as the one thing a cursor row must never draw. The whole row is one ink
+//! on that row, and the dim returns when the cursor moves off it.
+//!
 //! # Empty is not drawn
 //!
 //! A search with nothing to show draws no overlay at all. An empty, in-flight or
@@ -30,14 +47,30 @@
 //! sentence already does — and would cover the list they are about to go back
 //! to. The overlay is for choices, and a search with no candidates has none.
 //!
+//! # It is not drawn while the prompt has the focus
+//!
+//! The design's list is live: it is drawn while the query line is open and
+//! narrows with each keystroke. This build has no local directory to narrow
+//! against — the query goes to the server on `⏎` — so the only list it can hold
+//! belongs to the *submitted* query, not the draft. Re-opening `/` therefore
+//! hides the previous answer until the reader asks the new question: a list
+//! under a query it was not asked for would say the screen answers a question it
+//! is not being asked. This is a deliberate divergence from the design model,
+//! recorded in [`docs/known-gaps.md`](../../../../docs/known-gaps.md).
+//!
 //! [`UserSearchState::label`]: domain::user::UserSearchState::label
+
+use std::ops::Range;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
 use crate::app::{App, Focus};
+use crate::wrap::columns;
+use domain::user::UserCandidate;
 
 /// Where the overlay draws, or `None` when there is nothing to draw into.
 ///
@@ -46,10 +79,6 @@ use crate::app::{App, Focus};
 /// No border plus at least one candidate is below the floor — a one-row overlay
 /// would be all border — so that case draws nothing rather than a frame with no
 /// room in it.
-///
-/// It is drawn only while the line does **not** have the focus: re-opening `/`
-/// is the reader editing the question, and the previous answer steps aside
-/// rather than sitting under a query it does not belong to.
 fn overlay_area(app: &App, chat_list: Rect) -> Option<Rect> {
     let search = app.user_search();
     if app.focus == Focus::Input || !search.is_active() || search.is_empty() {
@@ -75,25 +104,19 @@ pub fn render(app: &App, chat_list: Rect, frame: &mut Frame<'_>) {
 
     frame.render_widget(Clear, area);
 
+    // The rows' inner width is the overlay's width less the two border columns,
+    // which is what the right-aligned standing is laid out against.
+    let width = usize::from(area.width).saturating_sub(2);
+    let query = app.user_search().query();
+    let selected = app.user_search().selected();
+
     let items: Vec<ListItem> = app
         .user_search()
         .candidates()
         .iter()
         .take(usize::from(area.height).saturating_sub(2))
-        .map(|candidate| {
-            // The display name is what the reader is reading; the handle is a
-            // second, dimmer fact about the same person, exactly as the unread
-            // count is beside a chat's title. `@` is drawn as stored, so the
-            // handle reads as a handle and stays searchable by eye.
-            let handle = candidate
-                .username
-                .as_ref()
-                .map_or_else(String::new, |name| format!(" @{name}"));
-            ListItem::new(Line::from(vec![
-                Span::styled(candidate.display_name.clone(), app.theme.text),
-                Span::styled(handle, app.theme.text_dim),
-            ]))
-        })
+        .enumerate()
+        .map(|(index, candidate)| candidate_row(app, candidate, query, width, index == selected))
         .collect();
 
     let list = List::new(items)
@@ -108,21 +131,204 @@ pub fn render(app: &App, chat_list: Rect, frame: &mut Frame<'_>) {
     // The real index, and `List` scrolls it into view itself — the same as the
     // emoji popup, and the reason this widget has no offset arithmetic.
     let mut state = ListState::default();
-    state.select(Some(app.user_search().selected()));
+    state.select(Some(selected));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// One candidate's row: the name and handle at the left, the standing at the
+/// right, and the fragment the reader typed inked `match`.
+///
+/// The standing's columns are reserved before the label is laid out, and the
+/// label is truncated to what is left: a name that lost cells to a standing
+/// would hide the thing the reader is choosing between, and the standing is the
+/// one fact the choice turns on. The design's box is wider than the chat-list
+/// column this overlay is bounded to, so a long name and a handle together are
+/// the pair that gives way first — handle before name, name's tail last.
+fn candidate_row<'a>(
+    app: &'a App,
+    candidate: &'a UserCandidate,
+    query: Option<&str>,
+    width: usize,
+    selected: bool,
+) -> ListItem<'a> {
+    // A `@` query is a username search, so the fragment belongs in the handle;
+    // anything else is a name search, and the fragment belongs in the name.
+    let by_username = query.is_some_and(|q| q.starts_with('@'));
+    let fragment = query
+        .map(|q| q.trim_start_matches('@'))
+        .filter(|f| !f.is_empty());
+
+    // The ink the row's quieter parts take. On the cursor row it is the body ink,
+    // because reverse video turns a dim foreground into a dim background.
+    let quiet = if selected {
+        app.theme.text
+    } else {
+        app.theme.text_dim
+    };
+    let base = app.theme.text;
+    let mark = app.theme.match_hit;
+
+    let standing = if app.chats().iter().any(|chat| chat.id == candidate.user_id) {
+        "chat"
+    } else {
+        "new"
+    };
+
+    // One space between the label and the standing, then the standing itself.
+    let budget = width.saturating_sub(columns(standing) + 1);
+    let mut used = 0;
+
+    let mut spans = Vec::new();
+    used += push_marked(
+        &mut spans,
+        &candidate.display_name,
+        if by_username { None } else { fragment },
+        base,
+        mark,
+        budget.saturating_sub(used),
+    );
+
+    if let Some(username) = candidate.username.as_deref() {
+        // The leading space and the `@` are chrome and never the match; only the
+        // handle's own text can carry the fragment.
+        let handle_fragment = if by_username { fragment } else { None };
+        for (text, fragment) in [(" ", None), ("@", None), (username, handle_fragment)] {
+            used += push_marked(
+                &mut spans,
+                text,
+                fragment,
+                quiet,
+                mark,
+                budget.saturating_sub(used),
+            );
+        }
+    }
+
+    // Fill the rest of the label's budget so the standing lands on the right
+    // edge, and keep at least one space in front of it.
+    let pad = budget.saturating_sub(used);
+    spans.push(Span::raw(" ".repeat(pad + 1)));
+    spans.push(Span::styled(standing, quiet));
+
+    ListItem::new(Line::from(spans))
+}
+
+/// Append `text` to `spans`, with `fragment` inked `mark`, taking at most
+/// `budget` columns; return how many columns were written.
+///
+/// The text is cut at a character boundary — never inside a cluster a terminal
+/// would draw as one cell — so a name too long for the column loses whole
+/// characters rather than half of one.
+fn push_marked<'a>(
+    spans: &mut Vec<Span<'a>>,
+    text: &'a str,
+    fragment: Option<&str>,
+    base: Style,
+    mark: Style,
+    budget: usize,
+) -> usize {
+    if budget == 0 || text.is_empty() {
+        return 0;
+    }
+
+    let cut = fit_columns(text, budget);
+    let slice = &text[..cut];
+    spans.extend(marked(slice, fragment, base, mark));
+    columns(slice)
+}
+
+/// The byte index of the longest prefix of `text` that fits `max` columns.
+fn fit_columns(text: &str, max: usize) -> usize {
+    let mut used = 0;
+    for (at, character) in text.char_indices() {
+        let cell = columns(&text[at..at + character.len_utf8()]);
+        if used + cell > max {
+            return at;
+        }
+        used += cell;
+    }
+    text.len()
+}
+
+/// `text` split into spans, with every case-insensitive occurrence of `fragment`
+/// inked `mark` and the rest in `base`.
+///
+/// An absent or empty fragment is the whole string in `base`, which is the
+/// common case: most rows carry no match at all.
+fn marked<'a>(text: &'a str, fragment: Option<&str>, base: Style, mark: Style) -> Vec<Span<'a>> {
+    let Some(fragment) = fragment.filter(|f| !f.is_empty()) else {
+        return vec![Span::styled(text, base)];
+    };
+
+    let ranges = match_ranges(text, fragment);
+    if ranges.is_empty() {
+        return vec![Span::styled(text, base)];
+    }
+
+    let mut spans = Vec::with_capacity(ranges.len() * 2 + 1);
+    let mut at = 0;
+    for range in ranges {
+        if range.start > at {
+            spans.push(Span::styled(&text[at..range.start], base));
+        }
+        spans.push(Span::styled(&text[range.start..range.end], mark));
+        at = range.end;
+    }
+    if at < text.len() {
+        spans.push(Span::styled(&text[at..], base));
+    }
+    spans
+}
+
+/// The byte ranges in `text` where `fragment` occurs, case-insensitively.
+///
+/// Matched character by character rather than on a lowercased copy, because a
+/// lowercased string is not the same string: `İ` lowercases to two code points,
+/// and a byte offset into the copy would then name a cell in a row that is not
+/// the one drawn. Names and handles carry non-ASCII, so the fold is per
+/// character and the offsets stay the original string's.
+fn match_ranges(text: &str, fragment: &str) -> Vec<Range<usize>> {
+    let needle: Vec<char> = fragment.chars().collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let haystack: Vec<(usize, char)> = text.char_indices().collect();
+
+    let mut ranges = Vec::new();
+    let mut at = 0;
+    while at + needle.len() <= haystack.len() {
+        let hit = needle
+            .iter()
+            .zip(&haystack[at..])
+            .all(|(want, (_, got))| same_letter(*want, *got));
+        if hit {
+            let start = haystack[at].0;
+            let last = haystack[at + needle.len() - 1];
+            ranges.push(start..last.0 + last.1.len_utf8());
+            at += needle.len();
+        } else {
+            at += 1;
+        }
+    }
+    ranges
+}
+
+/// Whether two characters are the same letter, ignoring case.
+fn same_letter(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use domain::user::UserCandidate;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::layout::{Constraint, Direction, Layout};
     use ratatui::style::Modifier;
 
+    use crate::theme::Theme;
     use crate::widgets::input_bar;
 
     /// A person the search offered.
@@ -195,6 +401,13 @@ mod tests {
         })
     }
 
+    /// Everything one row says, as a string.
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
     /// The chat-list rectangle, laid out the way `App::render` lays it out.
     fn chat_list(app: &App, width: u16, height: u16) -> Rect {
         let full = Rect::new(0, 0, width, height);
@@ -262,6 +475,59 @@ mod tests {
         assert!(
             buffer[(x, y)].modifier.contains(Modifier::REVERSED),
             "the row the cursor is on is the highlighted one"
+        );
+    }
+
+    /// The standing says whether choosing a person opens their chat or makes one,
+    /// read off the chat list behind the overlay.
+    #[test]
+    fn a_row_stands_chat_or_new_for_whether_a_conversation_exists() {
+        let existing = App::mock().chats()[0].id;
+        let app = showing(vec![
+            candidate(existing, "Existing Person", Some("ep")),
+            candidate(9001, "Fresh Person", Some("fp")),
+        ]);
+
+        let buffer = screen(&app, 80, 24);
+        let known = row_with(&buffer, "Existing Person").expect("the first row is drawn");
+        let fresh = row_with(&buffer, "Fresh Person").expect("the second row is drawn");
+
+        assert!(
+            row_text(&buffer, known).contains("chat│"),
+            "a person with a chat stands `chat` at the row's right edge: {:?}",
+            row_text(&buffer, known)
+        );
+        assert!(
+            row_text(&buffer, fresh).contains("new│"),
+            "a person without one stands `new` there: {:?}",
+            row_text(&buffer, fresh)
+        );
+    }
+
+    /// The fragment the reader typed is inked `match`, the same role a search hit
+    /// takes in a message.
+    #[test]
+    fn the_typed_fragment_is_inked_match_inside_the_name() {
+        let app = showing(vec![candidate(7, "Noor Haddad", Some("noorh"))]);
+        let match_fg = Theme::default()
+            .match_hit
+            .fg
+            .expect("a match is a foreground");
+
+        let buffer = screen(&app, 80, 24);
+        let y = row_with(&buffer, "Noor Haddad").expect("the row is drawn");
+        let x = (0..buffer.area.width)
+            .find(|&x| buffer[(x, y)].symbol() == "N")
+            .expect("the name's first letter");
+
+        assert_eq!(
+            buffer[(x, y)].fg,
+            match_fg,
+            "`no` inside `Noor` is the match ink"
+        );
+        assert!(
+            buffer[(x, y)].modifier.contains(Modifier::BOLD),
+            "a match is bold as well as coloured"
         );
     }
 
