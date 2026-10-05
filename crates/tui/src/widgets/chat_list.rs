@@ -44,7 +44,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         .highlight_style(app.theme.selection);
 
     let mut state = ListState::default();
-    state.select(Some(app.selected_chat));
+    state.select(Some(app.list.selected_chat));
     frame.render_stateful_widget(list, area, &mut state);
 }
 

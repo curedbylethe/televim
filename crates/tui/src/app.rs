@@ -27,6 +27,7 @@ use crate::emoji;
 use crate::jumplist::Jumplist;
 use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
+use crate::state::chat_list::ChatListState;
 use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
 use crate::theme::Theme;
@@ -986,15 +987,8 @@ pub struct App {
     /// The profile card's buffer and its per-keystroke state.
     pub profile: ProfileCard,
 
-    /// The conversations, and the messages the client has seen in them.
-    ///
-    /// One value rather than a list beside a window: an event from the feed
-    /// moves both, and keeping them apart would leave the preview and the
-    /// unread count somewhere the event never reached. [`App::apply_update`] is
-    /// the one place either is folded in.
-    list: ChatList,
-
-    pub selected_chat: usize,
+    /// The chat list and the selection cursor.
+    pub list: ChatListState,
 
     /// The conversation on show, and where the reader is in it.
     ///
@@ -1255,8 +1249,7 @@ impl App {
             pane: Pane::Conversation,
             session: SessionState::new(),
             profile: ProfileCard::new(),
-            list: ChatList::default(),
-            selected_chat: 0,
+            list: ChatListState::new(),
             conversation: ConversationView::new(0),
             vim: VimState::new(0),
             line: LineEditor::new(),
@@ -1347,7 +1340,7 @@ impl App {
     /// The conversations, as they were last fetched.
     #[must_use]
     pub fn chats(&self) -> &[Chat] {
-        &self.list.chats
+        &self.list.list.chats
     }
 
     /// The jump the reader is waiting on, if any.
@@ -1515,12 +1508,12 @@ impl App {
     /// leaves nothing selected, which is what closes the conversation: there is
     /// no chat for the window to belong to.
     pub fn set_chats(&mut self, chats: Vec<Chat>) {
-        self.list = ChatList::with_chats(chats);
+        self.list.list = ChatList::with_chats(chats);
 
-        let last = self.list.chats.len().saturating_sub(1);
-        self.selected_chat = self.selected_chat.min(last);
+        let last = self.list.list.chats.len().saturating_sub(1);
+        self.list.selected_chat = self.list.selected_chat.min(last);
 
-        if self.list.chats.is_empty() {
+        if self.list.list.chats.is_empty() {
             self.select_chat_none();
             // The account's drafts go with its list: a peer id can be reused by
             // another account, and inheriting a stranger's words is worse than
@@ -1545,13 +1538,13 @@ impl App {
     /// can say where the reader landed.
     pub fn refresh_chats(&mut self, chats: Vec<Chat>) -> bool {
         let open = self.conversation.window.chat_id;
-        self.list = ChatList::with_chats(chats);
+        self.list.list = ChatList::with_chats(chats);
 
-        if let Some(index) = self.list.chats.iter().position(|chat| chat.id == open) {
-            self.selected_chat = index;
+        if let Some(index) = self.list.list.chats.iter().position(|chat| chat.id == open) {
+            self.list.selected_chat = index;
             true
         } else {
-            self.selected_chat = 0;
+            self.list.selected_chat = 0;
             false
         }
     }
@@ -1712,10 +1705,16 @@ impl App {
     pub fn card_subject(&self) -> crate::card::CardSubject<'_> {
         match self.profile.profile_subject {
             ProfileId::SelfAccount => crate::card::CardSubject::SelfAccount,
-            ProfileId::User(id) => self.list.chats.iter().find(|chat| chat.id == id).map_or(
-                crate::card::CardSubject::SelfAccount,
-                crate::card::CardSubject::Contact,
-            ),
+            ProfileId::User(id) => self
+                .list
+                .list
+                .chats
+                .iter()
+                .find(|chat| chat.id == id)
+                .map_or(
+                    crate::card::CardSubject::SelfAccount,
+                    crate::card::CardSubject::Contact,
+                ),
         }
     }
 
@@ -1797,7 +1796,7 @@ impl App {
     /// A chat from the list, for a test that needs a contact to open a card about.
     #[cfg(test)]
     pub(crate) fn any_chat(&self) -> Option<domain::chat::Chat> {
-        self.list.chats.first().cloned()
+        self.list.list.chats.first().cloned()
     }
 
     /// Whether the card's highlight is on the row with this label.
@@ -1864,7 +1863,7 @@ impl App {
         // From the chat list it is the highlight, and from the conversation it is
         // the open one: the two are the same value, because opening a conversation
         // is what moves the highlight to it.
-        let Some(chat) = self.list.chats.get(self.selected_chat) else {
+        let Some(chat) = self.list.list.chats.get(self.list.selected_chat) else {
             return;
         };
         self.open_card(ProfileId::User(chat.id));
@@ -2223,11 +2222,11 @@ impl App {
     ///
     /// An index outside the list moves nothing.
     fn choose_chat(&mut self, index: usize) {
-        if self.list.chats.get(index).is_none() {
+        if self.list.list.chats.get(index).is_none() {
             return;
         }
 
-        self.selected_chat = index;
+        self.list.selected_chat = index;
         self.pending_chat = Some(ChatChoice {
             index,
             at: Instant::now(),
@@ -2259,12 +2258,12 @@ impl App {
     ///
     /// An index outside the list leaves the screen as it was.
     pub fn select_chat(&mut self, index: usize) {
-        let Some(chat) = self.list.chats.get(index) else {
+        let Some(chat) = self.list.list.chats.get(index) else {
             return;
         };
         let chat_id = chat.id;
 
-        self.selected_chat = index;
+        self.list.selected_chat = index;
         self.pending_chat = None;
         self.select_chat_none();
         // The new view starts its placeholder ids at the bottom again, so an
@@ -2330,7 +2329,7 @@ impl App {
     /// index: the two agree, and the window is what every question here is about.
     fn open_chat(&self) -> Option<&Chat> {
         let chat_id = self.conversation.window.chat_id;
-        self.list.chats.iter().find(|chat| chat.id == chat_id)
+        self.list.list.chats.iter().find(|chat| chat.id == chat_id)
     }
 
     /// The name of the conversation on show, for the input bar's title.
@@ -2756,7 +2755,7 @@ impl App {
             return self.apply_typing(*chat_id, *typing);
         }
 
-        let listed = self.list.apply_update(event.clone());
+        let listed = self.list.list.apply_update(event.clone());
 
         // The message is what the typing was for, so it ends it. Cleared here
         // rather than on the cancel action alone because the cancel is not sent
@@ -3269,8 +3268,8 @@ impl App {
     /// beside this one, so there is nothing for the two of them to choose
     /// between.
     fn handle_chat_list(&mut self, key: KeyEvent) {
-        let here = self.selected_chat;
-        let last = self.list.chats.len().saturating_sub(1);
+        let here = self.list.selected_chat;
+        let last = self.list.list.chats.len().saturating_sub(1);
 
         match key.code {
             // The list is the only pane beside this one, so both keys are the
@@ -3839,6 +3838,7 @@ impl App {
     pub fn open_user(&mut self, user: &UserCandidate) {
         let index = self
             .list
+            .list
             .ensure_private_chat(user.user_id, user.display_name.clone());
 
         self.select_chat(index);
@@ -4343,7 +4343,7 @@ impl App {
             _ if cmd.starts_with("new ") => self.begin_new_chat(cmd[4..].trim()),
             _ if cmd.starts_with("chat ") => {
                 if let Ok(id) = cmd[5..].trim().parse::<i64>()
-                    && let Some(pos) = self.list.chats.iter().position(|c| c.id == id)
+                    && let Some(pos) = self.list.list.chats.iter().position(|c| c.id == id)
                 {
                     self.select_chat(pos);
                 }
@@ -5233,7 +5233,11 @@ impl App {
 
     #[must_use]
     pub fn current_chat_id(&self) -> i64 {
-        self.list.chats.get(self.selected_chat).map_or(0, |c| c.id)
+        self.list
+            .list
+            .chats
+            .get(self.list.selected_chat)
+            .map_or(0, |c| c.id)
     }
 
     /// The prefix a prompt's text is drawn behind: `:` and `/`, and nothing for
@@ -5585,6 +5589,7 @@ mod tests {
     /// How many unread messages the list holds for a conversation.
     fn unread(app: &App, chat_id: i64) -> u32 {
         app.list
+            .list
             .chats
             .iter()
             .find(|chat| chat.id == chat_id)
@@ -5639,6 +5644,7 @@ mod tests {
         let mut app = App::mock();
         let chat = app
             .list
+            .list
             .chats
             .iter_mut()
             .find(|chat| chat.id == MOCK_CHAT)
@@ -5676,7 +5682,7 @@ mod tests {
         let mut app = App::mock();
         app.select_chat(1);
 
-        assert_eq!(app.selected_chat, 1);
+        assert_eq!(app.list.selected_chat, 1);
         assert_eq!(app.current_chat_id(), 2);
         assert_eq!(
             app.conversation.window.chat_id, 2,
@@ -5700,7 +5706,7 @@ mod tests {
         app.set_chats(mock_chats().into_iter().take(2).collect());
 
         assert_eq!(app.chats().len(), 2);
-        assert_eq!(app.selected_chat, 1, "clamped into the shorter list");
+        assert_eq!(app.list.selected_chat, 1, "clamped into the shorter list");
         assert_eq!(app.current_chat_id(), 2);
     }
 
@@ -5744,7 +5750,7 @@ mod tests {
         );
         assert!(!app.conversation.window.is_empty(), "and so is its window");
         assert_eq!(
-            app.selected_chat, 2,
+            app.list.selected_chat, 2,
             "the highlight followed the id to the end of the reversed list"
         );
         assert_eq!(
@@ -6037,7 +6043,7 @@ mod tests {
         // The conversation's own motions are not the list's: `k` up there moved
         // the cursor, and here it moves the highlight.
         app.handle_key(press(KeyCode::Char('k')));
-        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.list.selected_chat, 0);
         assert_eq!(reading(&app), Some(10), "the cursor did not move");
 
         app.handle_key(press(KeyCode::Char('l')));
@@ -6123,16 +6129,16 @@ mod tests {
         let mut app = on_the_chat_list();
 
         app.handle_key(press(KeyCode::Char('j')));
-        assert_eq!(app.selected_chat, 1);
+        assert_eq!(app.list.selected_chat, 1);
         app.handle_key(press(KeyCode::Char('j')));
-        assert_eq!(app.selected_chat, 2);
+        assert_eq!(app.list.selected_chat, 2);
         app.handle_key(press(KeyCode::Char('j')));
-        assert_eq!(app.selected_chat, 2, "and clamps at the end");
+        assert_eq!(app.list.selected_chat, 2, "and clamps at the end");
 
         app.handle_key(press(KeyCode::Char('k')));
         app.handle_key(press(KeyCode::Char('k')));
         app.handle_key(press(KeyCode::Char('k')));
-        assert_eq!(app.selected_chat, 0, "and at the start");
+        assert_eq!(app.list.selected_chat, 0, "and at the start");
     }
 
     /// A moment long enough after any keystroke this test could have pressed for
@@ -6156,7 +6162,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('j')));
         assert_eq!(
-            app.selected_chat, 2,
+            app.list.selected_chat, 2,
             "the highlight follows the key at once"
         );
 
@@ -6193,12 +6199,12 @@ mod tests {
         let mut app = on_the_chat_list();
 
         app.handle_key(press(KeyCode::Char('G')));
-        assert_eq!(app.selected_chat, 2);
+        assert_eq!(app.list.selected_chat, 2);
         assert_eq!(app.take_pending_chat(settled()), Some(2));
 
         app.handle_key(press(KeyCode::Char('g')));
         app.handle_key(press(KeyCode::Char('g')));
-        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.list.selected_chat, 0);
         assert_eq!(app.take_pending_chat(settled()), Some(0));
     }
 
@@ -6213,12 +6219,12 @@ mod tests {
         app.handle_key(press(KeyCode::Char('x')));
         app.handle_key(press(KeyCode::Char('g')));
         assert_eq!(
-            app.selected_chat, 2,
+            app.list.selected_chat, 2,
             "the `g` after the `x` starts a sequence rather than finishing one"
         );
 
         app.handle_key(press(KeyCode::Char('g')));
-        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.list.selected_chat, 0);
     }
 
     /// `Enter` is a reader saying "this one", not a movement, so it opens at once
@@ -6232,7 +6238,7 @@ mod tests {
 
         assert_eq!(app.focus, Focus::Conversation);
         assert_eq!(app.conversation.window.chat_id, 2);
-        assert_eq!(app.selected_chat, 1);
+        assert_eq!(app.list.selected_chat, 1);
         assert_eq!(
             app.take_pending_chat(settled()),
             None,
@@ -6248,7 +6254,7 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('g')));
         assert_eq!(
-            app.selected_chat, 0,
+            app.list.selected_chat, 0,
             "`gg` in the list, not the top of a window"
         );
         assert_eq!(app.conversation.window.chat_id, MOCK_CHAT);
@@ -8006,7 +8012,7 @@ mod tests {
             .iter()
             .position(|c| c.id == 2)
             .expect("chat 2 is part of the mock data");
-        assert_eq!(app.selected_chat, expected);
+        assert_eq!(app.list.selected_chat, expected);
         assert_eq!(
             app.conversation.window.chat_id, 2,
             "the panel follows the chat list"
@@ -8018,13 +8024,13 @@ mod tests {
     #[test]
     fn chat_command_ignores_unparseable_or_unknown_ids() {
         let mut app = App::mock();
-        let before = app.selected_chat;
+        let before = app.list.selected_chat;
 
         run_command_line(&mut app, "chat not-a-number");
-        assert_eq!(app.selected_chat, before);
+        assert_eq!(app.list.selected_chat, before);
 
         run_command_line(&mut app, "chat 999");
-        assert_eq!(app.selected_chat, before);
+        assert_eq!(app.list.selected_chat, before);
     }
 
     #[test]

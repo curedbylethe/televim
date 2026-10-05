@@ -2566,7 +2566,7 @@ mod tests {
         open_first_chat(&mut app, vec![chat(CHAT), chat(CHAT + 1)]);
 
         assert_eq!(app.chats().len(), 2);
-        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.list.selected_chat, 0);
         assert_eq!(
             app.conversation.window.chat_id, CHAT,
             "the list is newest first, so the first entry is the one to open"
@@ -3748,7 +3748,7 @@ mod tests {
         );
         assert_eq!(app.vim.cursor(), read_at, "and the reader where they were");
         assert_eq!(
-            app.selected_chat, 1,
+            app.list.selected_chat, 1,
             "the highlight followed the conversation's id into the reordered list"
         );
     }
@@ -3831,7 +3831,10 @@ mod tests {
             app.conversation.window.chat_id, CHAT,
             "the window the reader was reading is preserved"
         );
-        assert_eq!(app.selected_chat, 0, "the highlight falls back to the top");
+        assert_eq!(
+            app.list.selected_chat, 0,
+            "the highlight falls back to the top"
+        );
         assert!(
             app.status.contains("no longer"),
             "and the reader is told where they landed: {:?}",
@@ -3855,7 +3858,7 @@ mod tests {
             tui::SessionStore::Keyring,
         );
 
-        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.list.selected_chat, 0);
         assert_eq!(app.conversation.window.chat_id, CHAT);
     }
 
