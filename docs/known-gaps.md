@@ -183,6 +183,40 @@ Real, and named so they are not mistaken for oversights:
   the default path is pinned by the ASCII tests beside them, which cannot tell a
   shaper's reorder from no reorder at all.
 
+- **The new-chat surface in the binary is narrower than the design model's.** The
+  design run draws an `n`-invoked, live-narrowing results list: the list is drawn
+  while the query line is open and narrows with each keystroke, `gg`/`G` jump to
+  its ends, `l` chooses beside `⏎`, rows are ordered no-conversation-first and
+  capped at eight, the bar title is `New message`, the overlay title is
+  `query — N result(s)`, and a person with no handle draws `(no username)`. The
+  binary ships the same *surface* the plan's Q1 reading names — a prompt on the
+  bar with a status label — but a different reach: `/` on the chat list opens it
+  (`n` is taken by the conversation's search walk, and the plan chose the list's
+  `/` before the run landed), `:new <query>` is the route from anywhere else (the
+  design also offers `:newchat`; the binary does not), the
+  list is drawn only after `⏎` resolves the query, the keys are
+  `j`/`k`/`↑`/`↓`/`⏎`/`Esc`, the title is `New chat`, the label is
+  `/query — N candidates`, and a row draws only what the peer gave. The
+  differences are open question Q2's earlier recommendation meeting the run that
+  was commissioned to override it; reconciling them is a design-run change, not a
+  hand edit to `DESIGN.md` or the engine (`design/README.md`).
+- **The new-chat list is not narrowed locally.** The design's list filters a
+  local directory as the reader types; this binary has none — the query goes to
+  the server on `⏎` — so the list belongs to the *submitted* query, and
+  re-opening the prompt hides the previous answer rather than showing it under a
+  draft it was not asked for. A live, narrowing list needs a directory search in
+  the client, which is a new feature and not part of this change.
+- **The new-chat overlay truncates a long name to keep the standing visible.**
+  The overlay is bounded to the chat-list column (30% of the terminal) while the
+  design's box is 56 cells, so a name and handle that do not fit give way — the
+  handle first, the name's tail last — before the `chat`/`new` standing, because
+  the standing is the one fact the choice turns on. On a wide terminal both fit;
+  on a narrow one the handle is the first thing lost.
+- **The result cap and the no-conversation-first order are the server's.** The
+  design caps the list at eight and sorts people with no chat first; the binary
+  draws the candidates in the order it was given them, so both are properties of
+  the lookup rather than of the widget.
+
 ## v2 Hooks
 
 The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists and returns bytes, and the `tokio::fs` cache and any viewer are what is still ahead of it.

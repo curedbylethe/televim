@@ -114,6 +114,22 @@ Working today:
   otherwise fetch every chat it scrolled past. The focused pane's border is
   drawn in `Theme::border_focused`; `h`/`l` and `Tab` move between the two panes,
   and `Ctrl+w` steps back out of the line.
+- **Starting a conversation with someone new:** `/` on the chat list finds a
+  *person* rather than a message — there is no open conversation for it to
+  search, so it does not borrow the conversation's meaning — and `:new <query>`
+  opens the same prompt from anywhere `:` reaches, pre-filled. It is the same
+  surface as the message search, which is what "same search surface as global
+  search" is read to mean while no separate global search exists: a prompt on the
+  bar behind a `/` prefix with a status label, submitted with `Enter`. The server
+  answers with candidates; an ambiguous set is drawn as a short overlay list over
+  the chat list, walked with `j`/`k` or `↑`/`↓` and opened with `Enter`, and
+  dismissed with `Esc`. Each row is the person's name, their `@username` when
+  they have one, and a standing — `chat` when a conversation with them already
+  exists, `new` when choosing them makes one — with the fragment the reader typed
+  inked `match`. Picking someone already in the list focuses that chat rather than
+  creating a second; picking someone new lists and opens one. The status line says
+  where the search stands: `searching…` while an answer is in flight, the count
+  when it lands, and why when it finds nobody or fails.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
   screenful, `gg` to the first unread, `n` to cycle search matches. `gd` on a
   message that quotes another goes to the quoted message: a cursor move when it
@@ -171,7 +187,9 @@ Working today:
   several requests with a pause between them, and a failure part-way through is
   reported as how many went through rather than as a plain failure.
 - **Search:** `/` searches the loaded window, then asks the server and prefers
-  its answer. `n` repeats or cycles.
+  its answer. `n` repeats or cycles. This is the *conversation's* search; the
+  chat list has its own `/` that finds a person instead — see *Starting a
+  conversation with someone new* — so the two never shadow each other.
 - **Typing indicator:** the conversation title grows a dim `· typing` note while
   the peer is composing one. It ends when they cancel, when their message lands,
   or six seconds after the last sign of it, and it is furniture on the title
@@ -186,7 +204,8 @@ Working today:
   another conversation. `p` is not bound in Visual. The line keeps its own
   internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
   registers are deliberately not shared, because their formats differ.
-- **Commands:** `:q`/`:quit`, `:chat <id>`, `:settings`, `:signin` and `:retry`.
+- **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:settings`,
+  `:signin` and `:retry`.
   `:retry` re-runs the bring-up — the client, the chat list, the feed — and is how
   a launch that exhausted its three chat-list attempts is cleared without a
   restart; while a bring-up is already in flight it says so and does nothing.
@@ -208,8 +227,8 @@ Not built, and named here so nobody reads the roadmap below as current:
   `d` with no second press to distinguish. `p` is unbound in Visual — replacing a
   selection with the reader's own text is a destructive reading of a key that
   looks additive.
-- **`:w`** — not a command. The commands are `q`/`quit`, `chat <id>`, `settings`,
-  `signin` and `retry`.
+- **`:w`** — not a command. The commands are `q`/`quit`, `chat <id>`,
+  `new <query>`, `settings`, `signin` and `retry`.
 - **Word motions *behind an operator* on non-ASCII text in the input** — refused
   with a message. `vim-line`'s word motions index bytes rather than characters,
   and behind `d`/`c`/`y` the motion and the slice to apply it happen inside one

@@ -27,16 +27,16 @@ televim/
 └── crates/
     ├── telegram-framework/     # OUR wrapper over grammers
     │   ├── src/                # lib, error, session, client, auth, raw, dialogs,
-    │   │                       #   account, history, messages, search, updates,
-    │   │                       #   testing
+    │   │                       #   account, history, messages, search, users,
+    │   │                       #   updates, testing
     │   └── tests/auth_integration.rs
     ├── proto/                  # Thin adapter: telegram-framework -> domain types
     │   ├── src/                # lib, error, client, account, auth, types, stream,
-    │   │                       #   history, messages, search
+    │   │                       #   history, messages, search, users
     │   └── Cargo.toml
     ├── domain/                 # Pure business logic (no async, no UI)
     │   └── src/                # lib, account, chat, message, history, search,
-    │                           #   session, updates, vim
+    │                           #   session, updates, user, vim
     ├── tui/                    # ratatui widgets & input handling
     │   └── src/                # lib, app, card, event, grapheme, line, rows,
     │                           #   text_row, theme, wrap, widgets/
@@ -111,10 +111,17 @@ A **first-party crate** that wraps `grammers-client` and provides:
 - An **escape hatch**: `Client::invoke()` that forwards directly to `grammers`.
 
 The modules beyond the three above are the ones with a rule in them: `dialogs`,
-`account`, `history`, `messages`, `search` and `updates`. Each keeps every decision that can
+`account`, `history`, `messages`, `search`, `users` and `updates`. Each keeps every decision that can
 be wrong in a free function over primitives, so it is testable on CI without a
 datacenter, and keeps the `grammers`-reading code as thin as it can be made. That
 is the same rule `app/src/net.rs` follows.
+
+`users` is the one that reaches a person the reader has never talked to: it
+resolves a `@username`, or searches the account's contacts by display name, and
+seeds the returned peer's `access_hash` into the session's peer cache so the
+person is addressable by every other call afterwards — without that seed, every
+typed path (`send_message`, `fetch_history`) would refuse the stranger as an
+unknown peer.
 
 This is the only crate permitted to depend on `grammers-*`.
 
@@ -141,7 +148,8 @@ crates/proto/
 │   ├── stream.rs       # Update subscription & event mapping
 │   ├── history.rs      # History page -> domain window
 │   ├── messages.rs     # Send/edit/delete, and identifier widening
-│   └── search.rs       # Server-side search
+│   ├── search.rs       # Server-side search
+│   └── users.rs        # Resolve a @username, or search people -> candidates
 └── Cargo.toml          # deps: domain, telegram-framework, thiserror, tracing
 ```
 
@@ -150,7 +158,8 @@ crates/proto/
 Pure business logic. **No `tokio`, no `ratatui`, no `grammers`.** Only `thiserror`.
 
 The entities are `Chat`, `Message` and `Session`; the parts with real rules in
-them are the conversation window, search, and the update vocabulary.
+them are the conversation window, search, the update vocabulary, and a person the
+reader might start a conversation with.
 
 ```
 crates/domain/
@@ -164,10 +173,18 @@ crates/domain/
 │   ├── selection.rs    # Mark, Selection: the two ends of a selection
 │   ├── session.rs      # Session state
 │   ├── updates.rs      # UpdateEvent vocabulary
+│   ├── user.rs         # UserCandidate, UserSearchState: finding a person
 │   └── vim.rs          # Pure Vim motion calculator (no UI): VimState between
 │                       #   items, char_motion within one item's text
 └── Cargo.toml          # deps: thiserror
 ```
+
+`domain::user` is plain data, like the rest of the crate: `UserCandidate` is one
+person the server offered (their identifier, display name and optional
+`@username`), and `UserSearchState` holds the query, the candidates and the
+reader's place among them — with `adopt` refusing an answer whose query the
+reader has already replaced, the same stale-answer discipline `SearchState`
+keeps.
 
 `domain::history::ConversationWindow` is a flat, bounded `VecDeque` capped at
 `CONVERSATION_WINDOW` (200). It is a window over the messages the client has
@@ -207,7 +224,8 @@ crates/tui/
 │   │   ├── emoji_popup.rs  # The `:shortcode` completion above the bar
 │   │   ├── input_bar.rs
 │   │   ├── profile.rs   # The card, in the conversation's rectangle
-│   │   └── status_bar.rs
+│   │   ├── status_bar.rs
+│   │   └── user_list.rs # The new-chat results overlay, over the chat list
 │   └── theme.rs        # Color schemes
 └── Cargo.toml          # deps: domain, ratatui, crossterm, vim-line,
                        #        unicode-width, unicode-segmentation, unicode-bidi, emojis
@@ -225,6 +243,15 @@ leaves the line from any of its modes without throwing anything away, and the
 focused pane's block is drawn in `Theme::border_focused`. `event.rs` exists but
 `key_to_action` is not yet called: `App::handle_key` matches on `KeyEvent`
 directly. That is pre-existing dead code — do not delete it without asking.
+
+The new-conversation search is the second prompt-driven surface. `/` on the chat
+list opens it (the conversation's `/` still searches messages), `:new <query>`
+opens it from anywhere `:` reaches, and `⏎` queues an `Action::ResolveUser` for
+the composition root — `tui` never reaches the network. Its answer is drawn by
+`widgets/user_list.rs`, a transient overlay over the chat list in the
+`emoji_popup`'s shape, walked with `j`/`k`/`⏎`/`Esc` while it is up; the status
+line carries the query and the count, ranked above the conversation's own search
+label. It is a prompt and an overlay, not a third pane.
 
 `line.rs` owns the composed text and wraps `vim-line`, which never stores a
 buffer: the wrapper applies the edits the library calculates, decides `Enter`
