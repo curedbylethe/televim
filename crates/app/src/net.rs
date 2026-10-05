@@ -1310,14 +1310,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             chats,
             account,
             session_store,
-        } => {
-            apply_ready_to_screen(app, state, chats, account, session_store);
-            state.client = Some(client);
-            state.bringing_up = false;
-            // The client is there, so the sign-in flow's `waiting` flag means
-            // what it says: a request a client is carrying.
-            app.set_client_available(true);
-        }
+        } => apply_ready(app, state, client, chats, account, session_store),
 
         // Nothing failed, so nothing is an `Offline`: the screen's answer is a
         // sentence about the configuration, which is what the flow draws.
@@ -1363,24 +1356,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
 
-        Event::LoggedOut { result } => {
-            apply_logged_out(app, state, result);
-            // The signed-out client is gone — and the fresh one below is not up
-            // yet, so the screen is client-less until its `Ready` says otherwise.
-            app.set_client_available(false);
-
-            // A fresh client, because the one that just signed out cannot be
-            // reused — see [`State::cfg`]. Its `Ready` carries
-            // `Err(String::new())`, and `apply_ready_to_screen` is what opens
-            // the phone field off the back of it.
-            if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
-                // Counted as in flight from here rather than from the `Ready` it
-                // will send, so a `:retry` typed while it is on its way is refused
-                // rather than answered with a second client.
-                state.bringing_up = true;
-                spawn_bring_up(cfg, tx);
-            }
-        }
+        Event::LoggedOut { result } => apply_logged_out_and_reconnect(app, state, result),
 
         Event::Update(event) => {
             // Whether it moved anything is not acted on: the loop redraws on
@@ -1423,48 +1399,91 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::Jumped {
             jump,
-            mut cursor,
+            cursor,
             result,
-        } => {
-            // However it ended, the jump is over — unless a later one has taken
-            // its place, in which case that one is still on its way and must not
-            // be asked for again.
-            if state.history.jump == Some(jump) {
-                state.history.jump = None;
-            }
+        } => apply_jumped(app, state, jump, cursor, result),
+    }
+}
 
-            // A page was fetched for one conversation, and the reader can open
-            // another while it is in flight. The window refuses a page that is
-            // not its own; the cursor has to be refused here too, or it would
-            // start describing a conversation that is no longer on screen.
-            if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
-                return;
-            }
+fn apply_ready(
+    app: &mut App,
+    state: &mut State,
+    client: Arc<ProtoClient>,
+    chats: Vec<Chat>,
+    account: Result<domain::account::Account, String>,
+    session_store: tui::SessionStore,
+) {
+    apply_ready_to_screen(app, state, chats, account, session_store);
+    state.client = Some(client);
+    state.bringing_up = false;
+    // The client is there, so the sign-in flow's `waiting` flag means
+    // what it says: a request a client is carrying.
+    app.set_client_available(true);
+}
 
-            match result {
-                Ok(page) => {
-                    // Only a page the window took is worth telling the cursor
-                    // about: a jump the reader abandoned leaves it describing
-                    // what is still on screen.
-                    if app.apply_jump(&page, jump.target_id) {
-                        cursor.reset_to(&page);
-                        settle(app, cursor);
-                        state.history.cursor = Some(cursor);
-                    }
-                }
+fn apply_logged_out_and_reconnect(app: &mut App, state: &mut State, result: Result<(), String>) {
+    apply_logged_out(app, state, result);
+    // The signed-out client is gone — and the fresh one below is not up
+    // yet, so the screen is client-less until its `Ready` says otherwise.
+    app.set_client_available(false);
 
-                // The reader is left where they were, with the reason on the
-                // status line — and the wait is over, or the key would be wedged
-                // by one bad request. No backoff is set, unlike a paging fetch:
-                // this one was asked for by a keystroke rather than by the
-                // driver, so nothing is going to ask again on its own, and
-                // holding every direction would stall the paging the reader did
-                // not interrupt.
-                Err(error) => {
-                    app.clear_jump(jump.target_id);
-                    app.status = format!("history: {error}");
-                }
+    // A fresh client, because the one that just signed out cannot be
+    // reused — see [`State::cfg`]. Its `Ready` carries
+    // `Err(String::new())`, and `apply_ready_to_screen` is what opens
+    // the phone field off the back of it.
+    if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+        // Counted as in flight from here rather than from the `Ready` it
+        // will send, so a `:retry` typed while it is on its way is refused
+        // rather than answered with a second client.
+        state.bringing_up = true;
+        spawn_bring_up(cfg, tx);
+    }
+}
+
+fn apply_jumped(
+    app: &mut App,
+    state: &mut State,
+    jump: Jump,
+    mut cursor: HistoryCursor,
+    result: Result<Vec<Message>, ProtoError>,
+) {
+    // However it ended, the jump is over — unless a later one has taken
+    // its place, in which case that one is still on its way and must not
+    // be asked for again.
+    if state.history.jump == Some(jump) {
+        state.history.jump = None;
+    }
+
+    // A page was fetched for one conversation, and the reader can open
+    // another while it is in flight. The window refuses a page that is
+    // not its own; the cursor has to be refused here too, or it would
+    // start describing a conversation that is no longer on screen.
+    if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
+        return;
+    }
+
+    match result {
+        Ok(page) => {
+            // Only a page the window took is worth telling the cursor
+            // about: a jump the reader abandoned leaves it describing
+            // what is still on screen.
+            if app.apply_jump(&page, jump.target_id) {
+                cursor.reset_to(&page);
+                settle(app, cursor);
+                state.history.cursor = Some(cursor);
             }
+        }
+
+        // The reader is left where they were, with the reason on the
+        // status line — and the wait is over, or the key would be wedged
+        // by one bad request. No backoff is set, unlike a paging fetch:
+        // this one was asked for by a keystroke rather than by the
+        // driver, so nothing is going to ask again on its own, and
+        // holding every direction would stall the paging the reader did
+        // not interrupt.
+        Err(error) => {
+            app.clear_jump(jump.target_id);
+            app.status = format!("history: {error}");
         }
     }
 }
