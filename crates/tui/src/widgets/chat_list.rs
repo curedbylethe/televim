@@ -19,8 +19,8 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
                 String::new()
             };
             ListItem::new(Line::from(vec![
-                Span::styled(c.title.clone(), app.theme.text),
-                Span::styled(unread, app.theme.text_dim),
+                Span::styled(c.title.clone(), app.ui.theme.text),
+                Span::styled(unread, app.ui.theme.text_dim),
             ]))
         })
         .collect();
@@ -28,10 +28,10 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let title = format!(" Chats ({}) ", app.chats().len());
     // The focused pane's border is the only thing that says where the keys go,
     // so the two panes cannot both be drawn as though they had it.
-    let border = if app.focus == Focus::ChatList {
-        app.theme.border_focused
+    let border = if app.ui.focus == Focus::ChatList {
+        app.ui.theme.border_focused
     } else {
-        app.theme.border
+        app.ui.theme.border
     };
 
     let list = List::new(items)
@@ -41,10 +41,10 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
                 .border_style(border)
                 .title(title),
         )
-        .highlight_style(app.theme.selection);
+        .highlight_style(app.ui.theme.selection);
 
     let mut state = ListState::default();
-    state.select(Some(app.selected_chat));
+    state.select(Some(app.list.selected_chat));
     frame.render_stateful_widget(list, area, &mut state);
 }
 

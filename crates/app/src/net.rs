@@ -805,7 +805,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
 
     // Nothing is open, so there is no conversation for a cursor to describe —
     // nor a jump to be waiting on, because closing a conversation forgets one.
-    if app.conversation.window.chat_id == 0 {
+    if app.conversation.conversation.window.chat_id == 0 {
         state.history.cursor = None;
         state.history.jump = None;
     }
@@ -910,7 +910,7 @@ fn auto_reconnect(state: &State) -> bool {
 
 /// Decides which page to ask for, from what the screen and the cursor say.
 fn wanted(app: &App, history: History, now: Instant) -> Wanted {
-    let open = app.conversation.window.chat_id;
+    let open = app.conversation.conversation.window.chat_id;
     if open == 0 {
         return Wanted::Nothing;
     }
@@ -1368,12 +1368,12 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             // reader chose this, so a line saying why it could not read a
             // profile would be an excuse nobody asked for.
             app.set_account(Err(String::new()));
-            "signed out".clone_into(&mut app.status);
+            "signed out".clone_into(&mut app.ui.status);
         }
 
         // A real failure, so the real-failure wording. The deliberate-refusal
         // words are gone with the refusal they belonged to.
-        Err(reason) => app.status = format!("could not sign out: {reason}"),
+        Err(reason) => app.ui.status = format!("could not sign out: {reason}"),
     }
 }
 
@@ -1391,7 +1391,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // sentence about the configuration, which is what the flow draws.
         Event::NoCredentials => {
             app.begin_no_credentials();
-            "televim has no application credentials".clone_into(&mut app.status);
+            "televim has no application credentials".clone_into(&mut app.ui.status);
         }
 
         // A flash would be the wrong lifetime here. The sentence is the only
@@ -1401,7 +1401,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // about the client: there is one either way, and the `Ready` beside it is
         // what puts the screen up.
         Event::SessionDiscarded(sentence) => {
-            app.status = sentence;
+            app.ui.status = sentence;
         }
 
         Event::CodeRequested { phone, result } => match result {
@@ -1409,7 +1409,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                 state.login.code = Some(code);
                 // The number the request went out with, not the pre-fill: the
                 // row under the code says where Telegram sent it.
-                app.phone.clone_from(&phone);
+                app.session.phone.clone_from(&phone);
                 app.login_advanced(domain::session::SessionState::AwaitingCode { phone }, None);
             }
             Err(error) => apply_login_refusal(app, &error, 0),
@@ -1564,7 +1564,7 @@ fn apply_jumped(
         // not interrupt.
         Err(error) => {
             app.clear_jump(jump.target_id);
-            app.status = format!("history: {error}");
+            app.ui.status = format!("history: {error}");
         }
     }
 }
@@ -1601,7 +1601,7 @@ fn apply_history(
         }
 
         Err(error) => {
-            app.status = format!("history: {error}");
+            app.ui.status = format!("history: {error}");
             state.history.retry_at = Some(Instant::now() + backoff(&error));
 
             // A first page that failed leaves nothing to count from, so
@@ -1627,7 +1627,7 @@ fn apply_history(
 fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
     let reason = format!("{reason:#}");
     app.set_account(Err(reason.clone()));
-    app.status = format!("offline: {reason}");
+    app.ui.status = format!("offline: {reason}");
     // No client to carry anything, so an in-flight sign-in is not in flight: the
     // flag would only keep the panel saying "Checking…".
     app.set_client_available(false);
@@ -1646,7 +1646,7 @@ fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
 /// so the two cannot disagree about what "reconnecting" looks like.
 fn apply_feed_ended(app: &mut App, state: &mut State) {
     state.reconnect_requested = true;
-    "reconnecting".clone_into(&mut app.status);
+    "reconnecting".clone_into(&mut app.ui.status);
 
     // Nothing has a client until the rebuilt one's `Ready`: the flag says so to
     // every surface that would otherwise claim a request can be carried.
@@ -1697,7 +1697,7 @@ fn apply_ready_to_screen(
     // gate all described the list and the feed that are gone, and holding them
     // makes `wanted` fall to a paging direction whose page can never arrive
     // (G5), because the preserved window is not empty.
-    let restored = if app.conversation.window.chat_id != 0 {
+    let restored = if app.conversation.conversation.window.chat_id != 0 {
         state.history.cursor = None;
         state.history.jump = None;
         state.history.retry_at = None;
@@ -1722,7 +1722,7 @@ fn apply_ready_to_screen(
     // Said last, because `login_complete` is what puts the status line back to
     // its resting sentence and would otherwise overwrite this.
     if !restored {
-        "the open conversation is no longer in the chat list".clone_into(&mut app.status);
+        "the open conversation is no longer in the chat list".clone_into(&mut app.ui.status);
     }
 }
 
@@ -1747,7 +1747,7 @@ fn apply_sign_in(app: &mut App, state: &mut State, result: Result<SignIn, ProtoE
             // challenge, and the challenge is kept for the request that spends it.
             let hint = challenge.hint().map(str::to_owned);
             state.login.challenge = Some(challenge);
-            let phone = app.phone.clone();
+            let phone = app.session.phone.clone();
             app.login_advanced(
                 domain::session::SessionState::AwaitingPassword { phone },
                 hint,
@@ -1808,7 +1808,7 @@ fn apply_login_refusal(app: &mut App, error: &ProtoError, used: u8) {
 fn apply_sent(app: &mut App, chat_id: i64, temp_id: i64, result: Result<Message, ProtoError>) {
     app.end_send(temp_id);
 
-    if app.conversation.window.chat_id != chat_id {
+    if app.conversation.conversation.window.chat_id != chat_id {
         return;
     }
 
@@ -1832,7 +1832,7 @@ fn apply_sent(app: &mut App, chat_id: i64, temp_id: i64, result: Result<Message,
 /// `MessageEdited` update and nothing else, because `grammers` discards the
 /// updates the request answers with.
 fn apply_edited(app: &mut App, chat_id: i64, message_id: i64, result: Result<(), ProtoError>) {
-    if app.conversation.window.chat_id != chat_id {
+    if app.conversation.conversation.window.chat_id != chat_id {
         return;
     }
 
@@ -1870,7 +1870,7 @@ fn apply_deleted(app: &mut App, chat_id: i64, message_ids: &[i64], result: Resul
             let partial = deleted_before_failure(&error);
             tracing::debug!(chat_id, partial, %error, "a deletion failed");
 
-            if app.conversation.window.chat_id == chat_id {
+            if app.conversation.conversation.window.chat_id == chat_id {
                 app.flash(match partial {
                     Some(deleted) => format!(
                         "delete: {deleted} of {} went through, the rest did not",
@@ -1986,7 +1986,7 @@ fn apply_user_lookup_failed(app: &mut App, query: &str, reason: String) {
 fn open_first_chat(app: &mut App, chats: Vec<Chat>) {
     let count = chats.len();
     app.set_chats(chats);
-    app.status = format!("{count} conversation(s)");
+    app.ui.status = format!("{count} conversation(s)");
 
     if count > 0 {
         app.select_chat(0);
@@ -2052,7 +2052,7 @@ fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
     // A wait shorter than a second still has to be announced as one: "retrying in
     // 0s" reads as no retry at all.
     let seconds = retry.delay.as_secs().max(1);
-    app.status = format!(
+    app.ui.status = format!(
         "fetching the chat list failed ({:#}); retrying in {}s (attempt {}/{})",
         retry.reason, seconds, retry.attempt, retry.attempts
     );
@@ -2334,11 +2334,16 @@ mod tests {
             },
         );
 
-        assert_eq!(app.conversation.window.len(), 5, "the window was replaced");
+        assert_eq!(
+            app.conversation.conversation.window.len(),
+            5,
+            "the window was replaced"
+        );
         assert_eq!(
             app.conversation
+                .conversation
                 .window
-                .get(app.vim.cursor())
+                .get(app.conversation.vim.cursor())
                 .map(|message| message.id),
             Some(19),
             "and the reader is on the message that was quoted"
@@ -2412,8 +2417,9 @@ mod tests {
 
         assert_eq!(
             app.conversation
+                .conversation
                 .window
-                .get(app.vim.cursor())
+                .get(app.conversation.vim.cursor())
                 .map(|message| message.id),
             Some(8),
             "and the reader is back on the message they left"
@@ -2551,9 +2557,9 @@ mod tests {
         );
 
         assert!(
-            app.status.contains("31s") && app.status.contains("1/3"),
+            app.ui.status.contains("31s") && app.ui.status.contains("1/3"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -2566,12 +2572,12 @@ mod tests {
         open_first_chat(&mut app, vec![chat(CHAT), chat(CHAT + 1)]);
 
         assert_eq!(app.chats().len(), 2);
-        assert_eq!(app.selected_chat, 0);
+        assert_eq!(app.list.selected_chat, 0);
         assert_eq!(
-            app.conversation.window.chat_id, CHAT,
+            app.conversation.conversation.window.chat_id, CHAT,
             "the list is newest first, so the first entry is the one to open"
         );
-        assert!(app.status.contains('2'), "got {:?}", app.status);
+        assert!(app.ui.status.contains('2'), "got {:?}", app.ui.status);
     }
 
     #[test]
@@ -2581,7 +2587,7 @@ mod tests {
         open_first_chat(&mut app, Vec::new());
 
         assert!(app.chats().is_empty());
-        assert_eq!(app.conversation.window.chat_id, 0);
+        assert_eq!(app.conversation.conversation.window.chat_id, 0);
     }
 
     /// The highlight moves on the keystroke, but the conversation it names is
@@ -2603,14 +2609,14 @@ mod tests {
 
         drive(&mut app, &mut state, &tx);
         assert_eq!(
-            app.conversation.window.chat_id, CHAT,
+            app.conversation.conversation.window.chat_id, CHAT,
             "the highlight has moved but the reader has not stopped"
         );
 
         std::thread::sleep(CHAT_SWITCH_DELAY);
         drive(&mut app, &mut state, &tx);
 
-        assert_eq!(app.conversation.window.chat_id, CHAT + 1);
+        assert_eq!(app.conversation.conversation.window.chat_id, CHAT + 1);
         assert!(
             state.history.cursor.is_none(),
             "the old cursor is forgotten"
@@ -2645,7 +2651,7 @@ mod tests {
             },
         );
 
-        assert_eq!(app.conversation.window.len(), 5);
+        assert_eq!(app.conversation.conversation.window.len(), 5);
         assert!(
             !app.is_fetching(FetchDirection::Older),
             "the direction is open again"
@@ -2677,18 +2683,20 @@ mod tests {
             },
         );
 
-        assert_eq!(app.conversation.window.len(), 5);
+        assert_eq!(app.conversation.conversation.window.len(), 5);
         assert_eq!(
             app.conversation
+                .conversation
                 .window
-                .get(app.vim.cursor())
+                .get(app.conversation.vim.cursor())
                 .map(|message| message.id),
             Some(19),
             "the reader is on the message the jump was for"
         );
         assert_eq!(app.pending_jump(), None, "and the jump is over");
         assert!(
-            !app.conversation.window.exhausted_older && !app.conversation.window.exhausted_newer,
+            !app.conversation.conversation.window.exhausted_older
+                && !app.conversation.conversation.window.exhausted_newer,
             "a window that jumped is surrounded by the unknown on both sides"
         );
         assert_eq!(
@@ -2725,7 +2733,11 @@ mod tests {
             },
         );
 
-        assert!(app.status.contains("history:"), "got {:?}", app.status);
+        assert!(
+            app.ui.status.contains("history:"),
+            "got {:?}",
+            app.ui.status
+        );
         assert_eq!(
             app.pending_jump(),
             None,
@@ -2738,7 +2750,7 @@ mod tests {
              the paging the reader did not interrupt"
         );
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             8,
             "and the reader stayed where they were"
         );
@@ -2809,7 +2821,7 @@ mod tests {
         );
 
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             8,
             "the window kept what it had"
         );
@@ -2842,7 +2854,7 @@ mod tests {
         );
 
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             3,
             "the window on show kept what it had"
         );
@@ -2871,7 +2883,11 @@ mod tests {
             },
         );
 
-        assert!(app.status.contains("history:"), "got {:?}", app.status);
+        assert!(
+            app.ui.status.contains("history:"),
+            "got {:?}",
+            app.ui.status
+        );
         assert!(
             state.history.cursor.is_none(),
             "nothing was loaded, so the next pass opens the conversation again"
@@ -2893,9 +2909,9 @@ mod tests {
         );
 
         assert!(
-            app.status.starts_with("offline:") && app.status.contains("credentials"),
+            app.ui.status.starts_with("offline:") && app.ui.status.contains("credentials"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -2980,9 +2996,9 @@ mod tests {
         drive(&mut app, &mut state, &tx);
 
         assert!(
-            app.status.contains("already trying to connect"),
+            app.ui.status.contains("already trying to connect"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3020,12 +3036,12 @@ mod tests {
     #[test]
     fn the_feed_ending_says_it_is_reconnecting_and_gives_up_the_client() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply(&mut app, &mut state, Event::FeedEnded);
 
-        assert_eq!(app.status, "reconnecting");
+        assert_eq!(app.ui.status, "reconnecting");
         assert!(
             state.reconnect_requested,
             "the driver is told to carry the reconnect out"
@@ -3044,7 +3060,7 @@ mod tests {
             "nothing was queued against a client that is gone"
         );
         assert_eq!(
-            app.status, "not connected yet — the client is not up",
+            app.ui.status, "not connected yet — the client is not up",
             "the client flag was cleared"
         );
     }
@@ -3092,9 +3108,9 @@ mod tests {
         drive(&mut app, &mut state, &tx);
 
         assert!(
-            app.status.starts_with("offline:") && app.status.contains("feed"),
+            app.ui.status.starts_with("offline:") && app.ui.status.contains("feed"),
             "got {:?}",
-            app.status
+            app.ui.status
         );
         assert!(!state.bringing_up, "and it is not a bring-up");
     }
@@ -3135,7 +3151,7 @@ mod tests {
             Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0))),
         );
 
-        assert_eq!(app.conversation.window.newest_id(), Some(4));
+        assert_eq!(app.conversation.conversation.window.newest_id(), Some(4));
     }
 
     /// "Deleted 200 of 250" and "failed" are different events: one leaves a
@@ -3156,9 +3172,9 @@ mod tests {
         apply_deleted(&mut app, CHAT, &[1, 2, 3], Err(partial()));
 
         assert_eq!(
-            app.status, "delete: 200 of 3 went through, the rest did not",
+            app.ui.status, "delete: 200 of 3 went through, the rest did not",
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3176,9 +3192,9 @@ mod tests {
         apply_deleted(&mut app, CHAT, &[1], Err(failed()));
 
         assert_eq!(
-            app.status, "delete: network error: reset",
+            app.ui.status, "delete: network error: reset",
             "got {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3198,7 +3214,7 @@ mod tests {
             })),
         );
 
-        assert_eq!(app.status, "televim", "got {:?}", app.status);
+        assert_eq!(app.ui.status, "televim", "got {:?}", app.ui.status);
     }
 
     // ---- what a send answers --------------------------------------------
@@ -3208,13 +3224,17 @@ mod tests {
     #[test]
     fn a_send_result_frees_the_key_even_for_a_conversation_that_was_left() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("hi", None);
+        let temp_id = app.conversation.conversation.queue_send("hi", None);
         app.begin_send(temp_id);
 
         // The reader opens another conversation while the send is on its way.
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
-        assert_eq!(app.sending, Some(temp_id), "the send is still in flight");
+        assert_eq!(
+            app.conversation.sending,
+            Some(temp_id),
+            "the send is still in flight"
+        );
 
         let mut state = State::default();
         apply(
@@ -3228,7 +3248,7 @@ mod tests {
         );
 
         assert!(
-            app.sending.is_none(),
+            app.conversation.sending.is_none(),
             "a dropped result must not leave the send key wedged"
         );
     }
@@ -3238,7 +3258,7 @@ mod tests {
     #[test]
     fn a_send_result_for_a_conversation_that_is_no_longer_open_changes_nothing() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("hi", None);
+        let temp_id = app.conversation.conversation.queue_send("hi", None);
         app.begin_send(temp_id);
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
@@ -3255,7 +3275,7 @@ mod tests {
         );
 
         assert!(
-            app.conversation.window.is_empty(),
+            app.conversation.conversation.window.is_empty(),
             "the conversation the reader opened is still empty"
         );
     }
@@ -3267,7 +3287,7 @@ mod tests {
     #[test]
     fn a_send_in_flight_holds_the_key_across_a_conversation_change() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("first", None);
+        let temp_id = app.conversation.conversation.queue_send("first", None);
         app.begin_send(temp_id);
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
@@ -3279,13 +3299,13 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(
-            app.conversation.window.is_empty(),
+            app.conversation.conversation.window.is_empty(),
             "the in-flight send holds the key, so the new conversation is not given the id"
         );
         assert!(
-            app.status.contains("already on its way"),
+            app.ui.status.contains("already on its way"),
             "and the refusal is visible: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3300,14 +3320,14 @@ mod tests {
     #[test]
     fn a_stale_result_does_not_confirm_a_placeholder_reissued_the_same_id() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let old_temp = app.conversation.queue_send("first", None);
+        let old_temp = app.conversation.conversation.queue_send("first", None);
         app.begin_send(old_temp);
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
 
         // Reaching past the gate is deliberate: without it, this is the
         // collision the `chat_id` check has to survive.
-        let new_temp = app.conversation.queue_send("second", None);
+        let new_temp = app.conversation.conversation.queue_send("second", None);
         app.begin_send(new_temp);
         assert_eq!(
             new_temp, old_temp,
@@ -3327,13 +3347,14 @@ mod tests {
 
         assert_eq!(
             app.conversation
+                .conversation
                 .message(new_temp)
                 .map(|message| message.status),
             Some(MessageStatus::Sending),
             "a result for another conversation must not confirm this one's message"
         );
         assert!(
-            app.conversation.window.newest_id().is_none(),
+            app.conversation.conversation.window.newest_id().is_none(),
             "and the real message did not land here"
         );
     }
@@ -3341,7 +3362,7 @@ mod tests {
     #[test]
     fn a_send_result_replaces_the_placeholder_the_reader_was_shown() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("hi", None);
+        let temp_id = app.conversation.conversation.queue_send("hi", None);
         app.begin_send(temp_id);
 
         let mut state = State::default();
@@ -3356,17 +3377,17 @@ mod tests {
         );
 
         assert!(
-            app.conversation.message(temp_id).is_none(),
+            app.conversation.conversation.message(temp_id).is_none(),
             "the placeholder left"
         );
-        assert_eq!(app.conversation.window.newest_id(), Some(4));
-        assert!(app.sending.is_none(), "the key is free again");
+        assert_eq!(app.conversation.conversation.window.newest_id(), Some(4));
+        assert!(app.conversation.sending.is_none(), "the key is free again");
     }
 
     #[test]
     fn a_failed_send_keeps_the_message_and_says_why() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("hi", None);
+        let temp_id = app.conversation.conversation.queue_send("hi", None);
         app.begin_send(temp_id);
 
         let mut state = State::default();
@@ -3382,16 +3403,20 @@ mod tests {
 
         assert_eq!(
             app.conversation
+                .conversation
                 .message(temp_id)
                 .map(|message| message.status),
             Some(MessageStatus::Failed),
             "the reader's message stays, marked as failed"
         );
         assert!(
-            app.conversation.failure(temp_id).is_some(),
+            app.conversation.conversation.failure(temp_id).is_some(),
             "and it carries a reason"
         );
-        assert!(app.sending.is_none(), "the key is free to try again");
+        assert!(
+            app.conversation.sending.is_none(),
+            "the key is free to try again"
+        );
     }
 
     /// A flood wait is a delay, not a freeze: it is labelled with the wait it
@@ -3666,11 +3691,11 @@ mod tests {
         );
 
         assert!(
-            matches!(&app.account, AccountState::Unavailable(reason) if reason.is_empty()),
+            matches!(&app.session.account, AccountState::Unavailable(reason) if reason.is_empty()),
             "signed out with no reason to draw, not offline: {:?}",
-            app.account
+            app.session.account
         );
-        assert_eq!(app.session_store, tui::SessionStore::Keyring);
+        assert_eq!(app.session.session_store, tui::SessionStore::Keyring);
     }
 
     /// Credentials, no session: the reader lands on the form rather than on an
@@ -3681,7 +3706,7 @@ mod tests {
     #[test]
     fn a_client_up_with_no_session_opens_the_sign_in_field() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply_ready_to_screen(
@@ -3693,7 +3718,7 @@ mod tests {
         );
 
         assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
-        assert_eq!(app.focus, tui::Focus::Input, "the field has the keys");
+        assert_eq!(app.ui.focus, tui::Focus::Input, "the field has the keys");
     }
 
     /// A reason is not a sign-in. A session that authorizes with a profile this
@@ -3702,7 +3727,7 @@ mod tests {
     #[test]
     fn a_reason_is_not_taken_for_a_missing_session() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply_ready_to_screen(
@@ -3726,7 +3751,7 @@ mod tests {
     #[test]
     fn a_ready_over_an_open_conversation_keeps_it_and_restores_the_highlight_by_id() {
         let mut app = app_with_unread_out_of_reach(2);
-        let read_at = app.vim.cursor();
+        let read_at = app.conversation.vim.cursor();
         let mut state = State::default();
 
         apply_ready_to_screen(
@@ -3738,17 +3763,21 @@ mod tests {
         );
 
         assert_eq!(
-            app.conversation.window.chat_id, CHAT,
+            app.conversation.conversation.window.chat_id, CHAT,
             "the conversation the reader was in is still the one on screen"
         );
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             8,
             "with its loaded window intact"
         );
-        assert_eq!(app.vim.cursor(), read_at, "and the reader where they were");
         assert_eq!(
-            app.selected_chat, 1,
+            app.conversation.vim.cursor(),
+            read_at,
+            "and the reader where they were"
+        );
+        assert_eq!(
+            app.list.selected_chat, 1,
             "the highlight followed the conversation's id into the reordered list"
         );
     }
@@ -3828,14 +3857,17 @@ mod tests {
         );
 
         assert_eq!(
-            app.conversation.window.chat_id, CHAT,
+            app.conversation.conversation.window.chat_id, CHAT,
             "the window the reader was reading is preserved"
         );
-        assert_eq!(app.selected_chat, 0, "the highlight falls back to the top");
+        assert_eq!(
+            app.list.selected_chat, 0,
+            "the highlight falls back to the top"
+        );
         assert!(
-            app.status.contains("no longer"),
+            app.ui.status.contains("no longer"),
             "and the reader is told where they landed: {:?}",
-            app.status
+            app.ui.status
         );
     }
 
@@ -3855,8 +3887,8 @@ mod tests {
             tui::SessionStore::Keyring,
         );
 
-        assert_eq!(app.selected_chat, 0);
-        assert_eq!(app.conversation.window.chat_id, CHAT);
+        assert_eq!(app.list.selected_chat, 0);
+        assert_eq!(app.conversation.conversation.window.chat_id, CHAT);
     }
 
     // ---- a stored session that cannot be read --------------------------
@@ -3927,7 +3959,7 @@ mod tests {
             Event::SessionDiscarded("the stored session could not be read".to_owned()),
         );
 
-        assert_eq!(app.status, "the stored session could not be read");
+        assert_eq!(app.ui.status, "the stored session could not be read");
         assert!(
             state.client.is_none(),
             "the sentence is about a session, not about a client"
@@ -3938,7 +3970,7 @@ mod tests {
             !app.expire_status(Instant::now() + Duration::from_secs(10)),
             "the sentence does not go away on its own"
         );
-        assert_eq!(app.status, "the stored session could not be read");
+        assert_eq!(app.ui.status, "the stored session could not be read");
     }
 
     // ---- signing out ---------------------------------------------------
@@ -3963,13 +3995,13 @@ mod tests {
             "the conversations went with the session"
         );
         assert!(
-            matches!(&app.account, AccountState::Unavailable(reason) if reason.is_empty()),
+            matches!(&app.session.account, AccountState::Unavailable(reason) if reason.is_empty()),
             "signed out, and not as a failure to read a profile: {:?}",
-            app.account
+            app.session.account
         );
         assert!(state.client.is_none(), "and so did the client behind it");
         assert!(app.signin().is_none(), "the field is the next event's job");
-        assert_eq!(app.status, "signed out");
+        assert_eq!(app.ui.status, "signed out");
     }
 
     /// The whole sequence in two events: the sign-out empties the screen, and
@@ -3978,7 +4010,7 @@ mod tests {
     #[test]
     fn a_signed_out_client_comes_back_asking_to_sign_in() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply_logged_out(&mut app, &mut state, Ok(()));
@@ -3991,7 +4023,11 @@ mod tests {
         );
 
         assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
-        assert_eq!(app.focus, tui::Focus::Input, "and the keys are going there");
+        assert_eq!(
+            app.ui.focus,
+            tui::Focus::Input,
+            "and the keys are going there"
+        );
     }
 
     /// A failure is a failure, and the reader is still signed in: the framework
@@ -4016,9 +4052,9 @@ mod tests {
             Err("the session could not be cleared".to_owned()),
         );
 
-        assert!(matches!(app.account, AccountState::Known(_)));
+        assert!(matches!(app.session.account, AccountState::Known(_)));
         assert_eq!(
-            app.status,
+            app.ui.status,
             "could not sign out: the session could not be cleared"
         );
     }
@@ -4028,7 +4064,7 @@ mod tests {
     #[test]
     fn a_signed_in_account_opens_no_sign_in_field() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply_ready_to_screen(
@@ -4050,7 +4086,7 @@ mod tests {
     #[test]
     fn a_ready_does_not_replace_a_sign_in_the_reader_already_started() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         app.begin_signin();
         app.login_advanced(
             domain::session::SessionState::AwaitingCode {
@@ -4082,7 +4118,7 @@ mod tests {
     #[test]
     fn a_signed_in_account_takes_the_sign_in_surface_down() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         app.begin_signin();
         assert!(app.signin().is_some(), "the flow is up to begin with");
         let mut state = State::default();
@@ -4099,7 +4135,7 @@ mod tests {
             app.signin().is_none(),
             "and the conversation is the program again"
         );
-        assert!(matches!(app.account, AccountState::Known(_)));
+        assert!(matches!(app.session.account, AccountState::Known(_)));
     }
 
     /// A machine with no `api_id` and `api_hash` gets a sentence rather than a
@@ -4112,7 +4148,7 @@ mod tests {
         apply(&mut app, &mut state, Event::NoCredentials);
 
         assert_eq!(app.signin(), Some(&tui::app::SignIn::NoCredentials));
-        assert_eq!(app.status, "televim has no application credentials");
+        assert_eq!(app.ui.status, "televim has no application credentials");
         assert!(
             state.client.is_none(),
             "there is no client to have asked for anything"
@@ -4135,7 +4171,7 @@ mod tests {
     /// The lookup the `⏎` queues is the caller's, not this test's, so it is
     /// drained rather than left to surprise the next read.
     fn begin_user_query(app: &mut App, query: &str) {
-        app.focus = Focus::ChatList;
+        app.ui.focus = Focus::ChatList;
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for character in query.chars() {
             app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));

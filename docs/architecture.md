@@ -38,8 +38,9 @@ televim/
     │   └── src/                # lib, account, chat, message, history, search,
     │                           #   session, updates, user, vim
     ├── tui/                    # ratatui widgets & input handling
-    │   └── src/                # lib, app, card, event, grapheme, line, rows,
-    │                           #   text_row, theme, wrap, widgets/
+    │   └── src/                # lib, app, bidi, card, date, emoji, event,
+    │                           #   grapheme, jumplist, line, rows, state,
+    │                           #   text_row, theme, widgets, wrap
     └── app/                    # Composition root & CLI binary
         ├── src/                # main, config, net, runtime
         └── tests/              # proto_integration.rs, tui_e2e.rs
@@ -204,14 +205,27 @@ on `proto` or `telegram-framework`.
 crates/tui/
 ├── src/
 │   ├── lib.rs
-│   ├── app.rs          # The App struct, key dispatch, layout, prompt state
+│   ├── app.rs          # Key dispatch, layout, paging. Nine fields, defined in state/
+│   ├── state/
+│   │   ├── mod.rs
+│   │   ├── session.rs      # SessionState: the session and the sign-in surface
+│   │   ├── profile.rs      # ProfileCard: the card's buffer and its keystrokes
+│   │   ├── chat_list.rs    # ChatListState: the chat list and its selection cursor
+│   │   ├── outbox.rs       # Outbox: queued actions, fetches in flight, the clipboard
+│   │   ├── pending.rs      # Pending: half-typed keys and deferred requests
+│   │   ├── conversation.rs # ConversationState: the open view, registers, searches
+│   │   ├── input.rs        # InputState: the live line and the emoji popup
+│   │   ├── drafts.rs       # DraftStore: per-peer parked drafts and read receipts
+│   │   └── ui.rs           # UiState, FrameMetrics: mode, focus, the frame's cells
 │   ├── card.rs         # One profile panel over two subjects: the row model, the
 │                      #   drawing, and which rows exist
+│   ├── date.rs         # Civil dates: day keys, labels and `HH:MM`. Pure; no clock
 │   ├── emoji.rs        # The `:query` under the caret, and its candidates
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
 │   ├── bidi.rs         # Which way a message reads, and the logical ranges one
 │                      #   wrapped row is drawn in, already permuted
 │   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break
+│   ├── jumplist.rs     # Where the reader has been, so a jump can be taken back
 │   ├── line.rs         # The input line: owns the text, wraps vim-line; the
 │                      #   value `App` parks under a peer id
 │   ├── rows.rs         # One owner for the panel's geometry
@@ -235,19 +249,24 @@ crates/tui/
                        #        unicode-width, unicode-segmentation, unicode-bidi, emojis
 ```
 
-`app.rs` is the largest file in the workspace and holds the key dispatch, the
-scroll arithmetic, the paging decision, the prompt state, and the per-peer draft
-map: each conversation's `LineEditor` is parked under its outgoing peer id when
-the reader leaves and restored when they return, the way `read_receipts` keys
-view state by peer. Key dispatch is
-`Focus` first and `Mode` second: the conversation owns a mode (Normal, Visual,
-Confirm) and the input line owns a mode of its own inside `tui::line` — having
-the line at all used to be its insert mode, until the line grew a normal mode
-and a visual one, and one enum could no longer describe a conversation being
+`App` is nine fields — `ui`, `session`, `profile`, `list`, `outbox`, `pending`,
+`conversation`, `input` and `drafts` — one sub-struct per concern, not one
+struct that holds every one of them. The methods stayed in `app.rs`, so the
+file is still large: key dispatch, the scroll arithmetic, the paging decision
+and the prompt handling are still methods on `App`. Key dispatch is
+`App::handle_key`, `Focus` first and `Mode` second. Both fields live on
+`UiState` in `state/ui.rs`, and the frame-measurement cells live on that
+type's `FrameMetrics`. The conversation owns a mode (Normal, Visual, Confirm)
+and the input line owns a mode of its own inside `tui::line` — having the line
+at all used to be its insert mode, until the line grew a normal mode and a
+visual one, and one enum could no longer describe a conversation being
 selected in *and* a half-written line waiting. `Tab` and `BackTab` walk the
-panes in the order they are drawn, `h`/`l` step between the two panes, `Ctrl+w`
-leaves the line from any of its modes without throwing anything away, and the
-focused pane's block is drawn in `Theme::border_focused`. `event.rs` exists but
+panes in the order they are drawn, `h`/`l` step between the two panes,
+`Ctrl+w` leaves the line from any of its modes without throwing anything away,
+and the focused pane's block is drawn in `Theme::border_focused`. The per-peer
+draft map and the read receipts live on `DraftStore` (`state/drafts.rs`): each
+conversation's `LineEditor` is parked under its outgoing peer id when the
+reader leaves and restored when they return. `event.rs` exists but
 `key_to_action` is not yet called: `App::handle_key` matches on `KeyEvent`
 directly. That is pre-existing dead code — do not delete it without asking.
 
@@ -308,8 +327,9 @@ arithmetic as everything else; a motion that produces a character position
 panel asks them rather than working it out again: a message is as many rows as
 its text needs at the width the panel gave it, and the viewport, the scrollbar,
 `Ctrl+d`/`Ctrl+u` and the fetch triggers all count those rows. `App` records the
-panel's height and its width in `Cell`s on the way past, because a frame is
-drawn from a shared reference and only the panel knows them. Nothing is cached:
+panel's height and its width in `Cell`s on `UiState`'s `FrameMetrics` on the
+way past, because a frame is drawn from a shared reference and only the panel
+knows them. Nothing is cached:
 the layout is rebuilt per frame, because a cache is a second thing to keep in
 step with the window, and that is the failure this arrangement exists to
 prevent.

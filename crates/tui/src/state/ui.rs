@@ -1,0 +1,130 @@
+//! Dispatch mode, focus, and the chrome that is not conversation or input.
+
+use std::cell::Cell;
+use std::time::Instant;
+
+use crate::app::{Focus, Mode, Pane};
+use crate::bidi::BidiMode;
+use crate::theme::Theme;
+
+/// How many message rows the conversation panel is assumed to have before it
+/// has been drawn once.
+///
+/// Only the panel knows the real number, and only during a frame. This is what
+/// the key handling falls back on in between, and it is deliberately a normal
+/// size rather than a small one: a page that overshoots is clamped.
+const ASSUMED_ROWS: usize = 20;
+
+/// How many columns the conversation panel's messages are assumed to have
+/// before it has been drawn once.
+///
+/// The same fallback as [`ASSUMED_ROWS`] and for the same reason: the layout
+/// has to be answerable before the first frame.
+const ASSUMED_BODY_WIDTH: u16 = 80;
+
+/// What the status line shows before anything has happened.
+pub(crate) const IDLE_STATUS: &str = "televim";
+
+/// Rows, body width, and the clock, as of the last frame.
+///
+/// [`Cell`] because a frame is drawn from a shared reference. The panel records
+/// what the terminal made of the rectangle, and the key path reads it back.
+pub struct FrameMetrics {
+    /// How many message rows the conversation panel had room for as of the last
+    /// frame.
+    ///
+    /// A cell rather than a plain field because a frame is drawn from a shared
+    /// reference, and the panel is the only place that knows how tall the
+    /// terminal made it. It is a measurement rather than state anything decides,
+    /// so recording it late is the same as recording it at all.
+    pub rows: Cell<usize>,
+
+    /// How many columns the conversation panel's messages had room for as of
+    /// the last frame, which is the width the rows are laid out at.
+    ///
+    /// Recorded beside [`Self::rows`] and for the same reason: only the panel
+    /// knows, and the layout cannot be worked out without it. What is given up
+    /// for the scrollbar is given up before this, so no message is ever laid
+    /// out — or drawn — under the bar.
+    pub body_width: Cell<u16>,
+
+    /// The unix second the reader's clock last read, as of the last frame.
+    ///
+    /// A measurement rather than state anything decides, for the same reason as
+    /// [`Self::rows`] and [`Self::body_width`]: only the host owns a clock, and this
+    /// crate reads none ([`crate::date`] is pure). Zero means no clock has been
+    /// recorded, which the day labels read as "say the date rather than `Today`"
+    /// rather than as 1970.
+    pub now: Cell<i64>,
+}
+
+/// Dispatch mode, focus, and the chrome around the conversation.
+pub struct UiState {
+    pub mode: Mode,
+    pub focus: Focus,
+    pub theme: Theme,
+
+    /// What the right-hand pane is showing.
+    ///
+    /// A field rather than a variant of [`Focus`], because the two answer
+    /// different questions: this says what the right-hand column holds, and
+    /// `Focus` says where a keystroke lands. See [`Pane`].
+    pub pane: Pane,
+
+    pub status: String,
+    pub should_quit: bool,
+
+    /// When a transient status stops applying, if it is transient.
+    pub(crate) status_until: Option<Instant>,
+
+    /// When the peer stops being shown as typing, and in which conversation.
+    ///
+    /// One conversation rather than one per chat, because the note is drawn on
+    /// the open conversation's title and nowhere else: an event for a chat the
+    /// reader is not in is dropped, and a note for a chat left behind belongs to
+    /// the chat that was left.
+    ///
+    /// The same deadline shape as [`Self::status_until`] — an instant compared
+    /// only where the loop supplies one — because a frame is drawn from a shared
+    /// reference and cannot expire anything itself.
+    pub(crate) typing_until: Option<(i64, Instant)>,
+
+    /// Who permutes a right-to-left row: this program, or the terminal.
+    ///
+    /// **Fixed at construction**, and written only by [`crate::app::App::with_bidi`]:
+    /// the layout is a pure function of the window, the panel's width and the clock
+    /// ([`crate::rows`], invariant 4), and a mode read out of mutable state while
+    /// a frame is being drawn would make the same conversation two different
+    /// heights depending on when it was asked. A caller that has read the
+    /// configuration says so once and every later frame draws the same rows.
+    ///
+    /// [`BidiMode::Terminal`] — the default — emits rows as they are stored and
+    /// lets the terminal rearrange them, which is what a shaping terminal needs.
+    pub(crate) bidi: BidiMode,
+
+    /// Rows, body width, and the clock, as of the last frame.
+    pub(crate) metrics: FrameMetrics,
+}
+
+impl UiState {
+    /// Normal mode, the conversation focused, and no frame measured yet.
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            mode: Mode::Normal,
+            focus: Focus::Conversation,
+            theme: Theme::default(),
+            pane: Pane::Conversation,
+            status: IDLE_STATUS.to_string(),
+            should_quit: false,
+            status_until: None,
+            typing_until: None,
+            bidi: BidiMode::Terminal,
+            metrics: FrameMetrics {
+                rows: Cell::new(ASSUMED_ROWS),
+                body_width: Cell::new(ASSUMED_BODY_WIDTH),
+                now: Cell::new(0),
+            },
+        }
+    }
+}

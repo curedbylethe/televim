@@ -246,7 +246,7 @@ const ALL_HINTS: [&str; 15] = [
 /// look like output.
 #[must_use]
 pub fn hint(app: &App) -> &'static str {
-    match (app.focus, app.mode) {
+    match (app.ui.focus, app.ui.mode) {
         // The sign-in surface, above every other row: it is not a pane and it is
         // not a card, so nothing about the pair describes it. The keys are the
         // field's while one is open and the flow's while it is not.
@@ -267,18 +267,21 @@ pub fn hint(app: &App) -> &'static str {
         // Above the mode hints it specialises: while a completion is up, the
         // keys it takes mean something else, and the row has to say so.
         (Focus::Input, _) if app.completion().is_some() => COMPLETION_HINT,
-        (Focus::Input, _) if app.line.purpose().is_buffer() => match app.line.status() {
-            "VISUAL" => LINE_VISUAL_HINT,
-            "NORMAL" => LINE_NORMAL_HINT,
-            _ => INSERT_HINT,
-        },
+        (Focus::Input, _) if app.input.line.purpose().is_buffer() => {
+            match app.input.line.status() {
+                "VISUAL" => LINE_VISUAL_HINT,
+                "NORMAL" => LINE_NORMAL_HINT,
+                _ => INSERT_HINT,
+            }
+        }
         (Focus::ChatList, _) => CHAT_LIST_HINT,
         // Before the conversation's own arms, and matched on the pane as well as
         // the mode: a card is in the right-hand column with the focus on it, so
         // without this the pair below would answer for it. Two rows, because the
         // two subjects do not have the same keys.
-        (Focus::Conversation, Mode::Normal) if app.pane.is_profile() => match app.card_subject() {
-            crate::card::CardSubject::SelfAccount => match app.account {
+        (Focus::Conversation, Mode::Normal) if app.ui.pane.is_profile() => match app.card_subject()
+        {
+            crate::card::CardSubject::SelfAccount => match app.session.account {
                 // The signed-out shell has no rows to move over and no draft to
                 // continue, so its row names the command that fixes it and `q`.
                 AccountState::Unavailable(_) => CARD_SIGNED_OUT_HINT,
@@ -290,7 +293,7 @@ pub fn hint(app: &App) -> &'static str {
             crate::card::CardSubject::Contact(_) => CARD_CONTACT_HINT,
         },
         (Focus::Conversation, Mode::Visual) => VISUAL_HINT,
-        (Focus::Conversation, Mode::Normal) if !app.line.is_empty() => DRAFT_HINT,
+        (Focus::Conversation, Mode::Normal) if !app.input.line.is_empty() => DRAFT_HINT,
         (Focus::Conversation, Mode::Normal) => NORMAL_HINT,
         // The two states that say nothing, and both say it for the same reason.
         // A confirmation outranks every hint on the status line, so the prompt's
@@ -310,12 +313,14 @@ pub fn hint(app: &App) -> &'static str {
 /// whole of what the line is doing.
 #[must_use]
 pub fn mode_label(app: &App) -> &'static str {
-    match (app.focus, app.mode) {
-        (Focus::Input, _) if app.line.purpose().is_buffer() => match app.line.status() {
-            "VISUAL" => Mode::Visual.label(),
-            "NORMAL" => Mode::Normal.label(),
-            _ => "INSERT",
-        },
+    match (app.ui.focus, app.ui.mode) {
+        (Focus::Input, _) if app.input.line.purpose().is_buffer() => {
+            match app.input.line.status() {
+                "VISUAL" => Mode::Visual.label(),
+                "NORMAL" => Mode::Normal.label(),
+                _ => "INSERT",
+            }
+        }
         (Focus::Input, _) => "INSERT",
         // Named rather than wildcarded. A wildcard here is right until the day a
         // second pane of the right-hand column can be in Visual or Confirm, and
@@ -334,11 +339,11 @@ pub fn mode_label(app: &App) -> &'static str {
 /// the conversation for nothing.
 #[must_use]
 pub fn content_rows(app: &App, width: u16) -> usize {
-    if app.focus != Focus::Input || app.line.text().is_empty() {
+    if app.ui.focus != Focus::Input || app.input.line.text().is_empty() {
         return 1;
     }
 
-    crate::wrap::wrap_keeping_whitespace(app.line.text(), width)
+    crate::wrap::wrap_keeping_whitespace(app.input.line.text(), width)
         .len()
         .clamp(1, INPUT_MAX_ROWS)
 }
@@ -356,11 +361,15 @@ pub fn title(app: &App) -> String {
     // A sign-in field names itself whatever the focus is, the draft row included:
     // the step survives a `Tab` away from it, and a bar that said `draft` on the
     // way back would have stopped naming the field the reader is about to answer.
-    match app.line.purpose() {
+    match app.input.line.purpose() {
         PromptKind::Phone => " Phone ".to_owned(),
         PromptKind::Code => " Login code ".to_owned(),
         PromptKind::Password => " Password ".to_owned(),
-        _ => match (app.focus, app.line.purpose(), app.line.is_empty()) {
+        _ => match (
+            app.ui.focus,
+            app.input.line.purpose(),
+            app.input.line.is_empty(),
+        ) {
             (Focus::Input, PromptKind::Message, _) => match app.open_chat_name() {
                 Some(name) => format!(" Message to {name} "),
                 None => " Message ".to_owned(),
@@ -377,14 +386,14 @@ pub fn title(app: &App) -> String {
 }
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
-    let focused = app.focus == Focus::Input;
+    let focused = app.ui.focus == Focus::Input;
 
     // The columns and rows the text has, which is the area less the border.
     let width = area.width.saturating_sub(2).max(1);
     let height = usize::from(area.height).saturating_sub(2).max(1);
 
     let mode = app.bidi();
-    let laid_out = app.line.laid_out_in(width, mode);
+    let laid_out = app.input.line.laid_out_in(width, mode);
     let first = laid_out.first_row(height);
 
     let prefix = app.prompt_prefix();
@@ -457,7 +466,7 @@ fn body_row<'a>(
     lead: Option<&'a str>,
     mode: BidiMode,
 ) -> Line<'a> {
-    let text = app.line.text();
+    let text = app.input.line.text();
     // The prefix is drawn in front of the first row, so the text on it has that
     // many columns fewer — the same reason a message's sender is subtracted
     // before its rows are cut rather than clipped after.
@@ -466,7 +475,7 @@ fn body_row<'a>(
 
     let mut spans = Vec::new();
     if let Some(lead) = lead {
-        spans.push(Span::styled(lead, app.theme.text_dim));
+        spans.push(Span::styled(lead, app.ui.theme.text_dim));
     }
 
     let row = text_row::TextRow {
@@ -475,19 +484,19 @@ fn body_row<'a>(
         // A draft is not a search result: `/` searches the window and the server,
         // never the line the reader is typing in.
         matched: false,
-        selected: app.line.selection(),
+        selected: app.input.line.selection(),
         // The bar is never reversed, so the caret is its own style rather than a
         // hole in a row of reverse video. It needs the focus as well as the row:
         // a caret on a draft nobody is typing into is a promise the program does
         // not keep.
-        caret: (focused && caret_row).then(|| app.line.caret()),
+        caret: (focused && caret_row).then(|| app.input.line.caret()),
         reversed: false,
         // A password is Telegram's secret rather than the reader's draft, and it
         // is the only prompt that conceals — see [`crate::line::LineEditor::concealed`].
-        concealed: app.line.concealed(),
+        concealed: app.input.line.concealed(),
         // `status()` rather than a mode of this panel's own, because the line's
         // mode is the line's and the bar already reads it to pick its hint.
-        ink: text_row::Ink::draft(&app.theme, focused, app.line.status() == "NORMAL"),
+        ink: text_row::Ink::draft(&app.ui.theme, focused, app.input.line.status() == "NORMAL"),
     };
 
     spans.extend(match mode {
@@ -514,10 +523,10 @@ fn body_row<'a>(
 /// The bar does not take the focus visually, it *is* the focus, so it is the
 /// one pane whose border is on exactly when the line is.
 fn border(app: &App) -> Style {
-    if app.focus == Focus::Input {
-        app.theme.border_focused
+    if app.ui.focus == Focus::Input {
+        app.ui.theme.border_focused
     } else {
-        app.theme.border
+        app.ui.theme.border
     }
 }
 
@@ -717,7 +726,7 @@ mod tests {
 
         press(&mut app, KeyCode::Char('d'));
 
-        assert_eq!(app.line.status(), "d...");
+        assert_eq!(app.input.line.status(), "d...");
         assert_ne!(mode_label(&app), Mode::Normal.label());
     }
 
@@ -1069,7 +1078,7 @@ mod tests {
 
         assert_eq!(
             drawn.chars().count(),
-            app.line.text().chars().count(),
+            app.input.line.text().chars().count(),
             "two spaces are two columns, and the trailing one is on show: {drawn:?}"
         );
     }
@@ -1128,8 +1137,8 @@ mod tests {
         // `wrap`, and a mode that moved a break would make the same draft a
         // different height on two terminals in the same window.
         assert_eq!(
-            app.line.laid_out(78).rows,
-            app.line.laid_out_in(78, BidiMode::Visual).rows,
+            app.input.line.laid_out(78).rows,
+            app.input.line.laid_out_in(78, BidiMode::Visual).rows,
             "the rows break the same way in both modes"
         );
     }
@@ -1166,6 +1175,7 @@ mod tests {
             carets(&visual_screen, visual_top)[0].0,
             1 + u16::try_from(
                 visual
+                    .input
                     .line
                     .laid_out_in(78, BidiMode::Visual)
                     .visual_column
@@ -1177,11 +1187,12 @@ mod tests {
         );
         assert_eq!(
             carets(&terminal_screen, terminal_top)[0].0,
-            1 + u16::try_from(terminal.line.laid_out(78).column).expect("a column fits a u16"),
+            1 + u16::try_from(terminal.input.line.laid_out(78).column)
+                .expect("a column fits a u16"),
             "and under the default the same caret is at the logical end of the draft"
         );
         assert_eq!(
-            terminal.line.laid_out(78).visual_column,
+            terminal.input.line.laid_out(78).visual_column,
             None,
             "which is a question this program does not answer in the default mode"
         );
@@ -1242,7 +1253,7 @@ mod tests {
             type_text(&mut app, "a line of text");
         }
 
-        let laid_out = app.line.laid_out(78);
+        let laid_out = app.input.line.laid_out(78);
         let first = laid_out.first_row(INPUT_MAX_ROWS);
         let drawn = flat(&screen(&app, 80, 24));
 

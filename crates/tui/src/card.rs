@@ -258,7 +258,7 @@ impl CardSubject<'_> {
 
 /// The account's own rows.
 fn self_rows(app: &App) -> Vec<CardRow> {
-    let AccountState::Known(account) = &app.account else {
+    let AccountState::Known(account) = &app.session.account else {
         return Vec::new();
     };
 
@@ -279,7 +279,10 @@ fn self_rows(app: &App) -> Vec<CardRow> {
         rows.push(CardRow::value("birthday", birthday));
     }
     rows.push(CardRow::value("id", format!("id {}", account.user_id)));
-    rows.push(CardRow::value("session", session(&app.session_store)));
+    rows.push(CardRow::value(
+        "session",
+        session(&app.session.session_store),
+    ));
     rows.push(CardRow::action(ADD_ACCOUNT));
     rows.push(CardRow::action(LOGOUT));
     rows
@@ -509,16 +512,16 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
 /// is a hole in it. An action is dim whether or not the cursor is on it, because it
 /// is a promise rather than a value and dimming is how the panel says so.
 fn ink_for(app: &App, row: &CardRow, on_cursor: bool) -> Ink {
-    let base = Ink::readonly(&app.theme);
+    let base = Ink::readonly(&app.ui.theme);
     if on_cursor {
         return Ink {
-            plain: app.theme.selection,
+            plain: app.ui.theme.selection,
             ..base
         };
     }
     if row.is_action() {
         return Ink {
-            plain: app.theme.text_dim,
+            plain: app.ui.theme.text_dim,
             ..base
         };
     }
@@ -755,7 +758,7 @@ mod tests {
         assert!(before > 0, "the mock account has rows");
 
         // A birthday the privacy hides is a row that is not there.
-        if let AccountState::Known(account) = &mut app.account {
+        if let AccountState::Known(account) = &mut app.session.account {
             account.birthday = None;
         }
         let after = rows(&app).len();
@@ -908,7 +911,7 @@ mod drawing {
         // A bio long enough to wrap at the width above. The mock already has one,
         // so this *replaces* a row rather than adding one: the row count must not
         // move, because a row is a field and not a line of text.
-        if let crate::app::AccountState::Known(account) = &mut app.account {
+        if let crate::app::AccountState::Known(account) = &mut app.session.account {
             account.bio = Some("a bio that is quite a lot longer than thirty columns".to_owned());
         }
         let after_rows = rows(&app);
@@ -1204,7 +1207,7 @@ mod drawing {
     fn a_field_the_peer_did_not_fill_is_not_a_row() {
         let mut app = self_card();
         let with = rows(&app).len();
-        if let crate::app::AccountState::Known(account) = &mut app.account {
+        if let crate::app::AccountState::Known(account) = &mut app.session.account {
             account.birthday = None;
             account.bio = None;
         }

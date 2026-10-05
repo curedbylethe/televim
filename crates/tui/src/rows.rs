@@ -318,7 +318,7 @@ pub fn continues(previous: &Message, current: &Message) -> bool {
 /// group only, because that is the only row it is drawn on.
 #[must_use]
 pub fn group_of(app: &App, index: usize) -> Grouped {
-    let window = &app.conversation.window;
+    let window = &app.conversation.conversation.window;
     let Some(current) = window.get(index) else {
         return Grouped::alone();
     };
@@ -357,7 +357,7 @@ pub fn group_of(app: &App, index: usize) -> Grouped {
 /// - what is left is the server's acknowledgement of a message the peer has read,
 ///   which is arithmetic against the watermark the peer reported.
 fn receipt_of(app: &App, index: usize) -> Receipt {
-    let window = &app.conversation.window;
+    let window = &app.conversation.conversation.window;
     let Some(newest) = window.get(index) else {
         return Receipt::None;
     };
@@ -369,7 +369,7 @@ fn receipt_of(app: &App, index: usize) -> Receipt {
         return Receipt::None;
     }
 
-    match app.conversation.read_watermark() {
+    match app.conversation.conversation.read_watermark() {
         None => Receipt::None,
         Some(read) if newest.id <= read => Receipt::Read,
         Some(_) => Receipt::Delivered,
@@ -666,7 +666,7 @@ fn receipt_word(receipt: Receipt) -> Option<&'static str> {
 /// leaving the reply unanchored, and one that is still on its way says that
 /// instead of quoting a message that has not arrived.
 pub(crate) fn reply_prefix(app: &App, reply_to: i64, width: u16) -> String {
-    let text = match app.conversation.message(reply_to) {
+    let text = match app.conversation.conversation.message(reply_to) {
         Some(message) if matches!(message.status, MessageStatus::Sending) => {
             "[sending…]".to_owned()
         }
@@ -690,7 +690,11 @@ pub(crate) fn status_suffix(app: &App, message: &Message) -> Option<String> {
     match message.status {
         MessageStatus::Sending => Some("[sending…]".to_owned()),
         MessageStatus::Failed => {
-            let reason = app.conversation.failure(message.id).unwrap_or("failed");
+            let reason = app
+                .conversation
+                .conversation
+                .failure(message.id)
+                .unwrap_or("failed");
             Some(format!(
                 "[failed: {}]",
                 truncate(reason, FAILED_REASON_WIDTH)
@@ -872,13 +876,13 @@ mod tests {
     /// An application holding exactly these messages, oldest first.
     fn holding(messages: Vec<Message>) -> App {
         let mut app = App::mock();
-        app.conversation.window.replace(messages);
+        app.conversation.conversation.window.replace(messages);
         app
     }
 
     /// Where each message stands in its group, in window order.
     fn places(app: &App) -> Vec<Grouped> {
-        (0..app.conversation.window.len())
+        (0..app.conversation.conversation.window.len())
             .map(|index| group_of(app, index))
             .collect()
     }
@@ -1009,6 +1013,7 @@ mod tests {
     /// The timestamp of the message at window position `index`.
     fn stamped(app: &App, index: usize) -> i64 {
         app.conversation
+            .conversation
             .window
             .get(index)
             .expect("the window holds the message")
@@ -1193,8 +1198,8 @@ mod tests {
         ]);
 
         let before = places(&app);
-        app.vim.set_cursor(0);
-        app.vim.set_cursor(2);
+        app.conversation.vim.set_cursor(0);
+        app.conversation.vim.set_cursor(2);
 
         assert_eq!(
             before,
@@ -1219,7 +1224,7 @@ mod tests {
     fn my_group(read: Option<i64>) -> App {
         let mut app = holding(vec![mine(1, AT), mine(2, AT + 60)]);
         if let Some(read) = read {
-            app.conversation.set_read_watermark(read);
+            app.conversation.conversation.set_read_watermark(read);
         }
 
         app
@@ -1281,7 +1286,7 @@ mod tests {
     #[test]
     fn an_incoming_group_is_never_given_a_receipt() {
         let mut app = holding(vec![at(1, AT, false), at(2, AT + 60, false)]);
-        app.conversation.set_read_watermark(99);
+        app.conversation.conversation.set_read_watermark(99);
 
         assert_eq!(receipt_of_group(&app), Receipt::None);
     }
@@ -1299,7 +1304,7 @@ mod tests {
         failed.id = -1;
         failed.status = MessageStatus::Failed;
         let mut app = holding(vec![mine(1, AT), failed]);
-        app.conversation.set_read_watermark(99);
+        app.conversation.conversation.set_read_watermark(99);
 
         assert_eq!(
             receipt_of_group(&app),
@@ -1311,7 +1316,7 @@ mod tests {
         waiting.id = -1;
         waiting.status = MessageStatus::Sending;
         let mut sending = holding(vec![mine(1, AT), waiting]);
-        sending.conversation.set_read_watermark(99);
+        sending.conversation.conversation.set_read_watermark(99);
 
         assert_eq!(
             receipt_of_group(&sending),
@@ -1326,15 +1331,20 @@ mod tests {
     #[test]
     fn a_dismissed_failure_leaves_the_group_it_was_beside_as_it_was() {
         let mut app = my_group(Some(2));
-        let failed = app.conversation.queue_send("on its way", None);
-        assert!(app.conversation.fail_send(failed, "no route".to_owned()));
+        let failed = app.conversation.conversation.queue_send("on its way", None);
+        assert!(
+            app.conversation
+                .conversation
+                .fail_send(failed, "no route".to_owned())
+        );
 
-        let placeholder = app.conversation.window.len() - 1;
+        let placeholder = app.conversation.conversation.window.len() - 1;
         assert_eq!(group_of(&app, placeholder).receipt, Receipt::None);
         assert!(
             trailing_note(
                 &app,
                 app.conversation
+                    .conversation
                     .window
                     .get(placeholder)
                     .expect("it is there"),
@@ -1344,7 +1354,7 @@ mod tests {
             "and it says why, with no receipt beside it"
         );
 
-        assert!(app.conversation.dismiss_failed(failed));
+        assert!(app.conversation.conversation.dismiss_failed(failed));
         assert_eq!(
             receipt_of_group(&app),
             Receipt::Read,
@@ -1359,6 +1369,7 @@ mod tests {
     fn the_receipt_is_drawn_once_on_the_row_that_ends_the_group() {
         let read = my_group(Some(2));
         let message = read
+            .conversation
             .conversation
             .window
             .get(1)
@@ -1547,7 +1558,7 @@ mod tests {
         let mut app = App::mock();
 
         let before = app.row_layout();
-        app.vim.set_cursor(0);
+        app.conversation.vim.set_cursor(0);
         let after = app.row_layout();
 
         assert_eq!(before, after, "the cursor is not an input to the geometry");
@@ -1789,7 +1800,7 @@ mod tests {
     #[test]
     fn a_reply_prefix_is_quoted_within_the_room_the_first_row_has() {
         let mut app = App::mock();
-        let chat_id = app.conversation.window.chat_id;
+        let chat_id = app.conversation.conversation.window.chat_id;
         app.apply_latest(vec![Message {
             id: 90,
             chat_id,
@@ -1818,6 +1829,7 @@ mod tests {
         let app = App::mock();
         let mut sending = app
             .conversation
+            .conversation
             .window
             .get(0)
             .expect("the window holds it")
@@ -1844,6 +1856,7 @@ mod tests {
     fn the_note_behind_a_message_is_its_status_and_the_time_of_its_group() {
         let app = App::mock();
         let sent = app
+            .conversation
             .conversation
             .window
             .get(0)
@@ -1906,6 +1919,7 @@ mod tests {
             let message = Message {
                 text: (*text).to_owned().into(),
                 ..app
+                    .conversation
                     .conversation
                     .window
                     .get(0)
@@ -1976,7 +1990,7 @@ mod tests {
     #[test]
     fn a_decoration_containing_an_emoji_is_measured_in_columns() {
         let mut app = App::mock();
-        let chat_id = app.conversation.window.chat_id;
+        let chat_id = app.conversation.conversation.window.chat_id;
         app.apply_latest(vec![Message {
             id: 90,
             chat_id,

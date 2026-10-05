@@ -20,6 +20,7 @@ mod grapheme;
 pub mod jumplist;
 pub mod line;
 pub mod rows;
+pub mod state;
 pub mod text_row;
 pub mod theme;
 pub mod widgets;
