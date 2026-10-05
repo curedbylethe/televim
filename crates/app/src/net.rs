@@ -2070,6 +2070,16 @@ fn chat_list_retry(attempts_used: u8, error: &ProtoError) -> Option<Duration> {
     (attempts_used < CHAT_LIST_ATTEMPTS).then(|| backoff(error))
 }
 
+/// Whether a failed update-feed read may be tried again, and how long to wait.
+///
+/// `None` once [`CHAT_LIST_ATTEMPTS`] errors have been seen, mirroring
+/// [`chat_list_retry`]: past the bound the failure goes back up rather than
+/// looping. The wait is [`backoff`]'s — Telegram's own when it asked for one,
+/// the fixed `RETRY` otherwise.
+fn feed_error_retry(errors_seen: u8, error: &ProtoError) -> Option<Duration> {
+    (errors_seen < CHAT_LIST_ATTEMPTS).then(|| backoff(error))
+}
+
 /// Whether a failure is Telegram asking the client to wait before trying again.
 fn is_flood_wait(error: &ProtoError) -> bool {
     matches!(
@@ -2534,6 +2544,47 @@ mod tests {
 
         assert_eq!(chat_list_retry(CHAT_LIST_ATTEMPTS, &error), None);
         assert_eq!(chat_list_retry(CHAT_LIST_ATTEMPTS + 1, &error), None);
+    }
+
+    // ---- what a feed failure costs -------------------------------------
+
+    #[test]
+    fn a_feed_refusal_waits_what_telegram_asked_for() {
+        let flood = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+
+        assert_eq!(feed_error_retry(0, &flood), Some(Duration::from_secs(31)));
+        assert_eq!(
+            feed_error_retry(CHAT_LIST_ATTEMPTS - 1, &flood),
+            Some(Duration::from_secs(31)),
+            "the last error still gets its wait"
+        );
+    }
+
+    #[test]
+    fn a_feed_refusal_of_another_kind_waits_the_fixed_time() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+            "connection reset".to_owned(),
+        )));
+
+        assert_eq!(feed_error_retry(1, &error), Some(RETRY));
+    }
+
+    /// The bound is what stops the retry; the delay is never consulted again
+    /// once it is reached, however willing the error is to wait.
+    #[test]
+    fn a_feed_that_will_not_answer_stops_at_the_bound() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+
+        assert_eq!(feed_error_retry(CHAT_LIST_ATTEMPTS, &error), None);
+        assert_eq!(feed_error_retry(CHAT_LIST_ATTEMPTS + 1, &error), None);
     }
 
     #[test]
