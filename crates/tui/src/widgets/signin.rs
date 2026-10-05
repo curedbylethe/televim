@@ -951,7 +951,10 @@ mod tests {
         );
 
         press(&mut app, KeyCode::Char('q'));
-        assert!(app.confirm.is_none(), "q is unbound while the flow is up");
+        assert!(
+            app.conversation.confirm.is_none(),
+            "q is unbound while the flow is up"
+        );
     }
 
     /// A password is painted as bullets, and nothing else about it changes.

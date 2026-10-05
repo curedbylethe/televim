@@ -805,7 +805,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
 
     // Nothing is open, so there is no conversation for a cursor to describe —
     // nor a jump to be waiting on, because closing a conversation forgets one.
-    if app.conversation.window.chat_id == 0 {
+    if app.conversation.conversation.window.chat_id == 0 {
         state.history.cursor = None;
         state.history.jump = None;
     }
@@ -910,7 +910,7 @@ fn auto_reconnect(state: &State) -> bool {
 
 /// Decides which page to ask for, from what the screen and the cursor say.
 fn wanted(app: &App, history: History, now: Instant) -> Wanted {
-    let open = app.conversation.window.chat_id;
+    let open = app.conversation.conversation.window.chat_id;
     if open == 0 {
         return Wanted::Nothing;
     }
@@ -1697,7 +1697,7 @@ fn apply_ready_to_screen(
     // gate all described the list and the feed that are gone, and holding them
     // makes `wanted` fall to a paging direction whose page can never arrive
     // (G5), because the preserved window is not empty.
-    let restored = if app.conversation.window.chat_id != 0 {
+    let restored = if app.conversation.conversation.window.chat_id != 0 {
         state.history.cursor = None;
         state.history.jump = None;
         state.history.retry_at = None;
@@ -1808,7 +1808,7 @@ fn apply_login_refusal(app: &mut App, error: &ProtoError, used: u8) {
 fn apply_sent(app: &mut App, chat_id: i64, temp_id: i64, result: Result<Message, ProtoError>) {
     app.end_send(temp_id);
 
-    if app.conversation.window.chat_id != chat_id {
+    if app.conversation.conversation.window.chat_id != chat_id {
         return;
     }
 
@@ -1832,7 +1832,7 @@ fn apply_sent(app: &mut App, chat_id: i64, temp_id: i64, result: Result<Message,
 /// `MessageEdited` update and nothing else, because `grammers` discards the
 /// updates the request answers with.
 fn apply_edited(app: &mut App, chat_id: i64, message_id: i64, result: Result<(), ProtoError>) {
-    if app.conversation.window.chat_id != chat_id {
+    if app.conversation.conversation.window.chat_id != chat_id {
         return;
     }
 
@@ -1870,7 +1870,7 @@ fn apply_deleted(app: &mut App, chat_id: i64, message_ids: &[i64], result: Resul
             let partial = deleted_before_failure(&error);
             tracing::debug!(chat_id, partial, %error, "a deletion failed");
 
-            if app.conversation.window.chat_id == chat_id {
+            if app.conversation.conversation.window.chat_id == chat_id {
                 app.flash(match partial {
                     Some(deleted) => format!(
                         "delete: {deleted} of {} went through, the rest did not",
@@ -2334,11 +2334,16 @@ mod tests {
             },
         );
 
-        assert_eq!(app.conversation.window.len(), 5, "the window was replaced");
+        assert_eq!(
+            app.conversation.conversation.window.len(),
+            5,
+            "the window was replaced"
+        );
         assert_eq!(
             app.conversation
+                .conversation
                 .window
-                .get(app.vim.cursor())
+                .get(app.conversation.vim.cursor())
                 .map(|message| message.id),
             Some(19),
             "and the reader is on the message that was quoted"
@@ -2412,8 +2417,9 @@ mod tests {
 
         assert_eq!(
             app.conversation
+                .conversation
                 .window
-                .get(app.vim.cursor())
+                .get(app.conversation.vim.cursor())
                 .map(|message| message.id),
             Some(8),
             "and the reader is back on the message they left"
@@ -2568,7 +2574,7 @@ mod tests {
         assert_eq!(app.chats().len(), 2);
         assert_eq!(app.list.selected_chat, 0);
         assert_eq!(
-            app.conversation.window.chat_id, CHAT,
+            app.conversation.conversation.window.chat_id, CHAT,
             "the list is newest first, so the first entry is the one to open"
         );
         assert!(app.status.contains('2'), "got {:?}", app.status);
@@ -2581,7 +2587,7 @@ mod tests {
         open_first_chat(&mut app, Vec::new());
 
         assert!(app.chats().is_empty());
-        assert_eq!(app.conversation.window.chat_id, 0);
+        assert_eq!(app.conversation.conversation.window.chat_id, 0);
     }
 
     /// The highlight moves on the keystroke, but the conversation it names is
@@ -2603,14 +2609,14 @@ mod tests {
 
         drive(&mut app, &mut state, &tx);
         assert_eq!(
-            app.conversation.window.chat_id, CHAT,
+            app.conversation.conversation.window.chat_id, CHAT,
             "the highlight has moved but the reader has not stopped"
         );
 
         std::thread::sleep(CHAT_SWITCH_DELAY);
         drive(&mut app, &mut state, &tx);
 
-        assert_eq!(app.conversation.window.chat_id, CHAT + 1);
+        assert_eq!(app.conversation.conversation.window.chat_id, CHAT + 1);
         assert!(
             state.history.cursor.is_none(),
             "the old cursor is forgotten"
@@ -2645,7 +2651,7 @@ mod tests {
             },
         );
 
-        assert_eq!(app.conversation.window.len(), 5);
+        assert_eq!(app.conversation.conversation.window.len(), 5);
         assert!(
             !app.is_fetching(FetchDirection::Older),
             "the direction is open again"
@@ -2677,18 +2683,20 @@ mod tests {
             },
         );
 
-        assert_eq!(app.conversation.window.len(), 5);
+        assert_eq!(app.conversation.conversation.window.len(), 5);
         assert_eq!(
             app.conversation
+                .conversation
                 .window
-                .get(app.vim.cursor())
+                .get(app.conversation.vim.cursor())
                 .map(|message| message.id),
             Some(19),
             "the reader is on the message the jump was for"
         );
         assert_eq!(app.pending_jump(), None, "and the jump is over");
         assert!(
-            !app.conversation.window.exhausted_older && !app.conversation.window.exhausted_newer,
+            !app.conversation.conversation.window.exhausted_older
+                && !app.conversation.conversation.window.exhausted_newer,
             "a window that jumped is surrounded by the unknown on both sides"
         );
         assert_eq!(
@@ -2738,7 +2746,7 @@ mod tests {
              the paging the reader did not interrupt"
         );
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             8,
             "and the reader stayed where they were"
         );
@@ -2809,7 +2817,7 @@ mod tests {
         );
 
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             8,
             "the window kept what it had"
         );
@@ -2842,7 +2850,7 @@ mod tests {
         );
 
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             3,
             "the window on show kept what it had"
         );
@@ -3135,7 +3143,7 @@ mod tests {
             Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0))),
         );
 
-        assert_eq!(app.conversation.window.newest_id(), Some(4));
+        assert_eq!(app.conversation.conversation.window.newest_id(), Some(4));
     }
 
     /// "Deleted 200 of 250" and "failed" are different events: one leaves a
@@ -3208,13 +3216,17 @@ mod tests {
     #[test]
     fn a_send_result_frees_the_key_even_for_a_conversation_that_was_left() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("hi", None);
+        let temp_id = app.conversation.conversation.queue_send("hi", None);
         app.begin_send(temp_id);
 
         // The reader opens another conversation while the send is on its way.
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
-        assert_eq!(app.sending, Some(temp_id), "the send is still in flight");
+        assert_eq!(
+            app.conversation.sending,
+            Some(temp_id),
+            "the send is still in flight"
+        );
 
         let mut state = State::default();
         apply(
@@ -3228,7 +3240,7 @@ mod tests {
         );
 
         assert!(
-            app.sending.is_none(),
+            app.conversation.sending.is_none(),
             "a dropped result must not leave the send key wedged"
         );
     }
@@ -3238,7 +3250,7 @@ mod tests {
     #[test]
     fn a_send_result_for_a_conversation_that_is_no_longer_open_changes_nothing() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("hi", None);
+        let temp_id = app.conversation.conversation.queue_send("hi", None);
         app.begin_send(temp_id);
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
@@ -3255,7 +3267,7 @@ mod tests {
         );
 
         assert!(
-            app.conversation.window.is_empty(),
+            app.conversation.conversation.window.is_empty(),
             "the conversation the reader opened is still empty"
         );
     }
@@ -3267,7 +3279,7 @@ mod tests {
     #[test]
     fn a_send_in_flight_holds_the_key_across_a_conversation_change() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("first", None);
+        let temp_id = app.conversation.conversation.queue_send("first", None);
         app.begin_send(temp_id);
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
@@ -3279,7 +3291,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert!(
-            app.conversation.window.is_empty(),
+            app.conversation.conversation.window.is_empty(),
             "the in-flight send holds the key, so the new conversation is not given the id"
         );
         assert!(
@@ -3300,14 +3312,14 @@ mod tests {
     #[test]
     fn a_stale_result_does_not_confirm_a_placeholder_reissued_the_same_id() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let old_temp = app.conversation.queue_send("first", None);
+        let old_temp = app.conversation.conversation.queue_send("first", None);
         app.begin_send(old_temp);
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
 
         // Reaching past the gate is deliberate: without it, this is the
         // collision the `chat_id` check has to survive.
-        let new_temp = app.conversation.queue_send("second", None);
+        let new_temp = app.conversation.conversation.queue_send("second", None);
         app.begin_send(new_temp);
         assert_eq!(
             new_temp, old_temp,
@@ -3327,13 +3339,14 @@ mod tests {
 
         assert_eq!(
             app.conversation
+                .conversation
                 .message(new_temp)
                 .map(|message| message.status),
             Some(MessageStatus::Sending),
             "a result for another conversation must not confirm this one's message"
         );
         assert!(
-            app.conversation.window.newest_id().is_none(),
+            app.conversation.conversation.window.newest_id().is_none(),
             "and the real message did not land here"
         );
     }
@@ -3341,7 +3354,7 @@ mod tests {
     #[test]
     fn a_send_result_replaces_the_placeholder_the_reader_was_shown() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("hi", None);
+        let temp_id = app.conversation.conversation.queue_send("hi", None);
         app.begin_send(temp_id);
 
         let mut state = State::default();
@@ -3356,17 +3369,17 @@ mod tests {
         );
 
         assert!(
-            app.conversation.message(temp_id).is_none(),
+            app.conversation.conversation.message(temp_id).is_none(),
             "the placeholder left"
         );
-        assert_eq!(app.conversation.window.newest_id(), Some(4));
-        assert!(app.sending.is_none(), "the key is free again");
+        assert_eq!(app.conversation.conversation.window.newest_id(), Some(4));
+        assert!(app.conversation.sending.is_none(), "the key is free again");
     }
 
     #[test]
     fn a_failed_send_keeps_the_message_and_says_why() {
         let mut app = app_with_a_conversation(CHAT, 3);
-        let temp_id = app.conversation.queue_send("hi", None);
+        let temp_id = app.conversation.conversation.queue_send("hi", None);
         app.begin_send(temp_id);
 
         let mut state = State::default();
@@ -3382,16 +3395,20 @@ mod tests {
 
         assert_eq!(
             app.conversation
+                .conversation
                 .message(temp_id)
                 .map(|message| message.status),
             Some(MessageStatus::Failed),
             "the reader's message stays, marked as failed"
         );
         assert!(
-            app.conversation.failure(temp_id).is_some(),
+            app.conversation.conversation.failure(temp_id).is_some(),
             "and it carries a reason"
         );
-        assert!(app.sending.is_none(), "the key is free to try again");
+        assert!(
+            app.conversation.sending.is_none(),
+            "the key is free to try again"
+        );
     }
 
     /// A flood wait is a delay, not a freeze: it is labelled with the wait it
@@ -3726,7 +3743,7 @@ mod tests {
     #[test]
     fn a_ready_over_an_open_conversation_keeps_it_and_restores_the_highlight_by_id() {
         let mut app = app_with_unread_out_of_reach(2);
-        let read_at = app.vim.cursor();
+        let read_at = app.conversation.vim.cursor();
         let mut state = State::default();
 
         apply_ready_to_screen(
@@ -3738,15 +3755,19 @@ mod tests {
         );
 
         assert_eq!(
-            app.conversation.window.chat_id, CHAT,
+            app.conversation.conversation.window.chat_id, CHAT,
             "the conversation the reader was in is still the one on screen"
         );
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             8,
             "with its loaded window intact"
         );
-        assert_eq!(app.vim.cursor(), read_at, "and the reader where they were");
+        assert_eq!(
+            app.conversation.vim.cursor(),
+            read_at,
+            "and the reader where they were"
+        );
         assert_eq!(
             app.list.selected_chat, 1,
             "the highlight followed the conversation's id into the reordered list"
@@ -3828,7 +3849,7 @@ mod tests {
         );
 
         assert_eq!(
-            app.conversation.window.chat_id, CHAT,
+            app.conversation.conversation.window.chat_id, CHAT,
             "the window the reader was reading is preserved"
         );
         assert_eq!(
@@ -3859,7 +3880,7 @@ mod tests {
         );
 
         assert_eq!(app.list.selected_chat, 0);
-        assert_eq!(app.conversation.window.chat_id, CHAT);
+        assert_eq!(app.conversation.conversation.window.chat_id, CHAT);
     }
 
     // ---- a stored session that cannot be read --------------------------

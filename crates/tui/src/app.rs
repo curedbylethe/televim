@@ -28,6 +28,7 @@ use crate::jumplist::Jumplist;
 use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
 use crate::state::chat_list::ChatListState;
+use crate::state::conversation::ConversationState;
 use crate::state::outbox::Outbox;
 use crate::state::pending::Pending;
 use crate::state::profile::ProfileCard;
@@ -998,14 +999,9 @@ pub struct App {
     /// Half-typed keys and the requests a keystroke defers.
     pub pending: Pending,
 
-    /// The conversation on show, and where the reader is in it.
-    ///
-    /// The panel renders a slice of this, and the cursor below is the reader's
-    /// place within it. Nothing here holds a whole conversation: the window is
-    /// the ceiling on what the open chat costs.
-    pub conversation: ConversationView,
-
-    pub vim: VimState,
+    /// The open conversation's view, its editing and selection registers, and its
+    /// search surfaces.
+    pub conversation: ConversationState,
 
     /// What the reader is composing, and the editor working on it.
     ///
@@ -1030,56 +1026,6 @@ pub struct App {
     pub status: String,
     pub should_quit: bool,
 
-    /// Set by `/` search: the query text, the matches, and where the walk is.
-    ///
-    /// One value rather than a list beside a query: the label, the highlight and
-    /// `n`/`N` all read the same state, and keeping them apart would let the
-    /// three disagree about which list is on screen.
-    search: SearchState,
-
-    /// Set by a new-conversation search: the query, the people found, and where
-    /// the reader is among them.
-    ///
-    /// Its own state rather than reusing [`App::search`], which is scoped to the
-    /// open conversation: this one is about the chat list, and the two can be
-    /// live at once without either overwriting the other.
-    user_search: UserSearchState,
-
-    /// The message the next composed message answers, if it is a reply.
-    pub reply_to: Option<i64>,
-
-    /// The message the buffer is editing, if it is an edit.
-    pub editing: Option<i64>,
-
-    /// The placeholder of the send in flight, if one is.
-    ///
-    /// An `Option` rather than a flag so that a result is matched to the send it
-    /// answers: releasing the gate for a send that is no longer in flight is a
-    /// no-op, and a duplicate result cannot release a later send's gate.
-    pub sending: Option<i64>,
-
-    /// The deletion waiting to be confirmed, if one is.
-    pub confirm: Option<ConfirmKind>,
-
-    /// What the reader has selected over the messages, if anything.
-    ///
-    /// `None` outside a selection — and a selection with no mode of its own: the
-    /// conversation's [`Mode`] says whether a key is being applied to it, and a
-    /// `dd` puts one here for as long as the prompt is up without ever asking
-    /// for Visual.
-    ///
-    /// Both of its ends name a message by identifier, which is what lets it
-    /// survive a page landing: see [`App::after_window_change`].
-    selection: Option<Selection>,
-
-    /// What the reader last yanked.
-    ///
-    /// A yank is about *this* conversation and does not follow the reader into
-    /// another one: carrying it across would be a feature nobody asked for and
-    /// would need its own answer about whether it survives the change. So
-    /// [`App::select_chat_none`] forgets it along with everything else.
-    register: Register,
-
     /// When a transient status stops applying, if it is transient.
     status_until: Option<Instant>,
 
@@ -1094,13 +1040,6 @@ pub struct App {
     /// only where the loop supplies one — because a frame is drawn from a shared
     /// reference and cannot expire anything itself.
     typing_until: Option<(i64, Instant)>,
-
-    /// Where the reader was before each jump they have taken.
-    ///
-    /// What `Ctrl-o` and `Ctrl-i` walk. It is per conversation and keyed by
-    /// message identifier rather than by row, because a jump replaces the window
-    /// and a row means a different message on either side of that.
-    jumplist: Jumplist,
 
     /// How many message rows the conversation panel had room for as of the last
     /// frame.
@@ -1204,23 +1143,13 @@ impl App {
             list: ChatListState::new(),
             outbox: Outbox::new(),
             pending: Pending::new(),
-            conversation: ConversationView::new(0),
-            vim: VimState::new(0),
+            conversation: ConversationState::new(),
             line: LineEditor::new(),
             emoji: None,
             status: IDLE_STATUS.to_string(),
             should_quit: false,
-            search: SearchState::default(),
-            user_search: UserSearchState::default(),
-            reply_to: None,
-            editing: None,
-            sending: None,
-            confirm: None,
-            selection: None,
-            register: Register::default(),
             status_until: None,
             typing_until: None,
-            jumplist: Jumplist::default(),
             rows: Cell::new(ASSUMED_ROWS),
             body_width: Cell::new(ASSUMED_BODY_WIDTH),
             now: Cell::new(0),
@@ -1306,20 +1235,20 @@ impl App {
     /// result is dropped when it no longer names the query the reader is asking.
     #[must_use]
     pub fn search_query(&self) -> Option<&str> {
-        self.search.query()
+        self.conversation.search.query()
     }
 
     /// The search on the open conversation, for the panel to mark matches with.
     #[must_use]
     pub fn search(&self) -> &SearchState {
-        &self.search
+        &self.conversation.search
     }
 
     /// The new-conversation search, for the overlay to draw and the status line
     /// to name.
     #[must_use]
     pub fn user_search(&self) -> &UserSearchState {
-        &self.user_search
+        &self.conversation.user_search
     }
 
     /// What the reader has selected, for the panel to mark and the operations to
@@ -1330,7 +1259,7 @@ impl App {
     /// them is the same in every reader.
     #[must_use]
     pub fn selection(&self) -> Option<&Selection> {
-        self.selection.as_ref()
+        self.conversation.selection.as_ref()
     }
 
     /// The `:query` being completed, for the popup to draw and the status line
@@ -1362,7 +1291,7 @@ impl App {
         let Some(selection) = selection else {
             return 0..0;
         };
-        let window = &self.conversation.window;
+        let window = &self.conversation.conversation.window;
 
         match (
             window.position_of(selection.anchor.message_id),
@@ -1384,7 +1313,7 @@ impl App {
     /// `None` when there is no selection.
     #[must_use]
     pub fn selection_len(&self) -> Option<usize> {
-        let selection = self.selection.as_ref()?;
+        let selection = self.conversation.selection.as_ref()?;
 
         Some(selection.text_range().map_or_else(
             || self.covered(Some(selection)).len(),
@@ -1404,7 +1333,13 @@ impl App {
     /// [`Mode`] is about what a key means rather than about what is selected.
     #[must_use]
     pub fn select(&mut self, message_id: i64, char: Option<usize>) -> bool {
-        if self.conversation.window.position_of(message_id).is_none() {
+        if self
+            .conversation
+            .conversation
+            .window
+            .position_of(message_id)
+            .is_none()
+        {
             return false;
         }
 
@@ -1420,14 +1355,14 @@ impl App {
     /// works from the window and the text in front of it and cannot name
     /// anything else.
     pub fn set_selection(&mut self, selection: Selection) {
-        self.selection = Some(selection);
+        self.conversation.selection = Some(selection);
     }
 
     /// What the reader last yanked, for the caller that hands it to the system
     /// clipboard.
     #[must_use]
     pub fn register(&self) -> &Register {
-        &self.register
+        &self.conversation.register
     }
 
     /// Takes the text the reader asked to copy to the system clipboard.
@@ -1484,7 +1419,7 @@ impl App {
     /// does not hold falls back to the top and reports `false`, so the caller
     /// can say where the reader landed.
     pub fn refresh_chats(&mut self, chats: Vec<Chat>) -> bool {
-        let open = self.conversation.window.chat_id;
+        let open = self.conversation.conversation.window.chat_id;
         self.list.list = ChatList::with_chats(chats);
 
         if let Some(index) = self.list.list.chats.iter().position(|chat| chat.id == open) {
@@ -1511,23 +1446,23 @@ impl App {
         // Before the conversation below is zeroed: parking needs the peer id the
         // page on show still names.
         self.park_draft();
-        self.conversation = ConversationView::new(0);
+        self.conversation.conversation = ConversationView::new(0);
         // The note belongs to the chat being left: returning must not revive it,
         // so the deadline goes with the view rather than with the reader's memory.
         self.typing_until = None;
-        self.vim = VimState::new(0);
+        self.conversation.vim = VimState::new(0);
         self.outbox.fetching.clear();
         self.pending.pending_jump = None;
         // The marks are per conversation, and this is the path every switch goes
         // through, so this is where they go too: a reader who has closed the
         // conversation has nowhere to walk back to.
-        self.jumplist = Jumplist::default();
-        self.search.clear();
-        self.reply_to = None;
-        self.editing = None;
-        self.confirm = None;
-        self.selection = None;
-        self.register = Register::default();
+        self.conversation.jumplist = Jumplist::default();
+        self.conversation.search.clear();
+        self.conversation.reply_to = None;
+        self.conversation.editing = None;
+        self.conversation.confirm = None;
+        self.conversation.selection = None;
+        self.conversation.register = Register::default();
         self.line.forget_purpose();
     }
 
@@ -1545,7 +1480,7 @@ impl App {
     /// question mid-answer, not words the reader is writing, and the caller's own
     /// reset is what finishes with those.
     fn park_draft(&mut self) {
-        let chat_id = self.conversation.window.chat_id;
+        let chat_id = self.conversation.conversation.window.chat_id;
         if chat_id == 0 || !self.line.purpose().is_buffer() {
             return;
         }
@@ -1847,7 +1782,7 @@ impl App {
         self.pane = Pane::Profile(subject);
         self.focus = Focus::Conversation;
         self.mode = Mode::Normal;
-        self.selection = None;
+        self.conversation.selection = None;
     }
 
     /// Puts the conversation back in the right-hand pane.
@@ -1962,8 +1897,8 @@ impl App {
             return;
         }
 
-        self.register = Register::set(lines);
-        self.outbox.clipboard = Some(self.register.text());
+        self.conversation.register = Register::set(lines);
+        self.outbox.clipboard = Some(self.conversation.register.text());
     }
 
     /// The lines a card selection yanks, or the cursor row's value when there is
@@ -2151,7 +2086,7 @@ impl App {
             // program holds.
             crate::card::LOGOUT => {
                 self.mode = Mode::Confirm;
-                self.confirm = Some(ConfirmKind::Logout);
+                self.conversation.confirm = Some(ConfirmKind::Logout);
             }
             _ => {}
         }
@@ -2219,7 +2154,7 @@ impl App {
         // whatever else changes here, that has to stay true. The counter is not
         // carried across on purpose; `net`'s drop test is the executable form of
         // this sentence.
-        self.conversation = ConversationView::new(chat_id);
+        self.conversation.conversation = ConversationView::new(chat_id);
         // The window is gone and with it the watermark the new view starts
         // without. How far this conversation has been read is not a fact about
         // the page on show, so it is put back from what the feed has said.
@@ -2236,7 +2171,7 @@ impl App {
     fn restore_read_watermark(&mut self, chat_id: i64) -> bool {
         let recorded = self.read_receipts.borrow().get(&chat_id).copied();
         match recorded {
-            Some(max_id) => self.conversation.set_read_watermark(max_id),
+            Some(max_id) => self.conversation.conversation.set_read_watermark(max_id),
             None => false,
         }
     }
@@ -2267,7 +2202,7 @@ impl App {
     /// conversation rather than a conversation with an odd identifier.
     #[must_use]
     fn has_conversation(&self) -> bool {
-        self.conversation.window.chat_id != 0
+        self.conversation.conversation.window.chat_id != 0
     }
 
     /// The conversation on show, as the chat list holds it.
@@ -2275,7 +2210,7 @@ impl App {
     /// Looked up by the window's own identifier rather than by the selected
     /// index: the two agree, and the window is what every question here is about.
     fn open_chat(&self) -> Option<&Chat> {
-        let chat_id = self.conversation.window.chat_id;
+        let chat_id = self.conversation.conversation.window.chat_id;
         self.list.list.chats.iter().find(|chat| chat.id == chat_id)
     }
 
@@ -2301,7 +2236,7 @@ impl App {
         let chat = self.open_chat()?;
         let last = chat
             .last_message_id
-            .or_else(|| self.conversation.window.newest_id());
+            .or_else(|| self.conversation.conversation.window.newest_id());
 
         unread_target(last, chat.unread_count)
     }
@@ -2313,7 +2248,7 @@ impl App {
     /// behind it has or has not said. An arrival updates the preview, so this
     /// stays true as the conversation grows.
     fn holds_newest_edge(&self) -> bool {
-        let window = &self.conversation.window;
+        let window = &self.conversation.conversation.window;
         if window.is_empty() {
             return false;
         }
@@ -2328,7 +2263,10 @@ impl App {
 
     /// The message the cursor is on, if the window holds anything.
     fn cursor_message(&self) -> Option<&Message> {
-        self.conversation.window.get(self.vim.cursor())
+        self.conversation
+            .conversation
+            .window
+            .get(self.conversation.vim.cursor())
     }
 
     /// Identifier of the message the cursor is on, if the window holds anything.
@@ -2342,7 +2280,7 @@ impl App {
     /// while one is in flight, so a page that arrives late is recognised here
     /// rather than allowed to replace what is on screen.
     fn page_belongs_to_open_chat(&self, page: &[Message]) -> bool {
-        let chat_id = self.conversation.window.chat_id;
+        let chat_id = self.conversation.conversation.window.chat_id;
         page.iter().any(|message| message.chat_id == chat_id)
     }
 
@@ -2364,11 +2302,13 @@ impl App {
             return false;
         }
 
-        self.conversation.window.replace(page);
-        self.selection = None;
-        self.vim.set_total(self.conversation.window.len());
-        self.conversation.follow();
-        self.vim.apply_motion(Motion::Last);
+        self.conversation.conversation.window.replace(page);
+        self.conversation.selection = None;
+        self.conversation
+            .vim
+            .set_total(self.conversation.conversation.window.len());
+        self.conversation.conversation.follow();
+        self.conversation.vim.apply_motion(Motion::Last);
 
         true
     }
@@ -2383,7 +2323,7 @@ impl App {
         }
 
         let anchor = self.cursor_message_id();
-        if !self.conversation.window.push_front(page) {
+        if !self.conversation.conversation.window.push_front(page) {
             return false;
         }
 
@@ -2402,7 +2342,7 @@ impl App {
         }
 
         let anchor = self.cursor_message_id();
-        if !self.conversation.window.push_back(page) {
+        if !self.conversation.conversation.window.push_back(page) {
             return false;
         }
 
@@ -2444,21 +2384,22 @@ impl App {
         // their number says exactly where they start however the messages are
         // numbered.
         if self.holds_newest_edge()
-            && let Some(index) = landing_position(self.conversation.window.len(), self.unread())
+            && let Some(index) =
+                landing_position(self.conversation.conversation.window.len(), self.unread())
         {
-            self.vim.set_cursor(index);
+            self.conversation.vim.set_cursor(index);
             return None;
         }
 
         // Or found by identifier, when the window holds the target but not the
         // end of the conversation.
-        if let Some(index) = self.conversation.window.position_of(target) {
-            self.vim.set_cursor(index);
+        if let Some(index) = self.conversation.conversation.window.position_of(target) {
+            self.conversation.vim.set_cursor(index);
             return None;
         }
 
         Some(Jump {
-            peer_id: self.conversation.window.chat_id,
+            peer_id: self.conversation.conversation.window.chat_id,
             target_id: target,
             kind: JumpKind::Unread,
         })
@@ -2492,17 +2433,18 @@ impl App {
         };
 
         if let Some(origin) = self.cursor_message_id() {
-            self.jumplist
-                .record(self.conversation.window.chat_id, origin);
+            self.conversation
+                .jumplist
+                .record(self.conversation.conversation.window.chat_id, origin);
         }
 
-        if let Some(index) = self.conversation.window.position_of(target) {
-            self.vim.set_cursor(index);
+        if let Some(index) = self.conversation.conversation.window.position_of(target) {
+            self.conversation.vim.set_cursor(index);
             return None;
         }
 
         Some(Jump {
-            peer_id: self.conversation.window.chat_id,
+            peer_id: self.conversation.conversation.window.chat_id,
             target_id: target,
             kind: JumpKind::Reply,
         })
@@ -2524,7 +2466,11 @@ impl App {
         let Some(from) = self.cursor_message_id() else {
             return;
         };
-        let Some(target) = self.jumplist.back(self.conversation.window.chat_id, from) else {
+        let Some(target) = self
+            .conversation
+            .jumplist
+            .back(self.conversation.conversation.window.chat_id, from)
+        else {
             return;
         };
 
@@ -2545,8 +2491,9 @@ impl App {
             return;
         };
         let Some(target) = self
+            .conversation
             .jumplist
-            .forward(self.conversation.window.chat_id, from)
+            .forward(self.conversation.conversation.window.chat_id, from)
         else {
             return;
         };
@@ -2565,14 +2512,14 @@ impl App {
             return;
         }
 
-        if let Some(index) = self.conversation.window.position_of(id) {
-            self.vim.set_cursor(index);
+        if let Some(index) = self.conversation.conversation.window.position_of(id) {
+            self.conversation.vim.set_cursor(index);
             self.settle_follow();
             return;
         }
 
         self.pending.pending_jump = Some(Jump {
-            peer_id: self.conversation.window.chat_id,
+            peer_id: self.conversation.conversation.window.chat_id,
             target_id: id,
             kind,
         });
@@ -2636,18 +2583,23 @@ impl App {
         // Copied into the window rather than moved: a page that replaces a
         // window is the caller's to report to the cursor it keeps, and that
         // cursor is counted from the same messages.
-        self.conversation.window.replace(page.iter().cloned());
-        self.selection = None;
+        self.conversation
+            .conversation
+            .window
+            .replace(page.iter().cloned());
+        self.conversation.selection = None;
 
         // A window that jumped is surrounded by the unknown on both sides,
         // whatever the one before it had run out of.
-        self.conversation.window.exhausted_older = false;
-        self.conversation.window.exhausted_newer = false;
+        self.conversation.conversation.window.exhausted_older = false;
+        self.conversation.conversation.window.exhausted_newer = false;
 
-        self.vim.set_total(self.conversation.window.len());
+        self.conversation
+            .vim
+            .set_total(self.conversation.conversation.window.len());
 
         let landing = self.landing_index(target_id);
-        self.vim.set_cursor(landing);
+        self.conversation.vim.set_cursor(landing);
         self.settle_follow();
 
         true
@@ -2660,7 +2612,7 @@ impl App {
     /// the window when the target is past every one of them — an estimate that
     /// outran the conversation, which the nearest survivor answers honestly.
     fn landing_index(&self, target: i64) -> usize {
-        let window = &self.conversation.window;
+        let window = &self.conversation.conversation.window;
 
         window
             .position_of(target)
@@ -2709,7 +2661,7 @@ impl App {
         // reliably: a peer who sends instead of cancelling would otherwise be
         // shown as typing with their own message on screen.
         if let UpdateEvent::NewMessage(message) = event
-            && message.chat_id == self.conversation.window.chat_id
+            && message.chat_id == self.conversation.conversation.window.chat_id
         {
             self.typing_until = None;
         }
@@ -2722,13 +2674,13 @@ impl App {
         // reader is not in yet carries its reading when they open it.
         if let UpdateEvent::ReadReceipt { chat_id, max_id } = event {
             let noted = self.note_read(*chat_id, *max_id);
-            let open = self.conversation.apply_event(event);
+            let open = self.conversation.conversation.apply_event(event);
 
             return listed || noted || open;
         }
 
         let anchor = self.cursor_message_id();
-        let windowed = self.conversation.apply_event(event);
+        let windowed = self.conversation.conversation.apply_event(event);
         if windowed {
             self.after_window_change(anchor);
         }
@@ -2746,20 +2698,22 @@ impl App {
     /// terms would silently come to cover different messages and the next `d`
     /// would delete something the reader did not select.
     fn after_window_change(&mut self, anchor: Option<i64>) {
-        self.vim.set_total(self.conversation.window.len());
+        self.conversation
+            .vim
+            .set_total(self.conversation.conversation.window.len());
 
-        let cursor = self.vim.cursor();
+        let cursor = self.conversation.vim.cursor();
         let restored = anchor
-            .and_then(|id| self.conversation.window.position_of(id))
+            .and_then(|id| self.conversation.conversation.window.position_of(id))
             .unwrap_or(cursor);
-        self.vim.set_cursor(restored);
+        self.conversation.vim.set_cursor(restored);
 
         self.retain_selection();
 
-        if self.conversation.auto_follow() {
+        if self.conversation.conversation.auto_follow() {
             // A view pinned to the end stays pinned: what arrived is what the
             // reader asked to see.
-            self.vim.apply_motion(Motion::Last);
+            self.conversation.vim.apply_motion(Motion::Last);
         } else {
             self.settle_follow();
         }
@@ -2774,16 +2728,16 @@ impl App {
     /// selection is a one-message deletion the reader never asked for, and it
     /// would be asked for by the same key they used last time.
     fn retain_selection(&mut self) {
-        let Some(selection) = self.selection.take() else {
+        let Some(selection) = self.conversation.selection.take() else {
             return;
         };
 
-        let window = &self.conversation.window;
+        let window = &self.conversation.conversation.window;
         let held = window.position_of(selection.anchor.message_id).is_some()
             && window.position_of(selection.focus.message_id).is_some();
 
         if held {
-            self.selection = Some(selection);
+            self.conversation.selection = Some(selection);
         }
     }
 
@@ -2793,12 +2747,19 @@ impl App {
     /// one whose cursor is on it. Anywhere else means the reader has moved away,
     /// and an arrival no longer has the right to move them.
     fn settle_follow(&mut self) {
-        let last = self.conversation.window.len().saturating_sub(1);
+        let last = self
+            .conversation
+            .conversation
+            .window
+            .len()
+            .saturating_sub(1);
 
-        if self.conversation.window.is_empty() || self.vim.cursor() >= last {
-            self.conversation.follow();
+        if self.conversation.conversation.window.is_empty()
+            || self.conversation.vim.cursor() >= last
+        {
+            self.conversation.conversation.follow();
         } else {
-            self.conversation.unfollow();
+            self.conversation.conversation.unfollow();
         }
     }
 
@@ -2813,7 +2774,7 @@ impl App {
     /// top" means what a reader scrolling upwards thinks it means.
     #[must_use]
     pub fn wants_older(&self) -> bool {
-        let window = &self.conversation.window;
+        let window = &self.conversation.conversation.window;
 
         !self.outbox.fetching.is_in_flight(FetchDirection::Older)
             && !window.is_empty()
@@ -2828,12 +2789,12 @@ impl App {
     /// feed rather than through a fetch.
     #[must_use]
     pub fn wants_newer(&self) -> bool {
-        let window = &self.conversation.window;
+        let window = &self.conversation.conversation.window;
 
         !self.outbox.fetching.is_in_flight(FetchDirection::Newer)
             && !window.is_empty()
             && !window.exhausted_newer
-            && !self.conversation.auto_follow()
+            && !self.conversation.conversation.auto_follow()
             && self.near_the_end()
     }
 
@@ -2851,7 +2812,8 @@ impl App {
     /// because both are about where the reader is on the screen.
     fn cursor_extent(&self) -> (usize, usize) {
         let layout = self.row_layout();
-        let first = rows::first_row_of_message(&layout, self.vim.cursor()).unwrap_or(0);
+        let first =
+            rows::first_row_of_message(&layout, self.conversation.vim.cursor()).unwrap_or(0);
 
         (first, rows::total_rows(&layout))
     }
@@ -2889,8 +2851,8 @@ impl App {
         match direction {
             // Nothing is loaded, so there is no end to have run out of.
             FetchDirection::Latest => {}
-            FetchDirection::Older => self.conversation.window.exhausted_older = true,
-            FetchDirection::Newer => self.conversation.window.exhausted_newer = true,
+            FetchDirection::Older => self.conversation.conversation.window.exhausted_older = true,
+            FetchDirection::Newer => self.conversation.conversation.window.exhausted_newer = true,
         }
     }
 
@@ -2925,7 +2887,7 @@ impl App {
     /// The identifier rather than a flag, so releasing the gate can be matched
     /// to the send it answers.
     pub fn begin_send(&mut self, temp_id: i64) {
-        self.sending = Some(temp_id);
+        self.conversation.sending = Some(temp_id);
     }
 
     /// Releases the in-flight gate, if it is still held for `temp_id`.
@@ -2933,8 +2895,8 @@ impl App {
     /// A no-op for a send that has already been released, so a duplicate result
     /// cannot clear the gate of a later one.
     pub fn end_send(&mut self, temp_id: i64) {
-        if self.sending == Some(temp_id) {
-            self.sending = None;
+        if self.conversation.sending == Some(temp_id) {
+            self.conversation.sending = None;
         }
     }
 
@@ -2944,7 +2906,7 @@ impl App {
     /// owed.
     pub fn confirm_sent(&mut self, temp_id: i64, real: Message) -> bool {
         let anchor = self.cursor_message_id();
-        let changed = self.conversation.confirm_sent(temp_id, real);
+        let changed = self.conversation.conversation.confirm_sent(temp_id, real);
         if changed {
             self.after_window_change(anchor);
         }
@@ -2955,7 +2917,7 @@ impl App {
     ///
     /// Reports whether the placeholder was there to mark.
     pub fn fail_send(&mut self, temp_id: i64, reason: String) -> bool {
-        self.conversation.fail_send(temp_id, reason)
+        self.conversation.conversation.fail_send(temp_id, reason)
     }
 
     /// Removes a failed message and the reason recorded for it.
@@ -2963,7 +2925,7 @@ impl App {
     /// Reports whether either was there.
     pub fn dismiss_failed(&mut self, temp_id: i64) -> bool {
         let anchor = self.cursor_message_id();
-        let changed = self.conversation.dismiss_failed(temp_id);
+        let changed = self.conversation.conversation.dismiss_failed(temp_id);
         if changed {
             self.after_window_change(anchor);
         }
@@ -3006,7 +2968,7 @@ impl App {
     /// deadline kept for a chat the reader has left would be one nobody is shown
     /// and the reader has not been told about.
     fn apply_typing(&mut self, chat_id: i64, typing: bool) -> bool {
-        if chat_id != self.conversation.window.chat_id {
+        if chat_id != self.conversation.conversation.window.chat_id {
             return false;
         }
 
@@ -3030,7 +2992,7 @@ impl App {
     #[must_use]
     pub fn peer_is_typing(&self) -> bool {
         self.typing_until
-            .is_some_and(|(chat, _)| chat == self.conversation.window.chat_id)
+            .is_some_and(|(chat, _)| chat == self.conversation.conversation.window.chat_id)
     }
 
     /// Stops showing the peer as typing once its deadline has passed.
@@ -3062,7 +3024,7 @@ impl App {
     fn set_focus(&mut self, focus: Focus) {
         if focus != Focus::Conversation {
             self.mode = Mode::Normal;
-            self.selection = None;
+            self.conversation.selection = None;
         }
         // The single clear point for every way out of a pane, beside the one
         // below it for the line. A profile is not a stack: leaving it means the
@@ -3309,7 +3271,7 @@ impl App {
             return;
         };
 
-        if let Some(motion) = self.vim.handle_char(c) {
+        if let Some(motion) = self.conversation.vim.handle_char(c) {
             match motion {
                 // `gg` is where the unread messages start when there are
                 // any, and the top of what is loaded when there are not. A
@@ -3392,7 +3354,7 @@ impl App {
     /// draw one either.
     fn request_quit(&mut self) {
         self.mode = Mode::Confirm;
-        self.confirm = Some(ConfirmKind::Quit);
+        self.conversation.confirm = Some(ConfirmKind::Quit);
     }
 
     /// Opens the buffer for a new message, with no reply and no edit.
@@ -3403,8 +3365,8 @@ impl App {
     fn start_compose(&mut self) {
         self.focus = Focus::Input;
         self.line.open(PromptKind::Message);
-        self.reply_to = None;
-        self.editing = None;
+        self.conversation.reply_to = None;
+        self.conversation.editing = None;
     }
 
     /// Opens the buffer to answer the message under the cursor.
@@ -3418,8 +3380,8 @@ impl App {
 
         self.focus = Focus::Input;
         self.line.open(PromptKind::Reply);
-        self.reply_to = Some(id);
-        self.editing = None;
+        self.conversation.reply_to = Some(id);
+        self.conversation.editing = None;
     }
 
     /// Opens the line to find a person to talk to, with `query` already in it.
@@ -3462,8 +3424,8 @@ impl App {
 
         self.focus = Focus::Input;
         self.line.open_with(PromptKind::Edit, text);
-        self.editing = Some(id);
-        self.reply_to = None;
+        self.conversation.editing = Some(id);
+        self.conversation.reply_to = None;
     }
 
     /// Asks to delete what the selection covers, or the message under the cursor
@@ -3480,7 +3442,7 @@ impl App {
     /// Deletion is allowed on any real message, incoming included: Telegram
     /// permits it, and a private chat does remove the other side's words.
     fn request_delete(&mut self) {
-        if self.selection.is_none() {
+        if self.conversation.selection.is_none() {
             // The mark goes on directly rather than through `App::select`: the
             // message came out of the window a line ago, so there is nothing to
             // check.
@@ -3499,19 +3461,19 @@ impl App {
     /// is not something the protocol can do, and half a deletion is not something
     /// the reader would recognise afterwards.
     fn confirm_delete(&mut self) {
-        let Some(selection) = self.selection else {
+        let Some(selection) = self.conversation.selection else {
             return;
         };
 
         let Some(deletion) = self.deletion(&selection) else {
-            self.selection = None;
+            self.conversation.selection = None;
             self.mode = Mode::Normal;
             self.flash(self.refuse_placeholders(&selection));
             return;
         };
 
         self.mode = Mode::Confirm;
-        self.confirm = Some(ConfirmKind::DeleteMessages {
+        self.conversation.confirm = Some(ConfirmKind::DeleteMessages {
             ids: deletion.ids,
             outgoing: deletion.outgoing,
             skipped: deletion.skipped,
@@ -3531,6 +3493,7 @@ impl App {
         let covered = self.covered(Some(selection));
 
         for message in self
+            .conversation
             .conversation
             .window
             .iter()
@@ -3562,6 +3525,7 @@ impl App {
         let mut in_flight = false;
 
         for message in self
+            .conversation
             .conversation
             .window
             .iter()
@@ -3596,7 +3560,7 @@ impl App {
         }
 
         let anchor = self.cursor_message_id();
-        if self.conversation.dismiss_failed(id) {
+        if self.conversation.conversation.dismiss_failed(id) {
             self.after_window_change(anchor);
         }
     }
@@ -3609,11 +3573,11 @@ impl App {
     fn handle_confirm(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') => {
-                match &self.confirm {
+                match &self.conversation.confirm {
                     Some(ConfirmKind::Quit) => self.should_quit = true,
                     Some(ConfirmKind::Logout) => self.queue_action(Action::Logout),
                     Some(ConfirmKind::DeleteMessages { ids, .. }) => {
-                        let chat_id = self.conversation.window.chat_id;
+                        let chat_id = self.conversation.conversation.window.chat_id;
                         self.queue_action(Action::Delete {
                             chat_id,
                             message_ids: ids.clone(),
@@ -3621,13 +3585,13 @@ impl App {
                     }
                     None => {}
                 }
-                self.confirm = None;
-                self.selection = None;
+                self.conversation.confirm = None;
+                self.conversation.selection = None;
                 self.mode = Mode::Normal;
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.confirm = None;
-                self.selection = None;
+                self.conversation.confirm = None;
+                self.conversation.selection = None;
                 self.mode = Mode::Normal;
             }
             _ => {}
@@ -3648,7 +3612,7 @@ impl App {
         let step = self.rows.get().max(1);
         let layout = self.row_layout();
         let total = rows::total_rows(&layout);
-        let here = rows::first_row_of_message(&layout, self.vim.cursor()).unwrap_or(0);
+        let here = rows::first_row_of_message(&layout, self.conversation.vim.cursor()).unwrap_or(0);
 
         let target = if down {
             here.saturating_add(step).min(total.saturating_sub(1))
@@ -3660,7 +3624,7 @@ impl App {
         // cursor stops, so the page carries on past it in the direction it was
         // going rather than landing on it.
         if let Some(cursor) = rows::message_at_row_moving(&layout, target, down) {
-            self.vim.set_cursor(cursor);
+            self.conversation.vim.set_cursor(cursor);
         }
         self.settle_follow();
     }
@@ -3730,7 +3694,7 @@ impl App {
     /// passed through to the pane, because the overlay is a short list drawn
     /// over the chat list and not a mode of its own.
     fn handle_user_search(&mut self, key: KeyEvent) -> bool {
-        if !self.user_search.is_active() || key.modifiers != KeyModifiers::NONE {
+        if !self.conversation.user_search.is_active() || key.modifiers != KeyModifiers::NONE {
             return false;
         }
 
@@ -3747,7 +3711,8 @@ impl App {
 
     /// Moves the user-search highlight one candidate, wrapping.
     fn move_user_selection(&mut self, forward: bool) {
-        self.user_search
+        self.conversation
+            .user_search
             .move_selection(if forward { 1 } else { -1 });
     }
 
@@ -3757,7 +3722,7 @@ impl App {
     /// question, and a list left behind would reappear under the next search
     /// before that search had asked anything.
     fn dismiss_user_search(&mut self) {
-        self.user_search.clear();
+        self.conversation.user_search.clear();
     }
 
     /// Accepts the person the overlay is on.
@@ -3765,7 +3730,7 @@ impl App {
     /// With nothing to accept this does nothing, which is what an empty list
     /// means. Otherwise the choice goes to [`App::open_user`].
     fn accept_user_search(&mut self) {
-        let Some(candidate) = self.user_search.selected_candidate().cloned() else {
+        let Some(candidate) = self.conversation.user_search.selected_candidate().cloned() else {
             return;
         };
 
@@ -3796,7 +3761,7 @@ impl App {
 
         self.select_chat(index);
         self.set_focus(Focus::Conversation);
-        self.user_search.clear();
+        self.conversation.user_search.clear();
     }
 
     /// Moves the selected candidate one place, wrapping.
@@ -3888,7 +3853,7 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.selection = None;
+                self.conversation.selection = None;
                 self.mode = Mode::Normal;
                 self.status = IDLE_STATUS.into();
             }
@@ -3898,7 +3863,7 @@ impl App {
             KeyCode::Char('v') => self.begin_selection(Some(0)),
             KeyCode::Char('V') => self.begin_selection(None),
             KeyCode::Char('o' | 'O') => {
-                if let Some(selection) = &mut self.selection {
+                if let Some(selection) = &mut self.conversation.selection {
                     selection.swap();
                 }
             }
@@ -3964,12 +3929,12 @@ impl App {
     /// the user's settings — three things none of which can be tested here — and a
     /// yank that only works in the second is a yank that appears broken.
     fn yank(&mut self) {
-        let Some(selection) = self.selection else {
+        let Some(selection) = self.conversation.selection else {
             return;
         };
 
         let lines = self.yanked(&selection);
-        self.selection = None;
+        self.conversation.selection = None;
         self.mode = Mode::Normal;
 
         if lines.iter().all(String::is_empty) {
@@ -3980,8 +3945,8 @@ impl App {
             return;
         }
 
-        self.register = Register::set(lines);
-        self.outbox.clipboard = Some(self.register.text());
+        self.conversation.register = Register::set(lines);
+        self.outbox.clipboard = Some(self.conversation.register.text());
     }
 
     /// The lines a selection yanks: one for a text selection, one per message for
@@ -3996,7 +3961,13 @@ impl App {
     /// with an empty yank rather than a panic.
     fn yanked(&self, selection: &Selection) -> Vec<String> {
         if let Some((id, range)) = selection.text_range() {
-            let Some(message) = self.conversation.window.iter().find(|m| m.id == id) else {
+            let Some(message) = self
+                .conversation
+                .conversation
+                .window
+                .iter()
+                .find(|m| m.id == id)
+            else {
                 return Vec::new();
             };
 
@@ -4006,6 +3977,7 @@ impl App {
 
         let covered = self.covered(Some(selection));
         self.conversation
+            .conversation
             .window
             .iter()
             .skip(covered.start)
@@ -4039,7 +4011,7 @@ impl App {
     /// own note outranks a transient status, so a refusal written while a selection
     /// is up is a line the reader never sees.
     fn reply_to_selection(&mut self) {
-        let Some(selection) = self.selection else {
+        let Some(selection) = self.conversation.selection else {
             return;
         };
 
@@ -4049,7 +4021,7 @@ impl App {
             "a reply can only quote words inside one message"
         };
 
-        self.selection = None;
+        self.conversation.selection = None;
         self.mode = Mode::Normal;
         self.flash(refused);
     }
@@ -4066,13 +4038,13 @@ impl App {
     /// else, and a reader who wants to throw their draft away has a key that
     /// does that.
     fn paste(&mut self) {
-        if self.register.is_empty() {
+        if self.conversation.register.is_empty() {
             self.flash("nothing has been yanked");
             return;
         }
 
         self.start_compose();
-        self.line.insert(&self.register.text());
+        self.line.insert(&self.conversation.register.text());
     }
 
     /// Starts a selection at the cursor's message, character-wise or whole.    ///
@@ -4099,7 +4071,7 @@ impl App {
     /// message until the focus moves to another one, so that a charwise selection
     /// does not drag the viewport along with every character.
     fn move_focus(&mut self, motion: CharMotion) {
-        let Some(selection) = &mut self.selection else {
+        let Some(selection) = &mut self.conversation.selection else {
             return;
         };
         let Some(at) = selection.focus.char else {
@@ -4107,7 +4079,13 @@ impl App {
         };
         let id = selection.focus.message_id;
 
-        let Some(message) = self.conversation.window.iter().find(|m| m.id == id) else {
+        let Some(message) = self
+            .conversation
+            .conversation
+            .window
+            .iter()
+            .find(|m| m.id == id)
+        else {
             return;
         };
 
@@ -4125,10 +4103,15 @@ impl App {
     /// next one. It stops mattering as soon as the two ends are in different
     /// messages — which is exactly what they now are.
     fn move_focus_to_message(&mut self, forward: bool) {
-        let Some(focus) = self.selection.map(|selection| selection.focus) else {
+        let Some(focus) = self.conversation.selection.map(|selection| selection.focus) else {
             return;
         };
-        let Some(index) = self.conversation.window.position_of(focus.message_id) else {
+        let Some(index) = self
+            .conversation
+            .conversation
+            .window
+            .position_of(focus.message_id)
+        else {
             return;
         };
         let next = if forward {
@@ -4136,7 +4119,7 @@ impl App {
         } else {
             index.saturating_sub(1)
         };
-        let Some(message) = self.conversation.window.get(next) else {
+        let Some(message) = self.conversation.conversation.window.get(next) else {
             return;
         };
 
@@ -4144,13 +4127,13 @@ impl App {
         let last = message.display_body().chars().count().saturating_sub(1);
         let char = focus.char.map(|at| at.min(last));
 
-        if let Some(selection) = &mut self.selection {
+        if let Some(selection) = &mut self.conversation.selection {
             selection.focus = Mark {
                 message_id: id,
                 char,
             };
         }
-        self.vim.set_cursor(next);
+        self.conversation.vim.set_cursor(next);
         self.settle_follow();
     }
 
@@ -4199,15 +4182,15 @@ impl App {
         // `:new` keeps its query line for the same reason: the reader is about
         // to type into it, and the reset below would empty it.
         if self.signin_field().is_some() || self.line.purpose() == PromptKind::NewChat {
-            self.reply_to = None;
-            self.editing = None;
+            self.conversation.reply_to = None;
+            self.conversation.editing = None;
             return;
         }
 
         self.focus = Focus::Conversation;
         self.line.clear();
-        self.reply_to = None;
-        self.editing = None;
+        self.conversation.reply_to = None;
+        self.conversation.editing = None;
     }
 
     /// Queues the composed message as a send, and shows it immediately.
@@ -4218,7 +4201,7 @@ impl App {
     /// earn a `FLOOD_WAIT` — but a silent no-op reads as a hang, so the refusal
     /// says so.
     fn submit_message(&mut self) {
-        if self.sending.is_some() {
+        if self.conversation.sending.is_some() {
             self.flash("a message is already on its way");
             return;
         }
@@ -4227,15 +4210,18 @@ impl App {
         }
 
         let anchor = self.cursor_message_id();
-        let chat_id = self.conversation.window.chat_id;
+        let chat_id = self.conversation.conversation.window.chat_id;
         let text = self.line.take();
-        let temp_id = self.conversation.queue_send(&text, self.reply_to);
+        let temp_id = self
+            .conversation
+            .conversation
+            .queue_send(&text, self.conversation.reply_to);
         self.begin_send(temp_id);
         self.queue_action(Action::Send {
             chat_id,
             temp_id,
             text,
-            reply_to: self.reply_to,
+            reply_to: self.conversation.reply_to,
         });
         self.after_window_change(anchor);
     }
@@ -4246,14 +4232,14 @@ impl App {
     /// `MessageEdited` arrives, which is the only path by which its new text
     /// reaches the window.
     fn submit_edit(&mut self) {
-        let Some(message_id) = self.editing else {
+        let Some(message_id) = self.conversation.editing else {
             return;
         };
         if !self.has_conversation() || self.line.text().trim().is_empty() {
             return;
         }
 
-        let chat_id = self.conversation.window.chat_id;
+        let chat_id = self.conversation.conversation.window.chat_id;
         let text = self.line.take();
         self.queue_action(Action::Edit {
             chat_id,
@@ -4274,7 +4260,7 @@ impl App {
             return;
         }
 
-        self.user_search.begin(query);
+        self.conversation.user_search.begin(query);
         self.queue_action(Action::ResolveUser {
             query: query.to_owned(),
         });
@@ -4320,8 +4306,9 @@ impl App {
             return;
         };
 
-        let chat_id = self.conversation.window.chat_id;
+        let chat_id = self.conversation.conversation.window.chat_id;
         let ids: Vec<i64> = self
+            .conversation
             .conversation
             .window
             .iter()
@@ -4329,15 +4316,15 @@ impl App {
             .map(|message| message.id)
             .collect();
 
-        self.search.begin_local(&query, ids);
+        self.conversation.search.begin_local(&query, ids);
         self.land_on_match();
 
         // A conversation the window holds in full cannot be searched better, so
         // the round trip would be pure latency. Otherwise the request is handed
         // to the caller, which can reach the network, and the answer arrives at
         // [`App::apply_searched`].
-        if holds_everything(&self.conversation.window) {
-            self.search.finish_local();
+        if holds_everything(&self.conversation.conversation.window) {
+            self.conversation.search.finish_local();
         } else {
             self.queue_action(Action::Search { chat_id, query });
         }
@@ -4353,17 +4340,17 @@ impl App {
             return Some(query.to_owned());
         }
 
-        self.search.query().map(str::to_owned)
+        self.conversation.search.query().map(str::to_owned)
     }
 
     /// Lands the reader on the match the walk has just moved to.
     ///
     /// The local pass's matches are all in the window, so this is synchronous.
     fn land_on_match(&mut self) {
-        if let Some(id) = self.search.next()
-            && let Some(position) = self.conversation.window.position_of(id)
+        if let Some(id) = self.conversation.search.next()
+            && let Some(position) = self.conversation.conversation.window.position_of(id)
         {
-            self.vim.set_cursor(position);
+            self.conversation.vim.set_cursor(position);
         }
 
         self.settle_follow();
@@ -4375,34 +4362,38 @@ impl App {
     /// which is the same path `gg` takes. Wrapping announces itself, because a
     /// walk that looped silently reads as a stuck key.
     fn walk_search(&mut self, forward: bool) {
-        if !self.search.is_active() {
+        if !self.conversation.search.is_active() {
             self.flash("no previous search");
             return;
         }
-        if self.search.is_empty() {
+        if self.conversation.search.is_empty() {
             self.flash("nothing matched");
             return;
         }
 
-        self.search.clear_notice();
-        let before = self.search.index();
+        self.conversation.search.clear_notice();
+        let before = self.conversation.search.index();
         let Some(id) = (if forward {
-            self.search.next()
+            self.conversation.search.next()
         } else {
-            self.search.prev()
+            self.conversation.search.prev()
         }) else {
             return;
         };
 
-        if wrapped(before, self.search.index(), self.search.len()) {
-            self.search.note_wrap(forward);
+        if wrapped(
+            before,
+            self.conversation.search.index(),
+            self.conversation.search.len(),
+        ) {
+            self.conversation.search.note_wrap(forward);
         }
 
-        if let Some(position) = self.conversation.window.position_of(id) {
-            self.vim.set_cursor(position);
+        if let Some(position) = self.conversation.conversation.window.position_of(id) {
+            self.conversation.vim.set_cursor(position);
         } else {
             self.pending.pending_jump = Some(Jump {
-                peer_id: self.conversation.window.chat_id,
+                peer_id: self.conversation.conversation.window.chat_id,
                 target_id: id,
                 kind: JumpKind::Unread,
             });
@@ -4425,22 +4416,26 @@ impl App {
         ids: Vec<i64>,
         total: usize,
     ) -> bool {
-        if self.conversation.window.chat_id != chat_id {
+        if self.conversation.conversation.window.chat_id != chat_id {
             return false;
         }
 
         let cursor_id = self.cursor_message_id();
-        if !self.search.adopt_server(query, ids, total, cursor_id) {
+        if !self
+            .conversation
+            .search
+            .adopt_server(query, ids, total, cursor_id)
+        {
             return false;
         }
 
         // The cursor was on a local match the server may not have confirmed.
         // Landing it on the nearest surviving match keeps its sense of place;
         // the next `n` then moves forward from there rather than restarting.
-        if let Some(target) = self.search.landing(cursor_id)
-            && let Some(position) = self.conversation.window.position_of(target)
+        if let Some(target) = self.conversation.search.landing(cursor_id)
+            && let Some(position) = self.conversation.conversation.window.position_of(target)
         {
-            self.vim.set_cursor(position);
+            self.conversation.vim.set_cursor(position);
         }
 
         self.settle_follow();
@@ -4449,11 +4444,11 @@ impl App {
 
     /// Records that the server pass for `query` failed, keeping the local list.
     pub fn search_failed(&mut self, query: &str, reason: String) {
-        if self.search.query() != Some(query) {
+        if self.conversation.search.query() != Some(query) {
             return;
         }
 
-        self.search.fail(reason);
+        self.conversation.search.fail(reason);
     }
 
     /// Fills the new-conversation list with the answer to `query`, if it is still
@@ -4463,7 +4458,7 @@ impl App {
     /// reader has replaced is dropped without the caller having to check.
     /// Returns whether the answer landed.
     pub fn apply_users(&mut self, query: &str, candidates: Vec<UserCandidate>) -> bool {
-        self.user_search.adopt(query, candidates)
+        self.conversation.user_search.adopt(query, candidates)
     }
 
     /// Records that the lookup for `query` failed.
@@ -4472,11 +4467,11 @@ impl App {
     /// is: a late failure must not close a list that belongs to a newer search.
     /// Returns whether it landed.
     pub fn fail_users(&mut self, query: &str, reason: String) -> bool {
-        if self.user_search.query() != Some(query) {
+        if self.conversation.user_search.query() != Some(query) {
             return false;
         }
 
-        self.user_search.fail(reason);
+        self.conversation.user_search.fail(reason);
         true
     }
 
@@ -5095,14 +5090,15 @@ impl App {
     pub fn row_layout(&self) -> Vec<RowSpan> {
         let width = self.body_width();
         let now = self.now();
-        let mut laid_out: Vec<RowSpan> = Vec::with_capacity(self.conversation.window.len());
+        let mut laid_out: Vec<RowSpan> =
+            Vec::with_capacity(self.conversation.conversation.window.len());
         let mut first = 0;
         // The day of the last message that had one. A send still on its way has
         // no day of its own, so it neither opens a day nor closes the search for
         // the next message that does (T3).
         let mut day: Option<i64> = None;
 
-        for (index, message) in self.conversation.window.iter().enumerate() {
+        for (index, message) in self.conversation.conversation.window.iter().enumerate() {
             if rows::opens_day(message.timestamp, day) {
                 laid_out.push(RowSpan {
                     kind: RowKind::Other {
@@ -5177,9 +5173,9 @@ impl App {
     pub fn viewport(&self, layout: &[RowSpan], budget: usize) -> Slice {
         rows::slice(
             layout,
-            self.vim.cursor(),
+            self.conversation.vim.cursor(),
             budget,
-            self.conversation.auto_follow(),
+            self.conversation.conversation.auto_follow(),
         )
     }
 
@@ -5262,7 +5258,7 @@ impl App {
         if self.focus == Focus::Input {
             return widgets::input_bar::hint(self).to_owned();
         }
-        match &self.confirm {
+        match &self.conversation.confirm {
             Some(ConfirmKind::Quit) => return QUIT_PROMPT.to_owned(),
             Some(ConfirmKind::Logout) => return LOGOUT_PROMPT.to_owned(),
             Some(ConfirmKind::DeleteMessages {
@@ -5272,24 +5268,24 @@ impl App {
             }) => return delete_prompt(ids, *outgoing, *skipped),
             None => {}
         }
-        if let Some(selection) = &self.selection {
+        if let Some(selection) = &self.conversation.selection {
             return selection_note(selection, self.selection_len().unwrap_or(0));
         }
         // The new-conversation search outranks the conversation's own, and both
         // describe state the reader must not lose, so both sit above the flash.
         // A reader who asked for a person is asking the wider question, and its
         // label names where the answer stands.
-        if self.user_search.is_active() {
-            return self.user_search.label();
+        if self.conversation.user_search.is_active() {
+            return self.conversation.user_search.label();
         }
-        if self.search.is_active() {
-            return self.search.label();
+        if self.conversation.search.is_active() {
+            return self.conversation.search.label();
         }
         if self.pending.pending_jump.is_some() {
             return self.jump_label().to_owned();
         }
         if let Some(message) = self.cursor_message()
-            && let Some(reason) = self.conversation.failure(message.id)
+            && let Some(reason) = self.conversation.conversation.failure(message.id)
         {
             return reason.to_owned();
         }
@@ -5554,14 +5550,16 @@ mod tests {
     /// The identifier of the message the cursor is on.
     fn reading(app: &App) -> Option<i64> {
         app.conversation
+            .conversation
             .window
-            .get(app.vim.cursor())
+            .get(app.conversation.vim.cursor())
             .map(|message| message.id)
     }
 
     /// The text the open conversation holds for a message.
     fn text_of(app: &App, id: i64) -> Option<&str> {
         app.conversation
+            .conversation
             .window
             .iter()
             .find(|message| message.id == id)
@@ -5624,7 +5622,7 @@ mod tests {
         let app = App::new();
 
         assert!(app.chats().is_empty());
-        assert!(app.conversation.window.is_empty());
+        assert!(app.conversation.conversation.window.is_empty());
         assert_eq!(app.current_chat_id(), 0);
         assert!(!app.has_conversation());
         assert!(!app.wants_older(), "there is nothing to page through yet");
@@ -5639,15 +5637,15 @@ mod tests {
         assert_eq!(app.list.selected_chat, 1);
         assert_eq!(app.current_chat_id(), 2);
         assert_eq!(
-            app.conversation.window.chat_id, 2,
+            app.conversation.conversation.window.chat_id, 2,
             "the window belongs to the chat that was opened"
         );
         assert!(
-            app.conversation.window.is_empty(),
+            app.conversation.conversation.window.is_empty(),
             "nothing has been fetched for it yet"
         );
-        assert!(app.conversation.auto_follow());
-        assert_eq!(app.vim.total(), 0);
+        assert!(app.conversation.conversation.auto_follow());
+        assert_eq!(app.conversation.vim.total(), 0);
     }
 
     /// The fetched list replaces whatever was there, and the reader's place
@@ -5674,7 +5672,7 @@ mod tests {
 
         assert!(app.chats().is_empty());
         assert_eq!(app.current_chat_id(), 0);
-        assert!(app.conversation.window.is_empty());
+        assert!(app.conversation.conversation.window.is_empty());
     }
 
     /// A refresh installs a new list around the reader's place, rather than
@@ -5685,7 +5683,10 @@ mod tests {
     fn a_refresh_keeps_the_conversation_selection_and_draft_purpose() {
         let mut app = App::mock();
         app.start_reply();
-        let reply_to = app.reply_to.expect("the sample cursor is on a message");
+        let reply_to = app
+            .conversation
+            .reply_to
+            .expect("the sample cursor is on a message");
         spanning(&mut app, 3, 5);
 
         // The same conversations, reversed: an index would point at a different
@@ -5702,7 +5703,10 @@ mod tests {
             MOCK_CHAT,
             "the conversation on show is untouched"
         );
-        assert!(!app.conversation.window.is_empty(), "and so is its window");
+        assert!(
+            !app.conversation.conversation.window.is_empty(),
+            "and so is its window"
+        );
         assert_eq!(
             app.list.selected_chat, 2,
             "the highlight followed the id to the end of the reversed list"
@@ -5712,7 +5716,7 @@ mod tests {
             PromptKind::Reply,
             "the draft is still a reply, not reset to a plain message"
         );
-        assert_eq!(app.reply_to, Some(reply_to));
+        assert_eq!(app.conversation.reply_to, Some(reply_to));
         assert_eq!(
             app.selection()
                 .map(|selection| (selection.anchor.message_id, selection.focus.message_id)),
@@ -5839,6 +5843,7 @@ mod tests {
         let mut app = App::mock();
         app.handle_key(press(KeyCode::Char('r')));
         let replied_to = app
+            .conversation
             .reply_to
             .expect("a reply answers the message on the cursor");
         assert_eq!(app.line.purpose(), PromptKind::Reply);
@@ -5854,7 +5859,7 @@ mod tests {
             "but not the subject"
         );
         assert_eq!(
-            app.reply_to, None,
+            app.conversation.reply_to, None,
             "and nothing to reply to any more: {replied_to} was in the other chat"
         );
     }
@@ -5887,12 +5892,12 @@ mod tests {
     #[test]
     fn enter_shows_the_typed_message_while_it_is_on_its_way() {
         let mut app = App::mock();
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         submit(&mut app, "ping");
 
-        assert_eq!(app.conversation.window.len(), before + 1);
-        let id = app.sending.expect("the send is in flight");
+        assert_eq!(app.conversation.conversation.window.len(), before + 1);
+        let id = app.conversation.sending.expect("the send is in flight");
         assert_eq!(id, -1, "the first placeholder is minus one");
         assert_eq!(text_of(&app, id), Some("ping"));
         assert_eq!(
@@ -5921,19 +5926,19 @@ mod tests {
         type_text(&mut app, "ping");
         app.handle_key(press(KeyCode::Enter));
 
-        assert!(app.conversation.window.is_empty());
+        assert!(app.conversation.conversation.window.is_empty());
     }
 
     #[test]
     fn a_second_send_is_refused_while_one_is_on_its_way() {
         let mut app = App::mock();
         submit(&mut app, "first");
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         submit(&mut app, "second");
 
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             before,
             "the second message is not shown, because it was not queued"
         );
@@ -6191,7 +6196,7 @@ mod tests {
         app.handle_key(press(KeyCode::Enter));
 
         assert_eq!(app.focus, Focus::Conversation);
-        assert_eq!(app.conversation.window.chat_id, 2);
+        assert_eq!(app.conversation.conversation.window.chat_id, 2);
         assert_eq!(app.list.selected_chat, 1);
         assert_eq!(
             app.take_pending_chat(settled()),
@@ -6211,7 +6216,7 @@ mod tests {
             app.list.selected_chat, 0,
             "`gg` in the list, not the top of a window"
         );
-        assert_eq!(app.conversation.window.chat_id, MOCK_CHAT);
+        assert_eq!(app.conversation.conversation.window.chat_id, MOCK_CHAT);
     }
 
     // ---- a selection the window can move under -------------------------
@@ -6222,7 +6227,7 @@ mod tests {
     /// section is about is what survives the window moving rather than how a
     /// selection was made — so it is built here rather than pressed.
     fn spanning(app: &mut App, anchor: i64, focus: i64) {
-        app.selection = Some(Selection {
+        app.conversation.selection = Some(Selection {
             anchor: Mark::whole(anchor),
             focus: Mark::whole(focus),
         });
@@ -6264,7 +6269,11 @@ mod tests {
 
         assert!(app.apply_newer(numbered(cap + 1..=cap + 2)));
         assert!(
-            app.conversation.window.position_of(1).is_none(),
+            app.conversation
+                .conversation
+                .window
+                .position_of(1)
+                .is_none(),
             "the oldest message has been pushed out of a window at its cap"
         );
 
@@ -6345,6 +6354,7 @@ mod tests {
         let covered = app.covered(app.selection());
 
         app.conversation
+            .conversation
             .window
             .iter()
             .skip(covered.start)
@@ -7013,7 +7023,7 @@ mod tests {
 
         assert_eq!(app.focus, Focus::Input);
         assert_eq!(app.line.purpose(), PromptKind::Reply);
-        assert_eq!(app.reply_to, Some(1));
+        assert_eq!(app.conversation.reply_to, Some(1));
     }
 
     #[test]
@@ -7075,7 +7085,7 @@ mod tests {
     /// Bounded, so a target that is behind the cursor fails the test rather than
     /// hanging the suite.
     fn cursor_onto(app: &mut App, id: i64) {
-        for _ in 0..=app.conversation.window.len() {
+        for _ in 0..=app.conversation.conversation.window.len() {
             if reading(app) == Some(id) {
                 return;
             }
@@ -7092,14 +7102,14 @@ mod tests {
     fn spanning_all(app: &mut App) {
         go_to_top(app);
         key(app, 'V');
-        while app.vim.cursor() + 1 < app.conversation.window.len() {
+        while app.conversation.vim.cursor() + 1 < app.conversation.conversation.window.len() {
             key(app, 'j');
         }
     }
 
     /// The identifiers a pending deletion would ask the server for.
     fn asked_to_delete(app: &App) -> Vec<i64> {
-        match &app.confirm {
+        match &app.conversation.confirm {
             Some(ConfirmKind::DeleteMessages { ids, .. }) => ids.clone(),
             other => panic!("expected a deletion to be waiting, got {other:?}"),
         }
@@ -7112,7 +7122,7 @@ mod tests {
         key(&mut app, 'q');
 
         assert_eq!(app.mode, Mode::Confirm);
-        assert_eq!(app.confirm, Some(ConfirmKind::Quit));
+        assert_eq!(app.conversation.confirm, Some(ConfirmKind::Quit));
         assert!(!app.should_quit);
         assert_eq!(app.status_text(), QUIT_PROMPT);
     }
@@ -7126,7 +7136,7 @@ mod tests {
         run_command_line(&mut app, "q");
 
         assert_eq!(app.mode, Mode::Confirm);
-        assert_eq!(app.confirm, Some(ConfirmKind::Quit));
+        assert_eq!(app.conversation.confirm, Some(ConfirmKind::Quit));
         assert!(!app.should_quit);
     }
 
@@ -7138,7 +7148,7 @@ mod tests {
         key(&mut app, 'y');
 
         assert!(app.should_quit);
-        assert_eq!(app.confirm, None);
+        assert_eq!(app.conversation.confirm, None);
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.outbox.actions.is_empty());
     }
@@ -7157,7 +7167,10 @@ mod tests {
             app.handle_key(answer);
 
             assert!(!app.should_quit, "{answer:?} quit");
-            assert_eq!(app.confirm, None, "{answer:?} left the prompt up");
+            assert_eq!(
+                app.conversation.confirm, None,
+                "{answer:?} left the prompt up"
+            );
             assert_eq!(app.mode, Mode::Normal, "{answer:?} left the mode alone");
         }
     }
@@ -7170,7 +7183,7 @@ mod tests {
         app.handle_key(press_ctrl('c'));
 
         assert!(app.should_quit);
-        assert_eq!(app.confirm, None);
+        assert_eq!(app.conversation.confirm, None);
     }
 
     #[test]
@@ -7338,7 +7351,7 @@ mod tests {
     fn a_selection_with_some_placeholders_skips_them_and_says_how_many() {
         let mut app = conversation(&[(1, false), (2, false), (3, false)]);
         submit(&mut app, "hi");
-        let placeholder = app.sending.expect("the send is in flight");
+        let placeholder = app.conversation.sending.expect("the send is in flight");
         go_to_top(&mut app);
         key(&mut app, 'V');
         cursor_onto(&mut app, placeholder);
@@ -7360,7 +7373,7 @@ mod tests {
     fn a_selection_of_only_placeholders_is_refused() {
         let mut app = conversation(&[(1, false)]);
         submit(&mut app, "hi");
-        let placeholder = app.sending.expect("the send is in flight");
+        let placeholder = app.conversation.sending.expect("the send is in flight");
         go_to_top(&mut app);
         cursor_onto(&mut app, placeholder);
         key(&mut app, 'V');
@@ -7393,7 +7406,7 @@ mod tests {
     fn a_selection_reaching_a_placeholder_covers_the_window_positions() {
         let mut app = App::mock();
         submit(&mut app, "hi");
-        let placeholder = app.sending.expect("the send is in flight");
+        let placeholder = app.conversation.sending.expect("the send is in flight");
         go_to_top(&mut app);
         key(&mut app, 'V');
         cursor_onto(&mut app, placeholder);
@@ -7442,7 +7455,7 @@ mod tests {
     fn editing_a_message_that_has_not_been_sent_or_is_not_yours_is_refused() {
         let mut app = App::mock();
         submit(&mut app, "hi");
-        let id = app.sending.expect("the send is in flight");
+        let id = app.conversation.sending.expect("the send is in flight");
 
         app.handle_key(press(KeyCode::Char('e')));
         assert_eq!(app.mode, Mode::Normal);
@@ -7487,7 +7500,7 @@ mod tests {
         app.handle_key(press(KeyCode::Char('r')));
         assert_eq!(app.focus, Focus::Input);
         assert_eq!(app.line.purpose(), PromptKind::Reply);
-        assert_eq!(app.reply_to, Some(9));
+        assert_eq!(app.conversation.reply_to, Some(9));
 
         type_text(&mut app, "sure");
         app.handle_key(press(KeyCode::Enter));
@@ -7512,7 +7525,7 @@ mod tests {
         app.handle_key(press(KeyCode::Char('e')));
         assert_eq!(app.focus, Focus::Input);
         assert_eq!(app.line.purpose(), PromptKind::Edit);
-        assert_eq!(app.editing, Some(9));
+        assert_eq!(app.conversation.editing, Some(9));
         assert!(
             app.line.text().starts_with("No pressure then :)"),
             "the buffer opens with the message's text: {:?}",
@@ -7546,7 +7559,7 @@ mod tests {
         app.handle_key(press(KeyCode::Char('y')));
 
         assert_eq!(app.mode, Mode::Normal);
-        assert_eq!(app.confirm, None);
+        assert_eq!(app.conversation.confirm, None);
         assert_eq!(
             app.take_action(),
             Some(Action::Delete {
@@ -7565,7 +7578,7 @@ mod tests {
         app.handle_key(press(KeyCode::Esc));
 
         assert_eq!(app.mode, Mode::Normal);
-        assert_eq!(app.confirm, None);
+        assert_eq!(app.conversation.confirm, None);
         assert_eq!(app.take_action(), None);
     }
 
@@ -7573,13 +7586,13 @@ mod tests {
     fn the_dismiss_key_clears_a_failed_message() {
         let mut app = App::mock();
         submit(&mut app, "hi");
-        let id = app.sending.expect("the send is in flight");
+        let id = app.conversation.sending.expect("the send is in flight");
         app.fail_send(id, "boom".to_owned());
 
         app.handle_key(press(KeyCode::Char('D')));
 
-        assert_eq!(app.conversation.window.len(), 10);
-        assert!(app.conversation.message(id).is_none());
+        assert_eq!(app.conversation.conversation.window.len(), 10);
+        assert!(app.conversation.conversation.message(id).is_none());
     }
 
     /// The row only has room for a short reason; the whole of it is on the
@@ -7588,7 +7601,7 @@ mod tests {
     fn the_full_reason_a_send_failed_is_on_the_status_line() {
         let mut app = App::mock();
         submit(&mut app, "hi");
-        let id = app.sending.expect("the send is in flight");
+        let id = app.conversation.sending.expect("the send is in flight");
 
         app.fail_send(id, "flood wait, retry in 42s".to_owned());
 
@@ -7690,7 +7703,7 @@ mod tests {
         app.handle_key(press(KeyCode::Char('d')));
 
         assert_eq!(app.mode, Mode::Normal);
-        assert_eq!(app.confirm, None);
+        assert_eq!(app.conversation.confirm, None);
         assert!(app.take_action().is_none(), "nothing was queued");
     }
 
@@ -7706,7 +7719,7 @@ mod tests {
         }
 
         app.handle_key(press(KeyCode::Char('d')));
-        assert_eq!(app.confirm, Some(ConfirmKind::Logout));
+        assert_eq!(app.conversation.confirm, Some(ConfirmKind::Logout));
 
         app.handle_key(press(KeyCode::Char('y')));
         assert!(
@@ -7752,13 +7765,13 @@ mod tests {
     #[test]
     fn the_profile_and_the_conversation_cursors_are_independent() {
         let mut app = profile();
-        let in_the_conversation = app.vim.cursor();
+        let in_the_conversation = app.conversation.vim.cursor();
         for _ in 0..3 {
             app.handle_key(press(KeyCode::Char('j')));
         }
         assert!(app.profile_cursor() > 0, "the card's highlight moved");
         assert_eq!(
-            app.vim.cursor(),
+            app.conversation.vim.cursor(),
             in_the_conversation,
             "and the conversation's did not"
         );
@@ -7769,7 +7782,7 @@ mod tests {
         app.handle_key(press(KeyCode::Esc));
         app.handle_key(press(KeyCode::Char('k')));
         assert!(
-            app.vim.cursor() < in_the_conversation,
+            app.conversation.vim.cursor() < in_the_conversation,
             "the conversation's highlight moves on its own"
         );
     }
@@ -7893,7 +7906,7 @@ mod tests {
         app.handle_key(press(KeyCode::Char('d')));
 
         assert_eq!(app.mode, Mode::Confirm);
-        assert_eq!(app.confirm, Some(ConfirmKind::Logout));
+        assert_eq!(app.conversation.confirm, Some(ConfirmKind::Logout));
         assert_eq!(app.status_text(), LOGOUT_PROMPT);
         assert_eq!(app.take_action(), None, "nothing is asked for yet");
 
@@ -7903,7 +7916,7 @@ mod tests {
             Some(Action::Logout),
             "`y` asks for the sign-out"
         );
-        assert_eq!(app.confirm, None);
+        assert_eq!(app.conversation.confirm, None);
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -7918,11 +7931,14 @@ mod tests {
                 app.handle_key(press(KeyCode::Char('j')));
             }
             app.handle_key(press(KeyCode::Char('d')));
-            assert_eq!(app.confirm, Some(ConfirmKind::Logout));
+            assert_eq!(app.conversation.confirm, Some(ConfirmKind::Logout));
 
             app.handle_key(press(answer));
 
-            assert_eq!(app.confirm, None, "{answer:?} drops the question");
+            assert_eq!(
+                app.conversation.confirm, None,
+                "{answer:?} drops the question"
+            );
             assert_eq!(app.mode, Mode::Normal);
             assert_eq!(app.take_action(), None, "{answer:?} asks for nothing");
         }
@@ -7968,7 +7984,7 @@ mod tests {
             .expect("chat 2 is part of the mock data");
         assert_eq!(app.list.selected_chat, expected);
         assert_eq!(
-            app.conversation.window.chat_id, 2,
+            app.conversation.conversation.window.chat_id, 2,
             "the panel follows the chat list"
         );
     }
@@ -8059,12 +8075,12 @@ mod tests {
 
         assert_eq!(app.search_query(), Some("benchmarks"));
         assert_eq!(
-            app.vim.cursor(),
+            app.conversation.vim.cursor(),
             6,
             "the cursor lands on the only match, at its index in the window"
         );
         assert!(
-            !app.conversation.auto_follow(),
+            !app.conversation.conversation.auto_follow(),
             "the reader moved off the end"
         );
     }
@@ -8326,7 +8342,7 @@ mod tests {
     fn opening_a_conversation_starts_pinned_to_the_newest_message() {
         let app = App::mock();
 
-        assert!(app.conversation.auto_follow());
+        assert!(app.conversation.conversation.auto_follow());
         assert_eq!(reading(&app), Some(10));
     }
 
@@ -8336,12 +8352,15 @@ mod tests {
 
         app.handle_key(press(KeyCode::Char('k')));
         assert_eq!(reading(&app), Some(9));
-        assert!(!app.conversation.auto_follow(), "the reader has moved away");
+        assert!(
+            !app.conversation.conversation.auto_follow(),
+            "the reader has moved away"
+        );
 
         app.handle_key(press(KeyCode::Char('G')));
         assert_eq!(reading(&app), Some(10));
         assert!(
-            app.conversation.auto_follow(),
+            app.conversation.conversation.auto_follow(),
             "`G` means the newest message"
         );
     }
@@ -8349,19 +8368,22 @@ mod tests {
     #[test]
     fn a_page_moves_a_screenful_and_the_bottom_re_engages_following() {
         let mut app = App::mock();
-        assert_eq!(app.vim.cursor(), 9);
+        assert_eq!(app.conversation.vim.cursor(), 9);
 
         app.handle_key(press_ctrl('u'));
         assert_eq!(
-            app.vim.cursor(),
+            app.conversation.vim.cursor(),
             0,
             "a screenful up from the newest message"
         );
-        assert!(!app.conversation.auto_follow());
+        assert!(!app.conversation.conversation.auto_follow());
 
         app.handle_key(press_ctrl('d'));
-        assert_eq!(app.vim.cursor(), 9);
-        assert!(app.conversation.auto_follow(), "back at the newest message");
+        assert_eq!(app.conversation.vim.cursor(), 9);
+        assert!(
+            app.conversation.conversation.auto_follow(),
+            "back at the newest message"
+        );
     }
 
     /// The page step is the panel's height, so a taller terminal pages further.
@@ -8373,10 +8395,14 @@ mod tests {
         app.record_rows(4);
 
         app.handle_key(press_ctrl('u'));
-        assert_eq!(app.vim.cursor(), 5, "one panel's worth up from the end");
+        assert_eq!(
+            app.conversation.vim.cursor(),
+            5,
+            "one panel's worth up from the end"
+        );
 
         app.handle_key(press_ctrl('d'));
-        assert_eq!(app.vim.cursor(), 9);
+        assert_eq!(app.conversation.vim.cursor(), 9);
     }
 
     /// A page is a screenful of rows, not a screenful of messages: a message
@@ -8398,12 +8424,12 @@ mod tests {
             message(3, "c"),
         ]);
         go_to_top(&mut app);
-        assert_eq!(app.vim.cursor(), 0);
+        assert_eq!(app.conversation.vim.cursor(), 0);
 
         app.handle_key(press_ctrl('d'));
 
         assert_eq!(
-            app.vim.cursor(),
+            app.conversation.vim.cursor(),
             1,
             "row 4 is inside the message at row 1, which is what the cursor stands on"
         );
@@ -8418,7 +8444,7 @@ mod tests {
         let mut app = App::mock();
         app.record_body(53);
         app.record_rows(4);
-        let total = app.conversation.window.len();
+        let total = app.conversation.conversation.window.len();
         go_to_top(&mut app);
 
         for _ in 0..4 {
@@ -8427,15 +8453,15 @@ mod tests {
             assert!(
                 app.row_layout().iter().any(|span| span.kind
                     == RowKind::Message {
-                        index: app.vim.cursor()
+                        index: app.conversation.vim.cursor()
                     }),
                 "the layout has a message for the cursor at {}",
-                app.vim.cursor()
+                app.conversation.vim.cursor()
             );
         }
 
         assert_eq!(
-            app.vim.cursor(),
+            app.conversation.vim.cursor(),
             total - 1,
             "and four pages down of one screenful each is the newest message"
         );
@@ -8474,14 +8500,14 @@ mod tests {
             "the top of the window is the top of the slice"
         );
 
-        app.vim.set_cursor(5);
+        app.conversation.vim.set_cursor(5);
         assert_eq!(
             shown_from(&app, 4),
             3,
             "half a panel either side of the cursor"
         );
 
-        app.vim.set_cursor(9);
+        app.conversation.vim.set_cursor(9);
         assert_eq!(
             shown_from(&app, 4),
             6,
@@ -8499,13 +8525,13 @@ mod tests {
 
         assert!(app.apply_older(page(&[-1, 0])));
 
-        assert_eq!(app.conversation.window.len(), 12);
+        assert_eq!(app.conversation.conversation.window.len(), 12);
         assert_eq!(
             reading(&app),
             Some(9),
             "the window moved under the reader, not the reader with it"
         );
-        assert!(!app.conversation.auto_follow());
+        assert!(!app.conversation.conversation.auto_follow());
     }
 
     #[test]
@@ -8515,7 +8541,7 @@ mod tests {
         assert!(app.apply_older(page(&[-1, 0])));
 
         assert_eq!(reading(&app), Some(10), "the end did not move");
-        assert!(app.conversation.auto_follow());
+        assert!(app.conversation.conversation.auto_follow());
     }
 
     #[test]
@@ -8525,25 +8551,25 @@ mod tests {
 
         assert!(app.apply_newer(page(&[11, 12])));
 
-        assert_eq!(app.conversation.window.newest_id(), Some(12));
+        assert_eq!(app.conversation.conversation.window.newest_id(), Some(12));
         assert_eq!(reading(&app), Some(1), "the reader is still at the top");
     }
 
     #[test]
     fn a_page_for_another_conversation_is_refused() {
         let mut app = App::mock();
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         assert!(!app.apply_latest(vec![stranger(1)]));
         assert!(!app.apply_older(vec![stranger(1)]));
         assert!(!app.apply_newer(vec![stranger(1)]));
 
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             before,
             "a page that arrives late must not empty the window it does not belong to"
         );
-        assert_eq!(app.conversation.window.chat_id, MOCK_CHAT);
+        assert_eq!(app.conversation.conversation.window.chat_id, MOCK_CHAT);
     }
 
     // ---- events from the feed ------------------------------------------
@@ -8551,7 +8577,7 @@ mod tests {
     #[test]
     fn an_arrival_lands_at_the_bottom_of_a_pinned_view() {
         let mut app = App::mock();
-        assert!(app.conversation.auto_follow());
+        assert!(app.conversation.conversation.auto_follow());
 
         assert!(app.apply_update(&UpdateEvent::NewMessage(message(11, "ping"))));
 
@@ -8560,7 +8586,7 @@ mod tests {
             Some(11),
             "a pinned view follows the conversation"
         );
-        assert!(app.conversation.auto_follow());
+        assert!(app.conversation.conversation.auto_follow());
     }
 
     #[test]
@@ -8568,17 +8594,17 @@ mod tests {
         let mut app = App::mock();
         go_to_top(&mut app);
         let reading_before = reading(&app);
-        let len_before = app.conversation.window.len();
+        let len_before = app.conversation.conversation.window.len();
 
         assert!(app.apply_update(&UpdateEvent::NewMessage(message(11, "ping"))));
 
-        assert_eq!(app.conversation.window.len(), len_before + 1);
+        assert_eq!(app.conversation.conversation.window.len(), len_before + 1);
         assert_eq!(
             reading(&app),
             reading_before,
             "the reader stays where they were"
         );
-        assert!(!app.conversation.auto_follow());
+        assert!(!app.conversation.conversation.auto_follow());
     }
 
     /// An arrival the conversation already holds leaves it alone: the window
@@ -8592,12 +8618,12 @@ mod tests {
     #[test]
     fn an_arrival_the_conversation_already_holds_leaves_it_alone() {
         let mut app = App::mock();
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         let moved = app.apply_update(&UpdateEvent::NewMessage(message(10, "again")));
 
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             before,
             "the open window holds one copy of the message"
         );
@@ -8664,8 +8690,8 @@ mod tests {
         ]);
         let before = (
             reading(&app),
-            app.vim.cursor(),
-            app.conversation.window.len(),
+            app.conversation.vim.cursor(),
+            app.conversation.conversation.window.len(),
         );
         let newest = before.0.expect("the window holds messages");
 
@@ -8678,7 +8704,7 @@ mod tests {
         assert!(app.apply_update(&read(MOCK_CHAT, newest)));
 
         assert_eq!(
-            app.conversation.read_watermark(),
+            app.conversation.conversation.read_watermark(),
             Some(newest),
             "so the group's state is derived from it on the next frame"
         );
@@ -8690,8 +8716,8 @@ mod tests {
         assert_eq!(
             (
                 reading(&app),
-                app.vim.cursor(),
-                app.conversation.window.len()
+                app.conversation.vim.cursor(),
+                app.conversation.conversation.window.len()
             ),
             before,
             "and nothing about the reader's place moved"
@@ -8709,14 +8735,14 @@ mod tests {
         assert!(app.apply_update(&read(other, 7)));
 
         assert_eq!(
-            app.conversation.read_watermark(),
+            app.conversation.conversation.read_watermark(),
             None,
             "the conversation on show is a different one"
         );
 
         app.select_chat(1);
         assert_eq!(
-            app.conversation.read_watermark(),
+            app.conversation.conversation.read_watermark(),
             Some(7),
             "and the chat that owns it is opened carrying what it was told"
         );
@@ -8733,7 +8759,7 @@ mod tests {
         app.select_chat(0);
 
         assert_eq!(
-            app.conversation.read_watermark(),
+            app.conversation.conversation.read_watermark(),
             Some(6),
             "the view is new and the conversation's reading is not"
         );
@@ -8754,7 +8780,7 @@ mod tests {
                 "{chat_id} read up to {max_id} says nothing the reader has not been shown"
             );
         }
-        assert_eq!(app.conversation.read_watermark(), Some(9));
+        assert_eq!(app.conversation.conversation.read_watermark(), Some(9));
     }
 
     /// A receipt while the reader is scrolled back up moves neither the cursor nor
@@ -8764,16 +8790,22 @@ mod tests {
     fn a_read_acknowledgement_leaves_a_scrolled_up_reader_where_they_are() {
         let mut app = App::mock();
         app.handle_key(press_ctrl('u'));
-        let before = (app.vim.cursor(), app.conversation.auto_follow());
+        let before = (
+            app.conversation.vim.cursor(),
+            app.conversation.conversation.auto_follow(),
+        );
         assert!(
-            !app.conversation.auto_follow(),
+            !app.conversation.conversation.auto_follow(),
             "the fixture is scrolled back up"
         );
 
         assert!(app.apply_update(&read(MOCK_CHAT, 10)));
 
         assert_eq!(
-            (app.vim.cursor(), app.conversation.auto_follow()),
+            (
+                app.conversation.vim.cursor(),
+                app.conversation.conversation.auto_follow()
+            ),
             before,
             "and still there after it"
         );
@@ -8790,9 +8822,12 @@ mod tests {
     fn across_three_days() -> App {
         let mut app = App::mock();
         app.record_body(53);
-        app.conversation.window.replace((1..=9).map(message_of_day));
-        app.vim.set_total(9);
-        app.vim.set_cursor(8);
+        app.conversation
+            .conversation
+            .window
+            .replace((1..=9).map(message_of_day));
+        app.conversation.vim.set_total(9);
+        app.conversation.vim.set_cursor(8);
 
         app
     }
@@ -8823,7 +8858,7 @@ mod tests {
         // wrap, is a message row rather than one of the separator rows.
         for key in ['n', 'n', 'n', 'N', 'N'] {
             app.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
-            let on = app.vim.cursor();
+            let on = app.conversation.vim.cursor();
             assert!(
                 !separators.contains(&rows::first_row_of_message(&layout, on).expect("a message")),
                 "{key} landed on a separator row at message {on}"
@@ -8845,8 +8880,9 @@ mod tests {
 
         app.run_search("benchmarks");
         for _ in 0..5 {
-            let on = app.vim.cursor();
+            let on = app.conversation.vim.cursor();
             let id = app
+                .conversation
                 .conversation
                 .window
                 .get(on)
@@ -8886,9 +8922,9 @@ mod tests {
         ];
         for key in keys {
             app.handle_key(key);
-            let on = app.vim.cursor();
+            let on = app.conversation.vim.cursor();
             assert!(
-                app.conversation.window.get(on).is_some(),
+                app.conversation.conversation.window.get(on).is_some(),
                 "the cursor at {on} names a message the window holds"
             );
             assert!(
@@ -8909,11 +8945,15 @@ mod tests {
         let mut app = across_three_days();
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        assert_eq!(app.vim.cursor(), 0, "gg lands on the first message");
+        assert_eq!(
+            app.conversation.vim.cursor(),
+            0,
+            "gg lands on the first message"
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
         assert_eq!(
-            app.vim.cursor(),
+            app.conversation.vim.cursor(),
             8,
             "and G on the newest, neither of which is a separator row"
         );
@@ -8983,8 +9023,11 @@ mod tests {
         app.select_chat(0);
         // The same messages, in the same order, as the conversation being reopened
         // is filled.
-        app.conversation.window.replace((1..=9).map(message_of_day));
-        app.vim.set_total(9);
+        app.conversation
+            .conversation
+            .window
+            .replace((1..=9).map(message_of_day));
+        app.conversation.vim.set_total(9);
 
         assert_eq!(
             app.row_layout(),
@@ -8992,7 +9035,7 @@ mod tests {
             "the same rows in the same places, worked out again rather than kept"
         );
         assert_eq!(
-            app.conversation.read_watermark(),
+            app.conversation.conversation.read_watermark(),
             Some(109),
             "and the reading of the conversation, which the switch replaced"
         );
@@ -9038,6 +9081,7 @@ mod tests {
         // A full window with a day per message: the worst case for separators,
         // and still one row each.
         app.conversation
+            .conversation
             .window
             .replace((0..CONVERSATION_WINDOW).map(|day| {
                 let day = i64::try_from(day).expect("a window index fits a timestamp");
@@ -9052,7 +9096,7 @@ mod tests {
                     media: None,
                 }
             }));
-        app.vim.set_total(CONVERSATION_WINDOW);
+        app.conversation.vim.set_total(CONVERSATION_WINDOW);
 
         let layout = app.row_layout();
         assert_eq!(
@@ -9086,7 +9130,7 @@ mod tests {
         let mut app = App::mock();
 
         assert!(!app.apply_update(&UpdateEvent::NewMessage(unknown(11))));
-        assert_eq!(app.conversation.window.len(), 10);
+        assert_eq!(app.conversation.conversation.window.len(), 10);
     }
 
     /// A conversation other than the one on show is still one the list holds,
@@ -9094,14 +9138,14 @@ mod tests {
     #[test]
     fn an_arrival_for_another_conversation_reaches_the_list_alone() {
         let mut app = App::mock();
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         assert!(
             app.apply_update(&UpdateEvent::NewMessage(stranger(11))),
             "the list holds the conversation the message belongs to"
         );
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             before,
             "but the window on show is a different conversation"
         );
@@ -9133,7 +9177,7 @@ mod tests {
         }));
 
         assert_eq!(text_of(&app, 3), None);
-        assert_eq!(app.conversation.window.len(), 9);
+        assert_eq!(app.conversation.conversation.window.len(), 9);
         assert_eq!(
             reading(&app),
             Some(10),
@@ -9160,7 +9204,7 @@ mod tests {
 
     /// Where each message of the window stands in its group.
     fn places(app: &App) -> Vec<rows::Grouped> {
-        (0..app.conversation.window.len())
+        (0..app.conversation.conversation.window.len())
             .map(|index| rows::group_of(app, index))
             .collect()
     }
@@ -9171,7 +9215,10 @@ mod tests {
     #[test]
     fn an_edit_inside_a_group_changes_no_group_boundary() {
         let mut app = App::mock();
-        app.conversation.window.replace(a_group_of_three());
+        app.conversation
+            .conversation
+            .window
+            .replace(a_group_of_three());
         app.record_body(53);
 
         assert!(app.apply_update(&UpdateEvent::MessageEdited {
@@ -9209,7 +9256,10 @@ mod tests {
     #[test]
     fn a_deletion_inside_a_group_leaves_the_survivors_grouped() {
         let mut app = App::mock();
-        app.conversation.window.replace(a_group_of_three());
+        app.conversation
+            .conversation
+            .window
+            .replace(a_group_of_three());
         app.record_body(53);
 
         assert!(app.apply_update(&UpdateEvent::MessagesDeleted {
@@ -9291,7 +9341,7 @@ mod tests {
         let mut app = App::mock();
         app.record_body(53);
         app.apply_latest(tall_page(10));
-        app.vim.set_cursor(3);
+        app.conversation.vim.set_cursor(3);
 
         assert!(
             !app.wants_older(),
@@ -9299,7 +9349,7 @@ mod tests {
             rows::first_row_of_message(&app.row_layout(), 3).expect("the message is laid out")
         );
 
-        app.vim.set_cursor(0);
+        app.conversation.vim.set_cursor(0);
         assert!(
             app.wants_older(),
             "and the reader on the first message is near the top of both"
@@ -9373,7 +9423,7 @@ mod tests {
         let mut app = App::mock();
         app.select_chat(1);
 
-        assert!(app.conversation.window.is_empty());
+        assert!(app.conversation.conversation.window.is_empty());
         assert!(!app.wants_older());
         assert!(!app.wants_newer());
     }
@@ -9403,9 +9453,9 @@ mod tests {
 
         go_to_top(&mut app);
 
-        assert_eq!(app.vim.cursor(), 0);
+        assert_eq!(app.conversation.vim.cursor(), 0);
         assert_eq!(app.pending_jump(), None, "there is nowhere to be taken to");
-        assert!(!app.conversation.auto_follow());
+        assert!(!app.conversation.conversation.auto_follow());
     }
 
     #[test]
@@ -9414,7 +9464,7 @@ mod tests {
 
         go_to_top(&mut app);
 
-        assert_eq!(app.vim.cursor(), 0);
+        assert_eq!(app.conversation.vim.cursor(), 0);
         assert_eq!(app.pending_jump(), None);
     }
 
@@ -9434,7 +9484,7 @@ mod tests {
         );
         assert_eq!(app.pending_jump(), None, "so no page was needed");
         assert!(
-            !app.conversation.auto_follow(),
+            !app.conversation.conversation.auto_follow(),
             "the reader moved off the end"
         );
     }
@@ -9512,9 +9562,10 @@ mod tests {
 
         assert_eq!(reading(&app), Some(19));
         assert_eq!(app.pending_jump(), None, "the jump is over");
-        assert!(!app.conversation.auto_follow());
+        assert!(!app.conversation.conversation.auto_follow());
         assert!(
-            !app.conversation.window.exhausted_older && !app.conversation.window.exhausted_newer,
+            !app.conversation.conversation.window.exhausted_older
+                && !app.conversation.conversation.window.exhausted_newer,
             "a window that jumped has no edge the one before it can vouch for"
         );
     }
@@ -9550,13 +9601,13 @@ mod tests {
     fn a_jump_that_came_back_empty_leaves_the_reader_where_they_were() {
         let mut app = with_unread_out_of_reach(2);
         go_to_top(&mut app);
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         assert!(!app.apply_jump(&[], 19));
 
         assert_eq!(app.pending_jump(), None, "the key is free again");
         assert_eq!(
-            app.conversation.window.len(),
+            app.conversation.conversation.window.len(),
             before,
             "and the window is untouched"
         );
@@ -9575,7 +9626,7 @@ mod tests {
         assert!(!app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
         assert_eq!(app.pending_jump(), None);
         assert!(
-            app.conversation.window.is_empty(),
+            app.conversation.conversation.window.is_empty(),
             "the conversation that was opened kept its empty window"
         );
     }
@@ -9586,11 +9637,11 @@ mod tests {
     fn a_jump_page_for_another_conversation_is_refused() {
         let mut app = with_unread_out_of_reach(2);
         go_to_top(&mut app);
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         assert!(!app.apply_jump(&[stranger(19)], 19));
 
-        assert_eq!(app.conversation.window.len(), before);
+        assert_eq!(app.conversation.conversation.window.len(), before);
         assert_eq!(app.pending_jump(), None, "and the jump is over");
     }
 
@@ -9600,11 +9651,11 @@ mod tests {
     fn a_jump_page_for_another_target_is_refused() {
         let mut app = with_unread_out_of_reach(2);
         go_to_top(&mut app);
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         assert!(!app.apply_jump(&page(&[16, 17, 18, 19, 20]), 18));
 
-        assert_eq!(app.conversation.window.len(), before);
+        assert_eq!(app.conversation.conversation.window.len(), before);
         assert_eq!(
             app.pending_jump(),
             Some(Jump {
@@ -9625,7 +9676,7 @@ mod tests {
         let mut app = with_unread_out_of_reach(2);
         go_to_top(&mut app);
         assert!(app.pending_jump().is_some());
-        let before = app.vim.cursor();
+        let before = app.conversation.vim.cursor();
 
         app.handle_key(press(KeyCode::Char('G')));
 
@@ -9634,11 +9685,15 @@ mod tests {
             Some(19),
             "another key is swallowed rather than answered"
         );
-        assert_eq!(app.vim.cursor(), before, "and moves nothing");
+        assert_eq!(app.conversation.vim.cursor(), before, "and moves nothing");
 
         app.handle_key(press(KeyCode::Esc));
         assert_eq!(app.pending_jump(), None, "`Esc` drops the jump");
-        assert_eq!(app.vim.cursor(), before, "and leaves the reader put");
+        assert_eq!(
+            app.conversation.vim.cursor(),
+            before,
+            "and leaves the reader put"
+        );
         assert!(
             !app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19),
             "the page that was on its way has nobody waiting for it"
@@ -9656,7 +9711,7 @@ mod tests {
         app.handle_key(press(KeyCode::Esc));
 
         app.handle_key(press(KeyCode::Char('G')));
-        assert!(app.conversation.auto_follow());
+        assert!(app.conversation.conversation.auto_follow());
     }
 
     /// The contrapositive of what used to hold: a window that was replaced no
@@ -9848,13 +9903,13 @@ mod tests {
     fn a_reply_jump_that_came_back_empty_says_the_message_is_gone() {
         let mut app = with_a_reply_to_19();
         go_to_reply(&mut app);
-        let before = app.conversation.window.len();
+        let before = app.conversation.conversation.window.len();
 
         assert!(!app.apply_jump(&[], 19));
 
         assert_eq!(app.status_text(), JUMP_UNAVAILABLE);
         assert_eq!(app.pending_jump(), None, "and the key is free again");
-        assert_eq!(app.conversation.window.len(), before);
+        assert_eq!(app.conversation.conversation.window.len(), before);
     }
 
     /// The label names where the reader is going, so it differs by jump: a jump
@@ -10364,7 +10419,7 @@ mod tests {
         // The consequence of not doing this: a paused flow swallowed every key.
         app.handle_key(press(KeyCode::Char('q')));
         assert!(
-            app.confirm.is_some(),
+            app.conversation.confirm.is_some(),
             "`q` asks to quit, so it reached the app"
         );
     }

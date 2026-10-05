@@ -86,7 +86,7 @@ fn main() {
         "the fixture page belongs to the chat it was opened for"
     );
 
-    let window = app.conversation.window.len();
+    let window = app.conversation.conversation.window.len();
     assert!(
         window >= 50,
         "the window holds {window} messages, so the conversation is not loaded"

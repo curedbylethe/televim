@@ -92,11 +92,11 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     // Said in place of the messages rather than at an edge of the window, which
     // an empty one does not have. It is not one of the reserved rows either: a
     // window that is empty is never taller than the row the announcement takes.
-    if app.is_fetching(FetchDirection::Latest) && app.conversation.window.is_empty() {
+    if app.is_fetching(FetchDirection::Latest) && app.conversation.conversation.window.is_empty() {
         items.push(loading(app, FetchDirection::Latest.label()));
     }
 
-    let window = &app.conversation.window;
+    let window = &app.conversation.conversation.window;
     let mut drawn = 0;
     // The slice begins at a row rather than at a message, so what is drawn is
     // every entry the layout says has a row on the screen — which is not the
@@ -196,11 +196,11 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
 /// the note fits: see [`title_note_fits`].
 fn conversation_title(app: &App, width: u16) -> Line<'static> {
     let notes = format!("{}{}", search_note(app), selection_note(app));
-    let total = app.conversation.window.len();
+    let total = app.conversation.conversation.window.len();
     let count = if total == 0 {
         String::new()
     } else {
-        format!(" ({}/{total})", app.vim.cursor() + 1)
+        format!(" ({}/{total})", app.conversation.vim.cursor() + 1)
     };
     let head = format!(" Conversation{count}{notes}");
 
@@ -686,7 +686,7 @@ mod tests {
 
     /// The sample conversation's identifier, which a fixture message has to carry.
     fn mock_chat_id() -> i64 {
-        App::mock().conversation.window.chat_id
+        App::mock().conversation.conversation.window.chat_id
     }
 
     /// A short message of the sample conversation, `seconds` after [`AT`].
@@ -712,9 +712,9 @@ mod tests {
     fn showing(messages: Vec<Message>) -> App {
         let mut app = App::mock();
         let count = messages.len();
-        app.conversation.window.replace(messages);
-        app.vim.set_total(count);
-        app.vim.set_cursor(count.saturating_sub(1));
+        app.conversation.conversation.window.replace(messages);
+        app.conversation.vim.set_total(count);
+        app.conversation.vim.set_cursor(count.saturating_sub(1));
 
         app
     }
@@ -759,12 +759,12 @@ mod tests {
                 .modifier
                 .contains(Modifier::REVERSED),
             "the selection is on the row the panel drew for message {}: {}",
-            app.vim.cursor(),
+            app.conversation.vim.cursor(),
             row(screen, at_row)
         );
         assert_eq!(
             view.start_row + view.selection,
-            rows::first_row_of_message(&layout, app.vim.cursor())
+            rows::first_row_of_message(&layout, app.conversation.vim.cursor())
                 .expect("the cursor names a message the window holds"),
             "and that row is the message's own first row, not a separator's"
         );
@@ -1343,6 +1343,7 @@ mod tests {
         let screen = screen(&app, 80, 24);
         let message = app
             .conversation
+            .conversation
             .window
             .get(0)
             .expect("the fixture put one message in the window");
@@ -1581,6 +1582,7 @@ mod tests {
         // window stops well short of.
         app.apply_latest(
             app.conversation
+                .conversation
                 .window
                 .iter()
                 .map(|message| Message {
@@ -1959,7 +1961,7 @@ mod tests {
     #[test]
     fn the_title_says_where_the_reader_is() {
         let mut app = App::mock();
-        app.vim.set_cursor(8);
+        app.conversation.vim.set_cursor(8);
 
         let screen = screen(&app, 80, 24);
 
@@ -2067,7 +2069,7 @@ mod tests {
     #[test]
     fn a_long_message_stops_at_the_column_the_bar_was_given() {
         let mut app = App::mock();
-        let chat_id = app.conversation.window.chat_id;
+        let chat_id = app.conversation.conversation.window.chat_id;
         app.apply_latest(vec![long_message(chat_id)]);
 
         let screen = screen(&app, 80, 24);
@@ -2092,7 +2094,7 @@ mod tests {
     #[test]
     fn a_long_message_is_as_many_rows_as_it_needs() {
         let mut app = App::mock();
-        let chat_id = app.conversation.window.chat_id;
+        let chat_id = app.conversation.conversation.window.chat_id;
         app.apply_latest(vec![long_message(chat_id)]);
 
         let screen = screen(&app, 80, 24);
@@ -2140,7 +2142,7 @@ mod tests {
     #[test]
     fn a_continuation_row_names_nobody() {
         let mut incoming = App::mock();
-        let chat_id = incoming.conversation.window.chat_id;
+        let chat_id = incoming.conversation.conversation.window.chat_id;
         incoming.apply_latest(vec![long_message(chat_id)]);
         let theirs = screen(&incoming, 80, 24);
 
@@ -2152,7 +2154,7 @@ mod tests {
         );
 
         let mut outgoing = App::mock();
-        let chat_id = outgoing.conversation.window.chat_id;
+        let chat_id = outgoing.conversation.conversation.window.chat_id;
         outgoing.apply_latest(vec![long_message_sending(chat_id)]);
         let yours = screen(&outgoing, 80, 24);
 
@@ -2568,8 +2570,8 @@ mod tests {
         // well inside a window too tall for the panel. Landing on it leaves the
         // pinned view, as `gg` and a search landing do.
         let target = 6;
-        app.vim.set_cursor(target);
-        app.conversation.unfollow();
+        app.conversation.vim.set_cursor(target);
+        app.conversation.conversation.unfollow();
 
         let screen = screen(&app, 80, 10);
         let layout = app.row_layout();
@@ -2595,7 +2597,7 @@ mod tests {
     #[test]
     fn a_pending_send_says_so_on_the_last_row_of_its_message() {
         let mut app = App::mock();
-        let chat_id = app.conversation.window.chat_id;
+        let chat_id = app.conversation.conversation.window.chat_id;
         app.apply_latest(vec![long_message_sending(chat_id)]);
 
         let screen = screen(&app, 80, 24);
@@ -2625,7 +2627,7 @@ mod tests {
         use domain::message::{Message, MessageStatus};
 
         let mut app = App::mock();
-        let chat_id = app.conversation.window.chat_id;
+        let chat_id = app.conversation.conversation.window.chat_id;
         app.apply_latest(vec![
             Message {
                 id: 90,
@@ -2676,7 +2678,7 @@ mod tests {
     #[test]
     fn a_read_receipt_is_shown_once_on_the_newest_row_of_its_group() {
         let mut app = showing(vec![mine(1, 0), mine(2, 60)]);
-        app.conversation.set_read_watermark(2);
+        app.conversation.conversation.set_read_watermark(2);
 
         let screen = screen(&app, 80, 24);
         let newest = body_row(&screen, FIRST + 1);
@@ -2711,7 +2713,7 @@ mod tests {
     #[test]
     fn an_outgoing_group_the_peer_has_not_read_says_delivered() {
         let mut app = showing(vec![mine(1, 0), mine(2, 60)]);
-        app.conversation.set_read_watermark(1);
+        app.conversation.conversation.set_read_watermark(1);
 
         let screen = screen(&app, 80, 24);
 
@@ -2749,7 +2751,7 @@ mod tests {
         );
 
         let mut theirs = showing(vec![at(1, 0, false, "one"), at(2, 60, false, "two")]);
-        theirs.conversation.set_read_watermark(99);
+        theirs.conversation.conversation.set_read_watermark(99);
         let screen = screen(&theirs, 80, 24);
         assert_eq!(
             occurrences(&screen, "[read]") + occurrences(&screen, "[delivered]"),
@@ -2764,9 +2766,13 @@ mod tests {
     #[test]
     fn a_failed_send_says_why_and_claims_no_receipt() {
         let mut app = showing(vec![mine(1, 0), mine(2, 60)]);
-        app.conversation.set_read_watermark(99);
-        let failed = app.conversation.queue_send("on its way", None);
-        assert!(app.conversation.fail_send(failed, "no route".to_owned()));
+        app.conversation.conversation.set_read_watermark(99);
+        let failed = app.conversation.conversation.queue_send("on its way", None);
+        assert!(
+            app.conversation
+                .conversation
+                .fail_send(failed, "no route".to_owned())
+        );
 
         let screen = screen(&app, 80, 24);
         let last = message_rows(&screen)
@@ -2808,7 +2814,7 @@ mod tests {
         use domain::message::{Message, MessageStatus};
 
         let mut app = App::mock();
-        let chat_id = app.conversation.window.chat_id;
+        let chat_id = app.conversation.conversation.window.chat_id;
         app.apply_latest(vec![Message {
             id: 90,
             chat_id,
@@ -2869,7 +2875,9 @@ mod tests {
     #[test]
     fn a_reply_to_a_message_that_is_not_loaded_says_so() {
         let mut app = App::mock();
-        app.conversation.queue_send("orphan", Some(999));
+        app.conversation
+            .conversation
+            .queue_send("orphan", Some(999));
 
         let screen = screen(&app, 80, 24);
 
@@ -2887,7 +2895,7 @@ mod tests {
         press(&mut app, KeyCode::Char('i'));
         type_text(&mut app, "hello");
         press(&mut app, KeyCode::Enter);
-        let id = app.sending.expect("the send is in flight");
+        let id = app.conversation.sending.expect("the send is in flight");
 
         let sending = screen(&app, 80, 24);
         assert!(
