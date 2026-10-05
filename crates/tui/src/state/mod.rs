@@ -2,5 +2,6 @@
 
 pub mod chat_list;
 pub mod outbox;
+pub mod pending;
 pub mod profile;
 pub mod session;

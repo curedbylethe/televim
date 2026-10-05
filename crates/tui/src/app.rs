@@ -29,6 +29,7 @@ use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
 use crate::state::chat_list::ChatListState;
 use crate::state::outbox::Outbox;
+use crate::state::pending::Pending;
 use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
 use crate::theme::Theme;
@@ -445,7 +446,7 @@ pub enum SessionStore {
 /// caller that owns the network opens this once the movement has stopped, and
 /// deciding that needs to know how long ago the highlight last moved.
 #[derive(Debug, Clone, Copy)]
-struct ChatChoice {
+pub(crate) struct ChatChoice {
     /// Where in the list the highlight is.
     index: usize,
 
@@ -872,7 +873,7 @@ pub enum Action {
 
 /// A `f`, `t`, `F` or `T` that has been pressed and is waiting for its character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Find {
+pub(crate) struct Find {
     /// Which way to look.
     forward: bool,
 
@@ -994,6 +995,9 @@ pub struct App {
     /// Queued actions, in-flight fetches, and the clipboard the driver takes.
     pub outbox: Outbox,
 
+    /// Half-typed keys and the requests a keystroke defers.
+    pub pending: Pending,
+
     /// The conversation on show, and where the reader is in it.
     ///
     /// The panel renders a slice of this, and the cursor below is the reader's
@@ -1091,44 +1095,12 @@ pub struct App {
     /// reference and cannot expire anything itself.
     typing_until: Option<(i64, Instant)>,
 
-    /// The jump the reader has asked for and no page has answered yet.
-    ///
-    /// Set when `gg` cannot be answered from what is loaded, and cleared when the
-    /// page arrives — or fails, or comes back empty, because a jump that went
-    /// wrong must not wedge the key. It is what makes the key idempotent: a
-    /// second `gg` produces the same intent, which the caller recognises as one
-    /// already on its way.
-    pending_jump: Option<Jump>,
-
     /// Where the reader was before each jump they have taken.
     ///
     /// What `Ctrl-o` and `Ctrl-i` walk. It is per conversation and keyed by
     /// message identifier rather than by row, because a jump replaces the window
     /// and a row means a different message on either side of that.
     jumplist: Jumplist,
-
-    /// The conversation the highlight has moved onto but has not been taken to.
-    ///
-    /// The same hand-over as [`App::pending_jump`] — recorded here because
-    /// `tui` cannot reach the network — and for the same reason it carries a
-    /// time: a reader holding `j` would otherwise fetch every conversation they
-    /// scrolled past, and one page per chat as fast as a key repeats is how a
-    /// scroll through the list becomes a flood wait.
-    pending_chat: Option<ChatChoice>,
-
-    /// Whether a `g` was just pressed in the chat list and a second one would
-    /// take the reader to the top of it.
-    ///
-    /// The same latch as `dd` and for the same reason: `gg` is two presses in
-    /// Vim, and a key held down is not two of them.
-    pending_g: bool,
-
-    /// A `f`, `t`, `F` or `T` waiting for the character to look for.
-    ///
-    /// Two keys rather than one, as in Vim, and a latch for the same reason `dd`
-    /// has one: the key after `f` is the character, not a motion. The character
-    /// itself is not recorded, because it has not been typed yet.
-    pending_find: Option<Find>,
 
     /// How many message rows the conversation panel had room for as of the last
     /// frame.
@@ -1231,6 +1203,7 @@ impl App {
             profile: ProfileCard::new(),
             list: ChatListState::new(),
             outbox: Outbox::new(),
+            pending: Pending::new(),
             conversation: ConversationView::new(0),
             vim: VimState::new(0),
             line: LineEditor::new(),
@@ -1247,11 +1220,7 @@ impl App {
             register: Register::default(),
             status_until: None,
             typing_until: None,
-            pending_jump: None,
             jumplist: Jumplist::default(),
-            pending_chat: None,
-            pending_g: false,
-            pending_find: None,
             rows: Cell::new(ASSUMED_ROWS),
             body_width: Cell::new(ASSUMED_BODY_WIDTH),
             now: Cell::new(0),
@@ -1328,7 +1297,7 @@ impl App {
     /// reach the network.
     #[must_use]
     pub fn pending_jump(&self) -> Option<Jump> {
-        self.pending_jump
+        self.pending.pending_jump
     }
 
     /// The query the open conversation is being searched for, if any.
@@ -1548,7 +1517,7 @@ impl App {
         self.typing_until = None;
         self.vim = VimState::new(0);
         self.outbox.fetching.clear();
-        self.pending_jump = None;
+        self.pending.pending_jump = None;
         // The marks are per conversation, and this is the path every switch goes
         // through, so this is where they go too: a reader who has closed the
         // conversation has nowhere to walk back to.
@@ -2205,7 +2174,7 @@ impl App {
         }
 
         self.list.selected_chat = index;
-        self.pending_chat = Some(ChatChoice {
+        self.pending.pending_chat = Some(ChatChoice {
             index,
             at: Instant::now(),
         });
@@ -2218,12 +2187,12 @@ impl App {
     /// way [`App::pending_jump`] is: once handed over it is forgotten, so a
     /// caller that asks twice gets one conversation.
     pub fn take_pending_chat(&mut self, now: Instant) -> Option<usize> {
-        let choice = self.pending_chat?;
+        let choice = self.pending.pending_chat?;
         if now.saturating_duration_since(choice.at) < CHAT_SWITCH_DELAY {
             return None;
         }
 
-        self.pending_chat = None;
+        self.pending.pending_chat = None;
         Some(choice.index)
     }
 
@@ -2242,7 +2211,7 @@ impl App {
         let chat_id = chat.id;
 
         self.list.selected_chat = index;
-        self.pending_chat = None;
+        self.pending.pending_chat = None;
         self.select_chat_none();
         // The new view starts its placeholder ids at the bottom again, so an
         // identifier the old view handed out can be handed out once more. That is
@@ -2548,7 +2517,7 @@ impl App {
         // Asked before the stack is walked: a walk moves a mark between the two
         // stacks, and a reader who presses `Ctrl-o` while a page is on its way
         // must not have moved one for a return that did not happen.
-        if self.pending_jump.is_some() || !self.has_conversation() {
+        if self.pending.pending_jump.is_some() || !self.has_conversation() {
             return;
         }
 
@@ -2568,7 +2537,7 @@ impl App {
     /// `Tab` sends `Tab` instead, and `Tab` is the pane switch here — so on such
     /// a terminal only `Ctrl-o` works, which is what the design accepted.
     pub fn jump_forward(&mut self) {
-        if self.pending_jump.is_some() || !self.has_conversation() {
+        if self.pending.pending_jump.is_some() || !self.has_conversation() {
             return;
         }
 
@@ -2592,7 +2561,7 @@ impl App {
     /// in which stack was walked — and in what the status line says while the
     /// page is on its way, which is `kind`'s whole job.
     fn go_to(&mut self, id: i64, kind: JumpKind) {
-        if self.pending_jump.is_some() {
+        if self.pending.pending_jump.is_some() {
             return;
         }
 
@@ -2602,7 +2571,7 @@ impl App {
             return;
         }
 
-        self.pending_jump = Some(Jump {
+        self.pending.pending_jump = Some(Jump {
             peer_id: self.conversation.window.chat_id,
             target_id: id,
             kind,
@@ -2618,11 +2587,11 @@ impl App {
     /// is for is that the key is free again — a jump nothing releases is a key
     /// that never works again.
     pub fn clear_jump(&mut self, target_id: i64) -> bool {
-        if self.pending_jump.map(|jump| jump.target_id) != Some(target_id) {
+        if self.pending.pending_jump.map(|jump| jump.target_id) != Some(target_id) {
             return false;
         }
 
-        self.pending_jump = None;
+        self.pending.pending_jump = None;
         true
     }
 
@@ -2647,7 +2616,7 @@ impl App {
         // found; `gg`'s first-unread jump keeps its old silence, because its key
         // means "take me to the unread" and not "take me to message 19", and its
         // behaviour does not change here.
-        let kind = self.pending_jump.map(|jump| jump.kind);
+        let kind = self.pending.pending_jump.map(|jump| jump.kind);
         if !self.clear_jump(target_id) {
             return false;
         }
@@ -3168,9 +3137,9 @@ impl App {
         // would move it out from under the page. `Esc` is the one answer — it
         // drops the jump and leaves the reader where they were. The page may
         // still land, and is dropped when it does: nobody is waiting for it.
-        if self.pending_jump.is_some() {
+        if self.pending.pending_jump.is_some() {
             if key.code == KeyCode::Esc {
-                self.pending_jump = None;
+                self.pending.pending_jump = None;
             }
             return;
         }
@@ -3259,7 +3228,7 @@ impl App {
             // one to, so the list gets its own search instead of borrowing a
             // scope it does not have.
             KeyCode::Char('/') => {
-                self.pending_g = false;
+                self.pending.pending_g = false;
                 self.begin_new_chat("");
             }
 
@@ -3267,7 +3236,7 @@ impl App {
             // conversation: a reader looking for settings has usually not opened a
             // conversation to look in.
             KeyCode::Char('S') => {
-                self.pending_g = false;
+                self.pending.pending_g = false;
                 self.open_profile();
             }
 
@@ -3275,39 +3244,39 @@ impl App {
             // already the way into the conversation on this pane, and a key that
             // means two things in two panes is a key a reader has to learn twice.
             KeyCode::Char('A') => {
-                self.pending_g = false;
+                self.pending.pending_g = false;
                 self.open_contact();
             }
 
             KeyCode::Char('j') => {
-                self.pending_g = false;
+                self.pending.pending_g = false;
                 self.choose_chat(here.saturating_add(1).min(last));
             }
             KeyCode::Char('k') => {
-                self.pending_g = false;
+                self.pending.pending_g = false;
                 self.choose_chat(here.saturating_sub(1));
             }
             KeyCode::Char('g') => {
-                if std::mem::take(&mut self.pending_g) {
+                if std::mem::take(&mut self.pending.pending_g) {
                     self.choose_chat(0);
                 } else {
-                    self.pending_g = true;
+                    self.pending.pending_g = true;
                 }
             }
             KeyCode::Char('G') => {
-                self.pending_g = false;
+                self.pending.pending_g = false;
                 self.choose_chat(last);
             }
 
             KeyCode::Enter => {
-                self.pending_g = false;
+                self.pending.pending_g = false;
                 self.select_chat(here);
                 self.set_focus(Focus::Conversation);
             }
 
             // Any other key ends the sequence, so a lone `g` does not become a
             // jump to the top the next time one is pressed.
-            _ => self.pending_g = false,
+            _ => self.pending.pending_g = false,
         }
     }
 
@@ -3324,8 +3293,8 @@ impl App {
                 // reader has jumped from. Not while a jump is on its way — one
                 // fetch is in flight and the reader may have escaped it, and a
                 // second jump would replace the one they are still waiting for.
-                KeyCode::Char('o') if self.pending_jump.is_none() => self.jump_back(),
-                KeyCode::Char('i') if self.pending_jump.is_none() => self.jump_forward(),
+                KeyCode::Char('o') if self.pending.pending_jump.is_none() => self.jump_back(),
+                KeyCode::Char('i') if self.pending.pending_jump.is_none() => self.jump_forward(),
                 _ => {}
             }
             return;
@@ -3348,12 +3317,15 @@ impl App {
                 // left for the caller to fetch. Either way the reader has
                 // asked for something, so whatever they asked for before is
                 // replaced by it.
-                Motion::First => self.pending_jump = self.jump_to_unread(),
+                Motion::First => {
+                    let jump = self.jump_to_unread();
+                    self.pending.pending_jump = jump;
+                }
 
                 // `G` is the reader overriding a jump with "take me to the
                 // end". The page on its way is for a place they no longer
                 // want to be, and it is dropped when it lands.
-                Motion::Last => self.pending_jump = None,
+                Motion::Last => self.pending.pending_jump = None,
 
                 // `n` and `N` walk the search's matches. `VimState` reports
                 // the motion but cannot answer it, because a match is a
@@ -3363,7 +3335,10 @@ impl App {
 
                 // `gd`, likewise: which message this one quotes is a fact
                 // about the conversation, and the window is what holds it.
-                Motion::GotoReply => self.pending_jump = self.jump_to_reply(),
+                Motion::GotoReply => {
+                    let jump = self.jump_to_reply();
+                    self.pending.pending_jump = jump;
+                }
 
                 // `j` and `k` are the motions themselves, and the table has
                 // already applied them.
@@ -3899,7 +3874,7 @@ impl App {
         // A `f` takes the very next keypress as the character to look for, whatever
         // it is: that is what `fw` means, and reading the `w` as a motion would be
         // a different key entirely. Anything else ends the sequence.
-        if let Some(Find { forward, onto }) = self.pending_find.take()
+        if let Some(Find { forward, onto }) = self.pending.pending_find.take()
             && let KeyCode::Char(target) = key.code
         {
             self.move_focus(CharMotion::Find {
@@ -3909,7 +3884,7 @@ impl App {
             });
             return;
         }
-        self.pending_find = None;
+        self.pending.pending_find = None;
 
         match key.code {
             KeyCode::Esc => {
@@ -3944,25 +3919,25 @@ impl App {
             KeyCode::Char('$') => self.move_focus(CharMotion::Bound { end: true }),
 
             KeyCode::Char('f') => {
-                self.pending_find = Some(Find {
+                self.pending.pending_find = Some(Find {
                     forward: true,
                     onto: true,
                 });
             }
             KeyCode::Char('t') => {
-                self.pending_find = Some(Find {
+                self.pending.pending_find = Some(Find {
                     forward: true,
                     onto: false,
                 });
             }
             KeyCode::Char('F') => {
-                self.pending_find = Some(Find {
+                self.pending.pending_find = Some(Find {
                     forward: false,
                     onto: true,
                 });
             }
             KeyCode::Char('T') => {
-                self.pending_find = Some(Find {
+                self.pending.pending_find = Some(Find {
                     forward: false,
                     onto: false,
                 });
@@ -4426,7 +4401,7 @@ impl App {
         if let Some(position) = self.conversation.window.position_of(id) {
             self.vim.set_cursor(position);
         } else {
-            self.pending_jump = Some(Jump {
+            self.pending.pending_jump = Some(Jump {
                 peer_id: self.conversation.window.chat_id,
                 target_id: id,
                 kind: JumpKind::Unread,
@@ -5170,7 +5145,7 @@ impl App {
     pub fn reserved(&self) -> Reserved {
         Reserved {
             older: self.outbox.fetching.is_in_flight(FetchDirection::Older),
-            jumping: self.pending_jump.is_some(),
+            jumping: self.pending.pending_jump.is_some(),
             newer: self.outbox.fetching.is_in_flight(FetchDirection::Newer),
         }
     }
@@ -5182,7 +5157,8 @@ impl App {
     /// places that say one read this.
     #[must_use]
     pub fn jump_label(&self) -> &'static str {
-        self.pending_jump
+        self.pending
+            .pending_jump
             .map_or(JUMP_LABEL, |jump| jump.kind.label())
     }
 
@@ -5309,7 +5285,7 @@ impl App {
         if self.search.is_active() {
             return self.search.label();
         }
-        if self.pending_jump.is_some() {
+        if self.pending.pending_jump.is_some() {
             return self.jump_label().to_owned();
         }
         if let Some(message) = self.cursor_message()
