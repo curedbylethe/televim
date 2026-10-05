@@ -1,7 +1,7 @@
 //! Top-level TUI state.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -28,6 +28,7 @@ use crate::jumplist::Jumplist;
 use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
 use crate::state::chat_list::ChatListState;
+use crate::state::outbox::Outbox;
 use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
 use crate::theme::Theme;
@@ -929,7 +930,7 @@ impl Register {
 /// independently, so a page arriving in one direction must not release another,
 /// and opening a conversation must release all three.
 #[derive(Debug, Default, Clone, Copy)]
-struct Fetching {
+pub(crate) struct Fetching {
     latest: bool,
     older: bool,
     newer: bool,
@@ -989,6 +990,9 @@ pub struct App {
 
     /// The chat list and the selection cursor.
     pub list: ChatListState,
+
+    /// Queued actions, in-flight fetches, and the clipboard the driver takes.
+    pub outbox: Outbox,
 
     /// The conversation on show, and where the reader is in it.
     ///
@@ -1072,27 +1076,6 @@ pub struct App {
     /// [`App::select_chat_none`] forgets it along with everything else.
     register: Register,
 
-    /// The text a yank asked to be copied to the system clipboard, if one is
-    /// waiting to be written.
-    ///
-    /// Recorded rather than written, because `tui` does not hold stdout and a
-    /// widget that writes to the terminal behind the renderer's back is a race.
-    /// The caller that owns the terminal takes it with
-    /// [`App::take_clipboard`], which it does on the same pass of its loop that
-    /// the yank was read on — so this cannot outlive a conversation change by more
-    /// than a frame, and clearing it here would lose a yank rather than a stale
-    /// one.
-    clipboard: Option<String>,
-
-    /// The operations the reader asked for, waiting to be taken by the caller.
-    ///
-    /// The outbound half of the [`Jump`] pattern: recorded here because `tui`
-    /// cannot reach the network, and taken once by the caller that can. A queue
-    /// rather than a single slot, because two requests made inside one tick are
-    /// two requests — a send followed by `/` has to perform both, not lose the
-    /// send to the key that came after it.
-    actions: VecDeque<Action>,
-
     /// When a transient status stops applying, if it is transient.
     status_until: Option<Instant>,
 
@@ -1107,9 +1090,6 @@ pub struct App {
     /// only where the loop supplies one — because a frame is drawn from a shared
     /// reference and cannot expire anything itself.
     typing_until: Option<(i64, Instant)>,
-
-    /// The pages on their way from the network.
-    fetching: Fetching,
 
     /// The jump the reader has asked for and no page has answered yet.
     ///
@@ -1250,6 +1230,7 @@ impl App {
             session: SessionState::new(),
             profile: ProfileCard::new(),
             list: ChatListState::new(),
+            outbox: Outbox::new(),
             conversation: ConversationView::new(0),
             vim: VimState::new(0),
             line: LineEditor::new(),
@@ -1264,11 +1245,8 @@ impl App {
             confirm: None,
             selection: None,
             register: Register::default(),
-            clipboard: None,
-            actions: VecDeque::new(),
             status_until: None,
             typing_until: None,
-            fetching: Fetching::default(),
             pending_jump: None,
             jumplist: Jumplist::default(),
             pending_chat: None,
@@ -1494,7 +1472,7 @@ impl App {
     /// know, so the register — which always works — is what a yank can be relied
     /// on for.
     pub fn take_clipboard(&mut self) -> Option<String> {
-        self.clipboard.take()
+        self.outbox.clipboard.take()
     }
 
     /// Installs a freshly fetched chat list.
@@ -1569,7 +1547,7 @@ impl App {
         // so the deadline goes with the view rather than with the reader's memory.
         self.typing_until = None;
         self.vim = VimState::new(0);
-        self.fetching.clear();
+        self.outbox.fetching.clear();
         self.pending_jump = None;
         // The marks are per conversation, and this is the path every switch goes
         // through, so this is where they go too: a reader who has closed the
@@ -2016,7 +1994,7 @@ impl App {
         }
 
         self.register = Register::set(lines);
-        self.clipboard = Some(self.register.text());
+        self.outbox.clipboard = Some(self.register.text());
     }
 
     /// The lines a card selection yanks, or the cursor row's value when there is
@@ -2868,7 +2846,7 @@ impl App {
     pub fn wants_older(&self) -> bool {
         let window = &self.conversation.window;
 
-        !self.fetching.is_in_flight(FetchDirection::Older)
+        !self.outbox.fetching.is_in_flight(FetchDirection::Older)
             && !window.is_empty()
             && !window.exhausted_older
             && self.cursor_extent().0 < FETCH_MARGIN
@@ -2883,7 +2861,7 @@ impl App {
     pub fn wants_newer(&self) -> bool {
         let window = &self.conversation.window;
 
-        !self.fetching.is_in_flight(FetchDirection::Newer)
+        !self.outbox.fetching.is_in_flight(FetchDirection::Newer)
             && !window.is_empty()
             && !window.exhausted_newer
             && !self.conversation.auto_follow()
@@ -2914,7 +2892,7 @@ impl App {
     /// One fetch per direction at a time: this is what a trigger checks before
     /// it fires, so holding a key down cannot turn into a stream of requests.
     pub fn begin_fetch(&mut self, direction: FetchDirection) {
-        self.fetching.set(direction, true);
+        self.outbox.fetching.set(direction, true);
     }
 
     /// Records that the fetch for `direction` is over, however it ended.
@@ -2923,13 +2901,13 @@ impl App {
     /// alternative is a conversation that can never be paged again because one
     /// request went wrong.
     pub fn end_fetch(&mut self, direction: FetchDirection) {
-        self.fetching.set(direction, false);
+        self.outbox.fetching.set(direction, false);
     }
 
     /// Whether a fetch for `direction` is in flight.
     #[must_use]
     pub const fn is_fetching(&self, direction: FetchDirection) -> bool {
-        self.fetching.is_in_flight(direction)
+        self.outbox.fetching.is_in_flight(direction)
     }
 
     /// Records that a direction has run out.
@@ -2955,7 +2933,7 @@ impl App {
     /// cleared, and a caller that asks twice gets one action. The request is
     /// handed over rather than made here because the network is the caller's.
     pub fn take_action(&mut self) -> Option<Action> {
-        self.actions.pop_front()
+        self.outbox.actions.pop_front()
     }
 
     /// Adds an operation to the queue the caller drains.
@@ -2966,11 +2944,11 @@ impl App {
     /// room, and the refusal is said out loud rather than that operation
     /// vanishing.
     fn queue_action(&mut self, action: Action) {
-        if self.actions.len() >= ACTION_QUEUE {
-            self.actions.pop_front();
+        if self.outbox.actions.len() >= ACTION_QUEUE {
+            self.outbox.actions.pop_front();
             self.flash("too many requests at once — the oldest was dropped");
         }
-        self.actions.push_back(action);
+        self.outbox.actions.push_back(action);
     }
 
     /// Records that a send for `temp_id` is in flight.
@@ -3732,7 +3710,7 @@ impl App {
         // same OSC 52 write the conversation's goes through. One seam, two
         // producers.
         if let Some(yanked) = self.line.take_yanked() {
-            self.clipboard = Some(yanked);
+            self.outbox.clipboard = Some(yanked);
         }
 
         // Last, because it is a function of what the line now holds: deriving
@@ -4028,7 +4006,7 @@ impl App {
         }
 
         self.register = Register::set(lines);
-        self.clipboard = Some(self.register.text());
+        self.outbox.clipboard = Some(self.register.text());
     }
 
     /// The lines a selection yanks: one for a text selection, one per message for
@@ -5191,9 +5169,9 @@ impl App {
     #[must_use]
     pub fn reserved(&self) -> Reserved {
         Reserved {
-            older: self.fetching.is_in_flight(FetchDirection::Older),
+            older: self.outbox.fetching.is_in_flight(FetchDirection::Older),
             jumping: self.pending_jump.is_some(),
-            newer: self.fetching.is_in_flight(FetchDirection::Newer),
+            newer: self.outbox.fetching.is_in_flight(FetchDirection::Newer),
         }
     }
 
@@ -7186,7 +7164,7 @@ mod tests {
         assert!(app.should_quit);
         assert_eq!(app.confirm, None);
         assert_eq!(app.mode, Mode::Normal);
-        assert!(app.actions.is_empty());
+        assert!(app.outbox.actions.is_empty());
     }
 
     /// Either way of saying no, and neither of them is a third key: `Esc` is
