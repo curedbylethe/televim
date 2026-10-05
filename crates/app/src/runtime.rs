@@ -264,10 +264,10 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
     // are read, and these are what a launch with a reader in a hurry saves them
     // typing. `credentials_configured` is the flag that decides whether there is
     // a flow to put them in at all.
-    app.phone = cfg.phone.clone().unwrap_or_default();
-    app.code_prefill = cfg.code.clone().unwrap_or_default();
-    app.password_prefill = cfg.password.clone().unwrap_or_default();
-    app.credentials_configured = cfg.credentials().is_some();
+    app.session.phone = cfg.phone.clone().unwrap_or_default();
+    app.session.code_prefill = cfg.code.clone().unwrap_or_default();
+    app.session.password_prefill = cfg.password.clone().unwrap_or_default();
+    app.session.credentials_configured = cfg.credentials().is_some();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     spawn_reader(tx.clone());

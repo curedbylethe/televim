@@ -110,7 +110,7 @@ fn shell(app: &App, width: u16) -> Vec<Line<'_>> {
         };
     }
 
-    match &app.account {
+    match &app.session.account {
         AccountState::Unfetched => vec![Line::from(Span::styled(
             "reading the account…",
             app.theme.text_dim,

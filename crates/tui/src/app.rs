@@ -27,6 +27,7 @@ use crate::emoji;
 use crate::jumplist::Jumplist;
 use crate::line::{LineEditor, LineVerdict};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
+use crate::state::session::SessionState;
 use crate::theme::Theme;
 use crate::widgets;
 
@@ -964,9 +965,7 @@ impl Fetching {
 ///
 /// `struct_excessive_bools` is off deliberately: the booleans here are the
 /// screen's own facts rather than a state machine wearing a disguise — a
-/// [`Focus`] and a [`Mode`] already carry the two axes that could be enums, and
-/// the sign-in's `credentials_configured` is a fact about the machine rather than
-/// a step the reader is in.
+/// [`Focus`] and a [`Mode`] already carry the two axes that could be enums.
 #[allow(clippy::struct_excessive_bools)]
 pub struct App {
     pub mode: Mode,
@@ -980,59 +979,8 @@ pub struct App {
     /// `Focus` says where a keystroke lands. See [`Pane`].
     pub pane: Pane,
 
-    /// What the profile panel shows, and why it might show nothing.
-    pub account: AccountState,
-
-    /// Where the session is kept, as the panel says it.
-    pub session_store: SessionStore,
-
-    /// The sign-in surface, when it is up.
-    ///
-    /// `None` for every reader who is already signed in, which is most of the
-    /// life of the program. `Some` is an overlay and not a pane: see [`SignIn`].
-    pub signin: Option<SignIn>,
-
-    /// The phone number configuration carried, if there is one.
-    ///
-    /// Held rather than read from a prompt because `:signin` needs it twice —
-    /// to fill the field in, and to draw the row that says where the code went —
-    /// and because it is the one thing about a sign-in a reader does not have to
-    /// type. It is rewritten by the network with the number the request actually
-    /// went out with, so it is "where the code went" rather than "what the
-    /// configuration suggested".
-    pub phone: String,
-
-    /// What the configuration carried for the login code, if any.
-    ///
-    /// A **pre-fill**, and the only place a code may come from that is not
-    /// Telegram: Telegram sends the code, and the reader types it. This saves
-    /// that on a machine where the code is already written down, and it is read
-    /// once — when the step opens — because a wrong code has to be retyped, not
-    /// restored.
-    pub code_prefill: String,
-
-    /// What the configuration carried for the two-factor password, if any.
-    ///
-    /// A pre-fill on the same terms as [`App::code_prefill`]: read when the step
-    /// opens, never restored after a refusal.
-    pub password_prefill: String,
-
-    /// Whether this machine carries application credentials at all.
-    ///
-    /// **The gate on the flow.** Without an `api_id` and `api_hash` there is no
-    /// client to sign in *to*, so a phone field would be asking the reader for
-    /// something the program still could not do with — and the sentence that
-    /// says so is a better screen than a form that cannot be finished.
-    pub credentials_configured: bool,
-
-    /// Whether a client is there to carry a request.
-    ///
-    /// **The gate on the sign-in's `waiting` flag.** A request no client will
-    /// take is not a request on its way, so the flow must not be told one is:
-    /// the panel would say "Checking…" for an answer that is never coming, and
-    /// nothing else on the screen can put it right. `false` until the caller
-    /// says otherwise — this side of the boundary cannot see a client.
-    client_available: bool,
+    /// The account's session and the sign-in surface.
+    pub session: SessionState,
 
     /// The highlight on the profile panel's rows.
     ///
@@ -1239,17 +1187,6 @@ pub struct App {
     /// scroll through the list becomes a flood wait.
     pending_chat: Option<ChatChoice>,
 
-    /// Whether the reader has asked for the client to be brought up again.
-    ///
-    /// Recorded here because `tui` cannot reach the network, and taken by the
-    /// one caller that can. **Not an [`Action`]**, and the reason is the state a
-    /// retry is needed in: actions are drained only while there is a client, so a
-    /// queued one would be invisible at exactly the moment it matters — a launch
-    /// that came up `offline:`. One slot rather than a queue, because a second
-    /// retry while one is on its way is the same retry; the caller says so with
-    /// a transient status rather than asking twice.
-    retry_requested: bool,
-
     /// Whether a `g` was just pressed in the chat list and a second one would
     /// take the reader to the top of it.
     ///
@@ -1361,19 +1298,7 @@ impl App {
             focus: Focus::Conversation,
             theme: Theme::default(),
             pane: Pane::Conversation,
-            account: AccountState::Unfetched,
-            session_store: SessionStore::default(),
-            signin: None,
-            phone: String::new(),
-            code_prefill: String::new(),
-            password_prefill: String::new(),
-            // A program that is handed nothing assumes nothing: the caller that
-            // has read the configuration says so, and a launch without one gets
-            // the sentence rather than a form.
-            credentials_configured: false,
-            // A program that is handed nothing has no client either, and a
-            // sign-in it accepts now would be a request nobody carries.
-            client_available: false,
+            session: SessionState::new(),
             profile_vim: VimState::new(0),
             profile_subject: ProfileId::SelfAccount,
             profile_caret: 0,
@@ -1405,7 +1330,6 @@ impl App {
             pending_jump: None,
             jumplist: Jumplist::default(),
             pending_chat: None,
-            retry_requested: false,
             pending_g: false,
             pending_find: None,
             rows: Cell::new(ASSUMED_ROWS),
@@ -1456,16 +1380,16 @@ impl App {
         // The design's own number, so the sign-in scenes are the frames the
         // design drew rather than an approximation of them: the phone row is
         // pre-filled in every one of them.
-        app.phone = "+44 7700 900142".to_owned();
+        app.session.phone = "+44 7700 900142".to_owned();
         // The sign-in scenes are a machine that *can* sign in; the one that
         // cannot is its own scene, and it sets this back rather than inheriting
         // the other answer.
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         // And one with a client up, which is what the sample account above is: a
         // fetched account is what a `Ready` brings, and a `Ready` brings a
         // client. Without it every `⏎` in these scenes would report the
         // client-less sentence instead of the request under test.
-        app.client_available = true;
+        app.session.client_available = true;
         app
     }
 
@@ -1760,10 +1684,10 @@ impl App {
 
     /// Records what the account's own profile turned out to be.
     ///
-    /// The only writer of [`App::account`], so the three states cannot be mixed
+    /// The only writer of [`SessionState::account`], so the three states cannot be mixed
     /// up by a caller that knows only one of them.
     pub fn set_account(&mut self, account: Result<Account, String>) {
-        self.account = match account {
+        self.session.account = match account {
             Ok(account) => AccountState::Known(account),
             Err(reason) => AccountState::Unavailable(reason),
         };
@@ -1815,7 +1739,7 @@ impl App {
     /// "the session has not been placed yet" is one of the states the panel has
     /// to draw.
     pub fn set_session_store(&mut self, store: SessionStore) {
-        self.session_store = store;
+        self.session.session_store = store;
     }
 
     /// Where the profile's highlight is, for the panel to draw.
@@ -3299,7 +3223,7 @@ impl App {
         // **before** the pane walk below: while it is up `Tab` pauses the flow
         // rather than walking the panes, and `q` is unbound, so a reader typing a
         // phone number cannot quit the program out from under themselves.
-        if self.signin.is_some() {
+        if self.session.signin.is_some() {
             self.handle_signin(key);
             return;
         }
@@ -4651,7 +4575,7 @@ impl App {
     /// The sign-in surface, if it is up.
     #[must_use]
     pub fn signin(&self) -> Option<&SignIn> {
-        self.signin.as_ref()
+        self.session.signin.as_ref()
     }
 
     /// The field the reader is filling in, which is whatever step the flow is at.
@@ -4662,7 +4586,7 @@ impl App {
     /// asking for a code at the phone step. One answer, read from the state.
     #[must_use]
     pub fn signin_field(&self) -> Option<LoginField> {
-        match self.signin.as_ref().and_then(SignIn::flow) {
+        match self.session.signin.as_ref().and_then(SignIn::flow) {
             None => None,
             Some(flow) => match &flow.login.step {
                 domain::session::SessionState::LoggedOut => Some(LoginField::Phone),
@@ -4684,7 +4608,7 @@ impl App {
     /// failed launch up beside one in flight — and what the network side writes
     /// next (the retry sentence, or the next `offline:`) replaces it.
     pub fn request_retry(&mut self) {
-        self.retry_requested = true;
+        self.session.retry_requested = true;
         "reconnecting".clone_into(&mut self.status);
         // Written straight to `status` rather than through `flash`, because a
         // bring-up is not a thing that passes on its own: it ends in an event, and
@@ -4698,7 +4622,7 @@ impl App {
     /// taken is a request being carried out, and a caller that asks again on the
     /// next pass gets `None` rather than a second bring-up.
     pub fn take_retry_request(&mut self) -> bool {
-        std::mem::take(&mut self.retry_requested)
+        std::mem::take(&mut self.session.retry_requested)
     }
 
     /// Puts the sign-in flow up, with the phone field open and the configured
@@ -4713,9 +4637,9 @@ impl App {
     /// lets the reader press `⏎` again. The draft is untouched — the reader
     /// typed it, and a client that comes back is not a reason to type it twice.
     pub fn set_client_available(&mut self, available: bool) {
-        self.client_available = available;
+        self.session.client_available = available;
 
-        if !available && let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+        if !available && let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) {
             flow.waiting = false;
         }
     }
@@ -4731,14 +4655,14 @@ impl App {
     /// screen and from a card that is not about the account — and a form whose
     /// answer could not be used is worse than the sentence that explains why.
     pub fn begin_signin(&mut self) {
-        if !self.credentials_configured {
+        if !self.session.credentials_configured {
             self.begin_no_credentials();
             return;
         }
 
         self.pane = Pane::Conversation;
         self.mode = Mode::Normal;
-        self.signin = Some(SignIn::Flow(SignInFlow::default()));
+        self.session.signin = Some(SignIn::Flow(SignInFlow::default()));
         self.open_signin_field(LoginField::Phone);
         self.set_focus(Focus::Input);
     }
@@ -4751,7 +4675,7 @@ impl App {
     pub fn begin_no_credentials(&mut self) {
         self.pane = Pane::Conversation;
         self.mode = Mode::Normal;
-        self.signin = Some(SignIn::NoCredentials);
+        self.session.signin = Some(SignIn::NoCredentials);
         self.set_focus(Focus::Conversation);
     }
 
@@ -4763,7 +4687,7 @@ impl App {
     pub fn begin_stale_signin(&mut self) {
         self.begin_signin();
         self.flash("the stored session is no longer valid — sign in again");
-        if let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+        if let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) {
             flow.stale = true;
         }
     }
@@ -4800,9 +4724,9 @@ impl App {
             LoginField::Password => PromptKind::Password,
         };
         let text = match field {
-            LoginField::Phone if prefill => self.phone.trim().to_owned(),
-            LoginField::Code if prefill => self.code_prefill.clone(),
-            LoginField::Password if prefill => self.password_prefill.clone(),
+            LoginField::Phone if prefill => self.session.phone.trim().to_owned(),
+            LoginField::Code if prefill => self.session.code_prefill.clone(),
+            LoginField::Password if prefill => self.session.password_prefill.clone(),
             _ => String::new(),
         };
         self.line.open_with(prompt, text);
@@ -4819,7 +4743,7 @@ impl App {
     fn signin_away(&mut self) {
         if self.signin_field() == Some(LoginField::Code) {
             self.line.clear();
-            if let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+            if let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) {
                 flow.lost_code = true;
             }
         }
@@ -4839,6 +4763,7 @@ impl App {
         self.open_signin_field(field);
         self.set_focus(Focus::Input);
         let lost = self
+            .session
             .signin
             .as_mut()
             .and_then(SignIn::flow_mut)
@@ -4857,7 +4782,7 @@ impl App {
     /// stays up: the reader asked to sign in, not to stop.
     fn signin_cancel(&mut self) {
         self.queue_action(Action::LoginCancelled);
-        if let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+        if let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) {
             flow.login = domain::session::LoginState::default();
         }
         self.open_signin_field(LoginField::Phone);
@@ -4881,10 +4806,11 @@ impl App {
             return;
         };
 
-        if let Some(flow) = self.signin.as_ref().and_then(SignIn::flow)
+        if let Some(flow) = self.session.signin.as_ref().and_then(SignIn::flow)
             && flow.waiting
         {
             let said = self
+                .session
                 .signin
                 .as_mut()
                 .and_then(SignIn::flow_mut)
@@ -4918,13 +4844,13 @@ impl App {
         // client coming up is not the reader typing it again, and nothing is
         // queued — a queued login would fire on its own if a client appeared
         // later, which is a sign-in attempt nobody asked for.
-        if !self.client_available {
+        if !self.session.client_available {
             self.flash("not connected yet — the client is not up");
             return;
         }
 
         self.queue_action(Action::Login { field, value });
-        if let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+        if let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) {
             flow.waiting = true;
             flow.still_said = false;
         }
@@ -4949,14 +4875,14 @@ impl App {
             // The no-credentials sentence: no field, so no flow to pause, and
             // the two keys it answers are the two the shell cards name.
             Focus::Conversation => {
-                if self.signin.as_ref() == Some(&SignIn::NoCredentials) {
+                if self.session.signin.as_ref() == Some(&SignIn::NoCredentials) {
                     match key.code {
                         KeyCode::Char('q') => self.request_quit(),
                         // A command line is the way to `:q` from a shell that has
                         // no session and no chat, so the key has to answer here
                         // rather than in a focus that does not exist yet.
                         KeyCode::Char(':') => {
-                            self.signin = None;
+                            self.session.signin = None;
                             self.line.open(PromptKind::Command);
                             self.set_focus(Focus::Input);
                         }
@@ -5030,6 +4956,7 @@ impl App {
             }
             KeyCode::Enter
                 if self
+                    .session
                     .signin
                     .as_ref()
                     .and_then(SignIn::flow)
@@ -5051,7 +4978,7 @@ impl App {
     /// than in [`App::login_refused`] — it is not a refusal, it is the answer
     /// that puts the password row up.
     pub fn login_advanced(&mut self, state: domain::session::SessionState, hint: Option<String>) {
-        let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) else {
+        let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) else {
             return;
         };
         flow.login.step = state;
@@ -5087,7 +5014,7 @@ impl App {
     /// arrives after the reader has stopped looking at the line, and a line
     /// holding what they typed is a line holding a wrong answer.
     pub fn login_refused(&mut self, sentence: String, used: u8) {
-        let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) else {
+        let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) else {
             return;
         };
         flow.login.refusal = Some(sentence);
@@ -5106,7 +5033,7 @@ impl App {
     /// The flow is dropped rather than left at its last step, so the conversation
     /// is the whole program again — which is what signing in is for.
     pub fn login_complete(&mut self) {
-        self.signin = None;
+        self.session.signin = None;
         self.line.clear();
         self.set_focus(Focus::Conversation);
         self.clear_status();
@@ -5168,7 +5095,7 @@ impl App {
         // surface over it, which is an overlay and not a pane: the flow outlives
         // the card that named it. The chat list is not in the match: it is the
         // other column and it is always there.
-        match self.signin.as_ref() {
+        match self.session.signin.as_ref() {
             Some(signin) => widgets::signin::render(self, signin, horizontal[1], frame),
             None => match self.pane {
                 Pane::Conversation => {
@@ -5409,6 +5336,7 @@ impl App {
         // reader's words here: it is Telegram's code, and the state of it is
         // theirs rather than the draft's.
         if let Some(refusal) = self
+            .session
             .signin
             .as_ref()
             .and_then(SignIn::flow)

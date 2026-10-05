@@ -278,7 +278,7 @@ pub fn hint(app: &App) -> &'static str {
         // without this the pair below would answer for it. Two rows, because the
         // two subjects do not have the same keys.
         (Focus::Conversation, Mode::Normal) if app.pane.is_profile() => match app.card_subject() {
-            crate::card::CardSubject::SelfAccount => match app.account {
+            crate::card::CardSubject::SelfAccount => match app.session.account {
                 // The signed-out shell has no rows to move over and no draft to
                 // continue, so its row names the command that fixes it and `q`.
                 AccountState::Unavailable(_) => CARD_SIGNED_OUT_HINT,

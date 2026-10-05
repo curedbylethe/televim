@@ -1409,7 +1409,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                 state.login.code = Some(code);
                 // The number the request went out with, not the pre-fill: the
                 // row under the code says where Telegram sent it.
-                app.phone.clone_from(&phone);
+                app.session.phone.clone_from(&phone);
                 app.login_advanced(domain::session::SessionState::AwaitingCode { phone }, None);
             }
             Err(error) => apply_login_refusal(app, &error, 0),
@@ -1747,7 +1747,7 @@ fn apply_sign_in(app: &mut App, state: &mut State, result: Result<SignIn, ProtoE
             // challenge, and the challenge is kept for the request that spends it.
             let hint = challenge.hint().map(str::to_owned);
             state.login.challenge = Some(challenge);
-            let phone = app.phone.clone();
+            let phone = app.session.phone.clone();
             app.login_advanced(
                 domain::session::SessionState::AwaitingPassword { phone },
                 hint,
@@ -3020,7 +3020,7 @@ mod tests {
     #[test]
     fn the_feed_ending_says_it_is_reconnecting_and_gives_up_the_client() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply(&mut app, &mut state, Event::FeedEnded);
@@ -3666,11 +3666,11 @@ mod tests {
         );
 
         assert!(
-            matches!(&app.account, AccountState::Unavailable(reason) if reason.is_empty()),
+            matches!(&app.session.account, AccountState::Unavailable(reason) if reason.is_empty()),
             "signed out with no reason to draw, not offline: {:?}",
-            app.account
+            app.session.account
         );
-        assert_eq!(app.session_store, tui::SessionStore::Keyring);
+        assert_eq!(app.session.session_store, tui::SessionStore::Keyring);
     }
 
     /// Credentials, no session: the reader lands on the form rather than on an
@@ -3681,7 +3681,7 @@ mod tests {
     #[test]
     fn a_client_up_with_no_session_opens_the_sign_in_field() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply_ready_to_screen(
@@ -3702,7 +3702,7 @@ mod tests {
     #[test]
     fn a_reason_is_not_taken_for_a_missing_session() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply_ready_to_screen(
@@ -3963,9 +3963,9 @@ mod tests {
             "the conversations went with the session"
         );
         assert!(
-            matches!(&app.account, AccountState::Unavailable(reason) if reason.is_empty()),
+            matches!(&app.session.account, AccountState::Unavailable(reason) if reason.is_empty()),
             "signed out, and not as a failure to read a profile: {:?}",
-            app.account
+            app.session.account
         );
         assert!(state.client.is_none(), "and so did the client behind it");
         assert!(app.signin().is_none(), "the field is the next event's job");
@@ -3978,7 +3978,7 @@ mod tests {
     #[test]
     fn a_signed_out_client_comes_back_asking_to_sign_in() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply_logged_out(&mut app, &mut state, Ok(()));
@@ -4016,7 +4016,7 @@ mod tests {
             Err("the session could not be cleared".to_owned()),
         );
 
-        assert!(matches!(app.account, AccountState::Known(_)));
+        assert!(matches!(app.session.account, AccountState::Known(_)));
         assert_eq!(
             app.status,
             "could not sign out: the session could not be cleared"
@@ -4028,7 +4028,7 @@ mod tests {
     #[test]
     fn a_signed_in_account_opens_no_sign_in_field() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         let mut state = State::default();
 
         apply_ready_to_screen(
@@ -4050,7 +4050,7 @@ mod tests {
     #[test]
     fn a_ready_does_not_replace_a_sign_in_the_reader_already_started() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         app.begin_signin();
         app.login_advanced(
             domain::session::SessionState::AwaitingCode {
@@ -4082,7 +4082,7 @@ mod tests {
     #[test]
     fn a_signed_in_account_takes_the_sign_in_surface_down() {
         let mut app = App::new();
-        app.credentials_configured = true;
+        app.session.credentials_configured = true;
         app.begin_signin();
         assert!(app.signin().is_some(), "the flow is up to begin with");
         let mut state = State::default();
@@ -4099,7 +4099,7 @@ mod tests {
             app.signin().is_none(),
             "and the conversation is the program again"
         );
-        assert!(matches!(app.account, AccountState::Known(_)));
+        assert!(matches!(app.session.account, AccountState::Known(_)));
     }
 
     /// A machine with no `api_id` and `api_hash` gets a sentence rather than a

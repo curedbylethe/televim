@@ -110,7 +110,7 @@ fn rows<'a>(app: &'a App, flow: &'a SignInFlow, at: usize) -> Vec<Field<'a>> {
     let mut out = vec![
         Field {
             label: "Phone".to_owned(),
-            value: accepted_phone(app).or_else(|| flow.stale.then_some(&app.phone)),
+            value: accepted_phone(app).or_else(|| flow.stale.then_some(&app.session.phone)),
             marker: match (flow.stale, at) {
                 (true, 0) => Some(AGAIN_ROW),
                 (_, 1 | 2) => Some(OK),
@@ -301,7 +301,7 @@ fn notes<'a>(app: &'a App, flow: &'a SignInFlow, at: usize, width: u16) -> Vec<L
     }
 
     let said: String = match at {
-        0 if app.phone.is_empty() => "Include the country code.".to_owned(),
+        0 if app.session.phone.is_empty() => "Include the country code.".to_owned(),
         0 => "Include the country code.\nThe configured number is filled in.".to_owned(),
         1 => match accepted_phone(app) {
             Some(phone) => format!("Telegram sent a login code to {phone}."),
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn signin_without_credentials_says_so_instead_of_asking() {
         let mut app = App::mock();
-        app.credentials_configured = false;
+        app.session.credentials_configured = false;
 
         app.begin_signin();
 
@@ -808,7 +808,7 @@ mod tests {
     #[test]
     fn a_prefilled_code_is_restored_once_and_never_after_a_refusal() {
         let mut app = App::mock();
-        app.code_prefill = "42424".to_owned();
+        app.session.code_prefill = "42424".to_owned();
         app.begin_signin();
         press(&mut app, KeyCode::Enter);
         app.take_action();
@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn an_empty_phone_asks_telegram_for_nothing() {
         let mut app = App::mock();
-        app.phone = String::new();
+        app.session.phone = String::new();
         app.begin_signin();
 
         press(&mut app, KeyCode::Enter);
