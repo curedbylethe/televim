@@ -2812,6 +2812,18 @@ impl App {
         true
     }
 
+    /// Writes a sentence the reader must not lose.
+    ///
+    /// Straight to [`UiState::status`] rather than through [`App::flash`], and
+    /// clearing any flash deadline on the way: a persistent sentence ends in an
+    /// event that brings its own sentence, so it must not expire back to idle
+    /// while what it reports is still true. The contract [`App::flash`]
+    /// documents from the other side.
+    pub fn set_status(&mut self, status: impl Into<String>) {
+        self.ui.status = status.into();
+        self.ui.status_until = None;
+    }
+
     // ---- the peer's typing -----------------------------------------------
 
     /// Records or drops the peer's typing for the conversation on show.
@@ -7939,6 +7951,42 @@ mod tests {
             app.ui.status
         );
         assert_ne!(app.ui.status, IDLE_STATUS);
+    }
+
+    /// The flash deadline from before the command goes with it: `:retry`
+    /// answers the `offline:` line, so a transient timer must not take the
+    /// persistent sentence down on the next tick.
+    #[test]
+    fn retry_command_clears_a_flash_deadline() {
+        let mut app = App::mock();
+        app.flash("something went wrong");
+
+        run_command_line(&mut app, "retry");
+
+        assert!(app.ui.status_until.is_none(), "got {:?}", app.ui.status);
+        assert!(
+            !app.expire_status(Instant::now() + FLASH_FOR),
+            "got {:?}",
+            app.ui.status
+        );
+        assert_eq!(app.ui.status, "reconnecting");
+    }
+
+    /// A feed retry sentence lives at the persistent rank: above the hint, so
+    /// the reader sees the wait — and never above a confirmation, which is the
+    /// question that cannot wait.
+    #[test]
+    fn a_feed_retry_sentence_sits_at_the_persistent_rank() {
+        let mut app = App::mock();
+        app.ui.status = "the update feed failed (telegram returned rpc error 420 FLOOD_WAIT); \
+            retrying in 31s (attempt 1/3)"
+            .to_owned();
+
+        assert_eq!(app.status_text(), app.ui.status);
+
+        key(&mut app, 'q');
+
+        assert_eq!(app.status_text(), QUIT_PROMPT);
     }
 
     fn run_search_line(app: &mut App, query: &str) {
