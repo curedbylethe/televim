@@ -29,7 +29,7 @@
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 
-use crate::chat::Chat;
+use crate::chat::{Chat, ChatKind};
 use crate::message::Message;
 
 /// Something that happened to a conversation.
@@ -269,6 +269,35 @@ impl ChatList {
         self.messages.len() != before
     }
 
+    /// Focuses the private conversation with `user_id`, adding it if absent.
+    ///
+    /// Returns the index of the chat with this `user_id`, whether it was already
+    /// listed or was just appended. A private chat's identifier *is* the peer's
+    /// identifier, so a match here means the conversation already exists and
+    /// must be focused rather than duplicated.
+    ///
+    /// The list keeps whatever order Telegram gave it, and this helper does not
+    /// try to reconstruct that order: an inserted chat is appended, and the next
+    /// fetch is what reconciles the order. Reordering would mean guessing a
+    /// comparator the list deliberately does not have.
+    pub fn ensure_private_chat(&mut self, user_id: i64, title: String) -> usize {
+        if let Some(index) = self.chats.iter().position(|chat| chat.id == user_id) {
+            return index;
+        }
+
+        self.chats.push(Chat {
+            id: user_id,
+            title,
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+        });
+
+        self.chats.len() - 1
+    }
+
     /// The conversation with this identifier, if the client holds it.
     fn chat_mut(&mut self, chat_id: i64) -> Option<&mut Chat> {
         self.chats.iter_mut().find(|chat| chat.id == chat_id)
@@ -278,7 +307,6 @@ impl ChatList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::ChatKind;
     use crate::message::MessageStatus;
 
     /// A conversation whose preview already reads `earlier`.
@@ -659,5 +687,48 @@ mod tests {
             list.chats[0].unread_count, 1,
             "the window does not record whether this was the unread message"
         );
+    }
+
+    // ---- focusing rather than duplicating a conversation -----------------
+
+    #[test]
+    fn ensure_private_chat_returns_the_index_of_a_chat_already_present() {
+        let mut list = list();
+
+        let index = list.ensure_private_chat(2, "Someone Else".to_owned());
+
+        assert_eq!(index, 1, "the existing conversation is focused");
+        assert_eq!(list.chats.len(), 2, "and no second chat is appended");
+        assert_eq!(
+            list.chats[1].title, "chat-2",
+            "the existing entry is left as it was"
+        );
+    }
+
+    #[test]
+    fn ensure_private_chat_appends_a_private_chat_for_an_unknown_user() {
+        let mut list = list();
+
+        let index = list.ensure_private_chat(42, "Ada Lovelace".to_owned());
+
+        assert_eq!(index, list.chats.len() - 1, "the new chat is the one added");
+        assert_eq!(list.chats.len(), 3);
+        let added = &list.chats[index];
+        assert_eq!(added.id, 42);
+        assert_eq!(added.title, "Ada Lovelace");
+        assert_eq!(added.kind, ChatKind::Private);
+        assert!(!added.has_unread());
+        assert_eq!(added.last_message, None);
+    }
+
+    #[test]
+    fn ensure_private_chat_leaves_the_existing_chats_in_their_order() {
+        let mut list = list();
+
+        let _ = list.ensure_private_chat(42, "Ada".to_owned());
+
+        assert_eq!(list.chats[0].id, 1, "the first existing chat has not moved");
+        assert_eq!(list.chats[1].id, 2, "nor the second");
+        assert_eq!(list.chats[2].id, 42, "and the new one is appended");
     }
 }
