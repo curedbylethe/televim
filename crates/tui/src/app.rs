@@ -14,7 +14,7 @@ use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow,
 use domain::message::{Message, MessageStatus};
 use domain::search::{SearchState, word_prefix_match};
 use domain::selection::{Mark, Selection};
-use domain::updates::{ChatList, UpdateEvent};
+use domain::updates::UpdateEvent;
 use domain::user::{UserCandidate, UserSearchState};
 use domain::vim::{CharMotion, Motion, VimState, char_motion};
 use ratatui::Frame;
@@ -65,7 +65,7 @@ pub const CHAT_SWITCH_DELAY: Duration = Duration::from_millis(150);
 /// Only things that expire on their own are transient — a send or edit failure,
 /// a refusal. State the reader must not lose is written straight to the status
 /// and never carries a deadline.
-const FLASH_FOR: Duration = Duration::from_secs(5);
+pub(crate) const FLASH_FOR: Duration = Duration::from_secs(5);
 
 /// How long the peer is shown as typing after the last sign of it.
 ///
@@ -431,10 +431,10 @@ pub enum SessionStore {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ChatChoice {
     /// Where in the list the highlight is.
-    index: usize,
+    pub(crate) index: usize,
 
     /// When it got there.
-    at: Instant,
+    pub(crate) at: Instant,
 }
 
 /// The first and last row a selection reaches, in the card's own order.
@@ -932,7 +932,7 @@ impl Fetching {
 
     /// Records that a page in `direction` has been asked for, or that it is no
     /// longer on its way.
-    fn set(&mut self, direction: FetchDirection, in_flight: bool) {
+    pub(crate) fn set(&mut self, direction: FetchDirection, in_flight: bool) {
         let slot = match direction {
             FetchDirection::Latest => &mut self.latest,
             FetchDirection::Older => &mut self.older,
@@ -1014,15 +1014,10 @@ impl App {
 
     /// The same application, drawing right-to-left rows itself.
     ///
-    /// By value and at construction rather than a setter, because the mode is an
-    /// input to the layout rather than a thing that changes while the window is
-    /// open: every row is then the same height whichever mode was asked for, and
-    /// [`App::row_layout`] stays a pure function of the window and the width. A
-    /// caller that has read the configuration calls this once, where it builds
-    /// the application; nothing else needs to say anything.
+    /// Delegates to [`UiState::with_bidi`].
     #[must_use]
     pub fn with_bidi(mut self, bidi: BidiMode) -> Self {
-        self.ui.bidi = bidi;
+        self.ui = self.ui.with_bidi(bidi);
         self
     }
 
@@ -1220,16 +1215,9 @@ impl App {
 
     /// Takes the text the reader asked to copy to the system clipboard.
     ///
-    /// Drained by the caller that owns the terminal, on the same pass it read the
-    /// yank on. Idempotent in the way every other hand-over here is: once taken it
-    /// is forgotten, so a caller that asks twice gets one copy and not two.
-    ///
-    /// A yank is also offered to the clipboard, which is a convenience rather than
-    /// the point: whether the terminal honours OSC 52 at all is not this crate's to
-    /// know, so the register — which always works — is what a yank can be relied
-    /// on for.
+    /// Delegates to [`Outbox::take_clipboard`].
     pub fn take_clipboard(&mut self) -> Option<String> {
-        self.outbox.clipboard.take()
+        self.outbox.take_clipboard()
     }
 
     /// Installs a freshly fetched chat list.
@@ -1243,10 +1231,7 @@ impl App {
     /// leaves nothing selected, which is what closes the conversation: there is
     /// no chat for the window to belong to.
     pub fn set_chats(&mut self, chats: Vec<Chat>) {
-        self.list.list = ChatList::with_chats(chats);
-
-        let last = self.list.list.chats.len().saturating_sub(1);
-        self.list.selected_chat = self.list.selected_chat.min(last);
+        self.list.install(chats);
 
         if self.list.list.chats.is_empty() {
             self.select_chat_none();
@@ -1273,15 +1258,7 @@ impl App {
     /// can say where the reader landed.
     pub fn refresh_chats(&mut self, chats: Vec<Chat>) -> bool {
         let open = self.conversation.conversation.window.chat_id;
-        self.list.list = ChatList::with_chats(chats);
-
-        if let Some(index) = self.list.list.chats.iter().position(|chat| chat.id == open) {
-            self.list.selected_chat = index;
-            true
-        } else {
-            self.list.selected_chat = 0;
-            false
-        }
+        self.list.reinstall(chats, open)
     }
 
     /// Closes the conversation on show.
@@ -1302,10 +1279,10 @@ impl App {
         self.conversation.conversation = ConversationView::new(0);
         // The note belongs to the chat being left: returning must not revive it,
         // so the deadline goes with the view rather than with the reader's memory.
-        self.ui.typing_until = None;
+        self.ui.set_typing(None);
         self.conversation.vim = VimState::new(0);
         self.outbox.fetching.clear();
-        self.pending.pending_jump = None;
+        self.pending.set_jump(None);
         // The marks are per conversation, and this is the path every switch goes
         // through, so this is where they go too: a reader who has closed the
         // conversation has nowhere to walk back to.
@@ -1354,20 +1331,17 @@ impl App {
     /// the map never holds the open conversation's draft, and a peer with no
     /// entry gets a fresh line.
     fn resume_draft(&mut self, chat_id: i64) {
-        self.input.line = self.drafts.drafts.remove(&chat_id).unwrap_or_default();
+        let draft = self.drafts.take_draft(chat_id);
+        self.input.set_line(draft);
     }
 
     // ---- the profile panel ----------------------------------------------
 
     /// Records what the account's own profile turned out to be.
     ///
-    /// The only writer of [`SessionState::account`], so the three states cannot be mixed
-    /// up by a caller that knows only one of them.
+    /// Delegates to [`SessionState::set_account`].
     pub fn set_account(&mut self, account: Result<Account, String>) {
-        self.session.account = match account {
-            Ok(account) => AccountState::Known(account),
-            Err(reason) => AccountState::Unavailable(reason),
-        };
+        self.session.set_account(account);
     }
 
     /// The contact the card on show is about, if it is about one.
@@ -1417,12 +1391,9 @@ impl App {
 
     /// Records where the session is kept.
     ///
-    /// Its own setter rather than a field of `set_account`, because it is known
-    /// from the configuration before anything is read from the network — and
-    /// "the session has not been placed yet" is one of the states the panel has
-    /// to draw.
+    /// Delegates to [`SessionState::set_session_store`].
     pub fn set_session_store(&mut self, store: SessionStore) {
-        self.session.session_store = store;
+        self.session.set_session_store(store);
     }
 
     /// Where the profile's highlight is, for the panel to draw.
@@ -1632,15 +1603,15 @@ impl App {
         self.profile.profile_caret = 0;
         self.profile.profile_visual = None;
         self.profile.profile_count = None;
-        self.ui.pane = Pane::Profile(subject);
-        self.ui.focus = Focus::Conversation;
-        self.ui.mode = Mode::Normal;
+        self.ui.set_pane(Pane::Profile(subject));
+        self.ui.set_focus(Focus::Conversation);
+        self.ui.set_mode(Mode::Normal);
         self.conversation.selection = None;
     }
 
     /// Puts the conversation back in the right-hand pane.
     fn close_profile(&mut self) {
-        self.ui.pane = Pane::Conversation;
+        self.ui.set_pane(Pane::Conversation);
         self.profile.profile_vim = VimState::new(0);
     }
 
@@ -1751,7 +1722,8 @@ impl App {
         }
 
         self.conversation.register = Register::set(lines);
-        self.outbox.clipboard = Some(self.conversation.register.text());
+        self.outbox
+            .store_clipboard(self.conversation.register.text());
     }
 
     /// The lines a card selection yanks, or the cursor row's value when there is
@@ -1938,7 +1910,7 @@ impl App {
             // thing about a key that will eventually discard the one secret this
             // program holds.
             crate::card::LOGOUT => {
-                self.ui.mode = Mode::Confirm;
+                self.ui.set_mode(Mode::Confirm);
                 self.conversation.confirm = Some(ConfirmKind::Logout);
             }
             _ => {}
@@ -1961,27 +1933,18 @@ impl App {
             return;
         }
 
-        self.list.selected_chat = index;
-        self.pending.pending_chat = Some(ChatChoice {
+        self.list.select(index);
+        self.pending.set_pending_chat(Some(ChatChoice {
             index,
             at: Instant::now(),
-        });
+        }));
     }
 
     /// The conversation the reader has stopped on, once they have stopped.
     ///
-    /// Nothing while they are still moving, so a held key opens the chat they
-    /// land on rather than every one between here and there. Idempotent in the
-    /// way [`App::pending_jump`] is: once handed over it is forgotten, so a
-    /// caller that asks twice gets one conversation.
+    /// Delegates to [`Pending::take_pending_chat`].
     pub fn take_pending_chat(&mut self, now: Instant) -> Option<usize> {
-        let choice = self.pending.pending_chat?;
-        if now.saturating_duration_since(choice.at) < CHAT_SWITCH_DELAY {
-            return None;
-        }
-
-        self.pending.pending_chat = None;
-        Some(choice.index)
+        self.pending.take_pending_chat(now)
     }
 
     /// Opens the conversation at `index` in the chat list.
@@ -1998,8 +1961,8 @@ impl App {
         };
         let chat_id = chat.id;
 
-        self.list.selected_chat = index;
-        self.pending.pending_chat = None;
+        self.list.select(index);
+        self.pending.set_pending_chat(None);
         self.select_chat_none();
         // The new view starts its placeholder ids at the bottom again, so an
         // identifier the old view handed out can be handed out once more. That is
@@ -2032,21 +1995,9 @@ impl App {
     /// Records how far a conversation has been read, keeping the highest figure
     /// seen for it.
     ///
-    /// The feed's acknowledgement can repeat or arrive late, so a lower one is
-    /// dropped rather than applied: a read already shown cannot be taken back.
-    /// Reports whether this figure moved the conversation's watermark.
+    /// Delegates to [`DraftStore::note_read`].
     fn note_read(&self, chat_id: i64, max_id: i64) -> bool {
-        if max_id <= 0 {
-            return false;
-        }
-
-        let mut recorded = self.drafts.read_receipts.borrow_mut();
-        let moved = recorded.get(&chat_id).is_none_or(|read| max_id > *read);
-        if moved {
-            recorded.insert(chat_id, max_id);
-        }
-
-        moved
+        self.drafts.note_read(chat_id, max_id)
     }
 
     /// Whether a conversation is open to put messages in.
@@ -2371,28 +2322,20 @@ impl App {
             return;
         }
 
-        self.pending.pending_jump = Some(Jump {
+        self.pending.set_jump(Some(Jump {
             peer_id: self.conversation.conversation.window.chat_id,
             target_id: id,
             kind,
-        });
+        }));
         self.settle_follow();
     }
 
     /// Ends the reader's wait for a jump, reporting whether it was still the one
     /// being waited on.
     ///
-    /// A page that failed, or came back empty, has to end it exactly as a page
-    /// that landed does. The reader stays where they were either way; what this
-    /// is for is that the key is free again — a jump nothing releases is a key
-    /// that never works again.
+    /// Delegates to [`Pending::clear_jump`].
     pub fn clear_jump(&mut self, target_id: i64) -> bool {
-        if self.pending.pending_jump.map(|jump| jump.target_id) != Some(target_id) {
-            return false;
-        }
-
-        self.pending.pending_jump = None;
-        true
+        self.pending.clear_jump(target_id)
     }
 
     /// Replaces the window with a page fetched around a message the reader asked
@@ -2516,7 +2459,7 @@ impl App {
         if let UpdateEvent::NewMessage(message) = event
             && message.chat_id == self.conversation.conversation.window.chat_id
         {
-            self.ui.typing_until = None;
+            self.ui.set_typing(None);
         }
 
         // A read acknowledgement is not a window change. It moves the watermark
@@ -2673,19 +2616,16 @@ impl App {
 
     /// Records that a fetch for `direction` has been asked for.
     ///
-    /// One fetch per direction at a time: this is what a trigger checks before
-    /// it fires, so holding a key down cannot turn into a stream of requests.
+    /// Delegates to [`Outbox::begin_fetch`].
     pub fn begin_fetch(&mut self, direction: FetchDirection) {
-        self.outbox.fetching.set(direction, true);
+        self.outbox.begin_fetch(direction);
     }
 
     /// Records that the fetch for `direction` is over, however it ended.
     ///
-    /// A failed fetch releases the direction as surely as a successful one: the
-    /// alternative is a conversation that can never be paged again because one
-    /// request went wrong.
+    /// Delegates to [`Outbox::end_fetch`].
     pub fn end_fetch(&mut self, direction: FetchDirection) {
-        self.outbox.fetching.set(direction, false);
+        self.outbox.end_fetch(direction);
     }
 
     /// Whether a fetch for `direction` is in flight.
@@ -2713,11 +2653,9 @@ impl App {
 
     /// Takes the operation the reader asked for, if there is one.
     ///
-    /// Idempotent in the same way [`App::pending_jump`] is: once taken it is
-    /// cleared, and a caller that asks twice gets one action. The request is
-    /// handed over rather than made here because the network is the caller's.
+    /// Delegates to [`Outbox::take_action`].
     pub fn take_action(&mut self) -> Option<Action> {
-        self.outbox.actions.pop_front()
+        self.outbox.take_action()
     }
 
     /// Adds an operation to the queue the caller drains.
@@ -2789,27 +2727,16 @@ impl App {
 
     /// Shows `text` on the status line for a while, then reverts.
     ///
-    /// For things that pass on their own: a send that failed, a refusal. State
-    /// the reader must not lose is written straight to [`UiState::status`], which
-    /// never carries a deadline.
+    /// Delegates to [`UiState::flash`].
     pub fn flash(&mut self, text: impl Into<String>) {
-        self.ui.status = text.into();
-        self.ui.status_until = Some(Instant::now() + FLASH_FOR);
+        self.ui.flash(text);
     }
 
     /// Reverts a transient status once its time is up.
     ///
-    /// Reports whether a redraw is owed. Called from the loop, which already
-    /// runs on a timer: a status cannot expire during a frame, because a frame
-    /// is drawn from a shared reference.
+    /// Delegates to [`UiState::expire_status`].
     pub fn expire_status(&mut self, now: Instant) -> bool {
-        if self.ui.status_until.is_none_or(|at| now < at) {
-            return false;
-        }
-
-        self.ui.status_until = None;
-        IDLE_STATUS.clone_into(&mut self.ui.status);
-        true
+        self.ui.expire_status(now)
     }
 
     // ---- the peer's typing -----------------------------------------------
@@ -2825,13 +2752,13 @@ impl App {
             return false;
         }
 
-        self.ui.typing_until = if typing {
+        self.ui.set_typing(if typing {
             // Re-armed rather than set once, because a peer who keeps typing past
             // the deadline is still typing.
             Some((chat_id, Instant::now() + TYPING_FOR))
         } else {
             None
-        };
+        });
         true
     }
 
@@ -2851,20 +2778,9 @@ impl App {
 
     /// Stops showing the peer as typing once its deadline has passed.
     ///
-    /// Reports whether a redraw is owed. Called from the loop beside
-    /// [`App::expire_status`], which already runs on a timer: nothing repaints on
-    /// a schedule for this, so a peer who stops without a final event is gone by
-    /// the tick after the deadline rather than by a frame of its own.
+    /// Delegates to [`UiState::expire_typing`].
     pub fn expire_typing(&mut self, now: Instant) -> bool {
-        let Some((_, at)) = self.ui.typing_until else {
-            return false;
-        };
-        if now < at {
-            return false;
-        }
-
-        self.ui.typing_until = None;
-        true
+        self.ui.expire_typing(now)
     }
 
     // ---- key handling --------------------------------------------------
@@ -2877,7 +2793,7 @@ impl App {
     /// `d` holding something the reader cannot see.
     fn set_focus(&mut self, focus: Focus) {
         if focus != Focus::Conversation {
-            self.ui.mode = Mode::Normal;
+            self.ui.set_mode(Mode::Normal);
             self.conversation.selection = None;
         }
         // The single clear point for every way out of a pane, beside the one
@@ -2889,9 +2805,9 @@ impl App {
         // `BackTab`, `Ctrl+w` and `Esc`-to-leave all pass through here, so the
         // completion does not need a case in each of them.
         if focus != Focus::Input {
-            self.input.emoji = None;
+            self.input.dismiss_completion();
         }
-        self.ui.focus = focus;
+        self.ui.set_focus(focus);
     }
 
     /// Moves the focus one pane on, in the direction given, wrapping.
@@ -2926,7 +2842,7 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         // Ctrl-C always quits.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.ui.should_quit = true;
+            self.ui.quit();
             return;
         }
 
@@ -2955,7 +2871,7 @@ impl App {
         // still land, and is dropped when it does: nobody is waiting for it.
         if self.pending.pending_jump.is_some() {
             if key.code == KeyCode::Esc {
-                self.pending.pending_jump = None;
+                self.pending.set_jump(None);
             }
             return;
         }
@@ -3044,7 +2960,7 @@ impl App {
             // one to, so the list gets its own search instead of borrowing a
             // scope it does not have.
             KeyCode::Char('/') => {
-                self.pending.pending_g = false;
+                self.pending.set_g(false);
                 self.begin_new_chat("");
             }
 
@@ -3052,7 +2968,7 @@ impl App {
             // conversation: a reader looking for settings has usually not opened a
             // conversation to look in.
             KeyCode::Char('S') => {
-                self.pending.pending_g = false;
+                self.pending.set_g(false);
                 self.open_profile();
             }
 
@@ -3060,39 +2976,39 @@ impl App {
             // already the way into the conversation on this pane, and a key that
             // means two things in two panes is a key a reader has to learn twice.
             KeyCode::Char('A') => {
-                self.pending.pending_g = false;
+                self.pending.set_g(false);
                 self.open_contact();
             }
 
             KeyCode::Char('j') => {
-                self.pending.pending_g = false;
+                self.pending.set_g(false);
                 self.choose_chat(here.saturating_add(1).min(last));
             }
             KeyCode::Char('k') => {
-                self.pending.pending_g = false;
+                self.pending.set_g(false);
                 self.choose_chat(here.saturating_sub(1));
             }
             KeyCode::Char('g') => {
                 if std::mem::take(&mut self.pending.pending_g) {
                     self.choose_chat(0);
                 } else {
-                    self.pending.pending_g = true;
+                    self.pending.set_g(true);
                 }
             }
             KeyCode::Char('G') => {
-                self.pending.pending_g = false;
+                self.pending.set_g(false);
                 self.choose_chat(last);
             }
 
             KeyCode::Enter => {
-                self.pending.pending_g = false;
+                self.pending.set_g(false);
                 self.select_chat(here);
                 self.set_focus(Focus::Conversation);
             }
 
             // Any other key ends the sequence, so a lone `g` does not become a
             // jump to the top the next time one is pressed.
-            _ => self.pending.pending_g = false,
+            _ => self.pending.set_g(false),
         }
     }
 
@@ -3135,13 +3051,13 @@ impl App {
                 // replaced by it.
                 Motion::First => {
                     let jump = self.jump_to_unread();
-                    self.pending.pending_jump = jump;
+                    self.pending.set_jump(jump);
                 }
 
                 // `G` is the reader overriding a jump with "take me to the
                 // end". The page on its way is for a place they no longer
                 // want to be, and it is dropped when it lands.
-                Motion::Last => self.pending.pending_jump = None,
+                Motion::Last => self.pending.set_jump(None),
 
                 // `n` and `N` walk the search's matches. `VimState` reports
                 // the motion but cannot answer it, because a match is a
@@ -3153,7 +3069,7 @@ impl App {
                 // about the conversation, and the window is what holds it.
                 Motion::GotoReply => {
                     let jump = self.jump_to_reply();
-                    self.pending.pending_jump = jump;
+                    self.pending.set_jump(jump);
                 }
 
                 // `j` and `k` are the motions themselves, and the table has
@@ -3181,11 +3097,11 @@ impl App {
             // rather than made to wrap.
             'h' => self.set_focus(Focus::ChatList),
             '/' => {
-                self.ui.focus = Focus::Input;
+                self.ui.set_focus(Focus::Input);
                 self.input.line.open(PromptKind::Search);
             }
             ':' => {
-                self.ui.focus = Focus::Input;
+                self.ui.set_focus(Focus::Input);
                 self.input.line.open(PromptKind::Command);
             }
             'q' => self.request_quit(),
@@ -3207,7 +3123,7 @@ impl App {
     /// the reader cannot see, because a terminal that is not answering cannot
     /// draw one either.
     fn request_quit(&mut self) {
-        self.ui.mode = Mode::Confirm;
+        self.ui.set_mode(Mode::Confirm);
         self.conversation.confirm = Some(ConfirmKind::Quit);
     }
 
@@ -3217,7 +3133,7 @@ impl App {
     /// thing a reader who pressed `i` by reflex should never lose is the thing
     /// they were writing.
     fn start_compose(&mut self) {
-        self.ui.focus = Focus::Input;
+        self.ui.set_focus(Focus::Input);
         self.input.line.open(PromptKind::Message);
         self.conversation.reply_to = None;
         self.conversation.editing = None;
@@ -3232,7 +3148,7 @@ impl App {
             return;
         };
 
-        self.ui.focus = Focus::Input;
+        self.ui.set_focus(Focus::Input);
         self.input.line.open(PromptKind::Reply);
         self.conversation.reply_to = Some(id);
         self.conversation.editing = None;
@@ -3245,7 +3161,7 @@ impl App {
     /// the previous query is not the reader's words to keep, and a fresh search
     /// starts clean.
     fn begin_new_chat(&mut self, query: &str) {
-        self.ui.focus = Focus::Input;
+        self.ui.set_focus(Focus::Input);
         self.input
             .line
             .open_with(PromptKind::NewChat, query.to_owned());
@@ -3278,7 +3194,7 @@ impl App {
         let text = message.text.to_string();
         let id = message.id;
 
-        self.ui.focus = Focus::Input;
+        self.ui.set_focus(Focus::Input);
         self.input.line.open_with(PromptKind::Edit, text);
         self.conversation.editing = Some(id);
         self.conversation.reply_to = None;
@@ -3323,12 +3239,12 @@ impl App {
 
         let Some(deletion) = self.deletion(&selection) else {
             self.conversation.selection = None;
-            self.ui.mode = Mode::Normal;
+            self.ui.set_mode(Mode::Normal);
             self.flash(self.refuse_placeholders(&selection));
             return;
         };
 
-        self.ui.mode = Mode::Confirm;
+        self.ui.set_mode(Mode::Confirm);
         self.conversation.confirm = Some(ConfirmKind::DeleteMessages {
             ids: deletion.ids,
             outgoing: deletion.outgoing,
@@ -3430,7 +3346,7 @@ impl App {
         match key.code {
             KeyCode::Char('y') => {
                 match &self.conversation.confirm {
-                    Some(ConfirmKind::Quit) => self.ui.should_quit = true,
+                    Some(ConfirmKind::Quit) => self.ui.quit(),
                     Some(ConfirmKind::Logout) => self.queue_action(Action::Logout),
                     Some(ConfirmKind::DeleteMessages { ids, .. }) => {
                         let chat_id = self.conversation.conversation.window.chat_id;
@@ -3443,12 +3359,12 @@ impl App {
                 }
                 self.conversation.confirm = None;
                 self.conversation.selection = None;
-                self.ui.mode = Mode::Normal;
+                self.ui.set_mode(Mode::Normal);
             }
             KeyCode::Char('n') | KeyCode::Esc => {
                 self.conversation.confirm = None;
                 self.conversation.selection = None;
-                self.ui.mode = Mode::Normal;
+                self.ui.set_mode(Mode::Normal);
             }
             _ => {}
         }
@@ -3505,7 +3421,7 @@ impl App {
         // same OSC 52 write the conversation's goes through. One seam, two
         // producers.
         if let Some(yanked) = self.input.line.take_yanked() {
-            self.outbox.clipboard = Some(yanked);
+            self.outbox.store_clipboard(yanked);
         }
 
         // Last, because it is a function of what the line now holds: deriving
@@ -3535,7 +3451,7 @@ impl App {
             KeyCode::Up => self.move_completion(false),
             KeyCode::Down => self.move_completion(true),
             KeyCode::Tab | KeyCode::Enter => self.accept_completion(),
-            KeyCode::Esc => self.input.emoji = None,
+            KeyCode::Esc => self.dismiss_completion(),
             _ => return false,
         }
 
@@ -3599,7 +3515,7 @@ impl App {
     /// **A person the chat list already holds is focused**, which is the local
     /// half of "already-existing chats focus rather than duplicate": the match is
     /// by identifier, because a private chat's identifier *is* the peer's, and
-    /// [`ChatList::ensure_private_chat`] returns that existing index untouched.
+    /// [`domain::updates::ChatList::ensure_private_chat`] returns that existing index untouched.
     /// **Someone it does not hold is listed and opened**: the helper appends a
     /// private chat in the candidate's name without disturbing the order, and
     /// returns the new index.
@@ -3621,31 +3537,26 @@ impl App {
     }
 
     /// Moves the selected candidate one place, wrapping.
+    ///
+    /// Delegates to [`InputState::move_completion`].
     fn move_completion(&mut self, forward: bool) {
-        if let Some(trigger) = &mut self.input.emoji {
-            trigger.move_selection(forward);
-        }
+        self.input.move_completion(forward);
+    }
+
+    /// Puts the completion popup away.
+    ///
+    /// Delegates to [`InputState::dismiss_completion`].
+    fn dismiss_completion(&mut self) {
+        self.input.dismiss_completion();
     }
 
     /// Commits the chosen emoji over the `:query` that named it.
     ///
-    /// The inserted text is exactly what was accepted: no trailing space,
-    /// because a character the reader did not ask for is one they would have to
-    /// delete. The range comes from the trigger, so what is replaced is what
-    /// the popup was describing.
+    /// Delegates to [`InputState::accept_completion`], saying the overflow out
+    /// loud when the commit does not fit.
     fn accept_completion(&mut self) {
-        let Some(trigger) = self.input.emoji.as_ref() else {
-            return;
-        };
-        let Some(chosen) = trigger.chosen() else {
-            return;
-        };
-        let range = trigger.range.clone();
-        let text = chosen.as_str();
-
-        match self.input.line.replace(range, text) {
-            LineVerdict::TooLong => self.flash("message is too long"),
-            _ => self.input.emoji = None,
+        if self.input.accept_completion() == LineVerdict::TooLong {
+            self.flash("message is too long");
         }
     }
 
@@ -3668,7 +3579,7 @@ impl App {
             || !self.input.line.purpose().is_buffer()
             || self.input.line.status() != "INSERT"
         {
-            self.input.emoji = None;
+            self.input.dismiss_completion();
             return;
         }
 
@@ -3677,10 +3588,7 @@ impl App {
             .emoji
             .as_ref()
             .map_or(0, |trigger| trigger.selected);
-        self.input.emoji = emoji::detect(self.input.line.text(), self.input.line.caret());
-        if let Some(trigger) = &mut self.input.emoji {
-            trigger.reselect(selected);
-        }
+        self.input.redetect_completion(selected);
     }
 
     /// Handles a key while a selection is being made.
@@ -3709,13 +3617,13 @@ impl App {
             });
             return;
         }
-        self.pending.pending_find = None;
+        self.pending.set_find(None);
 
         match key.code {
             KeyCode::Esc => {
                 self.conversation.selection = None;
-                self.ui.mode = Mode::Normal;
-                self.ui.status = IDLE_STATUS.into();
+                self.ui.set_mode(Mode::Normal);
+                self.ui.set_status(IDLE_STATUS.into());
             }
 
             // Re-anchoring on the cursor's message is `v` again, which is what it
@@ -3744,28 +3652,28 @@ impl App {
             KeyCode::Char('$') => self.move_focus(CharMotion::Bound { end: true }),
 
             KeyCode::Char('f') => {
-                self.pending.pending_find = Some(Find {
+                self.pending.set_find(Some(Find {
                     forward: true,
                     onto: true,
-                });
+                }));
             }
             KeyCode::Char('t') => {
-                self.pending.pending_find = Some(Find {
+                self.pending.set_find(Some(Find {
                     forward: true,
                     onto: false,
-                });
+                }));
             }
             KeyCode::Char('F') => {
-                self.pending.pending_find = Some(Find {
+                self.pending.set_find(Some(Find {
                     forward: false,
                     onto: true,
-                });
+                }));
             }
             KeyCode::Char('T') => {
-                self.pending.pending_find = Some(Find {
+                self.pending.set_find(Some(Find {
                     forward: false,
                     onto: false,
-                });
+                }));
             }
 
             _ => {}
@@ -3795,7 +3703,7 @@ impl App {
 
         let lines = self.yanked(&selection);
         self.conversation.selection = None;
-        self.ui.mode = Mode::Normal;
+        self.ui.set_mode(Mode::Normal);
 
         if lines.iter().all(String::is_empty) {
             // A charwise selection that has not been moved is a position rather
@@ -3806,7 +3714,8 @@ impl App {
         }
 
         self.conversation.register = Register::set(lines);
-        self.outbox.clipboard = Some(self.conversation.register.text());
+        self.outbox
+            .store_clipboard(self.conversation.register.text());
     }
 
     /// The lines a selection yanks: one for a text selection, one per message for
@@ -3882,7 +3791,7 @@ impl App {
         };
 
         self.conversation.selection = None;
-        self.ui.mode = Mode::Normal;
+        self.ui.set_mode(Mode::Normal);
         self.flash(refused);
     }
 
@@ -3920,7 +3829,7 @@ impl App {
         };
 
         self.set_selection(Selection::at(id, char));
-        self.ui.mode = Mode::Visual;
+        self.ui.set_mode(Mode::Visual);
     }
 
     /// Applies a character motion to the focus's position within its message.
@@ -4047,7 +3956,7 @@ impl App {
             return;
         }
 
-        self.ui.focus = Focus::Conversation;
+        self.ui.set_focus(Focus::Conversation);
         self.input.line.clear();
         self.conversation.reply_to = None;
         self.conversation.editing = None;
@@ -4147,7 +4056,7 @@ impl App {
                     self.select_chat(pos);
                 }
             }
-            _ => self.ui.status = format!("unknown command: :{cmd}"),
+            _ => self.ui.set_status(format!("unknown command: :{cmd}")),
         }
     }
 
@@ -4252,11 +4161,11 @@ impl App {
         if let Some(position) = self.conversation.conversation.window.position_of(id) {
             self.conversation.vim.set_cursor(position);
         } else {
-            self.pending.pending_jump = Some(Jump {
+            self.pending.set_jump(Some(Jump {
                 peer_id: self.conversation.conversation.window.chat_id,
                 target_id: id,
                 kind: JumpKind::Unread,
-            });
+            }));
         }
 
         self.settle_follow();
@@ -4373,40 +4282,26 @@ impl App {
     /// failed launch up beside one in flight — and what the network side writes
     /// next (the retry sentence, or the next `offline:`) replaces it.
     pub fn request_retry(&mut self) {
-        self.session.retry_requested = true;
-        "reconnecting".clone_into(&mut self.ui.status);
+        self.session.request_retry();
         // Written straight to `status` rather than through `flash`, because a
         // bring-up is not a thing that passes on its own: it ends in an event, and
         // that event brings its own sentence.
-        self.ui.status_until = None;
+        self.ui.show_persistent("reconnecting");
     }
 
     /// The retry the reader asked for, once.
     ///
-    /// Forgotten on the way out, the way [`App::take_pending_chat`] is: a request
-    /// taken is a request being carried out, and a caller that asks again on the
-    /// next pass gets `None` rather than a second bring-up.
+    /// Delegates to [`SessionState::take_retry_request`].
     pub fn take_retry_request(&mut self) -> bool {
-        std::mem::take(&mut self.session.retry_requested)
+        self.session.take_retry_request()
     }
 
     /// Puts the sign-in flow up, with the phone field open and the configured
     /// number in it.
     ///
-    /// Records whether a client is there to carry a request, and ends the wait
-    /// when one is not.
-    ///
-    /// The wait is cleared here rather than left to time: an in-flight flag
-    /// with no client behind it is a sentence on the panel that nothing will
-    /// ever answer, so losing the client takes the flow out of "Checking…" and
-    /// lets the reader press `⏎` again. The draft is untouched — the reader
-    /// typed it, and a client that comes back is not a reason to type it twice.
+    /// Delegates to [`SessionState::set_client_available`].
     pub fn set_client_available(&mut self, available: bool) {
-        self.session.client_available = available;
-
-        if !available && let Some(flow) = self.session.signin.as_mut().and_then(SignIn::flow_mut) {
-            flow.waiting = false;
-        }
+        self.session.set_client_available(available);
     }
 
     /// The one way in, whatever the reader came from: the signed-out card's
@@ -4425,9 +4320,10 @@ impl App {
             return;
         }
 
-        self.ui.pane = Pane::Conversation;
-        self.ui.mode = Mode::Normal;
-        self.session.signin = Some(SignIn::Flow(SignInFlow::default()));
+        self.ui.set_pane(Pane::Conversation);
+        self.ui.set_mode(Mode::Normal);
+        self.session
+            .begin_signin(SignIn::Flow(SignInFlow::default()));
         self.open_signin_field(LoginField::Phone);
         self.set_focus(Focus::Input);
     }
@@ -4438,9 +4334,9 @@ impl App {
     /// `api_id` and `api_hash` are in a file, and a phone field here would ask
     /// the reader for something the program still could not do with.
     pub fn begin_no_credentials(&mut self) {
-        self.ui.pane = Pane::Conversation;
-        self.ui.mode = Mode::Normal;
-        self.session.signin = Some(SignIn::NoCredentials);
+        self.ui.set_pane(Pane::Conversation);
+        self.ui.set_mode(Mode::Normal);
+        self.session.begin_signin(SignIn::NoCredentials);
         self.set_focus(Focus::Conversation);
     }
 
@@ -4647,7 +4543,7 @@ impl App {
                         // no session and no chat, so the key has to answer here
                         // rather than in a focus that does not exist yet.
                         KeyCode::Char(':') => {
-                            self.session.signin = None;
+                            self.session.clear_signin();
                             self.input.line.open(PromptKind::Command);
                             self.set_focus(Focus::Input);
                         }
@@ -4798,7 +4694,7 @@ impl App {
     /// The flow is dropped rather than left at its last step, so the conversation
     /// is the whole program again — which is what signing in is for.
     pub fn login_complete(&mut self) {
-        self.session.signin = None;
+        self.session.clear_signin();
         self.input.line.clear();
         self.set_focus(Focus::Conversation);
         self.clear_status();
@@ -4806,12 +4702,9 @@ impl App {
 
     /// Puts the status line back to its resting sentence.
     ///
-    /// The other half of [`App::flash`], for the answers that are not transient:
-    /// a flow that has said its sentence and moved on must not keep showing it
-    /// over the next thing the reader does.
+    /// Delegates to [`UiState::clear_status`].
     fn clear_status(&mut self) {
-        IDLE_STATUS.clone_into(&mut self.ui.status);
-        self.ui.status_until = None;
+        self.ui.clear_status();
     }
 
     // ---- rendering -----------------------------------------------------
@@ -4880,16 +4773,9 @@ impl App {
 
     /// Records how many message rows the conversation panel has room for.
     ///
-    /// Called from the panel, which is the only place the terminal's height has
-    /// been turned into a rectangle. Zero is not a measurement anything can act
-    /// on, so it is stored as one row: a page that moves nowhere is worse than a
-    /// page that moves too little.
-    ///
-    /// This is the panel's height, and it is rows rather than messages: a
-    /// message is as tall as its text is, and how tall that is depends on the
-    /// width the panel gave it.
+    /// Delegates to [`UiState::record_rows`].
     pub fn record_rows(&self, rows: usize) {
-        self.ui.metrics.rows.set(rows.max(1));
+        self.ui.record_rows(rows);
     }
 
     /// The columns the conversation panel's messages have room for, as of the
@@ -4904,8 +4790,10 @@ impl App {
     }
 
     /// Records how many columns the conversation panel's messages have room for.
+    ///
+    /// Delegates to [`UiState::record_body`].
     pub fn record_body(&self, width: u16) {
-        self.ui.metrics.body_width.set(width);
+        self.ui.record_body(width);
     }
 
     /// The unix second the reader's clock last read.
@@ -4920,11 +4808,9 @@ impl App {
 
     /// Records what the reader's clock says, in unix seconds.
     ///
-    /// Called by the host once a frame, alongside the other measurements it
-    /// records: what a day is called depends on when it is being read, and
-    /// nothing here can know that.
+    /// Delegates to [`UiState::record_now`].
     pub fn record_now(&self, now: i64) {
-        self.ui.metrics.now.set(now);
+        self.ui.record_now(now);
     }
 
     /// The rows every message in the window occupies, laid out at the panel's

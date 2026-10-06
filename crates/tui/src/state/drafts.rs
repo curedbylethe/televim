@@ -54,4 +54,32 @@ impl DraftStore {
             read_receipts: RefCell::new(HashMap::new()),
         }
     }
+
+    /// Takes the draft parked under `chat_id`, or a fresh line.
+    ///
+    /// The value is moved out of the map, so the map never holds the open
+    /// conversation's draft.
+    pub(crate) fn take_draft(&mut self, chat_id: i64) -> LineEditor {
+        self.drafts.remove(&chat_id).unwrap_or_default()
+    }
+
+    /// Records how far a conversation has been read, keeping the highest figure
+    /// seen for it.
+    ///
+    /// The feed's acknowledgement can repeat or arrive late, so a lower one is
+    /// dropped rather than applied: a read already shown cannot be taken back.
+    /// Reports whether this figure moved the conversation's watermark.
+    pub(crate) fn note_read(&self, chat_id: i64, max_id: i64) -> bool {
+        if max_id <= 0 {
+            return false;
+        }
+
+        let mut recorded = self.read_receipts.borrow_mut();
+        let moved = recorded.get(&chat_id).is_none_or(|read| max_id > *read);
+        if moved {
+            recorded.insert(chat_id, max_id);
+        }
+
+        moved
+    }
 }

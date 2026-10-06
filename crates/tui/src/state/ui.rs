@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::time::Instant;
 
-use crate::app::{Focus, Mode, Pane};
+use crate::app::{FLASH_FOR, Focus, Mode, Pane};
 use crate::bidi::BidiMode;
 use crate::theme::Theme;
 
@@ -91,7 +91,7 @@ pub struct UiState {
 
     /// Who permutes a right-to-left row: this program, or the terminal.
     ///
-    /// **Fixed at construction**, and written only by [`crate::app::App::with_bidi`]:
+    /// **Fixed at construction**, and written only by [`Self::with_bidi`]:
     /// the layout is a pure function of the window, the panel's width and the clock
     /// ([`crate::rows`], invariant 4), and a mode read out of mutable state while
     /// a frame is being drawn would make the same conversation two different
@@ -126,5 +126,147 @@ impl UiState {
                 now: Cell::new(0),
             },
         }
+    }
+
+    /// The same application, drawing right-to-left rows itself.
+    ///
+    /// By value and at construction rather than a setter, because the mode is an
+    /// input to the layout rather than a thing that changes while the window is
+    /// open: every row is then the same height whichever mode was asked for, and
+    /// [`App::row_layout`](crate::app::App::row_layout) stays a pure function of
+    /// the window and the width. A caller that has read the configuration calls
+    /// this once, where it builds the application; nothing else needs to say
+    /// anything.
+    #[must_use]
+    pub(crate) fn with_bidi(mut self, bidi: BidiMode) -> Self {
+        self.bidi = bidi;
+        self
+    }
+
+    /// Shows `text` on the status line for a while, then reverts.
+    ///
+    /// For things that pass on their own: a send that failed, a refusal. State
+    /// the reader must not lose is written straight to [`Self::status`], which
+    /// never carries a deadline.
+    pub(crate) fn flash(&mut self, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_until = Some(Instant::now() + FLASH_FOR);
+    }
+
+    /// Puts the status line back to its resting sentence.
+    ///
+    /// The other half of [`Self::flash`], for the answers that are not transient:
+    /// a flow that has said its sentence and moved on must not keep showing it
+    /// over the next thing the reader does.
+    pub(crate) fn clear_status(&mut self) {
+        IDLE_STATUS.clone_into(&mut self.status);
+        self.status_until = None;
+    }
+
+    /// Writes `text` to the status line with no deadline.
+    ///
+    /// For state the reader must not lose — a bring-up, an unknown command —
+    /// which [`Self::flash`] must not carry: a deadline would take it away
+    /// before its answer arrives.
+    pub(crate) fn show_persistent(&mut self, text: &str) {
+        text.clone_into(&mut self.status);
+        self.status_until = None;
+    }
+
+    /// Reverts a transient status once its time is up.
+    ///
+    /// Reports whether a redraw is owed. Called from the loop, which already
+    /// runs on a timer: a status cannot expire during a frame, because a frame
+    /// is drawn from a shared reference.
+    pub(crate) fn expire_status(&mut self, now: Instant) -> bool {
+        if self.status_until.is_none_or(|at| now < at) {
+            return false;
+        }
+
+        self.status_until = None;
+        IDLE_STATUS.clone_into(&mut self.status);
+        true
+    }
+
+    /// Records the peer's typing note, or clears it.
+    ///
+    /// `None` is the note going away with the view it belonged to, which is
+    /// what a conversation switch and an arrived message both do.
+    pub(crate) fn set_typing(&mut self, typing: Option<(i64, Instant)>) {
+        self.typing_until = typing;
+    }
+
+    /// Stops showing the peer as typing once its deadline has passed.
+    ///
+    /// Reports whether a redraw is owed. Called from the loop beside
+    /// [`Self::expire_status`], which already runs on a timer: nothing repaints on
+    /// a schedule for this, so a peer who stops without a final event is gone by
+    /// the tick after the deadline rather than by a frame of its own.
+    pub(crate) fn expire_typing(&mut self, now: Instant) -> bool {
+        let Some((_, at)) = self.typing_until else {
+            return false;
+        };
+        if now < at {
+            return false;
+        }
+
+        self.typing_until = None;
+        true
+    }
+
+    /// Puts the dispatch `mode` somewhere.
+    pub(crate) fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+    }
+
+    /// Puts the keystroke landing `focus` somewhere.
+    pub(crate) fn set_focus(&mut self, focus: Focus) {
+        self.focus = focus;
+    }
+
+    /// Shows `pane` in the right-hand column.
+    pub(crate) fn set_pane(&mut self, pane: Pane) {
+        self.pane = pane;
+    }
+
+    /// Records that the reader answered yes to quitting.
+    pub(crate) fn quit(&mut self) {
+        self.should_quit = true;
+    }
+
+    /// Writes `status` straight to the line, with no deadline.
+    ///
+    /// The answering half of [`Self::show_persistent`] for callers that already
+    /// hold the owned sentence rather than a borrowed one.
+    pub(crate) fn set_status(&mut self, status: String) {
+        self.status = status;
+    }
+
+    /// Records how many message rows the conversation panel has room for.
+    ///
+    /// Called from the panel, which is the only place the terminal's height has
+    /// been turned into a rectangle. Zero is not a measurement anything can act
+    /// on, so it is stored as one row: a page that moves nowhere is worse than a
+    /// page that moves too little.
+    ///
+    /// This is the panel's height, and it is rows rather than messages: a
+    /// message is as tall as its text is, and how tall that is depends on the
+    /// width the panel gave it.
+    pub(crate) fn record_rows(&self, rows: usize) {
+        self.metrics.rows.set(rows.max(1));
+    }
+
+    /// Records how many columns the conversation panel's messages have room for.
+    pub(crate) fn record_body(&self, width: u16) {
+        self.metrics.body_width.set(width);
+    }
+
+    /// Records what the reader's clock says, in unix seconds.
+    ///
+    /// Called by the host once a frame, alongside the other measurements it
+    /// records: what a day is called depends on when it is being read, and
+    /// nothing here can know that.
+    pub(crate) fn record_now(&self, now: i64) {
+        self.metrics.now.set(now);
     }
 }
