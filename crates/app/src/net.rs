@@ -2133,10 +2133,10 @@ fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
     // A wait shorter than a second still has to be announced as one: "retrying in
     // 0s" reads as no retry at all.
     let seconds = retry.delay.as_secs().max(1);
-    app.ui.status = format!(
+    app.set_status(format!(
         "fetching the chat list failed ({:#}); retrying in {}s (attempt {}/{})",
         retry.reason, seconds, retry.attempt, retry.attempts
-    );
+    ));
 }
 
 /// What a feed retry in progress says on the status line.
@@ -2690,6 +2690,7 @@ mod tests {
     fn a_chat_list_being_retried_says_so_on_the_status_line() {
         let mut app = App::new();
         let mut state = State::default();
+        app.flash("something went wrong");
 
         apply(
             &mut app,
@@ -2709,6 +2710,11 @@ mod tests {
         assert!(
             app.ui.status.contains("31s") && app.ui.status.contains("1/3"),
             "got {:?}",
+            app.ui.status
+        );
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "the sentence does not go away on its own: {:?}",
             app.ui.status
         );
     }
