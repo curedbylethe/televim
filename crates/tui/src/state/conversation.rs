@@ -1,5 +1,7 @@
 //! The open conversation's view, its editing and selection registers, and its search surfaces.
 
+use std::ops::Range;
+
 use domain::history::ConversationView;
 use domain::message::{Message, MessageStatus};
 use domain::search::SearchState;
@@ -7,7 +9,7 @@ use domain::selection::{Mark, Selection};
 use domain::user::{UserCandidate, UserSearchState};
 use domain::vim::{CharMotion, Motion, VimState, char_motion};
 
-use crate::app::{ConfirmKind, Register};
+use crate::app::{ConfirmKind, Deletion, Register};
 use crate::jumplist::Jumplist;
 
 pub struct ConversationState {
@@ -442,6 +444,19 @@ impl ConversationState {
         self.settle_follow();
     }
 
+    /// The query a search should run, resolving an empty one to the last search.
+    ///
+    /// `None` when there is nothing to repeat, which is the one case `/` cannot
+    /// answer.
+    pub(crate) fn search_to_run(&self, query: &str) -> Option<String> {
+        let query = query.trim();
+        if !query.is_empty() {
+            return Some(query.to_owned());
+        }
+
+        self.search.query().map(str::to_owned)
+    }
+
     /// Lands the reader on the match the walk has just moved to.
     ///
     /// The local pass's matches are all in the window, so this is synchronous.
@@ -537,5 +552,150 @@ impl ConversationState {
     /// before that search had asked anything.
     pub(crate) fn dismiss_user_search(&mut self) {
         self.user_search.clear();
+    }
+
+    /// Whether a conversation is open to put messages in.
+    ///
+    /// Telegram numbers peers from one, so a zero here is the absence of a
+    /// conversation rather than a conversation with an odd identifier.
+    #[must_use]
+    pub(crate) fn has_conversation(&self) -> bool {
+        self.conversation.window.chat_id != 0
+    }
+
+    /// Where a jump to `target` lands when the window does not hold it.
+    ///
+    /// The nearest message at or past the target, or the last one there is:
+    /// a page centred on the target starts from the closest message to it.
+    pub(crate) fn landing_index(&self, target: i64) -> usize {
+        let window = &self.conversation.window;
+
+        window
+            .position_of(target)
+            .or_else(|| window.iter().position(|message| message.id >= target))
+            .unwrap_or_else(|| window.len().saturating_sub(1))
+    }
+
+    /// The window positions the selection covers, oldest first.
+    ///
+    /// **Positions**, and not the span between the two identifiers, because the
+    /// numbers do not say what covers what: a placeholder for a send in flight is
+    /// numbered below zero and sits at the *end* of the window, where the
+    /// conversation has reached. A selection reaching one spans a different set of
+    /// messages by identifier than by position, and acting on the wrong one is a
+    /// deletion of messages the reader did not select.
+    ///
+    /// Empty when there is no selection, and when one of its ends is not in the
+    /// window — which [`Self::retain_selection`] makes unreachable and which is
+    /// answered as "nothing" rather than as a panic.
+    ///
+    /// The one answer, for the panel to mark with, the operations to act on, and
+    /// the count to come from. Two answers would be two things to disagree.
+    #[must_use]
+    pub(crate) fn covered(&self, selection: Option<&Selection>) -> Range<usize> {
+        let Some(selection) = selection else {
+            return 0..0;
+        };
+        let window = &self.conversation.window;
+
+        match (
+            window.position_of(selection.anchor.message_id),
+            window.position_of(selection.focus.message_id),
+        ) {
+            (Some(anchor), Some(focus)) => anchor.min(focus)..anchor.max(focus) + 1,
+            _ => 0..0,
+        }
+    }
+
+    /// The lines a selection yanks: one for a text selection, one per message for
+    /// anything else.
+    ///
+    /// All of them possibly empty — a collapsed charwise selection yields one
+    /// empty string, and a set of messages that happen to be blank yields several
+    /// — which the caller notices. A selection naming a message the window no
+    /// longer holds yields nothing, which [`Self::retain_selection`] makes
+    /// unreachable and which is answered with an empty yank rather than a panic.
+    pub(crate) fn yanked(&self, selection: &Selection) -> Vec<String> {
+        if let Some((id, range)) = selection.text_range() {
+            let Some(message) = self.conversation.window.iter().find(|m| m.id == id) else {
+                return Vec::new();
+            };
+
+            let body = message.display_body();
+            return vec![body[crate::rows::byte_span(body, range)].to_owned()];
+        }
+
+        let covered = self.covered(Some(selection));
+        self.conversation
+            .window
+            .iter()
+            .skip(covered.start)
+            .take(covered.len())
+            .map(|message| message.display_body().to_owned())
+            .collect()
+    }
+
+    /// What deleting `selection` would ask the server for, or `None` when every
+    /// message in it is a placeholder.
+    ///
+    /// A placeholder is a local stand-in for a send the server has not
+    /// acknowledged, so it has no identifier the server knows: naming one would
+    /// have the whole request refused and take the real messages down with it.
+    /// They are left out of `ids` and counted, and a selection of nothing but
+    /// placeholders has nothing left to ask for.
+    pub(crate) fn deletion(&self, selection: &Selection) -> Option<Deletion> {
+        let mut deletion = Deletion::default();
+        let covered = self.covered(Some(selection));
+
+        for message in self
+            .conversation
+            .window
+            .iter()
+            .skip(covered.start)
+            .take(covered.len())
+        {
+            if message.id <= 0 {
+                deletion.skipped += 1;
+                continue;
+            }
+
+            deletion.ids.push(message.id);
+            deletion.outgoing += usize::from(message.is_outgoing);
+        }
+
+        (!deletion.ids.is_empty()).then_some(deletion)
+    }
+
+    /// The refusal for a selection of nothing but placeholders.
+    ///
+    /// The two sentences that already existed, kept: a failed message has a `D` to
+    /// offer and one still on its way does not, and pointing at `D` for a message
+    /// that has not left would be wrong. A selection of several gets the same
+    /// distinction in the only words that are true of all of them — `D` dismisses
+    /// one message at a time, and there is no bulk dismiss.
+    pub(crate) fn refuse_placeholders(&self, selection: &Selection) -> &'static str {
+        let covered = self.covered(Some(selection));
+        let mut count = 0;
+        let mut in_flight = false;
+
+        for message in self
+            .conversation
+            .window
+            .iter()
+            .skip(covered.start)
+            .take(covered.len())
+        {
+            count += 1;
+            in_flight |= !matches!(message.status, MessageStatus::Failed);
+        }
+
+        let one = count == 1;
+
+        match (one, in_flight) {
+            (true, true) => "that message is still on its way",
+            (true, false) => "that message never left — D dismisses it",
+            (false, true) => "those messages are still on their way",
+            (false, false) => "those messages never left — D dismisses one at a time",
+        }
     }
 }

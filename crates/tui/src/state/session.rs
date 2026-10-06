@@ -2,7 +2,7 @@
 
 use domain::account::Account;
 
-use crate::app::{AccountState, SessionStore, SignIn};
+use crate::app::{AccountState, LoginField, SessionStore, SignIn};
 
 /// The account's session and the sign-in surface.
 pub struct SessionState {
@@ -152,5 +152,28 @@ impl SessionState {
     /// than a second bring-up.
     pub(crate) fn take_retry_request(&mut self) -> bool {
         std::mem::take(&mut self.retry_requested)
+    }
+
+    /// The field the reader is filling in, which is whatever step the flow is at.
+    ///
+    /// **Derived, never stored.** A second field naming the current one is a
+    /// second thing that can be wrong: `login.step` is Telegram's own answer to
+    /// the same question, and the moment the two disagree the bar would be
+    /// asking for a code at the phone step. One answer, read from the state.
+    #[must_use]
+    pub(crate) fn signin_field(&self) -> Option<LoginField> {
+        match self.signin.as_ref().and_then(SignIn::flow) {
+            None => None,
+            Some(flow) => match &flow.login.step {
+                domain::session::SessionState::LoggedOut => Some(LoginField::Phone),
+                domain::session::SessionState::AwaitingCode { .. } => Some(LoginField::Code),
+                domain::session::SessionState::AwaitingPassword { .. } => {
+                    Some(LoginField::Password)
+                }
+                // Signed in is not a step anybody fills a field in at: the flow
+                // is over by the time the account's own identifier exists.
+                domain::session::SessionState::LoggedIn { .. } => None,
+            },
+        }
     }
 }

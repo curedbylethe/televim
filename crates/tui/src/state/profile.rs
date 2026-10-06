@@ -187,4 +187,14 @@ impl ProfileCard {
         let digit = u32::from(c);
         self.profile_count = Some(self.profile_count.unwrap_or(0) * 10 + digit);
     }
+
+    /// The cursor row as the identifier a [`Mark`] names.
+    pub(crate) fn card_row_id(&self) -> i64 {
+        i64::try_from(self.profile_vim.cursor()).unwrap_or(i64::MAX)
+    }
+
+    /// Whether the inline position is at the start of the cursor row's value.
+    pub(crate) fn card_caret_at_start(&self) -> bool {
+        self.profile_caret == 0
+    }
 }

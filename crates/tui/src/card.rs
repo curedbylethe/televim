@@ -770,6 +770,7 @@ mod tests {
 mod drawing {
     use super::*;
     use crate::app::App;
+    use crate::state::coordinate;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -803,10 +804,22 @@ mod drawing {
             .collect()
     }
 
+    /// Opens a card the way the delegate did: the seam, then the sizing.
+    fn open_card(app: &mut App, subject: crate::app::ProfileId) {
+        coordinate::open_card(
+            &mut app.profile,
+            &mut app.ui,
+            &mut app.conversation,
+            &mut app.outbox,
+            subject,
+        );
+        app.profile.resize(navigable(&rows(app)));
+    }
+
     /// One card, about the account.
     fn self_card() -> App {
         let mut app = App::mock();
-        app.open_card(crate::app::ProfileId::SelfAccount);
+        open_card(&mut app, crate::app::ProfileId::SelfAccount);
         app
     }
 
@@ -818,7 +831,7 @@ mod drawing {
     fn contact_card() -> (App, domain::chat::Chat) {
         let mut app = self_card();
         let chat = app.any_chat().expect("the mock has a chat");
-        app.open_card(crate::app::ProfileId::User(chat.id));
+        open_card(&mut app, crate::app::ProfileId::User(chat.id));
         app.set_contact(chat.id, Ok(crate::app::mock_account()));
         (app, chat)
     }
@@ -1059,7 +1072,7 @@ mod drawing {
     fn a_contacts_card_draws_nothing_until_the_profile_has_been_read() {
         let mut app = self_card();
         let chat = app.any_chat().expect("the mock has a chat");
-        app.open_card(crate::app::ProfileId::User(chat.id));
+        open_card(&mut app, crate::app::ProfileId::User(chat.id));
 
         assert!(rows(&app).is_empty(), "no rows, and no half of one");
         let text = rows_of(&screen(&app, 40)).join("\n");
@@ -1122,7 +1135,7 @@ mod drawing {
     fn a_contacts_card_whose_read_failed_says_why() {
         let mut app = self_card();
         let chat = app.any_chat().expect("the mock has a chat");
-        app.open_card(crate::app::ProfileId::User(chat.id));
+        open_card(&mut app, crate::app::ProfileId::User(chat.id));
         app.set_contact(chat.id, Err("peer 42 is not a person".to_owned()));
 
         assert!(rows(&app).is_empty());
@@ -1193,7 +1206,7 @@ mod drawing {
 
         let mut unread = self_card();
         let chat = unread.any_chat().expect("the mock has a chat");
-        unread.open_card(crate::app::ProfileId::User(chat.id));
+        open_card(&mut unread, crate::app::ProfileId::User(chat.id));
         unread.handle_card_key('d');
         assert_eq!(
             unread.status_text(),
