@@ -558,6 +558,9 @@ code.
 | `· name        Noor Haddad` | a card row: the cue, the label, the value | `CUE` |
 | `not signed in` | the shell card's first line, then the reason, wrapped | `NOT_SIGNED_IN` |
 | `reading the session…` | the shell card **before anything has been read**; it does not borrow the other one's wording | `READING` |
+| `reading their profile…` | the contact card **before their profile has been read**: one dim line, and no rows | `CONTACT_READING` |
+| `could not read this profile` | the contact card **when the read failed**; the reason follows, wrapped and dim | `CONTACT_UNAVAILABLE` |
+| `Profile · {name}` | a contact shell's title: the subject is named even when there are no rows | `cardTitle` |
 | `Set the credentials again with :signin.` | where to put the credentials back | `SET_CREDENTIALS` |
 | `signed out` | the status the screen rests on after the reader signs out, until the sign-in field arrives | the screen after a sign-out |
 | `Sign out and forget this session? (y/n)` | a screen-wide confirmation, raised by the `logout` row; `y` signs out | the card |
@@ -873,7 +876,8 @@ regressing.
    States: the self card, a contact's card, the selection row, the inline position,
    a charwise selection, a selection of rows, a value wrapped over rows, a row
    the peer did not give (absent, not empty), a dim action row, a reserved slot
-   drawn as nothing, and the two shell states (not signed in, nothing read yet).
+   drawn as nothing, and the four shell states (not signed in, nothing read yet, and
+   the contact's not-read-yet and read-failed).
    What would catch it regressing: the selection row is reverse video and the
    normal caret *on it* is the ground colour, so the reader can always see where
    the cursor is; and the title's `(n/m)` counts the rows the peer gave, so a
@@ -987,6 +991,17 @@ worse than not having them — the card's verbs are read. `y` yanks the characte
 selection; `yy` yanks the row's whole value into the register and then offers it
 to the system clipboard by OSC 52, the same two-part rule the conversation's `y`
 already follows. `d` and `e` refuse: the rows are not yours.
+
+A contact's card has no rows at all until the profile is read. It does not open
+on a half-filled name row: the shell sentence replaces the card. Before the read
+there is one dim line, `reading their profile…`. If the read failed, the card
+says `could not read this profile` and wraps the reason under it in dim text.
+There is deliberately no `Set the credentials again with :signin.` line: a
+contact's problem is never credentials, so naming `:signin` would send the
+reader to check something that is not the problem. The account's signed-out
+shell and the contact's read-failed shell never borrow each other's wording.
+Both shells still name the subject in the title, because the subject is named
+even, and especially, when there are no rows to show.
 
 ### The reserved colour row
 
@@ -1108,6 +1123,14 @@ so nothing is known either way.` It does not say the session is missing, because
 nothing has established that yet. Its hint names `q` only, and the signed-out
 card's hint names `::signin` and `q`: the shell cards are the whole program, so
 there is nothing behind them to go back to and `Esc` has nowhere to land.
+
+The contact's shells are not the account's. A contact's card always shows
+`CARD_CONTACT_HINT` in every state, known, unfetched, or unavailable, because it
+is a card with a way back: the chat list is still there behind it and `Esc`
+lands on a row. Only the account's shells, which have no list behind them,
+borrow the `q` hint. And because a contact's card can have no rows at all, its
+title takes the subject-name form: the subject is named even, especially, when
+there is nothing else to name.
 
 ## Principles
 
