@@ -9,17 +9,18 @@ use crate::line::LineEditor;
 pub struct DraftStore {
     /// The drafts of the conversations the reader is not in.
     ///
-    /// The open conversation's draft is [`App::line`]; this holds the rest,
+    /// The open conversation's draft is [`InputState`](super::input::InputState)'s
+    /// `line`; this holds the rest,
     /// parked under their peer id, so a reader who looks away and comes back
     /// finds the sentence they had started. The same seam as
-    /// [`App::read_receipts`]: the view is replaced on every switch, and what
+    /// [`DraftStore::read_receipts`]: the view is replaced on every switch, and what
     /// belongs to the conversation rather than to the page on show is kept here.
     ///
     /// Only a plain message draft is stored — [`App::park_draft`] forgets the
     /// reply or edit subject on the way in — and a peer's entry is dropped when
     /// its draft is empty, so the map holds only peers with words in them.
     ///
-    /// Not written to disk, for the same reason as [`App::read_receipts`]: a
+    /// Not written to disk, for the same reason as [`DraftStore::read_receipts`]: a
     /// launch starts empty, and an account change clears it ([`App::set_chats`])
     /// so no words cross an account boundary.
     pub(crate) drafts: HashMap<i64, LineEditor>,
@@ -52,5 +53,33 @@ impl DraftStore {
             drafts: HashMap::new(),
             read_receipts: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Takes the draft parked under `chat_id`, or a fresh line.
+    ///
+    /// The value is moved out of the map, so the map never holds the open
+    /// conversation's draft.
+    pub(crate) fn take_draft(&mut self, chat_id: i64) -> LineEditor {
+        self.drafts.remove(&chat_id).unwrap_or_default()
+    }
+
+    /// Records how far a conversation has been read, keeping the highest figure
+    /// seen for it.
+    ///
+    /// The feed's acknowledgement can repeat or arrive late, so a lower one is
+    /// dropped rather than applied: a read already shown cannot be taken back.
+    /// Reports whether this figure moved the conversation's watermark.
+    pub(crate) fn note_read(&self, chat_id: i64, max_id: i64) -> bool {
+        if max_id <= 0 {
+            return false;
+        }
+
+        let mut recorded = self.read_receipts.borrow_mut();
+        let moved = recorded.get(&chat_id).is_none_or(|read| max_id > *read);
+        if moved {
+            recorded.insert(chat_id, max_id);
+        }
+
+        moved
     }
 }

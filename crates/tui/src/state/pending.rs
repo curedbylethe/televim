@@ -1,6 +1,8 @@
 //! Half-typed keys and the requests a keystroke defers.
 
-use crate::app::{ChatChoice, Find, Jump};
+use std::time::Instant;
+
+use crate::app::{CHAT_SWITCH_DELAY, ChatChoice, Find, Jump};
 
 /// Half-typed keys and the requests a keystroke defers.
 ///
@@ -58,5 +60,76 @@ impl Pending {
             pending_find: None,
             pending_initial_chat: None,
         }
+    }
+
+    /// Records the jump the reader asked for, or clears it.
+    ///
+    /// `None` ends the wait however it ended: a page that failed, or came back
+    /// empty, has to end it exactly as a page that landed does.
+    pub(crate) fn set_jump(&mut self, jump: Option<Jump>) {
+        self.pending_jump = jump;
+    }
+
+    /// Ends the reader's wait for a jump, reporting whether it was still the one
+    /// being waited on.
+    ///
+    /// A page that failed, or came back empty, has to end it exactly as a page
+    /// that landed does. The reader stays where they were either way; what this
+    /// is for is that the key is free again — a jump nothing releases is a key
+    /// that never works again.
+    pub(crate) fn clear_jump(&mut self, target_id: i64) -> bool {
+        if self.pending_jump.map(|jump| jump.target_id) != Some(target_id) {
+            return false;
+        }
+
+        self.pending_jump = None;
+        true
+    }
+
+    /// Records the conversation the highlight moved onto.
+    ///
+    /// The open is recorded rather than made, because a reader who holds `j`
+    /// would otherwise have every conversation they passed fetched.
+    pub(crate) fn set_pending_chat(&mut self, choice: Option<ChatChoice>) {
+        self.pending_chat = choice;
+    }
+
+    /// The conversation the reader has stopped on, once they have stopped.
+    ///
+    /// Nothing while they are still moving, so a held key opens the chat they
+    /// land on rather than every one between here and there. Idempotent in the
+    /// way [`Self::pending_jump`] is: once handed over it is forgotten, so a
+    /// caller that asks twice gets one conversation.
+    pub(crate) fn take_pending_chat(&mut self, now: Instant) -> Option<usize> {
+        let choice = self.pending_chat?;
+        if now.saturating_duration_since(choice.at) < CHAT_SWITCH_DELAY {
+            return None;
+        }
+
+        self.pending_chat = None;
+        Some(choice.index)
+    }
+
+    /// Records the `--chat` id to open when the first chat list arrives.
+    ///
+    /// Launch state, set once before the first frame and taken when the list
+    /// lands, so a later refresh keeps the reader where they are.
+    pub(crate) fn set_initial_chat(&mut self, id: i64) {
+        self.pending_initial_chat = Some(id);
+    }
+
+    /// Takes the pending `--chat` id, if one was set and not yet consumed.
+    pub(crate) fn take_initial_chat(&mut self) -> Option<i64> {
+        self.pending_initial_chat.take()
+    }
+
+    /// Records whether a `g` was just pressed.
+    pub(crate) fn set_g(&mut self, armed: bool) {
+        self.pending_g = armed;
+    }
+
+    /// Records the `f`/`t`/`F`/`T` waiting for its character, or clears it.
+    pub(crate) fn set_find(&mut self, find: Option<Find>) {
+        self.pending_find = find;
     }
 }

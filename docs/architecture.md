@@ -205,9 +205,12 @@ on `proto` or `telegram-framework`.
 crates/tui/
 ├── src/
 │   ├── lib.rs
-│   ├── app.rs          # Key dispatch, layout, paging. Nine fields, defined in state/
+│   ├── app.rs          # Nine fields, thin delegates, layout, paging
+│   ├── app/
+│   │   └── tests.rs    # The suite, extracted from app.rs
 │   ├── state/
 │   │   ├── mod.rs
+│   │   ├── coordinate.rs   # The seam: multi-owner mutations as free fns
 │   │   ├── session.rs      # SessionState: the session and the sign-in surface
 │   │   ├── profile.rs      # ProfileCard: the card's buffer and its keystrokes
 │   │   ├── chat_list.rs    # ChatListState: the chat list and its selection cursor
@@ -250,11 +253,15 @@ crates/tui/
 ```
 
 `App` is nine fields — `ui`, `session`, `profile`, `list`, `outbox`, `pending`,
-`conversation`, `input` and `drafts` — one sub-struct per concern, not one
-struct that holds every one of them. The methods stayed in `app.rs`, so the
-file is still large: key dispatch, the scroll arithmetic, the paging decision
-and the prompt handling are still methods on `App`. Key dispatch is
-`App::handle_key`, `Focus` first and `Mode` second. Both fields live on
+`conversation`, `input` and `drafts` — one sub-struct per concern, each owning
+the mutations that touch only it. The mutations no single state type owns —
+key dispatch, chat selection, jumps, feed events, sign-in, card opening — live
+in `state/coordinate.rs` as free functions taking exactly the substructs they
+touch, never `&mut App`; `App` keeps one thin delegate per seam function,
+precomputing the rows, layout and yanked lines the seam cannot take because
+they render from `&App`. `impl App` is 1,356 lines of those delegates plus
+layout, paging and rendering. Key dispatch is `coordinate::handle_key`,
+`Focus` first and `Mode` second. Both fields live on
 `UiState` in `state/ui.rs`, and the frame-measurement cells live on that
 type's `FrameMetrics`. The conversation owns a mode (Normal, Visual, Confirm)
 and the input line owns a mode of its own inside `tui::line` — having the line
@@ -267,7 +274,7 @@ and the focused pane's block is drawn in `Theme::border_focused`. The per-peer
 draft map and the read receipts live on `DraftStore` (`state/drafts.rs`): each
 conversation's `LineEditor` is parked under its outgoing peer id when the
 reader leaves and restored when they return. `event.rs` exists but
-`key_to_action` is not yet called: `App::handle_key` matches on `KeyEvent`
+`key_to_action` is not yet called: `coordinate::handle_key` matches on `KeyEvent`
 directly. That is pre-existing dead code — do not delete it without asking.
 
 The new-conversation search is the second prompt-driven surface. `/` on the chat

@@ -1,6 +1,8 @@
 //! The session lifecycle and the sign-in surface.
 
-use crate::app::{AccountState, SessionStore, SignIn};
+use domain::account::Account;
+
+use crate::app::{AccountState, LoginField, SessionStore, SignIn};
 
 /// The account's session and the sign-in surface.
 pub struct SessionState {
@@ -89,6 +91,89 @@ impl SessionState {
             // sign-in it accepts now would be a request nobody carries.
             client_available: false,
             retry_requested: false,
+        }
+    }
+
+    /// Records what the account's own profile turned out to be.
+    ///
+    /// The only writer of [`Self::account`], so the three states cannot be mixed
+    /// up by a caller that knows only one of them.
+    pub(crate) fn set_account(&mut self, account: Result<Account, String>) {
+        self.account = match account {
+            Ok(account) => AccountState::Known(account),
+            Err(reason) => AccountState::Unavailable(reason),
+        };
+    }
+
+    /// Records where the session is kept.
+    ///
+    /// Its own setter rather than a field of `set_account`, because it is known
+    /// from the configuration before anything is read from the network — and
+    /// "the session has not been placed yet" is one of the states the panel has
+    /// to draw.
+    pub(crate) fn set_session_store(&mut self, store: SessionStore) {
+        self.session_store = store;
+    }
+
+    /// Records whether a client is there to carry a request.
+    ///
+    /// Ends the wait when one is not: an in-flight flag with no client behind
+    /// it is a sentence on the panel that nothing will ever answer, so losing
+    /// the client takes the flow out of "Checking…" and lets the reader press
+    /// `⏎` again. The draft is untouched — the reader typed it, and a client
+    /// that comes back is not a reason to type it twice.
+    pub(crate) fn set_client_available(&mut self, available: bool) {
+        self.client_available = available;
+
+        if !available && let Some(flow) = self.signin.as_mut().and_then(SignIn::flow_mut) {
+            flow.waiting = false;
+        }
+    }
+
+    /// Puts the sign-in surface up in `signin`.
+    pub(crate) fn begin_signin(&mut self, signin: SignIn) {
+        self.signin = Some(signin);
+    }
+
+    /// Takes the sign-in surface down: the flow is over.
+    pub(crate) fn clear_signin(&mut self) {
+        self.signin = None;
+    }
+
+    /// Records that the client is to be brought up again.
+    pub(crate) fn request_retry(&mut self) {
+        self.retry_requested = true;
+    }
+
+    /// The retry the reader asked for, once.
+    ///
+    /// Forgotten on the way out: a request taken is a request being carried
+    /// out, and a caller that asks again on the next pass gets `false` rather
+    /// than a second bring-up.
+    pub(crate) fn take_retry_request(&mut self) -> bool {
+        std::mem::take(&mut self.retry_requested)
+    }
+
+    /// The field the reader is filling in, which is whatever step the flow is at.
+    ///
+    /// **Derived, never stored.** A second field naming the current one is a
+    /// second thing that can be wrong: `login.step` is Telegram's own answer to
+    /// the same question, and the moment the two disagree the bar would be
+    /// asking for a code at the phone step. One answer, read from the state.
+    #[must_use]
+    pub(crate) fn signin_field(&self) -> Option<LoginField> {
+        match self.signin.as_ref().and_then(SignIn::flow) {
+            None => None,
+            Some(flow) => match &flow.login.step {
+                domain::session::SessionState::LoggedOut => Some(LoginField::Phone),
+                domain::session::SessionState::AwaitingCode { .. } => Some(LoginField::Code),
+                domain::session::SessionState::AwaitingPassword { .. } => {
+                    Some(LoginField::Password)
+                }
+                // Signed in is not a step anybody fills a field in at: the flow
+                // is over by the time the account's own identifier exists.
+                domain::session::SessionState::LoggedIn { .. } => None,
+            },
         }
     }
 }
