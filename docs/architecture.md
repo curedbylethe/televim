@@ -343,7 +343,7 @@ no library target.
 ```
 crates/app/
 ├── src/
-│   ├── main.rs         # Entry point, CLI parsing (clap)
+│   ├── main.rs         # Entry point, CLI parsing (clap: --config, --chat)
 │   ├── config.rs       # Load TOML + env
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump

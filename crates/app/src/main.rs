@@ -20,6 +20,10 @@ struct Cli {
     /// The log goes beside it, under the same name with a `.log` extension.
     #[arg(long, default_value = "televim.toml")]
     config: std::path::PathBuf,
+
+    /// Open this chat id on launch. Carried into launch state; STAGE-02 selects it.
+    #[arg(long)]
+    chat: Option<i64>,
 }
 
 fn main() -> Result<()> {
@@ -36,5 +40,32 @@ fn main() -> Result<()> {
 
     let cfg = config::Config::load(&cli.config)?;
 
-    runtime::run(&cfg, &cli.config)
+    runtime::run(&cfg, &cli.config, cli.chat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn chat_flag_parses_to_some_id() {
+        let cli =
+            Cli::try_parse_from(["televim", "--chat", "123"]).expect("a valid --chat id parses");
+        assert_eq!(cli.chat, Some(123));
+    }
+
+    #[test]
+    fn omitting_chat_yields_none() {
+        let cli = Cli::try_parse_from(["televim"]).expect("no flag is the ordinary launch");
+        assert_eq!(cli.chat, None);
+    }
+
+    #[test]
+    fn help_names_the_chat_flag() {
+        let mut help = Vec::new();
+        Cli::command().write_help(&mut help).expect("help renders");
+        let help = String::from_utf8(help).expect("help is text");
+        assert!(help.contains("--chat"), "help shows the flag:\n{help}");
+    }
 }
