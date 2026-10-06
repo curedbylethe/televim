@@ -2017,6 +2017,33 @@ impl App {
         self.resume_draft(chat_id);
     }
 
+    /// Opens the conversation whose chat id is `id`.
+    ///
+    /// The same lookup `:chat` does: the position of the id in the list, and
+    /// nothing is opened when it is not there. Reports whether the id was
+    /// found, so a caller that must land somewhere can say where it landed
+    /// instead of staying silent the way `:chat` does.
+    pub fn select_chat_by_id(&mut self, id: i64) -> bool {
+        let Some(pos) = self.list.list.chats.iter().position(|c| c.id == id) else {
+            return false;
+        };
+        self.select_chat(pos);
+        true
+    }
+
+    /// Records the `--chat` id to open when the first chat list arrives.
+    ///
+    /// Launch state, set once before the first frame and taken when the list
+    /// lands, so a later refresh keeps the reader where they are.
+    pub fn set_initial_chat(&mut self, id: i64) {
+        self.pending.pending_initial_chat = Some(id);
+    }
+
+    /// Takes the pending `--chat` id, if one was set and not yet consumed.
+    pub fn take_initial_chat(&mut self) -> Option<i64> {
+        self.pending.pending_initial_chat.take()
+    }
+
     /// Puts the conversation's recorded read watermark on the view just opened.
     ///
     /// Reports whether there was one to put back, which is what a reader switching
@@ -4141,10 +4168,10 @@ impl App {
             "new" => self.begin_new_chat(""),
             _ if cmd.starts_with("new ") => self.begin_new_chat(cmd[4..].trim()),
             _ if cmd.starts_with("chat ") => {
-                if let Ok(id) = cmd[5..].trim().parse::<i64>()
-                    && let Some(pos) = self.list.list.chats.iter().position(|c| c.id == id)
-                {
-                    self.select_chat(pos);
+                if let Ok(id) = cmd[5..].trim().parse::<i64>() {
+                    // Unknown ids stay a silent no-op here: only the launch
+                    // selection says where it landed instead.
+                    self.select_chat_by_id(id);
                 }
             }
             _ => self.ui.status = format!("unknown command: :{cmd}"),
@@ -7880,6 +7907,58 @@ mod tests {
 
         run_command_line(&mut app, "chat 999");
         assert_eq!(app.list.selected_chat, before);
+    }
+
+    #[test]
+    fn select_chat_by_id_opens_the_matching_chat_and_says_so() {
+        let mut app = App::mock();
+
+        assert!(app.select_chat_by_id(3));
+
+        let expected = app
+            .chats()
+            .iter()
+            .position(|c| c.id == 3)
+            .expect("chat 3 is part of the mock data");
+        assert_eq!(app.list.selected_chat, expected);
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, 3,
+            "the panel follows the chat list"
+        );
+    }
+
+    /// The `:chat` half of the contract: an unknown id reports `false` and
+    /// leaves the screen as it was — saying where the reader landed instead is
+    /// the launch selection's job, not this one's.
+    #[test]
+    fn select_chat_by_id_leaves_an_unknown_id_where_the_reader_was() {
+        let mut app = App::mock();
+        let before = app.list.selected_chat;
+
+        assert!(!app.select_chat_by_id(999));
+
+        assert_eq!(app.list.selected_chat, before);
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, MOCK_CHAT,
+            "still the conversation that was open"
+        );
+    }
+
+    /// The pending `--chat` id applies once: taken when the list lands, and
+    /// gone afterwards so a later refresh keeps the reader where they are.
+    #[test]
+    fn the_pending_initial_chat_is_taken_once() {
+        let mut app = App::mock();
+
+        assert_eq!(app.take_initial_chat(), None, "nothing pending at first");
+
+        app.set_initial_chat(2);
+        assert_eq!(app.take_initial_chat(), Some(2));
+        assert_eq!(
+            app.take_initial_chat(),
+            None,
+            "a second list lands with nothing to apply"
+        );
     }
 
     #[test]

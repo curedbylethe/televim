@@ -38,6 +38,13 @@ pub struct Pending {
     /// has one: the key after `f` is the character, not a motion. The character
     /// itself is not recorded, because it has not been typed yet.
     pub(crate) pending_find: Option<Find>,
+
+    /// The `--chat` id to open once the first chat list arrives.
+    ///
+    /// Set at launch from the CLI and taken when the list lands, so it applies
+    /// once: a later list refresh keeps the reader where they are. Unknown ids
+    /// are reported by the caller, not here.
+    pub(crate) pending_initial_chat: Option<i64>,
 }
 
 impl Pending {
@@ -49,6 +56,7 @@ impl Pending {
             pending_chat: None,
             pending_g: false,
             pending_find: None,
+            pending_initial_chat: None,
         }
     }
 }
