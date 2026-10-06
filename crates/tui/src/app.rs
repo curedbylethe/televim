@@ -16,7 +16,7 @@ use domain::search::{SearchState, word_prefix_match};
 use domain::selection::{Mark, Selection};
 use domain::updates::UpdateEvent;
 use domain::user::{UserCandidate, UserSearchState};
-use domain::vim::{CharMotion, Motion, VimState, char_motion};
+use domain::vim::{CharMotion, Motion, VimState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 
@@ -1129,7 +1129,7 @@ impl App {
     /// deletion of messages the reader did not select.
     ///
     /// Empty when there is no selection, and when one of its ends is not in the
-    /// window — which [`App::retain_selection`] makes unreachable and which is
+    /// window — which [`ConversationState::retain_selection`] makes unreachable and which is
     /// answered as "nothing" rather than as a panic.
     ///
     /// The one answer, for the panel to mark with, the operations to act on, and
@@ -1171,39 +1171,17 @@ impl App {
 
     /// Starts a selection at `message_id`, and reports whether it could be.
     ///
-    /// A mark can only be placed on a message the window holds, so a selection
-    /// over one that is not loaded is refused rather than recorded: `d` on it
-    /// would name an identifier nothing can act on, and a mark the panel cannot
-    /// draw is a mark the reader cannot see.
-    ///
-    /// The mode is not touched. A selection is not a mode — `dd` leaves one here
-    /// while the reader is in Normal, answering a question, and the conversation's
-    /// [`Mode`] is about what a key means rather than about what is selected.
+    /// Delegates to [`ConversationState::select`].
     #[must_use]
     pub fn select(&mut self, message_id: i64, char: Option<usize>) -> bool {
-        if self
-            .conversation
-            .conversation
-            .window
-            .position_of(message_id)
-            .is_none()
-        {
-            return false;
-        }
-
-        self.set_selection(Selection::at(message_id, char));
-        true
+        self.conversation.select(message_id, char)
     }
 
     /// Replaces the selection outright.
     ///
-    /// The writer half of [`App::selection`], and the whole of what a motion
-    /// needs: a motion moves one end of a selection and changes nothing else
-    /// about it. It does not check that the marks are loaded, because a motion
-    /// works from the window and the text in front of it and cannot name
-    /// anything else.
+    /// Delegates to [`ConversationState::set_selection`].
     pub fn set_selection(&mut self, selection: Selection) {
-        self.conversation.selection = Some(selection);
+        self.conversation.set_selection(selection);
     }
 
     /// What the reader last yanked, for the caller that hands it to the system
@@ -1363,21 +1341,9 @@ impl App {
     /// reader may open a second card while the first read is in flight, and the
     /// second card's fields are not the first one's.
     pub fn set_contact(&mut self, peer_id: i64, profile: Result<Account, String>) {
-        let Some(open) = self
-            .profile
-            .contact
-            .as_ref()
-            .filter(|open| open.peer_id == peer_id)
-        else {
+        if !self.profile.adopt_contact(peer_id, profile) {
             return;
-        };
-        self.profile.contact = Some(ContactProfile {
-            peer_id: open.peer_id,
-            state: match profile {
-                Ok(account) => AccountState::Known(account),
-                Err(reason) => AccountState::Unavailable(reason),
-            },
-        });
+        }
         // The highlight is re-sized because the row count just changed under it.
         // The account's own card is read once at start-up, so its rows are settled
         // before the card opens; a contact's card is drawn with *no* rows until
@@ -1385,8 +1351,7 @@ impl App {
         // moved afterwards — `j` clamps to a buffer of nothing. Re-clamping rather
         // than resetting keeps the reader where they were, which here is the top.
         self.profile
-            .profile_vim
-            .set_total(crate::card::navigable(&crate::card::rows(self)));
+            .retotal(crate::card::navigable(&crate::card::rows(self)));
     }
 
     /// Records where the session is kept.
@@ -1479,12 +1444,10 @@ impl App {
     /// Moves the card's highlight to `row`, for a caller that knows where it wants
     /// the cursor rather than which key gets it there.
     ///
-    /// A test helper *and* the reason the two are separate: a card's cursor is
-    /// `j`/`k` and a position is `l`/`h`, and every test that cares about the
-    /// second has to walk to the first to get there.
+    /// Delegates to [`ProfileCard::handle_card_row`].
     #[cfg(test)]
     pub(crate) fn handle_card_row(&mut self, row: usize) {
-        self.profile.profile_vim.set_cursor(row);
+        self.profile.handle_card_row(row);
     }
 
     /// One charwise motion within the cursor row's value.
@@ -1542,10 +1505,7 @@ impl App {
 
     /// Starts a card selection at the inline position, or extends the one there is.
     fn start_card_visual(&mut self) {
-        if self.profile.profile_visual.is_none() {
-            self.profile.profile_visual =
-                Some(Mark::text(self.card_row_id(), self.profile.profile_caret));
-        }
+        self.profile.start_visual(self.card_row_id());
     }
 
     /// Puts the profile in the right-hand pane.
@@ -1584,10 +1544,9 @@ impl App {
     /// a place in, and restoring the row they looked at last time would answer a
     /// question they did not ask.
     pub(crate) fn open_card(&mut self, subject: ProfileId) {
-        self.profile.profile_subject = subject;
         // One read per card opened, asked for here rather than by the panel: the
         // panel draws what it has, and the reader asked a question by pressing `A`.
-        self.profile.contact = match subject {
+        let contact = match subject {
             ProfileId::User(peer_id) => {
                 self.queue_action(Action::FetchContact { peer_id });
                 Some(ContactProfile {
@@ -1597,22 +1556,21 @@ impl App {
             }
             ProfileId::SelfAccount => None,
         };
+        self.profile.open(subject, contact);
         // Over the rows that are drawn, not over every row there is: a held slot
         // at the end of a card is not somewhere the highlight goes.
-        self.profile.profile_vim = VimState::new(crate::card::navigable(&crate::card::rows(self)));
-        self.profile.profile_caret = 0;
-        self.profile.profile_visual = None;
-        self.profile.profile_count = None;
+        self.profile
+            .resize(crate::card::navigable(&crate::card::rows(self)));
         self.ui.set_pane(Pane::Profile(subject));
         self.ui.set_focus(Focus::Conversation);
         self.ui.set_mode(Mode::Normal);
-        self.conversation.selection = None;
+        self.conversation.clear_selection();
     }
 
     /// Puts the conversation back in the right-hand pane.
     fn close_profile(&mut self) {
         self.ui.set_pane(Pane::Conversation);
-        self.profile.profile_vim = VimState::new(0);
+        self.profile.resize(0);
     }
 
     /// Leaves a card, for the way back rather than for `Esc`.
@@ -1622,9 +1580,7 @@ impl App {
     /// value means nothing in a conversation, and leaving it behind would be a
     /// caret waiting to be drawn on the wrong surface.
     fn close_card(&mut self) {
-        self.profile.profile_visual = None;
-        self.profile.profile_caret = 0;
-        self.profile.profile_count = None;
+        self.profile.clear_transient();
         self.close_profile();
     }
 
@@ -1714,14 +1670,14 @@ impl App {
     /// reported as one.
     fn yank_card(&mut self) {
         let lines = self.card_yanked();
-        self.profile.profile_visual = None;
+        self.profile.clear_visual();
 
         if lines.iter().all(String::is_empty) {
             self.flash("nothing to yank — move the selection first");
             return;
         }
 
-        self.conversation.register = Register::set(lines);
+        self.conversation.set_register(Register::set(lines));
         self.outbox
             .store_clipboard(self.conversation.register.text());
     }
@@ -1797,7 +1753,7 @@ impl App {
         let Some(value) = self.card_value() else {
             return;
         };
-        self.profile.profile_caret = char_motion(&value, self.profile.profile_caret, motion);
+        self.profile.move_char(motion, &value);
     }
 
     /// A motion between rows, which resets the inline position.
@@ -1811,7 +1767,7 @@ impl App {
         // that looks like a card with one more row than it has.
         self.profile.profile_vim.handle_char(c);
         self.off_reserved(matches!(c, 'j' | 'G'));
-        self.profile.profile_caret = 0;
+        self.profile.set_caret(0);
     }
 
     /// Steps the row cursor off a held slot.
@@ -1858,11 +1814,9 @@ impl App {
 
     /// A count before a motion, as `12j` means twelve.
     ///
-    /// The digits are otherwise unbound on a card, so a count costs one line rather
-    /// than shadowing a key that means something else.
+    /// Delegates to [`ProfileCard::card_count`].
     fn card_count(&mut self, c: char) {
-        let digit = u32::from(c);
-        self.profile.profile_count = Some(self.profile.profile_count.unwrap_or(0) * 10 + digit);
+        self.profile.card_count(c);
     }
 
     /// The cursor row's value, if the card has one on show.
@@ -1911,7 +1865,7 @@ impl App {
             // program holds.
             crate::card::LOGOUT => {
                 self.ui.set_mode(Mode::Confirm);
-                self.conversation.confirm = Some(ConfirmKind::Logout);
+                self.conversation.set_confirm(Some(ConfirmKind::Logout));
             }
             _ => {}
         }
@@ -1970,7 +1924,7 @@ impl App {
         // whatever else changes here, that has to stay true. The counter is not
         // carried across on purpose; `net`'s drop test is the executable form of
         // this sentence.
-        self.conversation.conversation = ConversationView::new(chat_id);
+        self.conversation.open_conversation(chat_id);
         // The window is gone and with it the watermark the new view starts
         // without. How far this conversation has been read is not a fact about
         // the page on show, so it is put back from what the feed has said.
@@ -2066,93 +2020,48 @@ impl App {
     }
 
     /// The message the cursor is on, if the window holds anything.
+    ///
+    /// Delegates to [`ConversationState::cursor_message`].
     fn cursor_message(&self) -> Option<&Message> {
-        self.conversation
-            .conversation
-            .window
-            .get(self.conversation.vim.cursor())
+        self.conversation.cursor_message()
     }
 
     /// Identifier of the message the cursor is on, if the window holds anything.
+    ///
+    /// Delegates to [`ConversationState::cursor_message_id`].
     fn cursor_message_id(&self) -> Option<i64> {
-        self.cursor_message().map(|message| message.id)
+        self.conversation.cursor_message_id()
     }
 
     /// Whether `page` holds anything for the conversation on show.
     ///
-    /// A page is fetched for one conversation and the reader can open another
-    /// while one is in flight, so a page that arrives late is recognised here
-    /// rather than allowed to replace what is on screen.
+    /// Delegates to [`ConversationState::page_belongs_to_open_chat`].
     fn page_belongs_to_open_chat(&self, page: &[Message]) -> bool {
-        let chat_id = self.conversation.conversation.window.chat_id;
-        page.iter().any(|message| message.chat_id == chat_id)
+        self.conversation.page_belongs_to_open_chat(page)
     }
 
     // ---- pages coming back ----------------------------------------------
 
     /// Replaces the window with the newest page of the open conversation.
     ///
-    /// The reader is put at the newest message: opening a conversation and
-    /// loading the page that ends one both mean "show me the end".
-    ///
-    /// A selection does not survive, because the messages it named are not
-    /// necessarily the ones on show now. There is nothing to restore it *to*:
-    /// unlike a page that extends the window, a page that replaces it has shifted
-    /// every message in it.
-    ///
-    /// Reports whether anything was shown.
+    /// Delegates to [`ConversationState::apply_latest`].
     pub fn apply_latest(&mut self, page: Vec<Message>) -> bool {
-        if !self.page_belongs_to_open_chat(&page) {
-            return false;
-        }
-
-        self.conversation.conversation.window.replace(page);
-        self.conversation.selection = None;
-        self.conversation
-            .vim
-            .set_total(self.conversation.conversation.window.len());
-        self.conversation.conversation.follow();
-        self.conversation.vim.apply_motion(Motion::Last);
-
-        true
+        self.conversation.apply_latest(page)
     }
 
     /// Puts a page in front of what the window holds.
     ///
-    /// Reports whether anything was added, and leaves the reader on the message
-    /// they were reading: the window moved under them, not the other way round.
+    /// Delegates to [`ConversationState::apply_older`].
     pub fn apply_older(&mut self, page: Vec<Message>) -> bool {
-        if !self.page_belongs_to_open_chat(&page) {
-            return false;
-        }
-
-        let anchor = self.cursor_message_id();
-        if !self.conversation.conversation.window.push_front(page) {
-            return false;
-        }
-
-        self.after_window_change(anchor);
-
-        true
+        self.conversation.apply_older(page)
     }
 
     /// Puts messages behind what the window holds: a fetched page, or one the
     /// reader has just typed.
     ///
-    /// Reports whether anything was added.
+    /// Delegates to [`ConversationState::apply_newer`].
     pub fn apply_newer(&mut self, page: Vec<Message>) -> bool {
-        if !self.page_belongs_to_open_chat(&page) {
-            return false;
-        }
-
-        let anchor = self.cursor_message_id();
-        if !self.conversation.conversation.window.push_back(page) {
-            return false;
-        }
-
-        self.after_window_change(anchor);
-
-        true
+        self.conversation.apply_newer(page)
     }
 
     // ---- jumping to the unread messages ---------------------------------
@@ -2383,7 +2292,7 @@ impl App {
             .conversation
             .window
             .replace(page.iter().cloned());
-        self.conversation.selection = None;
+        self.conversation.clear_selection();
 
         // A window that jumped is surrounded by the unknown on both sides,
         // whatever the one before it had run out of.
@@ -2486,77 +2395,16 @@ impl App {
 
     /// Puts the reader back where they were, now that the window has moved.
     ///
-    /// There are now **two** anchors to restore rather than one, and both are
-    /// restored the same way: by message identifier, because an index means a
-    /// different message on either side of a page. Restoring only the cursor is
-    /// the failure this arrangement exists to prevent — an older page landing
-    /// under a live selection shifts every index, so a selection left in index
-    /// terms would silently come to cover different messages and the next `d`
-    /// would delete something the reader did not select.
+    /// Delegates to [`ConversationState::after_window_change`].
     fn after_window_change(&mut self, anchor: Option<i64>) {
-        self.conversation
-            .vim
-            .set_total(self.conversation.conversation.window.len());
-
-        let cursor = self.conversation.vim.cursor();
-        let restored = anchor
-            .and_then(|id| self.conversation.conversation.window.position_of(id))
-            .unwrap_or(cursor);
-        self.conversation.vim.set_cursor(restored);
-
-        self.retain_selection();
-
-        if self.conversation.conversation.auto_follow() {
-            // A view pinned to the end stays pinned: what arrived is what the
-            // reader asked to see.
-            self.conversation.vim.apply_motion(Motion::Last);
-        } else {
-            self.settle_follow();
-        }
-    }
-
-    /// Drops the selection unless both of its ends still name a message the
-    /// window holds.
-    ///
-    /// Whole or not at all. A mark whose message has been paged out or pushed past
-    /// the window's cap cannot be put back anywhere, and narrowing the selection
-    /// to the end that survived would be worse than losing it: `d` on half a
-    /// selection is a one-message deletion the reader never asked for, and it
-    /// would be asked for by the same key they used last time.
-    fn retain_selection(&mut self) {
-        let Some(selection) = self.conversation.selection.take() else {
-            return;
-        };
-
-        let window = &self.conversation.conversation.window;
-        let held = window.position_of(selection.anchor.message_id).is_some()
-            && window.position_of(selection.focus.message_id).is_some();
-
-        if held {
-            self.conversation.selection = Some(selection);
-        }
+        self.conversation.after_window_change(anchor);
     }
 
     /// Keeps the follow state in step with where the cursor ended up.
     ///
-    /// The two are one fact seen twice: a view pinned to the newest message is
-    /// one whose cursor is on it. Anywhere else means the reader has moved away,
-    /// and an arrival no longer has the right to move them.
+    /// Delegates to [`ConversationState::settle_follow`].
     fn settle_follow(&mut self) {
-        let last = self
-            .conversation
-            .conversation
-            .window
-            .len()
-            .saturating_sub(1);
-
-        if self.conversation.conversation.window.is_empty()
-            || self.conversation.vim.cursor() >= last
-        {
-            self.conversation.conversation.follow();
-        } else {
-            self.conversation.conversation.unfollow();
-        }
+        self.conversation.settle_follow();
     }
 
     // ---- fetching --------------------------------------------------------
@@ -2675,52 +2523,37 @@ impl App {
 
     /// Records that a send for `temp_id` is in flight.
     ///
-    /// The identifier rather than a flag, so releasing the gate can be matched
-    /// to the send it answers.
+    /// Delegates to [`ConversationState::begin_send`].
     pub fn begin_send(&mut self, temp_id: i64) {
-        self.conversation.sending = Some(temp_id);
+        self.conversation.begin_send(temp_id);
     }
 
     /// Releases the in-flight gate, if it is still held for `temp_id`.
     ///
-    /// A no-op for a send that has already been released, so a duplicate result
-    /// cannot clear the gate of a later one.
+    /// Delegates to [`ConversationState::end_send`].
     pub fn end_send(&mut self, temp_id: i64) {
-        if self.conversation.sending == Some(temp_id) {
-            self.conversation.sending = None;
-        }
+        self.conversation.end_send(temp_id);
     }
 
     /// Replaces a send's placeholder with the message the server accepted.
     ///
-    /// Reports whether anything changed, so the caller knows whether a redraw is
-    /// owed.
+    /// Delegates to [`ConversationState::confirm_sent`].
     pub fn confirm_sent(&mut self, temp_id: i64, real: Message) -> bool {
-        let anchor = self.cursor_message_id();
-        let changed = self.conversation.conversation.confirm_sent(temp_id, real);
-        if changed {
-            self.after_window_change(anchor);
-        }
-        changed
+        self.conversation.confirm_sent(temp_id, real)
     }
 
     /// Marks a send as failed, keeping the message and recording why.
     ///
-    /// Reports whether the placeholder was there to mark.
+    /// Delegates to [`ConversationState::fail_send`].
     pub fn fail_send(&mut self, temp_id: i64, reason: String) -> bool {
-        self.conversation.conversation.fail_send(temp_id, reason)
+        self.conversation.fail_send(temp_id, reason)
     }
 
     /// Removes a failed message and the reason recorded for it.
     ///
-    /// Reports whether either was there.
+    /// Delegates to [`ConversationState::dismiss_failed`].
     pub fn dismiss_failed(&mut self, temp_id: i64) -> bool {
-        let anchor = self.cursor_message_id();
-        let changed = self.conversation.conversation.dismiss_failed(temp_id);
-        if changed {
-            self.after_window_change(anchor);
-        }
-        changed
+        self.conversation.dismiss_failed(temp_id)
     }
 
     // ---- transient status -----------------------------------------------
@@ -2794,7 +2627,7 @@ impl App {
     fn set_focus(&mut self, focus: Focus) {
         if focus != Focus::Conversation {
             self.ui.set_mode(Mode::Normal);
-            self.conversation.selection = None;
+            self.conversation.clear_selection();
         }
         // The single clear point for every way out of a pane, beside the one
         // below it for the line. A profile is not a stack: leaving it means the
@@ -3124,7 +2957,7 @@ impl App {
     /// draw one either.
     fn request_quit(&mut self) {
         self.ui.set_mode(Mode::Confirm);
-        self.conversation.confirm = Some(ConfirmKind::Quit);
+        self.conversation.set_confirm(Some(ConfirmKind::Quit));
     }
 
     /// Opens the buffer for a new message, with no reply and no edit.
@@ -3135,8 +2968,8 @@ impl App {
     fn start_compose(&mut self) {
         self.ui.set_focus(Focus::Input);
         self.input.line.open(PromptKind::Message);
-        self.conversation.reply_to = None;
-        self.conversation.editing = None;
+        self.conversation.set_reply_to(None);
+        self.conversation.set_editing(None);
     }
 
     /// Opens the buffer to answer the message under the cursor.
@@ -3150,8 +2983,8 @@ impl App {
 
         self.ui.set_focus(Focus::Input);
         self.input.line.open(PromptKind::Reply);
-        self.conversation.reply_to = Some(id);
-        self.conversation.editing = None;
+        self.conversation.set_reply_to(Some(id));
+        self.conversation.set_editing(None);
     }
 
     /// Opens the line to find a person to talk to, with `query` already in it.
@@ -3196,8 +3029,8 @@ impl App {
 
         self.ui.set_focus(Focus::Input);
         self.input.line.open_with(PromptKind::Edit, text);
-        self.conversation.editing = Some(id);
-        self.conversation.reply_to = None;
+        self.conversation.set_editing(Some(id));
+        self.conversation.set_reply_to(None);
     }
 
     /// Asks to delete what the selection covers, or the message under the cursor
@@ -3238,18 +3071,19 @@ impl App {
         };
 
         let Some(deletion) = self.deletion(&selection) else {
-            self.conversation.selection = None;
+            self.conversation.clear_selection();
             self.ui.set_mode(Mode::Normal);
             self.flash(self.refuse_placeholders(&selection));
             return;
         };
 
         self.ui.set_mode(Mode::Confirm);
-        self.conversation.confirm = Some(ConfirmKind::DeleteMessages {
-            ids: deletion.ids,
-            outgoing: deletion.outgoing,
-            skipped: deletion.skipped,
-        });
+        self.conversation
+            .set_confirm(Some(ConfirmKind::DeleteMessages {
+                ids: deletion.ids,
+                outgoing: deletion.outgoing,
+                skipped: deletion.skipped,
+            }));
     }
 
     /// What deleting `selection` would ask the server for, or `None` when every
@@ -3319,22 +3153,10 @@ impl App {
     }
 
     /// Dismisses the failed message under the cursor, if that is what it is.
+    ///
+    /// Delegates to [`ConversationState::dismiss_failed_at_cursor`].
     fn dismiss_failed_at_cursor(&mut self) {
-        let Some((id, status)) = self
-            .cursor_message()
-            .map(|message| (message.id, message.status))
-        else {
-            return;
-        };
-
-        if !matches!(status, MessageStatus::Failed) {
-            return;
-        }
-
-        let anchor = self.cursor_message_id();
-        if self.conversation.conversation.dismiss_failed(id) {
-            self.after_window_change(anchor);
-        }
+        self.conversation.dismiss_failed_at_cursor();
     }
 
     /// Handles a key while a confirmation is up.
@@ -3357,13 +3179,13 @@ impl App {
                     }
                     None => {}
                 }
-                self.conversation.confirm = None;
-                self.conversation.selection = None;
+                self.conversation.set_confirm(None);
+                self.conversation.clear_selection();
                 self.ui.set_mode(Mode::Normal);
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.conversation.confirm = None;
-                self.conversation.selection = None;
+                self.conversation.set_confirm(None);
+                self.conversation.clear_selection();
                 self.ui.set_mode(Mode::Normal);
             }
             _ => {}
@@ -3482,19 +3304,17 @@ impl App {
     }
 
     /// Moves the user-search highlight one candidate, wrapping.
+    ///
+    /// Delegates to [`ConversationState::move_user_selection`].
     fn move_user_selection(&mut self, forward: bool) {
-        self.conversation
-            .user_search
-            .move_selection(if forward { 1 } else { -1 });
+        self.conversation.move_user_selection(forward);
     }
 
     /// Puts the new-conversation overlay away and forgets the search.
     ///
-    /// Forgetting rather than hiding: the query and its results belong to one
-    /// question, and a list left behind would reappear under the next search
-    /// before that search had asked anything.
+    /// Delegates to [`ConversationState::dismiss_user_search`].
     fn dismiss_user_search(&mut self) {
-        self.conversation.user_search.clear();
+        self.conversation.dismiss_user_search();
     }
 
     /// Accepts the person the overlay is on.
@@ -3702,7 +3522,7 @@ impl App {
         };
 
         let lines = self.yanked(&selection);
-        self.conversation.selection = None;
+        self.conversation.clear_selection();
         self.ui.set_mode(Mode::Normal);
 
         if lines.iter().all(String::is_empty) {
@@ -3713,7 +3533,7 @@ impl App {
             return;
         }
 
-        self.conversation.register = Register::set(lines);
+        self.conversation.set_register(Register::set(lines));
         self.outbox
             .store_clipboard(self.conversation.register.text());
     }
@@ -3726,7 +3546,7 @@ impl App {
     /// — which [`App::yank`] is what notices.
     ///
     /// A selection naming a message the window no longer holds yields nothing,
-    /// which [`App::retain_selection`] makes unreachable and which is answered
+    /// which [`ConversationState::retain_selection`] makes unreachable and which is answered
     /// with an empty yank rather than a panic.
     fn yanked(&self, selection: &Selection) -> Vec<String> {
         if let Some((id, range)) = selection.text_range() {
@@ -3790,7 +3610,7 @@ impl App {
             "a reply can only quote words inside one message"
         };
 
-        self.conversation.selection = None;
+        self.conversation.clear_selection();
         self.ui.set_mode(Mode::Normal);
         self.flash(refused);
     }
@@ -3834,76 +3654,16 @@ impl App {
 
     /// Applies a character motion to the focus's position within its message.
     ///
-    /// Nothing happens without a character position to move: a linewise selection
-    /// is of a whole message and there is no place inside it to move to, which is
-    /// also what Vim does. The cursor does not follow — it stands on the anchor's
-    /// message until the focus moves to another one, so that a charwise selection
-    /// does not drag the viewport along with every character.
+    /// Delegates to [`ConversationState::move_focus`].
     fn move_focus(&mut self, motion: CharMotion) {
-        let Some(selection) = &mut self.conversation.selection else {
-            return;
-        };
-        let Some(at) = selection.focus.char else {
-            return;
-        };
-        let id = selection.focus.message_id;
-
-        let Some(message) = self
-            .conversation
-            .conversation
-            .window
-            .iter()
-            .find(|m| m.id == id)
-        else {
-            return;
-        };
-
-        selection.focus.char = Some(char_motion(message.display_body(), at, motion));
+        self.conversation.move_focus(motion);
     }
 
     /// Moves the focus to the next or the previous message, and the cursor with it.
     ///
-    /// The cursor follows because this is the only motion that leaves the message:
-    /// a reader stepping through messages with `j` is reading, not selecting
-    /// characters, and a cursor left behind would be off the selection entirely.
-    ///
-    /// A character position carries over where it still fits, so a selection that
-    /// has already been moved within a message keeps its relative place in the
-    /// next one. It stops mattering as soon as the two ends are in different
-    /// messages — which is exactly what they now are.
+    /// Delegates to [`ConversationState::move_focus_to_message`].
     fn move_focus_to_message(&mut self, forward: bool) {
-        let Some(focus) = self.conversation.selection.map(|selection| selection.focus) else {
-            return;
-        };
-        let Some(index) = self
-            .conversation
-            .conversation
-            .window
-            .position_of(focus.message_id)
-        else {
-            return;
-        };
-        let next = if forward {
-            index + 1
-        } else {
-            index.saturating_sub(1)
-        };
-        let Some(message) = self.conversation.conversation.window.get(next) else {
-            return;
-        };
-
-        let id = message.id;
-        let last = message.display_body().chars().count().saturating_sub(1);
-        let char = focus.char.map(|at| at.min(last));
-
-        if let Some(selection) = &mut self.conversation.selection {
-            selection.focus = Mark {
-                message_id: id,
-                char,
-            };
-        }
-        self.conversation.vim.set_cursor(next);
-        self.settle_follow();
+        self.conversation.move_focus_to_message(forward);
     }
 
     /// Handles `Enter` in the input line.
@@ -3951,15 +3711,15 @@ impl App {
         // `:new` keeps its query line for the same reason: the reader is about
         // to type into it, and the reset below would empty it.
         if self.signin_field().is_some() || self.input.line.purpose() == PromptKind::NewChat {
-            self.conversation.reply_to = None;
-            self.conversation.editing = None;
+            self.conversation.set_reply_to(None);
+            self.conversation.set_editing(None);
             return;
         }
 
         self.ui.set_focus(Focus::Conversation);
         self.input.line.clear();
-        self.conversation.reply_to = None;
-        self.conversation.editing = None;
+        self.conversation.set_reply_to(None);
+        self.conversation.set_editing(None);
     }
 
     /// Queues the composed message as a send, and shows it immediately.
@@ -4114,15 +3874,9 @@ impl App {
 
     /// Lands the reader on the match the walk has just moved to.
     ///
-    /// The local pass's matches are all in the window, so this is synchronous.
+    /// Delegates to [`ConversationState::land_on_match`].
     fn land_on_match(&mut self) {
-        if let Some(id) = self.conversation.search.next()
-            && let Some(position) = self.conversation.conversation.window.position_of(id)
-        {
-            self.conversation.vim.set_cursor(position);
-        }
-
-        self.settle_follow();
+        self.conversation.land_on_match();
     }
 
     /// Walks the search's matches in the direction given.
@@ -4174,10 +3928,7 @@ impl App {
     /// Replaces the local matches with the server's answer, if it is still
     /// wanted.
     ///
-    /// Returns whether the answer landed. It is refused for a conversation that
-    /// is no longer open and for a query the reader has replaced — the same
-    /// discipline a send's result gets, applied to the other half of the
-    /// answer's identity.
+    /// Delegates to [`ConversationState::apply_searched`].
     pub fn apply_searched(
         &mut self,
         chat_id: i64,
@@ -4185,63 +3936,29 @@ impl App {
         ids: Vec<i64>,
         total: usize,
     ) -> bool {
-        if self.conversation.conversation.window.chat_id != chat_id {
-            return false;
-        }
-
-        let cursor_id = self.cursor_message_id();
-        if !self
-            .conversation
-            .search
-            .adopt_server(query, ids, total, cursor_id)
-        {
-            return false;
-        }
-
-        // The cursor was on a local match the server may not have confirmed.
-        // Landing it on the nearest surviving match keeps its sense of place;
-        // the next `n` then moves forward from there rather than restarting.
-        if let Some(target) = self.conversation.search.landing(cursor_id)
-            && let Some(position) = self.conversation.conversation.window.position_of(target)
-        {
-            self.conversation.vim.set_cursor(position);
-        }
-
-        self.settle_follow();
-        true
+        self.conversation.apply_searched(chat_id, query, ids, total)
     }
 
     /// Records that the server pass for `query` failed, keeping the local list.
+    ///
+    /// Delegates to [`ConversationState::search_failed`].
     pub fn search_failed(&mut self, query: &str, reason: String) {
-        if self.conversation.search.query() != Some(query) {
-            return;
-        }
-
-        self.conversation.search.fail(reason);
+        self.conversation.search_failed(query, reason);
     }
 
     /// Fills the new-conversation list with the answer to `query`, if it is still
     /// wanted.
     ///
-    /// The stale-query refusal is the state's own, so a result for a query the
-    /// reader has replaced is dropped without the caller having to check.
-    /// Returns whether the answer landed.
+    /// Delegates to [`ConversationState::apply_users`].
     pub fn apply_users(&mut self, query: &str, candidates: Vec<UserCandidate>) -> bool {
-        self.conversation.user_search.adopt(query, candidates)
+        self.conversation.apply_users(query, candidates)
     }
 
     /// Records that the lookup for `query` failed.
     ///
-    /// Refused for a query the reader has replaced, for the same reason a result
-    /// is: a late failure must not close a list that belongs to a newer search.
-    /// Returns whether it landed.
+    /// Delegates to [`ConversationState::fail_users`].
     pub fn fail_users(&mut self, query: &str, reason: String) -> bool {
-        if self.conversation.user_search.query() != Some(query) {
-            return false;
-        }
-
-        self.conversation.user_search.fail(reason);
-        true
+        self.conversation.fail_users(query, reason)
     }
 
     // ---- the sign-in flow -----------------------------------------------
