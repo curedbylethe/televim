@@ -420,6 +420,10 @@
   const SIGNED_OUT = 'signed out';
   const READING = 'reading the session…';
   const READING_NOTE = 'Nothing has been read yet, so nothing is known either way.';
+  /* a contact's shell. Its problem is never credentials, so it names no way back into :signin. */
+  const CONTACT_READING = 'reading their profile…';
+  const CONTACT_UNAVAILABLE = 'could not read this profile';
+  const CONTACT_FAILED_REASON = 'the profile request failed: Telegram did not answer before the fetch timed out';
 
   /* ---------- sign in: the words this view adds ----------
      The refusals are a Telegram error code mapped to the line the reader sees. Three of them
@@ -627,6 +631,8 @@
     else if (view === 'nocreds') beginNoCreds(s);
     else if (view === 'loggedout') beginLoggedOut(s);
     else if (view === 'signedout' || view === 'reading') beginShell(s, view);
+    else if (view === 'contactReading') beginContactShell(s, 'personReading');
+    else if (view === 'contactFailed') beginContactShell(s, 'personFailed');
     else if (view === 'media') s.chats.unshift(makeMediaChat());
     return s;
   }
@@ -760,6 +766,12 @@
   function beginShell(s, sub) {
     s.view = sub; s.right = 'profile'; s.focus = 'profile';
     s.chats = []; s.chat = 0;            /* no client until credentials arrive, so no chats */
+    s.card = { sub, chat: 0, row: 0, col: 0, vis: null };
+  }
+
+  /* a contact's shell is not the account's: the chat list stays, only the card changes subject */
+  function beginContactShell(s, sub) {
+    s.view = 'chat'; s.right = 'profile'; s.focus = 'profile'; s.chat = 0;
     s.card = { sub, chat: 0, row: 0, col: 0, vis: null };
   }
   function ask(s, prompt, run) { s.confirm = { prompt, run }; }
@@ -1515,7 +1527,8 @@
     if (s.focus === 'profile') {
       const C = s.card;
       if (C.vis) return { t: ' ' + cardSel(s) + (C.vis.mode === 'rows' ? ' row(s)' : ' character(s)') + ' selected — Esc clears', a: 't' };
-      const h = C.sub === 'self' ? HINT.cardSelf : C.sub === 'person' ? HINT.cardContact : C.sub === 'reading' ? HINT.cardReading : HINT.cardSignedOut;
+      const contactShell = C.sub === 'person' || C.sub === 'personReading' || C.sub === 'personFailed';
+      const h = C.sub === 'self' ? HINT.cardSelf : contactShell ? HINT.cardContact : C.sub === 'reading' ? HINT.cardReading : HINT.cardSignedOut;
       return { t: h, a: 'd' };
     }
     if (s.focus === 'list') return { t: HINT.list, a: 'd' };
@@ -1710,6 +1723,8 @@
   function cardRows(s) {
     const C = s.card;
     if (!C) return [];
+    /* no rows at all until the profile is read: the shell sentence replaces the card */
+    if (C.sub === 'personReading' || C.sub === 'personFailed') return [];
     if (C.sub === 'self') {
       const P = s.profile;
       return [
@@ -1750,6 +1765,7 @@
   function cardTitle(s) {
     const C = s.card;
     if (C.sub === 'signedout' || C.sub === 'reading') return 'Profile';
+    if (C.sub === 'personReading' || C.sub === 'personFailed') return 'Profile · ' + (s.chats[C.chat] ? s.chats[C.chat].name : '');
     const rows = cardRows(s), nav = navRows(rows);
     let t = C.sub === 'self' ? 'Profile · you' : 'Profile · ' + (s.chats[C.chat] ? s.chats[C.chat].name : '');
     t += ' (' + (nav.length ? clamp(C.row, 0, nav.length - 1) + 1 : 0) + '/' + nav.length + ')';
@@ -1764,9 +1780,9 @@
     const last = segs[segs.length - 1];
     return [segs.length - 1, Math.max(0, last.e - last.s)];
   }
-  function shellLines(g, x0, h, head, body, action) {
+  function shellLines(g, x0, h, head, body, action, headInk) {
     let y = 1;
-    put(g, x0 + 2, y++, head, 't');
+    put(g, x0 + 2, y++, head, headInk || 't');
     if (body) wrap(body, 52, 52, true).forEach((r) => put(g, x0 + 2, y++, body.slice(r.s, r.e), 'd'));
     if (action) put(g, x0 + 2, y + 1, action, 't');
   }
@@ -1775,6 +1791,8 @@
     box(g, x0, 0, w, h, cardTitle(s), s.line ? false : s.focus === 'profile');
     if (C.sub === 'signedout') { shellLines(g, x0, h, NOT_SIGNED_IN, SIGNED_OUT_REASON, SET_CREDENTIALS); return; }
     if (C.sub === 'reading') { shellLines(g, x0, h, READING, READING_NOTE, ''); return; }
+    if (C.sub === 'personReading') { shellLines(g, x0, h, CONTACT_READING, '', '', 'd'); return; }
+    if (C.sub === 'personFailed') { shellLines(g, x0, h, CONTACT_UNAVAILABLE, CONTACT_FAILED_REASON, ''); return; }
     const { rows, nav, ri } = cardAt(s);
     const vis = C.vis ? {
       mode: C.vis.mode,
@@ -1874,7 +1892,7 @@
     const C = s.card;
     /* the shell cards are the whole program: there is nothing behind them to go back to, so
        only : and q answer, which is what their hint names. */
-    if (C.sub === 'signedout' || C.sub === 'reading') return;
+    if (C.sub === 'signedout' || C.sub === 'reading' || C.sub === 'personReading' || C.sub === 'personFailed') return;
     const { nav, r } = cardAt(s), n = nav.length;
     const val = r.kind === 'value' ? r.value : '';
     /* a count is a motion's multiplier and nothing else here; it costs one line because the
@@ -2176,7 +2194,9 @@
       { name: 'no username, no birthday', keys: '<Tab>jjA' },
       { name: 'not signed in', start: 'signedout', keys: '' },
       { name: ':signin from the card', start: 'signedout', keys: ':signin<CR>' },
-      { name: 'nothing read yet', start: 'reading', keys: '' }] },
+      { name: 'nothing read yet', start: 'reading', keys: '' },
+      { name: 'contact: the profile is not read yet', start: 'contactReading', keys: '' },
+      { name: 'contact: the read failed', start: 'contactFailed', keys: '' }] },
     { id: 'signin', name: 'Sign in', start: 'signin', variants: [
       { name: 'Phone, pre-filled', keys: '' },
       { name: 'Checking…', keys: '<CR>' },
