@@ -1707,6 +1707,22 @@ fn apply_ready_to_screen(
         true
     };
 
+    // The `--chat` id, taken once the first list has landed: a known id moves
+    // the reader there, before the sign-in flow below is entered, so a
+    // signed-out launch lands on the requested chat. An unknown id keeps the
+    // launch landing and is named persistently afterwards — unlike `:chat`,
+    // which stays silent — because `login_complete` below puts the status
+    // line back to its resting sentence and would overwrite it said here.
+    let mut unknown_initial_chat: Option<i64> = None;
+    if let Some(id) = app.take_initial_chat()
+        && !app.select_chat_by_id(id)
+    {
+        if app.conversation.conversation.window.chat_id == 0 {
+            app.select_chat(0);
+        }
+        unknown_initial_chat = Some(id);
+    }
+
     app.set_session_store(session_store.clone());
     state.session_store = Some(session_store);
     let no_session = matches!(&account, Err(reason) if reason.is_empty());
@@ -1723,6 +1739,9 @@ fn apply_ready_to_screen(
     // its resting sentence and would otherwise overwrite this.
     if !restored {
         "the open conversation is no longer in the chat list".clone_into(&mut app.ui.status);
+    }
+    if let Some(id) = unknown_initial_chat {
+        app.ui.status = format!("no chat with id {id}");
     }
 }
 
@@ -3739,6 +3758,95 @@ mod tests {
         );
 
         assert!(app.signin().is_none(), "the account is signed in");
+    }
+
+    // ---- a launch carrying --chat -----------------------------------------
+
+    /// A `Ready` landing on a pending `--chat` id opens that conversation:
+    /// the id is taken once the list is set, and the launch lands there
+    /// rather than on the first chat.
+    #[test]
+    fn a_ready_with_a_known_pending_chat_id_selects_it() {
+        let mut app = App::new();
+        app.set_initial_chat(CHAT + 1);
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id,
+            CHAT + 1,
+            "the requested conversation is the one on screen"
+        );
+        assert_eq!(app.list.selected_chat, 1, "and the highlight is on it");
+        assert_eq!(
+            app.take_initial_chat(),
+            None,
+            "the id applied once and is gone"
+        );
+    }
+
+    /// An id the list does not hold is not invented: the launch lands on the
+    /// first chat, and the status line names the unknown id persistently —
+    /// unlike `:chat`, which stays silent.
+    #[test]
+    fn a_ready_with_an_unknown_pending_chat_id_lands_first_and_names_it() {
+        let mut app = App::new();
+        app.set_initial_chat(999);
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, CHAT,
+            "the launch landing, not an invented conversation"
+        );
+        assert_eq!(app.list.selected_chat, 0);
+        assert!(
+            app.ui.status.contains("999"),
+            "the sentence names the id: {:?}",
+            app.ui.status
+        );
+        assert_eq!(app.chats().len(), 2, "and nothing was added to the list");
+    }
+
+    /// The pending selection applies before the sign-in flow is entered, so a
+    /// signed-out launch with `--chat` lands on the requested chat and then
+    /// opens the form — not the other way round.
+    #[test]
+    fn a_signed_out_launch_with_a_pending_chat_id_selects_then_signs_in() {
+        let mut app = App::new();
+        app.session.credentials_configured = true;
+        app.set_initial_chat(CHAT + 1);
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id,
+            CHAT + 1,
+            "the requested conversation is on screen under the form"
+        );
+        assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
+        assert_eq!(app.ui.focus, tui::Focus::Input, "the field has the keys");
     }
 
     // ---- a client brought back up over an open conversation --------------

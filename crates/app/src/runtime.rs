@@ -251,16 +251,13 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 
 /// Draw, wait for something to happen, apply it, then ask for what comes next.
 ///
-/// `initial_chat` is launch state STAGE-02 consumes; until then it is carried
-/// and not read.
+/// `initial_chat` is the `--chat` id, recorded below and selected once the
+/// first chat list lands (see `net::apply_ready_to_screen`).
 async fn event_loop(
     cfg: &Config,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     initial_chat: Option<i64>,
 ) -> Result<()> {
-    // STAGE-02 selects this chat once bring-up lands; carried, not read, here.
-    let _ = initial_chat;
-
     // When a key was taken on the previous pass, so the next frame can be timed
     // against it. Nothing to report in an ordinary run, hence the `Option`.
     let mut keypress_to_probe: Option<Instant> = None;
@@ -270,6 +267,9 @@ async fn event_loop(
     // while the window is open would make the same conversation two different
     // heights depending on when it was asked.
     let mut app = App::new().with_bidi(cfg.bidi_mode());
+    if let Some(id) = initial_chat {
+        app.set_initial_chat(id);
+    }
     "connecting…".clone_into(&mut app.ui.status);
 
     // What the configuration carries goes into the sign-in flow as pre-fills,
