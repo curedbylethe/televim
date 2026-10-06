@@ -49,9 +49,12 @@ pub(crate) enum AppEvent {
 ///
 /// `config_path` is only where the log goes, and it is passed rather than
 /// derived so that the two cannot disagree about which run they belong to.
-pub fn run(cfg: &Config, config_path: &Path) -> Result<()> {
+///
+/// `initial_chat` is the `--chat` id, carried as launch state for STAGE-02 to
+/// select on. Cli-only: it never enters `Config`, the file, or the environment.
+pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Result<()> {
     init_tracing(cfg, config_path);
-    build_runtime()?.block_on(run_async(cfg))
+    build_runtime()?.block_on(run_async(cfg, initial_chat))
 }
 
 /// Records the instant the program was asked to start.
@@ -175,7 +178,7 @@ fn init_tracing(cfg: &Config, config_path: &Path) {
         .try_init();
 }
 
-async fn run_async(cfg: &Config) -> Result<()> {
+async fn run_async(cfg: &Config, initial_chat: Option<i64>) -> Result<()> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut screen = stdout();
     execute!(screen, EnterAlternateScreen).context("entering alternate screen")?;
@@ -188,7 +191,7 @@ async fn run_async(cfg: &Config) -> Result<()> {
     let backend = CrosstermBackend::new(screen);
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
-    let result = event_loop(cfg, &mut terminal).await;
+    let result = event_loop(cfg, &mut terminal, initial_chat).await;
 
     // Always restore the terminal, even if the loop errored.
     let _ = disable_raw_mode();
@@ -247,7 +250,14 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 }
 
 /// Draw, wait for something to happen, apply it, then ask for what comes next.
-async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+///
+/// `initial_chat` is the `--chat` id, recorded below and selected once the
+/// first chat list lands (see `net::apply_ready_to_screen`).
+async fn event_loop(
+    cfg: &Config,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    initial_chat: Option<i64>,
+) -> Result<()> {
     // When a key was taken on the previous pass, so the next frame can be timed
     // against it. Nothing to report in an ordinary run, hence the `Option`.
     let mut keypress_to_probe: Option<Instant> = None;
@@ -257,6 +267,9 @@ async fn event_loop(cfg: &Config, terminal: &mut Terminal<CrosstermBackend<Stdou
     // while the window is open would make the same conversation two different
     // heights depending on when it was asked.
     let mut app = App::new().with_bidi(cfg.bidi_mode());
+    if let Some(id) = initial_chat {
+        app.set_initial_chat(id);
+    }
     "connecting…".clone_into(&mut app.ui.status);
 
     // What the configuration carries goes into the sign-in flow as pre-fills,

@@ -185,6 +185,38 @@ pub(crate) fn select_chat(
     resume_draft(&mut *drafts, &mut *input, chat_id);
 }
 
+/// Opens the conversation whose chat id is `id`.
+///
+/// The same lookup `:chat` does: the position of the id in the list, and
+/// nothing is opened when it is not there. Reports whether the id was
+/// found, so a caller that must land somewhere can say where it landed
+/// instead of staying silent the way `:chat` does.
+pub(crate) fn select_chat_by_id(
+    ui: &mut UiState,
+    list: &mut ChatListState,
+    outbox: &mut Outbox,
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    drafts: &mut DraftStore,
+    id: i64,
+) -> bool {
+    let Some(pos) = list.list.chats.iter().position(|c| c.id == id) else {
+        return false;
+    };
+    select_chat(
+        &mut *ui,
+        &mut *list,
+        &mut *outbox,
+        &mut *pending,
+        &mut *conversation,
+        &mut *input,
+        &mut *drafts,
+        pos,
+    );
+    true
+}
+
 /// Puts the conversation's recorded read watermark on the view just opened.
 ///
 /// Reports whether there was one to put back, which is what a reader switching
@@ -2434,10 +2466,10 @@ pub(crate) fn run_command(
             false
         }
         _ if cmd.starts_with("chat ") => {
-            if let Ok(id) = cmd[5..].trim().parse::<i64>()
-                && let Some(pos) = list.list.chats.iter().position(|c| c.id == id)
-            {
-                select_chat(
+            if let Ok(id) = cmd[5..].trim().parse::<i64>() {
+                // Unknown ids stay a silent no-op here: only the launch
+                // selection says where it landed instead.
+                select_chat_by_id(
                     &mut *ui,
                     &mut *list,
                     &mut *outbox,
@@ -2445,7 +2477,7 @@ pub(crate) fn run_command(
                     &mut *conversation,
                     &mut *input,
                     &mut *drafts,
-                    pos,
+                    id,
                 );
             }
             false

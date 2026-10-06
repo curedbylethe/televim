@@ -442,3 +442,24 @@ are in [`../AGENTS.md`](../AGENTS.md).
   two clients. What it deliberately does **not** do is back off: a recoverable
   `Some(Err)` is logged and carried past exactly as before, and a schedule for
   those errors is CUR-98's decision, not this one's.
+- **Why feed errors back off bounded and then rebuild:** CUR-98's recovery shape —
+  "bounded backoff and re-subscribe, mirroring the chat-list retry, or an
+  explicit reader-visible failure" — turned out to be all three at once. A
+  recoverable `Some(Err)` is waited out in the pump's task up to
+  `CHAT_LIST_ATTEMPTS` = 3 errors, sleeping `backoff(&error)`'s answer — Telegram's
+  own flood wait when it gave one, the fixed `RETRY` = 5s otherwise — because a
+  feed refused for being read too often has exactly the same answer as a page that
+  was, and the sleep stays in the pump's task so the driver's 250 ms tick never
+  waits on it. Each wait is reported as `Event::FeedRetrying`, naming the reason,
+  the wait and the count, so the reader watching a live feed gets the same account
+  a launch gets from `ChatListRetrying`. Past the bound the feed is ended the same
+  way a dead one is: `finish()` records the position first and the old client
+  stays in `state.client` until the rebuilt one's `Ready`, for the same replay
+  reason as the reconnect above. The waits spend nothing of the one automatic
+  reconnect — the retries run before any request, and only the rebuild the driver
+  issues consumes it. The reader-visible failure is the existing `offline:` slot,
+  recoverable with the existing `:retry`, which is not a budgeted attempt: no new
+  command (CUR-49), no indicator (CUR-45), no queue (CUR-47). The persistent
+  sentences — retrying, `reconnecting`, `offline:` — clear the flash deadline on
+  the way in, because a sentence that ends in an event must not expire back to
+  idle while what it reports is still true.

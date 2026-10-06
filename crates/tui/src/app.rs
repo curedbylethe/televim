@@ -1490,6 +1490,44 @@ impl App {
         );
     }
 
+    /// Opens the conversation whose chat id is `id`.
+    ///
+    /// The same lookup `:chat` does: the position of the id in the list, and
+    /// nothing is opened when it is not there. Reports whether the id was
+    /// found, so a caller that must land somewhere can say where it landed
+    /// instead of staying silent the way `:chat` does.
+    ///
+    /// Delegates to [`coordinate::select_chat_by_id`].
+    pub fn select_chat_by_id(&mut self, id: i64) -> bool {
+        coordinate::select_chat_by_id(
+            &mut self.ui,
+            &mut self.list,
+            &mut self.outbox,
+            &mut self.pending,
+            &mut self.conversation,
+            &mut self.input,
+            &mut self.drafts,
+            id,
+        )
+    }
+
+    /// Records the `--chat` id to open when the first chat list arrives.
+    ///
+    /// Launch state, set once before the first frame and taken when the list
+    /// lands, so a later refresh keeps the reader where they are.
+    ///
+    /// Delegates to [`Pending::set_initial_chat`].
+    pub fn set_initial_chat(&mut self, id: i64) {
+        self.pending.set_initial_chat(id);
+    }
+
+    /// Takes the pending `--chat` id, if one was set and not yet consumed.
+    ///
+    /// Delegates to [`Pending::take_initial_chat`].
+    pub fn take_initial_chat(&mut self) -> Option<i64> {
+        self.pending.take_initial_chat()
+    }
+
     /// Whether a conversation is open to put messages in.
     ///
     /// Delegates to [`ConversationState::has_conversation`].
@@ -1757,6 +1795,20 @@ impl App {
     /// Delegates to [`UiState::expire_status`].
     pub fn expire_status(&mut self, now: Instant) -> bool {
         self.ui.expire_status(now)
+    }
+
+    /// Writes a sentence the reader must not lose.
+    ///
+    /// Straight to [`UiState::status`] rather than through [`App::flash`], and
+    /// clearing any flash deadline on the way: a persistent sentence ends in an
+    /// event that brings its own sentence, so it must not expire back to idle
+    /// while what it reports is still true. The contract [`App::flash`]
+    /// documents from the other side.
+    ///
+    /// Delegates to [`UiState::show_persistent`].
+    pub fn set_status(&mut self, status: impl Into<String>) {
+        let status: String = status.into();
+        self.ui.show_persistent(&status);
     }
 
     // ---- the peer's typing -----------------------------------------------

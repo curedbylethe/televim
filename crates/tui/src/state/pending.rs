@@ -40,6 +40,13 @@ pub struct Pending {
     /// has one: the key after `f` is the character, not a motion. The character
     /// itself is not recorded, because it has not been typed yet.
     pub(crate) pending_find: Option<Find>,
+
+    /// The `--chat` id to open once the first chat list arrives.
+    ///
+    /// Set at launch from the CLI and taken when the list lands, so it applies
+    /// once: a later list refresh keeps the reader where they are. Unknown ids
+    /// are reported by the caller, not here.
+    pub(crate) pending_initial_chat: Option<i64>,
 }
 
 impl Pending {
@@ -51,6 +58,7 @@ impl Pending {
             pending_chat: None,
             pending_g: false,
             pending_find: None,
+            pending_initial_chat: None,
         }
     }
 
@@ -100,6 +108,19 @@ impl Pending {
 
         self.pending_chat = None;
         Some(choice.index)
+    }
+
+    /// Records the `--chat` id to open when the first chat list arrives.
+    ///
+    /// Launch state, set once before the first frame and taken when the list
+    /// lands, so a later refresh keeps the reader where they are.
+    pub(crate) fn set_initial_chat(&mut self, id: i64) {
+        self.pending_initial_chat = Some(id);
+    }
+
+    /// Takes the pending `--chat` id, if one was set and not yet consumed.
+    pub(crate) fn take_initial_chat(&mut self) -> Option<i64> {
+        self.pending_initial_chat.take()
     }
 
     /// Records whether a `g` was just pressed.

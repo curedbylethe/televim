@@ -33,14 +33,6 @@ Real, and named so they are not mistaken for oversights:
   winning, a light-terminal value, local state keyed by the peer's id — are in
   `DESIGN.md`. The slot is *interior* on a contact's card, so `j` and `k` step over
   it, and `card::navigable` bounds the highlight past a slot at the end.
-- **The design artifact does not model a contact card before its read lands.**
-  The engine has a shell for the account's two states — `reading` and `signedout`
-  — and none for a contact's, so the third and fourth shells the binary now draws
-  are only in the Rust. That is a divergence in the *other* direction from the
-  usual one, and it is left rather than hand-fixed: the engine is a 59 kB design
-  model that an agent wrote against `DESIGN.md`, and editing it by hand to add a
-  state is the failure `design/README.md` names. It wants a design run that adds
-  the state to `DESIGN.md` and the engine together, and `make design-pull` after.
 - **The join of a `userFull` to its `user` is unasserted.** Every decision it makes
   is tested at the level it can be written at — an empty `about` is not a bio, an
   empty username is not a username, a date that is not a date is dropped, a
@@ -78,33 +70,35 @@ Real, and named so they are not mistaken for oversights:
   carries on to the sign-in path with a status sentence, so an unreadable session
   ends at ` Phone ` rather than at `offline:`. An unreachable store is still the
   `offline:` line and has never been recoverable.
-- **The update feed's stream end reconnects; a recoverable feed error neither
-  backs off nor re-subscribes.** `pump` loops on `updates.next()`. When the stream
-  *ends* (`None`) it records the position with `UpdateSubscription::finish` and
-  reports `Event::FeedEnded`, and `net::drive` rebuilds the client from the same
-  stored session and takes a new feed in-process — no restart and no re-login —
-  through the `state.bringing_up` single-flight guard the reader's `:retry` already
-  uses. The rebuild is a new `Client` because the update relay is single-shot (see
+- **The update feed's stream end reconnects, and recoverable feed errors back off
+  and re-subscribe.** `pump` loops on `updates.next()`. A recoverable `Some(Err)`
+  is waited out in the pump's task up to `CHAT_LIST_ATTEMPTS` = 3, sleeping
+  `backoff(&error)` between attempts — Telegram's own flood wait when it gave one,
+  the fixed `RETRY` = 5s otherwise — and each wait is reported as
+  `Event::FeedRetrying`, naming the reason, the wait and the count, so the reader
+  sees the wait coming. Past the bound the position is recorded with
+  `UpdateSubscription::finish` and `Event::FeedEnded` is reported, and when the
+  stream itself *ends* (`None`) the same two things happen without the wait. Either
+  way `net::drive` rebuilds the client from the same stored session and takes a new
+  feed in-process — no restart and no re-login — through the `state.bringing_up`
+  single-flight guard the reader's `:retry` already uses. The rebuild is a new
+  `Client` because the update relay is single-shot (see
   [`decisions.md`](./decisions.md)); the resulting `Ready` is place-preserving, so
   the open conversation and its cursor, the chat-list highlight restored by id, the
   jumplist, the selection, the register and the draft all survive, and the stale
   `state.history` anchors are cleared so paging re-anchors from the preserved
   window rather than wedging. One automatic reconnect is allowed per working feed:
   a feed that ends again before any update has arrived is a persistent `offline:`
-  the reader clears with `:retry`. What remains is the recoverable-error half — a
-  `Some(Err)` is still `tracing::warn!`ed and carried past, with no sleep and no
-  attempt count, so the feed stays usable and resumes where it left off — and a
-  backoff policy for it is **CUR-98's**, not this build's. The live feed-end path
-  is not tested: a real end cannot be provoked from the repository and the opt-in
-  datacenter suite cannot tell a dead feed from a quiet one, so the reconnect is
-  verified by unit tests over `App` and `State`. The boundary with the overlapping
-  reliability issues, recorded so they cannot silently re-tread each other:
-  **CUR-98** owns a backoff policy on recoverable feed errors; **CUR-45** owns a
-  connection-state indicator (this build writes only the existing persistent status
-  string); **CUR-49** owns a manual `:reconnect` command (there is none);
-  **CUR-47** owns queued in-flight sends (none are queued). This is a separate
-  request from the chat-list fetch, which is the one thing a launch cannot start
-  without.
+  the reader clears with `:retry`. What remains is live-path verification: a real
+  end or error cannot be provoked from the repository and the opt-in datacenter
+  suite cannot tell a dead feed from a quiet one, so the backoff and the reconnect
+  are verified by unit tests over `App` and `State`. The boundary with the
+  overlapping reliability issues, recorded so they cannot silently re-tread each
+  other: **CUR-45** owns a connection-state indicator (this build writes only the
+  existing persistent status string); **CUR-49** owns a manual `:reconnect` command
+  (there is none); **CUR-47** owns queued in-flight sends (none are queued). This
+  is a separate request from the chat-list fetch, which is the one thing a launch
+  cannot start without.
 - **Two sign-in hints in the Rust differ from the engine's text.** The bar's field
   hint is ` ⏎: send  Esc: cancel` and the waiting hint is
   ` Checking… — the request is in flight`, where the design model reuses its

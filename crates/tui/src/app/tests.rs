@@ -2538,6 +2538,58 @@ fn chat_command_ignores_unparseable_or_unknown_ids() {
 }
 
 #[test]
+fn select_chat_by_id_opens_the_matching_chat_and_says_so() {
+    let mut app = App::mock();
+
+    assert!(app.select_chat_by_id(3));
+
+    let expected = app
+        .chats()
+        .iter()
+        .position(|c| c.id == 3)
+        .expect("chat 3 is part of the mock data");
+    assert_eq!(app.list.selected_chat, expected);
+    assert_eq!(
+        app.conversation.conversation.window.chat_id, 3,
+        "the panel follows the chat list"
+    );
+}
+
+/// The `:chat` half of the contract: an unknown id reports `false` and
+/// leaves the screen as it was — saying where the reader landed instead is
+/// the launch selection's job, not this one's.
+#[test]
+fn select_chat_by_id_leaves_an_unknown_id_where_the_reader_was() {
+    let mut app = App::mock();
+    let before = app.list.selected_chat;
+
+    assert!(!app.select_chat_by_id(999));
+
+    assert_eq!(app.list.selected_chat, before);
+    assert_eq!(
+        app.conversation.conversation.window.chat_id, MOCK_CHAT,
+        "still the conversation that was open"
+    );
+}
+
+/// The pending `--chat` id applies once: taken when the list lands, and
+/// gone afterwards so a later refresh keeps the reader where they are.
+#[test]
+fn the_pending_initial_chat_is_taken_once() {
+    let mut app = App::mock();
+
+    assert_eq!(app.take_initial_chat(), None, "nothing pending at first");
+
+    app.set_initial_chat(2);
+    assert_eq!(app.take_initial_chat(), Some(2));
+    assert_eq!(
+        app.take_initial_chat(),
+        None,
+        "a second list lands with nothing to apply"
+    );
+}
+
+#[test]
 fn unknown_command_sets_the_status_line() {
     let mut app = App::mock();
     run_command_line(&mut app, "frobnicate");
@@ -2594,6 +2646,42 @@ fn a_retry_outlives_a_transient_status() {
         app.ui.status
     );
     assert_ne!(app.ui.status, IDLE_STATUS);
+}
+
+/// The flash deadline from before the command goes with it: `:retry`
+/// answers the `offline:` line, so a transient timer must not take the
+/// persistent sentence down on the next tick.
+#[test]
+fn retry_command_clears_a_flash_deadline() {
+    let mut app = App::mock();
+    app.flash("something went wrong");
+
+    run_command_line(&mut app, "retry");
+
+    assert!(app.ui.status_until.is_none(), "got {:?}", app.ui.status);
+    assert!(
+        !app.expire_status(Instant::now() + FLASH_FOR),
+        "got {:?}",
+        app.ui.status
+    );
+    assert_eq!(app.ui.status, "reconnecting");
+}
+
+/// A feed retry sentence lives at the persistent rank: above the hint, so
+/// the reader sees the wait — and never above a confirmation, which is the
+/// question that cannot wait.
+#[test]
+fn a_feed_retry_sentence_sits_at_the_persistent_rank() {
+    let mut app = App::mock();
+    app.ui.status = "the update feed failed (telegram returned rpc error 420 FLOOD_WAIT); \
+        retrying in 31s (attempt 1/3)"
+        .to_owned();
+
+    assert_eq!(app.status_text(), app.ui.status);
+
+    key(&mut app, 'q');
+
+    assert_eq!(app.status_text(), QUIT_PROMPT);
 }
 
 fn run_search_line(app: &mut App, query: &str) {

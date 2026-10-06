@@ -187,6 +187,14 @@ pub enum Event {
     /// attempts are spent.
     ChatListRetrying(ChatListRetry),
 
+    /// A feed read failed and is being waited out.
+    ///
+    /// Its own event rather than silence because the reader watching a live
+    /// feed is owed the same account a launch gets: the wait is a wait with a
+    /// reason and an end. The [`Event::FeedEnded`] behind it comes only once
+    /// the errors are past their bound.
+    FeedRetrying(FeedRetry),
+
     /// The update feed has been read to its end.
     ///
     /// The feed ends when the client shuts down, and `None` is that. Its own
@@ -389,6 +397,31 @@ pub struct ChatListRetry {
     attempt: u8,
 
     /// The bound those attempts are counted against.
+    attempts: u8,
+}
+
+/// What a feed retry in progress has to say about itself.
+///
+/// One type rather than four fields on the event, because the whole of it is one
+/// sentence: none of the reason, the wait, or the count is read apart from the
+/// others, and a reader watching a live feed is owed all three at once — the
+/// same account a launch gets from [`ChatListRetry`].
+pub struct FeedRetry {
+    /// Why the read that just failed failed.
+    reason: ProtoError,
+
+    /// How long until the next read, which is [`backoff`]'s answer: Telegram's
+    /// own wait when it gave one, the fixed `RETRY` otherwise.
+    delay: Duration,
+
+    /// The failure being waited out, of `attempts` in all.
+    ///
+    /// Counted as failures *seen*, so the first one to be reported is the
+    /// first — every wait inside the bound is slept, and only the error past
+    /// it ends the feed.
+    attempt: u8,
+
+    /// The bound those failures are counted against.
     attempts: u8,
 }
 
@@ -754,9 +787,14 @@ fn session_store(cfg: &Config) -> Box<dyn SessionStore> {
 ///
 /// The feed ends when the client shuts down, and `None` is that: the task stops,
 /// and the loop is told so it can rebuild the client and take a new feed. A
-/// failure while resolving a gap in the sequence is logged and carried on with —
-/// the feed stays usable, and it resumes where it left off.
+/// failure while resolving a gap in the sequence is waited out up to
+/// [`CHAT_LIST_ATTEMPTS`] times — [`feed_error_retry`]'s answer, slept here in
+/// the pump's task so the driver's 250 ms tick never waits on it — and read
+/// past while the feed stays usable. Past the bound the feed is ended instead:
+/// the loop below records its position and reports it, which is the feed's end
+/// asking for the one rebuild.
 async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
+    let mut errors_seen: u8 = 0;
     while let Some(result) = updates.next().await {
         match result {
             Ok(event) => {
@@ -766,7 +804,24 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
                 }
             }
             Err(error) => {
-                tracing::warn!(%error, "the update feed reported a failure it can recover from");
+                if let Some(delay) = feed_error_retry(errors_seen, &error) {
+                    errors_seen += 1;
+                    tracing::warn!(%error, "the update feed reported a failure it can recover from");
+                    let retry = FeedRetry {
+                        reason: error,
+                        delay,
+                        attempt: errors_seen,
+                        attempts: CHAT_LIST_ATTEMPTS,
+                    };
+                    if tx.send(AppEvent::Net(Event::FeedRetrying(retry))).is_err() {
+                        // The loop is gone, so there is nothing left to tell.
+                        break;
+                    }
+                    tokio::time::sleep(delay).await;
+                } else {
+                    tracing::warn!(%error, "the update feed kept failing past its bound; ending it so the client is rebuilt");
+                    break;
+                }
             }
         }
     }
@@ -1431,6 +1486,8 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
 
+        Event::FeedRetrying(retry) => apply_feed_retrying(app, &retry),
+
         Event::FeedEnded => apply_feed_ended(app, state),
 
         Event::LoggedOut { result } => apply_logged_out_and_reconnect(app, state, result),
@@ -1627,7 +1684,10 @@ fn apply_history(
 fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
     let reason = format!("{reason:#}");
     app.set_account(Err(reason.clone()));
-    app.ui.status = format!("offline: {reason}");
+    // A persistent sentence, so the flash deadline goes with it: `expire_status`
+    // is the clock a flash carries, and a failure must not revert to idle
+    // while the reader is still looking at it.
+    app.set_status(format!("offline: {reason}"));
     // No client to carry anything, so an in-flight sign-in is not in flight: the
     // flag would only keep the panel saying "Checking…".
     app.set_client_available(false);
@@ -1646,7 +1706,9 @@ fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
 /// so the two cannot disagree about what "reconnecting" looks like.
 fn apply_feed_ended(app: &mut App, state: &mut State) {
     state.reconnect_requested = true;
-    "reconnecting".clone_into(&mut app.ui.status);
+    // Persistent rather than a flash, for the same reason as the retry
+    // sentence: a pending flash deadline must not take it down.
+    app.set_status("reconnecting");
 
     // Nothing has a client until the rebuilt one's `Ready`: the flag says so to
     // every surface that would otherwise claim a request can be carried.
@@ -1707,6 +1769,22 @@ fn apply_ready_to_screen(
         true
     };
 
+    // The `--chat` id, taken once the first list has landed: a known id moves
+    // the reader there, before the sign-in flow below is entered, so a
+    // signed-out launch lands on the requested chat. An unknown id keeps the
+    // launch landing and is named persistently afterwards — unlike `:chat`,
+    // which stays silent — because `login_complete` below puts the status
+    // line back to its resting sentence and would overwrite it said here.
+    let mut unknown_initial_chat: Option<i64> = None;
+    if let Some(id) = app.take_initial_chat()
+        && !app.select_chat_by_id(id)
+    {
+        if app.conversation.conversation.window.chat_id == 0 {
+            app.select_chat(0);
+        }
+        unknown_initial_chat = Some(id);
+    }
+
     app.set_session_store(session_store.clone());
     state.session_store = Some(session_store);
     let no_session = matches!(&account, Err(reason) if reason.is_empty());
@@ -1723,6 +1801,9 @@ fn apply_ready_to_screen(
     // its resting sentence and would otherwise overwrite this.
     if !restored {
         "the open conversation is no longer in the chat list".clone_into(&mut app.ui.status);
+    }
+    if let Some(id) = unknown_initial_chat {
+        app.ui.status = format!("no chat with id {id}");
     }
 }
 
@@ -2052,10 +2133,28 @@ fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
     // A wait shorter than a second still has to be announced as one: "retrying in
     // 0s" reads as no retry at all.
     let seconds = retry.delay.as_secs().max(1);
-    app.ui.status = format!(
+    app.set_status(format!(
         "fetching the chat list failed ({:#}); retrying in {}s (attempt {}/{})",
         retry.reason, seconds, retry.attempt, retry.attempts
-    );
+    ));
+}
+
+/// What a feed retry in progress says on the status line.
+///
+/// Persistent, not a flash, for the same reason as the chat-list sentence: a
+/// reader who looks away and back must find the wait with its reason and its
+/// end, not an empty status line — and never above a confirmation, which is
+/// what the rank in `status_text` guarantees. Both the wait and the count are
+/// here because a wait with no visible end of it is the thing this sentence
+/// exists to prevent.
+fn apply_feed_retrying(app: &mut App, retry: &FeedRetry) {
+    // A wait shorter than a second still has to be announced as one: "retrying in
+    // 0s" reads as no retry at all.
+    let seconds = retry.delay.as_secs().max(1);
+    app.set_status(format!(
+        "the update feed failed ({:#}); retrying in {}s (attempt {}/{})",
+        retry.reason, seconds, retry.attempt, retry.attempts
+    ));
 }
 
 /// Whether the launch chat-list fetch may be asked again, and how long to wait.
@@ -2068,6 +2167,16 @@ fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
 /// asked too often has exactly the same answer as a page that was.
 fn chat_list_retry(attempts_used: u8, error: &ProtoError) -> Option<Duration> {
     (attempts_used < CHAT_LIST_ATTEMPTS).then(|| backoff(error))
+}
+
+/// Whether a failed update-feed read may be tried again, and how long to wait.
+///
+/// `None` once [`CHAT_LIST_ATTEMPTS`] errors have been seen, mirroring
+/// [`chat_list_retry`]: past the bound the failure goes back up rather than
+/// looping. The wait is [`backoff`]'s — Telegram's own when it asked for one,
+/// the fixed `RETRY` otherwise.
+fn feed_error_retry(errors_seen: u8, error: &ProtoError) -> Option<Duration> {
+    (errors_seen < CHAT_LIST_ATTEMPTS).then(|| backoff(error))
 }
 
 /// Whether a failure is Telegram asking the client to wait before trying again.
@@ -2536,10 +2645,52 @@ mod tests {
         assert_eq!(chat_list_retry(CHAT_LIST_ATTEMPTS + 1, &error), None);
     }
 
+    // ---- what a feed failure costs -------------------------------------
+
+    #[test]
+    fn a_feed_refusal_waits_what_telegram_asked_for() {
+        let flood = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+
+        assert_eq!(feed_error_retry(0, &flood), Some(Duration::from_secs(31)));
+        assert_eq!(
+            feed_error_retry(CHAT_LIST_ATTEMPTS - 1, &flood),
+            Some(Duration::from_secs(31)),
+            "the last error still gets its wait"
+        );
+    }
+
+    #[test]
+    fn a_feed_refusal_of_another_kind_waits_the_fixed_time() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+            "connection reset".to_owned(),
+        )));
+
+        assert_eq!(feed_error_retry(1, &error), Some(RETRY));
+    }
+
+    /// The bound is what stops the retry; the delay is never consulted again
+    /// once it is reached, however willing the error is to wait.
+    #[test]
+    fn a_feed_that_will_not_answer_stops_at_the_bound() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+
+        assert_eq!(feed_error_retry(CHAT_LIST_ATTEMPTS, &error), None);
+        assert_eq!(feed_error_retry(CHAT_LIST_ATTEMPTS + 1, &error), None);
+    }
+
     #[test]
     fn a_chat_list_being_retried_says_so_on_the_status_line() {
         let mut app = App::new();
         let mut state = State::default();
+        app.flash("something went wrong");
 
         apply(
             &mut app,
@@ -2559,6 +2710,49 @@ mod tests {
         assert!(
             app.ui.status.contains("31s") && app.ui.status.contains("1/3"),
             "got {:?}",
+            app.ui.status
+        );
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "the sentence does not go away on its own: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The feed's wait names the same three things the launch's does: the
+    /// reason, the wait, and the count. Persistent too — a flash deadline left
+    /// over from something transient must not take it down on the next tick.
+    #[test]
+    fn a_feed_retry_says_so_on_the_status_line() {
+        let mut app = App::new();
+        let mut state = State::default();
+        app.flash("something went wrong");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::FeedRetrying(FeedRetry {
+                reason: ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+                    code: 420,
+                    name: "FLOOD_WAIT".to_owned(),
+                    value: Some(31),
+                })),
+                delay: Duration::from_secs(31),
+                attempt: 1,
+                attempts: CHAT_LIST_ATTEMPTS,
+            }),
+        );
+
+        assert!(
+            app.ui.status.contains("FLOOD_WAIT")
+                && app.ui.status.contains("31s")
+                && app.ui.status.contains("1/3"),
+            "got {:?}",
+            app.ui.status
+        );
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "the sentence does not go away on its own: {:?}",
             app.ui.status
         );
     }
@@ -3136,6 +3330,317 @@ mod tests {
             !state.auto_reconnect_used,
             "a working feed re-arms the one reconnect"
         );
+    }
+
+    // ---- feed errors that recover, then exhaust ---------------------------
+
+    /// A feed failure below the bound is waited out on the feed, not escalated:
+    /// the policy answers `Some`, which is the pump sleeping and reading on —
+    /// so no rebuild is asked for and nothing says `offline:`.
+    #[test]
+    fn a_feed_error_below_the_bound_schedules_a_wait_not_a_rebuild() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+            "connection reset".to_owned(),
+        )));
+
+        assert!(
+            feed_error_retry(0, &error).is_some(),
+            "the first failure is waited out"
+        );
+        assert!(
+            feed_error_retry(CHAT_LIST_ATTEMPTS - 1, &error).is_some(),
+            "and so is the last one inside the bound"
+        );
+
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::default();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(!state.reconnect_requested, "no rebuild is asked for");
+        assert!(!state.bringing_up, "and none is in flight");
+        assert!(
+            !app.ui.status.starts_with("offline:"),
+            "and nothing says it: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// Past the bound the pump gives up the feed — `None` is what sends it to
+    /// record the position and report the end — which is the feed's end asking
+    /// for the one rebuild. The retries before it spend nothing of the
+    /// reconnect; only the rebuild the driver issues consumes it (Q4). The
+    /// `Ready` that answers keeps the reader's place and drops the stale
+    /// anchors.
+    #[tokio::test]
+    async fn a_feed_that_keeps_failing_is_rebuilt_around_the_reader() {
+        let error = ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+            "connection reset".to_owned(),
+        )));
+
+        assert_eq!(
+            feed_error_retry(CHAT_LIST_ATTEMPTS, &error),
+            None,
+            "the bound is what ends the feed"
+        );
+
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(1);
+        app.select_chat(0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        for character in "half a th".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // Leaving the conversation parks the draft under it; the window the
+        // reader is in is loaded after, so it is the one the rebuild finds.
+        app.select_chat(1);
+        app.apply_latest(messages(CHAT + 1, 1..=2));
+        let read_at = app.conversation.vim.cursor();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            history: History {
+                cursor: Some(HistoryCursor::new(CHAT + 1)),
+                jump: Some(Jump {
+                    peer_id: CHAT + 1,
+                    target_id: 20,
+                    kind: JumpKind::Unread,
+                }),
+                retry_at: Some(Instant::now() + RETRY),
+            },
+            ..State::default()
+        };
+
+        // What the pump sends on exhaustion, after recording the position.
+        apply(&mut app, &mut state, Event::FeedEnded);
+
+        assert!(
+            state.reconnect_requested,
+            "the driver is told to carry the reconnect out"
+        );
+        assert!(
+            !state.auto_reconnect_used,
+            "the retries and the request spend nothing of the one reconnect"
+        );
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(state.bringing_up, "the bring-up was issued");
+        assert!(
+            state.auto_reconnect_used,
+            "and only the rebuild consumes the one attempt"
+        );
+
+        // What the rebuild answers with. The old client is still the screen's
+        // until this lands; the re-fetch only reorders the list.
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1), chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id,
+            CHAT + 1,
+            "the conversation the reader was in is still the one on screen"
+        );
+        assert_eq!(
+            app.conversation.conversation.window.len(),
+            2,
+            "with its loaded window intact"
+        );
+        assert_eq!(
+            app.conversation.vim.cursor(),
+            read_at,
+            "and the reader where they were"
+        );
+        assert_eq!(
+            app.list.selected_chat, 0,
+            "the highlight followed the conversation's id into the reordered list"
+        );
+        assert_eq!(state.history.cursor, None, "the cursor goes");
+        assert_eq!(state.history.jump, None, "and the jump on its way");
+        assert_eq!(state.history.retry_at, None, "and the retry gate");
+
+        // The draft parked under the other conversation is not a fact about
+        // the page on show, so the rebuild leaves it alone.
+        app.select_chat(1);
+        assert_eq!(
+            app.input.line.text(),
+            "half a th",
+            "and the parked draft is still where it was left"
+        );
+    }
+
+    /// The rebuild the exhausted feed asked for is the one automatic attempt,
+    /// so a second feed end before any update has arrived is the
+    /// reader-visible failure rather than another rebuild.
+    #[tokio::test]
+    async fn a_second_exhausted_feed_end_before_any_update_says_the_feed_ended_again() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            ..State::default()
+        };
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+        assert!(state.auto_reconnect_used, "the one attempt is spent");
+
+        // The rebuild answers with its own failure rather than a client, and
+        // no update arrives to re-arm the reconnect.
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("connection reset")),
+        );
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(
+            app.ui.status, "offline: the update feed ended again",
+            "got {:?}",
+            app.ui.status
+        );
+        assert!(!state.bringing_up, "and it is not a bring-up");
+    }
+
+    // ---- feed sentences that stay up ------------------------------------
+
+    /// The regression `status_until` is: a flash deadline left over from
+    /// something transient must not take a persistent feed sentence down on the
+    /// next tick. Fired through `drive`, which is the clock that would do it.
+    #[test]
+    fn a_reconnecting_feed_sentence_survives_the_tick() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::default();
+        app.flash("something went wrong");
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(app.ui.status, "reconnecting", "got {:?}", app.ui.status);
+    }
+
+    /// The same deadline, cleared the same way, on the failure slot: an
+    /// `offline:` is not a thing that passes on its own either.
+    #[test]
+    fn an_offline_sentence_survives_longer_than_a_flash() {
+        let mut app = App::new();
+        let mut state = State::default();
+        app.flash("something went wrong");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("connection reset")),
+        );
+
+        assert_eq!(app.ui.status, "offline: connection reset");
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "the sentence does not go away on its own: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The whole visible sequence of an exhaustion with no reconnect left: the
+    /// waits name their reason, wait and count, and the end past the bound is
+    /// the reader-visible failure rather than another rebuild.
+    #[test]
+    fn an_exhausted_feed_end_with_no_reconnect_left_says_offline() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            // A previous rebuild spent the one attempt, and no update has
+            // arrived since to re-arm it.
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+        let retry = || FeedRetry {
+            reason: ProtoError::Framework(FrameworkError::Request(RequestError::Network(
+                "connection reset".to_owned(),
+            ))),
+            delay: RETRY,
+            attempt: 0,
+            attempts: CHAT_LIST_ATTEMPTS,
+        };
+        app.flash("something went wrong");
+
+        for attempt in 1..=CHAT_LIST_ATTEMPTS {
+            apply(
+                &mut app,
+                &mut state,
+                Event::FeedRetrying(FeedRetry { attempt, ..retry() }),
+            );
+        }
+
+        assert!(
+            app.ui.status.contains("connection reset")
+                && app
+                    .ui
+                    .status
+                    .contains(&format!("{CHAT_LIST_ATTEMPTS}/{CHAT_LIST_ATTEMPTS}")),
+            "the last wait is still waited out loud: {:?}",
+            app.ui.status
+        );
+
+        // Past the bound the pump records the position and reports the end.
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(
+            app.ui.status, "offline: the update feed ended again",
+            "got {:?}",
+            app.ui.status
+        );
+        assert!(!state.bringing_up, "and it is not a bring-up");
+        assert!(
+            !app.expire_status(Instant::now() + Duration::from_secs(10)),
+            "and the failure stays up: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The way out of that failure is the reader's own `:retry`: unlike the
+    /// automatic reconnect it is not a budgeted attempt, so it re-runs the
+    /// bring-up — whose chat-list budget starts over inside it — and leaves
+    /// the spent flag for the next update to clear.
+    #[tokio::test]
+    async fn a_retry_after_an_exhausted_feed_brings_the_client_up_again() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+        app.ui.status = "offline: the update feed ended again".to_owned();
+
+        app.request_retry();
+        drive(&mut app, &mut state, &tx);
+
+        assert!(state.bringing_up, "the bring-up was issued");
+        assert!(
+            !app.take_retry_request(),
+            "the request was taken, so a second pass asks for nothing"
+        );
+        assert!(
+            state.auto_reconnect_used,
+            "the manual retry spends nothing of the automatic one"
+        );
+        assert_eq!(app.ui.status, "reconnecting", "got {:?}", app.ui.status);
     }
 
     /// The feed's event reaches the windows through the same call the screen's
@@ -3739,6 +4244,95 @@ mod tests {
         );
 
         assert!(app.signin().is_none(), "the account is signed in");
+    }
+
+    // ---- a launch carrying --chat -----------------------------------------
+
+    /// A `Ready` landing on a pending `--chat` id opens that conversation:
+    /// the id is taken once the list is set, and the launch lands there
+    /// rather than on the first chat.
+    #[test]
+    fn a_ready_with_a_known_pending_chat_id_selects_it() {
+        let mut app = App::new();
+        app.set_initial_chat(CHAT + 1);
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id,
+            CHAT + 1,
+            "the requested conversation is the one on screen"
+        );
+        assert_eq!(app.list.selected_chat, 1, "and the highlight is on it");
+        assert_eq!(
+            app.take_initial_chat(),
+            None,
+            "the id applied once and is gone"
+        );
+    }
+
+    /// An id the list does not hold is not invented: the launch lands on the
+    /// first chat, and the status line names the unknown id persistently —
+    /// unlike `:chat`, which stays silent.
+    #[test]
+    fn a_ready_with_an_unknown_pending_chat_id_lands_first_and_names_it() {
+        let mut app = App::new();
+        app.set_initial_chat(999);
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, CHAT,
+            "the launch landing, not an invented conversation"
+        );
+        assert_eq!(app.list.selected_chat, 0);
+        assert!(
+            app.ui.status.contains("999"),
+            "the sentence names the id: {:?}",
+            app.ui.status
+        );
+        assert_eq!(app.chats().len(), 2, "and nothing was added to the list");
+    }
+
+    /// The pending selection applies before the sign-in flow is entered, so a
+    /// signed-out launch with `--chat` lands on the requested chat and then
+    /// opens the form — not the other way round.
+    #[test]
+    fn a_signed_out_launch_with_a_pending_chat_id_selects_then_signs_in() {
+        let mut app = App::new();
+        app.session.credentials_configured = true;
+        app.set_initial_chat(CHAT + 1);
+        let mut state = State::default();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id,
+            CHAT + 1,
+            "the requested conversation is on screen under the form"
+        );
+        assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
+        assert_eq!(app.ui.focus, tui::Focus::Input, "the field has the keys");
     }
 
     // ---- a client brought back up over an open conversation --------------

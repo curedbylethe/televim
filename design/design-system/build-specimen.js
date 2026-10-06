@@ -137,7 +137,9 @@ const CARD_FRAMES = [
   ['profile-round-trip-frame', 'l h l: the card starts at the top', 'ljjjhl', 'profile card, l h l round trip', 'ljjjhl: the card starts at the top'],
   ['profile-signed-out-frame', 'not signed in', 'none', 'profile card, not signed in', 'not signed in'],
   ['profile-signin-frame', ':signin from the card', ':signin<CR>', 'profile card, :signin from the card', ':signin from the card'],
-  ['profile-nothing-read-yet-frame', 'nothing read yet', 'none', 'profile card, nothing read yet', 'nothing read yet']
+  ['profile-nothing-read-yet-frame', 'nothing read yet', 'none', 'profile card, nothing read yet', 'nothing read yet'],
+  ['profile-contact-reading-frame', 'contact: the profile is not read yet', 'none', 'profile card, contact profile not read yet', 'contact: the profile is not read yet'],
+  ['profile-contact-failed-frame', 'contact: the read failed', 'none', 'profile card, contact read failed', 'contact: the read failed']
 ].map(([id, caption, keys, aria, variant]) => [id, caption, keys, aria, ...variantIndex('profile', variant)]);
 const removeBlock = (h, id) => h.replace(new RegExp('\\n[ \\t]*<div class="frame" data-od-id="' + id + '"[^>]*>[\\s\\S]*?</p>'), '');
 CARD_FRAMES.forEach(([id]) => { html = removeBlock(html, id); });
