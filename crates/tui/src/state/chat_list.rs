@@ -8,8 +8,9 @@ pub struct ChatListState {
     ///
     /// One value rather than a list beside a window: an event from the feed
     /// moves both, and keeping them apart would leave the preview and the
-    /// unread count somewhere the event never reached. [`App::apply_update`] is
-    /// the one place either is folded in.
+    /// unread count somewhere the event never reached. [`ChatListState`] and
+    /// [`ConversationState`](super::conversation::ConversationState) are folded
+    /// in together, in the one place that takes the feed's events.
     pub(crate) list: ChatList,
 
     pub selected_chat: usize,

@@ -9,17 +9,18 @@ use crate::line::LineEditor;
 pub struct DraftStore {
     /// The drafts of the conversations the reader is not in.
     ///
-    /// The open conversation's draft is [`App::line`]; this holds the rest,
+    /// The open conversation's draft is [`InputState`](super::input::InputState)'s
+    /// `line`; this holds the rest,
     /// parked under their peer id, so a reader who looks away and comes back
     /// finds the sentence they had started. The same seam as
-    /// [`App::read_receipts`]: the view is replaced on every switch, and what
+    /// [`DraftStore::read_receipts`]: the view is replaced on every switch, and what
     /// belongs to the conversation rather than to the page on show is kept here.
     ///
     /// Only a plain message draft is stored — [`App::park_draft`] forgets the
     /// reply or edit subject on the way in — and a peer's entry is dropped when
     /// its draft is empty, so the map holds only peers with words in them.
     ///
-    /// Not written to disk, for the same reason as [`App::read_receipts`]: a
+    /// Not written to disk, for the same reason as [`DraftStore::read_receipts`]: a
     /// launch starts empty, and an account change clears it ([`App::set_chats`])
     /// so no words cross an account boundary.
     pub(crate) drafts: HashMap<i64, LineEditor>,
