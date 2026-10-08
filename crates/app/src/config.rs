@@ -19,13 +19,52 @@
 //! framework's builder has. [`Config::session_path`] is the way out for a
 //! machine that has no such store, and the way to keep a run out of it
 //! entirely.
+//!
+//! # The key to that file
+//!
+//! The file holds the authorisation key encrypted. The key to it is, in order:
+//! [`Config::session_passphrase`] (`TELEVIM_SESSION_PASSPHRASE`), else a random
+//! key kept in the operating system's credential store. With neither the session
+//! is not read or written at all, and the screen says which key is missing —
+//! the file is never left in plaintext to get around it. Prefer the environment
+//! variable to the configuration file: a file is a second place the secret rests.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tui::bidi::BidiMode;
 use tui::state::ui::StickerMode;
+
+/// A setting that must not reach a log or a panic message.
+///
+/// `Debug` is redacted, so `{cfg:?}` and a derived `Debug` on anything holding a
+/// [`Config`] cannot print it. The text is only reachable through
+/// [`Secret::expose`].
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    /// The secret itself. Only for handing to the thing that uses it.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Secret {
+    fn from(text: String) -> Self {
+        Self(text)
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
 
 /// Who arranges a right-to-left row: the terminal, or this program.
 ///
@@ -104,6 +143,14 @@ pub struct Config {
     /// Set this on a machine with no credential store — a headless one, for
     /// instance — or to keep a run from touching the real one.
     pub session_path: Option<PathBuf>,
+
+    /// The passphrase the session file is encrypted under.
+    ///
+    /// Only read when [`Config::session_path`] is set. Absent or blank, the file
+    /// key comes from the OS credential store instead. Prefer
+    /// `TELEVIM_SESSION_PASSPHRASE`: this program never writes the configuration
+    /// file, but a value put in one rests there in the clear.
+    pub session_passphrase: Option<Secret>,
 }
 
 impl Default for Config {
@@ -119,6 +166,7 @@ impl Default for Config {
             code: None,
             password: None,
             session_path: None,
+            session_passphrase: None,
         }
     }
 }
@@ -157,6 +205,19 @@ impl Config {
     #[must_use]
     pub fn credentials(&self) -> Option<(i32, &str)> {
         Some((self.api_id?, self.api_hash.as_deref()?))
+    }
+
+    /// The session passphrase, if one was given and is not blank.
+    ///
+    /// A blank value is no passphrase: an empty `TELEVIM_SESSION_PASSPHRASE=` is
+    /// what an unset variable in a template looks like, and deriving a key from
+    /// it would encrypt the session under nothing.
+    #[must_use]
+    pub fn passphrase(&self) -> Option<&str> {
+        self.session_passphrase
+            .as_ref()
+            .map(Secret::expose)
+            .filter(|passphrase| !passphrase.trim().is_empty())
     }
 
     /// Who emits a right-to-left row, from [`Config::bidi`].
@@ -219,6 +280,43 @@ mod tests {
             cfg.session_path, None,
             "the credential store is the default"
         );
+    }
+
+    /// The passphrase is read from the environment like the rest, wins over the
+    /// file's, is never printed, and a blank one is no passphrase.
+    #[test]
+    fn the_session_passphrase_comes_from_the_environment_and_is_never_printed() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = dir.path().join("televim.toml");
+        std::fs::write(&file, "session_passphrase = \"from-the-file\"\n")
+            .expect("the configuration is written");
+
+        // SAFETY: process-wide environment, written only by the tests in this
+        // module and only while holding `ENV`.
+        unsafe { std::env::remove_var("TELEVIM_SESSION_PASSPHRASE") };
+        let cfg = Config::load(&file).expect("the file loads");
+        assert_eq!(cfg.passphrase(), Some("from-the-file"));
+
+        // SAFETY: as above.
+        unsafe { std::env::set_var("TELEVIM_SESSION_PASSPHRASE", "s3cret-pass") };
+        let cfg = Config::load(&file).expect("the file loads");
+        assert_eq!(cfg.passphrase(), Some("s3cret-pass"), "TELEVIM_* wins");
+
+        let printed = format!("{cfg:?}");
+        assert!(
+            !printed.contains("s3cret-pass"),
+            "Debug redacts it: {printed}"
+        );
+
+        // SAFETY: as above.
+        unsafe { std::env::set_var("TELEVIM_SESSION_PASSPHRASE", "  ") };
+        let cfg = Config::load(&file).expect("the file loads");
+        assert_eq!(cfg.passphrase(), None, "a blank value is no passphrase");
+
+        // SAFETY: as above — clearing a name this test set.
+        unsafe { std::env::remove_var("TELEVIM_SESSION_PASSPHRASE") };
     }
 
     #[test]
