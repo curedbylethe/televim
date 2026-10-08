@@ -64,9 +64,31 @@ below.
 ## Test Layers
 
 - **Unit Tests:** `#[cfg(test)]` modules live beside the code they cover, in
-  `domain`, `tui`, and `telegram-framework`. Test the Vim motion logic
+  `domain`, `tui`, `telegram-framework` and `app`. Test the Vim motion logic
   exhaustively (e.g., `gg` on an empty buffer, `G` at the last message). Widget
   tests use `ratatui`'s `TestBackend`.
+- **History cache:** two layers, both on every job and neither needing a
+  client. The **store** (`app/src/history_store.rs`) is pure functions over
+  `HistoryCache` and one file in a temp directory: the file's round trip, its
+  `0600` mode, an atomic write that leaves no temp behind, a corrupt or missing
+  file as an empty cache, the exact-account rule, the depth, peer and chat-list
+  bounds (on load as well as on write), every merge rule per `PageKind` — overlap,
+  replace past a gap, ignore when disjoint, deletion inside a page's stretch, an
+  empty page changing nothing — and every feed rule: an edit in place, a deletion
+  across all peers, an arrival only into a current run, and the marks an
+  interruption, an overtaken page or an eviction take away. The **loop** (`net.rs`
+  tests) drives `apply` and `drive` over a `State` with no client: a page landing
+  in the cache and on disk, one write in flight at a time, a failed write that
+  does not fail the page, sign-out emptying the cache, feed events and numbered
+  sends owing a write, a seed on open and none over a window the wire answered
+  empty, a warm start drawing the cached list and conversation before any `Ready`,
+  the `Ready` refreshing around it, `--chat` from the cache, a `Ready` with no
+  session taking the cache down before the form, the draft surviving the `Ready`,
+  a failed bring-up leaving the cache readable, and a cold cache launching as it
+  always has. `tui`'s half — the seed accepted only for an empty open window, the
+  revalidation sentence and its rank, paging held while the newest page is in
+  flight — is in `tui/src/app/tests.rs` and the `TestBackend` tests of the
+  conversation panel and the status bar.
 - **Integration Tests:** `crates/app/tests/proto_integration.rs` exercises the whole stack — the framework's login, the session store, the session cache, and the `proto` wrapper over both — against a real datacenter: it proves a stored session rebuilds an authorised client, that the client produces a private chat list in newest-first order, that the update feed and the chat list name conversations by the same identifier, and that history pages come back oldest first, without gaps or repeats, from an anchor that is exclusive. It lives in `app` because that is the only crate that may hold a framework `Client` and a `ProtoClient` at once. Three cases cannot be provoked with one account and are documented as deferred in the test's module docs: an update arriving for real, the offline gap `catch_up` closes, and a conversation with a known amount of history. A run prints how many updates it examined, how many the framework discarded, and how far it walked the history, so a run that proved little says so.
 - **Opt-in Tests:** Anything that needs a real account — `telegram-framework`'s
   `auth_integration` and `app`'s `proto_integration` — checks `TELEVIM_TEST_DC`
@@ -130,7 +152,9 @@ below.
     directory **and every parent** — signs in with the developer's credentials,
     fetches a real chat list, and its RSS becomes a property of that account
     rather than of the program. The environment block in the report records what
-    was dropped and that no credential reached the run.
+    was dropped and that no credential reached the run. The sandbox holds no
+    history file either, so every figure is a cold-cache launch — see
+    [`memory.md`](./memory.md).
   - **The compared harness never runs under a profiler.** RSS is read in-process
     (`/proc/self/status` on Linux, `proc_pidinfo` on macOS) because the
     development host has neither `valgrind` nor `heaptrack`, and because under

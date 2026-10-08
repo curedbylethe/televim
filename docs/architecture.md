@@ -42,7 +42,8 @@ televim/
     │                           #   grapheme, jumplist, line, rows, state,
     │                           #   text_row, theme, widgets, wrap
     └── app/                    # Composition root & CLI binary
-        ├── src/                # main, config, net, runtime
+        ├── src/                # main, config, draft_store, history_store,
+        │                       #   net, runtime
         └── tests/              # proto_integration.rs, tui_e2e.rs
 ```
 
@@ -67,7 +68,7 @@ in one direction and wider in another:
 | `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation`, `unicode-bidi`, `emojis`, `image-webp`, `tracing` |
 | `telegram-framework` | `thiserror`, `tracing`, `tokio`, `serde`, `serde_json`, `keyring`, `aes-gcm-siv`, `argon2`, `getrandom`, `zeroize`, and behind `live` the `grammers-*` crates. The four after `keyring` are `sealed`'s, and they are always compiled. |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
-| `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
+| `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `dotenvy`, `serde`, `serde_json`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
 
 
 ## Config that lives on disk, not here
@@ -414,6 +415,9 @@ crates/app/
 ├── src/
 │   ├── main.rs         # Entry point, CLI parsing (clap: --config, --chat)
 │   ├── config.rs       # Load TOML + env
+│   ├── draft_store.rs  # The drafts file beside the config
+│   ├── history_store.rs # The history file beside the config: cached
+│   │                   #   messages per peer, the chat list, the merge
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
@@ -458,6 +462,57 @@ Everything with a rule in it is a function over the state — `wanted`,
 that can be wrong is tested without a client or a datacenter; the rest is the
 calls. A `HistoryCursor`
 lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
+
+`history_store.rs` owns the history file (`televim.toml` → `televim.history.json`)
+and the cache it holds: the newest `HISTORY_CACHE_DEPTH` (200, asserted equal to
+`CONVERSATION_WINDOW`) messages of each of at most `HISTORY_CACHE_PEERS` (32)
+private peers, and the head of the chat list, at most `HISTORY_CACHE_CHATS` (500)
+rows with no presence. It lives in `app` for the drafts file's reason — `domain`
+and `tui` own no filesystem — and what crosses out of it is plain
+`domain::message::Message` and `domain::chat::Chat`, never its own rows. Every
+rule in it is a pure function over `HistoryCache`: `merge` folds a fetched page in
+(`PageKind::Latest`, `Older`, `Newer` or `Around`, the fetch's terms restated so
+the module names no `proto` type), `apply_update` folds a feed event in, `arrive`
+adds an arrival or a numbered send, `feed_interrupted` forgets which runs are
+current, and the least recently touched peer is evicted past the bound. The file
+is read and written by `HistoryFile` alone: one atomic, `0600` JSON payload of
+`{ account, peers, chats }`, best effort on every failure.
+
+The data flows one way through three places. **`runtime.rs`** loads the file once
+at launch and keeps it only when `history_acceptable` says it was saved under
+exactly the configured phone — otherwise it is removed — then hands file and
+cache to `net::State` and calls `net::open_from_cache` **before the first frame**:
+a warm cache installs the cached list, opens its head (or the `--chat` id when the
+cached list holds it) and seeds that conversation, so the screen is the reader's
+conversations under `connecting…` rather than an empty one. The `Ready` that
+follows finds a conversation open and takes the reconnect's place-preserving
+refresh, which clears the cursor so the next pass asks for the newest page; and
+since the line is then the open conversation's draft, the `Ready` keeps it rather
+than clearing it as it does a finished sign-in flow. Every pass it calls
+`State::persist_history` with the list on screen, and `finish_history` on the way
+out. **`net.rs`** keeps the cache in `State::cached` (`CachedHistory`: the cache,
+a dirty flag and the one write in flight). `apply_history` and `apply_jumped`
+merge each page that lands (`remember_page`), the feed's events and a send's
+numbered answer go through `remember_update` and `remember_sent`, and
+`FeedEnded`, `FeedRetrying` and every `Ready` call `feed_interrupted`. A snapshot
+is encoded on the loop thread and written by `spawn_blocking`, one write at a
+time, so an older snapshot can never land over a newer one; sign-out and a
+`Ready` with no session call `forget_history`, which empties the cache and
+removes the file behind any write still going. `seed_opened` runs on every open
+— from `begin_latest`, and from `drive` alone while there is no client, so a
+reader switching chats offline still sees cached rows — and only for an empty
+window the cursor does not yet name. **`tui`** takes the seed through
+`App::seed_from_cache` (`ConversationState::seed`, accepted only for the open
+chat while its window is empty) and marks the window `cached` until a page from
+the wire replaces it; `App::is_revalidating` is that flag together with a newest
+page in flight, and it is what puts `REVALIDATING_LABEL` on the status line.
+`wants_older` and `wants_newer` hold while the newest page is in flight, because
+a cached window is no longer the empty window that used to be the guard. `tui`
+names no file and no `proto` type on the way.
+
+The per-peer cache does not reopen the flat-window decision in `domain`: it is a
+store of what was read, one layer up, and the window it seeds is the same single
+bounded window as before.
 
 Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
 `TELEVIM_API_HASH`, `TELEVIM_PHONE`, `TELEVIM_CODE`, `TELEVIM_PASSWORD` and

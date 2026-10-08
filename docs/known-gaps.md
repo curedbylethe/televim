@@ -277,6 +277,53 @@ Real, and named so they are not mistaken for oversights:
   gains one entry for each distinct peer that reports presence and is never evicted
   for the length of the session. It is not measured against the memory budget
   ([`memory.md`](./memory.md)).
+- **The history file is not encrypted at rest.** `televim.history.json` is plain
+  JSON restricted to its owner (`0600`), the drafts file's precedent; the session
+  file is sealed, and the drafts and the history are not. Anyone who can read the
+  reader's files can read the newest 200 messages of up to 32 conversations and
+  the chat list's previews. Sealing both with the session file's key is the
+  follow-up — see [`decisions.md`](./decisions.md).
+- **The history file's account tag is the configured phone, not the signed-in
+  account.** The tag is `cfg.phone`, the same as the drafts', so two accounts
+  signed in one after the other under a launch that configures no phone (or the
+  same phone) share the tag. A `Ready` with no session removes the file, and
+  sign-out removes it, which covers the usual way of changing account; a session
+  swapped underneath a launch by hand is not covered.
+- **A newest page requested on an old client can mark a run current that missed
+  messages.** A latest page asked for before a reconnect and landing after the
+  reconnect's `Ready` is counted as this session's newest page, so a message the
+  dropped feed never delivered between the page and the new feed can be absent
+  from a run the cache now calls current; the next arrival is then appended past
+  the hole. A later latest page whose stretch covers the hole repairs it.
+- **An edit or a deletion that arrives while an older newest page is in flight is
+  overwritten until the next one.** The page was fetched before the event and
+  speaks for its whole stretch, so merging it puts back the pre-edit text or the
+  deleted row, in the cache and in the window it replaces. The next latest page
+  corrects both.
+- **An empty newest page leaves the cached rows in place.** A conversation cleared
+  on the server answers with no messages, and the merge treats an empty page as no
+  answer, because a fetch that short-circuited looks the same. So the cleared
+  conversation's cached rows stay on screen until something else replaces them,
+  and stay in the file.
+- **Cached chat-list previews and unread counts are only as fresh as the last
+  write.** A launch draws them as they were when the file was last written, and
+  the `Ready` replaces them; between the two, a count can be wrong. Presence is not
+  cached at all, so a cached list draws none until the feed reports it.
+- **`Ready` moves the focus to the conversation while the reader is typing under
+  `connecting…`.** A warm launch lets the reader type into the cached
+  conversation's draft before the wire answers; the draft is kept across the
+  `Ready`, but the focus is settled by it, so the line can lose focus mid-word.
+- **The history cache's worst case is past the memory budget.** Typically about a
+  megabyte; with every cached message at Telegram's maximum length it is about
+  80 MB in memory and a write briefly needs about three times that. The figures
+  and the upgrade path (a byte budget beside the row bounds) are in
+  [`memory.md`](./memory.md). The feed's per-peer *seen* map is outside the peer
+  bound and grows by one small entry per peer that received an arrival in the
+  session.
+- **No history or chat-list cache for groups or channels.** Only private
+  conversations are cached, because only private conversations are shown — the
+  product's scope, not a limit of the store. Media bytes are not cached either;
+  the media *kind* is, so a cached `[image]` row draws its token and nothing more.
 
 ## v2 Hooks
 

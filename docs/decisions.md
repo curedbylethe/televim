@@ -652,3 +652,124 @@ are in [`../AGENTS.md`](../AGENTS.md).
   function in `proto` (`to_presence`), and that function is where the mapping is
   tested against both sides. Sharing one type would make `telegram-framework` depend
   on `domain` for a single enum.
+- **Why there is a local history cache, and why `app` owns it:** without one,
+  every launch is an empty screen until a datacenter answers, and an offline
+  launch is an empty screen for good. The acceptance criteria for it are three,
+  quoted as written: "last N messages per peer persisted (sqlite/redb)",
+  "startup renders from cache before network", and "GetHistory merges wire
+  results into cache". The store is `app/src/history_store.rs`, for the drafts
+  file's reason: a store that must reach disk has to live in the crate that owns
+  the configuration path, and `domain` and `tui` own no filesystem. What crosses
+  out of it is plain `domain` values, so `tui` seeds a window from a
+  `Vec<Message>` and names neither the file nor `proto`. It does not reopen the
+  flat-window decision above: the window it seeds is the same bounded window,
+  and the cache is a store of what was read rather than a second history model.
+- **Why the history cache is a JSON file and not sqlite or redb:** the criterion
+  names "(sqlite/redb)" as the means, and the means was weighed rather than
+  taken. The working set is small and bounded — at most 6,400 rows and a 500-row
+  list, about a megabyte typically — and it is read whole at launch and written
+  whole behind the screen, so a database's strengths (indexed lookups, partial
+  writes, transactions across tables) buy nothing a single atomic file does not
+  already give. Both candidates are new dependencies: `rusqlite` brings a C
+  library and a build-time C toolchain, `redb` an on-disk format of its own, and
+  either would weigh more in the binary than the whole feature. `serde_json` is
+  already a dependency of `app` for the drafts file, and the drafts file already
+  has the discipline wanted here — sibling temp, `0600` before a byte is written,
+  rename over the target, every failure a warning. So the history file copies
+  that discipline and adds no dependency. The ceiling is the whole-file rewrite:
+  a cache that grew past a working set, or one that needed to be queried rather
+  than loaded, is what would reopen this.
+- **Why the bounds are 200 per peer, 32 peers and 500 chats:**
+  `HISTORY_CACHE_DEPTH` is exactly one `CONVERSATION_WINDOW`, and a `const`
+  assertion keeps the two equal: a cache hit fills the window a conversation
+  opens into, and more would be rows the window drops on arrival. They are named
+  apart because they are different promises, memory and disk. The depth alone
+  bounded one conversation and not how many, so the worst case grew with every
+  conversation the reader ever opened and could not be written down;
+  `HISTORY_CACHE_PEERS` is 32, a working set rather than an archive — more than a
+  reader moves between in a sitting, far fewer than an account holds — and the
+  peer past it that goes is the one least recently *touched*: written from the
+  wire by a page or an arrival. Seeding a window is not a touch, and peers loaded
+  from a file are untouched until the wire writes them, the one whose newest
+  message is oldest going first. `HISTORY_CACHE_CHATS` is 500 because a cap at
+  all is what gives the file a worst case; the fetched list itself has none, and
+  500 is more than a screen scrolls through before the fetched list replaces it.
+  The worst case these give is declared in [`memory.md`](./memory.md).
+- **Why a fetched page is merged as the stretch it speaks for:** a cache that
+  stored the last page fetched would hold one page; one that appended every page
+  would keep messages the server has since deleted. So the cache holds one
+  unbroken run of numbered messages per peer, ending at the newest the wire has
+  shown, and every rule keeps that true. A page is the whole of the stretch it was
+  fetched from, so inside that stretch it replaces every row it carries (which is
+  how an edit lands) and deletes every row it does not. A latest page speaks from
+  its oldest message up, and for the whole conversation when it came back short;
+  an older or newer page from its anchor, exclusive, to its far end, and past it
+  when short; an around page for its own two ends and nothing past them. A page
+  joins only when that stretch overlaps the run or starts from an anchor inside
+  it, because ids are not dense and cannot prove on their own that two stretches
+  touch; a latest page that does not overlap *replaces* the run, because the
+  newest end moved on past a gap nobody fetched; any other page that does not
+  reach the run is ignored. An empty page changes nothing, because an empty
+  answer is as likely a fetch that short-circuited as a conversation that was
+  cleared. Whether a direction is exhausted is deliberately **not** cached: the
+  file says nothing about how far back a conversation goes, and the cursor finds
+  that out from the wire as it always has.
+- **Why a new message joins only a run known to be current:** an edit and a
+  deletion are always safe to apply to a run — an edit moves nothing, and a
+  deletion, which names no peer, is applied to every peer because private
+  conversations share one id sequence. An arrival is not safe: a run loaded from
+  disk, or one the feed has been interrupted behind, may end well short of the
+  conversation's newest message, and appending past that end would claim
+  everything in between never existed. So a run is *current* only once a latest
+  page has landed for it in this session, an arrival or a numbered send joins
+  only a current run, and the feed ending, the feed reading past a failure, and
+  every `Ready` forget every mark, so each run waits for its next latest page. The
+  newest id the feed has shown per peer is remembered too, so that a latest page
+  fetched just before an arrival — which does not carry it — cannot mark the run
+  current while missing it. The marks are memory only: they are claims about a
+  feed, and the next launch has a different one.
+- **Why the history file's account rule is stricter than the drafts':** for
+  drafts a false clear loses the reader's words, so only a named mismatch
+  discards. For history a false clear costs one fetch the wire was going to make
+  anyway, while a false accept paints another account's conversation under a peer
+  id that may be reused. So the file seeds a launch only when it was saved under
+  exactly the configured phone, unnamed matching unnamed, and a file that may not
+  seed is removed rather than left for the first write to overwrite. A `Ready`
+  that says there is no session forgets the cache and removes the file too: the
+  sign-in form it opens accepts any number, so the cache cannot know the account
+  that signs in next is its own.
+- **Why the chat list is in the history file:** "startup renders from cache
+  before network" cannot be met by messages alone, because a conversation is
+  opened from the list and the list came from the wire. So the head of the list
+  is cached in the same file — one account tag guards both and one removal on
+  sign-out takes both, where a second file would be a second place for another
+  account's conversations to survive. It is read off the screen each pass rather
+  than at each thing that moves it, because a landing, a pin, the feed, a send
+  and the reader reading all move it and the screen is where they have already
+  been folded together; only a change marks the file. Presence is not cached:
+  read back from a file, it is a claim about a moment that has passed. Before the
+  first frame the cached list is installed and its head (or the cached `--chat`
+  id) seeded, and the `Ready` that follows takes the reconnect's place-preserving
+  refresh, so nothing new decides where the reader lands. The draft resumed into
+  that conversation used to be wiped by the `Ready`'s `login_complete`, because
+  taking a finished sign-in flow down empties the line; with no flow open the line
+  is the reader's draft, so it is kept. When bring-up fails, `offline:` still
+  means what it meant: the cached rows are readable and switchable, and they are
+  not an answer.
+- **Why the history file is plaintext for now:** message bodies are as
+  sensitive as the drafts, and the drafts file is plaintext JSON beside the
+  configuration, restricted to its owner (`0600`) and tagged with the account. The
+  history file follows that precedent rather than the session file's. Sealing it
+  the way the session is sealed would bring the envelope's key resolution and its
+  failure modes — a wrong passphrase, no key at all — to a file whose loss costs
+  one fetch, and would put a key derivation in front of the cache a launch draws
+  from; that is a change of its own, not something this file half-does. It is
+  recorded in [`known-gaps.md`](./known-gaps.md).
+- **Why the cached window's sentence ranks just above the hint:** a cached window
+  has messages to show, so the `Loading…` row — which stands in for messages — is
+  not drawn over it, and the wait is said on the status line instead:
+  `Cached messages — loading the latest…`. It ranks below everything written to
+  the status, so a cache never talks over a failure — a revalidation that fails
+  says `history:`, and `offline:` keeps its line — and it is said only while the
+  window came from the cache *and* its newest page is in flight, so an offline
+  reader is not promised something that is not coming.
