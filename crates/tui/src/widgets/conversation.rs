@@ -1679,6 +1679,7 @@ mod tests {
             (MediaKind::Video, "[video]"),
             (MediaKind::Gif, "[gif]"),
             (MediaKind::Voice, "[voice]"),
+            (MediaKind::Sticker, "[sticker]"),
             (MediaKind::File, "[file]"),
         ] {
             let app = showing(vec![attachment(1, 0, false, media)]);

@@ -15,7 +15,7 @@ pub enum MessageStatus {
 /// The variants are deliberately coarse: `televim` distinguishes them only to
 /// give a message with no caption something to show, so the exact set can follow
 /// what the interface turns out to need rather than what Telegram can express.
-/// `File` is the catch-all — a sticker, a video note, a contact, or anything this
+/// `File` is the catch-all — a video note, a contact, or anything this
 /// build does not model — so that an unrecognised attachment still degrades to
 /// something visible instead of vanishing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,6 +24,7 @@ pub enum MediaKind {
     Video,
     Gif,
     Voice,
+    Sticker,
     File,
 }
 
@@ -39,6 +40,7 @@ impl MediaKind {
             Self::Video => "[video]",
             Self::Gif => "[gif]",
             Self::Voice => "[voice]",
+            Self::Sticker => "[sticker]",
             Self::File => "[file]",
         }
     }
@@ -142,6 +144,12 @@ mod tests {
     fn a_caption_is_never_replaced_by_the_label() {
         let message = attachment(Some(MediaKind::Photo), "at the pier");
         assert_eq!(message.display_body(), "at the pier");
+    }
+
+    #[test]
+    fn a_captioned_sticker_shows_its_caption() {
+        let message = attachment(Some(MediaKind::Sticker), "back at you");
+        assert_eq!(message.display_body(), "back at you");
     }
 
     #[test]
