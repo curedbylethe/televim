@@ -128,7 +128,7 @@ pub use messages::{TEXT_LIMIT, validate_text};
 #[cfg(feature = "live")]
 pub use search::{SEARCH_LIMIT, SearchArgs, SearchResults};
 #[cfg(feature = "live")]
-pub use updates::{MessageInfo, UpdateKind, UpdateSubscription};
+pub use updates::{MessageInfo, UpdateKind, UpdateSubscription, UserPresence};
 
 /// The `grammers` request and response types accepted by [`Client::invoke`].
 ///

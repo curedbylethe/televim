@@ -25,6 +25,8 @@ use std::borrow::Cow;
 
 use domain::chat::{Chat, ChatKind};
 use domain::message::{MediaKind, Message, MessageStatus};
+use domain::presence::Presence;
+use telegram_framework::UserPresence;
 
 #[cfg(feature = "live")]
 use telegram_framework::{DialogInfo, DialogKind, MessageInfo};
@@ -237,9 +239,42 @@ pub(crate) fn chat_kind(kind: DialogKind) -> ChatKind {
     }
 }
 
+/// Translates the framework's presence into the domain's.
+///
+/// Total and exhaustive on purpose: a new framework variant stops the build
+/// here rather than arriving in `domain` as a silent default. `was_online` is
+/// carried through unchanged.
+pub(crate) fn to_presence(presence: UserPresence) -> Presence {
+    match presence {
+        UserPresence::Online => Presence::Online,
+        UserPresence::Offline { was_online } => Presence::Offline { was_online },
+        UserPresence::Recently => Presence::Recently,
+        UserPresence::LastWeek => Presence::LastWeek,
+        UserPresence::LastMonth => Presence::LastMonth,
+        UserPresence::Hidden => Presence::Hidden,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_framework_presence_maps_to_its_domain_twin_keeping_the_timestamp() {
+        assert_eq!(to_presence(UserPresence::Online), Presence::Online);
+        assert_eq!(
+            to_presence(UserPresence::Offline {
+                was_online: 1_700_000_000
+            }),
+            Presence::Offline {
+                was_online: 1_700_000_000
+            }
+        );
+        assert_eq!(to_presence(UserPresence::Recently), Presence::Recently);
+        assert_eq!(to_presence(UserPresence::LastWeek), Presence::LastWeek);
+        assert_eq!(to_presence(UserPresence::LastMonth), Presence::LastMonth);
+        assert_eq!(to_presence(UserPresence::Hidden), Presence::Hidden);
+    }
 
     /// A conversation with everything but the fields under test filled in.
     fn proto_chat(id: i64, kind: ChatKind) -> ProtoChat {
