@@ -41,11 +41,9 @@
 //! the store the session went into. [`State`] holds them, so the one module that
 //! may see both halves sees them in one place.
 
-use std::fs;
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -70,6 +68,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
 use crate::config::Config;
 use crate::draft_store::DraftFile;
 use crate::history_store::{HistoryCache, HistoryFile, PageKind};
+use crate::media_cache::MediaCache;
 use crate::runtime::AppEvent;
 
 /// How many messages one page holds.
@@ -573,6 +572,12 @@ pub struct State {
     /// and never written.
     history_file: Option<HistoryFile>,
 
+    /// The media cache: downloads are looked up in it and stored into it.
+    ///
+    /// Set by the loop at launch, and `None` in the same places for the same
+    /// reason. Shared with the download tasks, which lock it off the loop.
+    media_cache: Option<Arc<Mutex<MediaCache>>>,
+
     /// The cached messages, and where writing them to that file has got to.
     cached: CachedHistory,
 
@@ -684,6 +689,27 @@ impl State {
     /// A setter for [`State::set_draft_file`]'s reason.
     pub(crate) fn set_history_file(&mut self, file: HistoryFile) {
         self.history_file = Some(file);
+    }
+
+    /// Hands the launch's media cache to downloads.
+    pub(crate) fn set_media_cache(&mut self, cache: MediaCache) {
+        self.media_cache = Some(Arc::new(Mutex::new(cache)));
+    }
+
+    /// Empties the media cache: its files are the account's, and sign-out ends
+    /// the account.
+    ///
+    /// Synchronous, like the history file's clear on the same path. A download
+    /// still in flight may store one more file after this; the next launch
+    /// under another account, or none, clears the directory anyway
+    /// ([`MediaCache::open`]).
+    fn forget_media(&self) {
+        if let Some(cache) = &self.media_cache {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .clear();
+        }
     }
 
     /// Hands over what the history file held at launch, already vetted
@@ -1351,7 +1377,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                 message_id,
             } => {
                 let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
-                kind.map(|kind| {
+                kind.zip(state.media_cache.clone()).map(|(kind, cache)| {
                     "downloading media…".clone_into(&mut app.ui.status);
                     app.conversation.downloads.start(*chat_id, *message_id);
                     let cancel = Arc::new(AtomicBool::new(false));
@@ -1360,7 +1386,11 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                         message_id: *message_id,
                         flag: Arc::clone(&cancel),
                     });
-                    MediaJob { kind, cancel }
+                    MediaJob {
+                        kind,
+                        cancel,
+                        cache,
+                    }
                 })
             }
             _ => None,
@@ -1994,6 +2024,7 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             // From memory as well as from disk, or the next write would put
             // them back.
             state.forget_history();
+            state.forget_media();
             // The empty reason is the signed-out *state*, not a missing one: the
             // reader chose this, so a line saying why it could not read a
             // profile would be an excuse nobody asked for.
@@ -2183,11 +2214,12 @@ struct MediaCancel {
     flag: Arc<AtomicBool>,
 }
 
-/// What one media download needs to run: the kind its file is named by, and the
-/// flag that stops it.
+/// What one media download needs to run: the kind its file is stored under, the
+/// flag that stops it, and the cache it is looked up in and stored into.
 struct MediaJob {
     kind: MediaKind,
     cancel: Arc<AtomicBool>,
+    cache: Arc<Mutex<MediaCache>>,
 }
 
 /// The status sentence for an open whose message is not on the screen, so its
@@ -2204,33 +2236,6 @@ fn open_media_kind(view: &ConversationView, chat_id: i64, message_id: i64) -> Op
     view.message(message_id)
         .filter(|message| message.chat_id == chat_id)
         .and_then(|message| message.media)
-}
-
-/// The extension a media kind is saved under.
-///
-/// A dispatch hint for whichever viewer opens the file, not a claim about its
-/// bytes: nothing here sniffs them, and a photo sent as a document keeps the
-/// extension of its kind.
-fn media_suffix(kind: MediaKind) -> &'static str {
-    match kind {
-        MediaKind::Photo => "jpg",
-        MediaKind::Video => "mp4",
-        MediaKind::Gif => "gif",
-        MediaKind::Voice => "ogg",
-        MediaKind::Sticker => "webp",
-        MediaKind::File => "bin",
-    }
-}
-
-/// The file name a download is saved under, in the temp directory.
-///
-/// The process id keeps two televim instances from sharing a file; the chat and
-/// message ids keep two messages apart.
-fn media_file_name(pid: u32, chat_id: i64, message_id: i64, kind: MediaKind) -> String {
-    format!(
-        "televim-{pid}-{chat_id}-{message_id}.{}",
-        media_suffix(kind)
-    )
 }
 
 /// The status sentence for a download that wrote no file.
@@ -2282,10 +2287,11 @@ fn media_progress(
     }
 }
 
-/// Downloads the media on a message and writes it to the temp directory.
+/// Downloads the media on a message into the cache, or serves it from there.
 ///
-/// The file is written whole or not at all, by [`write_private`], so a download
-/// that failed or was refused leaves nothing for a viewer to open half-read.
+/// A message already cached is answered from disk with no request on the wire.
+/// A miss downloads, then stores the bytes; the store is disk I/O, so it runs
+/// off the loop.
 async fn save_media(
     client: &ProtoClient,
     tx: &UnboundedSender<AppEvent>,
@@ -2302,6 +2308,10 @@ async fn save_media(
             reason: MEDIA_NOT_LOADED.to_owned(),
         };
     };
+
+    if let Some(event) = cached_media(&job.cache, chat_id, message_id) {
+        return event;
+    }
 
     let progress = media_progress(tx.clone(), chat_id, message_id, job.cancel);
     let bytes = match client
@@ -2324,64 +2334,57 @@ async fn save_media(
         }
     };
 
-    let name = media_file_name(std::process::id(), chat_id, message_id, job.kind);
-    let path = std::env::temp_dir().join(name);
-    match write_private(&path, &bytes) {
-        Ok(()) => Event::MediaSaved {
+    let cache = Arc::clone(&job.cache);
+    let kind = job.kind;
+    tokio::task::spawn_blocking(move || keep_download(&cache, chat_id, message_id, kind, &bytes))
+        .await
+        .unwrap_or_else(|error| Event::MediaFailed {
+            chat_id,
+            message_id,
+            reason: format!("could not cache the media: {error}; nothing was saved"),
+        })
+}
+
+/// The answer for a message already in the cache, if it is.
+fn cached_media(cache: &Mutex<MediaCache>, chat_id: i64, message_id: i64) -> Option<Event> {
+    let path = cache
+        .lock()
+        .expect("the media cache lock is not poisoned")
+        .lookup(chat_id, message_id)?;
+    Some(Event::MediaSaved {
+        chat_id,
+        message_id,
+        path,
+    })
+}
+
+/// Stores a finished download in the cache, and answers with the file it is in.
+///
+/// A store that fails is said on the status line: the reader asked to open the
+/// media, and a file that was never written cannot be opened.
+fn keep_download(
+    cache: &Mutex<MediaCache>,
+    chat_id: i64,
+    message_id: i64,
+    kind: MediaKind,
+    bytes: &[u8],
+) -> Event {
+    let stored = cache
+        .lock()
+        .expect("the media cache lock is not poisoned")
+        .store(chat_id, message_id, kind, bytes);
+    match stored {
+        Some(path) => Event::MediaSaved {
             chat_id,
             message_id,
             path,
         },
-        Err(error) => Event::MediaFailed {
+        None => Event::MediaFailed {
             chat_id,
             message_id,
-            reason: format!("could not write the media: {error}; nothing was saved"),
+            reason: "could not cache the media; nothing was saved".to_owned(),
         },
     }
-}
-
-/// Writes `bytes` to `path` whole, or leaves no file at `path`.
-///
-/// The bytes go to a sibling first and are renamed into place, the same shape as
-/// the drafts file: a write that fails part way leaves no half-written file where
-/// a viewer would look. The sibling is created owner-only, because the media is
-/// the account's.
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".part");
-    let temp = path.with_file_name(name);
-
-    // A stale sibling from an earlier write that did not finish: removed so the
-    // exclusive create below can take the name.
-    let _ = fs::remove_file(&temp);
-    let result = create_private(&temp)
-        .and_then(|mut file| file.write_all(bytes))
-        .and_then(|()| fs::rename(&temp, path));
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-/// Creates a new file readable and writable by its owner only.
-#[cfg(unix)]
-fn create_private(path: &Path) -> io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-}
-
-/// No mode bits on platforms whose permissions `std` cannot express portably.
-#[cfg(not(unix))]
-fn create_private(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
 }
 
 /// Settles a media download: a saved file is queued for the viewer and said on
@@ -7589,30 +7592,6 @@ mod media_tests {
         }
     }
 
-    /// Each kind is saved under the extension its viewer is dispatched by.
-    #[test]
-    fn each_media_kind_is_saved_under_its_dispatch_suffix() {
-        assert_eq!(media_suffix(MediaKind::Photo), "jpg");
-        assert_eq!(media_suffix(MediaKind::Video), "mp4");
-        assert_eq!(media_suffix(MediaKind::Gif), "gif");
-        assert_eq!(media_suffix(MediaKind::Voice), "ogg");
-        assert_eq!(media_suffix(MediaKind::Sticker), "webp");
-        assert_eq!(media_suffix(MediaKind::File), "bin");
-    }
-
-    /// The name carries the process, chat and message, and the kind's suffix.
-    #[test]
-    fn a_media_file_is_named_by_process_chat_message_and_kind() {
-        assert_eq!(
-            media_file_name(7, 42, 5, MediaKind::Video),
-            "televim-7-42-5.mp4"
-        );
-        assert_eq!(
-            media_file_name(7, -100, 5, MediaKind::File),
-            "televim-7--100-5.bin"
-        );
-    }
-
     /// An oversize media names the limit, and every other failure is a sentence
     /// that says nothing was saved.
     #[test]
@@ -7656,33 +7635,35 @@ mod media_tests {
         assert_eq!(open_media_kind(&view, CHAT + 1, 1), None, "another chat");
     }
 
-    /// The file lands whole under its name, owner-only, and leaves no sibling;
-    /// a write into a directory that does not exist leaves nothing behind.
+    /// A miss stores the download and answers with its file; the next open of the
+    /// same message is answered from disk, with no download to ask for.
     #[test]
-    fn a_saved_media_file_is_whole_owner_only_and_leaves_no_sibling() {
-        use std::os::unix::fs::PermissionsExt as _;
-
+    fn a_download_is_stored_once_and_the_next_open_is_served_from_disk() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let path = dir.path().join("televim-1-2-3.jpg");
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None));
 
-        write_private(&path, b"first").expect("the write lands");
-        write_private(&path, b"second").expect("an overwrite lands");
+        assert!(
+            cached_media(&cache, CHAT, 5).is_none(),
+            "nothing cached yet"
+        );
 
-        assert_eq!(std::fs::read(&path).expect("the file"), b"second");
-        let mode = std::fs::metadata(&path)
-            .expect("metadata")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
-        let names: Vec<_> = std::fs::read_dir(dir.path())
-            .expect("the directory")
-            .map(|entry| entry.expect("an entry").file_name())
-            .collect();
-        assert_eq!(names.len(), 1, "no sibling left: {names:?}");
+        let Event::MediaSaved { path, .. } =
+            keep_download(&cache, CHAT, 5, MediaKind::Video, b"clip")
+        else {
+            panic!("a stored download answers with its file");
+        };
+        assert_eq!(std::fs::read(&path).expect("the file"), b"clip");
 
-        let missing = dir.path().join("no-such-dir").join("televim-1-2-3.jpg");
-        assert!(write_private(&missing, b"x").is_err());
-        assert!(!missing.exists());
+        let Some(Event::MediaSaved {
+            path: again,
+            message_id,
+            ..
+        }) = cached_media(&cache, CHAT, 5)
+        else {
+            panic!("the cached message is served from disk");
+        };
+        assert_eq!(again, path);
+        assert_eq!(message_id, 5);
     }
 
     /// The progress callback reports each chunk on the channel, in order; once the

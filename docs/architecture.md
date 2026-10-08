@@ -43,7 +43,7 @@ televim/
     │                           #   text_row, theme, widgets, wrap
     └── app/                    # Composition root & CLI binary
         ├── src/                # main, config, draft_store, history_store,
-        │                       #   net, runtime
+        │                       #   media_cache, net, runtime
         └── tests/              # proto_integration.rs, tui_e2e.rs
 ```
 
@@ -425,6 +425,8 @@ crates/app/
 │   ├── draft_store.rs  # The drafts file beside the config
 │   ├── history_store.rs # The history file beside the config: cached
 │   │                   #   messages per peer, the chat list, the merge
+│   ├── media_cache.rs  # The media directory beside the config: one file
+│   │                   #   per message, bounded by bytes and by count
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
@@ -469,6 +471,16 @@ Everything with a rule in it is a function over the state — `wanted`,
 that can be wrong is tested without a client or a datacenter; the rest is the
 calls. A `HistoryCursor`
 lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
+
+`media_cache.rs` owns the media directory (`televim.media` beside the config, or
+`media_cache_dir`). One file per message, named `<chat>-<message>.<suffix>` from the
+server's ids, so the name survives a restart. `MediaCache` keeps an in-memory index
+that a scan rebuilds at launch, holds both `MEDIA_CACHE_MAX_BYTES` and
+`MEDIA_CACHE_MAX_ENTRIES` by evicting the oldest modification time, and writes each
+file atomically at `0600`, as the history file does. `runtime.rs` opens it at launch
+with the configured account, which clears the directory on a mismatch; `net::State`
+holds it behind an `Arc<Mutex>`, clears it at sign-out, and `save_media` looks up
+and stores through it — the store under `spawn_blocking`.
 
 `history_store.rs` owns the history file (`televim.toml` → `televim.history.json`)
 and the cache it holds: the newest `HISTORY_CACHE_DEPTH` (200, asserted equal to

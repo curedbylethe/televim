@@ -173,13 +173,19 @@ Working today:
   (`ProtoClient::download_media`, capped at 16 MiB, refused rather than
   truncated when it is over): the attachment is re-read by identifier, because a
   description is rebuilt on every page and a cached locator would be stale.
-  `o` on a media message in Normal mode saves it to `televim-<pid>-<chat>-<message>.<ext>`
-  in the temp directory, created `0600`, and launches the platform viewer on it:
+  `o` on a media message in Normal mode opens it in the platform viewer:
   `open -W` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows (untested).
-  The terminal leaves the alternate screen and raw mode for the viewer and comes
-  back where it was. A file over the 16 MiB limit is refused and nothing is
-  saved, and the status line says what happened. The saved files are left in the temp directory;
-  nothing removes them yet. While a download runs, its row shows `[image… 42%]` beside
+  The file comes from the media cache: a message opened before is served from
+  disk with no request, and a first open downloads it and stores it there. The
+  cache is a directory of `0600`, plaintext files named `<chat>-<message>.<ext>`,
+  kept beside the config as `televim.media` unless `media_cache_dir` (or
+  `TELEVIM_MEDIA_CACHE_DIR`) names another. It keeps at most 1 GiB and 256 files;
+  past either, the oldest by modification time goes first. The directory is
+  emptied when the account changes and on sign-out. Files saved by earlier
+  versions under the temp directory are not migrated or removed; the OS reclaims
+  them. The terminal leaves the alternate screen and raw mode for the viewer and
+  comes back where it was. A file over the 16 MiB limit is refused and nothing is
+  saved, and the status line says what happened. While a download runs, its row shows `[image… 42%]` beside
   the placeholder (the megabytes so far when Telegram declared no size); `Esc` on that
   message stops it, and a failed download shows `[failed: …]`. There is no viewer setting. The known limits of the
   hand-off are in [`docs/known-gaps.md`](docs/known-gaps.md).
@@ -272,7 +278,8 @@ Working today:
   arrives, the status line says `offline:` and `:retry` asks again. A `●` beside
   the sentence always shows which holds: green while the feed delivers, yellow
   while a bring-up or rebuild is under way, red once the budget is spent.
-- **History cache:** the newest 200 messages of each of the 32 most recently
+- **History cache:** media bytes are not in this file; they are in the media cache
+  (see **Media** above). The newest 200 messages of each of the 32 most recently
   touched private conversations, and the first 500 rows of the chat list, are kept
   in `televim.history.json` beside the config — plain JSON, `0600`, written
   atomically and off the loop's thread, behind every page, feed event and list

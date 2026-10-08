@@ -8,6 +8,7 @@
 mod config;
 mod draft_store;
 mod history_store;
+mod media_cache;
 mod net;
 mod runtime;
 
