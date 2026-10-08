@@ -357,6 +357,28 @@ Real, and named so they are not mistaken for oversights:
   tag, so rows 1 to 7 start at column 0 while row 0 starts after the tag. The
   `kitty` placement follows row 0's column, as the picture's first row does.
   Not changed here.
+- **Forwarding has no live proof in CI.** The batching and the error mapping are
+  unit-tested, and the key path is driven through the `tui` app tests with
+  action assertions. No test sends a forward to Telegram: the live round
+  trip is deferred, and `proto_integration.rs` names it among its deferred cases.
+  The opt-in run (`TELEVIM_TEST_DC=1 cargo test -p televim --test proto_integration`)
+  does not exercise forwarding. The upgrade path is a Saved Messages round trip in
+  that file.
+- **A content-protected source is refused only from the wire.** Nothing reads the
+  chat's `noforwards` flag before the send, so the picker opens over a protected
+  chat and the refusal arrives after `Enter`, as `CHAT_FORWARDS_RESTRICTED`, which
+  the status line reports as `<chat> does not allow forwarding`. The upgrade path is
+  to read the flag and refuse in `begin_forward`, next to the placeholder refusal.
+- **There is no `tui_e2e` keystroke test for the forward flow.** The seven
+  `tui_e2e.rs` stubs are `#[ignore = "requires termlens"]` and none covers
+  forwarding. The flow is asserted instead by the key-drive tests in
+  `crates/tui/src/app/tests.rs` and the picker's `TestBackend` tests in
+  `widgets/forward_picker.rs`, which is the layer that exists in this tree.
+- **The forward picker walks the chat list, not a shared destination picker.**
+  Epic 3's destination picker is not in the tree, so the picker is a chat-walker
+  over `ChatListState`, and the person picker in `user_list.rs` is not reused, since
+  it resolves people rather than chats. When Epic 3 lands, the picker should
+  converge on its interface rather than keep a second one.
 
 ## v2 Hooks
 
