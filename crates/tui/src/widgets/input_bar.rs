@@ -397,10 +397,15 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let height = usize::from(area.height).saturating_sub(2).max(1);
 
     let mode = app.bidi();
-    let laid_out = app.input.line.laid_out_in(width, mode);
-    let first = laid_out.first_row(height);
-
     let prefix = app.prompt_prefix();
+    // The prefix sits in front of the first row, so the rows are cut for the
+    // columns that are left over once it is drawn.
+    let lead_columns = u16::try_from(prefix.len()).unwrap_or(u16::MAX);
+    let laid_out = app
+        .input
+        .line
+        .laid_out_in(width.saturating_sub(lead_columns).max(1), mode);
+    let first = laid_out.first_row(height);
 
     let lines: Vec<Line> = laid_out
         .rows
@@ -471,12 +476,8 @@ fn body_row<'a>(
     mode: BidiMode,
 ) -> Line<'a> {
     let text = app.input.line.text();
-    // The prefix is drawn in front of the first row, so the text on it has that
-    // many columns fewer — the same reason a message's sender is subtracted
-    // before its rows are cut rather than clipped after.
-    let lead_columns = lead.map_or(0, str::len);
-    let body = (range.start + lead_columns).min(range.end)..range.end;
-
+    // `render` cut the rows for the columns the prefix leaves, so the row is
+    // already the body.
     let mut spans = Vec::new();
     if let Some(lead) = lead {
         spans.push(Span::styled(lead, app.ui.theme.text_dim));
@@ -484,7 +485,7 @@ fn body_row<'a>(
 
     let row = text_row::TextRow {
         text,
-        range: body.clone(),
+        range: range.clone(),
         // A draft is not a search result: `/` searches the window and the server,
         // never the line the reader is typing in.
         matched: false,
@@ -514,7 +515,7 @@ fn body_row<'a>(
             // every row of it. What *is* shared across the rows is the wrap —
             // `laid_out_in` cut them once, above, and a row is a slice of that.
             let base = bidi::base_direction(text);
-            text_row::spans_permuted(&row, &bidi::visual_row_in(text, body.clone(), base))
+            text_row::spans_permuted(&row, &bidi::visual_row_in(text, range.clone(), base))
         }
         BidiMode::Terminal => text_row::spans(&row),
     });
@@ -952,6 +953,44 @@ mod tests {
         assert_eq!(
             found[0].0, 3,
             "the draft is drawn at column 1, so this is its end"
+        );
+    }
+
+    /// The `:` prefix names the command line and must not eat the first thing
+    /// typed after it: the first character is visible in the column after the
+    /// prefix, the caret is painted just past it, and a second one is visible too.
+    #[test]
+    fn command_prefix_does_not_hide_first_keystroke() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char(':'));
+        type_text(&mut app, "q");
+
+        let buffer = screen(&app, 80, 24);
+        let rows = rows_of(&buffer);
+        let prompt = rows
+            .iter()
+            .position(|row| row.starts_with("│:"))
+            .expect("the command line draws its prefix on the bar's first row");
+        let top = (prompt - 1) as u16;
+
+        assert!(
+            rows[prompt].starts_with("│:q"),
+            "the first typed character is visible after the prefix: {:?}",
+            rows[prompt]
+        );
+        let found = carets(&buffer, top);
+        assert_eq!(found.len(), 1, "one caret, on one cell: {found:?}");
+        assert!(
+            found[0].2.contains(Modifier::REVERSED) && found[0].0 == 3,
+            "the caret is painted just past the typed character: {found:?}"
+        );
+
+        type_text(&mut app, "w");
+        let rows = rows_of(&screen(&app, 80, 24));
+        assert!(
+            rows[prompt].starts_with("│:qw"),
+            "a second character is visible too: {:?}",
+            rows[prompt]
         );
     }
 
