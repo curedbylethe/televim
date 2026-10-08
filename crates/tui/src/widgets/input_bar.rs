@@ -84,7 +84,8 @@ const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  
 /// has to reconcile it with the first, so both are named deliberately and neither
 /// is renamed to match the other. `DESIGN.md` says so where a reader of the spec
 /// finds it.
-const CHAT_LIST_HINT: &str = " j/k: chat  Enter: open  Tab: pane  h: conversation  A:card  S:you";
+const CHAT_LIST_HINT: &str =
+    " j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin";
 
 /// The hint while a selection is being made over the messages.
 const VISUAL_HINT: &str = " d: delete  y: yank  r: reply  Esc: cancel";
