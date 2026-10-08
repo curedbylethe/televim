@@ -89,6 +89,14 @@ below.
   revalidation sentence and its rank, paging held while the newest page is in
   flight — is in `tui/src/app/tests.rs` and the `TestBackend` tests of the
   conversation panel and the status bar.
+- **Media cache:** `app/src/media_cache.rs` is tested over a temp directory and no
+  client: a file found again after a restart under a pid-free name, the byte cap and
+  the entry cap each evicting the oldest modification time first, a file that could
+  never fit refused without evicting anything, strangers' and temp files ignored, an
+  account mismatch clearing the directory, `clear` on a missing directory, and the
+  owner-only mode before the rename. The loop's half (`net.rs`) checks that a
+  download is stored once and the next open is served from disk, with the download
+  never asked for again.
 - **Integration Tests:** `crates/app/tests/proto_integration.rs` exercises the whole stack — the framework's login, the session store, the session cache, and the `proto` wrapper over both — against a real datacenter: it proves a stored session rebuilds an authorised client, that the client produces a private chat list in newest-first order, that the update feed and the chat list name conversations by the same identifier, and that history pages come back oldest first, without gaps or repeats, from an anchor that is exclusive. It lives in `app` because that is the only crate that may hold a framework `Client` and a `ProtoClient` at once. Three cases cannot be provoked with one account and are documented as deferred in the test's module docs: an update arriving for real, the offline gap `catch_up` closes, and a conversation with a known amount of history. A run prints how many updates it examined, how many the framework discarded, and how far it walked the history, so a run that proved little says so.
 - **Opt-in Tests:** Anything that needs a real account — `telegram-framework`'s
   `auth_integration` and `app`'s `proto_integration` — checks `TELEVIM_TEST_DC`

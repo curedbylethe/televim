@@ -31,6 +31,7 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::draft_store::{DraftFile, drafts_acceptable};
 use crate::history_store::{HistoryCache, HistoryFile, history_acceptable};
+use crate::media_cache::MediaCache;
 use crate::net;
 use tui::app::App;
 use tui::state::ui::{GraphicsMode, StickerMode};
@@ -61,7 +62,17 @@ pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Resul
     init_tracing(cfg, config_path);
     let drafts_path = config_path.with_extension("drafts.json");
     let history_path = config_path.with_extension("history.json");
-    build_runtime()?.block_on(run_async(cfg, &drafts_path, &history_path, initial_chat))
+    let media_path = cfg
+        .media_cache_dir
+        .clone()
+        .unwrap_or_else(|| config_path.with_extension("media"));
+    build_runtime()?.block_on(run_async(
+        cfg,
+        &drafts_path,
+        &history_path,
+        &media_path,
+        initial_chat,
+    ))
 }
 
 /// Records the instant the program was asked to start.
@@ -190,6 +201,7 @@ async fn run_async(
     cfg: &Config,
     drafts_path: &Path,
     history_path: &Path,
+    media_path: &Path,
     initial_chat: Option<i64>,
 ) -> Result<()> {
     enable_raw_mode().context("enabling raw mode")?;
@@ -210,6 +222,7 @@ async fn run_async(
         &mut keys,
         drafts_path,
         history_path,
+        media_path,
         initial_chat,
     )
     .await;
@@ -437,6 +450,7 @@ async fn event_loop(
     keys: &mut EnhancedKeys<Stdout>,
     drafts_path: &Path,
     history_path: &Path,
+    media_path: &Path,
     initial_chat: Option<i64>,
 ) -> Result<()> {
     // When a key was taken on the previous pass, so the next frame can be timed
@@ -509,6 +523,12 @@ async fn event_loop(
     let mut network = net::State::new(cfg.clone(), tx.clone());
     // And the drafts file, so signing out can remove it.
     network.set_draft_file(draft_file.clone());
+    // Opened beside the history file. A directory written for another account,
+    // or for none, is cleared on the way in: the history's strict rule.
+    network.set_media_cache(MediaCache::open(
+        media_path.to_path_buf(),
+        cfg.phone.as_deref(),
+    ));
     // And the history file and what it held: every fetched page is merged
     // into the cache and written behind, and the messages go with the account
     // that is leaving.

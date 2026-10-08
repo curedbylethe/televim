@@ -15,13 +15,22 @@ Real, and named so they are not mistaken for oversights:
   which the crate's two-path split exists to avoid — the update feed arrives as a
   built `grammers` `Message`, and there is no raw variant to match on there
   without re-deriving one.
-- **A media download is a whole `Vec<u8>`, saved whole to a temp file.**
+- **A media download is a whole `Vec<u8>`, saved whole to the media cache.**
   `Client::download_media` and `ProtoClient::download_media` return the bytes, and
-  `o` on a media message writes them to a `0600` file in the temp directory and
-  hands that file to the platform viewer. Progress is reported per chunk and `Esc`
-  stops the transfer, but the bytes still arrive whole, so the return type is the
-  limit: streaming to disk and a cache on disk are a later change, and the 16 MiB
-  `MEDIA_LIMIT` refuses rather than truncates. Nothing removes the saved files; their lifecycle is CUR-10's.
+  `o` stores them as one file in the media cache before the platform viewer opens
+  it. Progress is reported per chunk and `Esc` stops the transfer, but the bytes
+  still arrive whole, so the return type is the limit: streaming to disk is a later
+  change (CUR-9), and the 16 MiB `MEDIA_LIMIT` refuses rather than truncates.
+- **The media cache has four known limits.**
+  - *Sign-out waits on the cache lock.* The clear runs on the loop, under the lock
+    a store in flight holds, so it waits out one write (up to 16 MiB).
+  - *A late store survives sign-out.* A download still in flight stores one file
+    after the clear. The next launch under another account, or under none, clears
+    it; so does the same account signing back in, because sign-out removed the tag.
+  - *An unwritable cache directory fails the open.* `o` says the media could not be
+    cached. There is no fall back to the temp directory.
+  - *Legacy temp files are left.* Files named `televim-<pid>-…` from before the cache
+    are not migrated or swept; the OS temp cleanup reclaims them.
 - **The viewer hand-off has four known limits.**
   - *Stdin race.* The loop blocks on the viewer with the terminal released, but the
     reader thread keeps calling `crossterm::event::read`. A key it captures during
@@ -342,8 +351,9 @@ Real, and named so they are not mistaken for oversights:
   session.
 - **No history or chat-list cache for groups or channels.** Only private
   conversations are cached, because only private conversations are shown — the
-  product's scope, not a limit of the store. Media bytes are not cached either;
-  the media *kind* is, so a cached `[image]` row draws its token and nothing more.
+  product's scope, not a limit of the store. Media bytes are not in the history
+  file: they are in the media cache, and the history keeps only the media *kind*, so
+  a cached `[image]` row draws its token and nothing more.
 
 - **Sixel is not implemented.** Sixel draws in pixels, so fitting the 24-by-8
   box needs the terminal's cell pixel size, and getting that is a probe the
@@ -392,4 +402,4 @@ Real, and named so they are not mistaken for oversights:
 
 ## v2 Hooks
 
-The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists, `o` saves the bytes to a temp file and opens the platform viewer, and the `tokio::fs` cache is what is still ahead of it.
+The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists, and `o` stores the bytes in the media cache and opens the platform viewer. Streaming to disk is what is still ahead of it.

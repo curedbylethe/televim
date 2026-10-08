@@ -374,6 +374,18 @@ band before this change (+248,176 B), so `make measure-check` reports a binary-s
 breach that this change did not cause. The baseline was not re-recorded here; that
 is a maintainer decision.
 
+### The media cache
+
+The media cache (`app/src/media_cache.rs`) is bounded on disk, not in memory:
+`MEDIA_CACHE_MAX_BYTES` is 1 GiB and `MEDIA_CACHE_MAX_ENTRIES` is 256 files. Resident,
+it holds one index entry per cached file — a message key, a path, a size and a
+modification time, about 150 bytes — so about 40 KB at the entry cap. A download's
+bytes are held in memory as they were before the cache, bounded by `MEDIA_LIMIT`
+(16 MiB), and written off the loop. The disk worst case is the byte cap plus one file
+of up to 16 MiB in flight during a write.
+
+These are **declared, not measured**, and the RSS budget is unaffected by the disk bound.
+
 ### The history cache
 
 The cache (`app/src/history_store.rs`) is resident for the whole run and copied

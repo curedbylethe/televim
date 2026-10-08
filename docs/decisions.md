@@ -425,6 +425,14 @@ are in [`../AGENTS.md`](../AGENTS.md).
   different work. Streaming and a cache directory are CUR-9 and CUR-10; `proto`
   narrows the two identifiers to the `i32` the wire uses on the way through, and
   says so with `ProtoError::MessageIdOutOfRange` rather than truncating.
+- **Why the media cache names files by message id:** a file is `<chat>-<message>.<suffix>`
+  from the ids the server assigned, so its name is the same after a restart. The old
+  temp-dir name carried the process id, the one thing a restart changes. The cache
+  stores whole downloads, because the return type is still `Vec<u8>`; streaming
+  (CUR-9) would replace that boundary, and the cache is the seam it writes into. The
+  cache is cleared with the account rather than kept per account: the history's
+  stricter rule applies, since a stranger's media is worse to show than one more
+  download.
 - **Why download progress is a callback that answers `bool`:** the framework's
   `download_media_with_progress` calls `progress(downloaded, declared)` after each
   accepted chunk, and a `false` answer aborts the transfer and drops the collected
