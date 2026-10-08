@@ -51,6 +51,10 @@ unicode-bidi = "0.3.18"
 # touched only while composing, and about 5 µs to scan — a table this workspace
 # otherwise maintains by hand for bytes it does not need.
 emojis = "0.9"
+# One use: decoding static WEBP stickers to RGBA in `tui::sticker`. The
+# dedicated decoder rather than `image`: Q2 weighed both by stripped release
+# binary delta and the dedicated crate cost less (report in STAGE-02).
+image-webp = "0.2"
 
 # Logging
 tracing = "0.1"
