@@ -516,7 +516,7 @@ code.
 | `> [message not loaded] ‖ body` | a reply whose target the window does not hold; `gd` on it fetches the target | asserted in `rows.rs` |
 | `[image]` | **a message that carries a photo and no caption**: its whole body, in `text-dim` | `MediaKind::label` |
 | `[video]` `[gif]` `[voice]` | ditto for a video, an animated GIF, a voice note | ditto |
-| `[file]` | ditto, and the **catch-all**: a sticker, a contact, a document, or any kind this build does not model, which degrades rather than vanishing | ditto |
+| `[file]` | ditto, and the **catch-all**: a contact, a document, or any kind this build does not model, which degrades rather than vanishing | ditto |
 | a caption beside a placeholder | never: `display_body()` returns the caption when there is one, so the label is drawn only for a message that says nothing; the caption is body ink | `Message::display_body` |
 | `[sending…]` | on the message's **last** row, which is the one with room | asserted |
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |

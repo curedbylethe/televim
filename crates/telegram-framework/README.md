@@ -375,8 +375,10 @@ This is the same reasoning as history's, and it is why the crate invokes
 
 Every message description carries **what** the message holds, if anything:
 `MessageInfo.media` is `Option<telegram_framework::MediaKind>` — `Photo`, `Video`,
-`Gif`, `Voice`, or `File`. `None` means Telegram said there is no media at all;
-`File` is the catch-all, so a sticker, a contact, a poll, and any kind a newer
+`Gif`, `Voice`, `Sticker`, or `File`. `None` means Telegram said there is no media at all;
+`Sticker` is a static sticker — an animated one stays `File`, and the raw path
+answers a sticker that moves as a `Gif` by attribute order — and `File` is the
+catch-all, so a contact, a poll, and any kind a newer
 Telegram invents all arrive as *something this message carries* rather than as
 nothing. Two classifiers produce it — `classify_raw` for the hand-built
 `GetHistory` path and `classify_typed` for the `grammers` update feed — and they

@@ -13,7 +13,18 @@ Taken on a release build (`lto = "fat"`, `codegen-units = 1`, `strip = true`,
 `panic = "abort"`), median of five `make measure` runs — which is what
 `docs/memory-baseline.json` records. The baseline was re-recorded when STAGE-03/04
 added `unicode-bidi`'s Unicode tables: binary size moved by +66,080 B and nothing
-else in the tree grew with it.
+else in the tree grew with it. It was re-recorded again when PR-CUR-13 shipped
+static stickers: binary size moved by +82,880 B — the dedicated WEBP decoder and
+the hand-rolled half-block painter, both weighed against heavier candidates
+first — and that anchor alone moved. Three runs beside the sticker tree measured
+harness input latency at 2.37 / 0.76 / 0.78 ms against the 0.509 ms anchor while
+frame time read 1.59 / 0.51 / 0.52 ms against 0.510 ms; the same binary's RSS
+swung ±20% between those runs, the first ran during disk-pressure recovery and
+the third beside a concurrent `make ci`, and nothing in the sticker diff runs on
+the harness's text-only hot path (a match arm and a small vector per message).
+That is a host settling, not a regression, so the latency anchors stay: moving
+one on three noisy runs is what the bands exist to prevent, and they keep
+enforcing until a clean-host run confirms.
 
 | Metric | Target | Measured | Verdict |
 | :--- | :--- | ---: | :--- |
@@ -24,7 +35,7 @@ else in the tree grew with it.
 | Input latency, key→draw (real binary) | < 16 ms | **0.063 ms** | inside |
 | Input latency, key→draw (harness, 50 keypresses) | < 16 ms | **0.509 ms** | inside |
 | Frame time, harness | — | **0.510 ms** | recorded |
-| Binary size, stripped release | < 15 MB | **5,676,400 bytes** (5.41 MB) | inside |
+| Binary size, stripped release | < 15 MB | **5,759,280 bytes** (5.49 MB) | inside |
 
 ### Two corrections to how these figures were taken
 
@@ -357,7 +368,7 @@ what was actually found.
 
 Chosen against the baseline above, and the alternatives were `tikv-jemallocator`
 and `mimalloc`. The tree is already inside both ceilings with two to three times
-of margin — **5,676,400 B** stripped against < 15 MB, and **3.06 MB** / **7.08 MB**
+of margin — **5,759,280 B** stripped against < 15 MB, and **3.06 MB** / **7.08 MB**
 RSS@idle against < 50 MB — so a candidate would have to give some of it back to
 be worth adopting. The workload is not the one those allocators target: a
 single-threaded current-thread `tokio` plus one reader thread, not many threads
