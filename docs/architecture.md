@@ -334,6 +334,13 @@ the composition root — `tui` never reaches the network. Its answer is drawn by
 line carries the query and the count, ranked above the conversation's own search
 label. It is a prompt and an overlay, not a third pane.
 
+Forwarding is the other overlay that queues an action. `f` or `s` raises the
+destination picker over the conversation, and `⏎` queues an `Action::Forward
+{ chat_id, message_ids, dest_chat_id }` for the composition root, which sends it
+in batches and answers with `Event::Forwarded { chat_id, dest_chat_id, requested,
+result }`. That event sets the status line and nothing else: the open chat does not
+change.
+
 `line.rs` owns the composed text and wraps `vim-line`, which never stores a
 buffer: the wrapper applies the edits the library calculates, decides `Enter`
 (send) and `Esc` (two stages, nothing lost) itself without handing either over,
