@@ -699,11 +699,16 @@ impl State {
     /// Empties the media cache: its files are the account's, and sign-out ends
     /// the account.
     ///
-    /// Synchronous, like the history file's clear on the same path. A download
-    /// still in flight is refused when it stores, so it leaves no file behind;
-    /// the next launch under another account, or none, clears the directory
-    /// anyway ([`MediaCache::open`]).
+    /// Synchronous, like the history file's clear on the same path. Every
+    /// download still in flight is cancelled, not only refused on store: its
+    /// flag is set so the transfer stops before its next chunk. A download
+    /// that does finish is still refused when it stores, so it leaves no file
+    /// behind; the next launch under another account, or none, clears the
+    /// directory anyway ([`MediaCache::open`]).
     fn forget_media(&self) {
+        for cancel in &self.media_cancel {
+            cancel.flag.store(true, Ordering::Relaxed);
+        }
         if let Some(cache) = &self.media_cache {
             cache
                 .lock()
@@ -7737,6 +7742,37 @@ mod media_tests {
         assert!(
             state.take_media().is_empty(),
             "a cancelled download queues no viewer"
+        );
+    }
+
+    /// Signing out cancels every download in flight: each flag is set, and the
+    /// entries stay until their settle event removes them.
+    #[test]
+    fn signing_out_cancels_every_media_download_in_flight() {
+        let mut app = App::new();
+        let mut state = State::default();
+        let flags: Vec<Arc<AtomicBool>> = (0..2)
+            .map(|message_id| {
+                let flag = Arc::new(AtomicBool::new(false));
+                state.media_cancel.push(MediaCancel {
+                    chat_id: CHAT,
+                    message_id,
+                    flag: Arc::clone(&flag),
+                });
+                flag
+            })
+            .collect();
+
+        apply_logged_out(&mut app, &mut state, Ok(()));
+
+        assert!(
+            flags.iter().all(|flag| flag.load(Ordering::Relaxed)),
+            "every in-flight download is cancelled by the sign-out"
+        );
+        assert_eq!(
+            state.media_cancel.len(),
+            2,
+            "the entries leave with their settle events, not the sign-out"
         );
     }
 
