@@ -118,7 +118,9 @@ Working today:
   highlight, `gg`/`G` reach both ends, and `Enter` opens the highlighted
   conversation. `:chat <id>` still works. Moving the highlight opens the
   conversation it lands on, once the reader has stopped moving — a held key would
-  otherwise fetch every chat it scrolled past. The focused pane's border is
+  otherwise fetch every chat it scrolled past. `p` pins the highlighted chat, or
+  unpins it; the pin is kept by Telegram, so it survives a restart, and pinned
+  chats lead the list, newest first within each section. The focused pane's border is
   drawn in `Theme::border_focused`; `h`/`l` and `Tab` move between the two panes,
   and `Ctrl+w` steps back out of the line.
 - **Starting a conversation with someone new:** `/` on the chat list finds a

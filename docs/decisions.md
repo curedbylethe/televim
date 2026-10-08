@@ -625,3 +625,12 @@ are in [`../AGENTS.md`](../AGENTS.md).
   the colours are proper roles rather than literals, in the mode labels' own
   hues as foregrounds. The state itself stays rendering-neutral in
   `state::connection`: wording and colour live with the draw, not the type.
+- **Why a pin is the account's, synced through Telegram, and not a local file:**
+  `p` on the chat list sends `messages.toggleDialogPin`, so the pin is the same
+  on every client the account uses and survives a restart, with the flag re-read
+  on every fetch. A local file would diverge from the other clients and would be
+  one more store to keep in step. A pinned chat sorts first, newest first within
+  its section, which is the one comparator the fetch already uses extended by a
+  key rather than replaced. The list does not move until Telegram has agreed, and
+  an unpin restores the chat's recency position. The list is not re-sorted on
+  updates: a background re-sort would move the highlight under the reader.
