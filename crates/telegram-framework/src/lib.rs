@@ -7,6 +7,8 @@
 //! * **Session storage** — [`SessionData`], the [`SessionStore`] trait, and its
 //!   [`MemoryStore`], [`FileStore`] and [`KeyringStore`] backends. None of them
 //!   mentions `grammers`, so they are always compiled.
+//! * **Sealing** — [`sealed`], the AEAD envelope a [`FileStore`] writes and the
+//!   [`KeyProvider`]s that supply its key: a passphrase, or the OS keyring.
 //! * **The client** — [`ClientBuilder`], the phone → code → 2FA login flow, the
 //!   [`Client::fetch_dialogs`] chat list, the `fetch_history` message history,
 //!   [`Client::fetch_account`] for the account's own profile,
@@ -70,6 +72,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod error;
+pub mod sealed;
 pub mod session;
 
 #[cfg(feature = "live")]
@@ -100,6 +103,7 @@ pub mod users;
 mod testing;
 
 pub use error::{AuthError, FrameworkError, RequestError, SessionError};
+pub use sealed::{FileKey, KeyProvider, KeyringKeyProvider, PassphraseProvider};
 pub use session::{
     AccountIdentity, AuthKey, ChannelKind, ChannelState, DcOption, FileStore, KeyringStore,
     MemoryStore, Peer, SessionData, SessionStore, UpdateState,
