@@ -20,19 +20,21 @@
 //! | Backend        | Use it for                                                        |
 //! | :------------- | :---------------------------------------------------------------- |
 //! | `KeyringStore` | Production. The session lives in the OS credential store.          |
-//! | `FileStore`    | Fallback when there is no keyring. **Writes the key in plaintext.** |
+//! | `FileStore`    | Fallback when there is no keyring. Encrypted at rest.              |
 //! | `MemoryStore`  | Tests and throwaway sessions that must not outlive the process.     |
 
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read as _, Seek as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use zeroize::Zeroizing;
 
 use crate::error::SessionError;
+use crate::sealed::{self, KeyProvider, KeyringKeyProvider};
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
@@ -387,28 +389,71 @@ impl SessionStore for MemoryStore {
     }
 }
 
-/// Persists the session as JSON in a file.
+/// Persists the session in a file, encrypted at rest.
 ///
 /// This is the fallback for machines with no usable OS keyring: headless Linux
-/// servers, containers, CI. It is **not** the default, because the file holds a
-/// permanent authorisation key in plaintext — anyone who can read the file can
-/// impersonate the account until the session is revoked. On Unix the file is
-/// created with `0600` permissions, which is a mitigation, not a solution.
+/// servers, containers, CI. The file holds a permanent authorisation key, so
+/// what is written is the [`sealed`] envelope — AES-256-GCM-SIV under a key the
+/// store's [`KeyProvider`] supplies — and never the JSON itself. On Unix the
+/// file is also created with `0600` permissions, as defence in depth.
+///
+/// # Failure
+///
+/// A file that is an envelope but does not open — the wrong passphrase or key,
+/// a modified or truncated file — is [`SessionError::Load`], and the file is
+/// left exactly as found. It is never [`SessionError::Corrupt`], which a caller
+/// may answer by deleting the file: a typo must not cost a session. A key source
+/// that cannot be reached is [`SessionError::Unavailable`].
+///
+/// # Migration
+///
+/// A file written by an older build is plaintext JSON. It still loads, and
+/// [`load`](SessionStore::load) immediately re-seals it in place: the
+/// ciphertext replaces the file atomically, and the old inode's bytes are then
+/// zero-filled and synced, and any stale `*.tmp` sibling of the same file is
+/// wiped and removed. A migration that cannot complete (no key source, a
+/// read-only directory) never fails the load; the legacy file simply stays as
+/// it was and the next load or save tries again.
+///
+/// The wipe is **best effort**, not a guarantee of unrecoverability. A
+/// journaling or copy-on-write filesystem, SSD wear levelling, snapshots and
+/// backups can all keep an earlier copy of the blocks that an in-place
+/// overwrite never reaches. On non-Unix platforms the old file cannot be
+/// overwritten once replaced, so it is not wiped at all. Treat a session that
+/// was ever stored in plaintext as exposed to whoever could read that disk, and
+/// sign the device out of Telegram if that matters.
 ///
 /// Prefer [`KeyringStore`] wherever a credential store exists.
 #[derive(Debug, Clone)]
 pub struct FileStore {
     path: PathBuf,
+    keys: Arc<dyn KeyProvider>,
 }
 
 impl FileStore {
-    /// Creates a store backed by the file at `path`.
+    /// Creates a store backed by the file at `path`, sealed with a random key
+    /// held in the OS credential store ([`KeyringKeyProvider::default`]).
+    ///
+    /// The file is encrypted either way: there is no constructor that writes
+    /// plaintext. On a machine with no credential store every save fails with
+    /// [`SessionError::Unavailable`]; use [`FileStore::with_key_provider`] with
+    /// a [`PassphraseProvider`](crate::PassphraseProvider) there.
     ///
     /// The file is not touched until [`SessionStore::save`] is called, and any
     /// missing parent directories are created then.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self::with_key_provider(path, Arc::new(KeyringKeyProvider::default()))
+    }
+
+    /// Creates a store backed by the file at `path`, sealed with the key `keys`
+    /// supplies.
+    #[must_use]
+    pub fn with_key_provider(path: impl Into<PathBuf>, keys: Arc<dyn KeyProvider>) -> Self {
+        Self {
+            path: path.into(),
+            keys,
+        }
     }
 
     /// The file this store reads and writes.
@@ -416,30 +461,150 @@ impl FileStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Seals `plaintext`, checks that the result opens again, and replaces the
+    /// file with it. A pre-existing plaintext file is wiped afterwards.
+    fn write_sealed(&self, plaintext: &[u8]) -> Result<(), SessionError> {
+        let envelope = sealed::seal(plaintext, self.keys.as_ref())?;
+        // Never write what could not be read back: a provider that seals under
+        // a key it cannot hand out again would turn a good session into a file
+        // nothing can open.
+        let reopened = sealed::open(&envelope, self.keys.as_ref())?;
+        if reopened.as_deref().map(Vec::as_slice) != Some(plaintext) {
+            return Err(SessionError::Save(
+                "the sealed session did not open again".to_owned(),
+            ));
+        }
+        if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).map_err(|error| SessionError::Save(error.to_string()))?;
+        }
+
+        // Opened *before* the replace, because the replace unlinks the old
+        // inode and a path can no longer reach it. The handle keeps it
+        // reachable, so it can be zeroed once the ciphertext is safely in
+        // place. Wiping first would instead leave a crash between the two steps
+        // with neither a session nor its plaintext.
+        let legacy = open_unsealed(&self.path);
+        write_atomically(&self.path, &envelope)?;
+        if let Some(mut old) = legacy {
+            if let Err(error) = wipe(&mut old) {
+                tracing::warn!(%error, "could not wipe the pre-migration session file");
+            }
+            remove_stale_temps(&self.path);
+        }
+        Ok(())
+    }
 }
 
 impl SessionStore for FileStore {
     fn load(&self) -> Result<Option<SessionData>, SessionError> {
-        match fs::read(&self.path) {
-            Ok(bytes) => SessionData::from_bytes(&bytes).map(Some),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(SessionError::Load(error.to_string())),
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => Zeroizing::new(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(SessionError::Load(error.to_string())),
+        };
+
+        if let Some(plain) = sealed::open(&bytes, self.keys.as_ref())? {
+            return SessionData::from_bytes(&plain).map(Some);
         }
+
+        // Not an envelope: a file from a build that wrote plaintext. A file
+        // that is not a snapshot either is `Corrupt`, as it always was.
+        let data = SessionData::from_bytes(&bytes)?;
+        // Seal the validated bytes as they are, so nothing a newer reader of
+        // the same version might care about is dropped by a round trip.
+        if let Err(error) = self.write_sealed(&bytes) {
+            tracing::warn!(%error, "could not encrypt the legacy session file; it stays as it was");
+        }
+        Ok(Some(data))
     }
 
     fn save(&self, session: &SessionData) -> Result<(), SessionError> {
-        let bytes = session.to_bytes()?;
-        if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-            fs::create_dir_all(parent).map_err(|error| SessionError::Save(error.to_string()))?;
-        }
-        write_atomically(&self.path, &bytes)
+        self.write_sealed(&Zeroizing::new(session.to_bytes()?))
     }
 
     fn clear(&self) -> Result<(), SessionError> {
+        // Zero first, best effort: an unlink alone leaves the bytes on disk.
+        // See [`FileStore`] for what this does and does not buy.
+        if let Ok(mut file) = fs::OpenOptions::new().write(true).open(&self.path) {
+            let _ = wipe(&mut file);
+        }
         match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                remove_stale_temps(&self.path);
+                Ok(())
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(SessionError::Clear(error.to_string())),
+        }
+    }
+}
+
+/// The existing file at `path`, opened for writing, if it is not an envelope.
+///
+/// That is a legacy plaintext file (or junk about to be replaced), and the
+/// handle is what lets [`wipe`] reach it after the path has been replaced.
+/// Unix only: elsewhere a rename over an open file is not reliable, so there is
+/// no pre-migration wipe.
+#[cfg(unix)]
+fn open_unsealed(path: &Path) -> Option<fs::File> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()?;
+    let mut head = Vec::with_capacity(sealed::MAGIC.len());
+    file.by_ref()
+        .take(sealed::MAGIC.len() as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    (!sealed::is_sealed(&head)).then_some(file)
+}
+
+#[cfg(not(unix))]
+fn open_unsealed(_path: &Path) -> Option<fs::File> {
+    None
+}
+
+/// Overwrites `file` with zeros, in place, and syncs it. Best effort: see the
+/// limits on [`FileStore`].
+fn wipe(file: &mut fs::File) -> io::Result<()> {
+    let len = file.metadata()?.len();
+    file.rewind()?;
+    io::copy(&mut io::repeat(0).take(len), file)?;
+    file.sync_all()
+}
+
+/// Wipes and removes the `<name>.<pid>.tmp` files [`write_atomically`] leaves
+/// when a process dies mid-write. A build that wrote plaintext may have left one
+/// holding it.
+fn remove_stale_temps(path: &Path) {
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut prefix = name.to_os_string();
+    prefix.push(".");
+    let prefix = prefix.to_string_lossy().into_owned();
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if is_file
+            && file_name
+                .strip_prefix(&prefix)
+                .is_some_and(|rest| rest.strip_suffix(".tmp").is_some())
+        {
+            if let Ok(mut file) = fs::OpenOptions::new().write(true).open(entry.path()) {
+                let _ = wipe(&mut file);
+            }
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
@@ -1079,6 +1244,44 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use crate::error::{AuthError, FrameworkError, RequestError};
+    use crate::sealed::{FileKey, KEY_LEN, MAGIC, SALT_LEN, Salt};
+
+    /// A provider with a fixed key, so no test touches the OS credential store.
+    #[derive(Debug)]
+    struct TestKey(u8);
+
+    impl KeyProvider for TestKey {
+        fn sealing_key(&self) -> Result<(Salt, FileKey), SessionError> {
+            Ok(([self.0; SALT_LEN], FileKey::from_bytes([self.0; KEY_LEN])))
+        }
+
+        fn opening_key(&self, _salt: &Salt) -> Result<FileKey, SessionError> {
+            Ok(FileKey::from_bytes([self.0; KEY_LEN]))
+        }
+    }
+
+    /// A key source that cannot be reached, as on a machine with no keyring.
+    #[derive(Debug)]
+    struct NoKey;
+
+    impl KeyProvider for NoKey {
+        fn sealing_key(&self) -> Result<(Salt, FileKey), SessionError> {
+            Err(SessionError::Unavailable("no key source".to_owned()))
+        }
+
+        fn opening_key(&self, _salt: &Salt) -> Result<FileKey, SessionError> {
+            Err(SessionError::Unavailable("no key source".to_owned()))
+        }
+    }
+
+    fn file_store(path: impl Into<PathBuf>) -> FileStore {
+        FileStore::with_key_provider(path, Arc::new(TestKey(1)))
+    }
+
+    /// What an older build wrote: the snapshot's JSON, as is.
+    fn legacy_bytes() -> Vec<u8> {
+        sample_session().to_bytes().expect("the sample serialises")
+    }
 
     /// Builds a snapshot with every field populated.
     fn sample_session() -> SessionData {
@@ -1146,14 +1349,14 @@ mod tests {
     #[test]
     fn file_store_round_trips() {
         let dir = tempfile::tempdir().expect("temp dir is created");
-        assert_round_trip(&FileStore::new(dir.path().join("session.json")));
+        assert_round_trip(&file_store(dir.path().join("session.json")));
     }
 
     #[test]
     fn file_store_creates_missing_parent_directories() {
         let dir = tempfile::tempdir().expect("temp dir is created");
         let path = dir.path().join("nested/deeper/session.json");
-        let store = FileStore::new(&path);
+        let store = file_store(&path);
         store.save(&sample_session()).expect("save succeeds");
         assert!(path.exists());
     }
@@ -1164,7 +1367,7 @@ mod tests {
         let path = dir.path().join("session.json");
         fs::write(&path, b"not json").expect("fixture is written");
 
-        let error = FileStore::new(&path)
+        let error = file_store(&path)
             .load()
             .expect_err("corrupt data is rejected");
         assert!(matches!(error, SessionError::Corrupt(_)), "got {error:?}");
@@ -1203,18 +1406,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir is created");
         let path = dir.path().join("session.json");
         let session = sample_session();
-        FileStore::new(&path).save(&session).expect("save succeeds");
+        file_store(&path).save(&session).expect("save succeeds");
 
         assert_eq!(
             siblings(&path),
             Vec::<String>::new(),
             "the atomic write left something behind next to the session"
         );
-        assert_eq!(
-            SessionData::from_bytes(&fs::read(&path).expect("the file is there"))
-                .expect("it parses"),
-            session
-        );
+        assert_eq!(file_store(&path).load().expect("it loads"), Some(session));
     }
 
     /// The point of the temp file: a write that fails cannot damage what is
@@ -1225,9 +1424,10 @@ mod tests {
     fn a_failed_save_leaves_the_previous_session_intact() {
         let dir = tempfile::tempdir().expect("temp dir is created");
         let path = dir.path().join("session.json");
-        let store = FileStore::new(&path);
+        let store = file_store(&path);
         let first = sample_session();
         store.save(&first).expect("the first save succeeds");
+        let on_disk = fs::read(&path).expect("the file is there");
 
         fs::create_dir(temp_sibling(&path)).expect("the temp's path is taken");
 
@@ -1245,15 +1445,13 @@ mod tests {
         );
         assert_eq!(
             fs::read(&path).expect("the file is still there"),
-            first.to_bytes().expect("the first snapshot serialises"),
+            on_disk,
             "not one byte of it may have changed"
         );
     }
 
-    /// The file holds a permanent authorisation key in plaintext, so it is
-    /// created for its owner alone. This is a mitigation and not a solution —
-    /// [`FileStore`]'s own docs say so — but the mode is the whole of it, so it
-    /// is asserted rather than assumed.
+    /// The file is ciphertext, but it is still created for its owner alone as
+    /// defence in depth, so the mode is asserted rather than assumed.
     #[cfg(unix)]
     #[test]
     fn file_store_creates_a_file_only_its_owner_can_read() {
@@ -1261,7 +1459,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("temp dir is created");
         let path = dir.path().join("session.json");
-        FileStore::new(&path)
+        file_store(&path)
             .save(&sample_session())
             .expect("save succeeds");
 
@@ -1273,6 +1471,259 @@ mod tests {
             mode & 0o777,
             0o600,
             "the file was created with mode {mode:o}"
+        );
+    }
+
+    /// The point of the whole change: nothing on disk is the JSON, or the key.
+    #[test]
+    fn file_store_writes_ciphertext_only() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        file_store(&path)
+            .save(&sample_session())
+            .expect("save succeeds");
+
+        let on_disk = fs::read(&path).expect("the file is there");
+        assert!(on_disk.starts_with(MAGIC), "no envelope magic");
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&on_disk).is_err(),
+            "the file parses as JSON"
+        );
+        let contains = |needle: &[u8]| on_disk.windows(needle.len()).any(|window| window == needle);
+        assert!(!contains(b"version"), "a JSON field name is readable");
+        assert!(
+            !contains(encode_hex(&[0xab; AuthKey::LEN]).as_bytes()),
+            "the authorisation key is readable"
+        );
+        assert!(!contains(&[0xab; 32]), "raw key bytes are readable");
+    }
+
+    /// A modified file must be refused as `Load` and left alone: `Corrupt` is
+    /// the answer that makes a caller delete the session.
+    #[test]
+    fn a_tampered_file_is_a_load_error_and_is_left_untouched() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let store = file_store(&path);
+        store.save(&sample_session()).expect("save succeeds");
+
+        let mut bytes = fs::read(&path).expect("the file is there");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        fs::write(&path, &bytes).expect("the tamper is written");
+
+        let error = store.load().expect_err("a modified file is refused");
+        assert!(matches!(error, SessionError::Load(_)), "got {error:?}");
+        assert_eq!(fs::read(&path).expect("still there"), bytes);
+    }
+
+    #[test]
+    fn a_truncated_envelope_is_a_load_error() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let store = file_store(&path);
+        store.save(&sample_session()).expect("save succeeds");
+        let bytes = fs::read(&path).expect("the file is there");
+        fs::write(&path, &bytes[..bytes.len() / 2]).expect("truncated");
+
+        let error = store.load().expect_err("half an envelope is refused");
+        assert!(matches!(error, SessionError::Load(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn the_wrong_key_is_a_load_error_and_leaves_the_file_alone() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        file_store(&path)
+            .save(&sample_session())
+            .expect("save succeeds");
+        let before = fs::read(&path).expect("the file is there");
+
+        let other = FileStore::with_key_provider(&path, Arc::new(TestKey(2)));
+        let error = other.load().expect_err("another key cannot open it");
+        assert!(matches!(error, SessionError::Load(_)), "got {error:?}");
+        assert_eq!(fs::read(&path).expect("still there"), before);
+    }
+
+    /// No key source is `Unavailable`, not `Corrupt`, and the file survives.
+    #[test]
+    fn an_unreachable_key_source_leaves_the_envelope_alone() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        file_store(&path)
+            .save(&sample_session())
+            .expect("save succeeds");
+        let before = fs::read(&path).expect("the file is there");
+
+        let store = FileStore::with_key_provider(&path, Arc::new(NoKey));
+        let error = store.load().expect_err("there is no key to open with");
+        assert!(
+            matches!(error, SessionError::Unavailable(_)),
+            "got {error:?}"
+        );
+        let error = store
+            .save(&sample_session())
+            .expect_err("there is no key to seal with");
+        assert!(
+            matches!(error, SessionError::Unavailable(_)),
+            "got {error:?}"
+        );
+        assert_eq!(fs::read(&path).expect("still there"), before);
+    }
+
+    /// A save never falls back to plaintext when it cannot seal.
+    #[test]
+    fn a_save_with_no_key_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let store = FileStore::with_key_provider(&path, Arc::new(NoKey));
+        assert!(store.save(&sample_session()).is_err());
+        assert!(!path.exists());
+        assert_eq!(siblings(&path), Vec::<String>::new());
+    }
+
+    /// A file an older build wrote loads, and is ciphertext by the time the
+    /// load returns.
+    #[test]
+    fn a_legacy_plaintext_file_loads_and_is_encrypted_in_place() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        fs::write(&path, legacy_bytes()).expect("fixture is written");
+        let store = file_store(&path);
+
+        assert_eq!(
+            store.load().expect("legacy loads"),
+            Some(sample_session()),
+            "the migration must not change what is read"
+        );
+
+        let on_disk = fs::read(&path).expect("the file is there");
+        assert!(on_disk.starts_with(MAGIC), "still plaintext on disk");
+        assert!(
+            !on_disk
+                .windows(b"auth_key".len())
+                .any(|window| window == b"auth_key"),
+            "plaintext survived in the new file"
+        );
+        assert_eq!(
+            store.load().expect("the migrated file loads"),
+            Some(sample_session())
+        );
+        assert_eq!(siblings(&path), Vec::<String>::new());
+    }
+
+    /// The old bytes are zeroed through the old inode, not merely unlinked.
+    #[cfg(unix)]
+    #[test]
+    fn migration_wipes_the_pre_migration_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let legacy = legacy_bytes();
+        fs::write(&path, &legacy).expect("fixture is written");
+        // A handle to the old inode: the replace unlinks the path, not this.
+        let mut old = fs::File::open(&path).expect("the legacy file opens");
+
+        file_store(&path).load().expect("legacy loads");
+
+        let mut left = Vec::new();
+        old.read_to_end(&mut left).expect("the old inode reads");
+        assert_eq!(left.len(), legacy.len(), "the old file changed length");
+        assert!(
+            left.iter().all(|byte| *byte == 0),
+            "plaintext was left behind"
+        );
+    }
+
+    /// A temp a crashed legacy write left behind holds plaintext too.
+    #[test]
+    fn migration_removes_stale_temp_files() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        fs::write(&path, legacy_bytes()).expect("fixture is written");
+        let stale = dir.path().join("session.json.99999.tmp");
+        fs::write(&stale, legacy_bytes()).expect("stale temp is written");
+        let unrelated = dir.path().join("other.json.1.tmp");
+        fs::write(&unrelated, b"x").expect("unrelated file is written");
+
+        file_store(&path).load().expect("legacy loads");
+
+        assert!(!stale.exists(), "the stale temp was left");
+        assert!(unrelated.exists(), "a file of another session was touched");
+    }
+
+    /// With no way to seal, the load still succeeds and the file is untouched:
+    /// a migration is never worth a session.
+    #[test]
+    fn a_migration_that_cannot_seal_does_not_fail_the_load() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        fs::write(&path, legacy_bytes()).expect("fixture is written");
+
+        let store = FileStore::with_key_provider(&path, Arc::new(NoKey));
+        assert_eq!(store.load().expect("legacy loads"), Some(sample_session()));
+        assert_eq!(fs::read(&path).expect("still there"), legacy_bytes());
+    }
+
+    /// A save over a legacy file leaves ciphertext and wipes the old bytes.
+    #[test]
+    fn saving_over_a_legacy_file_leaves_only_ciphertext() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        fs::write(&path, legacy_bytes()).expect("fixture is written");
+
+        let mut next = sample_session();
+        next.user_id = Some(43);
+        file_store(&path).save(&next).expect("save succeeds");
+
+        assert!(fs::read(&path).expect("there").starts_with(MAGIC));
+        assert_eq!(file_store(&path).load().expect("loads"), Some(next));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_migrated_file_is_still_only_owner_readable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        fs::write(&path, legacy_bytes()).expect("fixture is written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("loosened");
+
+        file_store(&path).load().expect("legacy loads");
+
+        let mode = fs::metadata(&path).expect("there").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mode {mode:o}");
+    }
+
+    #[test]
+    fn clear_removes_the_file() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let store = file_store(&path);
+        store.save(&sample_session()).expect("save succeeds");
+        store.clear().expect("clear succeeds");
+        assert!(!path.exists());
+        store.clear().expect("clearing nothing succeeds");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clear_zero_fills_before_it_unlinks() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let legacy = legacy_bytes();
+        fs::write(&path, &legacy).expect("fixture is written");
+        let mut old = fs::File::open(&path).expect("the file opens");
+
+        file_store(&path).clear().expect("clear succeeds");
+
+        assert!(!path.exists());
+        let mut left = Vec::new();
+        old.read_to_end(&mut left).expect("the old inode reads");
+        assert_eq!(left.len(), legacy.len());
+        assert!(
+            left.iter().all(|byte| *byte == 0),
+            "plaintext was left behind"
         );
     }
 
@@ -1318,7 +1769,7 @@ mod tests {
         assert_eq!(identity.phone.as_deref(), Some("+15551234567"));
 
         let memory = MemoryStore::new();
-        let file = FileStore::new(dir.path().join("session.json"));
+        let file = file_store(dir.path().join("session.json"));
         for (name, store) in [
             ("memory", &memory as &dyn SessionStore),
             ("file", &file as &dyn SessionStore),
@@ -1372,7 +1823,7 @@ mod tests {
         let path = dir.path().join("session.json");
         fs::write(&path, truncated).expect("fixture is written");
 
-        let error = FileStore::new(&path)
+        let error = file_store(&path)
             .load()
             .expect_err("a truncated file is refused");
         assert!(matches!(error, SessionError::Corrupt(_)), "got {error:?}");
