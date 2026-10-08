@@ -90,18 +90,54 @@ fn command_prompt_quits() {
 /// moves the cursor but not the slice — or the reverse — is a rendering bug
 /// that only shows on a screen.
 #[test]
-#[ignore = "requires termlens"]
 fn scrolling_up_and_down_moves_the_visible_slice() {
-    // TODO: with a conversation open, send `Ctrl+u`; assert the panel's first
-    // visible message changed and the newest one is no longer on screen. Then
-    // send `Ctrl+d`; assert the newest message is back.
+    let sandbox = common::sandbox();
+    let texts: Vec<String> = (1..=40).map(|n| format!("msg{n:02}")).collect();
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    common::seed_history(&sandbox, &[(1, "Ada")], &[(1, texts)]);
+    let mut t = common::spawn_offline(&sandbox);
+    t.wait_until(|s| s.contains("NORMAL"))
+        .expect("ready in NORMAL mode");
+
+    // The G7 prelude: clear the sign-in card so the conversation takes keys.
+    t.send_str(":").expect("open command line");
+    t.send(Key::Esc).expect("close command line");
+    t.wait_until(|s| !s.contains("Sign in to Telegram"))
+        .expect("sign-in card cleared");
+
+    // Scrolling up from the newest message moves the slice to the older end.
+    t.send(Key::Ctrl('u')).expect("scroll up");
+    let up = t
+        .snapshot_after(|s| s.contains("Conversation (22/40)"))
+        .expect("scrolled up to 22/40");
+    assert!(
+        up.contains("msg13") && up.contains("msg30"),
+        "older slice drawn: {}",
+        up.full_text()
+    );
+    assert!(
+        !up.contains("msg40"),
+        "newest message scrolled off: {}",
+        up.full_text()
+    );
+
+    // Scrolling back down brings the newest message back into view.
+    t.send(Key::Ctrl('d')).expect("scroll down");
+    let down = t
+        .snapshot_after(|s| s.contains("Conversation (40/40)"))
+        .expect("scrolled back to 40/40");
+    assert!(
+        down.contains("msg23") && down.contains("msg40"),
+        "newest slice drawn again: {}",
+        down.full_text()
+    );
 }
 
 /// A view pinned to the newest message is the state a conversation opens in,
 /// and an arrival is supposed to move it. The flag transitions are unit-tested;
 /// what a screen adds is that the viewport actually follows.
 #[test]
-#[ignore = "requires termlens"]
+#[ignore = "needs a prod seam to inject arrivals; deferred per O4, see GAPS.md"]
 fn an_arrival_scrolls_a_pinned_view() {
     // TODO: with a conversation open and pinned to the bottom, deliver an
     // arrival for that conversation; assert the new message is the last row.
@@ -111,7 +147,7 @@ fn an_arrival_scrolls_a_pinned_view() {
 /// an arrival. This is the case the anchor exists for, and it is invisible
 /// until something arrives.
 #[test]
-#[ignore = "requires termlens"]
+#[ignore = "needs a prod seam to inject arrivals; deferred per O4, see GAPS.md"]
 fn an_arrival_leaves_a_scrolled_back_view_alone() {
     // TODO: send `Ctrl+u`, note the first visible row, deliver an arrival for
     // the same conversation; assert the first visible row is unchanged and the
@@ -121,7 +157,7 @@ fn an_arrival_leaves_a_scrolled_back_view_alone() {
 /// Fetching is off the render loop, so a page in flight has to be visible as
 /// such rather than as a frozen panel.
 #[test]
-#[ignore = "requires termlens"]
+#[ignore = "needs a prod seam to inject arrivals; deferred per O4, see GAPS.md"]
 fn a_fetch_in_flight_is_shown_at_the_edge_it_is_coming_from() {
     // TODO: with the older page in flight, assert "Loading older…" is the first
     // row; with the newer page in flight, assert it is the last.
