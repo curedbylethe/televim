@@ -107,6 +107,20 @@ pub struct Theme {
     pub mode_insert: Style,
     pub mode_visual: Style,
     pub mode_confirm: Style,
+    /// The connection dot while the feed delivers.
+    ///
+    /// A foreground in the insert label's own green: the dot is one cell, so
+    /// it takes its ink rather than its ground.
+    pub conn_connected: Style,
+    /// The connection dot while a bring-up or a rebuild is under way.
+    ///
+    /// Connecting and reconnecting share one yellow — the visual label's —
+    /// because both are the same wait: nothing has answered yet.
+    pub conn_transient: Style,
+    /// The connection dot once the bring-up or the reconnect budget is spent.
+    ///
+    /// The confirm label's red: offline is the state that needs acting on.
+    pub conn_offline: Style,
 }
 
 impl Default for Theme {
@@ -156,6 +170,11 @@ impl Default for Theme {
             mode_confirm: Style::default()
                 .bg(rgb(0xe0, 0x6c, 0x75))
                 .fg(rgb(0x0d, 0x11, 0x17)),
+            // The mode labels' own hues as foregrounds: the dot is one cell,
+            // so it takes their ink rather than their ground.
+            conn_connected: Style::default().fg(rgb(0x6f, 0xbf, 0x73)),
+            conn_transient: Style::default().fg(rgb(0xe5, 0xc0, 0x7b)),
+            conn_offline: Style::default().fg(rgb(0xe0, 0x6c, 0x75)),
         }
     }
 }
