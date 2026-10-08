@@ -2294,18 +2294,35 @@ impl App {
         laid_out
     }
 
-    /// The rows the panel spends on the fetches it is announcing.
+    /// The rows the panel spends on what is not a message, in a panel `height`
+    /// rows tall: the fetches it is announcing, and the open draft's rows.
     ///
     /// One answer, read by the panel for both what it draws and what the
     /// messages have left, because the two cannot be allowed to disagree about
-    /// how tall an announcement is.
+    /// how tall an announcement or a draft is. `layout` is the one the panel
+    /// draws, whose trailing [`RowKind::Draft`] span, if any, gives the draft's
+    /// rows.
+    ///
+    /// Cap: the draft may take every row of the panel but one, so the messages
+    /// always keep a row. A draft taller than that is drawn in the rows it is
+    /// given and the rest is cut off; the input bar still shows all of it. The
+    /// cap only changes how many rows the messages may fill, never a count.
     #[must_use]
-    pub fn reserved(&self) -> Reserved {
-        Reserved {
+    pub fn reserved(&self, layout: &[RowSpan], height: usize) -> Reserved {
+        let mut reserved = Reserved {
             older: self.outbox.fetching.is_in_flight(FetchDirection::Older),
             jumping: self.pending.pending_jump.is_some(),
             newer: self.outbox.fetching.is_in_flight(FetchDirection::Newer),
-        }
+            draft: 0,
+        };
+        let draft = layout
+            .last()
+            .filter(|span| span.kind == RowKind::Draft)
+            .map_or(0, |span| span.len);
+        let room = height.saturating_sub(reserved.above() + reserved.below());
+
+        reserved.draft = draft.min(room.saturating_sub(1));
+        reserved
     }
 
     /// What a jump in flight is called, on the panel and on the status line.

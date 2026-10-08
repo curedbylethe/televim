@@ -73,7 +73,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     app.record_rows(usize::from(body.height));
     app.record_body(body.width);
 
-    let reserved = app.reserved();
+    let reserved = app.reserved(layout, usize::from(body.height));
     let above = reserved.above();
     let budget = usize::from(body.height).saturating_sub(above + reserved.below());
 
@@ -117,8 +117,9 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
         }
         // Only the entry the slice starts inside has rows above the panel; every
         // other one begins on it.
-        // A draft is not painted yet: until it is, it takes no row of the panel
-        // and is not mistaken for a separator, which is what it would be drawn as.
+        // A draft is not painted yet: the rows reserved for it below the messages
+        // stay blank, and it is not mistaken for a separator, which is what it
+        // would be drawn as.
         if span.kind == rows::RowKind::Draft {
             continue;
         }
@@ -1110,8 +1111,8 @@ mod tests {
     /// A day separator counts like any other row: it is in the layout, it is in
     /// `view.total`, and it is drawn, so it is in the sum without being special.
     fn assert_one_answer_about(app: &App, layout: &[RowSpan], buffer: &Buffer) {
-        let reserved = app.reserved();
         let panel_rows = message_rows(buffer).len();
+        let reserved = app.reserved(layout, panel_rows);
         let budget = panel_rows - reserved.above() - reserved.below();
         let view = app.viewport(layout, budget);
         let filled = message_rows(buffer)

@@ -25,7 +25,8 @@
 //!    given is a message index and a message index is what comes back. The one
 //!    exception to the count is [`RowKind::Draft`], which is drawn after the
 //!    last message and is in no total, slice or paging input, so a draft being
-//!    typed moves nothing.
+//!    typed moves nothing. Its rows are taken from the panel's budget below the
+//!    messages ([`Reserved::draft`]), so the messages never fill them.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -119,7 +120,8 @@ pub enum RowKind {
     /// Unlike [`RowKind::Other`] it is not one row: a draft wraps like a
     /// message does. Unlike a message it is in no count — [`total_rows`] stops
     /// at the last message, so the slice, the fetch margins and the paging
-    /// clamps never see it.
+    /// clamps never see it. The panel reserves room for it below the messages
+    /// ([`Reserved::draft`]), capped so that at least one message row is left.
     Draft,
 }
 
@@ -218,7 +220,8 @@ pub struct Slice {
     pub selection: usize,
 }
 
-/// The rows the panel spends on what it is fetching, rather than on messages.
+/// The rows the panel spends on what is not a message: what it is fetching, and
+/// the open draft, which is drawn below the messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Reserved {
     /// A page is on its way from in front of the window.
@@ -229,6 +232,14 @@ pub struct Reserved {
 
     /// A page is on its way from behind the window.
     pub newer: bool,
+
+    /// The rows the open draft is drawn in, after the messages.
+    ///
+    /// Taken from the panel before the messages are given their budget, because a
+    /// slice in follow mode fills every row it is given and the draft has to be
+    /// drawn in one of them. Counted by no total: it only decides how many rows
+    /// the messages may fill.
+    pub draft: usize,
 }
 
 impl Reserved {
@@ -238,10 +249,11 @@ impl Reserved {
         usize::from(self.older) + usize::from(self.jumping)
     }
 
-    /// The rows below the messages.
+    /// The rows below the messages: the draft's, then a page on its way from
+    /// behind the window.
     #[must_use]
     pub fn below(self) -> usize {
-        usize::from(self.newer)
+        usize::from(self.newer) + self.draft
     }
 }
 
