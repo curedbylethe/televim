@@ -2291,6 +2291,9 @@ impl App {
         // asked from, and above it — the `Clear` inside the widget is what makes
         // the list a panel rather than a smear of two lists.
         widgets::user_list::render(self, horizontal[0], frame);
+        // The forward picker is drawn over the conversation column it forwards
+        // from, above the messages and the bar, and below the status line.
+        widgets::forward_picker::render(self, horizontal[1], frame);
         widgets::status_bar::render(self, vertical[2], frame);
     }
 

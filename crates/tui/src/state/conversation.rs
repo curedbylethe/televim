@@ -207,6 +207,23 @@ impl ConversationState {
         self.forward = None;
     }
 
+    /// Moves the picker's cursor one chat, wrapping at either end of a list of
+    /// `chats` chats.
+    pub(crate) fn move_forward(&mut self, chats: usize, down: bool) {
+        let Some(pick) = self.forward.as_mut() else {
+            return;
+        };
+        if chats == 0 {
+            return;
+        }
+
+        pick.selected = if down {
+            (pick.selected + 1) % chats
+        } else {
+            (pick.selected + chats - 1) % chats
+        };
+    }
+
     /// Starts a selection at `message_id`, and reports whether it could be.
     ///
     /// A mark can only be placed on a message the window holds, so a selection
