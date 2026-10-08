@@ -69,6 +69,12 @@
 //! - **A message that carries media.** The text-only `send_message` cannot make
 //!   one, so the download test needs a conversation with an attachment seeded
 //!   before the run; without one it reports the gap and returns.
+//! - **A forward, live.** `forward_messages` is not run against Telegram. A round
+//!   trip that forwards a message from Saved Messages back into it would show the
+//!   copy arriving, and is the test to add once a live run is wanted; it is
+//!   deferred, not written. Until then the forward path is covered only by the
+//!   error mapping in `proto` and the batching in `telegram-framework`, and the
+//!   refusal from a content-protected source is never seen on the wire here.
 //!
 //! Each is covered as far as one account allows. The fetched list's ordering and
 //! the history's are asserted directly, which is deterministic, and the counts —
