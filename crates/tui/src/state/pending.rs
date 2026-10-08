@@ -1,5 +1,6 @@
 //! Half-typed keys and the requests a keystroke defers.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::app::{CHAT_SWITCH_DELAY, ChatChoice, Find, Jump};
@@ -131,5 +132,50 @@ impl Pending {
     /// Records the `f`/`t`/`F`/`T` waiting for its character, or clears it.
     pub(crate) fn set_find(&mut self, find: Option<Find>) {
         self.pending_find = find;
+    }
+}
+
+/// Media files the network has saved and no viewer has been handed yet.
+///
+/// The network writes each file and pushes its path here; the loop takes the
+/// paths when it can launch a viewer. Owned by the network state rather than
+/// [`Pending`], because only the network pushes to it.
+#[derive(Debug, Default)]
+pub struct MediaQueue {
+    paths: Vec<PathBuf>,
+}
+
+impl MediaQueue {
+    /// Queues a saved file for the viewer.
+    pub fn push(&mut self, path: PathBuf) {
+        self.paths.push(path);
+    }
+
+    /// Takes every queued path, oldest first, leaving the queue empty.
+    #[must_use]
+    pub fn take_pending(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::MediaQueue;
+
+    /// Paths come back in the order they were saved, once: a drain takes them
+    /// all and a second drain finds nothing.
+    #[test]
+    fn a_drain_takes_every_queued_path_in_order_and_then_nothing() {
+        let mut queue = MediaQueue::default();
+        queue.push(PathBuf::from("a.jpg"));
+        queue.push(PathBuf::from("b.mp4"));
+
+        assert_eq!(
+            queue.take_pending(),
+            vec![PathBuf::from("a.jpg"), PathBuf::from("b.mp4")]
+        );
+        assert!(queue.take_pending().is_empty());
     }
 }

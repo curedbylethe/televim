@@ -41,12 +41,16 @@
 //! the store the session went into. [`State`] holds them, so the one module that
 //! may see both halves sees them in one place.
 
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use domain::chat::Chat;
-use domain::message::Message;
+use domain::history::ConversationView;
+use domain::message::{MediaKind, Message};
 use domain::search::SEARCH_MATCHES;
 use domain::updates::UpdateEvent;
 use domain::user::UserCandidate;
@@ -56,7 +60,8 @@ use proto::{
 };
 use telegram_framework::{
     ClientBuilder, FileStore, FrameworkError, KeyProvider, KeyringKeyProvider, KeyringStore,
-    PASSWORD_ATTEMPTS, PassphraseProvider, Refusal, RequestError, SessionError, SessionStore,
+    MEDIA_LIMIT, PASSWORD_ATTEMPTS, PassphraseProvider, Refusal, RequestError, SessionError,
+    SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
@@ -413,6 +418,32 @@ pub enum Event {
         /// The bytes, or why the fetch failed, worded for the log.
         fetched: Result<Vec<u8>, String>,
     },
+
+    /// A media download that ran off the loop has written its file. Nothing has
+    /// opened it yet: the path waits in [`State::media`] for the viewer.
+    MediaSaved {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message whose media was saved.
+        message_id: i64,
+
+        /// The temp file the media was written to, whole.
+        path: PathBuf,
+    },
+
+    /// A media download that ran off the loop has not written a file, worded
+    /// for the status line.
+    MediaFailed {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message whose media was asked for.
+        message_id: i64,
+
+        /// Why no file was written, with the fact that none was.
+        reason: String,
+    },
 }
 
 /// What a chat-list retry in progress has to say about itself.
@@ -502,6 +533,12 @@ pub struct State {
 
     /// The cached messages, and where writing them to that file has got to.
     cached: CachedHistory,
+
+    /// The media files saved for the viewer, oldest first.
+    ///
+    /// Pushed by [`apply`] when a download lands. Nothing takes from it yet: the
+    /// viewer launch that drains it is the next stage's work.
+    media: tui::state::pending::MediaQueue,
 
     /// The configuration, and the channel to answer on — the pair bring-up needs
     /// to be run again.
@@ -1242,7 +1279,23 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // must not be held up by either. An action is left in place while there is
     // no client, because a message typed offline must not be thrown away.
     while let Some(action) = app.take_action() {
-        request_action(&client, state, action, tx);
+        // A media open is resolved here, where the conversation on show is: the
+        // download task has no state to ask, and a message that is not on show
+        // has no kind to name its file by.
+        let media = match &action {
+            Action::OpenMedia {
+                chat_id,
+                message_id,
+            } => {
+                let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
+                if kind.is_some() {
+                    "downloading media…".clone_into(&mut app.ui.status);
+                }
+                kind
+            }
+            _ => None,
+        };
+        request_action(&client, state, action, media, tx);
     }
 
     match wanted(app, state.history, Instant::now()) {
@@ -1522,6 +1575,7 @@ fn request_action(
     client: &Arc<ProtoClient>,
     state: &mut State,
     action: Action,
+    media: Option<MediaKind>,
     tx: &UnboundedSender<AppEvent>,
 ) {
     // The sign-out. It needs the client, so it cannot fall through to
@@ -1550,7 +1604,7 @@ fn request_action(
     };
 
     let Action::Login { field, value } = action else {
-        request_plain(client, action, tx);
+        request_plain(client, action, media, tx);
         return;
     };
 
@@ -1686,7 +1740,12 @@ async fn report_sign_in(
 
 /// Everything a sign-in step is *not*: an operation on a conversation, or a
 /// question about somebody.
-fn request_plain(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender<AppEvent>) {
+fn request_plain(
+    client: &Arc<ProtoClient>,
+    action: Action,
+    media: Option<MediaKind>,
+    tx: &UnboundedSender<AppEvent>,
+) {
     let client = Arc::clone(client);
     let tx = tx.clone();
 
@@ -1766,12 +1825,27 @@ fn request_plain(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender
             // reach the state before this function exists. `Logout` is there too:
             // it needs the client, so it is asked for there rather than here.
             // Unreachable rather than wrong: a value is one of the three, never
-            // two. OpenMedia shares the arm until its download lands: the key
-            // queues the action, nothing fetches it yet.
-            Action::Login { .. }
-            | Action::LoginCancelled
-            | Action::Logout
-            | Action::OpenMedia { .. } => {}
+            // two.
+            Action::Login { .. } | Action::LoginCancelled | Action::Logout => {}
+
+            // The download is the network's and the file it leaves is the
+            // viewer's. A message with no kind resolved is refused here rather
+            // than in `drive`, so the refusal reaches the status line the same
+            // way a failed fetch does: as an event.
+            Action::OpenMedia {
+                chat_id,
+                message_id,
+            } => {
+                let event = match media {
+                    Some(kind) => save_media(client.as_ref(), chat_id, message_id, kind).await,
+                    None => Event::MediaFailed {
+                        chat_id,
+                        message_id,
+                        reason: MEDIA_NOT_LOADED.to_owned(),
+                    },
+                };
+                let _ = tx.send(AppEvent::Net(event));
+            }
 
             // A person lookup is a question about a person rather than an
             // operation on a conversation, and it shares this task's shape for
@@ -1981,6 +2055,10 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             message_id,
             fetched,
         } => apply_sticker_settled(app, chat_id, message_id, fetched),
+
+        // The file is the viewer's from here: queued for the launch, and said
+        // on the status line so the reader is not left with the progress sentence.
+        Event::MediaSaved { .. } | Event::MediaFailed { .. } => apply_media(app, state, event),
     }
 }
 
@@ -1997,6 +2075,171 @@ fn apply_sticker_settled(
         return;
     }
     tui::sticker::resolve_fetch(&mut app.conversation.stickers, chat_id, message_id, fetched);
+}
+
+/// The status sentence for an open whose message is not on the screen, so its
+/// kind, and so its file name, is not known.
+const MEDIA_NOT_LOADED: &str = "that message's media is not loaded; nothing was downloaded";
+
+/// The kind of the media on `message_id` in `chat_id`, when the conversation on
+/// show holds that message with media.
+///
+/// `None` for a message that is not on show or carries nothing: the file's name
+/// needs the kind, and a message the reader can no longer see is refused rather
+/// than fetched without one.
+fn open_media_kind(view: &ConversationView, chat_id: i64, message_id: i64) -> Option<MediaKind> {
+    view.message(message_id)
+        .filter(|message| message.chat_id == chat_id)
+        .and_then(|message| message.media)
+}
+
+/// The extension a media kind is saved under.
+///
+/// A dispatch hint for whichever viewer opens the file, not a claim about its
+/// bytes: nothing here sniffs them, and a photo sent as a document keeps the
+/// extension of its kind.
+fn media_suffix(kind: MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Photo => "jpg",
+        MediaKind::Video => "mp4",
+        MediaKind::Gif => "gif",
+        MediaKind::Voice => "ogg",
+        MediaKind::Sticker => "webp",
+        MediaKind::File => "bin",
+    }
+}
+
+/// The file name a download is saved under, in the temp directory.
+///
+/// The process id keeps two televim instances from sharing a file; the chat and
+/// message ids keep two messages apart.
+fn media_file_name(pid: u32, chat_id: i64, message_id: i64, kind: MediaKind) -> String {
+    format!(
+        "televim-{pid}-{chat_id}-{message_id}.{}",
+        media_suffix(kind)
+    )
+}
+
+/// The status sentence for a download that wrote no file.
+///
+/// Every failure the download can report gets a sentence, so none is silent.
+/// The limit is named for an oversize media, because it is the one thing a
+/// reader can act on.
+fn media_failure(error: &ProtoError) -> String {
+    match error {
+        ProtoError::Framework(FrameworkError::MediaTooLarge { .. }) => format!(
+            "media is over the {} MiB limit; nothing was saved",
+            MEDIA_LIMIT / (1024 * 1024)
+        ),
+        ProtoError::Framework(FrameworkError::MediaUnavailable { .. }) => {
+            "this message carries no media televim can fetch; nothing was saved".to_owned()
+        }
+        ProtoError::MessageIdOutOfRange { .. } => {
+            "that message id is outside telegram's range; nothing was saved".to_owned()
+        }
+        other => format!("media download failed: {other}; nothing was saved"),
+    }
+}
+
+/// Downloads the media on a message and writes it to the temp directory.
+///
+/// The file is written whole or not at all, by [`write_private`], so a download
+/// that failed or was refused leaves nothing for a viewer to open half-read.
+async fn save_media(client: &ProtoClient, chat_id: i64, message_id: i64, kind: MediaKind) -> Event {
+    let bytes = match client.download_media(chat_id, message_id).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Event::MediaFailed {
+                chat_id,
+                message_id,
+                reason: media_failure(&error),
+            };
+        }
+    };
+
+    let name = media_file_name(std::process::id(), chat_id, message_id, kind);
+    let path = std::env::temp_dir().join(name);
+    match write_private(&path, &bytes) {
+        Ok(()) => Event::MediaSaved {
+            chat_id,
+            message_id,
+            path,
+        },
+        Err(error) => Event::MediaFailed {
+            chat_id,
+            message_id,
+            reason: format!("could not write the media: {error}; nothing was saved"),
+        },
+    }
+}
+
+/// Writes `bytes` to `path` whole, or leaves no file at `path`.
+///
+/// The bytes go to a sibling first and are renamed into place, the same shape as
+/// the drafts file: a write that fails part way leaves no half-written file where
+/// a viewer would look. The sibling is created owner-only, because the media is
+/// the account's.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    let temp = path.with_file_name(name);
+
+    // A stale sibling from an earlier write that did not finish: removed so the
+    // exclusive create below can take the name.
+    let _ = fs::remove_file(&temp);
+    let result = create_private(&temp)
+        .and_then(|mut file| file.write_all(bytes))
+        .and_then(|()| fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Creates a new file readable and writable by its owner only.
+#[cfg(unix)]
+fn create_private(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// No mode bits on platforms whose permissions `std` cannot express portably.
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// Settles a media download: a saved file is queued for the viewer and said on
+/// the status line, and a failed one is said there and queues nothing.
+fn apply_media(app: &mut App, state: &mut State, event: Event) {
+    match event {
+        Event::MediaSaved {
+            chat_id,
+            message_id,
+            path,
+        } => {
+            tracing::debug!(chat_id, message_id, path = %path.display(), "media saved");
+            app.flash(format!("media saved to {}", path.display()));
+            state.media.push(path);
+        }
+        Event::MediaFailed {
+            chat_id,
+            message_id,
+            reason,
+        } => {
+            tracing::warn!(chat_id, message_id, %reason, "a media download failed");
+            app.flash(reason);
+        }
+        _ => {}
+    }
 }
 
 fn apply_ready(
@@ -6932,5 +7175,173 @@ mod session_store_tests {
             std::fs::read(&path).expect("the file is still there"),
             sealed
         );
+    }
+}
+
+/// Tests for the media open: the suffix table, the failure sentences, the kind
+/// lookup and the file write. Its own module because the helpers above want
+/// their own sample messages, not the ones the chat tests build.
+#[cfg(test)]
+mod media_tests {
+    use std::borrow::Cow;
+    use std::path::PathBuf;
+
+    use domain::message::MessageStatus;
+
+    use super::*;
+
+    /// The conversation the sample messages belong to.
+    const CHAT: i64 = 7;
+    /// A media message of `kind` in `chat_id`, for the view the open looks in.
+    fn media_message(chat_id: i64, id: i64, kind: Option<MediaKind>) -> Message {
+        Message {
+            id,
+            chat_id,
+            text: Cow::Borrowed(""),
+            timestamp: id,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+            media: kind,
+        }
+    }
+
+    /// Each kind is saved under the extension its viewer is dispatched by.
+    #[test]
+    fn each_media_kind_is_saved_under_its_dispatch_suffix() {
+        assert_eq!(media_suffix(MediaKind::Photo), "jpg");
+        assert_eq!(media_suffix(MediaKind::Video), "mp4");
+        assert_eq!(media_suffix(MediaKind::Gif), "gif");
+        assert_eq!(media_suffix(MediaKind::Voice), "ogg");
+        assert_eq!(media_suffix(MediaKind::Sticker), "webp");
+        assert_eq!(media_suffix(MediaKind::File), "bin");
+    }
+
+    /// The name carries the process, chat and message, and the kind's suffix.
+    #[test]
+    fn a_media_file_is_named_by_process_chat_message_and_kind() {
+        assert_eq!(
+            media_file_name(7, 42, 5, MediaKind::Video),
+            "televim-7-42-5.mp4"
+        );
+        assert_eq!(
+            media_file_name(7, -100, 5, MediaKind::File),
+            "televim-7--100-5.bin"
+        );
+    }
+
+    /// An oversize media names the limit, and every other failure is a sentence
+    /// that says nothing was saved.
+    #[test]
+    fn every_download_failure_becomes_a_sentence_that_says_nothing_was_saved() {
+        let too_large = ProtoError::Framework(FrameworkError::MediaTooLarge {
+            peer_id: 1,
+            message_id: 2,
+            size: MEDIA_LIMIT + 1,
+            limit: MEDIA_LIMIT,
+        });
+        let text = media_failure(&too_large);
+        assert!(text.contains("16 MiB"), "{text}");
+        assert!(text.contains("nothing was saved"), "{text}");
+
+        let unavailable = ProtoError::Framework(FrameworkError::MediaUnavailable {
+            peer_id: 1,
+            message_id: 2,
+        });
+        assert!(media_failure(&unavailable).contains("no media televim can fetch"));
+
+        let out_of_range = ProtoError::MessageIdOutOfRange {
+            peer_id: 1,
+            id: i64::MAX,
+        };
+        assert!(media_failure(&out_of_range).contains("outside telegram's range"));
+    }
+
+    /// The kind is read only from a message on show, in the chat it was asked
+    /// for: a message that is gone, bare, or in another chat is refused.
+    #[test]
+    fn an_open_resolves_the_kind_only_for_a_message_on_show_with_media() {
+        let mut view = ConversationView::new(CHAT);
+        view.window.replace([
+            media_message(CHAT, 1, Some(MediaKind::Gif)),
+            media_message(CHAT, 2, None),
+        ]);
+
+        assert_eq!(open_media_kind(&view, CHAT, 1), Some(MediaKind::Gif));
+        assert_eq!(open_media_kind(&view, CHAT, 2), None, "carries no media");
+        assert_eq!(open_media_kind(&view, CHAT, 3), None, "not on show");
+        assert_eq!(open_media_kind(&view, CHAT + 1, 1), None, "another chat");
+    }
+
+    /// The file lands whole under its name, owner-only, and leaves no sibling;
+    /// a write into a directory that does not exist leaves nothing behind.
+    #[test]
+    fn a_saved_media_file_is_whole_owner_only_and_leaves_no_sibling() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim-1-2-3.jpg");
+
+        write_private(&path, b"first").expect("the write lands");
+        write_private(&path, b"second").expect("an overwrite lands");
+
+        assert_eq!(std::fs::read(&path).expect("the file"), b"second");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("the directory")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "no sibling left: {names:?}");
+
+        let missing = dir.path().join("no-such-dir").join("televim-1-2-3.jpg");
+        assert!(write_private(&missing, b"x").is_err());
+        assert!(!missing.exists());
+    }
+
+    /// A saved file is queued for the viewer and said on the status line; a
+    /// failed one is said there and queues nothing.
+    #[test]
+    fn apply_queues_a_saved_media_path_and_flashes_a_failure() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(Config::default(), tx);
+        let mut app = App::new();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::MediaSaved {
+                chat_id: CHAT,
+                message_id: 9,
+                path: PathBuf::from("televim-1-7-9.mp4"),
+            },
+        );
+        assert!(
+            app.ui.status.contains("televim-1-7-9.mp4"),
+            "{}",
+            app.ui.status
+        );
+        assert_eq!(
+            state.media.take_pending(),
+            vec![PathBuf::from("televim-1-7-9.mp4")]
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::MediaFailed {
+                chat_id: CHAT,
+                message_id: 9,
+                reason: "media is over the 16 MiB limit; nothing was saved".to_owned(),
+            },
+        );
+        assert_eq!(
+            app.ui.status,
+            "media is over the 16 MiB limit; nothing was saved"
+        );
+        assert!(state.media.take_pending().is_empty());
     }
 }
