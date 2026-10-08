@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tui::bidi::BidiMode;
-use tui::state::ui::StickerMode;
+use tui::state::ui::{GraphicsMode, StickerMode};
 
 /// A setting that must not reach a log or a panic message.
 ///
@@ -79,6 +79,11 @@ const BIDI_VISUAL: &str = "visual";
 const STICKERS_INLINE: &str = "inline";
 const STICKERS_OFF: &str = "off";
 
+/// How a sticker picture reaches the terminal, named as the `graphics` key
+/// spells it. `auto` decides from the environment once, at launch.
+const GRAPHICS_AUTO: &str = "auto";
+const GRAPHICS_KITTY: &str = "kitty";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -106,6 +111,19 @@ pub struct Config {
     /// for every sticker message and fetches nothing: no decode, no download
     /// traffic.
     pub stickers: String,
+
+    /// How a sticker picture reaches the terminal: `auto`, `kitty`, or `off`.
+    ///
+    /// `kitty` places the picture with the kitty graphics protocol, which
+    /// the kitty, ghostty and wezterm terminals speak. `off` paints it as
+    /// half-block cells on every terminal. `auto` — the default — is `kitty`
+    /// where the environment names one of those terminals, and `off`
+    /// everywhere else. The environment is read once, at launch, and never
+    /// per frame: see [`Config::graphics_mode`].
+    ///
+    /// **Per machine, not per terminal**, like [`Config::bidi`]: an ssh hop
+    /// keeps the value it was launched with.
+    pub graphics: String,
 
     /// Application identifier, from <https://my.telegram.org>.
     ///
@@ -160,6 +178,7 @@ impl Default for Config {
             theme: "default".to_owned(),
             bidi: BIDI_TERMINAL.to_owned(),
             stickers: STICKERS_INLINE.to_owned(),
+            graphics: GRAPHICS_AUTO.to_owned(),
             api_id: None,
             api_hash: None,
             phone: None,
@@ -177,7 +196,8 @@ impl Config {
             .set_default("log_level", "info")?
             .set_default("theme", "default")?
             .set_default("bidi", BIDI_TERMINAL)?
-            .set_default("stickers", STICKERS_INLINE)?;
+            .set_default("stickers", STICKERS_INLINE)?
+            .set_default("graphics", GRAPHICS_AUTO)?;
 
         if path.exists() {
             builder = builder.add_source(config::File::from(path));
@@ -254,11 +274,113 @@ impl Config {
             StickerMode::Inline
         }
     }
+
+    /// How a sticker picture reaches the terminal, from [`Config::graphics`].
+    ///
+    /// Only `kitty` names a mode outright; `off` and anything unknown are
+    /// half-blocks. `auto` consults the
+    /// environment through `lookup`, and anything else is
+    /// [`GraphicsMode::Halfblocks`]: the same rule as [`Config::sticker_mode`],
+    /// since a value this program cannot read must not switch a protocol on.
+    /// Called once, where the application is built, and never per frame.
+    #[must_use]
+    pub fn graphics_mode(&self, lookup: impl Fn(&str) -> Option<String>) -> GraphicsMode {
+        match self.graphics.as_str() {
+            GRAPHICS_KITTY => GraphicsMode::Kitty,
+            GRAPHICS_AUTO if kitty_terminal(lookup) => GraphicsMode::Kitty,
+            _ => GraphicsMode::Halfblocks,
+        }
+    }
+}
+
+/// Whether the environment names a terminal that speaks the kitty graphics
+/// protocol.
+///
+/// `KITTY_WINDOW_ID` is set by kitty in every window it hosts, `TERM` is
+/// `xterm-kitty` there, and `TERM_PROGRAM` names ghostty and wezterm. A
+/// multiplexer hides these, so inside `tmux` the answer is `off` unless the
+/// configuration says `kitty`.
+fn kitty_terminal(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    lookup("KITTY_WINDOW_ID").is_some()
+        || lookup("TERM").as_deref() == Some("xterm-kitty")
+        || matches!(
+            lookup("TERM_PROGRAM").as_deref(),
+            Some("ghostty" | "WezTerm")
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    /// The default asks the environment, and a bare environment is half-blocks.
+    #[test]
+    fn graphics_is_auto_and_half_blocks_where_nothing_is_named() {
+        assert_eq!(bare().graphics, "auto");
+        assert_eq!(bare().graphics_mode(env(&[])), GraphicsMode::Halfblocks);
+    }
+
+    #[test]
+    fn auto_chooses_kitty_where_the_environment_names_one() {
+        let cfg = bare();
+        assert_eq!(
+            cfg.graphics_mode(env(&[("KITTY_WINDOW_ID", "3")])),
+            GraphicsMode::Kitty
+        );
+        assert_eq!(
+            cfg.graphics_mode(env(&[("TERM", "xterm-kitty")])),
+            GraphicsMode::Kitty
+        );
+        assert_eq!(
+            cfg.graphics_mode(env(&[("TERM_PROGRAM", "ghostty")])),
+            GraphicsMode::Kitty
+        );
+        assert_eq!(
+            cfg.graphics_mode(env(&[("TERM_PROGRAM", "WezTerm")])),
+            GraphicsMode::Kitty
+        );
+        assert_eq!(
+            cfg.graphics_mode(env(&[("TERM", "xterm-256color")])),
+            GraphicsMode::Halfblocks,
+            "an ordinary terminal is not guessed kitty"
+        );
+    }
+
+    /// An explicit `kitty` is honoured without the environment; `off` wins over
+    /// a kitty environment.
+    #[test]
+    fn an_explicit_value_overrides_the_environment() {
+        let mut cfg = bare();
+        cfg.graphics = "kitty".to_owned();
+        assert_eq!(cfg.graphics_mode(env(&[])), GraphicsMode::Kitty);
+
+        cfg.graphics = "off".to_owned();
+        assert_eq!(
+            cfg.graphics_mode(env(&[("KITTY_WINDOW_ID", "3")])),
+            GraphicsMode::Halfblocks
+        );
+    }
+
+    /// The same rule as `stickers`: a spelling this program does not know must
+    /// not switch a protocol on, even in a kitty terminal.
+    #[test]
+    fn an_unknown_graphics_spelling_is_half_blocks() {
+        let mut cfg = bare();
+        cfg.graphics = "Kitty".to_owned();
+        assert_eq!(
+            cfg.graphics_mode(env(&[("KITTY_WINDOW_ID", "3")])),
+            GraphicsMode::Halfblocks
+        );
+    }
 
     /// A configuration with nothing set but the two required-by-nobody values.
     fn bare() -> Config {

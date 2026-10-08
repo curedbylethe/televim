@@ -32,6 +32,7 @@ use domain::message::{MediaKind, Message};
 use crate::app::{App, FetchDirection, Focus};
 use crate::bidi::{self, BidiMode};
 use crate::rows::{self, RowSpan};
+use crate::state::ui::{GraphicsMode, Placement};
 use crate::sticker::{DecodedSticker, STICKER_FIT_WIDTH};
 use crate::text_row;
 use crate::wrap::columns;
@@ -105,6 +106,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     // same set as the entries from the slice's first message onward, since a row
     // that names no message sits in the layout too.
     let mut on_the_first_row = true;
+    let mut pictures: Vec<Pending> = Vec::new();
     for span in layout
         .iter()
         .filter(|span| span.first + span.len > view.start_row)
@@ -150,10 +152,14 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
             skip,
             room: view.budget.saturating_sub(drawn),
         };
-        for item in message_items(app, message, index, &draw, &covered) {
-            items.push(item);
-            drawn += 1;
-        }
+        let base = items.len();
+        let (rendered, picture) = message_items(app, message, index, &draw, &covered);
+        drawn += rendered.len();
+        items.extend(rendered);
+        pictures.extend(picture.map(|p| Pending {
+            top: base + p.top,
+            ..p
+        }));
     }
 
     // The draft is drawn in the rows reserved for it below the messages, and no
@@ -189,9 +195,34 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     let list = List::new(items).highlight_style(app.ui.theme.selection);
     frame.render_stateful_widget(list, body, &mut state);
 
+    record_placements(app, body, state.offset(), &pictures);
+
     if let Some(gutter) = gutter {
         render_scrollbar(app, gutter, frame, &view);
     }
+}
+
+/// Records where the frame's pictures sit on the screen, for the loop to place.
+///
+/// The list has scrolled to show the selection, so a picture's row is its
+/// item's row less the first item the list drew. A picture the panel cuts off
+/// at either edge is not placed: the terminal cannot draw part of one over the
+/// rows above or below the panel.
+fn record_placements(app: &App, body: Rect, offset: usize, pictures: &[Pending]) {
+    let height = usize::from(body.height);
+    let placed = pictures
+        .iter()
+        .filter(|p| p.top >= offset && p.top + usize::from(p.rows) <= offset + height)
+        .map(|p| Placement {
+            message_id: p.message_id,
+            x: body.x + p.x,
+            y: body.y + u16::try_from(p.top - offset).unwrap_or(u16::MAX),
+            cols: p.cols,
+            rows: p.rows,
+        });
+    let mut slot = app.ui.placements.borrow_mut();
+    slot.clear();
+    slot.extend(placed);
 }
 
 /// The panel's title: where in what is loaded the reader is, what a search found
@@ -377,7 +408,7 @@ fn message_items<'m>(
     index: usize,
     draw: &Draw,
     covered: &Range<usize>,
-) -> Vec<ListItem<'m>> {
+) -> (Vec<ListItem<'m>>, Option<Pending>) {
     let grouped = rows::group_of(app, index);
     let wrapped = rows::message_rows(app, message, grouped, draw.width);
     // A decoded sticker paints its picture below its (empty) text rows, so
@@ -393,6 +424,7 @@ fn message_items<'m>(
     let coverage = coverage(app, message, index, covered);
 
     let mut items = Vec::with_capacity(wrapped.len() + block);
+    let mut picture = None;
     for (row, range) in wrapped.iter().enumerate().skip(draw.skip) {
         if items.len() >= draw.room {
             break;
@@ -432,7 +464,7 @@ fn message_items<'m>(
             if brow < skipped {
                 continue;
             }
-            items.push(sticker_block_row(
+            let (item, lead) = sticker_block_row(
                 app,
                 message,
                 image,
@@ -440,11 +472,50 @@ fn message_items<'m>(
                 &place,
                 coverage.as_ref(),
                 draw.width,
-            ));
+            );
+            if brow == 0 && app.graphics() == GraphicsMode::Kitty {
+                picture = Pending::for_picture(message.id, items.len(), lead, image);
+            }
+            items.push(item);
         }
     }
 
-    items
+    (items, picture)
+}
+
+/// A picture the frame drew as blank cells, waiting for the panel to place it.
+///
+/// `top` is an item of the whole list rather than of one message, so it is
+/// set once the message's items are appended; until then it names the
+/// message's own item.
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    top: usize,
+    message_id: i64,
+    /// Columns the row carrying the picture's first row spends before it,
+    /// relative to the body's left edge.
+    x: u16,
+    cols: u16,
+    rows: u16,
+}
+
+impl Pending {
+    /// The picture of `image` for the message `message_id`, whose first row is
+    /// item `at` of its own items, starting `lead` columns in.
+    fn for_picture(
+        message_id: i64,
+        at: usize,
+        lead: usize,
+        image: &DecodedSticker,
+    ) -> Option<Self> {
+        Some(Self {
+            top: at,
+            message_id,
+            x: u16::try_from(lead).ok()?,
+            cols: u16::try_from(image.width).ok()?,
+            rows: u16::try_from(image.height.div_ceil(2)).ok()?,
+        })
+    }
 }
 
 /// Where a block row stands in its message's block: which picture rows it
@@ -636,7 +707,7 @@ fn sticker_block_row<'m>(
     place: &BlockPlace,
     covered: Option<&Coverage>,
     width: u16,
-) -> ListItem<'m> {
+) -> (ListItem<'m>, usize) {
     let mut spans = Vec::new();
 
     if brow == 0 {
@@ -664,8 +735,18 @@ fn sticker_block_row<'m>(
         }
     }
 
+    // What the row spends before its picture: the tag and any quote, which
+    // the picture's first row is set after.
+    let lead = columns_of(&spans);
+    let kitty = app.graphics() == GraphicsMode::Kitty;
     for x in 0..STICKER_FIT_WIDTH as usize {
-        spans.push(block_cell(image, x, brow * 2));
+        // The kitty picture covers these cells, so they are left blank for
+        // it rather than painted twice.
+        if kitty {
+            spans.push(Span::raw(" "));
+        } else {
+            spans.push(block_cell(image, x, brow * 2));
+        }
     }
 
     if brow + 1 == place.block
@@ -708,7 +789,13 @@ fn sticker_block_row<'m>(
         }
     }
 
-    ListItem::new(Line::from(spans))
+    (ListItem::new(Line::from(spans)), lead)
+}
+
+/// The columns `spans` take up on the row, counted as the terminal will draw
+/// them.
+fn columns_of(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| columns(&span.content)).sum()
 }
 
 /// One half-block cell of a decoded picture: picture column `x`, picture rows
@@ -885,6 +972,7 @@ mod tests {
     use super::*;
     use crate::app::JumpKind;
     use crate::app::{App, TYPING_FOR};
+    use crate::state::ui::GraphicsMode;
     use crate::sticker::STICKER_TEST_WEBP;
     use crate::theme::Theme;
     use crate::wrap::columns;
@@ -2080,6 +2168,41 @@ mod tests {
         assert_eq!(pixel.symbol(), "▀");
         assert_eq!(pixel.fg, Color::Rgb(255, 0, 0));
         assert_eq!(pixel.bg, Color::Rgb(0, 0, 0));
+    }
+
+    /// Kitty mode leaves the block's cells blank for the picture, and records
+    /// where the picture goes: the body's column after the tag, on the block's
+    /// first row, at the picture's own size.
+    #[test]
+    fn kitty_mode_leaves_the_block_blank_and_records_its_picture() {
+        let app = showing_decoded(vec![attachment(1, 0, false, MediaKind::Sticker)])
+            .with_graphics(GraphicsMode::Kitty);
+
+        let screen = screen(&app, 80, 24);
+        for y in FIRST..FIRST + 8 {
+            let row = body_row(&screen, y);
+            assert!(
+                !row.contains('▀') && !row.contains('▄'),
+                "no half-block cells in kitty mode: {row}"
+            );
+        }
+
+        let placed = app.ui.placements.borrow();
+        assert_eq!(placed.len(), 1, "the one picture is recorded");
+        let picture = placed[0];
+        assert_eq!(picture.message_id, 1);
+        assert_eq!(picture.x, BODY_X + 7, "after the \"[them] \" tag");
+        assert_eq!(picture.y, FIRST);
+        assert_eq!(picture.cols, 4, "the fixture is four pixels wide");
+        assert_eq!(picture.rows, 2, "three pixels take two terminal rows");
+    }
+
+    /// The default mode records nothing: the half-block cells are the picture.
+    #[test]
+    fn half_block_mode_records_no_placement() {
+        let app = showing_decoded(vec![attachment(1, 0, false, MediaKind::Sticker)]);
+        let _ = screen(&app, 80, 24);
+        assert!(app.ui.placements.borrow().is_empty());
     }
 
     #[test]

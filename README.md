@@ -166,7 +166,10 @@ Working today:
   A static sticker with its bytes draws its picture inline — a bounded block,
   24 columns by 8 rows, half-block cells — and `[sticker]` while they are
   missing; `stickers = "off"` (or `TELEVIM_STICKERS=off`) draws the token for
-  every sticker message and fetches nothing. Fetching the bytes is a client-level operation today
+  every sticker message and fetches nothing. `graphics = "auto"` (or
+  `TELEVIM_GRAPHICS`) places the picture with the kitty graphics protocol where
+  the environment names kitty, ghostty or WezTerm; `kitty` forces it and `off`
+  keeps the half-block cells everywhere. Sixel is not yet supported. Fetching the bytes is a client-level operation today
   (`ProtoClient::download_media`, capped at 16 MiB, refused rather than
   truncated when it is over): the attachment is re-read by identifier, because a
   description is rebuilt on every page and a cached locator would be stale. A key

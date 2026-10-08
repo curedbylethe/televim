@@ -325,6 +325,29 @@ Real, and named so they are not mistaken for oversights:
   product's scope, not a limit of the store. Media bytes are not cached either;
   the media *kind* is, so a cached `[image]` row draws its token and nothing more.
 
+- **Sixel is not implemented.** Sixel draws in pixels, so fitting the 24-by-8
+  box needs the terminal's cell pixel size, and getting that is a probe the
+  program does not run. Kitty graphics is the only protocol `graphics` selects.
+- **Kitty pictures hide the cursor and selection under them.** In `kitty` mode
+  the block's cells are blank and the picture covers them, so the reverse video
+  of a cursor or selection shows only on the margins and the tag row, not on the
+  picture. The half-block mode paints both.
+- **Kitty placement is re-sent on every pass.** `tui::graphics::frame` clears
+  and re-places each visible picture on every loop pass, transmitting its base64
+  again. Not measured on a live terminal; a diff against last frame's placements
+  is the upgrade path if the traffic shows.
+- **A picture the panel cuts off is not drawn in `kitty` mode.** A block only
+  partly on screen shows blank cells instead of the cut picture, because the
+  terminal cannot draw part of one over the rows outside the panel.
+- **The kitty path has no live-terminal proof.** It is covered by byte-exact
+  encoder tests and one widget test that checks the blank cells and the recorded
+  placement. Nothing has run in kitty, ghostty or WezTerm.
+- **Half-block picture rows after the first start one tag-width left of row 0.**
+  Read from `sticker_block_row`, not from a test: only block row 0 is padded by the
+  tag, so rows 1 to 7 start at column 0 while row 0 starts after the tag. The
+  `kitty` placement follows row 0's column, as the picture's first row does.
+  Not changed here.
+
 ## v2 Hooks
 
 The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists and returns bytes, and the `tokio::fs` cache and any viewer are what is still ahead of it.

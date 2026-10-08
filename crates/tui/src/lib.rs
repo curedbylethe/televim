@@ -17,6 +17,7 @@ pub mod date;
 pub mod emoji;
 pub mod event;
 mod grapheme;
+pub mod graphics;
 pub mod jumplist;
 pub mod line;
 pub mod presence;

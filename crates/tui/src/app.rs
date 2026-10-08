@@ -38,7 +38,7 @@ use crate::state::outbox::Outbox;
 use crate::state::pending::Pending;
 use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
-use crate::state::ui::{IDLE_STATUS, StickerMode, UiState};
+use crate::state::ui::{GraphicsMode, IDLE_STATUS, StickerMode, UiState};
 use crate::widgets;
 
 /// How close to an end of the loaded messages the cursor has to get before the
@@ -1055,6 +1055,25 @@ impl App {
     pub fn with_stickers(mut self, stickers: StickerMode) -> Self {
         self.ui = self.ui.with_stickers(stickers);
         self
+    }
+
+    /// The same application, placing sticker pictures with the kitty graphics
+    /// protocol instead of painting them as cells.
+    ///
+    /// Delegates to [`UiState::with_graphics`].
+    #[must_use]
+    pub fn with_graphics(mut self, graphics: GraphicsMode) -> Self {
+        self.ui = self.ui.with_graphics(graphics);
+        self
+    }
+
+    /// How a sticker's picture reaches the terminal.
+    ///
+    /// Asked once per frame by the conversation panel, and never by the layout
+    /// — see the field's doc.
+    #[must_use]
+    pub fn graphics(&self) -> GraphicsMode {
+        self.ui.graphics
     }
 
     /// Who permutes a right-to-left row: this program, or the terminal.
@@ -2188,6 +2207,9 @@ impl App {
     /// draw a layout holding a row that names no message, which nothing in the
     /// program emits yet.
     pub(crate) fn render_layout(&self, layout: &[RowSpan], frame: &mut Frame<'_>) {
+        // What the conversation panel places is what it drew this frame; a frame
+        // that draws no panel places nothing.
+        self.ui.placements.borrow_mut().clear();
         let area = frame.area();
 
         // The bar is as tall as the draft the reader is typing in, up to its

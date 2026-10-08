@@ -1,6 +1,6 @@
 //! Dispatch mode, focus, and the chrome that is not conversation or input.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -42,6 +42,34 @@ pub enum StickerMode {
     Inline,
     /// Always the token, never the picture.
     Token,
+}
+
+/// How a decoded sticker's picture reaches the terminal.
+///
+/// Halfblocks is the default: the picture is painted as cells, the same on
+/// every terminal. Kitty leaves the block's cells blank and places the picture
+/// over them with the kitty graphics protocol, after the frame is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GraphicsMode {
+    /// Paint the picture as half-block cells.
+    #[default]
+    Halfblocks,
+    /// Place the picture with the kitty graphics protocol.
+    Kitty,
+}
+
+/// A decoded picture the last frame drew over its block, in screen cells.
+///
+/// The picture's top-left is at (`x`, `y`) and it spans `cols` by `rows`
+/// cells — its own pixel size, one cell a column and two pixels a row, which is
+/// the footprint the half-block painter gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub message_id: i64,
+    pub x: u16,
+    pub y: u16,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// Rows, body width, and the clock, as of the last frame.
@@ -153,6 +181,19 @@ pub struct UiState {
     /// is `app`'s to read, and this is what it becomes.
     pub(crate) stickers: StickerMode,
 
+    /// How the picture reaches the terminal. **Fixed at construction**, and
+    /// written only by [`Self::with_graphics`], for the same reason as
+    /// [`Self::bidi`]: the blank block the kitty mode draws has the same rows
+    /// as the painted one, but a mode that changed mid-session would leave
+    /// pictures placed over cells the next frame had already repainted.
+    pub(crate) graphics: GraphicsMode,
+
+    /// The pictures the last frame drew over their blocks, in screen cells.
+    /// Written by the conversation panel while it draws, read once after the
+    /// draw by the loop, which places them. Empty unless [`Self::graphics`] is
+    /// [`GraphicsMode::Kitty`].
+    pub(crate) placements: RefCell<Vec<Placement>>,
+
     /// Rows, body width, and the clock, as of the last frame.
     pub(crate) metrics: FrameMetrics,
 }
@@ -174,6 +215,8 @@ impl UiState {
             peer_presence: HashMap::new(),
             bidi: BidiMode::Terminal,
             stickers: StickerMode::Inline,
+            graphics: GraphicsMode::Halfblocks,
+            placements: RefCell::new(Vec::new()),
             metrics: FrameMetrics {
                 rows: Cell::new(ASSUMED_ROWS),
                 body_width: Cell::new(ASSUMED_BODY_WIDTH),
@@ -191,6 +234,16 @@ impl UiState {
     /// the window and the width. A caller that has read the configuration calls
     /// this once, where it builds the application; nothing else needs to say
     /// anything.
+    /// The same application, placing sticker pictures with the kitty graphics
+    /// protocol instead of painting them as cells.
+    ///
+    /// By value and at construction, for the same reason as [`Self::with_bidi`].
+    #[must_use]
+    pub(crate) fn with_graphics(mut self, graphics: GraphicsMode) -> Self {
+        self.graphics = graphics;
+        self
+    }
+
     #[must_use]
     pub(crate) fn with_bidi(mut self, bidi: BidiMode) -> Self {
         self.bidi = bidi;
