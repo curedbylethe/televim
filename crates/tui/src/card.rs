@@ -44,6 +44,7 @@ use domain::selection::Selection;
 use ratatui::text::Line;
 
 use crate::app::{AccountState, App, SessionStore};
+use crate::presence::wording;
 use crate::rows;
 use crate::text_row::{self, Ink, TextRow};
 use crate::wrap;
@@ -302,7 +303,10 @@ fn self_rows(app: &App) -> Vec<CardRow> {
 /// profile* rather than from the chat, so that a name the peer has since changed
 /// is the name they have now.
 fn contact_rows(app: &App) -> Vec<CardRow> {
-    let Some(AccountState::Known(account)) = app.contact().map(|c| &c.state) else {
+    let Some(contact) = app.contact() else {
+        return Vec::new();
+    };
+    let AccountState::Known(account) = &contact.state else {
         return Vec::new();
     };
 
@@ -316,6 +320,15 @@ fn contact_rows(app: &App) -> Vec<CardRow> {
     ];
     if let Some(identity) = identity(account) {
         rows.push(CardRow::value("username", identity));
+    }
+    // The live report wins over the one the profile read carried, because it is
+    // the newer of the two. Absent, not empty, when the peer restricts it.
+    let presence = app
+        .peer_presence(contact.peer_id)
+        .or(account.presence)
+        .and_then(|presence| wording(presence, app.now()));
+    if let Some(status) = presence {
+        rows.push(CardRow::value("status", status));
     }
     if let Some(bio) = account.bio.as_deref().filter(|_| account.has_bio()) {
         rows.push(CardRow::value("bio", bio.to_owned()));
@@ -1435,5 +1448,71 @@ mod drawing {
                 }
             }
         }
+    }
+
+    // ---- the presence row ------------------------------------------------
+
+    /// A contact's card, read, after the peer has reported `presence` through the
+    /// feed. The event is the only thing that sets the presence, so the fixture
+    /// reaches the state the program can produce and no other.
+    fn card_reporting(presence: domain::presence::Presence) -> App {
+        let (mut app, chat) = contact_card();
+        assert!(app.apply_update(&domain::updates::UpdateEvent::PeerStatus {
+            chat_id: chat.id,
+            presence,
+        }));
+        app
+    }
+
+    /// The value of the status row, if the card has one.
+    fn status_of(app: &App) -> Option<String> {
+        rows(app)
+            .into_iter()
+            .find(|row| row.label == "status")
+            .map(|row| row.value)
+    }
+
+    /// A contact who is online has a status row that says so, and the row is
+    /// drawn on the card rather than only held in the rows.
+    #[test]
+    fn a_contact_who_is_online_has_a_status_row_on_the_card() {
+        let app = card_reporting(domain::presence::Presence::Online);
+
+        assert_eq!(status_of(&app).as_deref(), Some("online"));
+        let text = rows_of(&screen(&app, 60)).join("\n");
+        assert!(text.contains("status"), "the row is labelled: {text}");
+        assert!(text.contains("online"), "and says so: {text}");
+    }
+
+    /// A contact who restricts their last-seen time has no status row at all,
+    /// rather than one reading "hidden" or "unknown".
+    #[test]
+    fn a_contact_who_hides_their_presence_has_no_status_row() {
+        let app = card_reporting(domain::presence::Presence::Hidden);
+
+        assert_eq!(status_of(&app), None, "no row for a restricted presence");
+        let text = rows_of(&screen(&app, 60)).join("\n");
+        assert!(!text.contains("status"), "and none drawn: {text}");
+    }
+
+    /// A profile read that carried a presence stands until the feed says
+    /// otherwise, and the feed's report wins once it arrives.
+    #[test]
+    fn the_feed_report_replaces_the_one_the_profile_read_carried() {
+        let (mut app, chat) = contact_card();
+        app.set_contact(
+            chat.id,
+            Ok(domain::account::Account {
+                presence: Some(domain::presence::Presence::Recently),
+                ..crate::app::mock_account()
+            }),
+        );
+        assert_eq!(status_of(&app).as_deref(), Some("last seen recently"));
+
+        assert!(app.apply_update(&domain::updates::UpdateEvent::PeerStatus {
+            chat_id: chat.id,
+            presence: domain::presence::Presence::Online,
+        }));
+        assert_eq!(status_of(&app).as_deref(), Some("online"));
     }
 }

@@ -19,6 +19,7 @@ pub mod event;
 mod grapheme;
 pub mod jumplist;
 pub mod line;
+pub mod presence;
 pub mod rows;
 pub mod state;
 pub mod sticker;

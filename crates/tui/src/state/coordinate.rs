@@ -565,6 +565,14 @@ pub(crate) fn apply_update(
         return apply_typing(&mut *ui, &mut *conversation, *chat_id, *typing);
     }
 
+    // Presence is the peer's standing, not a change to anything in the feed: no
+    // message moved, so the window, the cursor and any selection or search are
+    // left exactly where the reader put them. It is recorded for every peer,
+    // not only the one on show, because the contact card can name any of them.
+    if let UpdateEvent::PeerStatus { chat_id, presence } = event {
+        return ui.set_presence(*chat_id, *presence);
+    }
+
     let listed = list.list.apply_update(event.clone());
 
     // The message is what the typing was for, so it ends it. Cleared here

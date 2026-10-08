@@ -1,7 +1,10 @@
 //! Dispatch mode, focus, and the chrome that is not conversation or input.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::time::Instant;
+
+use domain::presence::Presence;
 
 use crate::app::{FLASH_FOR, Focus, Mode, Pane};
 use crate::bidi::BidiMode;
@@ -114,6 +117,14 @@ pub struct UiState {
     /// reference and cannot expire anything itself.
     pub(crate) typing_until: Option<(i64, Instant)>,
 
+    /// The last presence each peer was reported with, keyed by the peer's
+    /// identifier.
+
+    /// Per peer rather than per conversation, because the contact card can show
+    /// anyone and not only the peer on the open conversation. Sticky: an entry
+    /// stands until the next update for that peer, and nothing expires it.
+    pub(crate) peer_presence: HashMap<i64, Presence>,
+
     /// Who permutes a right-to-left row: this program, or the terminal.
     ///
     /// **Fixed at construction**, and written only by [`Self::with_bidi`]:
@@ -160,6 +171,7 @@ impl UiState {
             connection: ConnectionState::Connecting,
             status_until: None,
             typing_until: None,
+            peer_presence: HashMap::new(),
             bidi: BidiMode::Terminal,
             stickers: StickerMode::Inline,
             metrics: FrameMetrics {
@@ -242,6 +254,11 @@ impl UiState {
         self.status_until = None;
         IDLE_STATUS.clone_into(&mut self.status);
         true
+    }
+
+    /// Records a peer's presence, reporting whether it changed what is shown.
+    pub(crate) fn set_presence(&mut self, peer_id: i64, presence: Presence) -> bool {
+        self.peer_presence.insert(peer_id, presence) != Some(presence)
     }
 
     /// Records the peer's typing note, or clears it.
