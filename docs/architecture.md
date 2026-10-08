@@ -65,6 +65,7 @@ in one direction and wider in another:
 | :---- | :--------- |
 | `domain` | `thiserror` |
 | `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation`, `unicode-bidi`, `emojis`, `image-webp`, `tracing` |
+| `telegram-framework` | `thiserror`, `tracing`, `tokio`, `serde`, `serde_json`, `keyring`, `aes-gcm-siv`, `argon2`, `getrandom`, `zeroize`, and behind `live` the `grammers-*` crates. The four after `keyring` are `sealed`'s, and they are always compiled. |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
 | `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
 
@@ -102,7 +103,7 @@ The workspace uses `edition = "2024"`. When writing code, assume:
 A **first-party crate** that wraps `grammers-client` and provides:
 
 - `ClientBuilder` with ergonomic user-account login (phone → code → 2FA).
-- `SessionStore` trait with pluggable backends (keyring, file, memory).
+- `SessionStore` trait with pluggable backends (keyring, encrypted file, memory).
 - Typed event stream: `Updates` filtered to messages in private conversations with people — groups, channels and bots never reach the caller.
 - Chat listing with automatic `InputPeer` resolution and caching.
 - The account's own profile, which is the only call that discloses the account's
@@ -110,6 +111,19 @@ A **first-party crate** that wraps `grammers-client` and provides:
   itself, so a client that has not made it cannot name its own user.
 - Message send/edit/delete builders.
 - An **escape hatch**: `Client::invoke()` that forwards directly to `grammers`.
+
+`sealed` is the session file's encryption, and it needs no `grammers`. `seal`
+wraps the bytes `SessionData::to_bytes` produced in a `TVIM1` envelope
+(`TVIM1 | salt(16) | nonce(12) | ciphertext | tag(16)`, AES-256-GCM-SIV, the
+magic and the salt bound as associated data); `open` undoes it, and returns
+`Ok(None)` for bytes that are not an envelope so a legacy plaintext file is still
+read. A `KeyProvider` supplies the 256-bit `FileKey`: `PassphraseProvider`
+stretches a passphrase with Argon2id, `KeyringKeyProvider` keeps a random key in
+the OS credential store (`service "televim"`, `account "file-key"`). `FileStore`
+holds an `Arc<dyn KeyProvider>`, seals on every save, opens on every load, and
+migrates a plaintext file on its first load. An envelope that will not open is
+`SessionError::Load`, never `Corrupt`. The reasoning is in
+[`decisions.md`](./decisions.md).
 
 The modules beyond the three above are the ones with a rule in them: `dialogs`,
 `account`, `history`, `messages`, `search`, `users` and `updates`. Each keeps every decision that can
@@ -421,7 +435,12 @@ Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
 `TELEVIM_API_HASH`, `TELEVIM_PHONE`, `TELEVIM_CODE`, `TELEVIM_PASSWORD` and
 `TELEVIM_SESSION_PATH`; with no credentials the client is never built and the
 sign-in surface names the pair that is missing rather than drawing a form, and
-with no `session_path` the session goes to the OS credential store. `phone`,
+with no `session_path` the session goes to the OS credential store. With a
+`session_path` the session is an encrypted file, and the key to it is
+`TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase` in the file), else a random
+key kept in the OS credential store; `Config::session_passphrase` is a `Secret`
+whose `Debug` is redacted. `net.rs` resolves the store and its key source afresh
+at every bring-up and caches neither. `phone`,
 `code` and `password` are **pre-fills**, not the way in: a launch that finds no
 session opens the sign-in field with the phone already in the bar, and the flow
 asks for the code there, then for a two-factor password when Telegram says the
