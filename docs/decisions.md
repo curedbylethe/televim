@@ -162,6 +162,11 @@ are in [`../AGENTS.md`](../AGENTS.md).
   the allocation is reused. This protects against a log or a core dump read by
   accident, not against an attacker who can read this process's memory — who could
   read the passphrase from the environment in any case.
+- **Known limit: the keyring is delete-only from here.** `KeyringStore::clear`
+  deletes the entry, and the store holds no key material of its own to wipe. The
+  OS credential store owns the bytes it keeps, so what it does with them after a
+  delete is outside this repo. The wrapper's own `AuthKey` values are zeroed on
+  drop; the session mirror is grammers-owned and cannot be reached to wipe.
 - **Why the chat-list fetch is retried three times, why the wait is the one
   history paging already uses, and why `:retry` is a command:** the launch fetch
   ran once, and one `?` turned a single transient refusal into a terminal
