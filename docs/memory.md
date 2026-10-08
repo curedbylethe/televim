@@ -16,7 +16,9 @@ added `unicode-bidi`'s Unicode tables: binary size moved by +66,080 B and nothin
 else in the tree grew with it. It was re-recorded again when PR-CUR-13 shipped
 static stickers: binary size moved by +82,880 B — the dedicated WEBP decoder and
 the hand-rolled half-block painter, both weighed against heavier candidates
-first — and that anchor alone moved. Three runs beside the sticker tree measured
+first — and that anchor alone moved. It was re-recorded a third time with the local history cache:
+binary size moved to 6,189,696 B, and again that anchor alone moved (see
+[The history cache](#the-history-cache)). Three runs beside the sticker tree measured
 harness input latency at 2.37 / 0.76 / 0.78 ms against the 0.509 ms anchor while
 frame time read 1.59 / 0.51 / 0.52 ms against 0.510 ms; the same binary's RSS
 swung ±20% between those runs, the first ran during disk-pressure recovery and
@@ -437,7 +439,14 @@ both trees showed. Every timing on this host reads above the stored baseline on
 neither is this change's alone: harness input latency (0.758 ms against a
 0.611 ms threshold), which `main` breaches by the same amount on this host, and
 binary size (6,189,696 B against 5,816,873 B), which `main` was already past by
-257 KB. The baseline was not re-recorded; that is a maintainer decision.
+257 KB. The binary-size anchor was then re-recorded to this tree's exact
+6,189,696 B, a maintainer decision taken with this change; the timing and RSS
+anchors were left where they were, because what moved them is the host, not the
+tree, and re-anchoring them here would hide that. With the binary anchor moved, the
+check's remaining breaches are both input latency: the harness figure reads
+0.745–0.765 ms on both trees, and the shipped binary's 0.145–0.228 ms on `main`
+against 0.212–0.225 ms here, so either tree lands on either side of its
+0.213 ms threshold from one run to the next.
 
 ### No arena, by measurement
 
