@@ -879,6 +879,20 @@ pub enum Action {
     /// sign-out with no argument is the one action whose whole content is that it
     /// happened, so it carries nothing.
     Logout,
+
+    /// Download the media on `message_id` in `chat_id` and open it in an
+    /// external viewer.
+    ///
+    /// The same hand-over as every other action: the download is the network's,
+    /// so `tui` only records which message the reader asked for. Only queued for
+    /// a message that carries media, by the key that asks for it.
+    OpenMedia {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message whose media to open.
+        message_id: i64,
+    },
 }
 
 /// A `f`, `t`, `F` or `T` that has been pressed and is waiting for its character.
