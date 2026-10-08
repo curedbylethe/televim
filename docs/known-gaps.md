@@ -25,13 +25,6 @@ Real, and named so they are not mistaken for oversights:
   would be guessing. The return type is the other half: streaming, and a cache on
   disk, are CUR-9 and CUR-10, and the 16 MiB `MEDIA_LIMIT` is what a viewer will
   have to do something about rather than merely report.
-- **The sticker drain runs in series on the loop thread.** Each tick downloads
-  the panel's queued requests one by one and settles them through
-  `resolve_fetch` — no task, no event of its own — because a sticker that
-  arrives a tick later draws `[sticker]` that frame either way. A queue of many
-  stickers on a slow network holds the tick, and with it the reader's
-  keystrokes, until it clears; spreading the downloads over tasks (the shape
-  every other fetch in `net.rs` takes) is the follow-up if that ever bites.
 - **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
   between a contact's `name` and `username`, draws nothing, is not selectable, is
   not something `d` can act on, is skipped by a yank, and is neither counted nor
