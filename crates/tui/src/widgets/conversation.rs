@@ -3020,6 +3020,30 @@ mod tests {
     }
 
     #[test]
+    fn scrolled_up_the_draft_is_not_drawn_under_an_older_message() {
+        let mut app = drafting(twelve(), "see you there");
+        app.conversation.vim.set_cursor(5);
+        app.conversation.conversation.unfollow();
+        let screen = screen(&app, 80, 16);
+
+        assert_eq!(occurrences(&screen, "[you|draft]"), 0, "not drawn");
+        assert_eq!(
+            occurrences(&screen, "see you there"),
+            0,
+            "not drawn anywhere"
+        );
+        assert!(
+            row(
+                &screen,
+                *message_rows(&screen).last().expect("the panel has rows")
+            )
+            .contains("a line of the conversation"),
+            "the panel's last row is a message"
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    #[test]
     fn a_draft_taller_than_the_panel_keeps_one_message_row_on_screen() {
         // Long enough to wrap to more rows than the panel has room for.
         let app = drafting(twelve(), &"y".repeat(1200));

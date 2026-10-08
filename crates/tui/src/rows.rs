@@ -233,7 +233,9 @@ pub struct Reserved {
     /// A page is on its way from behind the window.
     pub newer: bool,
 
-    /// The rows the open draft is drawn in, after the messages.
+    /// The rows the open draft is drawn in, after the messages. Zero unless the
+    /// reader is following the newest message, since the draft is not drawn
+    /// while scrolled up.
     ///
     /// Taken from the panel before the messages are given their budget, because a
     /// slice in follow mode fills every row it is given and the draft has to be

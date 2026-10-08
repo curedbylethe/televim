@@ -2307,6 +2307,10 @@ impl App {
     /// always keep a row. A draft taller than that is drawn in the rows it is
     /// given and the rest is cut off; the input bar still shows all of it. The
     /// cap only changes how many rows the messages may fill, never a count.
+    ///
+    /// Only while following the newest message: the draft is drawn after the
+    /// slice, so scrolled up it would sit under an older message. Then it is not
+    /// drawn and reserves nothing.
     #[must_use]
     pub fn reserved(&self, layout: &[RowSpan], height: usize) -> Reserved {
         let mut reserved = Reserved {
@@ -2318,6 +2322,7 @@ impl App {
         let draft = layout
             .last()
             .filter(|span| span.kind == RowKind::Draft)
+            .filter(|_| self.conversation.conversation.auto_follow())
             .map_or(0, |span| span.len);
         let room = height.saturating_sub(reserved.above() + reserved.below());
 
