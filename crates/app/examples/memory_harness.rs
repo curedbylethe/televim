@@ -199,6 +199,7 @@ fn fixture_chats() -> Vec<Chat> {
                 unread_count: u32::try_from(n % 5).unwrap_or(u32::MAX),
                 last_message_id: Some(to_id(n + 1)),
                 last_timestamp: Some(FIXED_NOW - to_id(n) * 60),
+                pinned: false,
             }
         })
         .collect()

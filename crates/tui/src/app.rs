@@ -2561,6 +2561,7 @@ fn mock_chats() -> Vec<Chat> {
             // text came from.
             last_message_id: Some(10),
             last_timestamp: Some(1_730_000_000),
+            pinned: false,
         },
         Chat {
             id: 2,
@@ -2570,6 +2571,7 @@ fn mock_chats() -> Vec<Chat> {
             unread_count: 0,
             last_message_id: None,
             last_timestamp: Some(1_729_999_000),
+            pinned: false,
         },
         Chat {
             id: 3,
@@ -2579,6 +2581,7 @@ fn mock_chats() -> Vec<Chat> {
             unread_count: 1,
             last_message_id: None,
             last_timestamp: Some(1_729_998_000),
+            pinned: false,
         },
     ]
 }

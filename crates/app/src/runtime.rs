@@ -623,6 +623,7 @@ mod tests {
             unread_count: 0,
             last_message_id: None,
             last_timestamp: None,
+            pinned: false,
         }]);
         app.select_chat(0);
         app.apply_latest(vec![Message {
@@ -663,6 +664,7 @@ mod tests {
             unread_count: 0,
             last_message_id: None,
             last_timestamp: None,
+            pinned: false,
         }]);
         empty.select_chat(0);
         sync_drafts(&empty, &file, &mut last, Some("+1555"));

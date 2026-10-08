@@ -1833,6 +1833,7 @@ mod tests {
             // The conversation runs to 20; the page below stops well short of it.
             last_message_id: Some(20),
             last_timestamp: Some(1_730_000_000),
+            pinned: false,
         }]);
         app.select_chat(0);
         app.apply_latest(
@@ -3865,6 +3866,7 @@ mod tests {
             unread_count: 0,
             last_message_id: Some(1),
             last_timestamp: Some(0),
+            pinned: false,
         }]);
         app.select_chat(0);
         app.apply_latest(vec![Message {

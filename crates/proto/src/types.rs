@@ -60,6 +60,9 @@ pub(crate) struct ProtoChat {
 
     pub last_timestamp: Option<i64>,
     pub last_message: Option<String>,
+
+    /// Whether the account has pinned this chat to the top of the list.
+    pub pinned: bool,
 }
 
 /// A message on its way from the framework into `domain`.
@@ -104,6 +107,7 @@ impl From<ProtoChat> for Chat {
             unread_count: chat.unread_count,
             last_message_id: chat.last_message_id,
             last_timestamp: chat.last_timestamp,
+            pinned: chat.pinned,
         }
     }
 }
@@ -156,6 +160,7 @@ impl From<DialogInfo> for ProtoChat {
             last_message_id: dialog.last_message_id,
             last_timestamp: dialog.last_timestamp,
             last_message: dialog.last_text,
+            pinned: dialog.pinned,
         }
     }
 }
@@ -244,6 +249,7 @@ mod tests {
             unread_count: 0,
             last_message_id: None,
             last_timestamp: None,
+            pinned: false,
             last_message: None,
         }
     }
@@ -416,6 +422,7 @@ mod live_tests {
             unread_count: 0,
             last_message_id: None,
             last_timestamp: None,
+            pinned: false,
             last_text: None,
         }
     }
@@ -456,6 +463,7 @@ mod live_tests {
         source.last_message_id = Some(7);
         source.last_timestamp = Some(1_700_000_000);
         source.last_text = Some("see you at six".to_owned());
+        source.pinned = true;
 
         let chat: Chat = ProtoChat::from(source).into();
 
@@ -475,6 +483,10 @@ mod live_tests {
             chat.last_message.as_deref(),
             Some("see you at six"),
             "the framework's last_text is the domain's last_message"
+        );
+        assert!(
+            chat.pinned,
+            "the pin has to reach the list or it cannot sort"
         );
     }
 
