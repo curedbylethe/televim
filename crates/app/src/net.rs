@@ -63,7 +63,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
 
 use crate::config::Config;
 use crate::draft_store::DraftFile;
-use crate::history_store::HistoryFile;
+use crate::history_store::{HistoryCache, HistoryFile, PageKind};
 use crate::runtime::AppEvent;
 
 /// How many messages one page holds.
@@ -210,6 +210,15 @@ pub enum Event {
     History {
         /// What was asked for.
         direction: FetchDirection,
+
+        /// The id the page was counted from, exclusive: the oldest loaded for
+        /// an older page, the newest loaded for a newer one, nothing for the
+        /// newest page.
+        ///
+        /// Taken from the cursor *before* the fetch moved it, because that is
+        /// what says whether the page joins the cached history: the cursor
+        /// below has already been moved onto the page itself.
+        anchor: Option<i64>,
 
         /// The cursor the fetch ended with.
         ///
@@ -482,11 +491,16 @@ pub struct State {
     /// `None` wherever no loop set one, which is every test.
     draft_file: Option<DraftFile>,
 
-    /// Where read messages live on disk, so signing out can remove them.
+    /// Where read messages live on disk: written behind every page that
+    /// changes [`State::cached`], and removed on sign-out.
     ///
     /// Set by the loop beside [`State::draft_file`], and `None` in the same
-    /// places for the same reason.
+    /// places for the same reason — with no file the cache is kept in memory
+    /// and never written.
     history_file: Option<HistoryFile>,
+
+    /// The cached messages, and where writing them to that file has got to.
+    cached: CachedHistory,
 
     /// The configuration, and the channel to answer on — the pair bring-up needs
     /// to be run again.
@@ -588,6 +602,106 @@ impl State {
         self.history_file = Some(file);
     }
 
+    /// Hands over what the history file held at launch, already vetted
+    /// against the configured account.
+    ///
+    /// Not marked as changed: it is what the file already says.
+    pub(crate) fn restore_history(&mut self, cache: HistoryCache) {
+        self.cached.messages = cache;
+    }
+
+    /// The messages cached for `peer`, oldest first; empty when there are
+    /// none.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "seeds an opened conversation in the stage that follows"
+        )
+    )]
+    pub(crate) fn cached_history(&self, peer: i64) -> Vec<Message> {
+        self.cached.messages.get(peer)
+    }
+
+    /// Folds a page the wire answered with into the cache, and marks the
+    /// cache for writing if the page changed it.
+    fn remember_page(&mut self, peer: i64, page: &[Message], kind: PageKind) {
+        if self.cached.messages.merge(peer, page, kind) {
+            self.cached.dirty = true;
+        }
+    }
+
+    /// Writes the history cache to its file, if it changed and no write is
+    /// still in flight.
+    ///
+    /// Called by the loop every pass. The snapshot is serialised here, on the
+    /// loop's thread, so it is exactly the cache as it stands; only the disk
+    /// work goes to the blocking pool, so a slow disk never holds up a frame.
+    /// While the previous write is still going the cache stays marked and is
+    /// written on a later pass — never beside it, which is what keeps an older
+    /// snapshot from landing over a newer one. Failures are the file's to
+    /// warn about; the cache in memory is untouched either way.
+    pub(crate) fn persist_history(&mut self) {
+        if !self.cached.dirty {
+            return;
+        }
+        let Some(file) = self.history_file.clone() else {
+            return;
+        };
+        if self
+            .cached
+            .write
+            .as_ref()
+            .is_some_and(|write| !write.is_finished())
+        {
+            return;
+        }
+
+        self.cached.dirty = false;
+        let account = self.cfg.as_ref().and_then(|cfg| cfg.phone.as_deref());
+        let Some(bytes) = HistoryFile::encode(&self.cached.messages, account) else {
+            return;
+        };
+        self.cached.write = Some(tokio::task::spawn_blocking(move || file.write(&bytes)));
+    }
+
+    /// Waits out the write in flight and writes what it held back, for the
+    /// loop to call once on its way out.
+    ///
+    /// Without it, a page that landed while a write was going would be marked
+    /// and never written: the pass that would have written it never comes.
+    pub(crate) async fn finish_history(&mut self) {
+        if let Some(write) = self.cached.write.take() {
+            let _ = write.await;
+        }
+        self.persist_history();
+        if let Some(write) = self.cached.write.take() {
+            let _ = write.await;
+        }
+    }
+
+    /// Forgets the cached messages, in memory and on disk.
+    ///
+    /// The file is removed at once when nothing is writing it; otherwise the
+    /// removal is queued behind the write in flight, which would otherwise
+    /// land after it and put the file back.
+    fn forget_history(&mut self) {
+        self.cached.messages = HistoryCache::default();
+        self.cached.dirty = false;
+        let Some(file) = self.history_file.clone() else {
+            return;
+        };
+        match self.cached.write.take() {
+            Some(write) if !write.is_finished() => {
+                self.cached.write = Some(tokio::spawn(async move {
+                    let _ = write.await;
+                    let _ = tokio::task::spawn_blocking(move || file.clear()).await;
+                }));
+            }
+            _ => file.clear(),
+        }
+    }
+
     /// The client, once bring-up has installed one.
     ///
     /// Read by the loop's sticker drain, which downloads the panel's queued
@@ -598,6 +712,36 @@ impl State {
     pub(crate) fn client(&self) -> Option<Arc<ProtoClient>> {
         self.client.clone()
     }
+}
+
+/// The newest messages of each private conversation, and the write behind
+/// them.
+#[derive(Default)]
+struct CachedHistory {
+    /// The messages as the wire has shown them: what the history file was
+    /// loaded into at launch, with every fetched page merged in since.
+    ///
+    /// Held here rather than re-read from the file because every page has to
+    /// merge into what is cached, and the file is only ever this, a write
+    /// behind.
+    messages: HistoryCache,
+
+    /// Whether [`CachedHistory::messages`] has changed since its last
+    /// snapshot was taken for the file.
+    ///
+    /// A flag rather than a write per page: pages can land faster than a
+    /// write finishes, and only the newest snapshot is worth writing.
+    dirty: bool,
+
+    /// The one write of the history file that may be in flight.
+    ///
+    /// **One at a time is the ordering.** Two writes handed to the blocking
+    /// pool together can finish in either order, and the older snapshot
+    /// renaming over the newer would leave the file behind the cache. So a
+    /// snapshot is only taken once the write before it has finished, and a
+    /// sign-out's removal waits behind it too — or the write would put back
+    /// the file the sign-out had just removed.
+    write: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// The two answers Telegram has given this sign-in, and nothing else.
@@ -1173,6 +1317,11 @@ fn request(
 
     tokio::spawn(async move {
         let mut cursor = cursor;
+        let anchor = match direction {
+            FetchDirection::Latest => None,
+            FetchDirection::Older => cursor.oldest_loaded_id(),
+            FetchDirection::Newer => cursor.newest_loaded_id(),
+        };
 
         let result = match direction {
             FetchDirection::Latest => client.fetch_latest(cursor.peer_id(), PAGE).await,
@@ -1183,6 +1332,7 @@ fn request(
         // The loop may have gone; there is then nothing to report the page to.
         let _ = tx.send(AppEvent::Net(Event::History {
             direction,
+            anchor,
             cursor,
             result,
         }));
@@ -1586,9 +1736,9 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             }
             // The cached messages go too, for the same reason and with the
             // same best-effort: another account must never open onto them.
-            if let Some(file) = &state.history_file {
-                file.clear();
-            }
+            // From memory as well as from disk, or the next write would put
+            // them back.
+            state.forget_history();
             // The empty reason is the signed-out *state*, not a missing one: the
             // reader chose this, so a line saying why it could not read a
             // profile would be an excuse nobody asked for.
@@ -1709,9 +1859,10 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::History {
             direction,
+            anchor,
             cursor,
             result,
-        } => apply_history(app, state, direction, cursor, result),
+        } => apply_history(app, state, direction, anchor, cursor, result),
 
         Event::Jumped {
             jump,
@@ -1801,6 +1952,10 @@ fn apply_jumped(
 
     match result {
         Ok(page) => {
+            // Cached whether or not the window takes it: the page is what the
+            // wire said about that stretch either way, and the merge decides
+            // for itself whether it joins what is cached.
+            state.remember_page(cursor.peer_id(), &page, PageKind::Around);
             // Only a page the window took is worth telling the cursor
             // about: a jump the reader abandoned leaves it describing
             // what is still on screen.
@@ -1835,6 +1990,7 @@ fn apply_history(
     app: &mut App,
     state: &mut State,
     direction: FetchDirection,
+    anchor: Option<i64>,
     mut cursor: HistoryCursor,
     result: Result<Vec<Message>, ProtoError>,
 ) {
@@ -1848,6 +2004,9 @@ fn apply_history(
 
     match result {
         Ok(page) => {
+            if let Some(kind) = page_kind(direction, anchor, cursor, page.len()) {
+                state.remember_page(cursor.peer_id(), &page, kind);
+            }
             if direction == FetchDirection::Latest {
                 cursor.reset_to(&page);
             }
@@ -2311,6 +2470,33 @@ fn apply_page(app: &mut App, direction: FetchDirection, page: Vec<Message>) {
         FetchDirection::Newer => {
             app.apply_newer(page);
         }
+    }
+}
+
+/// Which stretch of the conversation a page that came back was fetched from,
+/// in the cache's terms.
+///
+/// `None` for a paging fetch with no anchor, which is one that short-circuited
+/// to an empty page before anything was loaded — nothing to fold in. Whether a
+/// page was short is the cursor's answer for the two paging directions, which
+/// the fetch has already noted, and the page's own length for the newest page,
+/// which the cursor is not told about: the same rule against the same `PAGE`.
+fn page_kind(
+    direction: FetchDirection,
+    anchor: Option<i64>,
+    cursor: HistoryCursor,
+    len: usize,
+) -> Option<PageKind> {
+    match direction {
+        FetchDirection::Latest => Some(PageKind::Latest { whole: len < PAGE }),
+        FetchDirection::Older => anchor.map(|before| PageKind::Older {
+            before,
+            reached_start: cursor.exhausted_older(),
+        }),
+        FetchDirection::Newer => anchor.map(|after| PageKind::Newer {
+            after,
+            reached_end: cursor.exhausted_newer(),
+        }),
     }
 }
 
@@ -3070,6 +3256,7 @@ mod tests {
             &mut state,
             Event::History {
                 direction: FetchDirection::Older,
+                anchor: None,
                 cursor: HistoryCursor::new(CHAT),
                 result: Ok(messages(CHAT, -1..=0)),
             },
@@ -3272,6 +3459,7 @@ mod tests {
             &mut state,
             Event::History {
                 direction: FetchDirection::Latest,
+                anchor: None,
                 cursor: HistoryCursor::new(CHAT),
                 result: Ok(messages(CHAT, 1..=2)),
             },
@@ -3302,6 +3490,7 @@ mod tests {
             &mut state,
             Event::History {
                 direction: FetchDirection::Latest,
+                anchor: None,
                 cursor: HistoryCursor::new(CHAT),
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
             },
@@ -3394,6 +3583,271 @@ mod tests {
 
         assert!(!path.exists(), "the messages went with the account");
         assert_eq!(app.ui.status, "signed out");
+    }
+
+    // ---- the history cache ------------------------------------------------
+
+    /// A state with [`CHAT`] open and the history file at `path`.
+    fn caching_state(path: &std::path::Path) -> State {
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        state.set_history_file(HistoryFile::new(path.to_path_buf()));
+        state
+    }
+
+    /// A page of [`CHAT`] arriving the way the fetch sends it.
+    fn page_arrives(
+        app: &mut App,
+        state: &mut State,
+        direction: FetchDirection,
+        anchor: Option<i64>,
+        page: Vec<Message>,
+    ) {
+        apply(
+            app,
+            state,
+            Event::History {
+                direction,
+                anchor,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(page),
+            },
+        );
+    }
+
+    /// What the loop does after the pass, waited out: the write is taken off
+    /// the loop's thread, so a test has to wait for it to land.
+    async fn persist(state: &mut State) {
+        state.persist_history();
+        if let Some(write) = state.cached.write.take() {
+            write.await.expect("the history write ran");
+        }
+    }
+
+    fn cached_ids(state: &State) -> Vec<i64> {
+        state
+            .cached_history(CHAT)
+            .iter()
+            .map(|message| message.id)
+            .collect()
+    }
+
+    fn file_ids(path: &std::path::Path) -> Vec<i64> {
+        HistoryFile::new(path.to_path_buf())
+            .load()
+            .cache
+            .get(CHAT)
+            .iter()
+            .map(|message| message.id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_latest_page_lands_in_the_cache_and_on_disk() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=3),
+        );
+        assert_eq!(cached_ids(&state), vec![1, 2, 3], "in memory at once");
+        assert!(!path.exists(), "and on disk only once the loop writes it");
+
+        persist(&mut state).await;
+        assert_eq!(file_ids(&path), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn only_numbered_messages_are_persisted() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, -2..=3),
+        );
+        persist(&mut state).await;
+
+        assert_eq!(
+            file_ids(&path),
+            vec![1, 2, 3],
+            "no placeholder reaches the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_page_merges_and_the_cap_keeps_the_newest() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=150),
+        );
+        persist(&mut state).await;
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 101..=250),
+        );
+        persist(&mut state).await;
+
+        let kept = file_ids(&path);
+        assert_eq!(kept, cached_ids(&state), "the file is the cache");
+        assert_eq!(
+            kept,
+            (51..=250).collect::<Vec<_>>(),
+            "merged rather than replaced, then cut to the newest 200"
+        );
+    }
+
+    /// An older page joins the cache through the anchor it was counted from,
+    /// which the event carries because the cursor beside it has moved on.
+    #[test]
+    fn an_older_page_from_the_cached_oldest_joins_the_cache() {
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 101..=200),
+        );
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(101),
+            messages(CHAT, 51..=100),
+        );
+        assert_eq!(cached_ids(&state), (51..=200).collect::<Vec<_>>());
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(10),
+            messages(CHAT, 1..=9),
+        );
+        assert_eq!(
+            cached_ids(&state),
+            (51..=200).collect::<Vec<_>>(),
+            "a page counted from outside the cache cannot be shown to join it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_does_not_fail_the_page() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        // A regular file where the directory should be, so the write fails.
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "").expect("the blocking file");
+        let path = blocker.join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=3),
+        );
+        persist(&mut state).await;
+
+        assert!(!path.exists());
+        assert_eq!(cached_ids(&state), vec![1, 2, 3], "the cache is untouched");
+        assert_eq!(
+            app.conversation.conversation.window.len(),
+            3,
+            "and the page reached the screen"
+        );
+    }
+
+    /// While a write is in flight no second one starts beside it, so an older
+    /// snapshot can never land over a newer one; the newer is written once
+    /// the first has finished.
+    #[tokio::test]
+    async fn a_write_waits_for_the_one_in_flight() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        state.cached.write = Some(tokio::spawn(async move {
+            let _ = held.await;
+        }));
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=3),
+        );
+        state.persist_history();
+        assert!(!path.exists(), "nothing started beside the write in flight");
+        assert!(state.cached.dirty, "the snapshot is still owed");
+
+        release.send(()).expect("the held write is waiting");
+        while !state
+            .cached
+            .write
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            tokio::task::yield_now().await;
+        }
+        persist(&mut state).await;
+        assert_eq!(file_ids(&path), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn signing_out_empties_the_cache_in_memory() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=3),
+        );
+        persist(&mut state).await;
+
+        apply_logged_out(&mut app, &mut state, Ok(()));
+        persist(&mut state).await;
+
+        assert!(cached_ids(&state).is_empty(), "nothing left to seed from");
+        assert!(!state.cached.dirty, "and nothing owed to the file");
+        assert!(!path.exists(), "nor written back after the removal");
     }
 
     /// Signing out with no drafts file is still a sign-out: `clear` on a
