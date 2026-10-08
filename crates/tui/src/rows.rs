@@ -14,14 +14,18 @@
 //!    increases strictly;
 //! 3. a slice is the panel's height exactly, or the whole of what is left of
 //!    the window, and never something between the two;
-//! 4. the layout is a pure function of the window's messages and the panel's
-//!    width — not of the cursor, not of the mode, not of when it was asked;
+//! 4. the layout is a pure function of the window's messages, the open draft and
+//!    the panel's width — not of the cursor, not of the mode, not of when it was
+//!    asked;
 //! 5. the width is the one left after the scrollbar's column is given up, so a
 //!    message is never written under the bar;
 //! 6. a row that is not a message — [`RowKind::Other`], a day separator or the
 //!    unread marker that will follow it — is counted as a row and is never a
 //!    place the cursor stands, so every position the cursor or a motion is
-//!    given is a message index and a message index is what comes back.
+//!    given is a message index and a message index is what comes back. The one
+//!    exception to the count is [`RowKind::Draft`], which is drawn after the
+//!    last message and is in no total, slice or paging input, so a draft being
+//!    typed moves nothing.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -49,6 +53,13 @@ use crate::wrap::{columns, wrap_decorated};
 /// `a_whole_message_is_as_wide_as_its_own_decorations` is the arithmetic that
 /// pins it.
 pub(crate) const WHO_WIDTH: usize = 7;
+
+/// The columns a draft row's sender is named in: `[you|draft] `.
+///
+/// Wider than [`WHO_WIDTH`] because a draft says it is a draft. The layout takes
+/// it off the first row's width the same way a message's decorations are taken
+/// off, so the draft's body is cut to fit beside its name.
+pub(crate) const DRAFT_WHO_WIDTH: usize = 12;
 
 /// How far apart two messages of one group can be, in seconds.
 ///
@@ -99,6 +110,17 @@ pub enum RowKind {
     /// Exactly one row, so it can never be half-drawn by a slice that starts
     /// inside it, and never the cursor's row, because a cursor names a message.
     Other { label: String },
+
+    /// The open conversation's draft, drawn as the row after the last message.
+    ///
+    /// Carries nothing: the words are the input line's, and the span's `text`
+    /// is the range of them that the row covers. It takes as many rows as the
+    /// draft wraps to, and at most one such span exists, last in the layout.
+    /// Unlike [`RowKind::Other`] it is not one row: a draft wraps like a
+    /// message does. Unlike a message it is in no count — [`total_rows`] stops
+    /// at the last message, so the slice, the fetch margins and the paging
+    /// clamps never see it.
+    Draft,
 }
 
 impl RowKind {
@@ -113,7 +135,7 @@ impl RowKind {
     pub fn index(&self) -> Option<usize> {
         match self {
             Self::Message { index } => Some(*index),
-            Self::Other { .. } => None,
+            Self::Other { .. } | Self::Draft => None,
         }
     }
 
@@ -121,7 +143,7 @@ impl RowKind {
     #[must_use]
     pub fn label(&self) -> Option<&str> {
         match self {
-            Self::Message { .. } => None,
+            Self::Message { .. } | Self::Draft => None,
             Self::Other { label } => Some(label),
         }
     }
@@ -154,7 +176,8 @@ pub struct RowSpan {
     /// The whole of the message's text, in the units
     /// [`crate::wrap`] works in: byte offsets at character boundaries. The rows
     /// the text is cut into are worked out again from the width, so what is
-    /// kept here is the range a selection or a yank would name. Empty for a row
+    /// kept here is the range a selection or a yank would name. For a
+    /// [`RowKind::Draft`], the range of the input line's text. Empty for a row
     /// that is not a message.
     pub text: Range<usize>,
 }
@@ -181,7 +204,7 @@ pub struct Slice {
     /// The rows the panel has room for.
     pub budget: usize,
 
-    /// The rows the whole window occupies, laid out.
+    /// The rows the whole window occupies, laid out. A draft's rows are not in it.
     pub total: usize,
 
     /// The message rows drawn: the panel's height, or what is left of the
@@ -495,10 +518,27 @@ pub fn sticker_block_rows(message: &Message, cache: &StickerCache) -> usize {
     }
 }
 
-/// How many rows a layout occupies.
+/// The rows of the window the layout holds, which is every row but a draft's.
+///
+/// A draft is drawn after the last message and is not part of what the reader
+/// is scrolling through, so the count stops at the last entry that is not one.
 #[must_use]
 pub fn total_rows(layout: &[RowSpan]) -> usize {
-    layout.last().map_or(0, |span| span.first + span.len)
+    layout
+        .iter()
+        .rev()
+        .find(|span| span.kind != RowKind::Draft)
+        .map_or(0, |span| span.first + span.len)
+}
+
+/// The rows a draft wraps to at `width`, as ranges into the draft's text.
+///
+/// The same wrap a message's body gets, with the draft's name in front of the
+/// first row. Non-empty text is at least one row, so a draft that is there is
+/// never zero rows tall.
+#[must_use]
+pub fn draft_rows(text: &str, width: u16) -> Vec<Range<usize>> {
+    wrap_decorated(text, DRAFT_WHO_WIDTH, 0, width)
 }
 
 /// The message that owns `row`.

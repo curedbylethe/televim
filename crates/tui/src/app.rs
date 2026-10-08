@@ -2216,8 +2216,8 @@ impl App {
     /// again, because two measurements of one thing is a bug waiting for the
     /// case where they disagree.
     ///
-    /// A pure function of the window's messages, [`App::body_width`] and
-    /// [`App::now`], and of nothing else: not the cursor, not the mode, not when
+    /// A pure function of the window's messages, the open draft, [`App::body_width`]
+    /// and [`App::now`], and of nothing else: not the cursor, not the mode, not when
     /// it was asked. A layout worked out before a page lands is thrown away
     /// rather than kept, which is why a [`RowSpan`] is named by message id.
     ///
@@ -2225,7 +2225,8 @@ impl App {
     /// them: a separator takes a row of the screen between two days and is
     /// counted by the scrollbar beside it, so it belongs in here rather than
     /// counted on the side. [`RowKind`] is what tells the two apart, and the
-    /// cursor — which is a message index — never rests on one.
+    /// cursor — which is a message index — never rests on one. The open draft,
+    /// when it has words, is the last entry; it is drawn but never counted.
     #[must_use]
     pub fn row_layout(&self) -> Vec<RowSpan> {
         let width = self.body_width();
@@ -2271,6 +2272,23 @@ impl App {
                 text,
             });
             first += len;
+        }
+
+        // The open chat's draft, when it is a message being written and has
+        // words in it: the same test `park_draft` makes, so a `:` command or a
+        // search is never drawn as one. A chat that is not open has no draft.
+        let draft = self.input.line.text();
+        if self.input.line.purpose().is_buffer()
+            && !draft.is_empty()
+            && self.conversation.conversation.window.chat_id != 0
+        {
+            laid_out.push(RowSpan {
+                kind: RowKind::Draft,
+                message_id: None,
+                first,
+                len: rows::draft_rows(draft, width).len(),
+                text: 0..draft.len(),
+            });
         }
 
         laid_out
