@@ -1,5 +1,5 @@
-//! Sending, editing and deleting messages, described in this crate's own
-//! vocabulary.
+//! Sending, editing, deleting and forwarding messages, described in this crate's
+//! own vocabulary.
 //!
 //! `grammers` stops at this module's private functions. [`MessageInfo`] is built
 //! from numbers and strings, so `proto` can turn the result of a send into a
@@ -107,6 +107,12 @@ pub const DELETE_BATCH_PAUSE: std::time::Duration = std::time::Duration::from_se
 /// [`DELETE_BATCH`] so each limit is named where it applies.
 pub const FORWARD_BATCH: usize = 100;
 
+/// How long to wait between two forwarding requests.
+///
+/// Telegram rate-limits forwards as it does deletions, so this is the same floor
+/// as [`DELETE_BATCH_PAUSE`].
+pub const FORWARD_BATCH_PAUSE: std::time::Duration = DELETE_BATCH_PAUSE;
+
 /// Checks that `text` can be sent as a message.
 ///
 /// Rejects text that is empty or nothing but whitespace, and text longer than
@@ -172,6 +178,20 @@ fn deletion_failed(deleted: usize, error: RequestError) -> FrameworkError {
 
     FrameworkError::PartialDelete {
         deleted,
+        source: Box::new(error),
+    }
+}
+
+/// What a failed forward means, given how much had already landed.
+///
+/// The forwarding twin of [`deletion_failed`], with the same distinction.
+fn forwarding_failed(forwarded: usize, error: RequestError) -> FrameworkError {
+    if forwarded == 0 {
+        return FrameworkError::Request(error);
+    }
+
+    FrameworkError::PartialForward {
+        forwarded,
         source: Box::new(error),
     }
 }
@@ -364,6 +384,84 @@ impl Client {
 
         Ok(())
     }
+
+    /// Forwards messages from one conversation into another, as new messages.
+    ///
+    /// The forwards keep the author and the captions, the way Telegram renders a
+    /// forward by default. They are not silent, not background, and not
+    /// refused for protected content here: a source that forbids forwarding is
+    /// refused by Telegram, and that arrives as [`FrameworkError::Request`].
+    ///
+    /// More identifiers than [`FORWARD_BATCH`] is several requests, with a pause
+    /// between them, as deletion does.
+    ///
+    /// Returns how many messages were forwarded. Telegram may decline a single
+    /// message while accepting the rest; a declined one is not counted, so the
+    /// count can be less than `ids.len()` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] when either conversation is not in
+    /// the session's peer cache, and [`FrameworkError::Request`] when Telegram
+    /// rejects the first request or the connection fails. A batch that fails after
+    /// an earlier one landed is [`FrameworkError::PartialForward`], which says how
+    /// many landed.
+    pub async fn forward_messages(
+        &self,
+        source_id: i64,
+        destination_id: i64,
+        ids: &[i32],
+    ) -> Result<usize, FrameworkError> {
+        let Some(source) = self.peer_ref(source_id) else {
+            tracing::warn!(
+                source_id,
+                "messages were forwarded from a conversation that is not in the peer cache"
+            );
+            return Err(FrameworkError::UnknownPeer(source_id));
+        };
+        let Some(destination) = self.peer_ref(destination_id) else {
+            tracing::warn!(
+                destination_id,
+                "messages were forwarded to a conversation that is not in the peer cache"
+            );
+            return Err(FrameworkError::UnknownPeer(destination_id));
+        };
+
+        let mut forwarded = 0usize;
+
+        for (index, batch) in forward_batches(ids).into_iter().enumerate() {
+            // Between the batches, and never before the first one or after the
+            // last. Keyed on the position rather than on what has landed, so an
+            // earlier batch that forwarded nothing still gets the pause.
+            if index > 0 {
+                tokio::time::sleep(FORWARD_BATCH_PAUSE).await;
+            }
+
+            let landed = match self
+                .inner()
+                .forward_messages(destination, batch, source)
+                .await
+            {
+                // grammers answers with one slot per identifier, and an empty slot
+                // is a message Telegram did not forward.
+                Ok(messages) => messages.iter().filter(|message| message.is_some()).count(),
+                Err(error) => {
+                    return Err(forwarding_failed(
+                        forwarded,
+                        RequestError::from_invocation(&error),
+                    ));
+                }
+            };
+
+            forwarded += landed;
+        }
+
+        self.flush_session();
+
+        tracing::debug!(source_id, destination_id, forwarded, "forwarded messages");
+
+        Ok(forwarded)
+    }
 }
 
 #[cfg(test)]
@@ -479,6 +577,34 @@ mod tests {
             panic!("expected a partial deletion, got {error:?}");
         };
         assert_eq!(deleted, 200);
+        assert!(
+            matches!(*source, RequestError::Network(_)),
+            "and the cause is kept"
+        );
+    }
+
+    // ---- what a forwarding failure means -----------------------------------
+
+    #[test]
+    fn a_forward_failure_before_anything_landed_is_an_ordinary_request_error() {
+        let error = forwarding_failed(0, RequestError::Network("reset".to_owned()));
+
+        assert!(matches!(error, FrameworkError::Request(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn a_forward_failure_after_some_landed_says_how_many() {
+        let error = forwarding_failed(100, RequestError::Network("reset".to_owned()));
+
+        assert!(
+            error.to_string().contains("forwarded 100"),
+            "the wording says what happened: {error}"
+        );
+
+        let FrameworkError::PartialForward { forwarded, source } = error else {
+            panic!("expected a partial forward, got {error:?}");
+        };
+        assert_eq!(forwarded, 100);
         assert!(
             matches!(*source, RequestError::Network(_)),
             "and the cause is kept"
