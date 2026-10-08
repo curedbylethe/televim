@@ -2190,7 +2190,8 @@ fn apply_feed_ended(app: &mut App, state: &mut State) {
 /// leaves the overlay up, and [`App::login_complete`] is the one call that takes
 /// it down — before the account, because the account is what the card draws and a
 /// card drawn under an overlay is a card nobody sees. At a launch there is no
-/// flow open and the method is a no-op.
+/// flow open, and the method only settles the focus and the status line: the
+/// line itself is then the open conversation's draft, and it is kept.
 ///
 /// **And the one case that opens the flow instead: credentials, no session.**
 /// That is `Err("")` — not an account and not a reason — and a reader who lands
@@ -2274,7 +2275,18 @@ fn apply_ready_to_screen(
     state.session_store = Some(session_store);
     let interrupted = app.signin().is_some();
     if !no_session || !interrupted {
+        // `login_complete` empties the line because with a flow up the line is
+        // the flow's field, holding a code or a password. With none up and a
+        // buffer on it, it is the open conversation's draft — resumed into it
+        // at the landing, or typed into a conversation the cache drew before
+        // the wire answered — and the reader's words are not the flow's to
+        // take. A `:` or `/` prompt mid-answer is still cleared, as it was.
+        let draft = (!interrupted && app.input.line.purpose().is_buffer())
+            .then(|| std::mem::take(&mut app.input.line));
         app.login_complete();
+        if let Some(draft) = draft {
+            app.input.line = draft;
+        }
     }
     app.set_account(account);
     if no_session && !interrupted {
@@ -4738,6 +4750,22 @@ mod tests {
         assert!(!path.exists(), "and the file is gone");
         state.persist_history(app.chats());
         assert!(!state.cached.dirty, "nothing owed to the file");
+    }
+
+    /// The landing resumes the open conversation's draft into the line, and
+    /// a warm launch lets the reader type into it before the wire answers:
+    /// either way the `Ready` that follows leaves the words where they are.
+    #[test]
+    fn the_open_conversations_draft_survives_the_ready() {
+        for (what, mut state) in [("warm", warm_state()), ("cold", State::default())] {
+            let mut app = launching();
+            app.drafts.restore(vec![(CHAT, "unsent".to_owned())]);
+            open_from_cache(&mut app, &state);
+
+            ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
+
+            assert_eq!(app.input.line.text(), "unsent", "{what}");
+        }
     }
 
     /// A bring-up that fails leaves the cached list and conversation readable
