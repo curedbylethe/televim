@@ -423,6 +423,10 @@ impl SessionStore for MemoryStore {
 /// was ever stored in plaintext as exposed to whoever could read that disk, and
 /// sign the device out of Telegram if that matters.
 ///
+/// [`clear`](SessionStore::clear) wipes the file only if it can be opened for
+/// writing. When it cannot (say, read-only permissions), the wipe is skipped
+/// and a warning is logged, but the file is still unlinked.
+///
 /// Prefer [`KeyringStore`] wherever a credential store exists.
 #[derive(Debug, Clone)]
 pub struct FileStore {
@@ -525,9 +529,20 @@ impl SessionStore for FileStore {
 
     fn clear(&self) -> Result<(), SessionError> {
         // Zero first, best effort: an unlink alone leaves the bytes on disk.
-        // See [`FileStore`] for what this does and does not buy.
-        if let Ok(mut file) = fs::OpenOptions::new().write(true).open(&self.path) {
-            let _ = wipe(&mut file);
+        // A failed wipe is logged and the unlink still runs. See [`FileStore`]
+        // for what this does and does not buy.
+        match fs::OpenOptions::new().write(true).open(&self.path) {
+            Ok(mut file) => {
+                if let Err(error) = wipe(&mut file) {
+                    tracing::warn!(%error, "could not wipe the session file before removing it");
+                }
+            }
+            // Nothing on disk to wipe.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            // Cannot open for writing, so the wipe is skipped; the unlink below still runs.
+            Err(error) => {
+                tracing::warn!(%error, "could not open the session file for wiping; removing it unwiped");
+            }
         }
         match fs::remove_file(&self.path) {
             Ok(()) => {
