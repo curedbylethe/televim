@@ -11,6 +11,7 @@ use domain::vim::{CharMotion, Motion, VimState, char_motion};
 
 use crate::app::{ConfirmKind, Deletion, Register};
 use crate::jumplist::Jumplist;
+use crate::sticker::StickerCache;
 
 pub struct ConversationState {
     /// The conversation on show, and where the reader is in it.
@@ -78,6 +79,13 @@ pub struct ConversationState {
     /// message identifier rather than by row, because a jump replaces the window
     /// and a row means a different message on either side of that.
     pub(crate) jumplist: Jumplist,
+
+    /// The open conversation's decoded stickers, keyed by message identifier.
+    ///
+    /// Per conversation like the register: identifiers repeat across chats, so
+    /// an entry belongs to the chat on show and [`Self::open_conversation`]
+    /// forgets them all on switch.
+    pub stickers: StickerCache,
 }
 
 impl ConversationState {
@@ -96,6 +104,7 @@ impl ConversationState {
             sending: None,
             confirm: None,
             jumplist: Jumplist::default(),
+            stickers: StickerCache::default(),
         }
     }
 
@@ -105,6 +114,9 @@ impl ConversationState {
     /// and the one before it is gone.
     pub(crate) fn open_conversation(&mut self, chat_id: i64) {
         self.conversation = ConversationView::new(chat_id);
+        // The pictures belong to the chat on show, as the marks do: a reader
+        // who returns finds them fetched again rather than mislabelled.
+        self.stickers.clear();
     }
 
     /// Replaces the selection outright.
