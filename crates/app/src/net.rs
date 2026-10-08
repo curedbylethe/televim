@@ -3182,6 +3182,17 @@ mod tests {
             .collect()
     }
 
+    /// The conversation the forwards are sent to in these tests.
+    const DEST: i64 = 9;
+
+    /// An application with the source conversation open and a destination on the
+    /// chat list, so both titles can be named.
+    fn forward_app() -> App {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        app.set_chats(vec![chat(CHAT), chat(DEST)]);
+        app
+    }
+
     /// An application with one conversation open and `count` messages loaded.
     fn app_with_a_conversation(chat_id: i64, count: i64) -> App {
         let mut app = App::new();
@@ -5823,6 +5834,94 @@ mod tests {
 
         assert_eq!(
             app.ui.status, "delete: network error: reset",
+            "got {:?}",
+            app.ui.status
+        );
+    }
+
+    /// A forward that lands names the destination, and the count is what landed.
+    #[test]
+    fn a_forward_that_lands_names_the_destination() {
+        let mut app = forward_app();
+
+        apply_forwarded(&mut app, CHAT, DEST, 3, Ok(3));
+
+        assert_eq!(
+            app.ui.status, "Forwarded 3 message(s) to chat-9",
+            "got {:?}",
+            app.ui.status
+        );
+    }
+
+    /// A partial forward says how many landed of how many were asked for, and
+    /// names the source, since the rest can be found there.
+    #[test]
+    fn a_partial_forward_counts_what_landed_and_names_the_source() {
+        let mut app = forward_app();
+        let partial = ProtoError::from(FrameworkError::PartialForward {
+            forwarded: 40,
+            source: Box::new(RequestError::Network("reset".to_owned())),
+        });
+
+        apply_forwarded(&mut app, CHAT, DEST, 100, Err(partial));
+
+        assert_eq!(
+            app.ui.status, "Forwarded 40 of 100 message(s) from chat-7; the rest failed",
+            "got {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The wire's content-protection refusal names the source, because that is the
+    /// conversation that does not allow it.
+    #[test]
+    fn a_refused_forward_names_the_source() {
+        let mut app = forward_app();
+        let refused = ProtoError::from(FrameworkError::Request(RequestError::Rpc {
+            code: 406,
+            name: "CHAT_FORWARDS_RESTRICTED".to_owned(),
+            value: None,
+        }));
+
+        assert!(is_forward_refusal(&refused));
+        apply_forwarded(&mut app, CHAT, DEST, 2, Err(refused));
+
+        assert_eq!(
+            app.ui.status, "chat-7 does not allow forwarding",
+            "got {:?}",
+            app.ui.status
+        );
+    }
+
+    /// Only the content-protection name is a refusal; a flood wait or a plain
+    /// network failure is reported as the failure it is.
+    #[test]
+    fn only_the_protected_content_name_is_a_forward_refusal() {
+        let flood = ProtoError::from(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(31),
+        }));
+        let network = ProtoError::from(FrameworkError::Request(RequestError::Network(
+            "reset".to_owned(),
+        )));
+
+        assert!(!is_forward_refusal(&flood));
+        assert!(!is_forward_refusal(&network));
+    }
+
+    /// A forward that failed before anything landed is a plain failure line.
+    #[test]
+    fn a_forward_that_failed_outright_is_a_plain_failure() {
+        let mut app = forward_app();
+        let failed = ProtoError::from(FrameworkError::Request(RequestError::Network(
+            "reset".to_owned(),
+        )));
+
+        apply_forwarded(&mut app, CHAT, DEST, 2, Err(failed));
+
+        assert_eq!(
+            app.ui.status, "forward: network error: reset",
             "got {:?}",
             app.ui.status
         );
