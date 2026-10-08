@@ -115,7 +115,9 @@ before any network round trip, so the frame being timed is the one that says the
 program has nothing to connect as. The README's < 500 ms target is unchanged and
 still the contract; this note is about which frame the number describes. The
 "populated load" row is the harness's substitute, and it measures a synthetic
-60-chat screen rather than a fetched one.
+60-chat screen rather than a fetched one. A launch with a warm history cache
+draws the cached chat list in its first frame, still before any round trip, but
+the measured launch has no cache, so its first frame is still the empty one.
 
 **Input latency is key→draw, not end-to-end.** The probe spans from the loop
 taking the keypress to the completion of the draw that shows its effect. Two real
@@ -321,7 +323,12 @@ while calibrating this one.
   one would be a change to what the harness measures rather than a reading of it.
 - **Heap fragmentation.** RSS does not distinguish a fragmented heap from a
   large one.
-- **Cache behaviour.**
+- **Cache behaviour**, the history cache's included. Every run is a cold-cache
+  launch: the sandbox holds no history file, and with no credentials nothing is
+  ever written to one. A warm launch parses the file before its first frame and
+  draws the cached chat list in it, so neither the parse nor that frame is in the
+  startup figure, and the cache's resident cost is in no RSS figure — see
+  [The history cache](#the-history-cache).
 - **Anything inside `grammers`**, including MTProto decoding, which happens in
   an external crate this workspace does not build.
 - **Windows.** There is no portable way to ask a process for its resident size,
@@ -334,6 +341,10 @@ while calibrating this one.
   `app/src/runtime.rs`, explicitly, even though the `full` feature set is enabled.
 - A bounded conversation window: `domain::history::ConversationWindow` caps at
   `CONVERSATION_WINDOW` messages, so full history is never held.
+- A bounded history cache: at most `HISTORY_CACHE_DEPTH` (200) messages for each
+  of at most `HISTORY_CACHE_PEERS` (32) peers, and `HISTORY_CACHE_CHATS` (500)
+  chat-list rows, in memory and in the file beside the configuration — see
+  [The history cache](#the-history-cache).
 - Measurement-only `Instant` probes in the event loop, gated on
   `TELEVIM_MEASURE` and written to the log rather than the screen, so a launch's
   first frame and a keypress's latency have numbers behind them.
@@ -360,6 +371,73 @@ and what they pull in, inside the 1% band (about 57.6 KB). The stored baseline
 band before this change (+248,176 B), so `make measure-check` reports a binary-size
 breach that this change did not cause. The baseline was not re-recorded here; that
 is a maintainer decision.
+
+### The history cache
+
+The cache (`app/src/history_store.rs`) is resident for the whole run and copied
+for every write, and it is the first structure in the program whose size is set
+by what the reader has read rather than by what is on screen. Its bounds are rows,
+not bytes: 200 messages × 32 peers is **6,400 rows at most**, plus 500 chat-list
+rows. Placeholders, presence and media bytes are never held; the media kind is.
+
+| | Typical | Worst case |
+| :--- | ---: | ---: |
+| Messages, in memory | about 1 MB | about 80 MB |
+| Messages, on disk | about 1 MB | about 160 MB |
+| Chat list, in memory and on disk | about 100 KB | about 6 MB |
+| A write, briefly | about 3× the cache | about 3× the cache, more for heavily escaped text |
+
+These are **declared, not measured**. The typical figure is 6,400 rows of an
+ordinary message's size. The worst case is every cached message at Telegram's
+4,096-character limit in three-byte UTF-8 — about 12 KB a message — and on disk,
+text made entirely of control characters, which JSON escapes to six bytes each.
+The chat list's worst case is 500 previews of that same length. A write holds the
+cache, the clone the encoder takes of it and the serialised bytes at once, the
+clone dropped once the bytes exist; a launch holds the file's bytes and the
+parsed payload together while it reads. The feed's *seen* map
+(`FeedMarks::seen`) is outside the peer bound: 16 bytes of payload, plus the
+map's node overhead, for each peer that received an arrival in the session, and
+never evicted until the process ends.
+
+**The worst case is past the 50 MB budget, and that is a known gap, not a
+claim that it fits.** At about 80 MB resident and about three times that during
+a write, a reader whose 32 most recent conversations were all maximum-length
+messages would take the process well over the ceiling. The typical case adds
+about a megabyte resident and a few megabytes briefly per write, inside the
+margin the measured figures leave. The upgrade path is a byte budget beside the
+row bounds — evicting by size as well as by count — and it is named in
+[`known-gaps.md`](./known-gaps.md) rather than built.
+
+What the change moves that the harness does measure is binary size. Measured on
+this host (Darwin 27.0.0, `arm64`, the pinned `rustc 1.98.1`), two `make measure`
+runs each of this tree's `main` and of the tree with the cache, release profile as
+above:
+
+| Metric | Before | With the cache | Delta |
+| :--- | ---: | ---: | ---: |
+| Binary size, stripped release | 6,073,840 B | 6,189,696 B | **+115,856 B (+1.91%)** |
+| RSS at idle, shipped binary, unauthorised | 8.48 / 8.50 MB | 6.97 / 7.00 MB | no increase |
+| RSS at idle, harness at 60 chats | 3.95 / 3.98 MB | 1.74 / 3.98 MB | no increase |
+| Startup, first frame | 1.343 / 1.561 ms | 1.653 / 1.704 ms | +0.14 to +0.36 ms |
+| Input latency, harness | 0.770 / 0.760 ms | 0.758 / 0.759 ms | none |
+
+Binary size is exact on every run, and the **+115,856 B is past the budget's 1%
+band** (about 57.6 KB of the stored baseline) on its own: the store's logic and
+`serde`'s derived code for its three row types, with no new dependency. The RSS
+figures are a credential-free, cold-cache launch that never builds a cache, so
+they could not show its cost; the binary's lower reading is the host's bimodal
+RSS (recorded above as 6.97–8.23 MB), not something this change saved. The first
+frame now also asks for a file that is not there, which is a single failed
+`open`; the difference is inside the startup band's +2.5 ms and inside the spread
+both trees showed. Every timing on this host reads above the stored baseline on
+**both** trees — the host moved from Darwin 25.5.0 to 27.0.0 since that baseline
+— so they compare the two trees to each other, not to the baseline.
+
+`make measure-check` against the stored baseline reports two breaches, and
+neither is this change's alone: harness input latency (0.758 ms against a
+0.611 ms threshold), which `main` breaches by the same amount on this host, and
+binary size (6,189,696 B against 5,816,873 B), which `main` was already past by
+257 KB. The baseline was not re-recorded; that is a maintainer decision.
 
 ### No arena, by measurement
 
