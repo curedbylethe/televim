@@ -347,6 +347,20 @@ the layout is rebuilt per frame, because a cache is a second thing to keep in
 step with the window, and that is the failure this arrangement exists to
 prevent.
 
+The open draft is the last span of that same layout, and the only one that
+counts for nothing. `App::row_layout` appends a `RowKind::Draft` span when the
+open chat's line is a message buffer (`Message`, `Reply` or `Edit`) with words in
+it and a chat is open; a `:` command or a `/` search never gets one. `rows::total_rows`
+stops at the last entry that is not a draft, so the slice, the fetch margins
+(`near_the_end`, `wants_newer`, `wants_older`, `cursor_extent`) and the page
+targets are the same with or without it. `App::reserved` takes the draft's rows
+from the panel below the messages, as `Reserved::draft` (`below()` is that plus a
+newer page on its way), capped so that one message row stays. The panel paints the
+draft in `widgets/conversation.rs` (`draft_items`, after the message loop): the
+words through `text_row`, the `[you|draft] ` tag in `text_dim` on the first row
+only, and no caret, selection, match, status or receipt. Page size is the raw panel
+height, not the height less the reservation, so page targets do not move.
+
 ### `app`
 
 Composition root. Wires the async runtime, the protocol client, the domain state,
