@@ -15,16 +15,27 @@ Real, and named so they are not mistaken for oversights:
   which the crate's two-path split exists to avoid — the update feed arrives as a
   built `grammers` `Message`, and there is no raw variant to match on there
   without re-deriving one.
-- **A media download is a whole `Vec<u8>`, and only the sticker drain calls it.**
-  `Client::download_media` and `ProtoClient::download_media` exist and are tested,
-  and the sticker fetch drain settles the panel's queued requests through the
-  latter — `stickers = "off"` drops the queue instead, so flag off is zero
-  fetch traffic. No *key* is bound to a download: a fetched attachment the reader
-  asked for has nowhere to go yet — no cache directory, no viewer, no save
-  path — and a program that asked for one before it could put the bytes somewhere
-  would be guessing. The return type is the other half: streaming, and a cache on
-  disk, are CUR-9 and CUR-10, and the 16 MiB `MEDIA_LIMIT` is what a viewer will
-  have to do something about rather than merely report.
+- **A media download is a whole `Vec<u8>`, saved whole to a temp file.**
+  `Client::download_media` and `ProtoClient::download_media` return the bytes, and
+  `o` on a media message writes them to a `0600` file in the temp directory and
+  hands that file to the platform viewer. The return type is the limit: streaming
+  and a cache on disk are CUR-9 and CUR-10, and the 16 MiB `MEDIA_LIMIT` refuses
+  rather than truncates. Nothing removes the saved files; their lifecycle is CUR-10's.
+- **The viewer hand-off has four known limits.**
+  - *Stdin race.* The loop blocks on the viewer with the terminal released, but the
+    reader thread keeps calling `crossterm::event::read`. A key it captures during
+    the suspend window is queued and then dropped on resume, so it reaches neither the
+    viewer nor the program. Input already queued is dropped the same way; network
+    events are kept.
+  - *Network stalls while the viewer is open.* The runtime is current-thread and the
+    loop is parked in the wait, so no network task runs until the viewer exits. A long
+    viewing can let the connection go quiet.
+  - *The opener's exit, not the viewer's.* macOS waits only because of `-W`. `xdg-open`
+    usually returns once a GUI handler is launched, so on Linux the terminal can come
+    back under a running viewer, and the sentence `Viewer exited (code …)` reports the
+    opener's exit code.
+  - *Windows is untested.* `cmd /C start` returns without waiting, so the terminal is
+    back at once there. No Windows leg runs in CI.
 - **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
   between a contact's `name` and `username`, draws nothing, is not selectable, is
   not something `d` can act on, is skipped by a yank, and is neither counted nor
@@ -350,4 +361,4 @@ Real, and named so they are not mistaken for oversights:
 
 ## v2 Hooks
 
-The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists and returns bytes, and the `tokio::fs` cache and any viewer are what is still ahead of it.
+The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists, `o` saves the bytes to a temp file and opens the platform viewer, and the `tokio::fs` cache is what is still ahead of it.
