@@ -13,6 +13,17 @@ use crate::app::{ConfirmKind, Deletion, Register};
 use crate::jumplist::Jumplist;
 use crate::sticker::StickerCache;
 
+/// What forwarding a selection would ask the server for.
+///
+/// `ids` is every numbered message the selection covers, oldest first, and
+/// `skipped` is how many placeholders were left out of it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // The forward key is the caller, in the next commit.
+pub(crate) struct Forwarding {
+    pub(crate) ids: Vec<i64>,
+    pub(crate) skipped: usize,
+}
+
 pub struct ConversationState {
     /// The conversation on show, and where the reader is in it.
     ///
@@ -725,6 +736,66 @@ impl ConversationState {
         }
 
         (!deletion.ids.is_empty()).then_some(deletion)
+    }
+
+    /// What forwarding `selection` would ask the server for, or `None` when every
+    /// message in it is a placeholder.
+    ///
+    /// The rules of [`Self::deletion`], for the same reason: a placeholder has no
+    /// identifier the server knows, so it is left out of `ids` and counted.
+    /// Forwarding is message-granular, so a charwise selection forwards the whole
+    /// message it sits in.
+    #[allow(dead_code)] // The forward key is the caller, in the next commit.
+    pub(crate) fn forwardable(&self, selection: &Selection) -> Option<Forwarding> {
+        let mut forwarding = Forwarding::default();
+        let covered = self.covered(Some(selection));
+
+        for message in self
+            .conversation
+            .window
+            .iter()
+            .skip(covered.start)
+            .take(covered.len())
+        {
+            if message.id <= 0 {
+                forwarding.skipped += 1;
+                continue;
+            }
+
+            forwarding.ids.push(message.id);
+        }
+
+        (!forwarding.ids.is_empty()).then_some(forwarding)
+    }
+
+    /// The refusal for a forward of nothing but placeholders.
+    ///
+    /// The same split as [`Self::refuse_placeholders`] — a message still on its
+    /// way is not one that failed — with the words that are true of forwarding:
+    /// `D` is about dismissing and says nothing about forwarding.
+    #[allow(dead_code)] // The forward key is the caller, in the next commit.
+    pub(crate) fn refuse_forward(&self, selection: &Selection) -> &'static str {
+        let covered = self.covered(Some(selection));
+        let mut count = 0;
+        let mut in_flight = false;
+
+        for message in self
+            .conversation
+            .window
+            .iter()
+            .skip(covered.start)
+            .take(covered.len())
+        {
+            count += 1;
+            in_flight |= !matches!(message.status, MessageStatus::Failed);
+        }
+
+        match (count == 1, in_flight) {
+            (true, true) => "that message is still on its way, so it cannot be forwarded",
+            (true, false) => "that message never left, so it cannot be forwarded",
+            (false, true) => "those messages are still on their way, so they cannot be forwarded",
+            (false, false) => "those messages never left, so they cannot be forwarded",
+        }
     }
 
     /// The refusal for a selection of nothing but placeholders.

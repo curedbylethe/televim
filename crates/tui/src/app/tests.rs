@@ -2006,6 +2006,61 @@ fn a_confirmation_hands_over_what_it_captured_and_not_the_selection_now() {
 }
 
 #[test]
+fn a_forward_covers_every_message_in_the_selection_oldest_first() {
+    let mut app = App::mock();
+    go_to_top(&mut app);
+    key(&mut app, 'V');
+    cursor_onto(&mut app, 3);
+
+    let selection = *app.selection().expect("a selection is up");
+    let forwarding = app
+        .conversation
+        .forwardable(&selection)
+        .expect("three numbered messages can be forwarded");
+
+    assert_eq!(forwarding.ids, vec![1, 2, 3]);
+    assert_eq!(forwarding.skipped, 0);
+}
+
+#[test]
+fn a_forward_leaves_out_placeholders_and_counts_them() {
+    let mut app = App::mock();
+    submit(&mut app, "hi");
+    let placeholder = app.conversation.sending.expect("the send is in flight");
+    go_to_top(&mut app);
+    key(&mut app, 'V');
+    cursor_onto(&mut app, placeholder);
+
+    let selection = *app.selection().expect("a selection is up");
+    let forwarding = app
+        .conversation
+        .forwardable(&selection)
+        .expect("the numbered messages can be forwarded");
+
+    assert_eq!(forwarding.ids, (1..=10).collect::<Vec<i64>>());
+    assert_eq!(
+        forwarding.skipped, 1,
+        "the placeholder is counted, not sent"
+    );
+}
+
+#[test]
+fn a_forward_of_nothing_but_placeholders_is_refused_with_the_reason() {
+    let mut app = App::mock();
+    submit(&mut app, "hi");
+    let placeholder = app.conversation.sending.expect("the send is in flight");
+    app.set_selection(Selection::at(placeholder, None));
+
+    let selection = *app.selection().expect("a selection is up");
+
+    assert_eq!(app.conversation.forwardable(&selection), None);
+    assert_eq!(
+        app.conversation.refuse_forward(&selection),
+        "that message is still on its way, so it cannot be forwarded"
+    );
+}
+
+#[test]
 fn editing_a_message_that_has_not_been_sent_or_is_not_yours_is_refused() {
     let mut app = App::mock();
     submit(&mut app, "hi");
