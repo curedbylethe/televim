@@ -21,15 +21,10 @@ Real, and named so they are not mistaken for oversights:
   it. Progress is reported per chunk and `Esc` stops the transfer, but the bytes
   still arrive whole, so the return type is the limit: streaming to disk is a later
   change (CUR-9), and the 16 MiB `MEDIA_LIMIT` refuses rather than truncates.
-- **The media cache has four known limits.**
+- **The media cache has three known limits.**
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on
     purpose: the cache is the account's, and sign-out ends the account.
-  - *A stale store can strand an index entry under a reused name.* A store refused
-    after a clear removes its file. If a fresh store has renamed onto the same name
-    in that window and then commits, a clear, then the same message downloaded again
-    within that window, its entry can point at the removed file, and `o` finds no
-    file. Needs a clear and a re-download of the same message inside one write.
   - *An unwritable cache directory moves the cache to the temp directory for one run.*
     The fallback is per launch and not persisted: the configured directory is never
     rewritten or migrated, and the next launch probes it again. If the temp fallback

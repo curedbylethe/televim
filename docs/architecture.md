@@ -486,7 +486,9 @@ sign-out, and `save_media` looks up and stores through it — the store under
 `spawn_blocking`. A store takes the lock twice and writes between: it reserves a file
 under the lock, writes with the lock released, and commits under the lock. `clear`
 bumps a generation, so a store that reserved before a clear removes its late file
-instead of indexing it, and sign-out never waits out a 16 MiB write.
+instead of indexing it, unless a newer reservation or entry holds its name; a
+reservation holds its name until it commits or its write fails. Sign-out never waits
+out a 16 MiB write.
 
 `history_store.rs` owns the history file (`televim.toml` → `televim.history.json`)
 and the cache it holds: the newest `HISTORY_CACHE_DEPTH` (200, asserted equal to

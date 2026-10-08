@@ -90,6 +90,9 @@ pub(crate) struct MediaCache {
     /// Bumped by [`MediaCache::clear`], so a store that began before a clear
     /// knows not to index its file after it.
     generation: u64,
+    /// Paths reserved since the last clear, with how many reservations hold
+    /// each. A stale store must not remove a file a current reservation owns.
+    pending: BTreeMap<PathBuf, usize>,
 }
 
 impl MediaCache {
@@ -119,6 +122,7 @@ impl MediaCache {
             max_entries,
             entries: BTreeMap::new(),
             generation: 0,
+            pending: BTreeMap::new(),
         };
         cache.claim(account);
         cache.scan();
@@ -147,7 +151,13 @@ impl MediaCache {
             .lock()
             .expect("the media cache lock is not poisoned")
             .reserve(chat_id, message_id, kind, bytes.len())?;
-        write_reserved(&reservation, bytes)?;
+        if write_reserved(&reservation, bytes).is_none() {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .abandon(&reservation);
+            return None;
+        }
         cache
             .lock()
             .expect("the media cache lock is not poisoned")
@@ -165,14 +175,17 @@ impl MediaCache {
         bytes: &[u8],
     ) -> Option<PathBuf> {
         let reservation = self.reserve(chat_id, message_id, kind, bytes.len())?;
-        write_reserved(&reservation, bytes)?;
+        if write_reserved(&reservation, bytes).is_none() {
+            self.abandon(&reservation);
+            return None;
+        }
         self.commit(reservation, chat_id, message_id)
     }
 
     /// Claims a file for a store of `size` bytes. Refuses what could never fit:
     /// bytes over [`MEDIA_LIMIT`], or over the byte cap. No I/O.
     fn reserve(
-        &self,
+        &mut self,
         chat_id: i64,
         message_id: i64,
         kind: MediaKind,
@@ -182,19 +195,38 @@ impl MediaCache {
         if size > MEDIA_LIMIT as u64 || size > self.max_bytes {
             return None;
         }
+        let path = self
+            .dir
+            .join(format!("{chat_id}-{message_id}.{}", suffix(kind)));
+        *self.pending.entry(path.clone()).or_insert(0) += 1;
         Some(Reservation {
             dir: self.dir.clone(),
-            path: self
-                .dir
-                .join(format!("{chat_id}-{message_id}.{}", suffix(kind))),
+            path,
             size,
             generation: self.generation,
         })
     }
 
+    /// Gives back a reservation whose write failed, so its name is free again.
+    fn abandon(&mut self, reservation: &Reservation) {
+        if reservation.generation == self.generation {
+            self.release(&reservation.path);
+        }
+    }
+
+    /// Drops one reservation of `path`. Only current-generation reservations
+    /// are counted, so a clear, which drops them all, needs no care here.
+    fn release(&mut self, path: &Path) {
+        if let Some(count) = self.pending.get_mut(path) {
+            *count -= 1;
+            if *count == 0 {
+                self.pending.remove(path);
+            }
+        }
+    }
+
     /// Indexes a written file, unless a clear ran since it was reserved. A
-    /// failed write has no reservation to commit, so no index entry is made
-    /// for a file that does not exist.
+    /// late file is removed unless a newer reservation or entry owns its name.
     fn commit(
         &mut self,
         reservation: Reservation,
@@ -209,12 +241,15 @@ impl MediaCache {
         } = reservation;
         if generation != self.generation {
             // The clear already swept the cache; the late file must not survive
-            // it. A later store may own this name by now, so leave indexed files.
-            if !self.entries.values().any(|entry| entry.path == path) {
+            // it. A newer store may own this name by now, so leave it to them.
+            let owned = self.pending.contains_key(&path)
+                || self.entries.values().any(|entry| entry.path == path);
+            if !owned {
                 let _ = fs::remove_file(&path);
             }
             return None;
         }
+        self.release(&path);
 
         let key = (chat_id, message_id);
         let entry = Entry {
@@ -237,6 +272,7 @@ impl MediaCache {
     pub(crate) fn clear(&mut self) {
         self.generation += 1;
         self.entries.clear();
+        self.pending.clear();
         let Ok(read) = fs::read_dir(&self.dir) else {
             return;
         };
@@ -700,5 +736,38 @@ mod tests {
 
         assert_eq!(cache.store(1, 2, MediaKind::Gif, b"gif"), None);
         assert_eq!(cache.lookup(1, 2), None);
+    }
+
+    #[test]
+    fn a_late_store_leaves_the_file_a_newer_reservation_is_about_to_index() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let stale = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
+        write_reserved(&stale, b"old").expect("written");
+        cache.clear();
+        let fresh = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
+        let path = fresh.path.clone();
+        write_reserved(&fresh, b"new").expect("written over the late file");
+
+        assert_eq!(cache.commit(stale, 7, 9), None, "the late store is refused");
+        assert_eq!(fs::read(&path).expect("the newer file survives"), b"new");
+
+        assert_eq!(cache.commit(fresh, 7, 9), Some(path.clone()));
+        assert_eq!(cache.lookup(7, 9), Some(path));
+    }
+
+    #[test]
+    fn a_failed_write_gives_its_name_back_to_a_late_store() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let stale = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
+        let path = stale.path.clone();
+        write_reserved(&stale, b"old").expect("written");
+        cache.clear();
+        let failed = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
+        cache.abandon(&failed);
+
+        assert_eq!(cache.commit(stale, 7, 9), None);
+        assert!(!path.exists(), "and the late file is removed");
     }
 }

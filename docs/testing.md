@@ -95,7 +95,7 @@ below.
   never fit refused without evicting anything, strangers' and temp files ignored, an
   account mismatch clearing the directory, `clear` on a missing directory, the
   owner-only mode before the rename, and a clear landing between a store's write and
-  its commit, which refuses the late file. An unwritable configured directory (a path
+  its commit, which refuses the late file without touching a newer store's file. An unwritable configured directory (a path
   under a regular file) opens the temp-directory fallback, where a store round-trips
   and the configured path is never created; the fallback keeps the byte cap, eviction
   and `0600` mode; and an unwritable fallback too degrades to `None` without panicking.
