@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::SessionError;
 use crate::sealed::{self, KeyProvider, KeyringKeyProvider};
@@ -43,8 +43,10 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 /// It serialises as a lowercase hex string: 512 bytes instead of the roughly
 /// 1.2 kB a JSON array of numbers would take, which matters because some
 /// credential stores cap how large an entry may be. Its [`Debug`]
-/// implementation never prints key material.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// implementation never prints key material, and its bytes are zeroed when it
+/// is dropped. It is deliberately not `Copy`: a copy would leave key bytes
+/// behind that nothing wipes.
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthKey([u8; Self::LEN]);
 
 impl AuthKey {
@@ -67,6 +69,15 @@ impl AuthKey {
 impl fmt::Debug for AuthKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("AuthKey(<redacted>)")
+    }
+}
+
+impl Drop for AuthKey {
+    fn drop(&mut self) {
+        // Every copy the wrapper makes is an `AuthKey`, and `MemoryStore::clear`
+        // releases its snapshot by dropping it, so this is the one place the
+        // wrapper's key bytes are scrubbed.
+        self.0.zeroize();
     }
 }
 
@@ -1108,7 +1119,7 @@ mod bridge {
             id: option.id,
             ipv4: option.ipv4.parse::<SocketAddrV4>().ok()?,
             ipv6: option.ipv6.parse().ok()?,
-            auth_key: option.auth_key.map(|key| *key.as_bytes()),
+            auth_key: option.auth_key.as_ref().map(|key| *key.as_bytes()),
         })
     }
 
@@ -1710,6 +1721,23 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600, "mode {mode:o}");
     }
 
+    /// Dropping a key — which is what clearing the in-memory snapshot does —
+    /// must overwrite its bytes, not just release them.
+    #[test]
+    fn dropping_an_auth_key_scrubs_its_bytes() {
+        let mut slot = std::mem::ManuallyDrop::new(AuthKey::from_bytes([0xab; AuthKey::LEN]));
+        let key: *mut AuthKey = &raw mut *slot;
+        // SAFETY: the value is dropped exactly once, through this pointer, and
+        // `slot` is never dropped again. Its storage stays allocated until the
+        // end of the test, so the bytes can be read back through `key`.
+        unsafe { std::ptr::drop_in_place(key) };
+        let left = unsafe { std::slice::from_raw_parts(key.cast::<u8>(), AuthKey::LEN) };
+        assert!(
+            left.iter().all(|byte| *byte == 0),
+            "key bytes survived the drop"
+        );
+    }
+
     #[test]
     fn clear_removes_the_file() {
         let dir = tempfile::tempdir().expect("temp dir is created");
@@ -1765,7 +1793,7 @@ mod tests {
             session
                 .dc_options
                 .first()
-                .and_then(|dc| dc.auth_key)
+                .and_then(|dc| dc.auth_key.as_ref())
                 .map(|key| key.as_bytes().to_vec()),
             Some(vec![0xab; AuthKey::LEN]),
             "the authorisation key is the reason the version was not bumped"
