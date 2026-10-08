@@ -19,6 +19,7 @@
 use std::cmp::Ordering;
 
 use grammers_client::peer::{Dialog, Peer};
+use grammers_client::session::types::PeerRef;
 
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
@@ -160,6 +161,33 @@ impl Client {
 
         Ok(conversations)
     }
+
+    /// Pins or unpins a conversation on the account's own list, as Telegram
+    /// keeps it, so the pin survives a restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] if this session holds no access
+    /// hash for the peer, and the request's own error if Telegram refuses.
+    pub async fn toggle_pin(&self, peer_id: i64, pinned: bool) -> Result<(), FrameworkError> {
+        let peer = self
+            .peer_ref(peer_id)
+            .ok_or(FrameworkError::UnknownPeer(peer_id))?;
+        self.invoke(&tl::functions::messages::ToggleDialogPin {
+            pinned,
+            peer: input_dialog_peer(peer),
+        })
+        .await?;
+        Ok(())
+    }
+}
+
+/// The `inputDialogPeer` that names this conversation.
+///
+/// A free function over a value, so the one decision in [`Client::toggle_pin`]
+/// can be tested without a datacenter.
+fn input_dialog_peer(peer: PeerRef) -> tl::enums::InputDialogPeer {
+    tl::enums::InputDialogPeer::Peer(tl::types::InputDialogPeer { peer: peer.into() })
 }
 
 /// Maps a dialog `grammers` built into this crate's own description.
@@ -329,6 +357,8 @@ fn pinned_then_newest(left: &DialogInfo, right: &DialogInfo) -> Ordering {
 
 #[cfg(test)]
 mod tests {
+    use grammers_client::session::types::{PeerAuth, PeerId};
+
     use super::*;
 
     /// A dialog with everything but the fields under test filled in.
@@ -454,6 +484,22 @@ mod tests {
         dialogs.sort_by(newest_first);
 
         assert_eq!(peer_ids(&dialogs), vec![3, 4, 2, 1, 5]);
+    }
+
+    #[test]
+    fn a_pin_names_the_conversation_as_a_dialog_peer() {
+        let input = input_dialog_peer(PeerRef {
+            id: PeerId::user(42).expect("42 is in the user range"),
+            auth: PeerAuth::from_hash(7),
+        });
+        let tl::enums::InputDialogPeer::Peer(dialog) = input else {
+            panic!("a conversation with a person is a peer dialog");
+        };
+        let tl::enums::InputPeer::User(user) = dialog.peer else {
+            panic!("a person addresses as an input user peer");
+        };
+        assert_eq!(user.user_id, 42);
+        assert_eq!(user.access_hash, 7);
     }
 
     #[test]

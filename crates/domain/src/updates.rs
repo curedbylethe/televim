@@ -300,8 +300,44 @@ impl ChatList {
     }
 
     /// The conversation with this identifier, if the client holds it.
+    /// Records a pin Telegram accepted and moves the chat to where that puts it.
+    ///
+    /// The same order the framework fetches by, applied to one chat: pinned
+    /// first, each section newest first. Unpinning therefore restores the
+    /// chat's recency position. `false` when the list does not hold the chat.
+    pub fn set_pinned(&mut self, chat_id: i64, pinned: bool) -> bool {
+        let Some(from) = self.chats.iter().position(|chat| chat.id == chat_id) else {
+            return false;
+        };
+        let mut chat = self.chats.remove(from);
+        chat.pinned = pinned;
+        let to = self
+            .chats
+            .iter()
+            .position(|other| sorts_before(&chat, other))
+            .unwrap_or(self.chats.len());
+        self.chats.insert(to, chat);
+        true
+    }
+
     fn chat_mut(&mut self, chat_id: i64) -> Option<&mut Chat> {
         self.chats.iter_mut().find(|chat| chat.id == chat_id)
+    }
+}
+
+/// Whether `chat` belongs above `other` in a list that is pinned first and
+/// newest first within each section.
+///
+/// Mirrors the framework's fetch order. A chat with no messages sorts last in
+/// its section, as it does there.
+fn sorts_before(chat: &Chat, other: &Chat) -> bool {
+    if chat.pinned != other.pinned {
+        return chat.pinned;
+    }
+    match (chat.last_timestamp, other.last_timestamp) {
+        (Some(mine), Some(theirs)) => mine > theirs,
+        (Some(_), None) => true,
+        _ => false,
     }
 }
 
@@ -322,6 +358,66 @@ mod tests {
             last_timestamp: Some(1_000),
             pinned: false,
         }
+    }
+
+    /// A conversation whose last message came at `at`.
+    fn chat_at(id: i64, at: i64) -> Chat {
+        Chat {
+            last_timestamp: Some(at),
+            ..chat(id)
+        }
+    }
+
+    fn ids(list: &ChatList) -> Vec<i64> {
+        list.chats.iter().map(|chat| chat.id).collect()
+    }
+
+    #[test]
+    fn a_pin_puts_the_chat_first_and_keeps_the_pinned_section_newest_first() {
+        let mut list =
+            ChatList::with_chats(vec![chat_at(2, 500), chat_at(1, 100), chat_at(3, 200)]);
+
+        assert!(list.set_pinned(1, true));
+        assert_eq!(ids(&list), vec![1, 2, 3]);
+
+        assert!(list.set_pinned(3, true));
+        assert_eq!(
+            ids(&list),
+            vec![3, 1, 2],
+            "3 is newer than 1, so it leads the pinned section"
+        );
+        assert!(!list.set_pinned(9, true), "a chat the list does not hold");
+    }
+
+    #[test]
+    fn an_unpin_restores_the_chat_to_its_recency_position() {
+        let mut list = ChatList::with_chats(vec![
+            Chat {
+                pinned: true,
+                ..chat_at(1, 100)
+            },
+            chat_at(2, 500),
+            chat_at(3, 200),
+        ]);
+
+        assert!(list.set_pinned(1, false));
+        assert_eq!(ids(&list), vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn a_conversation_with_no_messages_is_placed_last_in_its_section() {
+        let mut list = ChatList::with_chats(vec![
+            Chat {
+                last_timestamp: None,
+                ..chat(1)
+            },
+            chat_at(2, 500),
+        ]);
+
+        assert!(list.set_pinned(2, true));
+        assert_eq!(ids(&list), vec![2, 1]);
+        assert!(list.set_pinned(1, true));
+        assert_eq!(ids(&list), vec![2, 1], "pinned, but still dateless last");
     }
 
     /// A conversation with nothing in it yet.

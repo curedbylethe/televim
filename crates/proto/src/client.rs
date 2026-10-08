@@ -67,6 +67,18 @@ impl ProtoClient {
             .collect())
     }
 
+    /// Pins or unpins a chat on the account's own list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] if the chat is not known to this
+    /// session or Telegram refuses the change.
+    pub async fn toggle_pin(&self, chat_id: i64, pinned: bool) -> Result<(), ProtoError> {
+        self.inner.toggle_pin(chat_id, pinned).await?;
+
+        Ok(())
+    }
+
     /// Subscribes to the updates Telegram sends for this account.
     ///
     /// The feed is already narrowed to private conversations, so everything it
