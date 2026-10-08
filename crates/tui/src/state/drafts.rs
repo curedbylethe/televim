@@ -21,9 +21,11 @@ pub struct DraftStore {
     /// reply or edit subject on the way in — and a peer's entry is dropped when
     /// its draft is empty, so the map holds only peers with words in them.
     ///
-    /// Not written to disk, for the same reason as [`DraftStore::read_receipts`]: a
-    /// launch starts empty, and an account change clears it ([`App::set_chats`])
-    /// so no words cross an account boundary.
+    /// Persisted by `app` beside the configuration (`televim.drafts.json`):
+    /// the loop loads the file at launch and re-saves the snapshot whenever
+    /// it changes, so words survive a restart. An account change still clears
+    /// it ([`App::set_chats`]), and a file tagged for another account is
+    /// discarded at launch, so no words cross an account boundary.
     pub(crate) drafts: HashMap<i64, LineEditor>,
 
     /// How far each conversation this client has been told about has been read.

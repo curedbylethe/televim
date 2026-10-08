@@ -167,7 +167,10 @@ Working today:
   terminal volunteers the distinction). `gg` and `G` are the wrapper's, not the
   library's — see [`docs/decisions.md`](./docs/decisions.md). The bar is always a draft: it grows to six
   rows, and each conversation keeps its own: leaving parks it, re-entering
-  restores it, and another conversation starts with its own bar. It is drawn with
+  restores it, and another conversation starts with its own bar. Quitting keeps
+  them too: the loop writes `televim.drafts.json` beside the config whenever the
+  drafts change, so a relaunch — even after a `kill -9`, which loses at most one
+  250 ms tick — puts the words back. It is drawn with
   a painted caret that `TestBackend` can assert, which the real terminal's could
   not.
   A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a

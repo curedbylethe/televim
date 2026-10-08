@@ -264,15 +264,22 @@ are in [`../AGENTS.md`](../AGENTS.md).
   peer id, like `read_receipts`, not a `domain` history structure: `domain` keeps
   one flat message window and no per-conversation list, and a store that must
   reach disk would have to live in `app`, which owns the configuration path
-  (AGENTS.md dependency rule) — so the map stays in `tui` and is in-memory only,
-  for the process lifetime. It has no fixed cap, because evicting a live draft to
+  (AGENTS.md dependency rule) — so the map stays in `tui` and the file lives
+  in `app`. It has no fixed cap, because evicting a live draft to
   satisfy one would lose the reader's words, the failure the feature exists to
   prevent; instead an entry is dropped when its draft becomes empty, so the map
   holds only peers with text in the bar. The draft's subject (`reply_to`,
   `editing`) is still dropped on a switch, because it lives on `App` rather than
   in the `LineEditor` and restoring a reply target is a separate product decision;
-  only text, caret, mode and selection travel. On-disk persistence across restarts
-  is deferred.
+  only text, caret, mode and selection travel. Across restarts the map is
+  persisted as plain `(peer id, text)` pairs in `televim.drafts.json` beside
+  the configuration: every loop pass snapshots the parked map plus the live
+  line and rewrites the file when the snapshot changed — only text crosses
+  that boundary, no cursor, undo or purpose — through an atomic sibling-temp
+  rename at `0600`, so a kill loses at most one 250 ms tick (and a kill in
+  the pass after a send resurrects the sent line, accepted). The file carries
+  `cfg.phone` as its account tag and a launch for another account discards
+  it; signing out removes it.
 - **Why the measurement harness is an `[[example]]` and not a binary or a test:** `cargo build --release` does not build examples, so a harness that is one cannot reach the shipped artifact, and `app` is bin-only so its own event loop is unreachable from `app/tests` anyway. An example is also the only vehicle that needed no change to `[profile.release]`, which is load-bearing for the binary-size budget and out of bounds for measurement work. The fixture is built through `tui`'s public API rather than its `#[cfg(test)]` sample data because that data is invisible to every dependent crate: a harness that compiled only under `cfg(test)` could not be measured as a release build.
 - **Why RSS is read in-process rather than by a profiler:** neither `valgrind`, `heaptrack`, nor `hyperfine` is installed on the development host, so a harness that required one could only be run in CI. Reading the process's own resident size — `proc_pidinfo` on macOS, `/proc/self/status` on Linux — is the kernel's number for this process rather than a profiler's estimate, needs no dependency, and makes the harness a build target rather than a machine with tools on it. `valgrind --tool=massif` is still used automatically where it exists, and the choice of source is recorded in the report so two hosts' figures are not silently compared. The cost is that the macOS figure carries the VM's page-in schedule with it — one run in fifteen lands near 1.5 MB rather than 3.4 MB, with all five samples inside a run agreeing exactly — so a threshold taken from it alone would report the OS rather than the program. The noise floor is recorded so that is visible before anyone draws one.
 - **Why the harness records both a within-run and a cross-run spread:** the two answer different questions and only one of them is about this program. Within a run the samples measure the process settling; across runs they measure the machine the process started on. Quoting the first as the noise floor would understate it by a factor of two, and a threshold drawn from it would fire on the host.
