@@ -27,6 +27,21 @@ impl ChatListState {
         }
     }
 
+    /// Moves `chat_id` to where its pin puts it. The highlight stays on the
+    /// chat it was on, which may itself have moved; nothing changes when the
+    /// list does not hold the chat.
+    pub(crate) fn set_pinned(&mut self, chat_id: i64, pinned: bool) {
+        let highlighted = self.list.chats.get(self.selected_chat).map(|chat| chat.id);
+        if !self.list.set_pinned(chat_id, pinned) {
+            return;
+        }
+        if let Some(index) =
+            highlighted.and_then(|id| self.list.chats.iter().position(|chat| chat.id == id))
+        {
+            self.selected_chat = index;
+        }
+    }
+
     /// Installs a freshly fetched chat list.
     ///
     /// The list is replaced wholesale, and the selection is clamped rather

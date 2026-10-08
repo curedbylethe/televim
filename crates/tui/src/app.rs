@@ -824,6 +824,18 @@ pub enum Action {
         query: String,
     },
 
+    /// Pin or unpin the chat with `chat_id` on the account's own list.
+    ///
+    /// The same hand-over as every other action. Only queued with a client up:
+    /// the key that asks for it refuses without one.
+    TogglePin {
+        /// The chat to pin or unpin.
+        chat_id: i64,
+
+        /// Whether it should be pinned once Telegram has agreed.
+        pinned: bool,
+    },
+
     /// Ask Telegram to move the sign-in flow on with `value`.
     ///
     /// The same hand-over as every other action, and for the same reason: a
@@ -1196,6 +1208,14 @@ impl App {
     /// Delegates to [`Outbox::take_clipboard`].
     pub fn take_clipboard(&mut self) -> Option<String> {
         self.outbox.take_clipboard()
+    }
+
+    /// Records a pin Telegram accepted: the chat moves to its place and the
+    /// highlight stays on the chat it was on.
+    ///
+    /// Delegates to [`ChatListState::set_pinned`].
+    pub fn set_pinned(&mut self, chat_id: i64, pinned: bool) {
+        self.list.set_pinned(chat_id, pinned);
     }
 
     /// Installs a freshly fetched chat list.

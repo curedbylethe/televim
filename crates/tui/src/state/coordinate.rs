@@ -2942,6 +2942,7 @@ pub(crate) fn handle_chat_list(
     profile: &mut ProfileCard,
     outbox: &mut Outbox,
     drafts: &mut DraftStore,
+    client_available: bool,
     key: KeyEvent,
 ) -> bool {
     let here = list.selected_chat;
@@ -2977,6 +2978,14 @@ pub(crate) fn handle_chat_list(
         KeyCode::Char('S') => {
             pending.set_g(false);
             open_profile(&mut *profile, &mut *ui, &mut *conversation, &mut *outbox)
+        }
+
+        // `p` pins the highlighted chat, or unpins it. The list does not move
+        // until Telegram has agreed, so a refused pin leaves it where it was.
+        KeyCode::Char('p') => {
+            pending.set_g(false);
+            toggle_pin_highlighted(&*list, &mut *ui, &mut *outbox, client_available);
+            false
         }
 
         // The contact the highlight is on. `A` and not `l`, because `l` is
@@ -3050,6 +3059,33 @@ pub(crate) fn handle_chat_list(
             false
         }
     }
+}
+
+/// Asks for the highlighted chat's pin to flip.
+///
+/// Refuses with a flash when no client is up, the way a sign-in step does, and
+/// queues nothing: a queued pin would fire on its own if a client came up later.
+fn toggle_pin_highlighted(
+    list: &ChatListState,
+    ui: &mut UiState,
+    outbox: &mut Outbox,
+    client_available: bool,
+) {
+    let Some(chat) = list.list.chats.get(list.selected_chat) else {
+        return;
+    };
+    if !client_available {
+        ui.flash("not connected yet — the client is not up");
+        return;
+    }
+    queue_action(
+        outbox,
+        ui,
+        Action::TogglePin {
+            chat_id: chat.id,
+            pinned: !chat.pinned,
+        },
+    );
 }
 
 /// Handles a key while the profile has the focus.
@@ -3556,6 +3592,7 @@ pub(crate) fn handle_key(
             &mut *profile,
             &mut *outbox,
             &mut *drafts,
+            session.client_available,
             key,
         ),
         Focus::Conversation => handle_conversation_key(
