@@ -998,6 +998,89 @@ pub(crate) fn confirm_delete(ui: &mut UiState, conversation: &mut ConversationSt
     }));
 }
 
+/// Opens the forward picker over what the reader has selected, or over the
+/// message under the cursor when nothing is selected yet.
+///
+/// Refused the way a deletion is: a selection that cannot be forwarded clears
+/// to Normal with the reason on the status line, and so does one with no chat
+/// to forward into.
+pub(crate) fn begin_forward(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    list: &ChatListState,
+) {
+    if conversation.selection.is_none() {
+        let Some(id) = conversation.cursor_message_id() else {
+            return;
+        };
+        conversation.set_selection(Selection::at(id, None));
+    }
+    ui.set_mode(Mode::Visual);
+
+    let Some(selection) = conversation.selection else {
+        return;
+    };
+
+    let Some(forwarding) = conversation.forwardable(&selection) else {
+        let refusal = conversation.refuse_forward(&selection);
+        conversation.clear_selection();
+        ui.set_mode(Mode::Normal);
+        ui.flash(refusal);
+        return;
+    };
+
+    if list.list.chats.is_empty() {
+        conversation.clear_selection();
+        ui.set_mode(Mode::Normal);
+        ui.flash("no chat to forward to");
+        return;
+    }
+
+    conversation.open_forward(forwarding);
+}
+
+/// Handles a key while the forward picker is up.
+///
+/// The picker owns every key for as long as it is up, so that nothing the
+/// selection answers to can act on a selection the reader is forwarding. `Enter`
+/// queues the forward into the chat the picker is on and ends the selection;
+/// `Esc` puts the picker away and leaves the selection for the reader to keep.
+pub(crate) fn handle_forward_pick(
+    ui: &mut UiState,
+    list: &ChatListState,
+    outbox: &mut Outbox,
+    conversation: &mut ConversationState,
+    key: KeyEvent,
+) {
+    match key.code {
+        KeyCode::Enter => {
+            let Some(pick) = conversation.picking() else {
+                return;
+            };
+            let Some(dest) = list.list.chats.get(pick.selected) else {
+                conversation.dismiss_forward();
+                return;
+            };
+            let action = Action::Forward {
+                chat_id: pick.chat_id,
+                message_ids: pick.message_ids.clone(),
+                dest_chat_id: dest.id,
+            };
+            let skipped = pick.skipped;
+
+            queue_action(&mut *outbox, &mut *ui, action);
+            conversation.clear_selection();
+            ui.set_mode(Mode::Normal);
+            ui.set_status(IDLE_STATUS.into());
+            if skipped > 0 {
+                ui.flash(format!("{skipped} not sent yet, left out"));
+            }
+        }
+        KeyCode::Esc => conversation.dismiss_forward(),
+        _ => {}
+    }
+}
+
 /// Handles a key while a confirmation is up.
 ///
 /// However it ends, the selection goes with it: it was made for this
@@ -1057,6 +1140,7 @@ pub(crate) fn handle_visual(
     pending: &mut Pending,
     conversation: &mut ConversationState,
     outbox: &mut Outbox,
+    list: &ChatListState,
     key: KeyEvent,
 ) {
     // A `f` takes the very next keypress as the character to look for, whatever
@@ -1094,6 +1178,7 @@ pub(crate) fn handle_visual(
         KeyCode::Char('y') => yank(&mut *ui, &mut *outbox, &mut *conversation),
         KeyCode::Char('d') => request_delete(&mut *ui, &mut *conversation),
         KeyCode::Char('r') => reply_to_selection(&mut *ui, &mut *conversation),
+        KeyCode::Char('s') => begin_forward(&mut *ui, &mut *conversation, list),
 
         KeyCode::Char('j') => conversation.move_focus_to_message(true),
         KeyCode::Char('k') => conversation.move_focus_to_message(false),
@@ -2879,6 +2964,10 @@ pub(crate) fn handle_normal(
             request_delete(&mut *ui, &mut *conversation);
             false
         }
+        'f' => {
+            begin_forward(&mut *ui, &mut *conversation, list);
+            false
+        }
         'p' => {
             paste(&mut *ui, &mut *conversation, &mut *input);
             false
@@ -3365,6 +3454,13 @@ fn intercept_key(
         return true;
     }
 
+    // The forward picker owns every key while it is up: a key that reached the
+    // selection could change or drop what the picker is about to forward.
+    if conversation.picking().is_some() {
+        handle_forward_pick(&mut *ui, &*list, &mut *outbox, &mut *conversation, key);
+        return true;
+    }
+
     // The new-conversation overlay owns the keys that would otherwise move
     // the pane under it, for as long as it is open: `j`/`k` and the arrows
     // walk the candidates, `Enter` accepts one, and `Esc` puts the list away.
@@ -3546,6 +3642,7 @@ fn handle_conversation_key(
                 &mut *pending,
                 &mut *conversation,
                 &mut *outbox,
+                &*list,
                 key,
             );
             false

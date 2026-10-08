@@ -2060,6 +2060,153 @@ fn a_forward_of_nothing_but_placeholders_is_refused_with_the_reason() {
     );
 }
 
+/// `s` in Visual opens the picker over the selection, and what it will forward
+/// is captured then: the picker is the question, and the selection is the answer
+/// the reader gave.
+#[test]
+fn s_in_visual_opens_the_picker_over_the_selection() {
+    let mut app = App::mock();
+    go_to_top(&mut app);
+    key(&mut app, 'V');
+    cursor_onto(&mut app, 3);
+
+    key(&mut app, 's');
+
+    let pick = app.conversation.picking().expect("the picker is up");
+    assert_eq!(pick.chat_id, MOCK_CHAT);
+    assert_eq!(pick.message_ids, vec![1, 2, 3]);
+    assert_eq!(
+        app.ui.mode,
+        Mode::Visual,
+        "the selection is still up under it"
+    );
+}
+
+/// The forward goes where it was captured, and the picker's `Enter` ends the
+/// selection the way `y` ends a deletion.
+#[test]
+fn a_forward_hands_over_what_it_captured_and_not_the_selection_now() {
+    let mut app = App::mock();
+    go_to_top(&mut app);
+    key(&mut app, 'V');
+    cursor_onto(&mut app, 3);
+    key(&mut app, 's');
+
+    app.set_selection(Selection::at(5, None));
+
+    app.handle_key(press(KeyCode::Enter));
+
+    let dest = app.chats()[0].id;
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Forward {
+            chat_id: MOCK_CHAT,
+            message_ids: vec![1, 2, 3],
+            dest_chat_id: dest,
+        })
+    );
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert!(app.selection().is_none(), "the selection clears to Normal");
+}
+
+/// `f` in Normal forwards the message under the cursor, and `Esc` puts the picker
+/// away and leaves that selection for the reader.
+#[test]
+fn f_in_normal_forwards_the_cursor_message_and_esc_keeps_the_selection() {
+    let mut app = App::mock();
+    go_to_top(&mut app);
+
+    key(&mut app, 'f');
+
+    assert_eq!(
+        app.conversation
+            .picking()
+            .map(|pick| pick.message_ids.clone()),
+        Some(vec![1])
+    );
+
+    app.handle_key(press(KeyCode::Esc));
+
+    assert!(
+        app.conversation.picking().is_none(),
+        "the picker is put away"
+    );
+    assert!(
+        app.selection().is_some(),
+        "and the selection is still there"
+    );
+    assert_eq!(app.ui.mode, Mode::Visual);
+    assert_eq!(app.take_action(), None, "nothing was queued");
+}
+
+/// The picker owns every key while it is up: a `d` must not turn the forward
+/// into a deletion of the same selection.
+#[test]
+fn keys_other_than_the_pickers_do_not_reach_the_selection_while_it_is_up() {
+    let mut app = App::mock();
+    go_to_top(&mut app);
+    key(&mut app, 'V');
+    key(&mut app, 's');
+
+    key(&mut app, 'd');
+
+    assert!(
+        app.conversation.picking().is_some(),
+        "the picker is still up"
+    );
+    assert_eq!(app.ui.mode, Mode::Visual, "and no deletion was asked for");
+}
+
+/// A selection of nothing but placeholders opens no picker, and says why.
+#[test]
+fn a_forward_of_only_placeholders_opens_no_picker() {
+    let mut app = App::mock();
+    submit(&mut app, "hi");
+    let placeholder = app.conversation.sending.expect("the send is in flight");
+    app.set_selection(Selection::at(placeholder, None));
+    app.ui.set_mode(Mode::Visual);
+
+    key(&mut app, 's');
+
+    assert!(app.conversation.picking().is_none());
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert!(
+        app.ui.status.contains("still on its way"),
+        "the refusal says why: {:?}",
+        app.ui.status
+    );
+}
+
+/// Placeholders are left out of a forward, and the count is said on the status
+/// line once the forward is on its way.
+#[test]
+fn a_forward_leaves_placeholders_out_and_says_how_many() {
+    let mut app = App::mock();
+    submit(&mut app, "hi");
+    assert!(
+        matches!(app.take_action(), Some(Action::Send { .. })),
+        "the send itself is queued first, and is taken here"
+    );
+    let placeholder = app.conversation.sending.expect("the send is in flight");
+    go_to_top(&mut app);
+    key(&mut app, 'V');
+    cursor_onto(&mut app, placeholder);
+    key(&mut app, 's');
+
+    app.handle_key(press(KeyCode::Enter));
+
+    let dest = app.chats()[0].id;
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Forward {
+            chat_id: MOCK_CHAT,
+            message_ids: (1..=10).collect(),
+            dest_chat_id: dest,
+        })
+    );
+    assert_eq!(app.ui.status, "1 not sent yet, left out");
+}
+
 #[test]
 fn editing_a_message_that_has_not_been_sent_or_is_not_yours_is_refused() {
     let mut app = App::mock();

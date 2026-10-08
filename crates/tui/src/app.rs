@@ -2582,6 +2582,11 @@ impl App {
             }) => return delete_prompt(ids, *outgoing, *skipped),
             None => {}
         }
+        // The picker outranks the selection's own note: it is the question the
+        // reader is answering, and the note would describe the selection only.
+        if self.conversation.picking().is_some() {
+            return widgets::input_bar::FORWARD_PICKER_HINT.to_owned();
+        }
         if let Some(selection) = &self.conversation.selection {
             return selection_note(selection, self.selection_len().unwrap_or(0));
         }

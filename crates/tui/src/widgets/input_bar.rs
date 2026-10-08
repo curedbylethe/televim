@@ -88,7 +88,10 @@ const CHAT_LIST_HINT: &str =
     " j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin";
 
 /// The hint while a selection is being made over the messages.
-const VISUAL_HINT: &str = " d: delete  y: yank  r: reply  Esc: cancel";
+const VISUAL_HINT: &str = " d: delete  y: yank  s: forward  r: reply  Esc: cancel";
+
+/// The status line while the forward picker is up over a selection.
+pub const FORWARD_PICKER_HINT: &str = "VISUAL  j/k: choose  ⏎: forward  Esc: cancel";
 
 /// The hint while the profile panel has the focus.
 ///
