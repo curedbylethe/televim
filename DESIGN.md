@@ -531,6 +531,7 @@ code.
 | `· typing` | the peer is typing in the open conversation: a note on the conversation's title, in `text-dim`; the one title note that is not a count | `typing_note` |
 | `·` | a space in a draft being composed; a title-note joiner; a card row's cue | three meanings, all deliberate |
 | `Loading…` `Loading older…` `Loading newer…` | a fetch in flight | `FetchDirection::label` |
+| `Cached messages — loading the latest…` | a conversation drawn from the local history cache while its newest page is in flight. On the **status line**, not as a row: `Loading…` stands in for messages, and a cached window has messages to show | `REVALIDATING_LABEL` |
 | `Jumping to first unread…` | a jump the window could not answer | `JUMP_LABEL` |
 | `Jumping to the quoted message…` | `gd` on a reply whose target is not loaded: the page around it is in flight | specified here; not yet in the binary |
 | `Jumping back…` `Jumping forward…` | `Ctrl-o` / `Ctrl-i` to a position whose message is no longer loaded | ditto |
@@ -884,8 +885,9 @@ regressing.
    at all. A refusal written while any of the three is up is a line the reader
    never sees. That is why an operation that finishes in Visual leaves Visual,
    and why a prompt carries its counts rather than flashing them. Below the three
-   sit a jump in flight, the full reason a failed message failed, and then
-   whatever was last written to the status.
+   sit a jump in flight, the full reason a failed message failed, then
+   whatever was last written to the status, and last a cached conversation's
+   wait for its newest page, which outranks only the resting hint.
 
    **Above all of them is a keystroke inside the line — all but a sign-in
    refusal, which outranks even the hint.** A key being pressed
@@ -905,7 +907,8 @@ regressing.
    | 6 | a jump in flight | `Jumping to first unread…`, `Jumping to the quoted message…` |
    | 7 | why the message under the cursor failed | the send's own reason |
    | 8 | a `flash` — a refusal, a status worth reading | anything just written |
-   | 9 | the hint, or `televim` | the resting state. The editable profile and both cards use their own hint here, not `televim` |
+   | 9 | a cached conversation waiting for its newest page | `Cached messages — loading the latest…` |
+   | 10 | the hint, or `televim` | the resting state. The editable profile and both cards use their own hint here, not `televim` |
 
    Beside the ranking, always drawn: a `●` in the connection's colour — green
    while the feed delivers, yellow while a bring-up or a rebuild is under way,
@@ -918,6 +921,13 @@ regressing.
    state and the sentence names where it is going; see *Jump to the quoted message*.
    A search above it hides the label, which is the ranking working: the reader who
    pressed `gd` with a search up still sees the search until the page lands.
+
+   Rank 9 sits below everything written to the status so that a cache can never
+   talk over a failure: a revalidation that fails says `history:` like any other
+   page, and `offline:` keeps the line it always had. It is said only while both
+   halves hold — the window came from the cache, and its newest page is in
+   flight — so an offline reader looking at cached rows is told `offline:`, not
+   that something is coming.
 
    The unit in rank 3 is not decoration: three characters, three rows and three
    messages are all "3", and a reader who has just pressed `v` has to be able to

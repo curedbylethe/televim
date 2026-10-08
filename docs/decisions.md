@@ -610,14 +610,14 @@ are in [`../AGENTS.md`](../AGENTS.md).
   take the token path on their own, with nothing left to gate.
 - **Why the connection indicator is an always-visible dot beside the ranked
   sentence:** the sentences say what happened and the state says which of the
-  four holds, and a rank-9 sentence is hidden under every selection,
+  four holds, and a rank-8 sentence is hidden under every selection,
   confirmation and search — exactly when the reader most needs the signal. So
   the indicator is not a rank at all: a `●` drawn beside the sentence in every
   state, green while the feed delivers, yellow while a bring-up or a rebuild is
   under way, red once the budget is spent. The connected form renders rather
   than vanishing, because absence is not a state a reader can tell from a
   sentence that outranks it. The detailed retry sentences stay byte-identical
-  at rank 9 beside the dot. Two deliberate breaks follow. The dot ends the
+  at rank 8 beside the dot. Two deliberate breaks follow. The dot ends the
   one-sentence invariant: `status_bar.rs` renders two spans now, the dot and
   whatever `status_text()` returns. And it adds three `Theme` roles
   (`conn_connected`, `conn_transient`, `conn_offline`) against the stage plan's
