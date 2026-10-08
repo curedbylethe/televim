@@ -612,13 +612,6 @@ impl State {
 
     /// The messages cached for `peer`, oldest first; empty when there are
     /// none.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "seeds an opened conversation in the stage that follows"
-        )
-    )]
     pub(crate) fn cached_history(&self, peer: i64) -> Vec<Message> {
         self.cached.messages.get(peer)
     }
@@ -1212,12 +1205,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         Wanted::Nothing => {}
 
         Wanted::Latest(peer_id) => {
-            let cursor = HistoryCursor::new(peer_id);
-            // Recorded before the request rather than after it, so that the
-            // next pass — which is a quarter of a second away — does not ask for
-            // the same page again while this one is still on its way.
-            state.history.cursor = Some(cursor);
-            app.begin_fetch(FetchDirection::Latest);
+            let cursor = begin_latest(app, state, peer_id);
             request(&client, FetchDirection::Latest, cursor, tx);
         }
 
@@ -1241,6 +1229,37 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             request_jump(&client, jump, cursor, tx);
         }
     }
+}
+
+/// Starts on a conversation's newest page: puts what the cache holds for it on
+/// screen, and records the fetch that will replace it.
+///
+/// Everything [`drive`]'s `Latest` arm does short of the request itself, which
+/// needs a client: these effects can be checked without one, the way
+/// [`apply_ready_to_screen`]'s are.
+///
+/// **Every way of opening a conversation ends here** — the chat list, `:chat`,
+/// a search result, the launch landing and `--chat` — because each of them
+/// leaves a window the cursor does not name, and that is what [`wanted`] answers
+/// with the newest page. It runs on the same pass as the open, so the first
+/// frame drawn after it is the cached window, not the `Loading…` row.
+///
+/// The cache is read only for an empty window. A window with rows in it would
+/// refuse the seed — a retry after a newest page that failed, or a client
+/// brought back up over the conversation the reader was in — and reading the
+/// cache for it would copy a page out only to throw it away.
+fn begin_latest(app: &mut App, state: &mut State, peer_id: i64) -> HistoryCursor {
+    if app.conversation.conversation.window.is_empty() {
+        app.seed_from_cache(peer_id, state.cached_history(peer_id));
+    }
+
+    let cursor = HistoryCursor::new(peer_id);
+    // Recorded before the request rather than after it, so that the next pass —
+    // which is a quarter of a second away — does not ask for the same page again
+    // while this one is still on its way.
+    state.history.cursor = Some(cursor);
+    app.begin_fetch(FetchDirection::Latest);
+    cursor
 }
 
 /// Whether a feed that has just ended may be reconnected, or has spent its one
@@ -2630,6 +2649,7 @@ mod tests {
     use tui::app::ConnectionState;
     use tui::app::Focus;
     use tui::app::JumpKind;
+    use tui::app::REVALIDATING_LABEL;
 
     /// The conversation the sample messages belong to.
     const CHAT: i64 = 7;
@@ -3935,6 +3955,180 @@ mod tests {
             "got {:?}",
             app.ui.status
         );
+    }
+
+    // ---- opening a conversation from the cache ---------------------------
+
+    /// A state whose cache holds `ids` for `peer`, as a launch restores it.
+    fn state_caching(peer: i64, ids: std::ops::RangeInclusive<i64>) -> State {
+        let mut cache = HistoryCache::default();
+        cache.put(peer, &messages(peer, ids));
+        let mut state = State::default();
+        state.restore_history(cache);
+        state
+    }
+
+    /// An application with [`CHAT`] just opened and nothing loaded.
+    fn app_just_opened() -> App {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(0);
+        app
+    }
+
+    fn window_ids(app: &App) -> Vec<i64> {
+        app.conversation
+            .conversation
+            .window
+            .iter()
+            .map(|message| message.id)
+            .collect()
+    }
+
+    /// The driver's own pass, short of the request: what `wanted` names for a
+    /// conversation that has just been opened, begun.
+    fn open_pass(app: &mut App, state: &mut State) {
+        assert_eq!(
+            wanted(app, state.history, Instant::now()),
+            Wanted::Latest(CHAT),
+            "a conversation just opened asks for its newest page"
+        );
+        begin_latest(app, state, CHAT);
+    }
+
+    /// A warm cache paints the conversation before the wire has said anything,
+    /// and says on the status line that it is waiting to be replaced; the
+    /// newest page then replaces every cached row.
+    #[test]
+    fn a_cached_conversation_is_shown_until_its_newest_page_replaces_it() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT, 1..=3);
+
+        open_pass(&mut app, &mut state);
+
+        assert_eq!(window_ids(&app), vec![1, 2, 3], "the cache is on screen");
+        assert!(app.is_fetching(FetchDirection::Latest));
+        assert_eq!(app.status_text(), REVALIDATING_LABEL);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 4..=6),
+        );
+
+        assert_eq!(window_ids(&app), vec![4, 5, 6], "the page replaced it");
+        assert!(!app.is_revalidating());
+        assert_ne!(app.status_text(), REVALIDATING_LABEL);
+    }
+
+    /// A cold cache is today's open: an empty window under the `Loading…` row
+    /// until the page lands, and no word of a revalidation.
+    #[test]
+    fn a_cold_cache_opens_a_conversation_as_it_always_has() {
+        let mut app = app_just_opened();
+        let mut state = State::default();
+
+        open_pass(&mut app, &mut state);
+
+        assert!(app.conversation.conversation.window.is_empty());
+        assert!(app.is_fetching(FetchDirection::Latest), "Loading… is drawn");
+        assert!(!app.is_revalidating());
+        assert_ne!(app.status_text(), REVALIDATING_LABEL);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=2),
+        );
+
+        assert_eq!(window_ids(&app), vec![1, 2]);
+    }
+
+    /// What is cached for another conversation is never shown in this one.
+    #[test]
+    fn another_conversations_cache_does_not_seed_the_one_opened() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT + 1, 1..=3);
+
+        open_pass(&mut app, &mut state);
+
+        assert!(app.conversation.conversation.window.is_empty());
+        assert!(!app.is_revalidating());
+    }
+
+    /// A newest page that failed is asked for again once the backoff has
+    /// passed, and that second open finds the cached rows still on screen: it
+    /// leaves them be, and is revalidating again.
+    #[test]
+    fn a_retried_newest_page_leaves_the_cached_window_alone() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT, 1..=3);
+        open_pass(&mut app, &mut state);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+        assert!(app.ui.status.contains("history:"), "the failure is said");
+        assert_eq!(window_ids(&app), vec![1, 2, 3], "and the cache stays");
+
+        state.history.retry_at = None;
+        open_pass(&mut app, &mut state);
+
+        assert_eq!(window_ids(&app), vec![1, 2, 3]);
+        assert!(app.is_revalidating());
+    }
+
+    /// A launch with a warm cache: the chat list's round trip opens the first
+    /// conversation, and the same pass seeds it, so the frame drawn after the
+    /// list is the cached conversation rather than `Loading…`.
+    #[test]
+    fn the_launch_landing_opens_on_the_cached_conversation() {
+        let mut app = App::new();
+        let mut state = state_caching(CHAT, 1..=3);
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+        open_pass(&mut app, &mut state);
+
+        assert_eq!(window_ids(&app), vec![1, 2, 3]);
+        assert_eq!(app.status_text(), REVALIDATING_LABEL);
+    }
+
+    /// `--chat` lands on the conversation it names, and that one is seeded
+    /// rather than the head of the list.
+    #[test]
+    fn the_initial_chat_opens_on_its_cached_conversation() {
+        let mut app = App::new();
+        app.set_initial_chat(CHAT);
+        let mut state = state_caching(CHAT, 1..=3);
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1), chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+        open_pass(&mut app, &mut state);
+
+        assert_eq!(app.current_chat_id(), CHAT);
+        assert_eq!(window_ids(&app), vec![1, 2, 3]);
     }
 
     // ---- reconnecting when the feed ends --------------------------------
