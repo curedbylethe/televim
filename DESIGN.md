@@ -414,6 +414,7 @@ them; where the model and that file disagree, that file is the answer.
   the bar as a message row is: the row is still broken logically, the `: ` / `/ `
   prefix stays chrome, and the caret is drawn at the visual position of the
   logical one.
+- **An open draft is drawn as a row under the messages.** While the line is a message being written and has words in it, a row below the messages reads `[you|draft] ` in `text-dim`, then the words in the message ink, wrapped at the panel's width less the tag. Its rows are taken from the panel before the messages are given theirs, and no count includes them, so typing moves no scroll. It takes no caret, selection, match or receipt. In follow mode it comes straight after the newest message: at the panel's bottom when the conversation fills the panel, directly under that message when it does not. Scrolled up, it is not drawn at all, since under an older message it would read as that message's: the input bar still shows the words. **DESIGN-TBD:** the row is built to the existing `[you]` tag and `text-dim` vocabulary. No design run was commissioned for it. The visual pass is open, including whether a draft should be pinned to the panel's bottom while the reader is scrolled up.
 - **The focused pane's border is the only thing on screen that says where a
   keystroke goes.** Two panes drawn alike are two panes the reader has to guess
   between. `lit_borders` in `conversation.rs` reads the three corners and asserts
@@ -512,6 +513,7 @@ code.
 | Written | Means | Source |
 | :------ | :---- | :----- |
 | `[you]` `[them]` | which side a message is from, on its first row; in a group, on the group's first row only | `rows.rs` |
+| `[you|draft] ` | the open draft, drawn below the last message while it has words: the tag in `text-dim`, the words in the message ink. **DESIGN-TBD:** built to this vocabulary, not designed | `DRAFT_TAG` in `conversation.rs` |
 | `> quoted ‖ body` | a reply: quote and body **on one row**, `‖` between | `rows::reply_prefix` |
 | `> [message not loaded] ‖ body` | a reply whose target the window does not hold; `gd` on it fetches the target | asserted in `rows.rs` |
 | `[image]` | **a message that carries a photo and no caption**: its whole body, in `text-dim` | `MediaKind::label` |
