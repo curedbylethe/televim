@@ -5416,3 +5416,196 @@ fn accepting_a_candidate_that_is_not_a_chat_lists_and_opens_them() {
     );
     assert!(!app.user_search().is_active(), "and the list is put away");
 }
+
+// ---- the open draft --------------------------------------------------
+
+/// Types `text` into the open conversation's line, and leaves it the way the
+/// reader does: `Esc` to normal mode, and `Esc` again back to the conversation.
+fn draft_then_leave(app: &mut App, text: &str) {
+    app.handle_key(press(KeyCode::Char('i')));
+    type_text(app, text);
+    app.handle_key(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Esc));
+    assert_eq!(
+        app.ui.focus,
+        Focus::Conversation,
+        "and the words stay in the line"
+    );
+}
+
+/// Whether the layout's last entry is the draft.
+fn drafted(app: &App) -> bool {
+    app.row_layout()
+        .last()
+        .is_some_and(|span| span.kind == RowKind::Draft)
+}
+
+/// The slice the panel is given for every cursor and budget the tests try.
+fn slices_of(app: &mut App) -> Vec<rows::Slice> {
+    let mut slices = Vec::new();
+    for cursor in 0..app.conversation.conversation.window.len() {
+        app.conversation.vim.set_cursor(cursor);
+        let layout = app.row_layout();
+        for budget in 1..=8 {
+            slices.push(app.viewport(&layout, budget));
+        }
+    }
+    slices
+}
+
+/// An empty line has no row, and a line with words has one trailing row for
+/// them, after every message, and counts nothing of it.
+#[test]
+fn a_draft_is_a_trailing_row_only_while_the_line_has_words() {
+    let mut app = App::mock();
+    app.record_body(53);
+    let before = app.row_layout();
+    assert!(!drafted(&app), "an empty line is no row");
+
+    app.handle_key(press(KeyCode::Char('i')));
+    type_text(&mut app, "on its way");
+    let layout = app.row_layout();
+    let draft = layout.last().expect("the draft is laid out");
+
+    assert_eq!(draft.kind, RowKind::Draft);
+    assert_eq!(draft.message_id, None, "and names no message");
+    assert_eq!(draft.first, rows::total_rows(&before), "after the last row");
+    assert_eq!(draft.len, 1);
+    assert_eq!(draft.text, 0.."on its way".len(), "over the words it shows");
+    assert_eq!(
+        &layout[..layout.len() - 1],
+        &before[..],
+        "every other entry is as it was"
+    );
+
+    app.input.line.clear();
+    assert_eq!(app.row_layout(), before, "and cleared, it is gone");
+}
+
+/// A `:` command is not a draft, whatever is typed into it.
+#[test]
+fn a_command_being_typed_is_not_a_draft() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char(':')));
+    type_text(&mut app, "quit");
+
+    assert_eq!(app.input.line.purpose(), PromptKind::Command);
+    assert!(!drafted(&app));
+}
+
+/// A draft wraps at the panel's width less the `[you|draft] ` it is drawn
+/// behind: thirty characters fit a 40-column panel on their own, and not beside
+/// their name.
+#[test]
+fn a_draft_wraps_at_the_panel_width_less_its_name() {
+    let mut app = App::mock();
+    app.record_body(40);
+    app.handle_key(press(KeyCode::Char('i')));
+    type_text(&mut app, &"x".repeat(30));
+
+    let draft = app.row_layout().last().expect("the draft is laid out").len;
+
+    assert_eq!(
+        draft, 2,
+        "28 columns beside the name, and the rest below it"
+    );
+}
+
+/// The draft is drawn, and no count sees it: the total, a message at a row past
+/// the messages, and the number of entries are all what they are without it.
+#[test]
+fn a_draft_is_in_no_count_while_it_is_on_screen() {
+    let mut app = App::mock();
+    app.record_body(53);
+    let without = app.row_layout();
+    let total = rows::total_rows(&without);
+
+    app.handle_key(press(KeyCode::Char('i')));
+    type_text(&mut app, &"y".repeat(150));
+    let with = app.row_layout();
+
+    assert_eq!(with.len(), without.len() + 1, "one entry more");
+    assert!(with.last().is_some_and(|span| span.len > 1));
+    assert_eq!(
+        rows::total_rows(&with),
+        total,
+        "and the rows it spans are not in the total"
+    );
+    assert_eq!(rows::message_at_row(&with, total), None);
+    assert_eq!(rows::message_at_row_moving(&with, total, true), None);
+}
+
+/// The slice the panel is given is the same for every cursor and budget with a
+/// draft as without one: the draft is drawn below it and is not in what it
+/// shows, its total, or its scrollbar.
+#[test]
+fn the_slice_is_the_same_with_a_draft_as_without_one() {
+    let mut app = App::mock();
+    app.record_body(53);
+    let without = slices_of(&mut app);
+
+    draft_then_leave(&mut app, &"y".repeat(150));
+    assert!(drafted(&app), "the draft is there to be ignored");
+
+    assert_eq!(slices_of(&mut app), without);
+}
+
+/// The fetch triggers and the cursor's place in the window are what they are
+/// without the draft, for every cursor the window has.
+#[test]
+fn the_fetch_margins_are_the_same_with_a_draft_as_without_one() {
+    let mut app = App::mock();
+    app.record_body(53);
+    app.apply_latest(tall_page(10));
+    let measure = |app: &mut App| -> Vec<(usize, usize, bool, bool, bool)> {
+        (0..app.conversation.conversation.window.len())
+            .map(|cursor| {
+                app.conversation.vim.set_cursor(cursor);
+                (
+                    app.cursor_extent().0,
+                    app.cursor_extent().1,
+                    app.near_the_end(),
+                    app.wants_older(),
+                    app.wants_newer(),
+                )
+            })
+            .collect()
+    };
+    let without = measure(&mut app);
+
+    draft_then_leave(&mut app, "a draft that is only a little");
+    assert!(drafted(&app));
+
+    assert_eq!(measure(&mut app), without);
+}
+
+/// A page down and a page up land on the same messages with a draft as without
+/// one, and never on the draft.
+#[test]
+fn a_page_lands_on_the_same_messages_with_a_draft_as_without_one() {
+    let mut landings = Vec::new();
+
+    for drafting in [false, true] {
+        let mut app = App::mock();
+        app.record_body(53);
+        app.record_rows(4);
+        if drafting {
+            draft_then_leave(&mut app, &"draft ".repeat(20));
+            assert!(drafted(&app));
+        }
+        go_to_top(&mut app);
+
+        let mut cursors = Vec::new();
+        for _ in 0..4 {
+            app.handle_key(press_ctrl('d'));
+            cursors.push(app.conversation.vim.cursor());
+        }
+        for _ in 0..2 {
+            app.handle_key(press_ctrl('u'));
+            cursors.push(app.conversation.vim.cursor());
+        }
+        landings.push(cursors);
+    }
+
+    assert_eq!(landings[0], landings[1]);
+}
