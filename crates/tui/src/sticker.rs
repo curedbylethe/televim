@@ -22,6 +22,7 @@
 //! `tui` must not depend on `proto` (see the crate docs) — and only its
 //! outcome crosses here, through [`resolve_fetch`].
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::Cursor;
@@ -257,10 +258,19 @@ struct CacheEntry {
 }
 
 /// The open conversation's decoded stickers. See [`STICKER_CACHE_MAX_BYTES`].
+///
+/// The request queue beside it is what the panel asks for: rendering is a
+/// shared borrow, so a miss cannot fetch — it records `(chat_id,
+/// message_id)` here instead, and the drain (which owns the network) takes the
+/// batch with [`StickerCache::take_pending`] and settles each outcome through
+/// [`resolve_fetch`]. A request is recorded once: while it waits in either
+/// queue, further frames do not repeat it.
 #[derive(Debug, Default)]
 pub struct StickerCache {
     entries: VecDeque<CacheEntry>,
     bytes: usize,
+    pending: RefCell<Vec<(i64, i64)>>,
+    in_flight: RefCell<Vec<(i64, i64)>>,
 }
 
 impl StickerCache {
@@ -312,6 +322,8 @@ impl StickerCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+        self.pending.borrow_mut().clear();
+        self.in_flight.borrow_mut().clear();
     }
 
     /// How many pictures are cached.
@@ -331,6 +343,36 @@ impl StickerCache {
     pub fn bytes_used(&self) -> usize {
         self.bytes
     }
+
+    /// Asks for the bytes of `message_id` in `chat_id`.
+    ///
+    /// A no-op when the picture is cached or already asked for: the panel
+    /// calls this on every miss of every frame, and without the guard one
+    /// visible sticker would be a download per frame.
+    pub fn request(&self, chat_id: i64, message_id: i64) {
+        if self.get(message_id).is_some() {
+            return;
+        }
+        let key = (chat_id, message_id);
+        if self.in_flight.borrow().contains(&key) {
+            return;
+        }
+        let mut pending = self.pending.borrow_mut();
+        if !pending.contains(&key) {
+            pending.push(key);
+        }
+    }
+
+    /// Takes the requested batch for the drain, marking each in flight.
+    ///
+    /// The drain owns the network: it downloads each pair and settles the
+    /// outcome through [`resolve_fetch`], which releases the in-flight mark.
+    #[must_use]
+    pub fn take_pending(&self) -> Vec<(i64, i64)> {
+        let batch = std::mem::take(&mut *self.pending.borrow_mut());
+        self.in_flight.borrow_mut().extend(batch.iter().copied());
+        batch
+    }
 }
 
 /// Settles a sticker fetch into the cache: the outcome of the download the
@@ -348,6 +390,11 @@ pub fn resolve_fetch<E: fmt::Display>(
     message_id: i64,
     fetched: Result<Vec<u8>, E>,
 ) -> bool {
+    cache
+        .in_flight
+        .borrow_mut()
+        .retain(|flight| *flight != (chat_id, message_id));
+
     match fetched {
         Ok(bytes) => match cache.insert_bytes(message_id, &bytes) {
             Ok(()) => true,
@@ -369,25 +416,28 @@ pub fn resolve_fetch<E: fmt::Display>(
     }
 }
 
+/// Test bytes shared across the crate: a 4-by-3 lossless WEBP with twelve
+/// distinct pixels (see the decode test for the layout). Encoded once with
+/// `image-webp`'s own lossless encoder and embedded, so widget and geometry
+/// tests run without a datacenter or a network.
+#[cfg(test)]
+pub(crate) const STICKER_TEST_WEBP: &[u8] = &[
+    82, 73, 70, 70, 204, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 192, 0, 0, 0, 47, 3, 128, 0, 16,
+    205, 85, 32, 34, 2, 30, 136, 32, 0, 0, 0, 0, 128, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 24, 0, 0, 0, 0, 0, 0, 12, 0, 0, 224, 129, 64, 27, 0, 0, 0, 0,
+    156, 127, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 32, 15, 4, 18, 0, 0, 0, 0, 224, 252, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 156, 7, 34, 1, 0, 0, 0, 0, 112, 254, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0,
+    72, 225, 175, 116, 71, 14, 136, 8, 170, 19, 211, 249, 8,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A 4-by-3 lossless WEBP with twelve distinct pixels, row-major:
-    /// red green blue white / black cyan magenta(a128) yellow /
-    /// orange purple dark-teal(a64) light-grey. Encoded once with
-    /// `image-webp`'s own lossless encoder and embedded, so the test runs
-    /// without a datacenter or a network.
-    const FIXTURE_WEBP: &[u8] = &[
-        82, 73, 70, 70, 204, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 192, 0, 0, 0, 47, 3, 128, 0,
-        16, 205, 85, 32, 34, 2, 30, 136, 32, 0, 0, 0, 0, 128, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 24, 0, 0, 0, 0, 0, 0, 12, 0, 0, 224, 129, 64, 27, 0,
-        0, 0, 0, 156, 127, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 15, 4, 18, 0, 0, 0, 0, 224, 252, 11, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 156, 7, 34, 1, 0, 0,
-        0, 0, 112, 254, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0,
-        12, 0, 0, 0, 0, 0, 0, 0, 72, 225, 175, 116, 71, 14, 136, 8, 170, 19, 211, 249, 8,
-    ];
+    /// The shared crate fixture (see above for the pixel layout).
+    const FIXTURE_WEBP: &[u8] = STICKER_TEST_WEBP;
 
     fn pixel(image: &DecodedSticker, x: u32, y: u32) -> [u8; 4] {
         let at = (u64::from(y) * u64::from(image.width) + u64::from(x)) as usize * 4;
@@ -587,6 +637,59 @@ mod tests {
             "undecodable bytes store nothing either"
         );
         assert!(cache.get(9).is_none());
+    }
+
+    #[test]
+    fn a_miss_is_requested_once_and_released_on_settle() {
+        let mut cache = StickerCache::default();
+
+        cache.request(42, 7);
+        cache.request(42, 7);
+        cache.request(42, 8);
+        assert_eq!(
+            cache.take_pending(),
+            vec![(42, 7), (42, 8)],
+            "one request per message, in order"
+        );
+
+        cache.request(42, 9);
+        assert_eq!(
+            cache.take_pending(),
+            vec![(42, 9)],
+            "a taken batch does not come back"
+        );
+        cache.request(42, 7);
+        assert!(
+            cache.take_pending().is_empty(),
+            "a message in flight is not asked for again"
+        );
+
+        assert!(resolve_fetch::<&str>(
+            &mut cache,
+            42,
+            7,
+            Ok(FIXTURE_WEBP.to_vec())
+        ));
+        cache.request(42, 7);
+        assert!(
+            cache.take_pending().is_empty(),
+            "and neither is one that has settled into a picture"
+        );
+    }
+
+    #[test]
+    fn clearing_forgets_requests_with_the_pictures() {
+        let cache = StickerCache::default();
+        cache.request(42, 7);
+
+        let mut cleared = cache;
+        cleared.clear();
+        cleared.request(42, 7);
+        assert_eq!(
+            cleared.take_pending(),
+            vec![(42, 7)],
+            "a switch drops the old chat's queue with its pictures"
+        );
     }
 
     /// The ceilings are real numbers, not placeholders: the decode ceiling is
