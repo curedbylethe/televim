@@ -425,6 +425,19 @@ are in [`../AGENTS.md`](../AGENTS.md).
   different work. Streaming and a cache directory are CUR-9 and CUR-10; `proto`
   narrows the two identifiers to the `i32` the wire uses on the way through, and
   says so with `ProtoError::MessageIdOutOfRange` rather than truncating.
+- **Why download progress is a callback that answers `bool`:** the framework's
+  `download_media_with_progress` calls `progress(downloaded, declared)` after each
+  accepted chunk, and a `false` answer aborts the transfer and drops the collected
+  bytes as `FrameworkError::DownloadAborted`. A callback rather than a channel keeps
+  the seam std-only, so `proto` and `tui` name no channel type and the abort needs no
+  error path of its own. The app side sends each chunk on its existing unbounded
+  channel, which never blocks the chunk loop; progress is one event per chunk, so the
+  count is bounded by the chunk size, not by the tick.
+- **Why the progress is decorated beside the placeholder rather than replacing it:**
+  `Message::display_body` feeds selection, search, and bidi slicing as well as the
+  drawn row, so substituting a token into it would move every byte range those keep.
+  The token is drawn as the row's trailing note instead, from a bounded table kept
+  beside the open conversation (`tui::download`).
 - **Why the reply jump rides the first-unread pipeline, and why the key is `gd`:** a
   reply's quote is a message in the same conversation, and `gg` had already
   answered "a message the reader asked for by name, which the window does not
