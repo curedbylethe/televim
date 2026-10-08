@@ -59,7 +59,7 @@ use telegram_framework::{
     RequestError, SessionError, SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tui::app::{Action, App, FetchDirection, Jump, LoginField};
+use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
 
 use crate::config::Config;
 use crate::runtime::AppEvent;
@@ -1497,6 +1497,8 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // reconnect: without this, a reconnect that re-subscribes to a feed
             // that immediately ends again would rebuild the client for ever.
             state.auto_reconnect_used = false;
+            // And the connection holds: a working feed is a connected one.
+            app.set_connection(ConnectionState::Connected);
             // Whether it moved anything is not acted on: the loop redraws on
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
@@ -1688,6 +1690,8 @@ fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
     // is the clock a flash carries, and a failure must not revert to idle
     // while the reader is still looking at it.
     app.set_status(format!("offline: {reason}"));
+    // The spent budget reads as the failed state, beside the sentence.
+    app.set_connection(ConnectionState::Offline);
     // No client to carry anything, so an in-flight sign-in is not in flight: the
     // flag would only keep the panel saying "Checking…".
     app.set_client_available(false);
@@ -1709,6 +1713,9 @@ fn apply_feed_ended(app: &mut App, state: &mut State) {
     // Persistent rather than a flash, for the same reason as the retry
     // sentence: a pending flash deadline must not take it down.
     app.set_status("reconnecting");
+    // The feed dropped and the driver is rebuilding: reconnecting, in words and
+    // in state.
+    app.set_connection(ConnectionState::Reconnecting);
 
     // Nothing has a client until the rebuilt one's `Ready`: the flag says so to
     // every surface that would otherwise claim a request can be carried.
@@ -1751,6 +1758,8 @@ fn apply_ready_to_screen(
     account: Result<domain::account::Account, String>,
     session_store: tui::SessionStore,
 ) {
+    // The client is up: connected, whatever the screen says underneath it.
+    app.set_connection(ConnectionState::Connected);
     // A conversation already on screen is the reader's place, and a `Ready` that
     // lands on top of one is the client being brought back up — so the list is
     // refreshed around that place rather than the reader being moved to the top
@@ -2137,6 +2146,9 @@ fn apply_chat_list_retrying(app: &mut App, retry: &ChatListRetry) {
         "fetching the chat list failed ({:#}); retrying in {}s (attempt {}/{})",
         retry.reason, seconds, retry.attempt, retry.attempts
     ));
+    // A wait with a visible end of it is still a wait: reconnecting, beside the
+    // sentence that says how long.
+    app.set_connection(ConnectionState::Reconnecting);
 }
 
 /// What a feed retry in progress says on the status line.
@@ -2155,6 +2167,8 @@ fn apply_feed_retrying(app: &mut App, retry: &FeedRetry) {
         "the update feed failed ({:#}); retrying in {}s (attempt {}/{})",
         retry.reason, seconds, retry.attempt, retry.attempts
     ));
+    // The same wait the launch gets, and the same state beside its sentence.
+    app.set_connection(ConnectionState::Reconnecting);
 }
 
 /// Whether the launch chat-list fetch may be asked again, and how long to wait.
@@ -2214,6 +2228,7 @@ mod tests {
     use super::*;
     use tui::app::AccountState;
     use tui::app::CHAT_SWITCH_DELAY;
+    use tui::app::ConnectionState;
     use tui::app::Focus;
     use tui::app::JumpKind;
 
@@ -3330,6 +3345,168 @@ mod tests {
             !state.auto_reconnect_used,
             "a working feed re-arms the one reconnect"
         );
+    }
+
+    // ---- connection state -------------------------------------------------
+
+    /// A state built before any event is a launch, and a launch is waiting for
+    /// its `Ready`: the state agrees with the `"connecting…"` the runtime
+    /// writes before the first bring-up answers.
+    #[test]
+    fn a_new_app_starts_connecting() {
+        assert_eq!(App::new().connection(), ConnectionState::Connecting);
+    }
+
+    /// A chat-list retry in progress is a rebuild being waited out: the state
+    /// holds reconnecting beside the sentence that says how long.
+    #[test]
+    fn a_chat_list_retry_marks_the_connection_as_reconnecting() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRetrying(ChatListRetry {
+                reason: ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+                    code: 420,
+                    name: "FLOOD_WAIT".to_owned(),
+                    value: Some(31),
+                })),
+                delay: Duration::from_secs(31),
+                attempt: 1,
+                attempts: CHAT_LIST_ATTEMPTS,
+            }),
+        );
+
+        assert_eq!(app.connection(), ConnectionState::Reconnecting);
+        assert!(
+            app.ui.status.contains("retrying in 31s"),
+            "the sentence is untouched: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The feed's wait is the launch's wait, and the state beside it is the
+    /// same one.
+    #[test]
+    fn a_feed_retry_marks_the_connection_as_reconnecting() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::FeedRetrying(FeedRetry {
+                reason: ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+                    code: 420,
+                    name: "FLOOD_WAIT".to_owned(),
+                    value: Some(31),
+                })),
+                delay: Duration::from_secs(31),
+                attempt: 1,
+                attempts: CHAT_LIST_ATTEMPTS,
+            }),
+        );
+
+        assert_eq!(app.connection(), ConnectionState::Reconnecting);
+        assert!(
+            app.ui.status.contains("retrying in 31s"),
+            "the sentence is untouched: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// The feed's end asks for a rebuild: reconnecting, in words and in state.
+    #[test]
+    fn a_feed_end_marks_the_connection_as_reconnecting() {
+        let mut app = App::new();
+        let mut state = State::default();
+        app.set_connection(ConnectionState::Connected);
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+
+        assert_eq!(app.connection(), ConnectionState::Reconnecting);
+        assert_eq!(app.ui.status, "reconnecting");
+    }
+
+    /// A spent budget is the reader-visible failure: the second feed end before
+    /// any update lands as `offline:`, and the state lands as offline with it.
+    #[test]
+    fn an_exhausted_reconnect_marks_the_connection_as_offline() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+        app.set_connection(ConnectionState::Reconnecting);
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(app.connection(), ConnectionState::Offline);
+        assert_eq!(app.ui.status, "offline: the update feed ended again");
+    }
+
+    /// A bring-up that failed says `offline:`, and the state says offline with
+    /// it.
+    #[test]
+    fn an_offline_marks_the_connection_as_offline() {
+        let mut app = App::new();
+        let mut state = State::default();
+        app.set_connection(ConnectionState::Connected);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("connection reset")),
+        );
+
+        assert_eq!(app.connection(), ConnectionState::Offline);
+        assert_eq!(app.ui.status, "offline: connection reset");
+    }
+
+    /// An update is the feed working: the connection holds connected, and the
+    /// one reconnect the working feed earned is re-armed as before.
+    #[test]
+    fn an_update_marks_the_connection_as_connected() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State {
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+        app.set_connection(ConnectionState::Reconnecting);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0))),
+        );
+
+        assert_eq!(app.connection(), ConnectionState::Connected);
+        assert!(
+            !state.auto_reconnect_used,
+            "a working feed still re-arms the one reconnect"
+        );
+    }
+
+    /// A `Ready` is the client being up: connected, from whatever held before.
+    #[test]
+    fn a_ready_marks_the_connection_as_connected() {
+        let mut app = App::new();
+        let mut state = State::default();
+        app.set_connection(ConnectionState::Reconnecting);
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(app.connection(), ConnectionState::Connected);
     }
 
     // ---- feed errors that recover, then exhaust ---------------------------
