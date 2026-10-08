@@ -5193,6 +5193,54 @@ fn start_user_search(app: &mut App, query: &str) {
 /// `/` on the chat list opens the new-conversation query, not the message
 /// search: the two are different questions and must not share a prompt.
 #[test]
+fn p_on_the_chat_list_asks_to_pin_the_highlighted_chat() {
+    let mut app = on_the_chat_list();
+    app.handle_key(press(KeyCode::Char('j')));
+    let chat = app.list.list.chats[app.list.selected_chat].id;
+
+    app.handle_key(press(KeyCode::Char('p')));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::TogglePin {
+            chat_id: chat,
+            pinned: true,
+        })
+    );
+    assert_eq!(app.take_action(), None, "an action is taken once");
+}
+
+#[test]
+fn p_without_a_client_flashes_and_queues_nothing() {
+    let mut app = on_the_chat_list();
+    app.set_client_available(false);
+
+    app.handle_key(press(KeyCode::Char('p')));
+
+    assert_eq!(
+        app.take_action(),
+        None,
+        "nothing waits for a client to come up"
+    );
+    assert_eq!(
+        app.status_text(),
+        "not connected yet — the client is not up"
+    );
+}
+
+#[test]
+fn an_accepted_pin_moves_the_chat_and_the_highlight_stays_on_it() {
+    let mut app = on_the_chat_list();
+    app.handle_key(press(KeyCode::Char('j')));
+    let chat = app.list.list.chats[1].id;
+
+    app.set_pinned(chat, true);
+
+    assert_eq!(app.list.list.chats[0].id, chat);
+    assert_eq!(app.list.selected_chat, 0, "the highlight followed the chat");
+}
+
+#[test]
 fn a_slash_on_the_chat_list_opens_the_new_chat_prompt() {
     let mut app = App::mock();
     app.handle_key(press(KeyCode::Char('h')));

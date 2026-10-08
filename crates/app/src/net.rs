@@ -279,6 +279,19 @@ pub enum Event {
         result: Result<(), ProtoError>,
     },
 
+    /// A pin change came back, or the request failed.
+    PinToggled {
+        /// The chat whose pin was asked for.
+        chat_id: i64,
+
+        /// The pin that was asked for, so a success is applied without asking
+        /// the list what it was.
+        pinned: bool,
+
+        /// Nothing on success: the list moves here, on the answer.
+        result: Result<(), ProtoError>,
+    },
+
     /// A deletion came back, or the request failed.
     Deleted {
         /// The conversation the messages belonged to. Used only to decide
@@ -1372,6 +1385,15 @@ fn request_plain(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender
                 }));
             }
 
+            Action::TogglePin { chat_id, pinned } => {
+                let result = client.toggle_pin(chat_id, pinned).await;
+                let _ = tx.send(AppEvent::Net(Event::PinToggled {
+                    chat_id,
+                    pinned,
+                    result,
+                }));
+            }
+
             // A profile is a question about a person rather than an operation on
             // a conversation, for the same reason as the search below, and it shares
             // this task's shape for the same reason: a round trip here would stop
@@ -1560,6 +1582,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             message_id,
             result,
         } => apply_edited(app, chat_id, message_id, result),
+
+        Event::PinToggled {
+            chat_id,
+            pinned,
+            result,
+        } => apply_pin_toggled(app, chat_id, pinned, result),
 
         Event::Deleted {
             chat_id,
@@ -1967,6 +1995,21 @@ fn apply_edited(app: &mut App, chat_id: i64, message_id: i64, result: Result<(),
         Err(error) => {
             tracing::debug!(chat_id, message_id, %error, "an edit failed");
             app.flash(format!("edit: {}", failure_reason(&error)));
+        }
+    }
+}
+
+/// Folds a pin's answer in. The list moves and the status says so when Telegram
+/// agreed; the status says why not when it did not.
+fn apply_pin_toggled(app: &mut App, chat_id: i64, pinned: bool, result: Result<(), ProtoError>) {
+    match result {
+        Ok(()) => {
+            app.set_pinned(chat_id, pinned);
+            app.flash(if pinned { "pinned" } else { "unpinned" });
+        }
+        Err(error) => {
+            tracing::debug!(chat_id, %error, "a pin change failed");
+            app.flash(format!("pin: {}", failure_reason(&error)));
         }
     }
 }
