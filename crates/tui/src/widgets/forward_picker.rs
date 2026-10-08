@@ -31,6 +31,10 @@ pub fn render(app: &App, conversation: Rect, frame: &mut Frame<'_>) {
     };
 
     frame.render_widget(Clear, conversation);
+    // A kitty picture is not in the buffer, so `Clear` does not cover it: the
+    // loop would place it over the chats. The conversation recorded it this
+    // frame, under the column the picker has just taken.
+    app.ui.placements.borrow_mut().clear();
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -205,6 +209,37 @@ mod tests {
         assert!(
             row_text(&buffer, y).contains("📌"),
             "the pinned chat carries its marker"
+        );
+    }
+
+    /// A kitty sticker under the picker is not placed: the terminal draws
+    /// pictures over the buffer, so `Clear` alone would leave it on the chats.
+    #[test]
+    fn a_kitty_picture_under_the_picker_is_not_placed() {
+        let app = picking();
+        app.ui
+            .placements
+            .borrow_mut()
+            .push(crate::state::ui::Placement {
+                message_id: 1,
+                x: 0,
+                y: 0,
+                cols: 4,
+                rows: 2,
+            });
+
+        let mut terminal =
+            Terminal::new(TestBackend::new(80, 24)).expect("the test backend builds");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render(&app, area, frame);
+            })
+            .expect("the picker draws");
+
+        assert!(
+            app.ui.placements.borrow().is_empty(),
+            "no picture is placed over the picker"
         );
     }
 
