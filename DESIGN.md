@@ -230,9 +230,9 @@ has one cell height and the reader chose the cell.
   caret in here right now* — the reason the dot exists is that a caret is
   standing on a blank cell, and that is true of a search query too.
 
-### The fourteen hint rows
+### The fifteen hint rows
 
-`ALL_HINTS` is the array a test iterates. These are the fourteen, verbatim, with
+`ALL_HINTS` is the array a test iterates. These are the fifteen, verbatim, with
 the width each one measures. The width is
 `chars().count()`, the same count the test makes, and the array is the authority:
 the numbers below were re-measured from it.
@@ -241,7 +241,8 @@ the numbers below were re-measured from it.
 | :--------- | :--- | ------: |
 | conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct` | 67 |
 | chat list has the focus | ` j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin` | 69 |
-| conversation, Visual | ` d: delete  y: yank  r: reply  Esc: cancel` | 42 |
+| conversation, Visual | ` d: delete  y: yank  s: forward  r: reply  Esc: cancel` | 54 |
+| the forward picker is up | `VISUAL  j/k: choose  ⏎: forward  Esc: cancel` | 44 |
 | a deletion is confirmed | ` y: delete  n/Esc: cancel` | 24 |
 | the bar holds a draft, not focused | ` ⏎ draft — i to continue, ^J/⏎ to discard` | 41 |
 | the line is being typed in | ` ⏎: send  ^J: newline  shift+⏎: newline where supported` | 55 |
@@ -542,7 +543,7 @@ code.
 | `Delete your message from both sides? (y/n)` | ditto, naming **which side** | `DELETE_OUTGOING_PROMPT` |
 | `Delete 3 of your messages? (y/n)` | a count, and pluralisation | `delete_yours_prompt` |
 | `NORMAL` `INSERT` `VISUAL` `CONFIRM` | upper case, in a filled label | `status_bar.rs` |
-| ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the fourteen rows above |
+| ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the fifteen rows above |
 | `: ` `/ ` | a prompt's prefix, on its first row only | `App::prompt_prefix` |
 | `3 message(s) selected — Esc clears` | the status line's sentence for a selection, **stating the unit** | `selection_note` |
 | `3 character(s) selected — Esc clears` | ditto for a selection inside one message | ditto |
@@ -854,9 +855,59 @@ username that focuses an existing conversation instead of duplicating it. A quer
 opening with `!` stands in for the failed search, so the failure sentence has a
 frame to be seen in.
 
+## Forwarding a message
+
+A message one reader wants to show in another conversation. Forwarding is an
+operation on a selection, so it starts from one, and the surface it adds is a
+destination picker.
+
+**Invocation.** `s` while a Visual selection is up raises the picker over that
+selection, and the Visual hint names it: `s: forward`. `f` in Normal mode raises
+the same picker over the message under the cursor, first making that message the
+selection, so the picker sees the same thing either way. There is no global key
+and no command: the conversation's own selection is the only place a forward can
+begin, because the messages being sent are the ones on screen.
+
+**The selection.** The reader reaches Visual the ordinary way (`v`, extended with
+`j`/`k`, `gg`/`G`), and the pane's title counts what is held (`· 3 selected`).
+`s` raises the picker and does not clear the selection, so `Esc` returns to
+exactly the range the reader had.
+
+**The picker.** A transient bordered box over the whole conversation column, the
+rectangle the conversation draws in; the chat list beside it is untouched. Its
+first interior row is the header, `Forward N messages to…`, where N is the number
+of numbered messages the selection covers. Each chat is one row: a `📌` before the
+title when the chat is pinned, the title, two spaces, and its newest message as a
+preview in dim ink. A chat with no messages shows no preview. `j`/`k` or `↑`/`↓`
+move the highlight and wrap at either end. The highlighted row is reverse video.
+`⏎` queues the forward into the highlighted chat. `Esc` puts the picker away and
+returns to the selection it was raised from, unchanged.
+
+**What a send does.** `⏎` queues the forward and ends the selection: the picker
+goes, the mode returns to Normal, and the reader stays in the conversation they
+were in. **The open chat does not change.** The forward stays in the current chat;
+the destination is not opened, and the outcome is reported on the status line
+when the network answers (`Forwarded N message(s) to …`). Choosing the
+conversation the reader is already in forwards to itself, which is the same
+operation and needs no special case.
+
+**Refusals.** A selection with nothing forwardable (only placeholders) is refused
+with the reason on the status line, and the selection clears to Normal, as a
+deletion's refusal does. So is a list with no chat to forward into. A source chat
+that Telegram content-protects refuses the forward on the wire; the status line
+says `<chat> does not allow forwarding`. Nothing checks for that before the send.
+
+**Palette.** No new roles. The header is the body ink, the title is body ink, the
+preview and the `📌` are dim, the highlighted row is reverse video, and the box is
+the ordinary border.
+
+Scenes: `forward` in the engine, two frames: a Visual selection of three messages
+with the forward key named in the hint, and the picker raised over the
+conversation, with its header, a pinned chat, and a preview.
+
 ## Components
 
-Nine, with their states, and the `TestBackend` assertion that would catch each
+Ten, with their states, and the `TestBackend` assertion that would catch each
 regressing.
 
 1. **Panel** — `Chats`, `Conversation`, `Input`. States: focused, unfocused,
@@ -873,7 +924,7 @@ regressing.
    which are *different modes that share a word*. The label belongs to whichever
    mode the keys about to be pressed will mean, and a confirmation is a question
    about the whole screen.
-4. **Hint row** — fourteen variants, one per state of the screen, all under
+4. **Hint row** — fifteen variants, one per state of the screen, all under
    `ASSUMED_WIDTH - MODE_LABEL_WIDTH`. Three keys mean something else while a
    `:shortcode` completion is up, and the status line names them for as long as
    it is. The settings hint and the card hints lose to a confirmation and to an
@@ -966,6 +1017,15 @@ regressing.
    dismissed by `Esc`, and the conversation behind it is unchanged. What would
    catch it regressing: the box never leaves the chat-list column, and the
    highlighted row is reverse video with its quieter text in body ink.
+
+10. **Forward picker** — the transient list `s` in Visual, or `f` in Normal,
+    raises over the conversation column it forwards from. Drawn over the
+    conversation, never over the chat list. States: several chats, a pinned chat's
+    `📌` marker, a last-message preview, the highlighted row, and the header naming
+    how many messages are being sent. Not a panel and not a mode: it is an overlay
+    dismissed by `Esc`, which returns to the selection it was raised from. What
+    would catch it regressing: the header counts the selection, the box never
+    leaves the conversation column, and the highlighted row is reverse video.
 
 ## Profile
 
