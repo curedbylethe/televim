@@ -415,12 +415,13 @@ pub enum SessionStore {
     #[default]
     Keyring,
 
-    /// A file on disk, in plaintext.
+    /// A file on disk, encrypted at rest.
     ///
     /// Named for the fact rather than for the type: the panel renders
-    /// `session: /path/to/file (plaintext)`, and a variant called `File` would
-    /// have that fact nowhere to live.
-    PlaintextFile(PathBuf),
+    /// `session: encrypted file /path/to/file`, and a variant called `File` would
+    /// have that fact nowhere to live. The store never writes plaintext, so the
+    /// label does not offer a reader the other reading.
+    EncryptedFile(PathBuf),
 }
 
 /// A row of the profile panel.

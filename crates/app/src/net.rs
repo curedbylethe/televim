@@ -55,8 +55,8 @@ use proto::{
     UpdateStream,
 };
 use telegram_framework::{
-    ClientBuilder, FileStore, FrameworkError, KeyringStore, PASSWORD_ATTEMPTS, Refusal,
-    RequestError, SessionError, SessionStore,
+    ClientBuilder, FileStore, FrameworkError, KeyProvider, KeyringKeyProvider, KeyringStore,
+    PASSWORD_ATTEMPTS, PassphraseProvider, Refusal, RequestError, SessionError, SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
@@ -654,14 +654,28 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
     // is described to the reader out of `session_store(cfg)`, and a store
     // resolved a second time could be a second store — so a reader could be told
     // where their session is while a different file is the one being cleared.
-    let store = session_store(cfg);
+    let Session { store, keys } = session_store(cfg);
     let discarded = discard_corrupt_session(&*store);
+
+    // After the probe above, not before: the probe is what opens an existing file
+    // and so what derives its key, and a key already derived is not derived
+    // twice. What this adds is the case with no file yet: a reader with no key
+    // is told so now, rather than after typing a login code that has nowhere to
+    // be kept.
+    if let Some(keys) = &keys {
+        keys.sealing_key().map_err(|error| key_trouble(&error))?;
+    }
 
     let client = ClientBuilder::new(api_id, api_hash)
         .session_store(store)
         .build()
         .await
-        .context("building the client")?;
+        .map_err(|error| match error {
+            // A file that did not open is the key's doing, and the sentence says
+            // which key. Never a discard: see [`discard_corrupt_session`].
+            FrameworkError::Session(error) if keys.is_some() => key_trouble(&error),
+            error => anyhow::Error::new(error).context("building the client"),
+        })?;
 
     let authorized = client
         .is_authorized()
@@ -797,17 +811,81 @@ async fn read_account(client: &ProtoClient) -> Result<domain::account::Account, 
 /// cannot see a field read two ways.
 fn session_description(cfg: &Config) -> tui::SessionStore {
     match &cfg.session_path {
-        Some(path) => tui::SessionStore::PlaintextFile(path.clone()),
+        Some(path) => tui::SessionStore::EncryptedFile(path.clone()),
         None => tui::SessionStore::Keyring,
     }
 }
 
-/// The store itself: the file the configuration names, or the machine's own
-/// credential store.
-fn session_store(cfg: &Config) -> Box<dyn SessionStore> {
+/// The store the session goes in, and the key behind it when that is a file.
+struct Session {
+    store: Box<dyn SessionStore>,
+
+    /// The file's key source. `None` for the OS credential store, which needs no
+    /// key from here.
+    keys: Option<Arc<dyn KeyProvider>>,
+}
+
+/// The store itself: the encrypted file the configuration names, or the
+/// machine's own credential store.
+///
+/// Resolved afresh by every bring-up and never kept: a cached key would be a
+/// longer-lived secret, and a passphrase changed in the environment is read on
+/// the next `:retry`.
+fn session_store(cfg: &Config) -> Session {
+    session_store_with(cfg, || Arc::new(KeyringKeyProvider::default()))
+}
+
+/// [`session_store`], with the OS-keyring key source passed in.
+///
+/// A seam for the tests only: it is what lets them resolve a store without
+/// reaching the real credential store.
+fn session_store_with(cfg: &Config, keyring: impl FnOnce() -> Arc<dyn KeyProvider>) -> Session {
     match session_description(cfg) {
-        tui::SessionStore::Keyring => Box::new(KeyringStore::default()),
-        tui::SessionStore::PlaintextFile(path) => Box::new(FileStore::new(path)),
+        tui::SessionStore::Keyring => Session {
+            store: Box::new(KeyringStore::default()),
+            keys: None,
+        },
+        tui::SessionStore::EncryptedFile(path) => {
+            let keys = key_provider(cfg, keyring);
+            Session {
+                store: Box::new(FileStore::with_key_provider(path, Arc::clone(&keys))),
+                keys: Some(keys),
+            }
+        }
+    }
+}
+
+/// Where the session file's key comes from: the passphrase if there is one,
+/// otherwise the OS credential store.
+///
+/// The order is the whole policy. Neither being usable is not answered here with
+/// a third source — least of all with no key at all — but when the provider is
+/// first asked for a key, as [`key_trouble`].
+fn key_provider(
+    cfg: &Config,
+    keyring: impl FnOnce() -> Arc<dyn KeyProvider>,
+) -> Arc<dyn KeyProvider> {
+    match cfg.passphrase() {
+        Some(passphrase) => Arc::new(PassphraseProvider::new(passphrase)),
+        None => keyring(),
+    }
+}
+
+/// The `offline:` sentence for a session file whose key is missing or wrong.
+///
+/// Names what the reader can set, and says the file was left alone, because the
+/// alternative they will fear is that it was thrown away.
+fn key_trouble(error: &SessionError) -> anyhow::Error {
+    match error {
+        SessionError::Unavailable(why) => anyhow::anyhow!(
+            "the session file is encrypted and no key is available: set \
+             TELEVIM_SESSION_PASSPHRASE or make the OS keyring available ({why}); \
+             the file was left as it was"
+        ),
+        other => anyhow::anyhow!(
+            "{other}; check TELEVIM_SESSION_PASSPHRASE or the OS keyring; \
+             the file was left as it was"
+        ),
     }
 }
 
@@ -4746,7 +4824,7 @@ mod tests {
         // Bytes that are not a session: what a truncated write, or a file that
         // belongs to something else, looks like.
         std::fs::write(&path, b"not json").expect("the corrupt bytes are written");
-        let store = FileStore::new(&path);
+        let store = FileStore::with_key_provider(&path, Arc::new(session_store_tests::Fixed));
 
         let sentence = discard_corrupt_session(&store).expect("corrupt bytes are discarded");
         assert!(!sentence.is_empty(), "the reader is told what happened");
@@ -4768,7 +4846,7 @@ mod tests {
     fn a_healthy_stored_session_is_left_alone() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let path = dir.path().join("session.json");
-        let store = FileStore::new(&path);
+        let store = FileStore::with_key_provider(&path, Arc::new(session_store_tests::Fixed));
         store
             .save(&telegram_framework::SessionData::default())
             .expect("a session is written");
@@ -5180,7 +5258,46 @@ mod tests {
 
 #[cfg(test)]
 mod session_store_tests {
+    use telegram_framework::{FileKey, SessionData};
+
     use super::*;
+    use crate::config::Secret;
+
+    /// A key that never touches the OS credential store.
+    #[derive(Debug)]
+    pub(super) struct Fixed;
+
+    impl KeyProvider for Fixed {
+        fn sealing_key(&self) -> Result<([u8; 16], FileKey), SessionError> {
+            Ok(([7; 16], FileKey::from_bytes([7; 32])))
+        }
+
+        fn opening_key(&self, _salt: &[u8; 16]) -> Result<FileKey, SessionError> {
+            Ok(FileKey::from_bytes([7; 32]))
+        }
+    }
+
+    /// A credential store that cannot be reached: a headless machine.
+    #[derive(Debug)]
+    struct NoKeyring;
+
+    impl KeyProvider for NoKeyring {
+        fn sealing_key(&self) -> Result<([u8; 16], FileKey), SessionError> {
+            Err(SessionError::Unavailable("no secret service".to_owned()))
+        }
+
+        fn opening_key(&self, _salt: &[u8; 16]) -> Result<FileKey, SessionError> {
+            Err(SessionError::Unavailable("no secret service".to_owned()))
+        }
+    }
+
+    fn file_config(path: &std::path::Path, passphrase: Option<&str>) -> Config {
+        Config {
+            session_path: Some(path.to_owned()),
+            session_passphrase: passphrase.map(|text| Secret::from(text.to_owned())),
+            ..Config::default()
+        }
+    }
 
     /// The panel names the store, and it names the one the session is in. The
     /// two are the same decision rather than two reads of a field, so this test
@@ -5200,8 +5317,148 @@ mod session_store_tests {
         };
         assert_eq!(
             session_description(&cfg),
-            tui::SessionStore::PlaintextFile("/tmp/televim.session".into()),
-            "a file is named, and named as the plaintext thing it is"
+            tui::SessionStore::EncryptedFile("/tmp/televim.session".into()),
+            "a file is named, and named as the encrypted thing it is"
+        );
+
+        // The key is not the store: the passphrase changes where the key comes
+        // from and nothing the reader is told about where the session is.
+        let cfg = file_config("/tmp/televim.session".as_ref(), Some("hunter2"));
+        assert_eq!(
+            session_description(&cfg),
+            tui::SessionStore::EncryptedFile("/tmp/televim.session".into())
+        );
+    }
+
+    /// With a passphrase set, what lands on disk is the envelope, and the keyring
+    /// is never asked.
+    #[test]
+    fn a_passphrase_makes_the_file_ciphertext_and_the_keyring_is_not_asked() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let cfg = file_config(&path, Some("test"));
+
+        let Session { store, keys } =
+            session_store_with(&cfg, || panic!("the keyring is not asked"));
+        keys.expect("a file has a key source")
+            .sealing_key()
+            .expect("a passphrase is a key");
+        store
+            .save(&SessionData::default())
+            .expect("the session is saved");
+
+        let bytes = std::fs::read(&path).expect("the file exists");
+        assert!(bytes.starts_with(b"TVIM1"), "an envelope, not JSON");
+        assert!(
+            !bytes.windows(7).any(|window| window == b"version"),
+            "and nothing readable inside it"
+        );
+        assert!(
+            store.load().expect("it opens again").is_some(),
+            "under the same passphrase"
+        );
+    }
+
+    /// No passphrase falls through to the keyring's key, and a blank one is no
+    /// passphrase.
+    #[test]
+    fn without_a_passphrase_the_keyring_key_seals_the_file() {
+        for passphrase in [None, Some("   ")] {
+            let dir = tempfile::tempdir().expect("a scratch directory");
+            let path = dir.path().join("session.bin");
+            let cfg = file_config(&path, passphrase);
+
+            let Session { store, keys } = session_store_with(&cfg, || Arc::new(Fixed));
+            keys.expect("a file has a key source")
+                .sealing_key()
+                .expect("the keyring has a key");
+            store
+                .save(&SessionData::default())
+                .expect("the session is saved");
+
+            assert!(
+                std::fs::read(&path)
+                    .expect("the file exists")
+                    .starts_with(b"TVIM1"),
+                "ciphertext under the keyring key (passphrase {passphrase:?})"
+            );
+        }
+    }
+
+    /// The credential store is not even looked at when there is no file for it
+    /// to be the key to.
+    #[test]
+    fn no_file_configured_means_no_key_source() {
+        let cfg = Config::default();
+        let session = session_store_with(&cfg, || panic!("the keyring is not asked"));
+        assert!(session.keys.is_none());
+    }
+
+    /// Neither key: an `offline:` sentence that names what to set, and the file
+    /// is exactly as it was — no discard, and no plaintext written to get round
+    /// it.
+    #[test]
+    fn with_no_key_at_all_the_reader_is_told_which_and_the_file_is_untouched() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let sealed = {
+            let store = FileStore::with_key_provider(&path, Arc::new(Fixed));
+            store
+                .save(&SessionData::default())
+                .expect("a session is written");
+            std::fs::read(&path).expect("the file exists")
+        };
+        let cfg = file_config(&path, None);
+
+        let Session { store, keys } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        assert_eq!(
+            discard_corrupt_session(&*store),
+            None,
+            "an unreachable key is not a corrupt session"
+        );
+        let error = keys
+            .expect("a file has a key source")
+            .sealing_key()
+            .expect_err("there is no key");
+        let sentence = format!("{:#}", key_trouble(&error));
+        assert!(
+            sentence.contains("TELEVIM_SESSION_PASSPHRASE") && sentence.contains("keyring"),
+            "the sentence names both keys: {sentence}"
+        );
+        assert!(sentence.contains("left as it was"), "{sentence}");
+
+        assert_eq!(
+            std::fs::read(&path).expect("the file is still there"),
+            sealed,
+            "byte for byte"
+        );
+    }
+
+    /// A wrong passphrase is a typo, not a corrupt session: the file stays, and
+    /// the sentence points at the passphrase.
+    #[test]
+    fn a_wrong_passphrase_leaves_the_file_and_names_the_passphrase() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("right")))
+            .save(&SessionData::default())
+            .expect("a session is written");
+        let sealed = std::fs::read(&path).expect("the file exists");
+
+        let cfg = file_config(&path, Some("wrong"));
+        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+
+        assert_eq!(discard_corrupt_session(&*store), None, "not discarded");
+        let error = store.load().expect_err("the wrong key does not open it");
+        assert!(matches!(error, SessionError::Load(_)), "{error:?}");
+        let sentence = format!("{:#}", key_trouble(&error));
+        assert!(
+            sentence.contains("TELEVIM_SESSION_PASSPHRASE"),
+            "{sentence}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the file is still there"),
+            sealed
         );
     }
 }

@@ -394,7 +394,7 @@ const MONTHS: [&str; 12] = [
 fn session(store: &SessionStore) -> String {
     match store {
         SessionStore::Keyring => "OS keyring".to_owned(),
-        SessionStore::PlaintextFile(path) => path.display().to_string(),
+        SessionStore::EncryptedFile(path) => format!("encrypted file {}", path.display()),
     }
 }
 
@@ -601,6 +601,17 @@ mod tests {
             year: None,
         };
         assert_eq!(birthday(Some(date)), Some("born 10 Dec".to_owned()));
+    }
+
+    /// The card names the store the session is in, and says of a file that it is
+    /// encrypted, so a path is never read as a plaintext one.
+    #[test]
+    fn the_session_row_names_the_store_and_calls_a_file_encrypted() {
+        assert_eq!(session(&SessionStore::Keyring), "OS keyring");
+        assert_eq!(
+            session(&SessionStore::EncryptedFile("/tmp/televim.session".into())),
+            "encrypted file /tmp/televim.session"
+        );
     }
 
     /// A date the framework let through that is still not one says what is wrong
