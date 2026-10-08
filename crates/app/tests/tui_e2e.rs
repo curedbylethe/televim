@@ -25,13 +25,36 @@ fn launches_to_chat_list_in_normal_mode() {
     .expect("chat list in NORMAL mode");
 }
 
+/// The warm-start cache seeds the chat list before the first frame, so a
+/// launch with a history file shows its chats with no network.
 #[test]
-#[ignore = "insert mode is unreachable without credentials or a chat; see report"]
+fn seeded_history_fills_the_chat_list_offline() {
+    let sandbox = common::sandbox();
+    common::seed_history(
+        &sandbox,
+        &[(1, "Ada"), (2, "Grace"), (3, "Linus")],
+        &[(1, vec!["hi", "are you there", "call me"])],
+    );
+    let mut t = common::spawn_offline(&sandbox);
+
+    t.wait_until(|s| s.contains("Chats (3)") && s.contains("no application credentials"))
+        .expect("seeded chat list drawn");
+}
+
+#[test]
 fn insert_mode_echoes_typing() {
     let sandbox = common::sandbox();
+    common::seed_history(&sandbox, &[(1, "Ada")], &[]);
     let mut t = common::spawn_offline(&sandbox);
     t.wait_until(|s| s.contains("NORMAL"))
         .expect("ready in NORMAL mode");
+
+    // With no credentials the sign-in sentence answers only `q` and `:`, so
+    // `i` does nothing until a command line has cleared it.
+    t.send_str(":").expect("open command line");
+    t.send(Key::Esc).expect("close command line");
+    t.wait_until(|s| !s.contains("Sign in to Telegram"))
+        .expect("sign-in card cleared");
 
     t.send(Key::Char('i')).expect("enter insert mode");
     t.wait_until(|s| s.contains("INSERT"))
