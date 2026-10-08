@@ -6,6 +6,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod config;
+mod draft_store;
 mod net;
 mod runtime;
 
