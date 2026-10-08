@@ -25,6 +25,10 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 keyring.workspace = true
+aes-gcm-siv.workspace = true
+argon2.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
 
 grammers-client = { workspace = true, optional = true }
 grammers-tl-types = { workspace = true, optional = true }
