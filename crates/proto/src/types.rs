@@ -108,6 +108,7 @@ impl From<ProtoChat> for Chat {
             last_message_id: chat.last_message_id,
             last_timestamp: chat.last_timestamp,
             pinned: chat.pinned,
+            presence: None,
         }
     }
 }

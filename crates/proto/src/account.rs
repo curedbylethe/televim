@@ -89,6 +89,7 @@ fn translate(account: telegram_framework::Account) -> Account {
         phone: account.phone,
         birthday: account.birthday.map(birthday),
         bio: account.bio,
+        presence: None,
     }
 }
 

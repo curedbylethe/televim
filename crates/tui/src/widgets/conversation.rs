@@ -1834,6 +1834,7 @@ mod tests {
             last_message_id: Some(20),
             last_timestamp: Some(1_730_000_000),
             pinned: false,
+            presence: None,
         }]);
         app.select_chat(0);
         app.apply_latest(
@@ -3867,6 +3868,7 @@ mod tests {
             last_message_id: Some(1),
             last_timestamp: Some(0),
             pinned: false,
+            presence: None,
         }]);
         app.select_chat(0);
         app.apply_latest(vec![Message {
