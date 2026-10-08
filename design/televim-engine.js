@@ -13,7 +13,7 @@
   /* the hints a reader can see, each of which fits. ALL_HINTS is what the column check iterates. */
   const HINT = {
     normal: ' i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct',
-    list: ' j/k: chat  Enter: open  Tab: pane  h: conversation  A:card  S:you',
+    list: ' j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin',
     visual: ' d: delete  y: yank  r: reply  Esc: cancel',
     /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
     draft: ' ⏎ draft — i to continue, ^J/⏎ to discard',

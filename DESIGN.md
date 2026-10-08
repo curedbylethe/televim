@@ -240,7 +240,7 @@ the numbers below were re-measured from it.
 | Shown when | Text | Columns |
 | :--------- | :--- | ------: |
 | conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct` | 67 |
-| chat list has the focus | ` j/k: chat  Enter: open  Tab: pane  h: conversation  A:card  S:you` | 66 |
+| chat list has the focus | ` j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin` | 69 |
 | conversation, Visual | ` d: delete  y: yank  r: reply  Esc: cancel` | 42 |
 | a deletion is confirmed | ` y: delete  n/Esc: cancel` | 24 |
 | the bar holds a draft, not focused | ` ⏎ draft — i to continue, ^J/⏎ to discard` | 41 |
