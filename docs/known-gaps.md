@@ -22,11 +22,14 @@ Real, and named so they are not mistaken for oversights:
   still arrive whole, so the return type is the limit: streaming to disk is a later
   change (CUR-9), and the 16 MiB `MEDIA_LIMIT` refuses rather than truncates.
 - **The media cache has four known limits.**
-  - *Sign-out waits on the cache lock.* The clear runs on the loop, under the lock
-    a store in flight holds, so it waits out one write (up to 16 MiB).
-  - *A late store survives sign-out.* A download still in flight stores one file
-    after the clear. The next launch under another account, or under none, clears
-    it; so does the same account signing back in, because sign-out removed the tag.
+  - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
+    so signing back in under the same phone re-tags an empty directory. Kept on
+    purpose: the cache is the account's, and sign-out ends the account.
+  - *A stale store can strand an index entry under a reused name.* A store refused
+    after a clear removes its file. If a fresh store has renamed onto the same name
+    in that window and then commits, a clear, then the same message downloaded again
+    within that window, its entry can point at the removed file, and `o` finds no
+    file. Needs a clear and a re-download of the same message inside one write.
   - *An unwritable cache directory fails the open.* `o` says the media could not be
     cached. There is no fall back to the temp directory.
   - *Legacy temp files are left.* Files named `televim-<pid>-…` from before the cache
