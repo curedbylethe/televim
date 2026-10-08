@@ -3164,6 +3164,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             presence: None,
+            deleted: false,
         }
     }
 

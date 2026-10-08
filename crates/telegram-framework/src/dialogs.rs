@@ -64,6 +64,10 @@ pub struct DialogInfo {
     /// What the peer is.
     pub kind: DialogKind,
 
+    /// Whether the peer is an account Telegram has deleted. Only a user can be;
+    /// a group or a channel is never deleted in this sense.
+    pub deleted: bool,
+
     /// How many messages are unread.
     pub unread_count: u32,
 
@@ -219,6 +223,7 @@ fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
         peer_id,
         title: peer_title(peer_id, peer),
         kind: peer_kind(peer),
+        deleted: peer_deleted(peer),
         unread_count: unread_count(raw.unread_count),
         last_message_id: last_message.map(|message| i64::from(message.id())),
         last_timestamp: last_message
@@ -234,6 +239,16 @@ fn peer_kind(peer: &Peer) -> DialogKind {
         Peer::User(user) => classify_user(user.is_bot()),
         Peer::Group(_) => DialogKind::Group,
         Peer::Channel(_) => DialogKind::Channel,
+    }
+}
+
+/// Whether the peer is a deleted account. Telegram keeps the conversation with
+/// one in the list, with no name left to show, so the flag is the only way to
+/// tell it apart from a person who has simply not set a name.
+fn peer_deleted(peer: &Peer) -> bool {
+    match peer {
+        Peer::User(user) => user.deleted(),
+        Peer::Group(_) | Peer::Channel(_) => false,
     }
 }
 
@@ -367,6 +382,7 @@ mod tests {
             peer_id,
             title: format!("chat {peer_id}"),
             kind: DialogKind::PrivateUser,
+            deleted: false,
             unread_count: 0,
             last_message_id: None,
             last_timestamp,

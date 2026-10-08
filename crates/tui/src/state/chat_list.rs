@@ -27,6 +27,19 @@ impl ChatListState {
         }
     }
 
+    /// The chats a forward can land in: every chat the list shows, except a
+    /// deleted account, which has no one left to receive it.
+    ///
+    /// The forward picker's cursor indexes this list, so the picker and its
+    /// confirm both read it rather than the chat list itself.
+    pub(crate) fn forward_destinations(&self) -> Vec<&Chat> {
+        self.list
+            .chats
+            .iter()
+            .filter(|chat| !chat.deleted)
+            .collect()
+    }
+
     /// Moves `chat_id` to where its pin puts it. The highlight stays on the
     /// chat it was on, which may itself have moved; nothing changes when the
     /// list does not hold the chat.
@@ -81,5 +94,37 @@ impl ChatListState {
     /// list moves nothing, and that check stays where the list is read.
     pub(crate) fn select(&mut self, index: usize) {
         self.selected_chat = index;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::chat::ChatKind;
+
+    fn chat(id: i64, deleted: bool) -> Chat {
+        Chat {
+            id,
+            title: format!("chat-{id}"),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            presence: None,
+            deleted,
+        }
+    }
+
+    #[test]
+    fn a_deleted_account_is_listed_but_is_no_forward_destination() {
+        let mut state = ChatListState::new();
+        state.install(vec![chat(1, false), chat(2, true), chat(3, false)]);
+
+        let ids: Vec<i64> = state.forward_destinations().iter().map(|c| c.id).collect();
+
+        assert_eq!(ids, vec![1, 3]);
+        assert_eq!(state.list.chats.len(), 3, "the chat list still shows it");
     }
 }

@@ -223,7 +223,7 @@ Working today:
   are left out and counted, and more than a hundred messages go in several requests.
   Telegram can refuse a forward from a chat that protects its content; the status
   line then names that chat, and nothing checks for it before the send. The picker
-  walks the chat list only.
+  walks the chat list only, and leaves out deleted accounts, which stay in the list.
 - **Search:** `/` searches the loaded window, then asks the server and prefers
   its answer. `n` repeats or cycles. This is the *conversation's* search; the
   chat list has its own `/` that finds a person instead — see *Starting a

@@ -48,6 +48,9 @@ pub struct Chat {
     /// The peer's last reported presence, if one has been seen. Sticky until the
     /// next update for this peer; nothing here expires it.
     pub presence: Option<Presence>,
+    /// Whether the peer is a deleted account. The chat list still shows it;
+    /// the forward picker leaves it out, since a message to it cannot land.
+    pub deleted: bool,
 }
 
 impl Chat {
@@ -82,6 +85,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             presence: None,
+            deleted: false,
         }
     }
 
