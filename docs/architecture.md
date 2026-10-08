@@ -257,7 +257,7 @@ crates/tui/
 │   ├── date.rs         # Civil dates: day keys, labels and `HH:MM`. Pure; no clock
 │   ├── emoji.rs        # The `:query` under the caret, and its candidates
 │   ├── presence.rs     # Presence -> the words on screen ("online", "last seen today"). Pure; the caller passes now
-│   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
+│   ├── event.rs        # crossterm KeyEvent -> AppAction (context-free keys only)
 │   ├── bidi.rs         # Which way a message reads, and the logical ranges one
 │                      #   wrapped row is drawn in, already permuted
 │   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break
@@ -321,9 +321,9 @@ draft map and the read receipts live on `DraftStore` (`state/drafts.rs`): each
 conversation's `LineEditor` is parked under its outgoing peer id when the
 reader leaves and restored when they return. Across restarts `app` persists
 the snapshot beside the configuration (`televim.drafts.json`: atomic rename,
-account-tagged, removed on sign-out); `tui` itself names no file. `event.rs` exists but
-`key_to_action` is not yet called: `coordinate::handle_key` matches on `KeyEvent`
-directly. That is pre-existing dead code — do not delete it without asking.
+account-tagged, removed on sign-out); `tui` itself names no file. `event.rs` is the
+context-free key map: `App::handle_key` answers its `Quit` (`Ctrl-C`) before the
+precompute, and `coordinate::handle_key` keeps the focus and mode dispatch.
 
 The new-conversation search is the second prompt-driven surface. `/` on the chat
 list opens it (the conversation's `/` still searches messages), `:new <query>`

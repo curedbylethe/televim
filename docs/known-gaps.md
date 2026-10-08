@@ -175,7 +175,6 @@ Real, and named so they are not mistaken for oversights:
   `#[ignore]`d placeholders awaiting `termlens`. `make measure` is a
   measurement harness, not a benchmark suite: it reports what a run costs, and
   nothing compares two implementations.
-- **`tui/src/event.rs` is unwired.** `key_to_action` is not called.
 - **A peer with no bare identifier is skipped**, and the skip is unreachable
   today. See [`decisions.md`](./decisions.md) for why, and which test guards it.
 

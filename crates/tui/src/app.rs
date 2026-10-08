@@ -27,6 +27,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 
 use crate::bidi::BidiMode;
 use crate::emoji;
+use crate::event::{AppAction, key_to_action};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
 use crate::state::chat_list::ChatListState;
 pub use crate::state::connection::ConnectionState;
@@ -1967,6 +1968,13 @@ impl App {
     /// when a card opened: the rows render from `&App`, so the measurement
     /// stays here while the dispatch moves behind the seam.
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // The context-free globals answer here, before the precompute.
+        // `coordinate::preempt_key` answers `Ctrl-C` the same way below, so the
+        // two arms agree; the lower one can go in a later cleanup.
+        if key_to_action(key, self.ui.mode) == AppAction::Quit {
+            self.ui.quit();
+            return;
+        }
         let rows = crate::card::rows(self);
         let lines = self.card_yanked();
         let is_contact = matches!(self.card_subject(), crate::card::CardSubject::Contact(_));

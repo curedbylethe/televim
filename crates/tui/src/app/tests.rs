@@ -6089,3 +6089,23 @@ fn o_on_a_message_without_media_refuses() {
     assert_eq!(app.take_action(), None, "nothing is queued");
     assert_eq!(reading(&app), Some(2), "and the reader stays put");
 }
+
+#[test]
+fn ctrl_c_quits_from_the_normal_mode_and_the_quit_prompt() {
+    let mut app = App::mock();
+    app.handle_key(press_ctrl('c'));
+    assert!(app.ui.should_quit);
+
+    let mut app = App::mock();
+    key(&mut app, 'q');
+    assert_eq!(app.ui.mode, Mode::Confirm);
+    app.handle_key(press_ctrl('c'));
+    assert!(app.ui.should_quit, "Ctrl-C answers the prompt by quitting");
+}
+
+#[test]
+fn a_plain_key_does_not_quit_on_the_global_path() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('j')));
+    assert!(!app.ui.should_quit);
+}
