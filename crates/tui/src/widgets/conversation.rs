@@ -2783,6 +2783,261 @@ mod tests {
         assert_one_answer_about(&app, &layout, &screen);
     }
 
+    // ---- the open draft ---------------------------------------------------
+
+    /// A conversation with `text` typed into its line and left there, the reader
+    /// back on the conversation, as a reader leaves a draft.
+    fn drafting(messages: Vec<Message>, text: &str) -> App {
+        let mut app = showing(messages);
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, text);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+
+        app
+    }
+
+    /// The frame row the open draft is drawn on, if the layout has one.
+    fn draft_row(app: &App) -> Option<u16> {
+        app.row_layout()
+            .last()
+            .filter(|span| span.kind == rows::RowKind::Draft)
+            .map(|span| drawn_at(span.first))
+    }
+
+    /// The frame row the message at window position `index` begins on.
+    fn message_row_of(app: &App, index: usize) -> u16 {
+        let layout = app.row_layout();
+        drawn_at(rows::first_row_of_message(&layout, index).expect("the window holds it"))
+    }
+
+    /// Twelve messages, alternating sides a few minutes apart: taller than a panel
+    /// of ten message rows once the day separator is counted.
+    fn twelve() -> Vec<Message> {
+        (1..=12)
+            .map(|id| at(id, id * 60, id % 2 == 0, "a line of the conversation"))
+            .collect()
+    }
+
+    #[test]
+    fn a_draft_is_drawn_once_behind_the_you_draft_tag() {
+        let app = drafting(
+            vec![
+                at(1, 0, false, "the pier at six"),
+                at(2, 60, true, "on my way"),
+            ],
+            "see you there",
+        );
+        let screen = screen(&app, 80, 24);
+        let y = draft_row(&app).expect("the draft is laid out");
+
+        assert_eq!(occurrences(&screen, "[you|draft]"), 1, "drawn once");
+        assert!(
+            row(&screen, y).contains("[you|draft] see you there"),
+            "{}",
+            row(&screen, y)
+        );
+        assert_eq!(
+            occurrences(&screen, "[you]"),
+            1,
+            "and the sent message keeps its own tag"
+        );
+    }
+
+    #[test]
+    fn the_draft_tag_is_as_wide_as_the_layout_leaves_room_for() {
+        assert_eq!(
+            crate::wrap::columns(super::DRAFT_TAG),
+            rows::DRAFT_WHO_WIDTH
+        );
+    }
+
+    #[test]
+    fn the_draft_tag_is_in_the_dim_ink_and_the_words_in_the_message_ink() {
+        let dim = theme().text_dim.fg.expect("dim text has an ink");
+        let prose = theme().text.fg.expect("body text has an ink");
+        let app = drafting(vec![at(1, 0, false, "the pier at six")], "see you there");
+        let screen = screen(&app, 80, 24);
+        let y = draft_row(&app).expect("the draft is laid out");
+        let tag = label_column(&screen, y, "[you|draft]");
+
+        for x in tag..tag + 12 {
+            assert_eq!(cell(&screen, x, y).fg, dim, "the tag is dim at column {x}");
+        }
+
+        let words = label_column(&screen, y, "see you");
+        for x in words..words + 7 {
+            assert_eq!(
+                cell(&screen, x, y).fg,
+                prose,
+                "the words are read in the message ink at column {x}"
+            );
+        }
+
+        let message_y = message_row_of(&app, 0);
+        let message = label_column(&screen, message_y, "the pier");
+        assert_eq!(
+            cell(&screen, words, y).fg,
+            cell(&screen, message, message_y).fg,
+            "the same ink a message's words are drawn in"
+        );
+    }
+
+    #[test]
+    fn a_draft_row_carries_no_status_and_no_receipt() {
+        let app = drafting(vec![mine(1, 0), mine(2, 60)], "still typing");
+        let screen = screen(&app, 80, 24);
+        let y = draft_row(&app).expect("the draft is laid out");
+        let text = body_row(&screen, y);
+
+        for suffix in ["[sending", "[delivered]", "[read]", "[failed"] {
+            assert!(
+                !text.contains(suffix),
+                "{suffix} is a message's, not the draft's"
+            );
+        }
+        assert!(
+            !text.contains("[you]"),
+            "and it is not named as a sent message"
+        );
+        assert!(text.trim_end().ends_with("still typing"), "{text}");
+    }
+
+    #[test]
+    fn the_draft_row_is_never_reversed_and_the_cursor_never_stands_on_it() {
+        use ratatui::style::Modifier;
+
+        let app = drafting(
+            vec![at(1, 0, false, "a"), at(2, 60, true, "b")],
+            "not yet sent",
+        );
+        let screen = screen(&app, 80, 24);
+        let y = draft_row(&app).expect("the draft is laid out");
+
+        assert_cursor_stands_on_a_message(&app, &screen);
+        for x in BODY_X..78 {
+            let cell = cell(&screen, x, y);
+            assert!(
+                !cell.modifier.contains(Modifier::REVERSED),
+                "the draft is not reversed at column {x}"
+            );
+            assert_ne!(cell.bg, selection_bg(), "nor selected at column {x}");
+        }
+        assert!(
+            cell(&screen, BODY_X, message_row_of(&app, 1))
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the cursor is on the newest message, which is the row above the draft"
+        );
+    }
+
+    #[test]
+    fn a_draft_row_is_there_while_the_line_has_words_and_goes_with_them() {
+        let mut app = showing(vec![at(1, 0, false, "the pier at six")]);
+        assert_eq!(
+            occurrences(&screen(&app, 80, 24), "[you|draft]"),
+            0,
+            "an empty line paints no row"
+        );
+
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "see you");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            occurrences(&screen(&app, 80, 24), "[you|draft] see you"),
+            1,
+            "a line with words paints it"
+        );
+
+        app.input.line.clear();
+        assert_eq!(
+            occurrences(&screen(&app, 80, 24), "[you|draft]"),
+            0,
+            "and clearing the line takes it away"
+        );
+    }
+
+    #[test]
+    fn a_draft_that_wraps_continues_at_the_panels_first_column() {
+        let app = drafting(vec![at(1, 0, false, "the pier at six")], &"x".repeat(150));
+        let screen = screen(&app, 80, 24);
+        let y = draft_row(&app).expect("the draft is laid out");
+
+        assert_eq!(
+            occurrences(&screen, "[you|draft]"),
+            1,
+            "named on its first row only"
+        );
+        assert_eq!(
+            cell(&screen, BODY_X, y + 1).symbol(),
+            "x",
+            "and its next row begins where the first row's words do not"
+        );
+        assert!(
+            !row(&screen, y + 1).contains('['),
+            "and carries no tag: {}",
+            row(&screen, y + 1)
+        );
+    }
+
+    #[test]
+    fn in_follow_mode_a_draft_is_drawn_at_the_bottom_of_a_taller_conversation() {
+        use ratatui::style::Modifier;
+
+        let app = drafting(twelve(), "see you there");
+        assert!(
+            app.conversation.conversation.auto_follow(),
+            "the view is pinned to the newest message"
+        );
+        let screen = screen(&app, 80, 16);
+        let bottom = *message_rows(&screen).last().expect("the panel has rows");
+
+        assert!(
+            row(&screen, bottom).contains("[you|draft] see you there"),
+            "the draft is the panel's last row: {}",
+            row(&screen, bottom)
+        );
+        assert_eq!(occurrences(&screen, "[you|draft]"), 1, "and drawn once");
+        assert!(
+            row(&screen, bottom - 1).contains("a line of the conversation"),
+            "the newest message is the row above it: {}",
+            row(&screen, bottom - 1)
+        );
+        assert!(
+            cell(&screen, BODY_X, bottom - 1)
+                .modifier
+                .contains(Modifier::REVERSED),
+            "and the cursor is still on that message"
+        );
+        assert!(
+            !cell(&screen, BODY_X, bottom)
+                .modifier
+                .contains(Modifier::REVERSED),
+            "and not on the draft"
+        );
+        assert_one_answer(&app, &screen);
+    }
+
+    #[test]
+    fn a_draft_taller_than_the_panel_keeps_one_message_row_on_screen() {
+        // Long enough to wrap to more rows than the panel has room for.
+        let app = drafting(twelve(), &"y".repeat(1200));
+        let screen = screen(&app, 80, 16);
+        let drawn_words = message_rows(&screen)
+            .into_iter()
+            .filter(|y| row(&screen, *y).contains("yyy"))
+            .count();
+
+        assert_eq!(drawn_words, 9, "the draft takes every row but one");
+        assert!(
+            row(&screen, message_rows(&screen)[0]).contains("a line of the conversation"),
+            "and that one is the newest message: {}",
+            row(&screen, message_rows(&screen)[0])
+        );
+        assert_one_answer(&app, &screen);
+    }
+
     // ---- what a group says once ------------------------------------------
 
     /// Three messages from one side a minute apart are one group: the sender is
