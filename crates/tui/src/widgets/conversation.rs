@@ -115,14 +115,13 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
         if drawn >= view.budget {
             break;
         }
+        // The draft is the layout's last entry, so the walk over the messages
+        // ends here and the draft is drawn below them.
+        if span.kind == rows::RowKind::Draft {
+            break;
+        }
         // Only the entry the slice starts inside has rows above the panel; every
         // other one begins on it.
-        // A draft is not painted yet: the rows reserved for it below the messages
-        // stay blank, and it is not mistaken for a separator, which is what it
-        // would be drawn as.
-        if span.kind == rows::RowKind::Draft {
-            continue;
-        }
         let skip = if on_the_first_row { view.skip } else { 0 };
         on_the_first_row = false;
 
@@ -155,6 +154,26 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
             items.push(item);
             drawn += 1;
         }
+    }
+
+    // The draft is drawn in the rows reserved for it below the messages, and no
+    // more than were reserved: the slice never had those rows, so the messages did
+    // not fill them and the draft cannot overrun the panel.
+    if let Some(draft) = layout
+        .last()
+        .filter(|span| span.kind == rows::RowKind::Draft)
+    {
+        let words = app
+            .input
+            .line
+            .text()
+            .get(draft.text.clone())
+            .unwrap_or_default();
+        items.extend(
+            draft_items(app, words, body.width)
+                .into_iter()
+                .take(reserved.draft),
+        );
     }
 
     if reserved.newer {
@@ -721,6 +740,52 @@ fn block_ink(pixel: Option<[u8; 4]>) -> Option<Color> {
         .map(|pixel| Color::Rgb(pixel[0], pixel[1], pixel[2]))
 }
 
+/// The name a draft is drawn behind on its first row.
+///
+/// Its width is [`rows::DRAFT_WHO_WIDTH`], which the layout wraps the words to.
+const DRAFT_TAG: &str = "[you|draft] ";
+
+/// The open draft, one row per line it wraps to, in the ink a message's text is.
+///
+/// The name is on the first row only, as a message's sender is. The rows after it
+/// begin at the panel's first column, as a message's continuation rows do: the
+/// layout wraps them at the full width, so an indent would push their end off the
+/// panel. The words are [`text_row`]'s, with no selection, match or caret: a draft
+/// is read here, not moved through, so nothing about the row is reversed.
+fn draft_items<'a>(app: &'a App, words: &'a str, width: u16) -> Vec<ListItem<'a>> {
+    rows::draft_rows(words, width)
+        .into_iter()
+        .enumerate()
+        .map(|(line, range)| {
+            let mut spans = Vec::new();
+            if line == 0 {
+                spans.push(Span::styled(DRAFT_TAG, app.ui.theme.text_dim));
+            }
+
+            let row = text_row::TextRow {
+                text: words,
+                range: range.clone(),
+                matched: false,
+                selected: None,
+                caret: None,
+                reversed: false,
+                concealed: false,
+                ink: text_row::Ink::readonly(&app.ui.theme),
+            };
+            match app.bidi() {
+                BidiMode::Terminal => spans.extend(text_row::spans(&row)),
+                BidiMode::Visual => {
+                    let base = bidi::base_direction(words);
+                    let pieces = bidi::visual_row_in(words, range, base);
+                    spans.extend(text_row::spans_permuted(&row, &pieces));
+                }
+            }
+
+            ListItem::new(Line::from(spans))
+        })
+        .collect()
+}
+
 /// A row saying what is being fetched.
 ///
 /// The label is a `&'static str` rather than a borrow of anything: the row
@@ -1110,6 +1175,9 @@ mod tests {
     ///
     /// A day separator counts like any other row: it is in the layout, it is in
     /// `view.total`, and it is drawn, so it is in the sum without being special.
+    ///
+    /// The open draft's rows are in `reserved.below()`, which is where the panel
+    /// keeps them, so they are drawn rows the same way and need no separate count.
     fn assert_one_answer_about(app: &App, layout: &[RowSpan], buffer: &Buffer) {
         let panel_rows = message_rows(buffer).len();
         let reserved = app.reserved(layout, panel_rows);
