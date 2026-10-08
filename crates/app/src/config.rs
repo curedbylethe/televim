@@ -169,6 +169,13 @@ pub struct Config {
     /// `TELEVIM_SESSION_PASSPHRASE`: this program never writes the configuration
     /// file, but a value put in one rests there in the clear.
     pub session_passphrase: Option<Secret>,
+
+    /// The directory downloaded media is kept in, so a re-open is instant.
+    ///
+    /// Unset, the cache sits beside the configuration file, as the history and
+    /// drafts files do. Files in it are plaintext, readable by the account that
+    /// runs this program, and the directory is emptied when the account changes.
+    pub media_cache_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -186,6 +193,7 @@ impl Default for Config {
             password: None,
             session_path: None,
             session_passphrase: None,
+            media_cache_dir: None,
         }
     }
 }
@@ -401,6 +409,50 @@ mod tests {
         assert_eq!(
             cfg.session_path, None,
             "the credential store is the default"
+        );
+        assert_eq!(
+            cfg.media_cache_dir, None,
+            "beside the config file is the default"
+        );
+    }
+
+    /// The cache directory is read from the file under its own key.
+    #[test]
+    fn the_media_cache_dir_is_read_from_the_file() {
+        let path =
+            std::env::temp_dir().join(format!("televim-cfg-media-{}.toml", std::process::id()));
+        std::fs::write(&path, "media_cache_dir = \"/var/tmp/televim-media\"\n")
+            .expect("a temp file can be written");
+
+        let cfg = Config::load(&path).expect("a file with the key loads");
+        std::fs::remove_file(&path).expect("the temp file can be removed");
+
+        assert_eq!(
+            cfg.media_cache_dir,
+            Some(PathBuf::from("/var/tmp/televim-media"))
+        );
+    }
+
+    /// `TELEVIM_MEDIA_CACHE_DIR` sets the directory with no file at all.
+    #[test]
+    fn the_environment_supplies_the_media_cache_dir() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
+        // SAFETY: process-wide environment, written only by the tests in this
+        // module and only while holding `ENV`.
+        unsafe {
+            std::env::set_var("TELEVIM_MEDIA_CACHE_DIR", "/var/tmp/from-env");
+        }
+
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+
+        // SAFETY: as above — clearing a name this module's tests set.
+        unsafe { std::env::remove_var("TELEVIM_MEDIA_CACHE_DIR") };
+
+        assert_eq!(
+            cfg.media_cache_dir,
+            Some(PathBuf::from("/var/tmp/from-env"))
         );
     }
 
