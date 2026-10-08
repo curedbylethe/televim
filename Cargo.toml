@@ -76,6 +76,17 @@ base64 = "0.22"
 # on every platform; on Linux the Secret Service backend needs `libdbus`.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 
+# Session file encryption, in `telegram-framework::sealed`. AES-256-GCM-SIV is
+# nonce-misuse-resistant (RFC 8452) and shares the `aes` build already in the
+# lockfile; Argon2id stretches a passphrase into the file key. Both are pure
+# Rust, so no C toolchain is needed on any platform.
+aes-gcm-siv = { version = "0.12", default-features = false, features = ["aes", "alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+# One use: random nonces, salts and the keyring-held file key.
+getrandom = "0.4"
+# One use: wiping key material when it is dropped. Already in the lockfile.
+zeroize = "1"
+
 # Dev-only
 tempfile = "3"
 # Compile-time assertions. Used to lock the "a login token cannot be cloned or
