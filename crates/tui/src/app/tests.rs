@@ -5609,3 +5609,66 @@ fn a_page_lands_on_the_same_messages_with_a_draft_as_without_one() {
 
     assert_eq!(landings[0], landings[1]);
 }
+
+/// In follow mode a conversation taller than the panel gives the messages every
+/// row it has, so the draft's rows come out of the panel first: the messages are
+/// given what the draft leaves, and the draft is the rows below them. No count
+/// moves for it.
+#[test]
+fn a_draft_takes_its_rows_from_the_panel_before_the_messages_do() {
+    let mut app = App::mock();
+    app.record_body(53);
+    app.apply_latest(tall_page(10));
+    let height = 8;
+    let without = app.row_layout();
+    let total = rows::total_rows(&without);
+    assert!(total > height, "the conversation is taller than the panel");
+    assert_eq!(
+        app.reserved(&without, height).below(),
+        0,
+        "and with no draft nothing is reserved below the messages"
+    );
+
+    draft_then_leave(&mut app, &"x".repeat(150));
+    assert!(
+        app.conversation.conversation.auto_follow(),
+        "still following"
+    );
+    let layout = app.row_layout();
+    let draft = layout.last().expect("the draft is laid out").len;
+    assert!(draft < height - 1, "a few rows, well under the cap");
+
+    let reserved = app.reserved(&layout, height);
+    assert_eq!(reserved.draft, draft, "the draft's rows are reserved");
+    assert_eq!(reserved.below(), draft, "and they are the rows below");
+
+    let view = app.viewport(&layout, height - reserved.above() - reserved.below());
+    assert_eq!(view.budget + draft, height, "the messages get what is left");
+    assert_eq!(
+        view.rows, view.budget,
+        "and fill it, the conversation being taller"
+    );
+    assert_eq!(view.total, total, "the total is the one without the draft");
+}
+
+/// A draft taller than the panel is cut back to every row but one, so the
+/// messages keep a row of their own however long the draft is.
+#[test]
+fn a_draft_taller_than_the_panel_leaves_the_messages_one_row() {
+    let mut app = App::mock();
+    app.record_body(53);
+    app.apply_latest(tall_page(10));
+    let height = 6;
+
+    draft_then_leave(&mut app, &"x".repeat(600));
+    let layout = app.row_layout();
+    let draft = layout.last().expect("the draft is laid out").len;
+    assert!(draft > height, "taller than the panel");
+
+    let reserved = app.reserved(&layout, height);
+    assert_eq!(reserved.draft, height - 1, "every row of the panel but one");
+
+    let view = app.viewport(&layout, height - reserved.below());
+    assert_eq!(view.budget, 1, "and one is left for the messages");
+    assert_eq!(view.rows, 1);
+}
