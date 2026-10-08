@@ -897,9 +897,9 @@ deletion's refusal does. So is a list with no chat to forward into. A source cha
 that Telegram content-protects refuses the forward on the wire; the status line
 says `<chat> does not allow forwarding`. Nothing checks for that before the send.
 
-**Palette.** No new roles. The header is the body ink, the title is body ink, the
-preview and the `📌` are dim, the highlighted row is reverse video, and the box is
-the ordinary border.
+**Palette.** No new roles. The header, the title and the `📌` are the body ink, the
+preview is dim, the highlighted row is reverse video, and the box is the ordinary
+border.
 
 Scenes: `forward` in the engine, two frames: a Visual selection of three messages
 with the forward key named in the hint, and the picker raised over the
