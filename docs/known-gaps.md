@@ -15,14 +15,23 @@ Real, and named so they are not mistaken for oversights:
   which the crate's two-path split exists to avoid — the update feed arrives as a
   built `grammers` `Message`, and there is no raw variant to match on there
   without re-deriving one.
-- **A media download is a whole `Vec<u8>`, and nothing in the interface calls it.**
+- **A media download is a whole `Vec<u8>`, and only the sticker drain calls it.**
   `Client::download_media` and `ProtoClient::download_media` exist and are tested,
-  but no key is bound to them: a fetched attachment has nowhere to go yet — no
-  cache directory, no viewer, no save path — and a program that asked for one
-  before it could put the bytes somewhere would be guessing. The return type is
-  the other half: streaming, and a cache on disk, are CUR-9 and CUR-10, and the
-  16 MiB `MEDIA_LIMIT` is what a viewer will have to do something about rather
-  than merely report.
+  and the sticker fetch drain settles the panel's queued requests through the
+  latter — `stickers = "off"` drops the queue instead, so flag off is zero
+  fetch traffic. No *key* is bound to a download: a fetched attachment the reader
+  asked for has nowhere to go yet — no cache directory, no viewer, no save
+  path — and a program that asked for one before it could put the bytes somewhere
+  would be guessing. The return type is the other half: streaming, and a cache on
+  disk, are CUR-9 and CUR-10, and the 16 MiB `MEDIA_LIMIT` is what a viewer will
+  have to do something about rather than merely report.
+- **The sticker drain runs in series on the loop thread.** Each tick downloads
+  the panel's queued requests one by one and settles them through
+  `resolve_fetch` — no task, no event of its own — because a sticker that
+  arrives a tick later draws `[sticker]` that frame either way. A queue of many
+  stickers on a slow network holds the tick, and with it the reader's
+  keystrokes, until it clears; spreading the downloads over tasks (the shape
+  every other fetch in `net.rs` takes) is the follow-up if that ever bites.
 - **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
   between a contact's `name` and `username`, draws nothing, is not selectable, is
   not something `d` can act on, is skipped by a yank, and is neither counted nor

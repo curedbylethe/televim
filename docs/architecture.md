@@ -64,7 +64,7 @@ in one direction and wider in another:
 | Crate | Depends on |
 | :---- | :--------- |
 | `domain` | `thiserror` |
-| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation`, `unicode-bidi`, `emojis` |
+| `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation`, `unicode-bidi`, `emojis`, `image-webp`, `tracing` |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
 | `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `serde`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64` |
 
@@ -232,6 +232,8 @@ crates/tui/
 │   ├── line.rs         # The input line: owns the text, wraps vim-line; the
 │                      #   value `App` parks under a peer id
 │   ├── rows.rs         # One owner for the panel's geometry
+│   ├── sticker.rs      # Static stickers: decode to fitted RGBA, a bounded
+│                      #   per-conversation cache, and the fetch request queue
 │   ├── text_row.rs     # A run of text the reader can put a cursor in: the
 │                      #   text, a match on it, a selection split out of it, and
 │                      #   a caret cut into it. Shared by the conversation, the
@@ -249,7 +251,8 @@ crates/tui/
 │   │   └── user_list.rs # The new-chat results overlay, over the chat list
 │   └── theme.rs        # Color schemes
 └── Cargo.toml          # deps: domain, ratatui, crossterm, vim-line,
-                       #        unicode-width, unicode-segmentation, unicode-bidi, emojis
+                       #        unicode-width, unicode-segmentation, unicode-bidi, emojis,
+                       #        image-webp, tracing
 ```
 
 `App` is nine fields — `ui`, `session`, `profile`, `list`, `outbox`, `pending`,
@@ -334,7 +337,8 @@ arithmetic as everything else; a motion that produces a character position
 
 `rows.rs` and `wrap.rs` are one answer to "how tall is this message", and the
 panel asks them rather than working it out again: a message is as many rows as
-its text needs at the width the panel gave it, and the viewport, the scrollbar,
+its text needs at the width the panel gave it — plus, for a decoded sticker
+with its bytes, the fit box's eight block rows — and the viewport, the scrollbar,
 `Ctrl+d`/`Ctrl+u` and the fetch triggers all count those rows. `App` records the
 panel's height and its width in `Cell`s on `UiState`'s `FrameMetrics` on the
 way past, because a frame is drawn from a shared reference and only the panel
@@ -415,6 +419,17 @@ read once in `runtime.rs` and handed to `tui` as a plain `tui::bidi::BidiMode`
 through `App::with_bidi`, which is the only path a configuration value takes into
 `App`; `tui` names no configuration type. The value is per machine rather than per
 terminal, so an ssh hop keeps it — see [`decisions.md`](./decisions.md).
+
+`Config` also reads `TELEVIM_STICKERS` — `inline` (the default) or `off` — which
+says whether a decoded sticker draws its picture or its token. It is read once
+in `runtime.rs` and handed to `tui` as a plain `tui::state::ui::StickerMode`
+through `App::with_stickers`, by the same construction and for the same reason:
+the layout counts block rows for a picture and token rows for a token, so the
+mode is fixed before the first frame. `off` draws `[sticker]` for every sticker
+message and never downloads — the fetch drain is gated on the same value, so
+flag off means zero fetch traffic. An unknown spelling falls back to `inline`,
+because a value the program cannot read that guessed `off` would take the
+pictures away from precisely the reader who never asked for that.
 
 `bidi.rs` is the authority and both consumers go through it: the conversation
 panel and the input bar each ask `base_direction` for the direction of the text

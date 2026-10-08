@@ -37,7 +37,7 @@ use crate::state::outbox::Outbox;
 use crate::state::pending::Pending;
 use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
-use crate::state::ui::{IDLE_STATUS, UiState};
+use crate::state::ui::{IDLE_STATUS, StickerMode, UiState};
 use crate::widgets;
 
 /// How close to an end of the loaded messages the cursor has to get before the
@@ -1025,6 +1025,15 @@ impl App {
         self
     }
 
+    /// The same application, drawing `[sticker]` where a picture would go.
+    ///
+    /// Delegates to [`UiState::with_stickers`].
+    #[must_use]
+    pub fn with_stickers(mut self, stickers: StickerMode) -> Self {
+        self.ui = self.ui.with_stickers(stickers);
+        self
+    }
+
     /// Who permutes a right-to-left row: this program, or the terminal.
     ///
     /// Asked once per row by the conversation panel, and never per frame by the
@@ -1032,6 +1041,15 @@ impl App {
     #[must_use]
     pub fn bidi(&self) -> BidiMode {
         self.ui.bidi
+    }
+
+    /// Whether a decoded sticker paints its picture or its token.
+    ///
+    /// Asked once per tick by the loop's sticker drain, and never per frame by
+    /// the layout — see the field's doc.
+    #[must_use]
+    pub fn sticker_mode(&self) -> StickerMode {
+        self.ui.stickers
     }
 
     /// An application holding the sample conversation the tests read from.
@@ -2239,7 +2257,11 @@ impl App {
             // the bidi mode: a row is broken logically and permuted at paint
             // time, so the same window is the same height in either mode.
             let text = 0..message.display_body().len();
-            let len = rows::message_rows(self, message, rows::group_of(self, index), width).len();
+            let rows = rows::message_rows(self, message, rows::group_of(self, index), width);
+            // A decoded sticker paints its picture below its (empty) text: the
+            // block rows come after the text rows, so the two heights add.
+            let block = rows::sticker_block_rows(message, &self.conversation.stickers);
+            let len = rows.len() + block;
 
             laid_out.push(RowSpan {
                 kind: RowKind::Message { index },

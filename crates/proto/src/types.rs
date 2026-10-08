@@ -203,6 +203,7 @@ fn media_kind(kind: telegram_framework::media::MediaKind) -> MediaKind {
         telegram_framework::media::MediaKind::Video => MediaKind::Video,
         telegram_framework::media::MediaKind::Gif => MediaKind::Gif,
         telegram_framework::media::MediaKind::Voice => MediaKind::Voice,
+        telegram_framework::media::MediaKind::Sticker => MediaKind::Sticker,
         // The framework's own `File`, and every kind it has not heard of either:
         // all of them are "a thing this message carries".
         _ => MediaKind::File,
@@ -531,6 +532,10 @@ mod live_tests {
             (
                 telegram_framework::media::MediaKind::Voice,
                 MediaKind::Voice,
+            ),
+            (
+                telegram_framework::media::MediaKind::Sticker,
+                MediaKind::Sticker,
             ),
             (
                 // The catch-all, for every kind Telegram adds and this build has

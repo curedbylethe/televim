@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tui::bidi::BidiMode;
+use tui::state::ui::StickerMode;
 
 /// Who arranges a right-to-left row: the terminal, or this program.
 ///
@@ -32,6 +33,12 @@ use tui::bidi::BidiMode;
 /// spells them.
 const BIDI_TERMINAL: &str = "terminal";
 const BIDI_VISUAL: &str = "visual";
+
+/// What a sticker message draws: its picture, or its token.
+///
+/// The two the `stickers` key knows, named as the configuration spells them.
+const STICKERS_INLINE: &str = "inline";
+const STICKERS_OFF: &str = "off";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -52,6 +59,14 @@ pub struct Config {
     /// launched with, and `tmux` multiplexes one value over every pane. Whether
     /// the right value followed you is the reader's to know.
     pub bidi: String,
+
+    /// Whether a decoded sticker draws its picture: `inline` or `off`.
+    ///
+    /// `inline` — the default — draws the bounded block where bytes are
+    /// cached, and `[sticker]` while they are missing. `off` draws `[sticker]`
+    /// for every sticker message and fetches nothing: no decode, no download
+    /// traffic.
+    pub stickers: String,
 
     /// Application identifier, from <https://my.telegram.org>.
     ///
@@ -97,6 +112,7 @@ impl Default for Config {
             log_level: "info".to_owned(),
             theme: "default".to_owned(),
             bidi: BIDI_TERMINAL.to_owned(),
+            stickers: STICKERS_INLINE.to_owned(),
             api_id: None,
             api_hash: None,
             phone: None,
@@ -112,7 +128,8 @@ impl Config {
         let mut builder = config::Config::builder()
             .set_default("log_level", "info")?
             .set_default("theme", "default")?
-            .set_default("bidi", BIDI_TERMINAL)?;
+            .set_default("bidi", BIDI_TERMINAL)?
+            .set_default("stickers", STICKERS_INLINE)?;
 
         if path.exists() {
             builder = builder.add_source(config::File::from(path));
@@ -157,6 +174,23 @@ impl Config {
             BidiMode::Visual
         } else {
             BidiMode::Terminal
+        }
+    }
+
+    /// Whether a decoded sticker draws its picture, from [`Config::stickers`].
+    ///
+    /// Only the exact word `off` asks for the token everywhere. Everything
+    /// else — including a spelling this program does not know — is
+    /// [`StickerMode::Inline`], because a value it cannot read that guessed
+    /// `off` would take the pictures away from precisely the reader who never
+    /// asked for that. The comparison is case-sensitive, like
+    /// [`Config::bidi_mode`]: the value is a word from the documentation.
+    #[must_use]
+    pub fn sticker_mode(&self) -> StickerMode {
+        if self.stickers == STICKERS_OFF {
+            StickerMode::Token
+        } else {
+            StickerMode::Inline
         }
     }
 }
@@ -228,6 +262,58 @@ mod tests {
 
         cfg.bidi = String::new();
         assert_eq!(cfg.bidi_mode(), BidiMode::Terminal);
+    }
+
+    /// Stickers draw inline unless the reader says `off`, and saying `off` is
+    /// visible in the mode the configuration names.
+    #[test]
+    fn stickers_are_inline_unless_turned_off() {
+        assert_eq!(
+            bare().sticker_mode(),
+            StickerMode::Inline,
+            "and the default configuration says so"
+        );
+
+        let mut cfg = bare();
+        cfg.stickers = "off".to_owned();
+        assert_eq!(cfg.sticker_mode(), StickerMode::Token);
+    }
+
+    /// A spelling the configuration does not know keeps the pictures: taking
+    /// them away on an unreadable value would punish precisely the reader who
+    /// never asked for that.
+    #[test]
+    fn an_unknown_spelling_of_the_stickers_key_is_inline_not_off() {
+        let mut cfg = bare();
+        cfg.stickers = "Off".to_owned();
+        assert_eq!(cfg.sticker_mode(), StickerMode::Inline);
+
+        cfg.stickers = String::new();
+        assert_eq!(cfg.sticker_mode(), StickerMode::Inline);
+    }
+
+    /// The flag is reachable from the environment under the workspace prefix,
+    /// like the rest of the configuration.
+    #[test]
+    fn the_environment_supplies_the_stickers_key_too() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
+        // SAFETY: as above — process-wide environment, written only by the
+        // tests in this module and only while holding `ENV`.
+        unsafe {
+            std::env::set_var("TELEVIM_STICKERS", "off");
+        }
+
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+        assert_eq!(
+            cfg.sticker_mode(),
+            StickerMode::Token,
+            "so the escape hatch is reachable from the environment alone"
+        );
+
+        // SAFETY: as above — clearing a name this module's tests set.
+        unsafe { std::env::remove_var("TELEVIM_STICKERS") };
     }
 
     /// The environment is read under the prefix the rest of the workspace

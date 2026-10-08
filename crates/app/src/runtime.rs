@@ -31,6 +31,7 @@ use crate::config::Config;
 use crate::draft_store::{DraftFile, drafts_acceptable};
 use crate::net;
 use tui::app::App;
+use tui::state::ui::StickerMode;
 
 /// Something for the loop to do.
 ///
@@ -273,7 +274,9 @@ async fn event_loop(
     // application: it is an input to the layout, so a mode that could change
     // while the window is open would make the same conversation two different
     // heights depending on when it was asked.
-    let mut app = App::new().with_bidi(cfg.bidi_mode());
+    let mut app = App::new()
+        .with_bidi(cfg.bidi_mode())
+        .with_stickers(cfg.sticker_mode());
     if let Some(id) = initial_chat {
         app.set_initial_chat(id);
     }
@@ -363,6 +366,20 @@ async fn event_loop(
         // reader who scrolled to the top and stopped into a page request, and
         // what starts the next page once one has landed.
         net::drive(&mut app, &mut network, &tx);
+        // Stickers the panel asked for while drawing, downloaded and settled
+        // before the next frame — in series on this thread, because a sticker
+        // that arrives a tick later draws `[sticker]` that frame either way.
+        // Flag off never reaches here: the drain is not called, so no download
+        // traffic runs and the cache stays empty for the token path.
+        if app.sticker_mode() == StickerMode::Inline
+            && let Some(client) = network.client()
+        {
+            let download = |chat_id: i64, message_id: i64| {
+                let client = std::sync::Arc::clone(&client);
+                async move { client.download_media(chat_id, message_id).await }
+            };
+            drain_stickers(StickerMode::Inline, &mut app, download).await;
+        }
         copy_if_asked(&mut app);
         sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
     }
@@ -382,6 +399,44 @@ fn unix_seconds() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+/// Settles one tick's sticker requests: every `(chat_id, message_id)` pair the
+/// panel asked for is downloaded and resolved into the cache.
+///
+/// The downloader is a parameter rather than the client, so the loop's own
+/// plumbing stays testable without a datacenter: production passes a closure
+/// over the client's download, and a test passes a counter. Awaited in series
+/// on the loop's own thread — no spawned tasks, no channels — because a
+/// sticker that arrives a tick later draws `[sticker]` that frame either way,
+/// and the queue remembers what is still wanted.
+///
+/// With [`StickerMode::Token`] the requests are dropped, never downloaded:
+/// flag off means zero fetch traffic, and the cache stays empty so geometry
+/// and draw take the token path on their own. A failed download is settled,
+/// not retried here: settling releases the in-flight mark, and the next miss
+/// re-requests. Nothing panics: a refusal is a log line beside the
+/// configuration, never the terminal (see [`resolve_fetch`](tui::sticker::resolve_fetch)).
+///
+/// The production call lives beside the flag in the loop below, where the
+/// client is in reach: each tick drains what the panel asked for while
+/// drawing. The downloader stays a parameter so the plumbing is also
+/// exercised by its tests, without a datacenter.
+async fn drain_stickers<F, Fut, E>(mode: StickerMode, app: &mut App, download: F)
+where
+    F: Fn(i64, i64) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, E>>,
+    E: std::fmt::Display,
+{
+    let pending = app.conversation.stickers.take_pending();
+    if mode != StickerMode::Inline {
+        return;
+    }
+
+    for (chat_id, message_id) in pending {
+        let fetched = download(chat_id, message_id).await;
+        tui::sticker::resolve_fetch(&mut app.conversation.stickers, chat_id, message_id, fetched);
+    }
 }
 
 /// Hands the reader's last yank to the terminal's clipboard, if one is waiting.
@@ -508,6 +563,41 @@ fn spawn_reader(tx: mpsc::UnboundedSender<AppEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tui::state::ui::StickerMode;
+
+    /// The download, as a request counter: records every pair it is asked
+    /// for, and answers with bytes that will not decode — so settling, not
+    /// picturing, is what these tests pin down.
+    struct Counter {
+        calls: std::sync::Mutex<Vec<(i64, i64)>>,
+    }
+
+    impl Counter {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(i64, i64)> {
+            self.calls
+                .lock()
+                .expect("the counter is not poisoned")
+                .clone()
+        }
+
+        fn download(
+            &self,
+            chat_id: i64,
+            message_id: i64,
+        ) -> std::future::Ready<Result<Vec<u8>, String>> {
+            self.calls
+                .lock()
+                .expect("the counter is not poisoned")
+                .push((chat_id, message_id));
+            std::future::ready(Ok(vec![0xDE, 0xAD]))
+        }
+    }
 
     // ---- the drafts sync --------------------------------------------------
 
@@ -744,6 +834,65 @@ mod tests {
             out.written().contains("\x1b[<1u"),
             "but the terminal was still handed back: {:?}",
             out.written()
+        );
+    }
+
+    /// Inline, the drain downloads every requested pair exactly once and
+    /// settles each outcome — here a refusal, which releases the pair rather
+    /// than caching anything.
+    #[tokio::test]
+    async fn the_drain_downloads_every_request_and_settles_it() {
+        let downloads = Counter::new();
+        let mut app = App::new();
+        app.conversation.stickers.request(42, 7);
+        app.conversation.stickers.request(42, 8);
+        app.conversation.stickers.request(42, 7);
+
+        drain_stickers(StickerMode::Inline, &mut app, |chat_id, message_id| {
+            downloads.download(chat_id, message_id)
+        })
+        .await;
+
+        assert_eq!(
+            downloads.calls(),
+            vec![(42, 7), (42, 8)],
+            "one download per message, in order"
+        );
+        assert!(
+            app.conversation.stickers.take_pending().is_empty(),
+            "settled pairs are not asked for again"
+        );
+        assert!(
+            app.conversation.stickers.get(7).is_none(),
+            "an undecodable answer caches nothing"
+        );
+    }
+
+    /// Flag off, the drain never downloads: the requests are dropped, the
+    /// counter stays at zero, and the cache stays empty — so every sticker
+    /// message draws `[sticker]` with zero fetch traffic.
+    #[tokio::test]
+    async fn flag_off_means_zero_fetch_traffic() {
+        let downloads = Counter::new();
+        let mut app = App::new();
+        app.conversation.stickers.request(42, 7);
+
+        drain_stickers(StickerMode::Token, &mut app, |chat_id, message_id| {
+            downloads.download(chat_id, message_id)
+        })
+        .await;
+
+        assert!(
+            downloads.calls().is_empty(),
+            "no download ran for a dropped request"
+        );
+        assert!(
+            app.conversation.stickers.take_pending().is_empty(),
+            "and the dropped requests do not pile up"
+        );
+        assert!(
+            app.conversation.stickers.get(7).is_none(),
+            "so the token path is all there is to draw"
         );
     }
 }

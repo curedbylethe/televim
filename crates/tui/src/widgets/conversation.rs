@@ -21,16 +21,18 @@ use std::ops::Range;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use domain::message::Message;
+use domain::message::{MediaKind, Message};
 
 use crate::app::{App, FetchDirection, Focus};
 use crate::bidi::{self, BidiMode};
 use crate::rows::{self, RowSpan};
+use crate::sticker::{DecodedSticker, STICKER_FIT_WIDTH};
 use crate::text_row;
 use crate::wrap::columns;
 
@@ -134,30 +136,17 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
             break;
         };
 
-        let grouped = rows::group_of(app, index);
-        let wrapped = rows::message_rows(app, message, grouped, body.width);
         // Which window positions the selection covers is one question, and its
         // answer does not change from one message to the next, so it is worked out
         // once here rather than per message.
         let covered = app.covered(app.selection());
-        let coverage = coverage(app, message, index, &covered);
-        for (row, range) in wrapped.iter().enumerate().skip(skip) {
-            if drawn >= view.budget {
-                break;
-            }
-            let place = Place {
-                first: row == 0,
-                last: row + 1 == wrapped.len(),
-                group: grouped,
-            };
-            items.push(message_row(
-                app,
-                message,
-                &place,
-                range,
-                coverage.as_ref(),
-                body.width,
-            ));
+        let draw = Draw {
+            width: body.width,
+            skip,
+            room: view.budget.saturating_sub(drawn),
+        };
+        for item in message_items(app, message, index, &draw, &covered) {
+            items.push(item);
             drawn += 1;
         }
     }
@@ -330,6 +319,104 @@ struct Place {
     group: rows::Grouped,
 }
 
+/// What one message's rows are drawn with: the width they are cut to, the
+/// leading rows the slice skips, and the rows still on the panel.
+struct Draw {
+    width: u16,
+    skip: usize,
+    room: usize,
+}
+
+/// Every row one message draws: its text rows, then its sticker block, if it
+/// has one.
+///
+/// The rows, not the count: the caller extends its items with them, so what is
+/// drawn and what the budget spent are one answer. At most `draw.room` rows —
+/// a message is drawn whole or not at all, and the panel decides the whole.
+fn message_items<'m>(
+    app: &App,
+    message: &'m Message,
+    index: usize,
+    draw: &Draw,
+    covered: &Range<usize>,
+) -> Vec<ListItem<'m>> {
+    let grouped = rows::group_of(app, index);
+    let wrapped = rows::message_rows(app, message, grouped, draw.width);
+    // A decoded sticker paints its picture below its (empty) text rows, so
+    // the layout counted both; a miss draws the token the body names, and
+    // asks for the bytes rather than fetching — rendering is a shared
+    // borrow, so the request waits in the cache's queue for the drain.
+    let block = rows::sticker_block_rows(message, &app.conversation.stickers);
+    if block == 0 && message.media == Some(MediaKind::Sticker) && message.text.is_empty() {
+        app.conversation
+            .stickers
+            .request(message.chat_id, message.id);
+    }
+    let coverage = coverage(app, message, index, covered);
+
+    let mut items = Vec::with_capacity(wrapped.len() + block);
+    for (row, range) in wrapped.iter().enumerate().skip(draw.skip) {
+        if items.len() >= draw.room {
+            break;
+        }
+        let place = Place {
+            first: row == 0,
+            last: block == 0 && row + 1 == wrapped.len(),
+            group: grouped,
+        };
+        items.push(message_row(
+            app,
+            message,
+            &place,
+            range,
+            coverage.as_ref(),
+            draw.width,
+        ));
+    }
+
+    if block > 0
+        && let Some(image) = app.conversation.stickers.get(message.id)
+    {
+        // The slice can begin inside the block, past the text rows that are
+        // not there: what is above the panel is skipped, not drawn.
+        let skipped = draw.skip.saturating_sub(wrapped.len());
+        // The list marks only the message's first row, so the cursor's
+        // reverse video over the rest of the block is painted here.
+        let place = BlockPlace {
+            block,
+            grouped,
+            cursor_here: app.conversation.vim.cursor() == index,
+        };
+        for brow in 0..block {
+            if items.len() >= draw.room {
+                break;
+            }
+            if brow < skipped {
+                continue;
+            }
+            items.push(sticker_block_row(
+                app,
+                message,
+                image,
+                brow,
+                &place,
+                coverage.as_ref(),
+                draw.width,
+            ));
+        }
+    }
+
+    items
+}
+
+/// Where a block row stands in its message's block: which picture rows it
+/// paints, and whether the cursor stands on the message.
+struct BlockPlace {
+    block: usize,
+    grouped: rows::Grouped,
+    cursor_here: bool,
+}
+
 /// One row of one message: the slice of its text `range` names, which the
 /// panel's width has already made room for.
 ///
@@ -489,6 +576,145 @@ fn message_row<'m>(
     ListItem::new(Line::from(spans))
 }
 
+/// One row of a decoded sticker's picture: the pair of picture rows `brow`
+/// names, as half-block cells.
+///
+/// The picture sits left-aligned in the body column at most
+/// [`STICKER_FIT_WIDTH`] cells wide; columns past a narrower picture are empty
+/// cells, and rows past a shorter picture are empty rows — the block is the
+/// fit box whatever the picture's own size. True colours straight from the
+/// picture: the block is body ink, and takes no theme role of its own.
+///
+/// The decorations follow the message rules row for row: the tag on the
+/// block's first row, the trailing note on its last, each once. A search may
+/// land the cursor here but marks nothing on the picture — the tag is patched
+/// like any matched message's, the pixels never are — and a Whole selection
+/// takes the selection's own ink over the whole block, pixels included.
+fn sticker_block_row<'m>(
+    app: &App,
+    message: &'m Message,
+    image: &DecodedSticker,
+    brow: usize,
+    place: &BlockPlace,
+    covered: Option<&Coverage>,
+    width: u16,
+) -> ListItem<'m> {
+    let mut spans = Vec::new();
+
+    if brow == 0 {
+        if place.grouped.first {
+            let who = if message.is_outgoing { "you" } else { "them" };
+            spans.push(Span::styled(format!("[{who}] "), app.ui.theme.text_dim));
+        } else {
+            // The tag is blank rather than absent, so the picture begins in the
+            // same column as a message's text would.
+            spans.push(Span::raw(" ".repeat(rows::WHO_WIDTH)));
+        }
+
+        if let Some(reply_to) = message.reply_to {
+            spans.push(Span::styled(
+                rows::reply_prefix(app, reply_to, width),
+                app.ui.theme.text_dim,
+            ));
+        }
+    }
+
+    let matched = app.search().is_match(message.id);
+    if matched {
+        for span in &mut spans {
+            span.style = span.style.patch(app.ui.theme.match_hit);
+        }
+    }
+
+    for x in 0..STICKER_FIT_WIDTH as usize {
+        spans.push(block_cell(image, x, brow * 2));
+    }
+
+    if brow + 1 == place.block
+        && let Some(note) = rows::trailing_note(app, message, place.grouped)
+    {
+        // The note is right-aligned past the whole box: the picture is
+        // left-aligned in it, so the note stands at the same column whatever
+        // the picture's own width.
+        let prefix = if brow == 0 {
+            rows::WHO_WIDTH
+                + message.reply_to.map_or(0, |reply_to| {
+                    columns(&rows::reply_prefix(app, reply_to, width))
+                })
+        } else {
+            0
+        };
+        let drawn = prefix + STICKER_FIT_WIDTH as usize;
+        let gap = usize::from(width).saturating_sub(drawn + columns(&note));
+        if gap > 0 {
+            spans.push(Span::raw(" ".repeat(gap)));
+        }
+        spans.push(Span::styled(note, app.ui.theme.text_dim));
+        if matched {
+            let last_span = spans.len() - 1;
+            spans[last_span].style = spans[last_span].style.patch(app.ui.theme.match_hit);
+        }
+    }
+
+    if let Some(Coverage::Whole) = covered {
+        for span in &mut spans {
+            span.style = span.style.patch(app.ui.theme.selection_bg);
+        }
+    }
+
+    // The list marks only the message's first row: every block row the cursor
+    // stands on takes the selection reverse video, tag cell included.
+    if place.cursor_here {
+        for span in &mut spans {
+            span.style = span.style.patch(app.ui.theme.selection);
+        }
+    }
+
+    ListItem::new(Line::from(spans))
+}
+
+/// One half-block cell of a decoded picture: picture column `x`, picture rows
+/// `py` and `py + 1`.
+///
+/// `▀` carries the upper pixel's ink over the lower's; a missing or
+/// transparent half falls back to `▄` or a blank cell, so transparency shows
+/// the terminal behind the picture rather than a painted box. Half transparent
+/// is absent.
+///
+/// Panic-free by construction: every index goes through [`slice::get`], so a
+/// picture whose buffer does not match its dimensions draws blank cells rather
+/// than ending the process the release profile aborts on.
+fn block_cell(image: &DecodedSticker, x: usize, py: usize) -> Span<'static> {
+    let pixel = |x: usize, y: usize| -> Option<[u8; 4]> {
+        let (x, y) = (u64::try_from(x).ok()?, u64::try_from(y).ok()?);
+        let (w, h) = (u64::from(image.width), u64::from(image.height));
+        if x >= w || y >= h {
+            return None;
+        }
+        let at = usize::try_from((y * w + x) * 4).ok()?;
+        image
+            .rgba
+            .get(at..at.checked_add(4)?)?
+            .first_chunk::<4>()
+            .copied()
+    };
+
+    match (block_ink(pixel(x, py)), block_ink(pixel(x, py + 1))) {
+        (Some(upper), Some(lower)) => Span::styled("▀", Style::default().fg(upper).bg(lower)),
+        (Some(upper), None) => Span::styled("▀", Style::default().fg(upper)),
+        (None, Some(lower)) => Span::styled("▄", Style::default().fg(lower)),
+        (None, None) => Span::raw(" "),
+    }
+}
+
+/// A pixel's ink, or nothing for a missing or transparent one: half
+/// transparent is absent.
+fn block_ink(pixel: Option<[u8; 4]>) -> Option<Color> {
+    pixel
+        .filter(|pixel| pixel[3] >= 128)
+        .map(|pixel| Color::Rgb(pixel[0], pixel[1], pixel[2]))
+}
+
 /// A row saying what is being fetched.
 ///
 /// The label is a `&'static str` rather than a borrow of anything: the row
@@ -575,6 +801,7 @@ mod tests {
     use super::*;
     use crate::app::JumpKind;
     use crate::app::{App, TYPING_FOR};
+    use crate::sticker::STICKER_TEST_WEBP;
     use crate::theme::Theme;
     use crate::wrap::columns;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1679,6 +1906,7 @@ mod tests {
             (MediaKind::Video, "[video]"),
             (MediaKind::Gif, "[gif]"),
             (MediaKind::Voice, "[voice]"),
+            (MediaKind::Sticker, "[sticker]"),
             (MediaKind::File, "[file]"),
         ] {
             let app = showing(vec![attachment(1, 0, false, media)]);
@@ -1691,6 +1919,241 @@ mod tests {
                 row(&screen, FIRST)
             );
         }
+    }
+
+    /// An application holding these sticker messages with their pictures
+    /// decoded, the way the fetch drain leaves them.
+    fn showing_decoded(messages: Vec<Message>) -> App {
+        let mut app = showing(messages);
+        let ids: Vec<i64> = app
+            .conversation
+            .conversation
+            .window
+            .iter()
+            .filter(|message| message.media == Some(MediaKind::Sticker) && message.text.is_empty())
+            .map(|message| message.id)
+            .collect();
+        for id in ids {
+            app.conversation
+                .stickers
+                .insert_bytes(id, STICKER_TEST_WEBP)
+                .expect("the fixture decodes");
+        }
+        app
+    }
+
+    /// The column the first picture cell stands in on `y`: past the tag, where
+    /// the first half-block glyph is.
+    fn block_column(screen: &Buffer, y: u16) -> u16 {
+        let at = body_row(screen, y)
+            .find('▀')
+            .or_else(|| body_row(screen, y).find('▄'))
+            .unwrap_or_else(|| panic!("a picture cell is on row {y}: {}", body_row(screen, y)));
+
+        BODY_X + u16::try_from(at).expect("a column fits a frame")
+    }
+
+    #[test]
+    fn a_decoded_sticker_draws_an_eight_row_block() {
+        let app = showing_decoded(vec![attachment(1, 0, false, MediaKind::Sticker)]);
+
+        let layout = app.row_layout();
+        let span = layout
+            .iter()
+            .find(|span| span.kind.index() == Some(0))
+            .expect("the message is laid out");
+        assert_eq!(span.len, 8, "the block is the fit box: eight rows");
+
+        let screen = screen(&app, 80, 24);
+        // The fixture is 4 by 3, so two terminal rows carry its pixels and
+        // the rest of the box is empty cells — the block is the fit box
+        // whatever the picture's own size.
+        for y in FIRST..FIRST + 2 {
+            assert!(
+                body_row(&screen, y).contains('▀'),
+                "block row {} carries picture cells: {}",
+                y - FIRST + 1,
+                body_row(&screen, y)
+            );
+        }
+        for y in FIRST + 2..FIRST + 8 {
+            assert!(
+                !body_row(&screen, y).contains('▀'),
+                "block row {} is padding past the picture",
+                y - FIRST + 1
+            );
+        }
+
+        // The fixture's first pixels: red over black, straight from the
+        // picture — no theme role in between.
+        let pixel = cell(&screen, block_column(&screen, FIRST), FIRST);
+        assert_eq!(pixel.symbol(), "▀");
+        assert_eq!(pixel.fg, Color::Rgb(255, 0, 0));
+        assert_eq!(pixel.bg, Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn a_sticker_without_bytes_draws_its_token_and_asks_for_them() {
+        let app = showing(vec![attachment(1, 0, false, MediaKind::Sticker)]);
+        let chat_id = app.conversation.conversation.window.chat_id;
+
+        let first = screen(&app, 80, 24);
+        assert!(
+            row(&first, FIRST).contains("[sticker]"),
+            "a miss draws the token this frame: {}",
+            row(&first, FIRST)
+        );
+        assert_eq!(
+            cell(&first, label_column(&first, FIRST, "[sticker]"), FIRST).fg,
+            theme().text_dim.fg.expect("dim text has an ink"),
+            "in the placeholder ink"
+        );
+
+        assert_eq!(
+            app.conversation.stickers.take_pending(),
+            vec![(chat_id, 1)],
+            "the miss asks for the bytes once"
+        );
+        let _again = screen(&app, 80, 24);
+        assert!(
+            app.conversation.stickers.take_pending().is_empty(),
+            "further frames do not repeat it while it waits"
+        );
+    }
+
+    #[test]
+    fn undecodable_bytes_draw_the_token() {
+        let mut app = showing(vec![attachment(1, 0, false, MediaKind::Sticker)]);
+        assert!(
+            app.conversation
+                .stickers
+                .insert_bytes(1, &[0xDE, 0xAD, 0xBE, 0xEF])
+                .is_err(),
+            "garbage is no picture"
+        );
+
+        let screen = screen(&app, 80, 24);
+        assert!(
+            row(&screen, FIRST).contains("[sticker]"),
+            "a failed decode falls back to the token: {}",
+            row(&screen, FIRST)
+        );
+        assert!(
+            !body_row(&screen, FIRST).contains('▀'),
+            "and paints no picture cells"
+        );
+    }
+
+    #[test]
+    fn a_sticker_block_yanks_its_token() {
+        let mut app = showing_decoded(vec![attachment(1, 0, false, MediaKind::Sticker)]);
+
+        press(&mut app, KeyCode::Char('V'));
+        press(&mut app, KeyCode::Char('y'));
+
+        assert_eq!(
+            app.register().lines(),
+            std::slice::from_ref(&"[sticker]".to_owned()),
+            "a block yanks the program's word for it, label and all"
+        );
+    }
+
+    #[test]
+    fn a_captioned_sticker_draws_no_block() {
+        let mut captioned = at(1, 0, false, "back at you");
+        captioned.media = Some(MediaKind::Sticker);
+        // Bytes decoded or not, the caption wins: no block, no token.
+        let mut app = showing(vec![captioned]);
+        app.conversation
+            .stickers
+            .insert_bytes(1, STICKER_TEST_WEBP)
+            .expect("the fixture decodes");
+
+        let screen = screen(&app, 80, 24);
+        assert!(
+            row(&screen, FIRST).contains("back at you"),
+            "the caption is the body: {}",
+            row(&screen, FIRST)
+        );
+        assert!(
+            !body_row(&screen, FIRST).contains('▀'),
+            "and no picture is drawn beside it"
+        );
+    }
+
+    #[test]
+    fn the_cursor_reverses_every_block_row() {
+        use ratatui::style::Modifier;
+
+        let app = showing_decoded(vec![attachment(1, 0, false, MediaKind::Sticker)]);
+        let screen = screen(&app, 80, 24);
+        let at = block_column(&screen, FIRST);
+
+        for y in FIRST..FIRST + 8 {
+            assert!(
+                cell(&screen, at, y).modifier.contains(Modifier::REVERSED),
+                "block row {} stands on the cursor's row: {:?}",
+                y - FIRST + 1,
+                cell(&screen, at, y).modifier
+            );
+        }
+    }
+
+    #[test]
+    fn a_selected_sticker_block_takes_the_selection_ink() {
+        let mut app = showing_decoded(vec![attachment(1, 0, false, MediaKind::Sticker)]);
+
+        press(&mut app, KeyCode::Char('V'));
+        let screen = screen(&app, 80, 24);
+        let marked = cell(&screen, block_column(&screen, FIRST), FIRST);
+
+        assert_eq!(
+            marked.bg,
+            selection_bg(),
+            "the picture takes the selection's own ink"
+        );
+    }
+
+    #[test]
+    fn a_search_hit_marks_no_pixels_on_the_block() {
+        let mut app = showing_decoded(vec![attachment(1, 0, false, MediaKind::Sticker)]);
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "sticker");
+        press(&mut app, KeyCode::Enter);
+
+        let screen = screen(&app, 80, 24);
+        assert_cursor_stands_on_a_message(&app, &screen);
+
+        let pixel = cell(&screen, block_column(&screen, FIRST), FIRST);
+        assert_eq!(
+            pixel.fg,
+            Color::Rgb(255, 0, 0),
+            "the picture keeps its own ink under a match"
+        );
+    }
+
+    #[test]
+    fn a_trailing_note_stays_on_the_blocks_last_row() {
+        let app = showing_decoded(vec![
+            at(1, 0, false, "hello"),
+            attachment(2, 60, false, MediaKind::Sticker),
+        ]);
+
+        let screen = screen(&app, 80, 24);
+        // The window holds a one-row message and an eight-row block, so the
+        // block's last row is eight below the message's own first row.
+        let last = FIRST + 1 + 7;
+
+        assert!(
+            row(&screen, last).contains(&clock_at(60)),
+            "the group's time is on the block's last row, not pushed down: {}",
+            row(&screen, last)
+        );
+        assert!(
+            !row(&screen, FIRST + 1).contains(&clock_at(60)),
+            "and not on the block's first: {}",
+            row(&screen, FIRST + 1)
+        );
     }
 
     /// The frame column `label` begins at on row `y`, if it is on it at all.

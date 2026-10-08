@@ -100,7 +100,13 @@ below.
   and the `proto` mapping are all ordinary unit tests that run on every job, and
   the placeholder body is asserted in `tui`'s `TestBackend` tests. What only a
   datacenter can answer is whether Telegram hands over the bytes, which is why
-  that one assertion is here and not in CI.
+  that one assertion is here and not in CI. The sticker path is covered the same
+  way, one layer up: the WEBP decode (fixture pixels, garbage-in-`Err`, the
+  pre-allocation clamp), the bounded cache (eviction, replace, clear on switch),
+  the eight-row block geometry and its half-block cells, the `[sticker]`
+  fallbacks (miss, corrupt bytes, caption, flag off), and the fetch drain — a
+  counting test double stands in for `download_media`, so inline drains and
+  settles while `off` performs zero traffic. All of those run on every job.
 - **TUI E2E Tests:** `app/tests/tui_e2e.rs` holds seven `#[ignore]`d
   placeholders describing what a PTY harness should assert — the screen after
   launch, typing, `:q`, scrolling, and an arrival moving a pinned view. **None of

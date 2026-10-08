@@ -470,6 +470,55 @@ are in [`../AGENTS.md`](../AGENTS.md).
   sentences — retrying, `reconnecting`, `offline:` — clear the flash deadline on
   the way in, because a sentence that ends in an event must not expire back to
   idle while what it reports is still true.
+- **Why the sticker attribute is asked about last:** a document's attributes are
+  read in the order they can be told apart in — the `voice` flag, then animation,
+  video, and a voice-marked audio attribute — and the sticker attribute comes
+  after all of them, so a sticker carrying another attribute keeps its more
+  specific kind: a sticker that moves was already answered as a GIF, as any
+  animation is. Only a document that is nothing but a sticker is one. On the
+  typed path the same rule is a second clause: `grammers` reads the sticker off
+  the document for us, and a sticker whose `animated` bit is set stays `File` —
+  animated stickers are out of scope, and a static-only pipeline that promoted
+  one would fetch and paint what it cannot show. The order is stated in a code
+  comment at the arm, because an arm order that silently changed would silently
+  reclassify.
+- **Why sticker decode is synchronous and the cache is bounded twice:** decode
+  runs on the event loop — no `spawn_blocking`, no threads — because the runtime
+  is a current-thread one and a sticker that misses its frame draws `[sticker]`
+  that frame either way; a thread would buy latency nothing can see. The two
+  bounds are different dangers: the decode ceiling (1 MiB, a 512-pixel square in
+  RGBA) is checked with checked arithmetic on the header's dimensions *before*
+  anything is allocated, because 16 MiB of WEBP is not 16 MiB of RGBA, and the
+  cache cap (32 KiB, sixteen fit-box pictures and change) evicts oldest-first,
+  because identifiers repeat across conversations and the whole cache is dropped
+  on switch. Both ceilings carry `const assert!`s against the 50 MB budget, the
+  way `MEDIA_LIMIT` does: a number that can grow without failing the build is a
+  suggestion.
+- **Why the sticker painter is hand-rolled and not `ratatui-image`:** the job
+  is 24 half-block cells by 8 rows — one `match` on two pixels — and the crate
+  costs a stripped ~1.26 MB over an `image`-decode baseline (measured
+  release-harness to release-harness), drags `ravif`/AVIF and friends even at
+  `default-features = false`, drops alpha in its half-block encoder, resamples a
+  4-by-3 picture through a Triangle filter so the fixture's red-over-black cell
+  renders as `Rgb(75, 74, 82)`, and picks its protocol by probing the terminal —
+  a capability probe this program is forbidden from running on a thread, and from
+  running at all outside the loop. The hand-rolled painter maps exact pixels,
+  keeps transparency as terminal-behind-the-picture, needs no dependency and no
+  theme role, and is asserted cell by cell in `TestBackend`, which no graphics
+  protocol reaches.
+- **Why the stickers flag defaults to inline and unknown means inline:** the
+  flag (`stickers`, `TELEVIM_STICKERS`, `off` to disable) copies the `bidi`
+  pattern — a word in the file, read once, handed to `tui` as a plain
+  `tui::state::ui::StickerMode` fixed at construction, because the layout counts
+  different rows for a picture than for a token. Only the exact word `off` takes
+  the pictures away; everything else, including a spelling the program does not
+  know, draws them. The direction is deliberate: a value the program cannot read
+  that guessed `off` would take the pictures away from precisely the reader who
+  never asked for that, while a value that guesses `inline` on a terminal that
+  cannot show pictures still shows `[sticker]` — the fallback the flag names. And
+  `off` is zero traffic, not just token pixels: the drain drops the requests
+  instead of downloading them, so the cache stays empty and geometry and draw
+  take the token path on their own, with nothing left to gate.
 - **Why the connection indicator is an always-visible dot beside the ranked
   sentence:** the sentences say what happened and the state says which of the
   four holds, and a rank-9 sentence is hidden under every selection,
