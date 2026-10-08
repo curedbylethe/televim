@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::Stdout;
 use std::io::{Write, stdout};
 use std::path::Path;
+use std::process::{Command, ExitStatus};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -198,12 +199,20 @@ async fn run_async(
     // Pushed before the reader thread starts, because a key arriving between the
     // two would be read without it — and popped by the guard when this function
     // returns, whatever it returns.
-    let keys = EnhancedKeys::push(stdout()).context("asking for disambiguated keys")?;
+    let mut keys = EnhancedKeys::push(stdout()).context("asking for disambiguated keys")?;
 
     let backend = CrosstermBackend::new(screen);
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
-    let result = event_loop(cfg, &mut terminal, drafts_path, history_path, initial_chat).await;
+    let result = event_loop(
+        cfg,
+        &mut terminal,
+        &mut keys,
+        drafts_path,
+        history_path,
+        initial_chat,
+    )
+    .await;
 
     // Always restore the terminal, even if the loop errored.
     let _ = disable_raw_mode();
@@ -235,29 +244,177 @@ async fn run_async(
 /// keyboard after this program exits, and a bare `execute!` at the bottom of a
 /// function is skipped on every early return and every `?`. So the pop is a
 /// [`Drop`], and dropping the guard is what undoes it.
+///
+/// **Suspending for a viewer is an explicit pop and re-push, not a second guard.**
+/// The viewer must see the terminal as the shell left it, so the flags come off
+/// with [`EnhancedKeys::suspend`] and go back on with [`EnhancedKeys::resume`].
+/// `active` says which side of that the terminal is on, so the `Drop` pops only
+/// what is actually pushed. Rebuilding the guard instead would have to move it out
+/// of `run_async`, and the alternative of a bare escape pair would leave the
+/// early-return guarantee above with nothing to hold it.
 struct EnhancedKeys<W: Write> {
     out: W,
+    active: bool,
 }
+
+const ENHANCED_KEY_FLAGS: KeyboardEnhancementFlags =
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
 
 impl<W: Write> EnhancedKeys<W> {
     /// Asks the terminal for the flags, and returns the guard that gives them
     /// back.
     fn push(mut out: W) -> std::io::Result<Self> {
-        execute!(
-            out,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        )?;
+        execute!(out, PushKeyboardEnhancementFlags(ENHANCED_KEY_FLAGS))?;
 
-        Ok(Self { out })
+        Ok(Self { out, active: true })
+    }
+
+    /// Gives the flags back for a viewer to read the keyboard without them.
+    fn suspend(&mut self) -> std::io::Result<()> {
+        if self.active {
+            execute!(self.out, PopKeyboardEnhancementFlags)?;
+            self.active = false;
+        }
+        Ok(())
+    }
+
+    /// Asks for the flags again once the viewer has exited.
+    fn resume(&mut self) -> std::io::Result<()> {
+        if !self.active {
+            execute!(self.out, PushKeyboardEnhancementFlags(ENHANCED_KEY_FLAGS))?;
+            self.active = true;
+        }
+        Ok(())
     }
 }
 
 impl<W: Write> Drop for EnhancedKeys<W> {
     fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
         // Nothing to report: the terminal has already been handed back by the
         // time this runs on every path, and a pop that failed is not something
         // the reader could act on.
         let _ = execute!(self.out, PopKeyboardEnhancementFlags);
+    }
+}
+
+/// Gives the terminal to a child process: leaves the alternate screen and raw
+/// mode, pops the keyboard flags, and shows the cursor again.
+///
+/// The reverse of [`run_async`]'s setup, in reverse order. Every step is the
+/// same one the shutdown takes, so a viewer and the shell see the same terminal.
+fn suspend_tui(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    keys: &mut EnhancedKeys<Stdout>,
+) -> std::io::Result<()> {
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    disable_raw_mode()?;
+    keys.suspend()?;
+    terminal.show_cursor()
+}
+
+/// Takes the terminal back from a child process: the setup order of
+/// [`run_async`], then a full redraw.
+///
+/// The clear is what makes the next frame a complete one: the child may have
+/// written anywhere on the screen, and ratatui's diff would otherwise leave
+/// those cells as they are.
+fn resume_tui(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    keys: &mut EnhancedKeys<Stdout>,
+) -> std::io::Result<()> {
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    enable_raw_mode()?;
+    keys.resume()?;
+    terminal.hide_cursor()?;
+    terminal.clear()
+}
+
+/// The platform's file opener, and the arguments that come before the path.
+///
+/// `open -W` on macOS waits for the application to quit; without `-W` it returns
+/// as soon as the file is handed over, and the terminal would come back under a
+/// running viewer. The Windows form is best-effort and untested: `start` returns
+/// without waiting, so there the terminal comes back at once.
+#[cfg(target_os = "macos")]
+const OPENER: (&str, &[&str]) = ("open", &["-W"]);
+#[cfg(all(unix, not(target_os = "macos")))]
+const OPENER: (&str, &[&str]) = ("xdg-open", &[]);
+#[cfg(windows)]
+const OPENER: (&str, &[&str]) = ("cmd", &["/C", "start", ""]);
+
+/// The command that opens `path` in the platform's viewer.
+///
+/// Inherits the terminal's stdio, which is what a viewer needs and what keeps the
+/// program's own output off the screen: nothing is piped. `status()` is what
+/// waits, and the caller holds the loop until it returns.
+fn viewer_command(path: &Path) -> Command {
+    let (program, args) = OPENER;
+    let mut command = Command::new(program);
+    command.args(args).arg(path);
+    command
+}
+
+/// Runs the viewer on `path` with the terminal given away, and takes it back.
+///
+/// The outer `Result` is a failure to restore the terminal, which ends the loop
+/// the way a failed draw does. The inner one is the viewer's own outcome, which
+/// the caller says on the status line: a failure to spawn or suspend is a refusal
+/// there, not an error here.
+fn run_viewer(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    keys: &mut EnhancedKeys<Stdout>,
+    path: &Path,
+) -> Result<std::io::Result<ExitStatus>> {
+    let launched = match suspend_tui(terminal, keys) {
+        Ok(()) => viewer_command(path).status(),
+        Err(error) => Err(error),
+    };
+    resume_tui(terminal, keys).context("taking the terminal back from the viewer")?;
+    Ok(launched)
+}
+
+/// The status sentence for a viewer's outcome.
+///
+/// A missing opener and a spawn failure are refusals, and the path is named in
+/// both so the reader can open the file by hand: the file stays on disk.
+fn viewer_sentence(outcome: &std::io::Result<ExitStatus>, path: &Path) -> String {
+    match outcome {
+        Ok(status) => match status.code() {
+            Some(code) => format!("Viewer exited (code {code})"),
+            None => "Viewer exited (no exit code)".to_owned(),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => format!(
+            "Cannot open media: {} is not installed; the file is at {}",
+            OPENER.0,
+            path.display()
+        ),
+        Err(error) => format!(
+            "Cannot open media: {error}; the file is at {}",
+            path.display()
+        ),
+    }
+}
+
+/// Drops what the channel buffered while the viewer had the terminal.
+///
+/// Input is discarded: a key typed into a viewer that the reader thread picked up
+/// and queued is not one the reader meant for the program, and replaying it on
+/// resume would act on it twice. This is the Q1 decision; the byte the reader
+/// thread captured mid-suspend is the residual race, documented in
+/// `docs/known-gaps.md`. Network events are applied, not dropped, because a page
+/// that landed during the viewer is still a page.
+fn drain_while_suspended(
+    rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+    app: &mut App,
+    network: &mut net::State,
+) {
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::Net(event) = event {
+            net::apply(app, network, event);
+        }
     }
 }
 
@@ -277,6 +434,7 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 async fn event_loop(
     cfg: &Config,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    keys: &mut EnhancedKeys<Stdout>,
     drafts_path: &Path,
     history_path: &Path,
     initial_chat: Option<i64>,
@@ -425,6 +583,16 @@ async fn event_loop(
             spawn_sticker_drain(batch, download, tx.clone());
         }
         copy_if_asked(&mut app);
+        // After the picture and the clipboard of this pass, so neither is written
+        // into the window a viewer has the terminal for. One viewer per queued
+        // path, each with its own suspend and resume, and the input that arrived
+        // while it ran is dropped before the next draw (see `drain_while_suspended`).
+        for path in network.take_media() {
+            app.set_status(format!("Opening {}…", path.display()));
+            let outcome = run_viewer(terminal, keys, &path)?;
+            app.flash(viewer_sentence(&outcome, &path));
+            drain_while_suspended(&mut rx, &mut app, &mut network);
+        }
         sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
         // Unlike the drafts, written off the loop's thread: the file is up to
         // a window per conversation, and it is a write behind the pages that
@@ -1017,6 +1185,100 @@ mod tests {
         assert!(
             app.conversation.stickers.get(7).is_none(),
             "so the token path is all there is to draw"
+        );
+    }
+
+    /// The viewer gets the keyboard back as the shell left it, and the reader
+    /// gets it back after: suspend pops once, a second suspend writes nothing,
+    /// and resume pushes again.
+    #[test]
+    fn suspend_and_resume_pop_and_push_the_flags_once_each() {
+        let out = Shared::default();
+        let mut keys = EnhancedKeys::push(out.clone()).expect("a cell takes the sequence");
+
+        keys.suspend().expect("a cell takes the sequence");
+        let after_suspend = out.written();
+        keys.suspend().expect("a cell takes the sequence");
+        assert_eq!(out.written(), after_suspend, "a second suspend is a no-op");
+
+        keys.resume().expect("a cell takes the sequence");
+        keys.resume().expect("a cell takes the sequence");
+        assert_eq!(
+            out.written().matches("\x1b[>1u").count(),
+            2,
+            "one push at push and one at resume: {:?}",
+            out.written()
+        );
+        assert_eq!(
+            out.written().matches("\x1b[<1u").count(),
+            1,
+            "one pop at suspend, none from the drop while active: {:?}",
+            out.written()
+        );
+    }
+
+    /// Suspended, the guard pops nothing on drop: the flags are already off.
+    #[test]
+    fn dropping_a_suspended_guard_does_not_pop_twice() {
+        let out = Shared::default();
+        {
+            let mut keys = EnhancedKeys::push(out.clone()).expect("a cell takes the sequence");
+            keys.suspend().expect("a cell takes the sequence");
+        }
+
+        assert_eq!(
+            out.written().matches("\x1b[<1u").count(),
+            1,
+            "{:?}",
+            out.written()
+        );
+    }
+
+    /// The path is the last argument, so the opener never reads a flag from it.
+    #[test]
+    fn the_viewer_is_the_platform_opener_on_the_file() {
+        let path = Path::new("/tmp/televim-1-2-3.jpg");
+        let command = viewer_command(path);
+
+        assert_eq!(command.get_program(), OPENER.0);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args.last().copied(), Some(path.as_os_str()));
+        assert_eq!(args.len(), OPENER.1.len() + 1);
+    }
+
+    /// The sentences the reader sees for each outcome: an exit code, an exit
+    /// with no code, and the two refusals, which both keep the path so the file
+    /// can be opened by hand.
+    #[cfg(unix)]
+    #[test]
+    fn a_viewer_outcome_is_one_status_sentence() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let path = Path::new("/tmp/televim-1-2-3.jpg");
+
+        let exited = std::process::ExitStatus::from_raw(3 << 8);
+        assert_eq!(viewer_sentence(&Ok(exited), path), "Viewer exited (code 3)");
+
+        let signalled = std::process::ExitStatus::from_raw(9);
+        assert_eq!(
+            viewer_sentence(&Ok(signalled), path),
+            "Viewer exited (no exit code)"
+        );
+
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let sentence = viewer_sentence(&Err(missing), path);
+        assert!(sentence.starts_with("Cannot open media: "), "{sentence}");
+        assert!(
+            sentence.ends_with("the file is at /tmp/televim-1-2-3.jpg"),
+            "{sentence}"
+        );
+
+        let refused = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let sentence = viewer_sentence(&Err(refused), path);
+        assert!(sentence.starts_with("Cannot open media: "), "{sentence}");
+        assert!(
+            sentence.ends_with("the file is at /tmp/televim-1-2-3.jpg"),
+            "{sentence}"
         );
     }
 }

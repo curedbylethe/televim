@@ -536,8 +536,8 @@ pub struct State {
 
     /// The media files saved for the viewer, oldest first.
     ///
-    /// Pushed by [`apply`] when a download lands. Nothing takes from it yet: the
-    /// viewer launch that drains it is the next stage's work.
+    /// Pushed by [`apply`] when a download lands, and taken by the loop with
+    /// [`State::take_media`] before it hands the terminal to a viewer.
     media: tui::state::pending::MediaQueue,
 
     /// The configuration, and the channel to answer on — the pair bring-up needs
@@ -767,6 +767,12 @@ impl State {
             }
             _ => file.clear(),
         }
+    }
+
+    /// Takes every saved media path, oldest first, for the loop to hand to the
+    /// viewer. Leaves the queue empty.
+    pub fn take_media(&mut self) -> Vec<PathBuf> {
+        self.media.take_pending()
     }
 
     /// The client, once bring-up has installed one.

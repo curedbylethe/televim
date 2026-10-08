@@ -172,8 +172,15 @@ Working today:
   keeps the half-block cells everywhere. Sixel is not yet supported. Fetching the bytes is a client-level operation today
   (`ProtoClient::download_media`, capped at 16 MiB, refused rather than
   truncated when it is over): the attachment is re-read by identifier, because a
-  description is rebuilt on every page and a cached locator would be stale. A key
-  that opens an attachment is not built.
+  description is rebuilt on every page and a cached locator would be stale.
+  `o` on a media message in Normal mode saves it to `televim-<pid>-<chat>-<message>.<ext>`
+  in the temp directory, created `0600`, and launches the platform viewer on it:
+  `open -W` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows (untested).
+  The terminal leaves the alternate screen and raw mode for the viewer and comes
+  back where it was. A file over the 16 MiB limit is refused and nothing is
+  saved, and the status line says what happened. The saved files are left in the temp directory;
+  nothing removes them yet. There is no viewer setting. The known limits of the
+  hand-off are in [`docs/known-gaps.md`](docs/known-gaps.md).
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
   typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.
   The line is a real editor (`vim-line`, wrapped in `tui::line`): caret
