@@ -82,6 +82,38 @@ impl crate::ProtoClient {
 
         Ok(bytes)
     }
+
+    /// [`download_media`](Self::download_media), reporting each chunk as it
+    /// lands. `progress` is called with the bytes so far and the declared size,
+    /// and returning `false` aborts the transfer.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`download_media`](Self::download_media) returns, and
+    /// [`ProtoError::Framework`] wrapping `FrameworkError::DownloadAborted` when
+    /// `progress` returns `false`.
+    pub async fn download_media_with_progress(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        progress: impl FnMut(usize, Option<usize>) -> bool,
+    ) -> Result<Vec<u8>, ProtoError> {
+        let target = narrow(chat_id, message_id)?;
+
+        let bytes = self
+            .inner()
+            .download_media_with_progress(chat_id, i64::from(target), progress)
+            .await?;
+
+        tracing::debug!(
+            chat_id,
+            message_id,
+            bytes = bytes.len(),
+            "downloaded a message's media"
+        );
+
+        Ok(bytes)
+    }
 }
 
 #[cfg(all(test, feature = "live"))]
