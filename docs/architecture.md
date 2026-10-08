@@ -50,9 +50,9 @@ televim/
 There is no workspace-level `tests/` or `benches/`. Integration tests live in the
 crate that owns the seam they exercise: `app`'s because it is the only crate that
 can hold a framework `Client` and a `ProtoClient` at once, `telegram-framework`'s
-for the login flow. `app/tests/tui_e2e.rs` is a set of `#[ignore]`d placeholders —
-`termlens` is not a dependency yet, so nothing in it runs. There are no
-benchmarks.
+for the login flow. `app/tests/tui_e2e.rs` runs the binary in a pty through
+`termlens` and asserts on the screen; its tests run in the normal gate, and the
+three deferred cases (AC5–AC7) are `#[ignore]`d. There are no benchmarks.
 
 **Dependency rule (strict):** `domain` knows nothing of `telegram-framework` or
 `tui`; `app` orchestrates them. `tui` depends on `domain` but **not** on `proto`
@@ -430,7 +430,7 @@ crates/app/
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
 ├── tests/
 │   ├── proto_integration.rs  # Opt-in, against a real datacenter
-│   └── tui_e2e.rs            # #[ignore]d placeholders awaiting termlens
+│   └── tui_e2e.rs            # PTY tests via termlens; AC5–AC7 #[ignore]d
 └── Cargo.toml
 ```
 

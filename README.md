@@ -38,7 +38,7 @@ RSS at idle after loading 50+ chats.
 | **Startup Time**         | < 500 ms from launch to the chat list rendering on screen.                                                         | `make measure`, `Instant` probe to the first drawn frame (the empty frame; see `docs/memory.md`). |
 | **Input Latency**        | < 16 ms (one frame) for a keypress to reflect in the UI.                                                           | `make measure`, `Instant` probe from keypress to frame (excludes the terminal read and paint). |
 | **Binary Size**          | < 15 MB (stripped, `lto = "fat"`).                                                                                 | `ls -lh target/release/televim`.                            |
-| **Vim Fidelity**         | 95% of navigation commands from `vim-line` and common Normal-mode motions (hjkl, gg, G, /, n, N) work as expected. | Integration tests with `termlens`.                          |
+| **Vim Fidelity**         | 95% of navigation commands from `vim-line` and common Normal-mode motions (hjkl, gg, G, /, n, N) work as expected. | Integration tests with `termlens` (`app/tests/tui_e2e.rs`). Today they cover launch, INSERT typing, `:q` and Ctrl-u/Ctrl-d scrolling, not the full command set. |
 | **Protocol Correctness** | Successfully authenticate, fetch the private chat list, and send/receive messages via MTProto.                     | End-to-end test against a Telegram test DC.                 |
 
 

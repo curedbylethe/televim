@@ -171,10 +171,16 @@ Real, and named so they are not mistaken for oversights:
   with one. The allocator question itself is closed rather than open: the
   global allocator is the system allocator, chosen on the measured margins, and
   no arena pays — see [`decisions.md`](./decisions.md).
-- **No benchmarks and no working PTY tests.** `app/tests/tui_e2e.rs` is
-  `#[ignore]`d placeholders awaiting `termlens`. `make measure` is a
-  measurement harness, not a benchmark suite: it reports what a run costs, and
-  nothing compares two implementations.
+- **No benchmarks.** `make measure` is a measurement harness, not a benchmark
+  suite: it reports what a run costs, and nothing compares two implementations.
+- **Three PTY tests are deferred, `#[ignore]`d with reasons.** In
+  `app/tests/tui_e2e.rs`: AC5 `an_arrival_scrolls_a_pinned_view`, AC6
+  `an_arrival_leaves_a_scrolled_back_view_alone`, and AC7
+  `a_fetch_in_flight_is_shown_at_the_edge_it_is_coming_from`. The warm-start cache
+  loads once, and arrivals and fetches enter only as network events, so no offline
+  run can produce them, and no seam injects them. Their bodies are empty. The
+  follow-up is a seam (an issue is to be filed). The other PTY tests (launch,
+  seeded chat list, INSERT typing, `:q`, scrolling) run in the normal gate.
 - **A peer with no bare identifier is skipped**, and the skip is unreachable
   today. See [`decisions.md`](./decisions.md) for why, and which test guards it.
 
@@ -204,8 +210,11 @@ Real, and named so they are not mistaken for oversights:
   test can show that a permutation reached the cells and nothing about how a real
   terminal drew the emitted bytes. `Visual` is the machine-verifiable half and
   `Terminal` rests on the terminal matrix in [`decisions.md`](./decisions.md);
-  the follow-up would be an end-to-end harness driving a real terminal, which
-  needs `app/tests/tui_e2e.rs` un-stubbed first. The input bar's right-to-left
+  the follow-up was an end-to-end harness driving a real terminal. That harness now
+  exists (`app/tests/tui_e2e.rs`, a pty through `termlens`), so the follow-up is
+  unblocked for the screen-level half. It still cannot show how the user's own
+  terminal shapes or draws the bytes: `termlens` reads the screen through its
+  emulator, not through a shaping terminal. The input bar's right-to-left
   tests inherit the same ceiling whole: they drive `BidiMode::Visual` only, and
   the default path is pinned by the ASCII tests beside them, which cannot tell a
   shaper's reorder from no reorder at all.
@@ -369,8 +378,8 @@ Real, and named so they are not mistaken for oversights:
   chat and the refusal arrives after `Enter`, as `CHAT_FORWARDS_RESTRICTED`, which
   the status line reports as `<chat> does not allow forwarding`. The upgrade path is
   to read the flag and refuse in `begin_forward`, next to the placeholder refusal.
-- **There is no `tui_e2e` keystroke test for the forward flow.** The seven
-  `tui_e2e.rs` stubs are `#[ignore = "requires termlens"]` and none covers
+- **There is no `tui_e2e` keystroke test for the forward flow.** The `tui_e2e.rs`
+  tests cover launch, seeded chats, typing, `:q` and scrolling, and none covers
   forwarding. The flow is asserted instead by the key-drive tests in
   `crates/tui/src/app/tests.rs` and the picker's `TestBackend` tests in
   `widgets/forward_picker.rs`, which is the layer that exists in this tree.
