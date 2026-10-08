@@ -504,6 +504,26 @@ fn two_actions_queued_together_are_taken_in_order() {
     assert_eq!(app.take_action(), None, "and the queue is drained");
 }
 
+#[test]
+fn a_queued_forward_is_taken_with_its_fields_in_order() {
+    let mut app = App::mock();
+    app.outbox.actions.push_back(Action::Forward {
+        chat_id: 1,
+        message_ids: vec![10, 11],
+        dest_chat_id: 2,
+    });
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Forward {
+            chat_id: 1,
+            message_ids: vec![10, 11],
+            dest_chat_id: 2,
+        }),
+    );
+    assert_eq!(app.take_action(), None, "and the queue is drained");
+}
+
 // ---- focus and the panes --------------------------------------------
 
 /// The sample data, with the focus on the chat list.
