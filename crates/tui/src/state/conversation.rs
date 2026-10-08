@@ -10,6 +10,7 @@ use domain::user::{UserCandidate, UserSearchState};
 use domain::vim::{CharMotion, Motion, VimState, char_motion};
 
 use crate::app::{ConfirmKind, Deletion, Register};
+use crate::download::Downloads;
 use crate::jumplist::Jumplist;
 use crate::sticker::StickerCache;
 
@@ -118,6 +119,11 @@ pub struct ConversationState {
     /// forgets them all on switch.
     pub stickers: StickerCache,
 
+    /// The open conversation's media downloads in flight, and the ones that
+    /// failed. Keyed by conversation as well as message, and bounded, so a
+    /// download outlives a switch without being shown in the wrong chat.
+    pub downloads: Downloads,
+
     /// Whether the window on show came from the local cache rather than from the
     /// wire.
     ///
@@ -152,6 +158,7 @@ impl ConversationState {
             confirm: None,
             jumplist: Jumplist::default(),
             stickers: StickerCache::default(),
+            downloads: Downloads::default(),
             cached: false,
         }
     }

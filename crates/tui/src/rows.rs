@@ -37,6 +37,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
 use crate::date;
+use crate::download::Outcome;
 use crate::sticker::{STICKER_FIT_ROWS, StickerCache};
 use crate::wrap::{columns, wrap_decorated};
 
@@ -765,6 +766,13 @@ pub(crate) fn reply_prefix(app: &App, reply_to: i64, width: u16) -> String {
 /// once, on the row with room for it. The gap in front of it belongs to
 /// [`trailing_note`], which is what puts it there.
 pub(crate) fn status_suffix(app: &App, message: &Message) -> Option<String> {
+    // A download of a received message is what its row is about while it runs
+    // or after it has failed. A send's status is never in the table: a message
+    // is one or the other.
+    if let Some(outcome) = app.conversation.downloads.get(message.chat_id, message.id) {
+        return Some(download_token(message, outcome));
+    }
+
     match message.status {
         MessageStatus::Sending => Some("[sending…]".to_owned()),
         MessageStatus::Failed => {
@@ -779,6 +787,31 @@ pub(crate) fn status_suffix(app: &App, message: &Message) -> Option<String> {
             ))
         }
         MessageStatus::Sent | MessageStatus::Received => None,
+    }
+}
+
+/// The token a media download is drawn as on its message's row.
+///
+/// The kind's own label without its closing bracket, so a photo in flight reads
+/// `[image… 42%]`: the placeholder the reader already knows, with how far along
+/// it is inside. With no declared size there is no percentage to give, so the
+/// bytes so far are said in megabytes instead.
+fn download_token(message: &Message, outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::InFlight { downloaded, total } => {
+            let kind = message
+                .media
+                .map_or("[media]", MediaKind::label)
+                .trim_end_matches(']');
+            let progress = match total {
+                Some(total) if *total > 0 => {
+                    format!("{}%", (downloaded.saturating_mul(100) / total).min(100))
+                }
+                _ => format!("{:.1} MB", *downloaded as f64 / 1_048_576.0),
+            };
+            format!("{kind}… {progress}]")
+        }
+        Outcome::Failed(reason) => format!("[failed: {}]", truncate(reason, FAILED_REASON_WIDTH)),
     }
 }
 

@@ -14,6 +14,7 @@ pub mod app;
 pub mod bidi;
 pub mod card;
 pub mod date;
+pub mod download;
 pub mod emoji;
 pub mod event;
 mod grapheme;

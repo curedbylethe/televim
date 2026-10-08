@@ -1353,6 +1353,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                 let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
                 kind.map(|kind| {
                     "downloading media…".clone_into(&mut app.ui.status);
+                    app.conversation.downloads.start(*chat_id, *message_id);
                     let cancel = Arc::new(AtomicBool::new(false));
                     state.media_cancel.push(MediaCancel {
                         chat_id: *chat_id,
@@ -2417,12 +2418,16 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
             downloaded,
             total,
         } => {
+            app.conversation
+                .downloads
+                .progress(chat_id, message_id, downloaded, total);
             tracing::trace!(chat_id, message_id, downloaded, ?total, "media progress");
         }
         Event::MediaCancelled {
             chat_id,
             message_id,
         } => {
+            app.conversation.downloads.forget(chat_id, message_id);
             tracing::debug!(chat_id, message_id, "media download cancelled");
         }
         Event::MediaSaved {
@@ -2430,6 +2435,7 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
             message_id,
             path,
         } => {
+            app.conversation.downloads.forget(chat_id, message_id);
             tracing::debug!(chat_id, message_id, path = %path.display(), "media saved");
             app.flash(format!("media saved to {}", path.display()));
             state.media.push(path);
@@ -2440,6 +2446,9 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
             reason,
         } => {
             tracing::warn!(chat_id, message_id, %reason, "a media download failed");
+            app.conversation
+                .downloads
+                .fail(chat_id, message_id, reason.clone());
             app.flash(reason);
         }
         _ => {}

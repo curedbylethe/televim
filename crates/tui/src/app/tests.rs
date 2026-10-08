@@ -6397,6 +6397,82 @@ fn o_on_a_captioned_media_message_still_queues_its_open() {
     );
 }
 
+/// A download in flight draws its percentage on the message's row, inside the
+/// placeholder's own brackets; with no declared size it says the megabytes so far.
+#[test]
+fn an_in_flight_download_draws_its_progress_on_the_row() {
+    let mut app = App::mock();
+    app.apply_latest(vec![with_media(2, "", domain::message::MediaKind::Photo)]);
+
+    app.conversation.downloads.start(MOCK_CHAT, 2);
+    app.conversation
+        .downloads
+        .progress(MOCK_CHAT, 2, 42, Some(100));
+    let message = app.conversation.conversation.message(2).expect("on show");
+    assert_eq!(
+        crate::rows::status_suffix(&app, message).as_deref(),
+        Some("[image… 42%]")
+    );
+
+    app.conversation
+        .downloads
+        .progress(MOCK_CHAT, 2, 2_097_152, None);
+    let message = app.conversation.conversation.message(2).expect("on show");
+    assert_eq!(
+        crate::rows::status_suffix(&app, message).as_deref(),
+        Some("[image… 2.0 MB]")
+    );
+}
+
+/// A failed download draws its reason; a cancelled one, which is forgotten,
+/// draws nothing and the placeholder is left as it was.
+#[test]
+fn a_failed_download_draws_its_reason_and_a_forgotten_one_draws_nothing() {
+    let mut app = App::mock();
+    app.apply_latest(vec![with_media(2, "", domain::message::MediaKind::Photo)]);
+
+    app.conversation
+        .downloads
+        .fail(MOCK_CHAT, 2, "no route".to_owned());
+    let message = app.conversation.conversation.message(2).expect("on show");
+    assert_eq!(
+        crate::rows::status_suffix(&app, message).as_deref(),
+        Some("[failed: no route]")
+    );
+
+    app.conversation.downloads.forget(MOCK_CHAT, 2);
+    let message = app.conversation.conversation.message(2).expect("on show");
+    assert_eq!(crate::rows::status_suffix(&app, message), None);
+}
+
+/// `Esc` on a message whose download is in flight queues that download's cancel,
+/// once; with nothing in flight under the cursor it queues nothing.
+#[test]
+fn esc_cancels_the_download_under_the_cursor_only_while_one_is_in_flight() {
+    let mut app = App::mock();
+    app.apply_latest(vec![
+        message(1, "text"),
+        with_media(2, "", domain::message::MediaKind::Photo),
+        message(3, "text"),
+    ]);
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(reading(&app), Some(2));
+
+    app.handle_key(press(KeyCode::Esc));
+    assert_eq!(app.take_action(), None, "nothing is in flight to cancel");
+
+    app.conversation.downloads.start(MOCK_CHAT, 2);
+    app.handle_key(press(KeyCode::Esc));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::CancelMediaDownload {
+            chat_id: MOCK_CHAT,
+            message_id: 2,
+        })
+    );
+    assert_eq!(app.take_action(), None, "one cancel, not two");
+}
+
 /// `o` on a message without media queues nothing and says which key would
 /// have opened something.
 #[test]
