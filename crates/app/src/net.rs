@@ -1228,6 +1228,12 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     }
 
     let Some(client) = state.client.clone() else {
+        // No client, so nothing is asked for — but a conversation opened
+        // while there is none is still owed what the cache holds for it, or
+        // an offline reader switching chats finds every one of them empty.
+        // The cursor is left alone: the newest page is still unasked for, and
+        // the client that comes up asks for it.
+        seed_opened(app, state);
         return;
     };
 
@@ -1282,14 +1288,10 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
 /// with the newest page. It runs on the same pass as the open, so the first
 /// frame drawn after it is the cached window, not the `Loading…` row.
 ///
-/// The cache is read only for an empty window. A window with rows in it would
-/// refuse the seed — a retry after a newest page that failed, or a client
-/// brought back up over the conversation the reader was in — and reading the
-/// cache for it would copy a page out only to throw it away.
+/// The seed is [`seed_opened`]'s, which a driver with no client runs on its
+/// own.
 fn begin_latest(app: &mut App, state: &mut State, peer_id: i64) -> HistoryCursor {
-    if app.conversation.conversation.window.is_empty() {
-        app.seed_from_cache(peer_id, state.cached_history(peer_id));
-    }
+    seed_opened(app, state);
 
     let cursor = HistoryCursor::new(peer_id);
     // Recorded before the request rather than after it, so that the next pass —
@@ -1298,6 +1300,36 @@ fn begin_latest(app: &mut App, state: &mut State, peer_id: i64) -> HistoryCursor
     state.history.cursor = Some(cursor);
     app.begin_fetch(FetchDirection::Latest);
     cursor
+}
+
+/// Puts what the cache holds for the conversation just opened on screen.
+///
+/// *Just opened* is the cursor's word, the one [`wanted`] reads: a
+/// conversation the cursor does not name has not had its newest page begun.
+/// Once one has, an empty window is the wire's answer — a conversation with
+/// nothing in it — and laying cached rows over it would show the reader
+/// messages the server has just said are not there.
+///
+/// The cache is read only for an empty window. A window with rows in it would
+/// refuse the seed — a retry after a newest page that failed, or a client
+/// brought back up over the conversation the reader was in — and reading the
+/// cache for it would copy a page out only to throw it away.
+///
+/// Needs no client, so it is the whole of an open when there is none:
+/// [`begin_latest`] runs it and then asks; [`drive`] runs it alone while
+/// offline.
+fn seed_opened(app: &mut App, state: &State) {
+    let open = app.conversation.conversation.window.chat_id;
+    if open == 0
+        || state
+            .history
+            .cursor
+            .is_some_and(|cursor| cursor.peer_id() == open)
+        || !app.conversation.conversation.window.is_empty()
+    {
+        return;
+    }
+    app.seed_from_cache(open, state.cached_history(open));
 }
 
 /// Whether a feed that has just ended may be reconnected, or has spent its one
@@ -4412,6 +4444,64 @@ mod tests {
 
         assert_eq!(app.current_chat_id(), CHAT);
         assert_eq!(window_ids(&app), vec![1, 2, 3]);
+    }
+
+    // ---- reading offline -------------------------------------------------
+
+    /// A failed bring-up leaves no client, and a chat switch still paints
+    /// the cache: nothing is asked for, the newest page is left unbegun for
+    /// the client that comes up, and the status line still says `offline:`.
+    #[test]
+    fn a_chat_switch_offline_seeds_from_the_cache_and_asks_for_nothing() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT + 1, 1..=3);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("no route to the datacenter")),
+        );
+
+        app.select_chat(1);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(window_ids(&app), vec![1, 2, 3], "the cache is on screen");
+        assert!(
+            !app.is_fetching(FetchDirection::Latest),
+            "nothing asked for"
+        );
+        assert!(
+            !app.is_revalidating(),
+            "so nothing is said to be on its way"
+        );
+        assert_eq!(state.history.cursor, None, "the newest page is still owed");
+        assert!(
+            app.status_text().starts_with("offline:"),
+            "cached rows are not an answer: {:?}",
+            app.status_text()
+        );
+
+        app.select_chat(0);
+        drive(&mut app, &mut state, &tx);
+        assert!(
+            app.conversation.conversation.window.is_empty(),
+            "an uncached conversation opens empty, as it always has offline"
+        );
+    }
+
+    /// Once a newest page has been begun for the conversation, an empty
+    /// window is the wire's answer, and losing the client does not paint the
+    /// cache over it.
+    #[test]
+    fn a_window_the_wire_answered_empty_is_not_seeded_offline() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT, 1..=3);
+        state.history = opened(CHAT);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(app.conversation.conversation.window.is_empty());
     }
 
     // ---- reconnecting when the feed ends --------------------------------
