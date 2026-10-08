@@ -583,7 +583,7 @@
   /* MediaKind::label. A media message with no caption has this as its whole `text` (so search, yank
      and reply read it like any text) and `ph` marks it as the program's wording rather than the
      sender's; a caption replaces it and clears `ph`. */
-  const MEDIA_LABEL = { Photo: '[image]', Video: '[video]', Gif: '[gif]', Voice: '[voice]', File: '[file]' };
+  const MEDIA_LABEL = { Photo: '[image]', Video: '[video]', Gif: '[gif]', Voice: '[voice]', File: '[file]', Sticker: '[sticker]' };
   const media = (from, kind, o) => {
     const cap = o && o.caption;
     return Object.assign({ from, text: cap || MEDIA_LABEL[kind], ph: !cap, kind }, o || {});
@@ -604,6 +604,31 @@
       media('them', 'Video', { at: at(0, '20:14') }),
       media('you', 'Gif', { at: at(0, '20:15'), rcpt: 'read' }),
       media('you', 'File', { at: at(0, '20:40'), status: 'failed: file exceeds the 2 GB limit' })
+    ] };
+  }
+
+  /* A static sticker, drawn inline as a bounded half-block picture. The art is the
+     model's stand-in for decoded pixels: 16 columns by 8 rows, inside the 24-by-8
+     box DESIGN.md bounds the real block by. `inline: false` is the flag off or a
+     failed decode, and the message is the `[sticker]` token instead. */
+  const STICKER_ART = [
+    '  ▄▄▄▄▄▄▄▄▄▄▄▄  ',
+    ' ▄████████████▄ ',
+    '████████████████',
+    '████●██████●████',
+    '████████████████',
+    '█████▄▄▄▄▄▄█████',
+    ' ▀████████████▀ ',
+    '  ▀▀▀▀▀▀▀▀▀▀▀▀  '
+  ];
+  const sticker = (from, o) => Object.assign({ from, text: '[sticker]', ph: true, kind: 'Sticker', art: STICKER_ART, inline: true }, o || {});
+  /* the chat the sticker scenes read. Sides alternate so the sticker is its own
+     group and carries its own tag and time. */
+  function makeStickerChat(inline) {
+    return { name: 'Ken Thompson', unread: 0, top: 0, cur: 1, msgs: [
+      { from: 'you', text: 'The new set is out.', at: at(0, '20:02') },
+      sticker('them', { at: at(0, '20:04'), inline }),
+      { from: 'you', text: 'Send the penguin one next.', at: at(0, '20:05') }
     ] };
   }
 
@@ -634,6 +659,8 @@
     else if (view === 'contactReading') beginContactShell(s, 'personReading');
     else if (view === 'contactFailed') beginContactShell(s, 'personFailed');
     else if (view === 'media') s.chats.unshift(makeMediaChat());
+    else if (view === 'sticker') s.chats.unshift(makeStickerChat(true));
+    else if (view === 'stickerFallback') s.chats.unshift(makeStickerChat(false));
     return s;
   }
 
@@ -1579,7 +1606,13 @@
          message carries no evidence of its own. */
       const base = baseDir(m.text);
       /* the sender label is the group's, so only its first row carries it */
-      wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, base, s: r.s, e: r.e, from: m.from, ph: !!m.ph }));
+      if (m.art && m.inline) {
+        /* An inline sticker paints its picture instead of its token: one row per art
+           line, in body ink — it is what the sender sent, not the program's word for
+           it — so the cursor, selection, time and status rules below read them like
+           any rows of the message. */
+        m.art.forEach((line, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full: line, qlen: 0, mask: [], base, s: 0, e: line.length, from: m.from, ph: false }));
+      } else wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, base, s: r.s, e: r.e, from: m.from, ph: !!m.ph }));
       /* the last row of a message carries its own status; the last row of a group also carries
          the peer's read state (outgoing only, never beside a status) and the group's time */
       const rcpt = tail && m.from === 'you' && !m.status && m.rcpt ? m.rcpt : '';
@@ -2155,6 +2188,13 @@
       { name: 'Visual: [voice] selected, [file] under the cursor', keys: 'kkkkkkvjj' },
       { name: 'Visual, yanked: the placeholder is text', keys: 'kkkkkkvjjy' },
       { name: 'All five kinds in one window', keys: 'kk' }] },
+    /* A static sticker. Ken Thompson's chat is put first by the `sticker` start (or
+       `stickerFallback` for the token frame); the cursor begins on the sticker and
+       every frame goes through the real handler. */
+    { id: 'sticker', name: 'Sticker block', start: 'sticker', variants: [
+      { name: 'Inline: a static sticker as a bounded block', keys: '' },
+      { name: 'Visual, yanked: the block yanks [sticker]', keys: 'vy' },
+      { name: 'Fallback: [sticker] when the flag is off or decoding fails', start: 'stickerFallback', keys: '' }] },
     { id: 'insert', name: 'Insert', variants: [
       { name: 'Composing', keys: DRAFT },
       { name: 'Esc: line Normal', keys: DRAFT + '<Esc>' },
