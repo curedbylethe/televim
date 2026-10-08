@@ -104,11 +104,12 @@ pub(crate) fn classify_typed(media: Option<&Media>) -> Option<MediaKind> {
         Media::Document(document) => classify_document(&document.raw),
         // `grammers` reads a document with a sticker attribute as a sticker, so
         // this is where a sticker arrives: a static one is its own kind, and an
-        // animated one stays a file — CUR-13 is static stickers only. Everything
-        // `grammers` flattens away or builds that this crate does not read — a
-        // contact, a poll, a location, a web page, and any kind added after this
-        // build — is one arm, deliberately: all of them carry something, and
-        // none of them is nothing.
+        // animated one stays a file — animated stickers are out of scope, and
+        // the raw path answers a sticker that moves as a GIF by attribute
+        // order. Everything `grammers` flattens away or builds that this crate
+        // does not read — a contact, a poll, a location, a web page, and any
+        // kind added after this build — is one arm, deliberately: all of them
+        // carry something, and none of them is nothing.
         Media::Sticker(sticker) => {
             if sticker.is_animated() {
                 MediaKind::File
@@ -564,11 +565,11 @@ mod tests {
         assert_eq!(typed(sticker), expected);
     }
 
-    /// Animated stickers are out of scope — CUR-13 is static stickers only — so
-    /// one stays a file. `grammers` keys `animated` off the document's own
-    /// Animated attribute, which is what the typed path asks; the raw path
-    /// answers the same document as a GIF by attribute order, an animation
-    /// winning there whatever else the document carries.
+    /// Animated stickers are out of scope, so one stays a file. `grammers` keys
+    /// `animated` off the document's own Animated attribute, which is what the
+    /// typed path asks; the raw path answers the same document as a GIF by
+    /// attribute order, an animation winning there whatever else the document
+    /// carries.
     #[test]
     fn an_animated_sticker_stays_a_file() {
         let animated = media_document(

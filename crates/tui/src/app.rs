@@ -36,7 +36,7 @@ use crate::state::outbox::Outbox;
 use crate::state::pending::Pending;
 use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
-use crate::state::ui::{IDLE_STATUS, UiState};
+use crate::state::ui::{IDLE_STATUS, StickerMode, UiState};
 use crate::widgets;
 
 /// How close to an end of the loaded messages the cursor has to get before the
@@ -1024,6 +1024,15 @@ impl App {
         self
     }
 
+    /// The same application, drawing `[sticker]` where a picture would go.
+    ///
+    /// Delegates to [`UiState::with_stickers`].
+    #[must_use]
+    pub fn with_stickers(mut self, stickers: StickerMode) -> Self {
+        self.ui = self.ui.with_stickers(stickers);
+        self
+    }
+
     /// Who permutes a right-to-left row: this program, or the terminal.
     ///
     /// Asked once per row by the conversation panel, and never per frame by the
@@ -1031,6 +1040,15 @@ impl App {
     #[must_use]
     pub fn bidi(&self) -> BidiMode {
         self.ui.bidi
+    }
+
+    /// Whether a decoded sticker paints its picture or its token.
+    ///
+    /// Asked once per tick by the loop's sticker drain, and never per frame by
+    /// the layout — see the field's doc.
+    #[must_use]
+    pub fn sticker_mode(&self) -> StickerMode {
+        self.ui.stickers
     }
 
     /// An application holding the sample conversation the tests read from.

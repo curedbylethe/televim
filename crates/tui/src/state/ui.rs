@@ -25,6 +25,21 @@ const ASSUMED_BODY_WIDTH: u16 = 80;
 /// What the status line shows before anything has happened.
 pub(crate) const IDLE_STATUS: &str = "televim";
 
+/// Whether a decoded sticker paints its picture or its token.
+///
+/// Inline is the default: a sticker message with bytes draws the bounded
+/// block, and one without draws `[sticker]` while its bytes are asked for.
+/// Token draws `[sticker]` for every sticker message and never asks — no
+/// decode, no fetch traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StickerMode {
+    /// Paint the picture (or the token while its bytes are missing).
+    #[default]
+    Inline,
+    /// Always the token, never the picture.
+    Token,
+}
+
 /// Rows, body width, and the clock, as of the last frame.
 ///
 /// [`Cell`] because a frame is drawn from a shared reference. The panel records
@@ -102,6 +117,21 @@ pub struct UiState {
     /// lets the terminal rearrange them, which is what a shaping terminal needs.
     pub(crate) bidi: BidiMode,
 
+    /// Whether a decoded sticker paints its picture or its token.
+    ///
+    /// **Fixed at construction**, and written only by [`Self::with_stickers`]:
+    /// the same purity argument as [`Self::bidi`] — the layout counts block
+    /// rows for a picture and token rows for a token, so a mode that could
+    /// change while the window is open would make the same conversation two
+    /// different heights depending on when it was asked. A caller that has
+    /// read the configuration says so once and every later frame draws the
+    /// same rows.
+    ///
+    /// [`StickerMode::Inline`] — the default — paints the block where bytes
+    /// are cached. `tui` names no configuration type: the spelling in the file
+    /// is `app`'s to read, and this is what it becomes.
+    pub(crate) stickers: StickerMode,
+
     /// Rows, body width, and the clock, as of the last frame.
     pub(crate) metrics: FrameMetrics,
 }
@@ -120,6 +150,7 @@ impl UiState {
             status_until: None,
             typing_until: None,
             bidi: BidiMode::Terminal,
+            stickers: StickerMode::Inline,
             metrics: FrameMetrics {
                 rows: Cell::new(ASSUMED_ROWS),
                 body_width: Cell::new(ASSUMED_BODY_WIDTH),
@@ -140,6 +171,20 @@ impl UiState {
     #[must_use]
     pub(crate) fn with_bidi(mut self, bidi: BidiMode) -> Self {
         self.bidi = bidi;
+        self
+    }
+
+    /// The same application, drawing `[sticker]` where a picture would go.
+    ///
+    /// By value and at construction rather than a setter, for the same reason
+    /// as [`Self::with_bidi`]: the mode is an input to the layout, and
+    /// [`App::row_layout`](crate::app::App::row_layout) stays a pure function
+    /// of the window and the width. A caller that has read the configuration
+    /// calls this once, where it builds the application; nothing else needs to
+    /// say anything.
+    #[must_use]
+    pub(crate) fn with_stickers(mut self, stickers: StickerMode) -> Self {
+        self.stickers = stickers;
         self
     }
 

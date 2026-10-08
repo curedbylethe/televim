@@ -528,6 +528,17 @@ impl State {
     fn take_reconnect_request(&mut self) -> bool {
         std::mem::take(&mut self.reconnect_requested)
     }
+
+    /// The client, once bring-up has installed one.
+    ///
+    /// Read by the loop's sticker drain, which downloads the panel's queued
+    /// requests in series on the loop thread: a sticker that arrives a tick
+    /// later draws `[sticker]` that frame either way, so the round trip needs
+    /// no task and no event of its own. `None` while there is no client, and
+    /// the drain asks nothing then.
+    pub(crate) fn client(&self) -> Option<Arc<ProtoClient>> {
+        self.client.clone()
+    }
 }
 
 /// The two answers Telegram has given this sign-in, and nothing else.
