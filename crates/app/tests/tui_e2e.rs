@@ -8,23 +8,59 @@
 //! `TestBackend` assertions in `tui`'s conversation panel; their keystroke
 //! flows through a real terminal wait on `termlens` like the rest.
 
+mod common;
+
+use termlens::Key;
+
 #[test]
-#[ignore = "requires termlens"]
 fn launches_to_chat_list_in_normal_mode() {
-    // TODO: spawn target/release/televim in a PTY; assert screen contains
-    // "Chats", "Conversation", and "NORMAL".
+    let sandbox = common::sandbox();
+    let mut t = common::spawn_offline(&sandbox);
+
+    // The empty sandbox has no chats, so the title is "Chats (0)". The
+    // no-credentials sentence is the deterministic offline screen.
+    t.wait_until(|s| {
+        s.contains("Chats") && s.contains("NORMAL") && s.contains("no application credentials")
+    })
+    .expect("chat list in NORMAL mode");
 }
 
 #[test]
-#[ignore = "requires termlens"]
+#[ignore = "insert mode is unreachable without credentials or a chat; see report"]
 fn insert_mode_echoes_typing() {
-    // TODO: send `i`, `h`, `i`, `Esc`; assert screen contains "hi".
+    let sandbox = common::sandbox();
+    let mut t = common::spawn_offline(&sandbox);
+    t.wait_until(|s| s.contains("NORMAL"))
+        .expect("ready in NORMAL mode");
+
+    t.send(Key::Char('i')).expect("enter insert mode");
+    t.wait_until(|s| s.contains("INSERT"))
+        .expect("INSERT mode shown");
+    t.send_str("hi").expect("type hi");
+    t.wait_until(|s| s.contains("hi"))
+        .expect("typed text echoed");
+    t.send(Key::Esc).expect("leave insert mode");
+    t.wait_until(|s| s.contains("NORMAL"))
+        .expect("back in NORMAL mode");
 }
 
 #[test]
-#[ignore = "requires termlens"]
 fn command_prompt_quits() {
-    // TODO: send `:`, `q`, `Enter`; assert process exits.
+    let sandbox = common::sandbox();
+    let mut t = common::spawn_offline(&sandbox);
+    t.wait_until(|s| s.contains("NORMAL"))
+        .expect("ready in NORMAL mode");
+
+    t.send_str(":q").expect("type :q");
+    t.send(Key::Enter).expect("submit command");
+    // `:q` asks for confirmation before quitting.
+    t.wait_until(|s| s.contains("Quit televim?"))
+        .expect("quit confirmation shown");
+    t.send(Key::Char('y')).expect("confirm quit");
+    assert!(
+        t.wait_exit().expect("process exits").success(),
+        "televim exits cleanly on :q"
+    );
 }
 
 /// The cursor is what tells the panel which slice to draw, so a scroll that
