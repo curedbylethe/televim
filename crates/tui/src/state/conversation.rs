@@ -18,10 +18,23 @@ use crate::sticker::StickerCache;
 /// `ids` is every numbered message the selection covers, oldest first, and
 /// `skipped` is how many placeholders were left out of it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // The forward key is the caller, in the next commit.
 pub(crate) struct Forwarding {
     pub(crate) ids: Vec<i64>,
     pub(crate) skipped: usize,
+}
+
+/// A forward waiting for a destination, and the chat it is to land in.
+///
+/// The messages and their source are captured when the picker opens, so that
+/// nothing the reader does to the selection afterwards changes what `Enter`
+/// forwards. `selected` is the chat the picker's cursor is on, as an index into
+/// the chat list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForwardPick {
+    pub(crate) chat_id: i64,
+    pub(crate) message_ids: Vec<i64>,
+    pub(crate) skipped: usize,
+    pub(crate) selected: usize,
 }
 
 pub struct ConversationState {
@@ -67,6 +80,13 @@ pub struct ConversationState {
     /// Both of its ends name a message by identifier, which is what lets it
     /// survive a page landing: see [`App::after_window_change`].
     pub(crate) selection: Option<Selection>,
+
+    /// The forward being directed at a chat, if one is.
+    ///
+    /// Only meaningful while a selection is up: see [`Self::picking`]. Several
+    /// places clear the selection directly, and a picker left behind by one of
+    /// them is inert rather than a second thing to clear.
+    pub(crate) forward: Option<ForwardPick>,
 
     /// The message the next composed message answers, if it is a reply.
     pub reply_to: Option<i64>,
@@ -125,6 +145,7 @@ impl ConversationState {
             user_search: UserSearchState::default(),
             register: Register::default(),
             selection: None,
+            forward: None,
             reply_to: None,
             editing: None,
             sending: None,
@@ -161,6 +182,29 @@ impl ConversationState {
     /// Drops the selection, whatever it was for.
     pub(crate) fn clear_selection(&mut self) {
         self.selection = None;
+        self.forward = None;
+    }
+
+    /// The forward picker, while one is up over a selection.
+    #[must_use]
+    pub(crate) fn picking(&self) -> Option<&ForwardPick> {
+        self.selection.as_ref().and(self.forward.as_ref())
+    }
+
+    /// Opens the picker over the selection, with what is to be forwarded
+    /// captured now.
+    pub(crate) fn open_forward(&mut self, forwarding: Forwarding) {
+        self.forward = Some(ForwardPick {
+            chat_id: self.conversation.window.chat_id,
+            message_ids: forwarding.ids,
+            skipped: forwarding.skipped,
+            selected: 0,
+        });
+    }
+
+    /// Puts the picker away and leaves the selection as it was.
+    pub(crate) fn dismiss_forward(&mut self) {
+        self.forward = None;
     }
 
     /// Starts a selection at `message_id`, and reports whether it could be.
@@ -745,7 +789,6 @@ impl ConversationState {
     /// identifier the server knows, so it is left out of `ids` and counted.
     /// Forwarding is message-granular, so a charwise selection forwards the whole
     /// message it sits in.
-    #[allow(dead_code)] // The forward key is the caller, in the next commit.
     pub(crate) fn forwardable(&self, selection: &Selection) -> Option<Forwarding> {
         let mut forwarding = Forwarding::default();
         let covered = self.covered(Some(selection));
@@ -773,7 +816,6 @@ impl ConversationState {
     /// The same split as [`Self::refuse_placeholders`] — a message still on its
     /// way is not one that failed — with the words that are true of forwarding:
     /// `D` is about dismissing and says nothing about forwarding.
-    #[allow(dead_code)] // The forward key is the caller, in the next commit.
     pub(crate) fn refuse_forward(&self, selection: &Selection) -> &'static str {
         let covered = self.covered(Some(selection));
         let mut count = 0;
