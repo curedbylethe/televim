@@ -18,9 +18,10 @@ Real, and named so they are not mistaken for oversights:
 - **A media download is a whole `Vec<u8>`, saved whole to a temp file.**
   `Client::download_media` and `ProtoClient::download_media` return the bytes, and
   `o` on a media message writes them to a `0600` file in the temp directory and
-  hands that file to the platform viewer. The return type is the limit: streaming
-  and a cache on disk are CUR-9 and CUR-10, and the 16 MiB `MEDIA_LIMIT` refuses
-  rather than truncates. Nothing removes the saved files; their lifecycle is CUR-10's.
+  hands that file to the platform viewer. Progress is reported per chunk and `Esc`
+  stops the transfer, but the bytes still arrive whole, so the return type is the
+  limit: streaming to disk and a cache on disk are a later change, and the 16 MiB
+  `MEDIA_LIMIT` refuses rather than truncates. Nothing removes the saved files; their lifecycle is CUR-10's.
 - **The viewer hand-off has four known limits.**
   - *Stdin race.* The loop blocks on the viewer with the terminal released, but the
     reader thread keeps calling `crossterm::event::read`. A key it captures during

@@ -179,7 +179,9 @@ Working today:
   The terminal leaves the alternate screen and raw mode for the viewer and comes
   back where it was. A file over the 16 MiB limit is refused and nothing is
   saved, and the status line says what happened. The saved files are left in the temp directory;
-  nothing removes them yet. There is no viewer setting. The known limits of the
+  nothing removes them yet. While a download runs, its row shows `[image… 42%]` beside
+  the placeholder (the megabytes so far when Telegram declared no size); `Esc` on that
+  message stops it, and a failed download shows `[failed: …]`. There is no viewer setting. The known limits of the
   hand-off are in [`docs/known-gaps.md`](docs/known-gaps.md).
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
   typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.
