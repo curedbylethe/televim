@@ -414,6 +414,18 @@ async fn a_media_message_downloads_through_the_client() {
         "a message reported to carry media must yield bytes"
     );
 
+    // The same identifier twice must yield the same bytes. A fetch that landed
+    // on a neighbour of the named message would still be non-empty, so this is
+    // what ties the bytes to the identifier asked for.
+    let again = proto
+        .download_media(chat.id, media_message.id)
+        .await
+        .expect("a second download of the same message succeeds");
+    assert_eq!(
+        bytes, again,
+        "a message's media must be the same bytes on every download"
+    );
+
     // And the refusal, on a message this account can be sure has no attachment.
     if let Some(plain) = page.iter().find(|message| message.media.is_none()) {
         let refused = proto.download_media(chat.id, plain.id).await;
