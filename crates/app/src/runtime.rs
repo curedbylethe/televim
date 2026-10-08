@@ -32,7 +32,7 @@ use crate::draft_store::{DraftFile, drafts_acceptable};
 use crate::history_store::{HistoryCache, HistoryFile, history_acceptable};
 use crate::net;
 use tui::app::App;
-use tui::state::ui::StickerMode;
+use tui::state::ui::{GraphicsMode, StickerMode};
 
 /// Something for the loop to do.
 ///
@@ -291,7 +291,8 @@ async fn event_loop(
     // heights depending on when it was asked.
     let mut app = App::new()
         .with_bidi(cfg.bidi_mode())
-        .with_stickers(cfg.sticker_mode());
+        .with_stickers(cfg.sticker_mode())
+        .with_graphics(cfg.graphics_mode(|key| std::env::var(key).ok()));
     if let Some(id) = initial_chat {
         app.set_initial_chat(id);
     }
@@ -374,6 +375,9 @@ async fn event_loop(
         terminal
             .draw(|frame| app.render(frame))
             .context("drawing frame")?;
+        if app.graphics() == GraphicsMode::Kitty {
+            place_pictures(&app);
+        }
 
         probe_first_frame();
 
@@ -501,6 +505,20 @@ fn spawn_sticker_drain<F, Fut, E>(
             }
         }
     });
+}
+
+/// Writes the kitty graphics bytes for the frame just drawn, over its sticker
+/// blocks.
+///
+/// Best-effort, like the clipboard: the frame is already on the screen, and a
+/// picture that did not land is a block of blank cells until the next pass
+/// places it again.
+fn place_pictures(app: &App) {
+    let bytes = tui::graphics::frame(app);
+    let mut out = stdout();
+    if let Err(error) = out.write_all(bytes.as_bytes()).and_then(|()| out.flush()) {
+        tracing::debug!(%error, "the picture placement did not go through");
+    }
 }
 
 /// Hands the reader's last yank to the terminal's clipboard, if one is waiting.

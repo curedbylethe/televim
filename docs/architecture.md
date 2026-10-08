@@ -547,6 +547,20 @@ flag off means zero fetch traffic. An unknown spelling falls back to `inline`,
 because a value the program cannot read that guessed `off` would take the
 pictures away from precisely the reader who never asked for that.
 
+`Config` also reads `TELEVIM_GRAPHICS` — `auto` (the default), `kitty`, or `off` —
+which says how a picture reaches the terminal. `auto` asks the environment once
+(`KITTY_WINDOW_ID`, `TERM=xterm-kitty`, or `TERM_PROGRAM` naming ghostty or
+WezTerm) and is `kitty` only where one of them is named. It is resolved in
+`runtime.rs` and handed to `tui` as `tui::state::ui::GraphicsMode` through
+`App::with_graphics`, fixed before the first frame like the other two.
+
+In `kitty` mode the conversation panel paints the block's cells blank and records
+each picture it drew in `UiState::placements`, with its screen cell and size, once
+the list has scrolled. `runtime.rs` writes `tui::graphics::frame(app)` after each
+draw: a clear of last frame's placements, then the transmit and placement escapes
+for each picture still in the cache. `tui::graphics` is pure — base64, the
+protocol's chunked escapes, and the placement — and writes nothing itself.
+
 `bidi.rs` is the authority and both consumers go through it: the conversation
 panel and the input bar each ask `base_direction` for the direction of the text
 as a whole, then `visual_row_in` for the pieces of one row of it — in the

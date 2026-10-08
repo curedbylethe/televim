@@ -613,6 +613,20 @@ are in [`../AGENTS.md`](../AGENTS.md).
   `off` is zero traffic, not just token pixels: the drain drops the requests
   instead of downloading them, so the cache stays empty and geometry and draw
   take the token path on their own, with nothing left to gate.
+- **Why stickers place kitty graphics over blank cells, detected from the
+  environment, and sixel is deferred:** the kitty protocol sizes a picture by
+  its cell columns and rows (`c=`, `r=`), so the 24-by-8 box needs no pixel
+  knowledge. Sixel draws in pixels: fitting the box needs the cell's pixel size,
+  which only a terminal query can give, and the program does not probe — see the
+  capability rule above. So sixel waits for a decision about that query. The
+  capability is a config key (`graphics`, `TELEVIM_GRAPHICS`) read once at launch,
+  with `auto` consulting `KITTY_WINDOW_ID`, `TERM` and `TERM_PROGRAM` only to
+  choose the default, never per frame. The encoder is hand-rolled, base64 and all,
+  for the binary-size band: no dependency was added. The picture covers blank
+  cells rather than replacing the half-block painter, which stays the fallback
+  and keeps its exact-pixel tests. Measured with `make measure`: binary 6,189,712
+  bytes against the stored 6,189,696, +16 bytes (+0.0%), inside the 1% band. The
+  baseline is not re-recorded here; that is a maintainer's call.
 - **Why the connection indicator is an always-visible dot beside the ranked
   sentence:** the sentences say what happened and the state says which of the
   four holds, and a rank-8 sentence is hidden under every selection,
