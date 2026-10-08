@@ -2887,6 +2887,9 @@ fn handle_normal_ctrl(
 /// then the plain-character match. Dispatch order and bindings are unchanged.
 ///
 /// Returns true when a card was opened and its highlight still needs sizing.
+// The keys are one table, and the `Esc` that stops a download is one more arm of
+// it; splitting the table would only move the same lines to another function.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle_normal(
     ui: &mut UiState,
     pending: &mut Pending,
@@ -2908,6 +2911,22 @@ pub(crate) fn handle_normal(
     // table owns that prefix. A character that never reached it left the `g`
     // armed for whatever key came next, so `g` then `d` then `G` deleted a
     // message instead of going to the end.
+    // `Esc` stops the download of the message under the cursor when one is in
+    // flight. With none in flight it does nothing here, as it always has.
+    if key.code == KeyCode::Esc
+        && let Some(message) = conversation.cursor_message()
+        && conversation
+            .downloads
+            .is_in_flight(message.chat_id, message.id)
+    {
+        let action = Action::CancelMediaDownload {
+            chat_id: message.chat_id,
+            message_id: message.id,
+        };
+        queue_action(&mut *outbox, &mut *ui, action);
+        return false;
+    }
+
     let KeyCode::Char(c) = key.code else {
         return false;
     };
