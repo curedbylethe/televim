@@ -220,10 +220,13 @@ fn conversation_title(app: &App, width: u16) -> Line<'static> {
 
     // Dropped whole rather than cut, which is the one outcome the design refuses:
     // a half-written `· typ` is worse than no note, and this is the only note that
-    // is not about the reader's own view.
+    // is not about the reader's own view. One note at a time: while the peer is
+    // typing, that is the news, and the presence it would otherwise add is not.
     let mut spans = vec![Span::raw(head.clone())];
     if let Some(note) = typing_note(app)
-        && title_note_fits(&head, note, width)
+        .map(str::to_owned)
+        .or_else(|| presence_note(app))
+        && title_note_fits(&head, &note, width)
     {
         spans.push(Span::styled(note, app.ui.theme.text_dim));
     }
@@ -263,6 +266,16 @@ const TITLE_MARGIN: u16 = 5;
 /// the loop does that on its tick.
 fn typing_note(app: &App) -> Option<&'static str> {
     app.peer_is_typing().then_some(" · typing")
+}
+
+/// What the title says about the peer's presence, if it has been reported.
+///
+/// Read for the conversation on show: its chat is the peer's own identifier. A
+/// restricted or unknown presence says nothing, so there is no note for it.
+fn presence_note(app: &App) -> Option<String> {
+    let peer = app.conversation.conversation.window.chat_id;
+    let words = crate::presence::wording(app.peer_presence(peer)?, app.now())?;
+    Some(format!(" · {words}"))
 }
 
 /// What the title says about a search, if one is running.
@@ -877,6 +890,7 @@ mod tests {
     use crate::wrap::columns;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use domain::message::MediaKind;
+    use domain::presence::Presence;
     use domain::selection::Mark;
     use domain::updates::UpdateEvent;
     use ratatui::Terminal;
@@ -4229,6 +4243,102 @@ mod tests {
         assert!(
             !title.contains("typing"),
             "and the note that is not the reader's is gone rather than cut: {title}"
+        );
+    }
+
+    // ---- the peer's presence ---------------------------------------------
+
+    /// 2026-09-20 00:00 UTC, the day the peer was last online, and the reader's
+    /// clock eighteen days later.
+    const SEEN: i64 = 1_789_862_400;
+    const NOW: i64 = SEEN + 18 * 86_400;
+
+    /// The sample conversation with the peer's presence reported through the feed,
+    /// which is the only thing that sets it.
+    fn peer_reporting(presence: Presence) -> App {
+        let mut app = App::mock();
+        assert!(
+            app.apply_update(&UpdateEvent::PeerStatus {
+                chat_id: mock_chat_id(),
+                presence,
+            }),
+            "a new presence is on the title now, so a redraw is owed"
+        );
+        app
+    }
+
+    #[test]
+    fn the_peer_online_is_said_on_the_panel_title_in_the_dim_ink() {
+        let title = " Conversation (10/10)";
+        let screen = screen(&peer_reporting(Presence::Online), 80, 24);
+
+        assert!(
+            row(&screen, 0).contains("· online"),
+            "the note is on the title: {}",
+            row(&screen, 0)
+        );
+        let ink = cell(&screen, note_x(title), 0);
+        assert_eq!(
+            ink.fg,
+            dim_fg(),
+            "and it is dim, like the typing note ({:?} at {})",
+            ink.fg,
+            ink.symbol()
+        );
+    }
+
+    #[test]
+    fn an_offline_peer_is_said_to_have_been_last_seen_on_a_date() {
+        let app = peer_reporting(Presence::Offline {
+            was_online: i32::try_from(SEEN).expect("the fixture fits a protocol timestamp"),
+        });
+        app.record_now(NOW);
+
+        assert!(
+            row(&screen(&app, 80, 24), 0).contains("· last seen on Sep 20, 2026"),
+            "{}",
+            row(&screen(&app, 80, 24), 0)
+        );
+    }
+
+    /// `· last seen recently` does not fit a 40-column panel beside the count, and
+    /// the note goes whole rather than cut to `· last se`.
+    #[test]
+    fn a_full_title_drops_the_presence_note_whole() {
+        let screen = screen(&peer_reporting(Presence::Recently), 40, 24);
+        let title = row(&screen, 0);
+
+        assert!(title.contains("Conversation (10/10)"), "{title}");
+        assert!(
+            !title.contains("last seen") && !title.contains("recently"),
+            "the note is gone rather than cut: {title}"
+        );
+    }
+
+    /// The peer typing is the news while they are, and the presence it would add
+    /// waits: one note on the title, never both.
+    #[test]
+    fn typing_takes_the_title_over_the_presence_note() {
+        let mut app = peer_reporting(Presence::Online);
+        assert!(app.apply_update(&UpdateEvent::PeerTyping {
+            chat_id: mock_chat_id(),
+            typing: true,
+        }));
+
+        let title = row(&screen(&app, 80, 24), 0);
+        assert!(title.contains("· typing"), "{title}");
+        assert!(!title.contains("online"), "and not both notes: {title}");
+    }
+
+    /// A restricted presence is no note at all, so the title is the one it would
+    /// have been without the report.
+    #[test]
+    fn a_hidden_presence_leaves_the_title_as_it_was() {
+        let title = row(&screen(&peer_reporting(Presence::Hidden), 80, 24), 0);
+
+        assert!(
+            !title.contains('·'),
+            "no note for a hidden presence: {title}"
         );
     }
 

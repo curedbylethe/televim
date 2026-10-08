@@ -5747,3 +5747,49 @@ fn a_draft_reserves_nothing_while_scrolled_up() {
     let view = app.viewport(&layout, height - reserved.above() - reserved.below());
     assert_eq!(view.budget, height, "the messages get the full panel");
 }
+
+/// A peer's presence arriving is news for the title and the card, and for nothing
+/// the reader is looking at: the cursor, a visual selection and a search all stay
+/// where the reader left them, and a repeat of the same report redraws nothing.
+#[test]
+fn a_presence_update_leaves_the_cursor_selection_and_search_alone() {
+    let mut app = App::mock();
+    run_search_line(&mut app, "benchmarks");
+    app.handle_key(press(KeyCode::Char('v')));
+    app.handle_key(press(KeyCode::Char('j')));
+    assert_eq!(app.ui.mode, Mode::Visual, "a selection is running");
+
+    let before = (
+        app.conversation.vim.cursor(),
+        app.ui.mode,
+        app.search_query().map(str::to_owned),
+        app.conversation.conversation.window.len(),
+        reading(&app),
+    );
+
+    let online = UpdateEvent::PeerStatus {
+        chat_id: MOCK_CHAT,
+        presence: domain::presence::Presence::Online,
+    };
+    assert!(app.apply_update(&online), "a new presence is a redraw");
+    assert_eq!(
+        app.peer_presence(MOCK_CHAT),
+        Some(domain::presence::Presence::Online),
+        "and the open view holds it"
+    );
+    assert_eq!(
+        (
+            app.conversation.vim.cursor(),
+            app.ui.mode,
+            app.search_query().map(str::to_owned),
+            app.conversation.conversation.window.len(),
+            reading(&app),
+        ),
+        before,
+        "and the reader's place, selection and search did not move"
+    );
+    assert!(
+        !app.apply_update(&online),
+        "the same presence again changes nothing on screen"
+    );
+}

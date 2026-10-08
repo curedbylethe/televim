@@ -17,6 +17,7 @@ use domain::history::{CONVERSATION_WINDOW, ConversationWindow};
 use domain::message::Message;
 #[cfg(test)]
 use domain::message::MessageStatus;
+use domain::presence::Presence;
 use domain::search::SearchState;
 use domain::selection::{Mark, Selection};
 use domain::updates::UpdateEvent;
@@ -1852,6 +1853,15 @@ impl App {
     }
 
     // ---- the peer's typing -----------------------------------------------
+
+    /// The presence the peer was last reported with, if one has arrived.
+    ///
+    /// Sticky until the next update for that peer: nothing here expires it, and
+    /// `None` means no update has named this peer yet.
+    #[must_use]
+    pub fn peer_presence(&self, peer_id: i64) -> Option<Presence> {
+        self.ui.peer_presence.get(&peer_id).copied()
+    }
 
     /// Whether the peer in the conversation on show is being shown as typing.
     ///
