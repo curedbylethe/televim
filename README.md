@@ -213,6 +213,17 @@ Working today:
   are placeholders. Delete removes for both sides. More than a hundred messages is
   several requests with a pause between them, and a failure part-way through is
   reported as how many went through rather than as a plain failure.
+- **Forward:** `f` in Normal forwards the message under the cursor, or the current
+  selection if there is one; `s` in Visual forwards the selection. Either raises a
+  picker of your chats over the conversation. `j`/`k` or the arrows choose a chat,
+  `Enter` queues the forward into it and clears the selection, and `Esc` puts the
+  picker away and keeps the selection. The forward stays in the current chat: the
+  destination is not opened, and the status line reports how many went through. The
+  messages keep their authors and captions, as Telegram renders a forward. Placeholders
+  are left out and counted, and more than a hundred messages go in several requests.
+  Telegram can refuse a forward from a chat that protects its content; the status
+  line then names that chat, and nothing checks for it before the send. The picker
+  walks the chat list only.
 - **Search:** `/` searches the loaded window, then asks the server and prefers
   its answer. `n` repeats or cycles. This is the *conversation's* search; the
   chat list has its own `/` that finds a person instead — see *Starting a
