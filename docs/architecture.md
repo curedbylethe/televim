@@ -276,7 +276,9 @@ panes in the order they are drawn, `h`/`l` step between the two panes,
 and the focused pane's block is drawn in `Theme::border_focused`. The per-peer
 draft map and the read receipts live on `DraftStore` (`state/drafts.rs`): each
 conversation's `LineEditor` is parked under its outgoing peer id when the
-reader leaves and restored when they return. `event.rs` exists but
+reader leaves and restored when they return. Across restarts `app` persists
+the snapshot beside the configuration (`televim.drafts.json`: atomic rename,
+account-tagged, removed on sign-out); `tui` itself names no file. `event.rs` exists but
 `key_to_action` is not yet called: `coordinate::handle_key` matches on `KeyEvent`
 directly. That is pre-existing dead code — do not delete it without asking.
 

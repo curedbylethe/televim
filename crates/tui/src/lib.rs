@@ -31,3 +31,4 @@ pub use app::{
     AccountState, Action, App, ConfirmKind, FetchDirection, Focus, Jump, LoginField, Mode, Pane,
     ProfileId, PromptKind, Register, SessionStore, SignIn, SignInFlow,
 };
+pub use state::connection::ConnectionState;

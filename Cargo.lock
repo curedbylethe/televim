@@ -3064,6 +3064,7 @@ dependencies = [
  "proto",
  "ratatui",
  "serde",
+ "serde_json",
  "telegram-framework",
  "tempfile",
  "tokio",

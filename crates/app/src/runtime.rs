@@ -28,6 +28,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::draft_store::{DraftFile, drafts_acceptable};
 use crate::net;
 use tui::app::App;
 use tui::state::ui::StickerMode;
@@ -48,14 +49,16 @@ pub(crate) enum AppEvent {
 
 /// Build a current-thread runtime (memory budget) and run the TUI.
 ///
-/// `config_path` is only where the log goes, and it is passed rather than
-/// derived so that the two cannot disagree about which run they belong to.
+/// `config_path` is where the log and the drafts file go, and it is passed
+/// rather than derived so that the two cannot disagree about which run they
+/// belong to.
 ///
 /// `initial_chat` is the `--chat` id, carried as launch state for STAGE-02 to
 /// select on. Cli-only: it never enters `Config`, the file, or the environment.
 pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Result<()> {
     init_tracing(cfg, config_path);
-    build_runtime()?.block_on(run_async(cfg, initial_chat))
+    let drafts_path = config_path.with_extension("drafts.json");
+    build_runtime()?.block_on(run_async(cfg, &drafts_path, initial_chat))
 }
 
 /// Records the instant the program was asked to start.
@@ -179,7 +182,7 @@ fn init_tracing(cfg: &Config, config_path: &Path) {
         .try_init();
 }
 
-async fn run_async(cfg: &Config, initial_chat: Option<i64>) -> Result<()> {
+async fn run_async(cfg: &Config, drafts_path: &Path, initial_chat: Option<i64>) -> Result<()> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut screen = stdout();
     execute!(screen, EnterAlternateScreen).context("entering alternate screen")?;
@@ -192,7 +195,7 @@ async fn run_async(cfg: &Config, initial_chat: Option<i64>) -> Result<()> {
     let backend = CrosstermBackend::new(screen);
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
-    let result = event_loop(cfg, &mut terminal, initial_chat).await;
+    let result = event_loop(cfg, &mut terminal, drafts_path, initial_chat).await;
 
     // Always restore the terminal, even if the loop errored.
     let _ = disable_raw_mode();
@@ -254,9 +257,13 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 ///
 /// `initial_chat` is the `--chat` id, recorded below and selected once the
 /// first chat list lands (see `net::apply_ready_to_screen`).
+///
+/// `drafts_path` is the drafts file beside the configuration: loaded here
+/// once, re-synced every pass, and cleared on sign-out.
 async fn event_loop(
     cfg: &Config,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    drafts_path: &Path,
     initial_chat: Option<i64>,
 ) -> Result<()> {
     // When a key was taken on the previous pass, so the next frame can be timed
@@ -275,6 +282,23 @@ async fn event_loop(
     }
     "connecting…".clone_into(&mut app.ui.status);
 
+    // The drafts file beside the configuration, loaded once at launch. A file
+    // tagged for another account never seeds this one: a peer id can be
+    // reused across accounts, and inheriting a stranger's words is worse
+    // than losing one's own. Either side unnamed accepts the file — a false
+    // clear loses words, a false accept is corrected by park/resume.
+    let draft_file = DraftFile::new(drafts_path.to_path_buf());
+    let loaded = draft_file.load();
+    if drafts_acceptable(loaded.account.as_deref(), cfg.phone.as_deref()) {
+        app.drafts.restore(loaded.drafts);
+    } else {
+        tracing::warn!("drafts stored for another account were discarded");
+    }
+    // Nothing synced yet, so the first pass always writes: a discarded file
+    // is overwritten rather than left behind, and a launch with nothing
+    // stored settles the file (or its absence) at once.
+    let mut last_synced: Option<Vec<(i64, String)>> = None;
+
     // What the configuration carries goes into the sign-in flow as pre-fills,
     // and nothing more: the flow is where a phone number, a code and a password
     // are read, and these are what a launch with a reader in a hurry saves them
@@ -291,6 +315,8 @@ async fn event_loop(
     // Holds the configuration and this channel, because a sign-out has to rebuild
     // the client and `apply` cannot be handed either.
     let mut network = net::State::new(cfg.clone(), tx.clone());
+    // And the drafts file, so signing out can remove it.
+    network.set_draft_file(draft_file.clone());
 
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an
@@ -355,6 +381,7 @@ async fn event_loop(
             drain_stickers(StickerMode::Inline, &mut app, download).await;
         }
         copy_if_asked(&mut app);
+        sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
     }
 
     Ok(())
@@ -425,6 +452,43 @@ fn copy_if_asked(app: &mut App) {
     if let Err(error) = copy_to_clipboard(&text) {
         tracing::debug!(%error, "the clipboard write did not go through");
     }
+}
+
+/// Writes the drafts file when the snapshot changed, and removes it when the
+/// snapshot is empty.
+///
+/// Every pass rather than on park or send: `resume_draft` moves the entry out
+/// of the map into the live line, so a park-only file would go stale the
+/// moment the reader returns to the chat — the snapshot is the parked map
+/// *plus* the live line, compared as a sorted vec with no dirty flag.
+/// Change-gated, so a quiet loop costs one small vec compare per 250 ms tick
+/// and no IO; the file sees at most one atomic rename a tick.
+///
+/// A kill inside the pass between a send and this sync resurrects the sent
+/// text as a draft: the window is one tick wide, the alternative puts IO on
+/// the keystroke path for no measurable gain, and a resurrected sent line is
+/// visible and deletable rather than silent loss.
+///
+/// An empty snapshot removes the file rather than writing an empty payload:
+/// no words means nothing to keep, and logout's `clear` then survives the
+/// passes that follow it instead of being rewritten by them.
+fn sync_drafts(
+    app: &App,
+    file: &DraftFile,
+    last: &mut Option<Vec<(i64, String)>>,
+    account: Option<&str>,
+) {
+    let chat_id = app.conversation.conversation.window.chat_id;
+    let snapshot = app.drafts.snapshot(Some((chat_id, &app.input.line)));
+    if last.as_ref() == Some(&snapshot) {
+        return;
+    }
+    if snapshot.is_empty() {
+        file.clear();
+    } else {
+        file.save(&snapshot, account);
+    }
+    *last = Some(snapshot);
 }
 
 /// The most bytes of escape sequence this will write for a clipboard.
@@ -533,6 +597,79 @@ mod tests {
                 .push((chat_id, message_id));
             std::future::ready(Ok(vec![0xDE, 0xAD]))
         }
+    }
+
+    // ---- the drafts sync --------------------------------------------------
+
+    /// A loop pass writes the snapshot on change, skips a quiet pass, and
+    /// removes the file when nothing is left — the whole per-tick contract
+    /// without a terminal or a tick.
+    #[test]
+    fn the_sync_writes_on_change_skips_quiet_passes_and_removes_when_empty() {
+        use std::borrow::Cow;
+
+        use domain::chat::{Chat, ChatKind};
+        use domain::message::{Message, MessageStatus};
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = DraftFile::new(dir.path().join("televim.drafts.json"));
+
+        let mut app = App::new();
+        app.set_chats(vec![Chat {
+            id: 7,
+            title: "seven".to_owned(),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+        }]);
+        app.select_chat(0);
+        app.apply_latest(vec![Message {
+            id: 1,
+            chat_id: 7,
+            text: Cow::Borrowed("first"),
+            timestamp: 1,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+            media: None,
+        }]);
+        app.drafts.restore(vec![(7, "unsent".to_owned())]);
+
+        let mut last: Option<Vec<(i64, String)>> = None;
+        sync_drafts(&app, &file, &mut last, Some("+1555"));
+        assert_eq!(
+            file.load().drafts,
+            vec![(7, "unsent".to_owned())],
+            "the first pass writes what the launch loaded"
+        );
+
+        let before = std::fs::read(dir.path().join("televim.drafts.json"))
+            .expect("the file the first pass wrote");
+        sync_drafts(&app, &file, &mut last, Some("+1555"));
+        let after =
+            std::fs::read(dir.path().join("televim.drafts.json")).expect("the file is still there");
+        assert_eq!(before, after, "a quiet pass writes nothing");
+
+        // Empty the map the way a send does: the entry leaves, the line is
+        // already empty, and the snapshot is nothing.
+        let mut empty = App::new();
+        empty.set_chats(vec![Chat {
+            id: 7,
+            title: "seven".to_owned(),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+        }]);
+        empty.select_chat(0);
+        sync_drafts(&empty, &file, &mut last, Some("+1555"));
+        assert!(
+            !dir.path().join("televim.drafts.json").exists(),
+            "no words means no file, so logout's clear survives later passes"
+        );
     }
 
     /// The escape sequence is written to a real terminal, so the parts of it that

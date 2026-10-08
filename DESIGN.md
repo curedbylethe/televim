@@ -885,12 +885,16 @@ regressing.
    sit a jump in flight, the full reason a failed message failed, and then
    whatever was last written to the status.
 
-   **Above all of them is a keystroke inside the line.** A key being pressed
+   **Above all of them is a keystroke inside the line — all but a sign-in
+   refusal, which outranks even the hint.** A key being pressed
    cannot be answered by a sentence about a state the reader is in the middle of
-   changing, so the hint wins. The full order, highest first:
+   changing, so the hint wins; a refusal is Telegram's answer about the value
+   just typed, and a reader who cannot see it types the same one again. The
+   full order, highest first:
 
    | Rank | What it says | Example |
    | ---: | :----------- | :------ |
+   | 0 | a sign-in refusal — above even the line's hint | `that code is not the one Telegram sent` |
    | 1 | a key inside the line — the line's own hint | ` i/a: ins  w/b/e  …` |
    | 2 | a confirmation | `Quit televim? (y/n)` |
    | 3 | a selection, **with its unit** | `2 message(s) selected — Esc clears`, or `3 row(s) selected — Esc clears` on a card |
@@ -900,6 +904,13 @@ regressing.
    | 7 | why the message under the cursor failed | the send's own reason |
    | 8 | a `flash` — a refusal, a status worth reading | anything just written |
    | 9 | the hint, or `televim` | the resting state. The editable profile and both cards use their own hint here, not `televim` |
+
+   Beside the ranking, always drawn: a `●` in the connection's colour — green
+   while the feed delivers, yellow while a bring-up or a rebuild is under way,
+   red once the budget is spent. It is not a rank, so whatever sentence wins
+   above still says what happened in words, and the dot still says which of
+   the four holds. A selection or a confirmation hiding the retry sentence
+   hides nothing the dot was saying.
 
    Rank 6 is one rank with three sentences, because a jump in flight is one kind of
    state and the sentence names where it is going; see *Jump to the quoted message*.

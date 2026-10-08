@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::app::{FLASH_FOR, Focus, Mode, Pane};
 use crate::bidi::BidiMode;
+use crate::state::connection::ConnectionState;
 use crate::theme::Theme;
 
 /// How many message rows the conversation panel is assumed to have before it
@@ -89,6 +90,15 @@ pub struct UiState {
     pub status: String,
     pub should_quit: bool,
 
+    /// What the network has last told the screen about the connection.
+    ///
+    /// A plain field beside [`Self::status`] rather than derived from it,
+    /// because the sentence and the state answer different questions: the
+    /// sentence says what happened, and this says which of the four holds. Set
+    /// from `app`, through [`Self::set_connection`], beside the sentence for
+    /// the same event — nowhere else.
+    pub connection: ConnectionState,
+
     /// When a transient status stops applying, if it is transient.
     pub(crate) status_until: Option<Instant>,
 
@@ -147,6 +157,7 @@ impl UiState {
             pane: Pane::Conversation,
             status: IDLE_STATUS.to_string(),
             should_quit: false,
+            connection: ConnectionState::Connecting,
             status_until: None,
             typing_until: None,
             bidi: BidiMode::Terminal,
@@ -285,6 +296,16 @@ impl UiState {
     /// hold the owned sentence rather than a borrowed one.
     pub(crate) fn set_status(&mut self, status: String) {
         self.status = status;
+    }
+
+    /// Records what the network last told the screen about the connection.
+    ///
+    /// The one writer of [`Self::connection`], and `pub` because the writer is
+    /// `app`'s `net::apply` rather than anything in this crate: the transition
+    /// belongs beside the sentence for the same event, and that sentence is
+    /// written on the other side of the boundary.
+    pub fn set_connection(&mut self, connection: ConnectionState) {
+        self.connection = connection;
     }
 
     /// Records how many message rows the conversation panel has room for.
