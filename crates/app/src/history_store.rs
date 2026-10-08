@@ -22,7 +22,7 @@
 //! terminal, which this program is drawing on.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use domain::history::CONVERSATION_WINDOW;
 use domain::message::{MediaKind, Message, MessageStatus};
+use domain::updates::UpdateEvent;
 use serde::{Deserialize, Serialize};
 
 /// How many messages of one conversation the file keeps.
@@ -85,9 +86,47 @@ impl LoadedHistory {
 ///
 /// A `BTreeMap` for the drafts file's reason: the same cache always
 /// serialises to the same bytes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct HistoryCache {
     peers: BTreeMap<i64, Vec<CachedMessage>>,
+
+    /// What this session's update feed has said about the cached runs.
+    feed: FeedMarks,
+}
+
+/// Two caches are equal when they would write the same file: the feed marks
+/// belong to the session that made them, are never written, and a cache
+/// loaded from disk has none.
+impl PartialEq for HistoryCache {
+    fn eq(&self, other: &Self) -> bool {
+        self.peers == other.peers
+    }
+}
+
+impl Eq for HistoryCache {}
+
+/// What the update feed has said about each peer's cached run since it was
+/// last whole, which is what decides whether a new message may join the run.
+///
+/// **Memory only.** A mark is a claim about a feed — that nothing it carried
+/// for the peer has been missed — and the next launch has a different feed.
+#[derive(Debug, Clone, Default)]
+struct FeedMarks {
+    /// The peers whose cached run is known to end at their newest message: a
+    /// newest page has landed for each since the feed was last interrupted,
+    /// reaching at least as far as anything [`FeedMarks::seen`] holds.
+    current: BTreeSet<i64>,
+
+    /// The newest identifier each peer has been seen to reach outside a page
+    /// — an arrival over the feed, or a send the server numbered — whether or
+    /// not it was cached.
+    ///
+    /// What lets a page be told apart from one the feed has overtaken: a page
+    /// fetched just before a message arrived does not carry it, and a run it
+    /// lands as would end short of the newest while looking current. Kept
+    /// across an interruption, because a message seen is a message that
+    /// exists whichever feed carried it.
+    seen: BTreeMap<i64, i64>,
 }
 
 impl HistoryCache {
@@ -185,6 +224,14 @@ impl HistoryCache {
     /// be a fetch that short-circuited as a conversation that was cleared, and
     /// wiping the cache on the strength of it would throw away a launch's
     /// head start for nothing.
+    ///
+    /// **What a page says about the feed.** A latest page that lands is what
+    /// makes `peer`'s run current for [`HistoryCache::arrive`] — unless the
+    /// feed has already shown a message newer than the run now ends at, in
+    /// which case the page was fetched before that message and any page that
+    /// leaves the run there takes the mark away: the message is real, the
+    /// run no longer holds it, and a later arrival appended past it would hide
+    /// the hole.
     pub(crate) fn merge(&mut self, peer: i64, page: &[Message], kind: PageKind) -> bool {
         let mut fresh: Vec<CachedMessage> = page
             .iter()
@@ -243,11 +290,159 @@ impl HistoryCache {
         let excess = merged.len().saturating_sub(HISTORY_CACHE_DEPTH);
         merged.drain(..excess);
 
+        // Decided before the no-change answer below: a latest page identical
+        // to the run still shows the run is current.
+        if let Some(newest) = merged.last().map(|row| row.id) {
+            if self.feed.seen.get(&peer).is_some_and(|&seen| newest < seen) {
+                self.feed.current.remove(&peer);
+            } else if matches!(kind, PageKind::Latest { .. }) {
+                self.feed.current.insert(peer);
+            }
+        }
+
         if cached == Some(&merged) {
             return false;
         }
         self.peers.insert(peer, merged);
         true
+    }
+
+    /// Folds an event from the update feed into what is cached, and says
+    /// whether anything changed.
+    ///
+    /// Each rule keeps [`HistoryCache::merge`]'s promise — one unbroken run
+    /// per peer, ending at its newest message:
+    ///
+    /// * An edit replaces the text of a cached message where it stands, and
+    ///   is ignored for one that is not cached: it moves nothing.
+    /// * A deletion removes the messages from **every** peer, because it
+    ///   names none — [`UpdateEvent::MessagesDeleted`] says why it cannot —
+    ///   and the identifiers of private conversations are one sequence, so
+    ///   they cannot match another peer's messages. A run with messages taken
+    ///   out of it has no hole the conversation does not have.
+    /// * A new message goes through [`HistoryCache::arrive`], which adds it
+    ///   only to a run known to be current.
+    ///
+    /// The rest change nothing a row holds: a read receipt is a watermark on
+    /// the conversation, and a row's status is its direction alone; typing
+    /// and presence are not messages at all.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "built ahead of the feed hook that calls it")
+    )]
+    pub(crate) fn apply_update(&mut self, event: &UpdateEvent) -> bool {
+        match event {
+            UpdateEvent::NewMessage(message) => self.arrive(message),
+            UpdateEvent::MessageEdited {
+                chat_id,
+                message_id,
+                new_text,
+            } => self.edit(*chat_id, *message_id, new_text),
+            UpdateEvent::MessagesDeleted { message_ids } => self.delete(message_ids),
+            UpdateEvent::ReadReceipt { .. }
+            | UpdateEvent::PeerTyping { .. }
+            | UpdateEvent::PeerStatus { .. } => false,
+        }
+    }
+
+    /// Adds a message that has just come into being — an arrival over the
+    /// feed, or a send the server has numbered — and says whether anything
+    /// changed.
+    ///
+    /// **Only to a current run.** A run loaded from disk, or one the feed has
+    /// been interrupted behind, may end well short of the conversation's
+    /// newest message, and appending past that end would hide everything in
+    /// between: yesterday's run ending at 100 with 150 added is a cache that
+    /// claims 101 to 149 never existed. Such a run is left as it is, stale but
+    /// unbroken, and the next latest page brings it up to date. Either way the
+    /// message is noted as seen, which is what keeps a page fetched before it
+    /// from marking the run current.
+    ///
+    /// Inserted where its identifier puts it rather than appended, because a
+    /// send's answer and the feed travel apart and either can come first; one
+    /// already cached is replaced by this copy, and one older than the whole
+    /// run is outside it and ignored. Placeholders never enter, for
+    /// [`HistoryCache::put`]'s reason, and the newest [`HISTORY_CACHE_DEPTH`]
+    /// are kept.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "built ahead of the feed hook that calls it")
+    )]
+    pub(crate) fn arrive(&mut self, message: &Message) -> bool {
+        if message.id <= 0 {
+            return false;
+        }
+        let peer = message.chat_id;
+        let seen = self.feed.seen.entry(peer).or_insert(message.id);
+        *seen = (*seen).max(message.id);
+        if !self.feed.current.contains(&peer) {
+            return false;
+        }
+
+        let row = CachedMessage::from_message(message);
+        let rows = self.peers.entry(peer).or_default();
+        match rows.binary_search_by_key(&row.id, |cached| cached.id) {
+            Ok(at) if rows[at] == row => return false,
+            Ok(at) => rows[at] = row,
+            Err(0) if !rows.is_empty() => return false,
+            Err(at) => rows.insert(at, row),
+        }
+        let excess = rows.len().saturating_sub(HISTORY_CACHE_DEPTH);
+        rows.drain(..excess);
+        true
+    }
+
+    /// Replaces the text of message `id` of `peer`, if it is cached.
+    fn edit(&mut self, peer: i64, id: i64, text: &str) -> bool {
+        let Some(row) = self
+            .peers
+            .get_mut(&peer)
+            .and_then(|rows| rows.iter_mut().find(|row| row.id == id))
+        else {
+            return false;
+        };
+        if row.text == text {
+            return false;
+        }
+        text.clone_into(&mut row.text);
+        true
+    }
+
+    /// Takes the messages `ids` out of every peer.
+    ///
+    /// A current run that loses the newest message the feed showed is still
+    /// current — the deletion is the conversation's own — so what it now ends
+    /// at becomes the newest seen, or a later page ending there would read as
+    /// one the feed had overtaken.
+    fn delete(&mut self, ids: &[i64]) -> bool {
+        let FeedMarks { current, seen } = &mut self.feed;
+        let mut changed = false;
+        self.peers.retain(|peer, rows| {
+            let before = rows.len();
+            rows.retain(|row| !ids.contains(&row.id));
+            if rows.len() != before {
+                changed = true;
+                if current.contains(peer) && seen.get(peer).is_some_and(|id| ids.contains(id)) {
+                    match rows.last() {
+                        Some(row) => seen.insert(*peer, row.id),
+                        None => seen.remove(peer),
+                    };
+                }
+            }
+            !rows.is_empty()
+        });
+        changed
+    }
+
+    /// Forgets which runs are current, because the feed may have missed
+    /// something: it ended, it read past a failure, or the client under it was
+    /// replaced. Every run is then stale until its next latest page.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "built ahead of the feed hook that calls it")
+    )]
+    pub(crate) fn feed_interrupted(&mut self) {
+        self.feed.current.clear();
     }
 }
 
@@ -1083,6 +1278,262 @@ mod tests {
 
         assert!(cache.merge(PEER, &page([3, 1, 2, 3]), LATEST));
         assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
+    }
+
+    // ---- folding in the feed ---------------------------------------------
+
+    /// A cache whose run for [`PEER`] is `ids`, made current the way the loop
+    /// makes it: by a latest page landing.
+    fn current(ids: impl IntoIterator<Item = i64>) -> HistoryCache {
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(ids), LATEST));
+        cache
+    }
+
+    fn arrival(id: i64) -> UpdateEvent {
+        UpdateEvent::NewMessage(message(id, PEER, "new"))
+    }
+
+    fn edit(chat_id: i64, message_id: i64, text: &'static str) -> UpdateEvent {
+        UpdateEvent::MessageEdited {
+            chat_id,
+            message_id,
+            new_text: Cow::Borrowed(text),
+        }
+    }
+
+    fn deletion(ids: &[i64]) -> UpdateEvent {
+        UpdateEvent::MessagesDeleted {
+            message_ids: ids.to_vec(),
+        }
+    }
+
+    #[test]
+    fn an_edit_replaces_the_cached_text_in_place() {
+        let mut cache = cached(1..=3);
+
+        assert!(cache.apply_update(&edit(PEER, 2, "edited")));
+        let read = cache.get(PEER);
+        assert_eq!(ids(&read), vec![1, 2, 3]);
+        assert_eq!(&*read[1].text, "edited");
+
+        assert!(
+            !cache.apply_update(&edit(PEER, 2, "edited")),
+            "the same text again changes nothing"
+        );
+    }
+
+    #[test]
+    fn an_edit_of_a_message_not_cached_changes_nothing() {
+        let mut cache = cached(1..=3);
+        let before = cache.clone();
+
+        assert!(!cache.apply_update(&edit(PEER, 9, "edited")), "not cached");
+        assert!(
+            !cache.apply_update(&edit(99, 2, "edited")),
+            "the id is cached, but under another conversation"
+        );
+        assert_eq!(cache, before);
+    }
+
+    #[test]
+    fn a_deletion_names_no_peer_and_removes_from_every_one() {
+        let mut cache = cached(1..=3);
+        cache.put(
+            30,
+            &[message(4, 30, "elsewhere"), message(5, 30, "elsewhere")],
+        );
+
+        assert!(cache.apply_update(&deletion(&[2, 4])));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 3]);
+        assert_eq!(ids(&cache.get(30)), vec![5]);
+
+        assert!(!cache.apply_update(&deletion(&[42])), "nothing cached");
+
+        assert!(cache.apply_update(&deletion(&[1, 3])));
+        assert!(cache.get(PEER).is_empty());
+        assert_eq!(
+            cache,
+            {
+                let mut left = HistoryCache::default();
+                left.put(30, &[message(5, 30, "elsewhere")]);
+                left
+            },
+            "an emptied peer is no entry"
+        );
+    }
+
+    #[test]
+    fn a_new_message_joins_a_run_a_latest_page_made_current() {
+        let mut cache = current(1..=3);
+
+        assert!(cache.apply_update(&arrival(4)));
+        assert!(cache.apply_update(&arrival(6)));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3, 4, 6]);
+    }
+
+    /// Yesterday's run, as the file restores it: a message now is no proof
+    /// that nothing came between, so it is left out.
+    #[test]
+    fn a_new_message_is_ignored_while_the_run_is_not_known_current() {
+        let mut cache = cached(1..=100);
+        let before = cache.clone();
+
+        assert!(!cache.apply_update(&arrival(150)));
+        assert_eq!(cache, before);
+
+        let mut cache = HistoryCache::default();
+        assert!(
+            !cache.apply_update(&arrival(150)),
+            "nor does one start a run of its own"
+        );
+        assert_eq!(cache, HistoryCache::default());
+
+        let mut cache = cached(1..=3);
+        assert!(
+            !cache.merge(PEER, &page([2, 3]), PageKind::Around,),
+            "only a latest page speaks for the newest end"
+        );
+        assert!(!cache.apply_update(&arrival(4)));
+    }
+
+    #[test]
+    fn an_empty_latest_page_does_not_make_a_run_current() {
+        let mut cache = cached(1..=3);
+
+        assert!(!cache.merge(PEER, &[], LATEST));
+        assert!(!cache.apply_update(&arrival(9)));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
+    }
+
+    /// A latest page fetched just before a message arrived does not carry it,
+    /// so the run it lands as is not current — or the next arrival would be
+    /// appended past the one it missed.
+    #[test]
+    fn a_latest_page_the_feed_has_overtaken_is_not_current() {
+        let mut cache = HistoryCache::default();
+        assert!(
+            !cache.apply_update(&arrival(4)),
+            "seen while nothing is current"
+        );
+
+        assert!(cache.merge(PEER, &page(1..=3), LATEST));
+        assert!(!cache.apply_update(&arrival(5)), "4 is missing below it");
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
+
+        assert!(cache.merge(PEER, &page(1..=5), LATEST));
+        assert!(
+            cache.apply_update(&arrival(6)),
+            "a page that reached 5 is current"
+        );
+        assert_eq!(ids(&cache.get(PEER)), (1..=6).collect::<Vec<_>>());
+    }
+
+    /// A stale page that drops what the feed added leaves the run short of a
+    /// message that exists, so it is no longer current.
+    #[test]
+    fn a_page_that_drops_a_fed_message_takes_the_mark_away() {
+        let mut cache = current(1..=3);
+        assert!(cache.apply_update(&arrival(4)));
+
+        assert!(cache.merge(PEER, &page(1..=3), LATEST));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
+        assert!(!cache.apply_update(&arrival(5)));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
+    }
+
+    /// Deleting the newest message is the conversation's own doing, and a run
+    /// that matches it is still current.
+    #[test]
+    fn deleting_the_newest_message_keeps_the_run_current() {
+        let mut cache = current(1..=3);
+        assert!(cache.apply_update(&arrival(4)));
+        assert!(cache.apply_update(&deletion(&[4])));
+
+        assert!(!cache.merge(PEER, &page(1..=3), LATEST), "the same run");
+        assert!(cache.apply_update(&arrival(5)));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn an_interrupted_feed_leaves_every_run_stale_until_its_next_latest_page() {
+        let mut cache = current(1..=3);
+
+        cache.feed_interrupted();
+        assert!(!cache.apply_update(&arrival(4)));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
+
+        assert!(cache.merge(PEER, &page(1..=4), LATEST));
+        assert!(cache.apply_update(&arrival(5)));
+        assert_eq!(ids(&cache.get(PEER)), (1..=5).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_arrival_lands_where_its_id_puts_it_once() {
+        let mut cache = current([10, 12]);
+
+        assert!(
+            cache.apply_update(&arrival(11)),
+            "a send's answer came first"
+        );
+        assert_eq!(ids(&cache.get(PEER)), vec![10, 11, 12]);
+
+        assert!(!cache.apply_update(&arrival(11)), "the same copy again");
+        let mut edited = message(11, PEER, "the feed's copy");
+        edited.is_outgoing = true;
+        assert!(cache.arrive(&edited), "a different copy replaces it");
+        assert_eq!(ids(&cache.get(PEER)), vec![10, 11, 12]);
+        assert_eq!(&*cache.get(PEER)[1].text, "the feed's copy");
+
+        assert!(
+            !cache.apply_update(&arrival(9)),
+            "older than the whole run is outside it"
+        );
+        assert_eq!(ids(&cache.get(PEER)), vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn a_placeholder_never_arrives() {
+        let mut cache = current(1..=3);
+        let before = cache.clone();
+
+        assert!(!cache.apply_update(&arrival(0)));
+        assert!(!cache.apply_update(&arrival(-4)));
+        assert_eq!(cache, before);
+    }
+
+    #[test]
+    fn an_arrival_into_a_full_run_drops_the_oldest() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let mut cache = current(1..=depth);
+
+        assert!(cache.apply_update(&arrival(depth + 1)));
+        let kept = ids(&cache.get(PEER));
+        assert_eq!(kept.len(), HISTORY_CACHE_DEPTH);
+        assert_eq!(kept.first(), Some(&2));
+        assert_eq!(kept.last(), Some(&(depth + 1)));
+    }
+
+    #[test]
+    fn events_that_are_not_about_a_message_change_nothing() {
+        let mut cache = current(1..=3);
+
+        for event in [
+            UpdateEvent::ReadReceipt {
+                chat_id: PEER,
+                max_id: 3,
+            },
+            UpdateEvent::PeerTyping {
+                chat_id: PEER,
+                typing: true,
+            },
+            UpdateEvent::PeerStatus {
+                chat_id: PEER,
+                presence: domain::presence::Presence::Online,
+            },
+        ] {
+            assert!(!cache.apply_update(&event), "{event:?}");
+        }
     }
 
     /// A hand-written peer deeper than the cap is cut on load, oldest first.
