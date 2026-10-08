@@ -46,6 +46,7 @@ ratatui.workspace = true
 # The integration tests keep their session in a scratch file, so a run never
 # touches the developer's own.
 tempfile.workspace = true
+termlens.workspace = true
 
 [lints]
 workspace = true

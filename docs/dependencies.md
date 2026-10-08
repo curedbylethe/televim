@@ -74,12 +74,12 @@ Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 
 | `tempfile` | Dev-only. |
 | `static_assertions` | Dev-only. Compile-time assertions, used to lock the "a login token cannot be cloned or reused" guarantee with the compiler rather than with a convention. |
+| `termlens` | Dev-only. Runs the `televim` binary in a pseudo-terminal for the PTY integration tests in `app/tests/tui_e2e.rs`. Default features, which pull `insta` for screen snapshots. |
 
 ### Declared but not depended on
 
-`criterion`, `bumpalo`, `termlens` and `ratatui-testlib` are **not** dependencies.
-Widget tests use `ratatui`'s own `TestBackend`; there are no benchmarks; and
-`app/tests/tui_e2e.rs` is waiting on `termlens` before any of it can run. See
+`criterion`, `bumpalo` and `ratatui-testlib` are **not** dependencies.
+Widget tests use `ratatui`'s own `TestBackend`, and there are no benchmarks. See
 [`testing.md`](./testing.md).
 
 `tikv-jemallocator` is in that state too, and was there until it was removed: it

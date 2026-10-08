@@ -92,6 +92,9 @@ tempfile = "3"
 # Compile-time assertions. Used to lock the "a login token cannot be cloned or
 # reused" guarantee with the compiler rather than with a convention.
 static_assertions = "1.1"
+# Drives the televim binary in a pseudo-terminal for the PTY integration tests
+# in `app/tests/tui_e2e.rs`. Dev-only: no crate's `[dependencies]` names it.
+termlens = "0.11.5"
 
 # Internal crates
 domain = { path = "crates/domain" }
