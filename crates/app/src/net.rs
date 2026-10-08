@@ -491,8 +491,8 @@ pub struct State {
     /// `None` wherever no loop set one, which is every test.
     draft_file: Option<DraftFile>,
 
-    /// Where read messages live on disk: written behind every page that
-    /// changes [`State::cached`], and removed on sign-out.
+    /// Where read messages live on disk: written behind every page or feed
+    /// event that changes [`State::cached`], and removed on sign-out.
     ///
     /// Set by the loop beside [`State::draft_file`], and `None` in the same
     /// places for the same reason — with no file the cache is kept in memory
@@ -624,6 +624,31 @@ impl State {
         }
     }
 
+    /// Folds an event from the feed into the cache, and marks the cache for
+    /// writing if the event changed it.
+    ///
+    /// Whatever conversation is on screen: the cache keeps every peer, and an
+    /// edit to one the reader is not looking at is still the newest word on
+    /// it.
+    fn remember_update(&mut self, event: &UpdateEvent) {
+        if self.cached.messages.apply_update(event) {
+            self.cached.dirty = true;
+        }
+    }
+
+    /// Folds a send the server has numbered into the cache, the way the same
+    /// message arriving over the feed would be.
+    ///
+    /// Its own path because the answer is the one place a send's real
+    /// identifier is sure to reach: the feed may or may not carry the same
+    /// message back, and when it does the copy lands on the same row. The
+    /// placeholder it replaces was never cached.
+    fn remember_sent(&mut self, message: &Message) {
+        if self.cached.messages.arrive(message) {
+            self.cached.dirty = true;
+        }
+    }
+
     /// Writes the history cache to its file, if it changed and no write is
     /// still in flight.
     ///
@@ -712,11 +737,12 @@ impl State {
 #[derive(Default)]
 struct CachedHistory {
     /// The messages as the wire has shown them: what the history file was
-    /// loaded into at launch, with every fetched page merged in since.
+    /// loaded into at launch, with every fetched page merged in since and
+    /// every edit, deletion and arrival the feed carried folded in.
     ///
-    /// Held here rather than re-read from the file because every page has to
-    /// merge into what is cached, and the file is only ever this, a write
-    /// behind.
+    /// Held here rather than re-read from the file because every page and
+    /// event has to fold into what is cached, and the file is only ever this,
+    /// a write behind.
     messages: HistoryCache,
 
     /// Whether [`CachedHistory::messages`] has changed since its last
@@ -1825,7 +1851,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
 
-        Event::FeedRetrying(retry) => apply_feed_retrying(app, &retry),
+        Event::FeedRetrying(retry) => {
+            // The feed reads past the failure, so what it failed to deliver
+            // may be gone: no cached run is known current behind it.
+            state.cached.messages.feed_interrupted();
+            apply_feed_retrying(app, &retry);
+        }
 
         Event::FeedEnded => apply_feed_ended(app, state),
 
@@ -1838,6 +1869,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             state.auto_reconnect_used = false;
             // And the connection holds: a working feed is a connected one.
             app.set_connection(ConnectionState::Connected);
+            state.remember_update(&event);
             // Whether it moved anything is not acted on: the loop redraws on
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
@@ -1856,7 +1888,14 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             chat_id,
             temp_id,
             result,
-        } => apply_sent(app, chat_id, temp_id, result),
+        } => {
+            // Cached whether or not the reader is still in the conversation:
+            // the screen drops an answer it has left, the cache does not.
+            if let Ok(message) = &result {
+                state.remember_sent(message);
+            }
+            apply_sent(app, chat_id, temp_id, result);
+        }
 
         Event::Edited {
             chat_id,
@@ -2085,6 +2124,9 @@ fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
 /// so the two cannot disagree about what "reconnecting" looks like.
 fn apply_feed_ended(app: &mut App, state: &mut State) {
     state.reconnect_requested = true;
+    // Whatever arrives before the new feed is up is never seen, so no cached
+    // run is known current until its next newest page.
+    state.cached.messages.feed_interrupted();
     // Persistent rather than a flash, for the same reason as the retry
     // sentence: a pending flash deadline must not take it down.
     app.set_status("reconnecting");
@@ -2143,6 +2185,11 @@ fn apply_ready_to_screen(
     // gate all described the list and the feed that are gone, and holding them
     // makes `wanted` fall to a paging direction whose page can never arrive
     // (G5), because the preserved window is not empty.
+    // The cache's word that a run is current was a word about the old feed,
+    // and this client brings a new one: forgotten for every peer, so each is
+    // trusted again only once its next newest page lands — which, for the
+    // conversation on show, the reset below asks for at once.
+    state.cached.messages.feed_interrupted();
     let restored = if app.conversation.conversation.window.chat_id != 0 {
         state.history.cursor = None;
         state.history.jump = None;
@@ -3868,6 +3915,173 @@ mod tests {
         assert!(cached_ids(&state).is_empty(), "nothing left to seed from");
         assert!(!state.cached.dirty, "and nothing owed to the file");
         assert!(!path.exists(), "nor written back after the removal");
+    }
+
+    // ---- the feed into the cache ------------------------------------------
+
+    /// [`CHAT`] open with its newest page, `1..=3`, landed — so its cached run
+    /// is current — and nothing owed to the file yet.
+    fn current_state() -> (App, State) {
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=3),
+        );
+        state.cached.dirty = false;
+        (app, state)
+    }
+
+    fn arrives(app: &mut App, state: &mut State, id: i64) {
+        apply(
+            app,
+            state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, id..=id).remove(0))),
+        );
+    }
+
+    /// Edits and deletions are safe on any run, so they reach one the wire
+    /// has not confirmed this session: here, one restored from the file.
+    #[test]
+    fn feed_edits_and_deletions_reach_the_cache_and_owe_a_write() {
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = state_caching(CHAT, 1..=3);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::MessageEdited {
+                chat_id: CHAT,
+                message_id: 2,
+                new_text: Cow::Borrowed("edited"),
+            }),
+        );
+        assert_eq!(&*state.cached_history(CHAT)[1].text, "edited");
+        assert!(state.cached.dirty, "the edit is owed to the file");
+
+        state.cached.dirty = false;
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::MessagesDeleted {
+                message_ids: vec![1],
+            }),
+        );
+        assert_eq!(cached_ids(&state), vec![2, 3]);
+        assert!(state.cached.dirty, "the deletion is owed to the file");
+    }
+
+    #[test]
+    fn a_feed_arrival_joins_the_cache_once_the_newest_page_has_landed() {
+        let (mut app, mut state) = current_state();
+
+        arrives(&mut app, &mut state, 4);
+
+        assert_eq!(cached_ids(&state), vec![1, 2, 3, 4]);
+        assert!(state.cached.dirty);
+    }
+
+    /// A run restored from the file may end long before the newest message,
+    /// so an arrival is not appended to it.
+    #[test]
+    fn a_feed_arrival_is_left_out_of_a_run_not_confirmed_this_session() {
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = state_caching(CHAT, 1..=3);
+
+        arrives(&mut app, &mut state, 10);
+
+        assert_eq!(cached_ids(&state), vec![1, 2, 3]);
+        assert!(!state.cached.dirty, "nothing changed, nothing owed");
+    }
+
+    /// A send's answer carries its real identifier, and that is what is
+    /// cached; the placeholder it replaces never was.
+    #[test]
+    fn a_send_the_server_numbered_joins_a_current_cache() {
+        let (mut app, mut state) = current_state();
+        let mut sent = messages(CHAT, 4..=4).remove(0);
+        sent.is_outgoing = true;
+        sent.status = MessageStatus::Sent;
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Sent {
+                chat_id: CHAT,
+                temp_id: -1,
+                result: Ok(sent),
+            },
+        );
+
+        assert_eq!(cached_ids(&state), vec![1, 2, 3, 4]);
+        assert!(state.cached_history(CHAT)[3].is_outgoing);
+        assert!(state.cached.dirty);
+    }
+
+    /// The feed ending, reading past a failure, or a new client coming up
+    /// each may have missed a message, so no run is current behind them —
+    /// until the next newest page lands.
+    #[test]
+    fn an_interrupted_feed_forgets_which_runs_are_current() {
+        type Interrupt = fn(&mut App, &mut State);
+        let interruptions: [(&str, Interrupt); 3] = [
+            ("the feed ended", |app, state| {
+                apply(app, state, Event::FeedEnded);
+            }),
+            ("the feed read past a failure", |app, state| {
+                apply(
+                    app,
+                    state,
+                    Event::FeedRetrying(FeedRetry {
+                        reason: ProtoError::Framework(FrameworkError::UnknownPeer(CHAT)),
+                        delay: RETRY,
+                        attempt: 1,
+                        attempts: CHAT_LIST_ATTEMPTS,
+                    }),
+                );
+            }),
+            ("a client came up", |app, state| {
+                apply_ready_to_screen(
+                    app,
+                    state,
+                    vec![chat(CHAT)],
+                    Ok(domain::account::Account::default()),
+                    tui::SessionStore::Keyring,
+                );
+            }),
+        ];
+
+        for (what, interrupt) in interruptions {
+            let (mut app, mut state) = current_state();
+
+            interrupt(&mut app, &mut state);
+            arrives(&mut app, &mut state, 4);
+
+            assert_eq!(cached_ids(&state), vec![1, 2, 3], "{what}");
+            assert!(!state.cached.dirty, "{what}");
+        }
+
+        let (mut app, mut state) = current_state();
+        apply(&mut app, &mut state, Event::FeedEnded);
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=4),
+        );
+        arrives(&mut app, &mut state, 5);
+        assert_eq!(
+            cached_ids(&state),
+            vec![1, 2, 3, 4, 5],
+            "the next newest page makes the run current again"
+        );
     }
 
     /// Signing out with no drafts file is still a sign-out: `clear` on a

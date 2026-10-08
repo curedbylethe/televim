@@ -326,10 +326,6 @@ impl HistoryCache {
     /// The rest change nothing a row holds: a read receipt is a watermark on
     /// the conversation, and a row's status is its direction alone; typing
     /// and presence are not messages at all.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built ahead of the feed hook that calls it")
-    )]
     pub(crate) fn apply_update(&mut self, event: &UpdateEvent) -> bool {
         match event {
             UpdateEvent::NewMessage(message) => self.arrive(message),
@@ -364,10 +360,6 @@ impl HistoryCache {
     /// run is outside it and ignored. Placeholders never enter, for
     /// [`HistoryCache::put`]'s reason, and the newest [`HISTORY_CACHE_DEPTH`]
     /// are kept.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built ahead of the feed hook that calls it")
-    )]
     pub(crate) fn arrive(&mut self, message: &Message) -> bool {
         if message.id <= 0 {
             return false;
@@ -437,10 +429,6 @@ impl HistoryCache {
     /// Forgets which runs are current, because the feed may have missed
     /// something: it ended, it read past a failure, or the client under it was
     /// replaced. Every run is then stale until its next latest page.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built ahead of the feed hook that calls it")
-    )]
     pub(crate) fn feed_interrupted(&mut self) {
         self.feed.current.clear();
     }
