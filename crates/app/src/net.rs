@@ -307,6 +307,21 @@ pub enum Event {
         result: Result<(), ProtoError>,
     },
 
+    /// A forward came back, or the request failed.
+    Forwarded {
+        /// The conversation the messages were forwarded from.
+        chat_id: i64,
+
+        /// The conversation they were forwarded to.
+        dest_chat_id: i64,
+
+        /// How many messages were asked for.
+        requested: usize,
+
+        /// How many landed on success; the failure otherwise.
+        result: Result<usize, ProtoError>,
+    },
+
     /// A deletion came back, or the request failed.
     Deleted {
         /// The conversation the messages belonged to. Used only to decide
@@ -1796,6 +1811,15 @@ fn request_plain(
                 }));
             }
 
+            Action::Forward {
+                chat_id,
+                message_ids,
+                dest_chat_id,
+            } => {
+                let event = forward(&client, chat_id, message_ids, dest_chat_id).await;
+                let _ = tx.send(AppEvent::Net(event));
+            }
+
             Action::TogglePin { chat_id, pinned } => {
                 let result = client.toggle_pin(chat_id, pinned).await;
                 let _ = tx.send(AppEvent::Net(Event::PinToggled {
@@ -2042,6 +2066,13 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             message_ids,
             result,
         } => apply_deleted(app, chat_id, &message_ids, result),
+
+        Event::Forwarded {
+            chat_id,
+            dest_chat_id,
+            requested,
+            result,
+        } => apply_forwarded(app, chat_id, dest_chat_id, requested, result),
 
         Event::History {
             direction,
@@ -2726,6 +2757,76 @@ fn apply_deleted(app: &mut App, chat_id: i64, message_ids: &[i64], result: Resul
             }
         }
     }
+}
+
+/// Sends a forward and says what came back.
+///
+/// The batch is sent as one call, which the proto wrapper splits; a refusal from
+/// the wire is what the reply carries, not something checked up front.
+async fn forward(
+    client: &ProtoClient,
+    chat_id: i64,
+    message_ids: Vec<i64>,
+    dest_chat_id: i64,
+) -> Event {
+    let requested = message_ids.len();
+    let result = client
+        .forward_messages(chat_id, dest_chat_id, &message_ids)
+        .await;
+    Event::Forwarded {
+        chat_id,
+        dest_chat_id,
+        requested,
+        result,
+    }
+}
+
+/// Reports how a forward went on the status line.
+///
+/// The source and destination are named by title, because the reader thinks of
+/// a conversation by its name and not its identifier.
+fn apply_forwarded(
+    app: &mut App,
+    chat_id: i64,
+    dest_chat_id: i64,
+    requested: usize,
+    result: Result<usize, ProtoError>,
+) {
+    let source = chat_title(app, chat_id);
+    let text = match result {
+        Ok(forwarded) => {
+            let dest = chat_title(app, dest_chat_id);
+            format!("Forwarded {forwarded} message(s) to {dest}")
+        }
+        Err(ProtoError::Framework(FrameworkError::PartialForward { forwarded, .. })) => {
+            format!(
+                "Forwarded {forwarded} of {requested} message(s) from {source}; the rest failed"
+            )
+        }
+        Err(error) if is_forward_refusal(&error) => {
+            format!("{source} does not allow forwarding")
+        }
+        Err(error) => format!("forward: {}", failure_reason(&error)),
+    };
+    app.flash(text);
+}
+
+/// Whether the wire refused the forward because the source is content-protected.
+fn is_forward_refusal(error: &ProtoError) -> bool {
+    matches!(
+        error,
+        ProtoError::Framework(FrameworkError::Request(RequestError::Rpc { name, .. }))
+            if name == "CHAT_FORWARDS_RESTRICTED"
+    )
+}
+
+/// The title of a conversation on the chat list, or its identifier if the list
+/// does not hold it.
+fn chat_title(app: &App, chat_id: i64) -> String {
+    app.chats()
+        .iter()
+        .find(|chat| chat.id == chat_id)
+        .map_or_else(|| format!("chat {chat_id}"), |chat| chat.title.clone())
 }
 
 /// How many identifiers a failed deletion had already removed, if it had got

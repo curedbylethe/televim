@@ -798,6 +798,18 @@ pub enum Action {
         message_ids: Vec<i64>,
     },
 
+    /// Forward messages from `chat_id` to `dest_chat_id`.
+    Forward {
+        /// The conversation the messages come from.
+        chat_id: i64,
+
+        /// The messages to forward, in the order they are to arrive.
+        message_ids: Vec<i64>,
+
+        /// The conversation to forward them to.
+        dest_chat_id: i64,
+    },
+
     /// Read the profile of the peer with this bare identifier.
     ///
     /// A question rather than a fetch, for the same reason as [`Action::Search`]:
