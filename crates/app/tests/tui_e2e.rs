@@ -1,12 +1,23 @@
-//! PTY-based E2E tests for the TUI.
+//! PTY end-to-end tests: the real `televim` binary runs in a pseudo-terminal
+//! driven by `termlens`, and each test asserts on the screen it draws.
 //!
-//! These are gated on `termlens`, which is not yet wired up. Once it is,
-//! remove the `#[ignore]`s and add `termlens` as a dev-dependency of this
-//! crate.
+//! Run policy: these are ordinary tests with no `#[ignore]`. `make test` and
+//! CI's `cargo test --all --all-features` run them on every job. They need a
+//! pty and nothing else: no network, no credentials.
+//!
+//! Harness (`common/mod.rs`): `sandbox()` makes a temporary config directory,
+//! `seed_history()` writes a `history.json` beside it so cached chats are on
+//! screen before the first frame, and `spawn_offline()` launches the binary
+//! from `CARGO_BIN_EXE_televim`. Assert with `wait_until` on positive
+//! predicates, or `snapshot_after` when the screen text is needed.
+//!
+//! Deferred: AC5–AC7 (an arrival moving a pinned view, an arrival leaving a
+//! scrolled-back view alone, a fetch in flight shown at its edge) stay
+//! `#[ignore]`d with reasons. Nothing offline can inject an arrival or start a
+//! fetch; see `docs/known-gaps.md`.
 //!
 //! Sending, editing and deleting are covered by unit tests and by the
-//! `TestBackend` assertions in `tui`'s conversation panel; their keystroke
-//! flows through a real terminal wait on `termlens` like the rest.
+//! `TestBackend` assertions in `tui`'s conversation panel.
 
 mod common;
 

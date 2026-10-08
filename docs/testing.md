@@ -129,13 +129,20 @@ below.
   fallbacks (miss, corrupt bytes, caption, flag off), and the fetch drain — a
   counting test double stands in for `download_media`, so inline drains and
   settles while `off` performs zero traffic. All of those run on every job.
-- **TUI E2E Tests:** `app/tests/tui_e2e.rs` holds seven `#[ignore]`d
-  placeholders describing what a PTY harness should assert — the screen after
-  launch, typing, `:q`, scrolling, and an arrival moving a pinned view. **None of
-  them run**: `termlens` is not a dev-dependency, and the test bodies are `TODO`
-  comments. Keystroke and rendering coverage today comes from the unit tests and
-  the `TestBackend` assertions in `tui`'s conversation panel. Wiring this up means
-  adding `termlens` to `app` and filling the bodies in.
+- **TUI E2E Tests:** `app/tests/tui_e2e.rs` runs the `televim` binary in a pty
+  through `termlens` and asserts on the screen: the chat list after launch, a
+  seeded cache drawn before the first frame, typing in INSERT, `:q` quitting, and
+  Ctrl-u/Ctrl-d moving the conversation's visible slice. **Run policy:** these are
+  not `#[ignore]`d; `make test` and CI's `cargo test --all --all-features` run them
+  on every job. They need a pty, not a network or credentials. **File map:** the
+  tests are in `tui_e2e.rs`; the helpers (`sandbox`, `seed_history`,
+  `spawn_offline`) are in `app/tests/common/mod.rs`. Three cases stay `#[ignore]`d
+  with reasons, AC5–AC7 (an arrival moving a pinned view, an arrival leaving a
+  scrolled-back view alone, a fetch in flight shown at its edge), because nothing
+  offline can inject an arrival or start a fetch; see
+  [`known-gaps.md`](./known-gaps.md). Their bodies are empty, so
+  `--include-ignored` passes them without proving anything. Rendering of other
+  keystroke flows is still covered by `tui`'s `TestBackend` tests.
 - **Memory Verification:** implemented as `make measure`, not as part of `ci`.
   The driver (`scripts/memory/measure.py`) builds the release binary and
   `crates/app/examples/memory_harness.rs`, runs the harness five times, launches
