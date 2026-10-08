@@ -62,6 +62,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tui::app::{Action, App, FetchDirection, Jump, LoginField};
 
 use crate::config::Config;
+use crate::draft_store::DraftFile;
 use crate::runtime::AppEvent;
 
 /// How many messages one page holds.
@@ -445,6 +446,13 @@ pub struct State {
     /// Where the session went, once bring-up has said so.
     session_store: Option<tui::SessionStore>,
 
+    /// Where unsent words live on disk, so signing out can remove them.
+    ///
+    /// Set by the loop after [`State::new`]: the path is derived from the
+    /// configuration path, which `apply` cannot be handed — the loop owns it.
+    /// `None` wherever no loop set one, which is every test.
+    draft_file: Option<DraftFile>,
+
     /// The configuration, and the channel to answer on — the pair bring-up needs
     /// to be run again.
     ///
@@ -527,6 +535,15 @@ impl State {
     /// again on the next pass gets `false` rather than a second bring-up.
     fn take_reconnect_request(&mut self) -> bool {
         std::mem::take(&mut self.reconnect_requested)
+    }
+
+    /// Points sign-out at the drafts file, so it can remove it.
+    ///
+    /// A setter rather than a third `new` parameter: unlike `cfg` and `tx`
+    /// this one is read apart from them, only on the logout path, and every
+    /// existing caller builds a loop-less state that has no file.
+    pub fn set_draft_file(&mut self, file: DraftFile) {
+        self.draft_file = Some(file);
     }
 }
 
@@ -1419,6 +1436,14 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             // screen ends with it.
             state.client = None;
             app.set_chats(Vec::new());
+            // The words go with the account: a peer id can be reused by
+            // another one, and the in-memory clear above already flows to the
+            // file on the next sync — this removes the file itself, so no
+            // empty payload is left behind. Best-effort: `clear` only warns,
+            // and a failed delete must not fail the logout.
+            if let Some(file) = &state.draft_file {
+                file.clear();
+            }
             // The empty reason is the signed-out *state*, not a missing one: the
             // reader chose this, so a line saying why it could not read a
             // profile would be an excuse nobody asked for.
@@ -3121,6 +3146,45 @@ mod tests {
             state.bringing_up,
             "a `:retry` before the launch answered would be a second client"
         );
+    }
+
+    /// Signing out removes the drafts file, best-effort: the words belong to
+    /// the account that is leaving, and a failed delete still signs out.
+    #[test]
+    fn signing_out_removes_the_drafts_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = DraftFile::new(dir.path().join("televim.drafts.json"));
+        file.save(&[(CHAT, "unsent".to_owned())], Some("+1555"));
+        assert!(dir.path().join("televim.drafts.json").exists());
+
+        let mut app = app_with_a_conversation(CHAT, 2);
+        let mut state = State::default();
+        state.set_draft_file(file);
+        apply_logged_out(&mut app, &mut state, Ok(()));
+
+        assert!(
+            !dir.path().join("televim.drafts.json").exists(),
+            "the words went with the account"
+        );
+        assert_eq!(
+            app.ui.status, "signed out",
+            "and the sign-out itself is unaffected: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// Signing out with no drafts file is still a sign-out: `clear` on a
+    /// missing file succeeds rather than failing the logout.
+    #[test]
+    fn signing_out_without_a_drafts_file_still_signs_out() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+
+        let mut app = app_with_a_conversation(CHAT, 2);
+        let mut state = State::default();
+        state.set_draft_file(DraftFile::new(dir.path().join("televim.drafts.json")));
+        apply_logged_out(&mut app, &mut state, Ok(()));
+
+        assert_eq!(app.ui.status, "signed out");
     }
 
     /// An `offline:` is the end of a bring-up, so the retry the reader types at it
