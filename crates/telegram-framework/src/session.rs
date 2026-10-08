@@ -1770,6 +1770,35 @@ mod tests {
         );
     }
 
+    /// Logout needs both halves at once: the path must be gone, and the bytes
+    /// that were on disk must not survive under a handle that still points at
+    /// them. Each half alone can pass while the other fails, so they are
+    /// asserted together after one `clear()`, and the second `clear()` checks
+    /// that a repeated logout is harmless.
+    #[cfg(unix)]
+    #[test]
+    fn clear_leaves_neither_the_file_nor_its_bytes_behind() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        let store = file_store(&path);
+        store.save(&sample_session()).expect("save succeeds");
+        let mut old = fs::File::open(&path).expect("the saved file opens");
+
+        store.clear().expect("clear succeeds");
+
+        assert!(!path.exists(), "the session file survived clear");
+        store.clear().expect("a second clear succeeds");
+        old.rewind().expect("the old inode rewinds");
+        let mut left = Vec::new();
+        old.read_to_end(&mut left).expect("the old inode reads");
+        assert!(!left.is_empty(), "the held inode should still have length");
+        assert!(
+            left.iter().all(|byte| *byte == 0),
+            "sealed session bytes survived clear"
+        );
+        assert_eq!(siblings(&path), Vec::<String>::new());
+    }
+
     /// A snapshot written before this build named the account still loads, key
     /// and all. The fields are `#[serde(default)]` precisely so that adding
     /// them did not have to cost every existing reader a login.
