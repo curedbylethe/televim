@@ -1,10 +1,12 @@
 //! Read messages on disk: the history file beside the configuration.
 //!
-//! The last [`HISTORY_CACHE_DEPTH`] messages of each private conversation, so a
-//! launch can paint a conversation before the wire has answered. It lives here
-//! for the drafts file's reason: `domain` and `tui` own no filesystem, and this
-//! is the crate that owns the configuration path. What crosses out of it is
-//! plain [`domain::message::Message`] values, never the file's own rows.
+//! The last [`HISTORY_CACHE_DEPTH`] messages of each private conversation, and
+//! the chat list they were read from, so a launch can paint the list and a
+//! conversation before the wire has answered. It lives here for the drafts
+//! file's reason: `domain` and `tui` own no filesystem, and this is the crate
+//! that owns the configuration path. What crosses out of it is plain
+//! [`domain::message::Message`] and [`domain::chat::Chat`] values, never the
+//! file's own rows.
 //!
 //! **Bodies, not bytes.** A row is a message's text and the *kind* of
 //! attachment it carries — the `[image]` token, not the image. Media bytes
@@ -28,6 +30,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use domain::chat::{Chat, ChatKind};
 use domain::history::CONVERSATION_WINDOW;
 use domain::message::{MediaKind, Message, MessageStatus};
 use domain::updates::UpdateEvent;
@@ -60,6 +63,15 @@ const _: () = assert!(HISTORY_CACHE_DEPTH == CONVERSATION_WINDOW);
 /// The one past the bound that goes is the one least recently *touched* — see
 /// [`HistoryCache::touch`] for what that means and why.
 pub(crate) const HISTORY_CACHE_PEERS: usize = 32;
+
+/// How many conversations of the chat list the file keeps.
+///
+/// The list as the wire last showed it is what a launch draws before the wire
+/// has answered, so the file holds the head of it: pinned first, then newest,
+/// the order it is kept in. Five hundred is more conversations than a screen
+/// scrolls through before the fetched list replaces them, and a cap at all is
+/// what gives the file a worst case — the fetched list itself has none.
+pub(crate) const HISTORY_CACHE_CHATS: usize = 500;
 
 /// The history file beside the configuration.
 ///
@@ -121,6 +133,15 @@ pub(crate) struct HistoryCache {
 
     /// The count the next touch is stamped with.
     clock: u64,
+
+    /// The chat list as the wire last showed it, head first, at most
+    /// [`HISTORY_CACHE_CHATS`] long.
+    ///
+    /// In the history file rather than a file of its own: one account tag
+    /// guards both, and one removal on sign-out takes both — a list kept
+    /// apart would be a second place for another account's conversations to
+    /// survive.
+    chats: Vec<CachedChat>,
 }
 
 /// Two caches are equal when they would write the same file: the feed marks
@@ -128,7 +149,7 @@ pub(crate) struct HistoryCache {
 /// and a cache loaded from disk has neither.
 impl PartialEq for HistoryCache {
     fn eq(&self, other: &Self) -> bool {
-        self.peers == other.peers
+        self.peers == other.peers && self.chats == other.chats
     }
 }
 
@@ -167,6 +188,44 @@ impl HistoryCache {
         self.peers.get(&peer).map_or_else(Vec::new, |rows| {
             rows.iter().map(|row| row.to_message(peer)).collect()
         })
+    }
+
+    /// The cached chat list, head first, as the domain's own type.
+    ///
+    /// Empty when nothing has been cached, which is a cold launch. Every chat
+    /// comes back without a presence: a peer's status is stale the moment it
+    /// is read back, and the feed says the current one soon enough.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "cached ahead of the launch that draws it")
+    )]
+    pub(crate) fn chats(&self) -> Vec<Chat> {
+        self.chats.iter().map(CachedChat::to_chat).collect()
+    }
+
+    /// Makes the cached chat list `chats`, and says whether it changed.
+    ///
+    /// Only private conversations, and only the first
+    /// [`HISTORY_CACHE_CHATS`] of them: what the screen shows, to the file's
+    /// bound. Compared before anything is copied, because the loop asks this
+    /// every pass and the answer is almost always no.
+    pub(crate) fn set_chats(&mut self, chats: &[Chat]) -> bool {
+        let listed = chats
+            .iter()
+            .filter(|chat| chat.is_private())
+            .take(HISTORY_CACHE_CHATS);
+        if self.chats.len() == listed.clone().count()
+            && self
+                .chats
+                .iter()
+                .zip(listed.clone())
+                .all(|(cached, chat)| cached.matches(chat))
+        {
+            return false;
+        }
+        self.chats = listed.map(CachedChat::from_chat).collect();
+        true
     }
 
     /// Replaces what is cached for `peer` with `messages`, oldest first.
@@ -544,13 +603,84 @@ pub(crate) enum PageKind {
 }
 
 /// The file payload:
-/// `{ "account": <phone|null>, "peers": { "<peer_id>": [<row>, …] } }`.
+/// `{ "account": <phone|null>, "peers": { "<peer_id>": [<row>, …] },
+/// "chats": [<chat>, …] }`.
+///
+/// `chats` is left out while empty, and a file without it — one written
+/// before the list was cached — loads with no list rather than not at all.
 #[derive(Debug, Serialize, Deserialize)]
 struct Payload {
     #[serde(default)]
     account: Option<String>,
     #[serde(default)]
     peers: BTreeMap<i64, Vec<CachedMessage>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    chats: Vec<CachedChat>,
+}
+
+/// One conversation of the cached chat list: what its row draws.
+///
+/// No kind, because only private conversations are cached and that is the
+/// one kind a row is read back as. No presence, because a status read back
+/// from a file is a claim about a moment that has passed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CachedChat {
+    id: i64,
+    title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_message: Option<String>,
+    #[serde(default)]
+    unread_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_message_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_timestamp: Option<i64>,
+    #[serde(default)]
+    pinned: bool,
+}
+
+impl CachedChat {
+    fn from_chat(chat: &Chat) -> Self {
+        Self {
+            id: chat.id,
+            title: chat.title.clone(),
+            last_message: chat.last_message.as_deref().map(str::to_owned),
+            unread_count: chat.unread_count,
+            last_message_id: chat.last_message_id,
+            last_timestamp: chat.last_timestamp,
+            pinned: chat.pinned,
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "cached ahead of the launch that draws it")
+    )]
+    fn to_chat(&self) -> Chat {
+        Chat {
+            id: self.id,
+            title: self.title.clone(),
+            kind: ChatKind::Private,
+            last_message: self.last_message.clone().map(Cow::Owned),
+            unread_count: self.unread_count,
+            last_message_id: self.last_message_id,
+            last_timestamp: self.last_timestamp,
+            pinned: self.pinned,
+            presence: None,
+        }
+    }
+
+    /// Whether `chat` would be cached as this row: every field the row keeps,
+    /// compared in place.
+    fn matches(&self, chat: &Chat) -> bool {
+        self.id == chat.id
+            && self.title == chat.title
+            && self.last_message.as_deref() == chat.last_message.as_deref()
+            && self.unread_count == chat.unread_count
+            && self.last_message_id == chat.last_message_id
+            && self.last_timestamp == chat.last_timestamp
+            && self.pinned == chat.pinned
+    }
 }
 
 /// One cached message: what the conversation view draws, and nothing else.
@@ -678,6 +808,8 @@ impl HistoryFile {
                         rows.iter().map(|row| row.to_message(peer)).collect();
                     cache.put(peer, &messages);
                 }
+                cache.chats = payload.chats;
+                cache.chats.truncate(HISTORY_CACHE_CHATS);
                 LoadedHistory {
                     account: payload.account,
                     cache,
@@ -713,6 +845,7 @@ impl HistoryFile {
         let payload = Payload {
             account: account.map(str::to_owned),
             peers: cache.peers.clone(),
+            chats: cache.chats.clone(),
         };
         serde_json::to_vec(&payload)
             .inspect_err(|error| tracing::warn!(%error, "history could not be serialised"))
@@ -983,6 +1116,7 @@ mod tests {
         let (_dir, file) = scratch("history.json");
         let mut cache = HistoryCache::default();
         cache.put(PEER, &[message(1, PEER, "someone else's")]);
+        assert!(cache.set_chats(&[chat(PEER, "someone else's friend")]));
         file.save(&cache, Some("+10000000001"));
 
         let loaded = file.load();
@@ -996,6 +1130,127 @@ mod tests {
             seeded.get(PEER).is_empty(),
             "messages saved under another account never reach the window"
         );
+        assert!(
+            seeded.chats().is_empty(),
+            "nor does the list they were read from: one tag guards both"
+        );
+    }
+
+    // ---- the chat list ---------------------------------------------------
+
+    fn chat(id: i64, title: &str) -> Chat {
+        Chat {
+            id,
+            title: title.to_owned(),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            presence: None,
+        }
+    }
+
+    /// The fields a row of the list draws, as one comparable value: `Chat`
+    /// itself has no `PartialEq`.
+    fn row(chat: &Chat) -> (i64, &str, Option<&str>, u32, Option<i64>, Option<i64>, bool) {
+        (
+            chat.id,
+            &chat.title,
+            chat.last_message.as_deref(),
+            chat.unread_count,
+            chat.last_message_id,
+            chat.last_timestamp,
+            chat.pinned,
+        )
+    }
+
+    #[test]
+    fn a_save_round_trips_the_chat_list_without_presence() {
+        let (_dir, file) = scratch("history.json");
+        let mut pinned = chat(30, "pinned");
+        pinned.pinned = true;
+        pinned.unread_count = 2;
+        pinned.last_message = Some(Cow::Borrowed("see you"));
+        pinned.last_message_id = Some(41);
+        pinned.last_timestamp = Some(410);
+        pinned.presence = Some(domain::presence::Presence::Online);
+        let listed = vec![pinned, chat(PEER, "seven")];
+        let mut cache = HistoryCache::default();
+        assert!(cache.set_chats(&listed));
+
+        file.save(&cache, Some("+1555"));
+
+        let loaded = file.load().cache;
+        assert_eq!(loaded, cache);
+        let read = loaded.chats();
+        assert_eq!(
+            read.iter().map(row).collect::<Vec<_>>(),
+            listed.iter().map(row).collect::<Vec<_>>(),
+            "every field a row draws comes back, in the list's order"
+        );
+        assert!(
+            read.iter()
+                .all(|chat| chat.presence.is_none() && chat.is_private()),
+            "and no presence, which was stale the moment it was written"
+        );
+    }
+
+    #[test]
+    fn the_same_list_again_changes_nothing() {
+        let mut cache = HistoryCache::default();
+        let listed = vec![chat(1, "one"), chat(2, "two")];
+        assert!(cache.set_chats(&listed));
+
+        let mut online = listed.clone();
+        online[0].presence = Some(domain::presence::Presence::Online);
+        assert!(!cache.set_chats(&online), "a presence is not kept");
+
+        let mut previewed = listed.clone();
+        previewed[1].last_message = Some(Cow::Borrowed("new"));
+        assert!(cache.set_chats(&previewed), "a preview is");
+        assert!(cache.set_chats(&[]), "and an emptied list empties it");
+        assert!(cache.chats().is_empty());
+    }
+
+    #[test]
+    fn only_private_chats_are_cached_and_only_the_head_of_the_list() {
+        let mut cache = HistoryCache::default();
+        let mut bot = chat(1, "bot");
+        bot.kind = ChatKind::Bot;
+        let count = i64::try_from(HISTORY_CACHE_CHATS).expect("the cap fits an id");
+        let listed: Vec<Chat> = std::iter::once(bot)
+            .chain((2..=count + 5).map(|id| chat(id, "person")))
+            .collect();
+
+        assert!(cache.set_chats(&listed));
+        let kept = cache.chats();
+        assert_eq!(kept.len(), HISTORY_CACHE_CHATS);
+        assert_eq!(kept.first().map(|chat| chat.id), Some(2), "no bot");
+        assert_eq!(kept.last().map(|chat| chat.id), Some(count + 1));
+        assert!(
+            !cache.set_chats(&listed),
+            "the same list again is the same cut, so nothing changed"
+        );
+    }
+
+    /// A file written before the list was cached has no `chats` at all, and
+    /// still seeds its messages.
+    #[test]
+    fn a_file_without_a_chat_list_loads_its_messages() {
+        let (_dir, file) = scratch("history.json");
+        fs::write(
+            &file.path,
+            r#"{"account": "+1555", "peers": {"7": [
+                {"id": 4, "text": "hello", "timestamp": 40, "is_outgoing": true}
+            ]}}"#,
+        )
+        .expect("the older file");
+
+        let loaded = file.load();
+        assert_eq!(ids(&loaded.cache.get(PEER)), vec![4]);
+        assert!(loaded.cache.chats().is_empty());
     }
 
     #[test]
@@ -1708,6 +1963,7 @@ mod tests {
         let payload = Payload {
             account: None,
             peers,
+            chats: Vec::new(),
         };
         fs::write(
             &file.path,
@@ -1732,6 +1988,7 @@ mod tests {
         let payload = Payload {
             account: None,
             peers: BTreeMap::from([(PEER, rows)]),
+            chats: Vec::new(),
         };
         fs::write(
             &file.path,

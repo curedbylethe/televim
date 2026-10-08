@@ -491,8 +491,9 @@ pub struct State {
     /// `None` wherever no loop set one, which is every test.
     draft_file: Option<DraftFile>,
 
-    /// Where read messages live on disk: written behind every page or feed
-    /// event that changes [`State::cached`], and removed on sign-out.
+    /// Where read messages and the chat list live on disk: written behind
+    /// every page, feed event or list change that changes [`State::cached`],
+    /// and removed on sign-out.
     ///
     /// Set by the loop beside [`State::draft_file`], and `None` in the same
     /// places for the same reason — with no file the cache is kept in memory
@@ -659,7 +660,18 @@ impl State {
     /// written on a later pass — never beside it, which is what keeps an older
     /// snapshot from landing over a newer one. Failures are the file's to
     /// warn about; the cache in memory is untouched either way.
-    pub(crate) fn persist_history(&mut self) {
+    ///
+    /// **`chats` is the list on screen**, and it is taken into the cache here
+    /// rather than where each thing that moves it happens. A list lands with a
+    /// `Ready`, is reordered by a pin, and has its previews and unread counts
+    /// moved by the feed, by a send and by the reader reading — and the screen
+    /// is the one place all of those have already been folded together. Read
+    /// once a pass, compared in place, and only a change marks the cache, so a
+    /// quiet pass costs a scan of the list and no write.
+    pub(crate) fn persist_history(&mut self, chats: &[Chat]) {
+        if self.cached.messages.set_chats(chats) {
+            self.cached.dirty = true;
+        }
         if !self.cached.dirty {
             return;
         }
@@ -688,11 +700,11 @@ impl State {
     ///
     /// Without it, a page that landed while a write was going would be marked
     /// and never written: the pass that would have written it never comes.
-    pub(crate) async fn finish_history(&mut self) {
+    pub(crate) async fn finish_history(&mut self, chats: &[Chat]) {
         if let Some(write) = self.cached.write.take() {
             let _ = write.await;
         }
-        self.persist_history();
+        self.persist_history(chats);
         if let Some(write) = self.cached.write.take() {
             let _ = write.await;
         }
@@ -3687,7 +3699,7 @@ mod tests {
     /// What the loop does after the pass, waited out: the write is taken off
     /// the loop's thread, so a test has to wait for it to land.
     async fn persist(state: &mut State) {
-        state.persist_history();
+        state.persist_history(&[]);
         if let Some(write) = state.cached.write.take() {
             write.await.expect("the history write ran");
         }
@@ -3877,7 +3889,7 @@ mod tests {
             None,
             messages(CHAT, 1..=3),
         );
-        state.persist_history();
+        state.persist_history(&[]);
         assert!(!path.exists(), "nothing started beside the write in flight");
         assert!(state.cached.dirty, "the snapshot is still owed");
 
@@ -3892,6 +3904,63 @@ mod tests {
         }
         persist(&mut state).await;
         assert_eq!(file_ids(&path), vec![1, 2, 3]);
+    }
+
+    /// What the loop does after the pass with the list on screen, waited out.
+    async fn persist_list(state: &mut State, app: &App) {
+        state.persist_history(app.chats());
+        if let Some(write) = state.cached.write.take() {
+            write.await.expect("the history write ran");
+        }
+    }
+
+    fn file_chats(path: &std::path::Path) -> Vec<(i64, Option<String>)> {
+        HistoryFile::new(path.to_path_buf())
+            .load()
+            .cache
+            .chats()
+            .iter()
+            .map(|chat| (chat.id, chat.last_message.as_deref().map(str::to_owned)))
+            .collect()
+    }
+
+    /// The list a `Ready` lands is written behind, a quiet pass writes
+    /// nothing, and the feed moving a preview owes the file the new list.
+    #[tokio::test]
+    async fn the_chat_list_is_written_behind_as_it_lands_and_moves() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = App::new();
+        let mut state = State::default();
+        state.set_history_file(HistoryFile::new(path.clone()));
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+        persist_list(&mut state, &app).await;
+        assert_eq!(file_chats(&path), vec![(CHAT, None), (CHAT + 1, None)]);
+
+        state.persist_history(app.chats());
+        assert!(
+            !state.cached.dirty && state.cached.write.is_none(),
+            "the same list on the next pass is no write"
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT + 1, 9..=9).remove(0))),
+        );
+        persist_list(&mut state, &app).await;
+        assert_eq!(
+            file_chats(&path),
+            vec![(CHAT, None), (CHAT + 1, Some("text".to_owned()))],
+            "the arrival moved its conversation's preview"
+        );
     }
 
     #[tokio::test]

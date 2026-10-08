@@ -417,11 +417,13 @@ async fn event_loop(
         sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
         // Unlike the drafts, written off the loop's thread: the file is up to
         // a window per conversation, and it is a write behind the pages that
-        // already reached the screen, so nothing waits on it.
-        network.persist_history();
+        // already reached the screen, so nothing waits on it. The chat list
+        // goes with it, read off the screen, where every change to it has
+        // already landed.
+        network.persist_history(app.chats());
     }
 
-    network.finish_history().await;
+    network.finish_history(app.chats()).await;
     Ok(())
 }
 
