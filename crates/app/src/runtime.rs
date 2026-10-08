@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::draft_store::{DraftFile, drafts_acceptable};
+use crate::history_store::HistoryFile;
 use crate::net;
 use tui::app::App;
 use tui::state::ui::StickerMode;
@@ -49,16 +50,17 @@ pub(crate) enum AppEvent {
 
 /// Build a current-thread runtime (memory budget) and run the TUI.
 ///
-/// `config_path` is where the log and the drafts file go, and it is passed
-/// rather than derived so that the two cannot disagree about which run they
-/// belong to.
+/// `config_path` is where the log, the drafts file and the history file go,
+/// and it is passed rather than derived so that they cannot disagree about
+/// which run they belong to.
 ///
 /// `initial_chat` is the `--chat` id, carried as launch state for STAGE-02 to
 /// select on. Cli-only: it never enters `Config`, the file, or the environment.
 pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Result<()> {
     init_tracing(cfg, config_path);
     let drafts_path = config_path.with_extension("drafts.json");
-    build_runtime()?.block_on(run_async(cfg, &drafts_path, initial_chat))
+    let history_path = config_path.with_extension("history.json");
+    build_runtime()?.block_on(run_async(cfg, &drafts_path, &history_path, initial_chat))
 }
 
 /// Records the instant the program was asked to start.
@@ -182,7 +184,12 @@ fn init_tracing(cfg: &Config, config_path: &Path) {
         .try_init();
 }
 
-async fn run_async(cfg: &Config, drafts_path: &Path, initial_chat: Option<i64>) -> Result<()> {
+async fn run_async(
+    cfg: &Config,
+    drafts_path: &Path,
+    history_path: &Path,
+    initial_chat: Option<i64>,
+) -> Result<()> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut screen = stdout();
     execute!(screen, EnterAlternateScreen).context("entering alternate screen")?;
@@ -195,7 +202,7 @@ async fn run_async(cfg: &Config, drafts_path: &Path, initial_chat: Option<i64>) 
     let backend = CrosstermBackend::new(screen);
     let mut terminal = Terminal::new(backend).context("creating terminal")?;
 
-    let result = event_loop(cfg, &mut terminal, drafts_path, initial_chat).await;
+    let result = event_loop(cfg, &mut terminal, drafts_path, history_path, initial_chat).await;
 
     // Always restore the terminal, even if the loop errored.
     let _ = disable_raw_mode();
@@ -260,10 +267,14 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 ///
 /// `drafts_path` is the drafts file beside the configuration: loaded here
 /// once, re-synced every pass, and cleared on sign-out.
+///
+/// `history_path` is the history file beside it: handed to the network state
+/// so signing out can remove it. Nothing reads or writes it yet.
 async fn event_loop(
     cfg: &Config,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     drafts_path: &Path,
+    history_path: &Path,
     initial_chat: Option<i64>,
 ) -> Result<()> {
     // When a key was taken on the previous pass, so the next frame can be timed
@@ -317,6 +328,9 @@ async fn event_loop(
     let mut network = net::State::new(cfg.clone(), tx.clone());
     // And the drafts file, so signing out can remove it.
     network.set_draft_file(draft_file.clone());
+    // And the history file, for the same reason: the messages go with the
+    // account that is leaving.
+    network.set_history_file(HistoryFile::new(history_path.to_path_buf()));
 
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an
