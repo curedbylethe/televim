@@ -78,6 +78,9 @@ pub struct DialogInfo {
 
     /// Text of the most recent message, if it had any.
     pub last_text: Option<String>,
+
+    /// Whether the account has pinned this conversation to the top of its list.
+    pub pinned: bool,
 }
 
 impl Client {
@@ -138,7 +141,7 @@ impl Client {
             }
         }
 
-        conversations.sort_by(newest_first);
+        conversations.sort_by(pinned_then_newest);
         // Nothing else writes the peers and per-channel timestamps that dialog
         // iteration just learned, and the update stream reads them from the
         // store rather than from memory.
@@ -193,6 +196,7 @@ fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
         last_timestamp: last_message
             .and_then(|message| message_timestamp(message.date().timestamp())),
         last_text: last_message.and_then(|message| last_text(message.text())),
+        pinned: raw.pinned,
     })
 }
 
@@ -312,6 +316,17 @@ fn newest_first(left: &DialogInfo, right: &DialogInfo) -> Ordering {
     right.last_timestamp.cmp(&left.last_timestamp)
 }
 
+/// Orders conversations with the pinned ones first, each section newest first.
+///
+/// `false < true`, so comparing the pins in reverse puts the pinned section
+/// ahead; ties fall through to `newest_first` within each section.
+fn pinned_then_newest(left: &DialogInfo, right: &DialogInfo) -> Ordering {
+    right
+        .pinned
+        .cmp(&left.pinned)
+        .then_with(|| newest_first(left, right))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +341,7 @@ mod tests {
             last_message_id: None,
             last_timestamp,
             last_text: None,
+            pinned: false,
         }
     }
 
@@ -447,5 +463,23 @@ mod tests {
         dialogs.sort_by(newest_first);
 
         assert_eq!(peer_ids(&dialogs), vec![1, 2]);
+    }
+
+    #[test]
+    fn pinned_dialogs_sort_above_newer_unpinned_ones_newest_first_within_each() {
+        let mut pinned_old = dialog(1, Some(100));
+        pinned_old.pinned = true;
+        let mut pinned_new = dialog(2, Some(300));
+        pinned_new.pinned = true;
+        let mut dialogs = vec![
+            dialog(3, Some(900)),
+            pinned_old,
+            dialog(4, Some(500)),
+            pinned_new,
+        ];
+
+        dialogs.sort_by(pinned_then_newest);
+
+        assert_eq!(peer_ids(&dialogs), vec![2, 1, 3, 4]);
     }
 }

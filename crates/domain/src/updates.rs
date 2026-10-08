@@ -293,6 +293,7 @@ impl ChatList {
             unread_count: 0,
             last_message_id: None,
             last_timestamp: None,
+            pinned: false,
         });
 
         self.chats.len() - 1
@@ -319,6 +320,7 @@ mod tests {
             unread_count: 0,
             last_message_id: Some(9),
             last_timestamp: Some(1_000),
+            pinned: false,
         }
     }
 
@@ -328,6 +330,7 @@ mod tests {
             last_message: None,
             last_message_id: None,
             last_timestamp: None,
+            pinned: false,
             ..chat(id)
         }
     }

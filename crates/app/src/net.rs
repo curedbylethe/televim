@@ -2280,6 +2280,7 @@ mod tests {
             unread_count: 0,
             last_message_id: None,
             last_timestamp: None,
+            pinned: false,
         }
     }
 

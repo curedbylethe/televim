@@ -41,6 +41,8 @@ pub struct Chat {
     pub last_message_id: Option<i64>,
     /// Unix timestamp (seconds) of the most recent message, if any.
     pub last_timestamp: Option<i64>,
+    /// Whether the account has pinned this chat to the top of the list.
+    pub pinned: bool,
 }
 
 impl Chat {
@@ -73,6 +75,7 @@ mod tests {
             unread_count: 0,
             last_message_id: None,
             last_timestamp: None,
+            pinned: false,
         }
     }
 
