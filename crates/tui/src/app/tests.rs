@@ -2139,6 +2139,106 @@ fn f_in_normal_forwards_the_cursor_message_and_esc_keeps_the_selection() {
     assert_eq!(app.take_action(), None, "nothing was queued");
 }
 
+/// Opens the picker over the first message, from the top of the sample
+/// conversation.
+fn forward_picker_up() -> App {
+    let mut app = App::mock();
+    go_to_top(&mut app);
+    key(&mut app, 'f');
+    app
+}
+
+/// The chat the picker's cursor is on.
+fn picker_on(app: &App) -> usize {
+    app.conversation
+        .picking()
+        .expect("the picker is up")
+        .selected
+}
+
+/// `j` and the arrows walk the chats, wrapping at the end, and do not move the
+/// reader's place in the messages.
+#[test]
+fn j_and_down_walk_the_chats_and_wrap_at_the_end() {
+    let mut app = forward_picker_up();
+    let chats = app.chats().len();
+    assert!(chats >= 3, "the sample has chats to walk");
+    let place = reading(&app);
+
+    key(&mut app, 'j');
+    assert_eq!(picker_on(&app), 1);
+    app.handle_key(press(KeyCode::Down));
+    assert_eq!(picker_on(&app), 2);
+    key(&mut app, 'j');
+    assert_eq!(picker_on(&app), 0, "past the last chat wraps to the first");
+
+    assert_eq!(
+        reading(&app),
+        place,
+        "the messages did not move under the picker"
+    );
+}
+
+#[test]
+fn k_and_up_walk_back_and_wrap_at_the_top() {
+    let mut app = forward_picker_up();
+    let last = app.chats().len() - 1;
+
+    key(&mut app, 'k');
+    assert_eq!(
+        picker_on(&app),
+        last,
+        "above the first chat wraps to the last"
+    );
+    app.handle_key(press(KeyCode::Up));
+    assert_eq!(picker_on(&app), last - 1);
+}
+
+/// `Enter` forwards into the chat the picker is on, and does not open it.
+#[test]
+fn enter_forwards_into_the_chat_the_picker_is_on_and_does_not_open_it() {
+    let mut app = forward_picker_up();
+    let open_before = app.conversation.conversation.window.chat_id;
+    key(&mut app, 'j');
+    key(&mut app, 'j');
+    let dest = app.chats()[2].id;
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Forward {
+            chat_id: MOCK_CHAT,
+            message_ids: vec![1],
+            dest_chat_id: dest,
+        })
+    );
+    assert_eq!(
+        app.conversation.conversation.window.chat_id, open_before,
+        "the conversation stays open where it was"
+    );
+}
+
+/// The status line names the picker's keys while it is up. Once the picker is
+/// put away the selection's own note is back, and the Visual hint names `s`.
+#[test]
+fn the_picker_and_the_visual_hint_name_their_keys() {
+    let mut app = forward_picker_up();
+    assert_eq!(
+        app.status_text(),
+        "VISUAL  j/k: choose  \u{23ce}: forward  Esc: cancel"
+    );
+
+    app.handle_key(press(KeyCode::Esc));
+
+    assert_eq!(
+        crate::widgets::input_bar::hint(&app),
+        " d: delete  y: yank  s: forward  r: reply  Esc: cancel",
+        "the Visual hint is the one the selection's note stands in front of"
+    );
+    assert_eq!(app.status_text(), "1 message(s) selected — Esc clears");
+}
+
 /// The picker owns every key while it is up: a `d` must not turn the forward
 /// into a deletion of the same selection.
 #[test]

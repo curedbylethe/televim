@@ -1076,6 +1076,12 @@ pub(crate) fn handle_forward_pick(
                 ui.flash(format!("{skipped} not sent yet, left out"));
             }
         }
+        KeyCode::Down | KeyCode::Char('j') => {
+            conversation.move_forward(list.list.chats.len(), true);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            conversation.move_forward(list.list.chats.len(), false);
+        }
         KeyCode::Esc => conversation.dismiss_forward(),
         _ => {}
     }
