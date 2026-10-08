@@ -117,6 +117,11 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
         }
         // Only the entry the slice starts inside has rows above the panel; every
         // other one begins on it.
+        // A draft is not painted yet: until it is, it takes no row of the panel
+        // and is not mistaken for a separator, which is what it would be drawn as.
+        if span.kind == rows::RowKind::Draft {
+            continue;
+        }
         let skip = if on_the_first_row { view.skip } else { 0 };
         on_the_first_row = false;
 
