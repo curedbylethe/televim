@@ -100,6 +100,13 @@ pub const DELETE_BATCH: usize = 100;
 /// messages is not left watching a progress bar.
 pub const DELETE_BATCH_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The most identifiers one forwarding request may name.
+///
+/// Telegram's limit for `messages.forwardMessages`, which the pinned `grammers`
+/// does not split either, so [`forward_batches`] does. Kept apart from
+/// [`DELETE_BATCH`] so each limit is named where it applies.
+pub const FORWARD_BATCH: usize = 100;
+
 /// Checks that `text` can be sent as a message.
 ///
 /// Rejects text that is empty or nothing but whitespace, and text longer than
@@ -143,6 +150,15 @@ pub fn validate_text(text: &str) -> Result<(), FrameworkError> {
 #[must_use]
 pub fn delete_batches(ids: &[i32]) -> Vec<&[i32]> {
     ids.chunks(DELETE_BATCH).collect()
+}
+
+/// The batches `ids` is forwarded in, oldest first.
+///
+/// The same shape as [`delete_batches`], and for the same reasons: pure, so the
+/// splitting is checked without a datacenter, and empty in means no requests out.
+#[must_use]
+pub fn forward_batches(ids: &[i32]) -> Vec<&[i32]> {
+    ids.chunks(FORWARD_BATCH).collect()
 }
 
 /// What a failed deletion means, given how much had already landed.
@@ -401,6 +417,42 @@ mod tests {
     #[test]
     fn a_deletion_of_nothing_is_no_requests() {
         assert!(delete_batches(&[]).is_empty());
+    }
+
+    // ---- forwarding batches -------------------------------------------------
+
+    #[test]
+    fn a_forward_longer_than_one_request_is_split() {
+        let all = ids(250);
+        let batches = forward_batches(&all);
+
+        assert_eq!(
+            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+            vec![FORWARD_BATCH, FORWARD_BATCH, 50]
+        );
+    }
+
+    #[test]
+    fn splitting_a_forward_keeps_every_identifier_in_order() {
+        let all = ids(250);
+        let batches = forward_batches(&all);
+
+        assert_eq!(batches.concat(), all, "nothing dropped, nothing reordered");
+    }
+
+    #[test]
+    fn a_forward_that_fits_in_one_request_is_passed_through_whole() {
+        let all = ids(FORWARD_BATCH);
+        let batches = forward_batches(&all);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0], all.as_slice());
+        assert_eq!(forward_batches(&ids(FORWARD_BATCH + 1)).len(), 2);
+    }
+
+    #[test]
+    fn a_forward_of_nothing_is_no_requests() {
+        assert!(forward_batches(&[]).is_empty());
     }
 
     // ---- what a failure means ---------------------------------------------
