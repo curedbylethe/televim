@@ -229,6 +229,23 @@ Real, and named so they are not mistaken for oversights:
   existing order alone rather than guessing a comparator). Both are properties of
   the lookup and the chat list rather than of the widget.
 
+- **The open draft row is not a cursor stop.** It takes no caret, selection or
+  motion, and the cursor never rests on it. Acting on it from the panel, reaching
+  it and resuming the draft there, is CUR-25 and is not built; until then the bar
+  is the only place a draft is edited.
+- **In scroll mode the draft row follows the last message the panel shows.** The
+  row is drawn after the slice, so with the reader scrolled up it sits under an
+  older message: with the cursor six messages up from the newest of twelve, it
+  was drawn under the ninth. Follow mode is the case the row was built for. Where
+  it belongs while scrolled up is part of the open visual pass (DESIGN-TBD, below).
+- **The draft row is not in `DESIGN.md`, and its look is DESIGN-TBD.** It is built
+  to the existing `[you]` tag and `text-dim` vocabulary; no OpenDesign artifact
+  was commissioned for it. `DESIGN.md` mirrors the OpenDesign project, so an entry
+  there is a `make design-push`, which edits the project, and it waits for that call.
+- **The draft row's `BidiMode::Visual` path has no test.** `draft_items` permutes
+  the words the way `message_row` does, but no test in `widgets/conversation.rs`
+  sets that mode on a draft; the draft tests all run in the default mode.
+
 ## v2 Hooks
 
 The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists and returns bytes, and the `tokio::fs` cache and any viewer are what is still ahead of it.
