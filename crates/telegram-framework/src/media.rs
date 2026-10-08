@@ -219,6 +219,23 @@ fn fetchable_media(media: Option<&tl::enums::MessageMedia>) -> Option<Media> {
     (media.to_data().is_some() || media.to_raw_input_location().is_some()).then_some(media)
 }
 
+/// The fetchable media of the message named by `message_id` within a page.
+///
+/// Matched by identifier rather than taken from the first message: a page
+/// may hold neighbours of the named message, and one of them may carry media
+/// that is not the media asked for. Anything that is not that message — an
+/// older sibling, an empty or a service entry — answers `None`.
+fn select_media(page: &[tl::enums::Message], message_id: i64) -> Option<Media> {
+    page.iter()
+        .find_map(|message| match message {
+            tl::enums::Message::Message(message) if i64::from(message.id) == message_id => {
+                Some(message.media.as_ref())
+            }
+            _ => None,
+        })
+        .and_then(fetchable_media)
+}
+
 /// A download being collected, with the ceiling applied as it fills.
 ///
 /// Its own type rather than a `Vec` and a running length, because the refusal
@@ -355,10 +372,10 @@ impl Client {
             peer: peer.into(),
             offset_id,
             offset_date: 0,
-            // Zero in both directions and a page of one: Telegram counts a page
-            // from an anchor downwards, so this is exactly the named message and
-            // nothing before it.
-            add_offset: 0,
+            // A page of one starting one step toward newer messages from the
+            // anchor, which includes the anchor itself: `offset_id` alone
+            // excludes it, so a zero shift returns the older neighbour instead.
+            add_offset: -1,
             limit: 1,
             max_id: 0,
             min_id: 0,
@@ -394,15 +411,7 @@ impl Client {
         // only reaches the store if it is written back.
         self.flush_session();
 
-        let media = raw
-            .iter()
-            .find_map(|message| match message {
-                tl::enums::Message::Message(message) => Some(message.media.as_ref()),
-                tl::enums::Message::Empty(_) | tl::enums::Message::Service(_) => None,
-            })
-            .and_then(fetchable_media);
-
-        let Some(media) = media else {
+        let Some(media) = select_media(&raw, message_id) else {
             tracing::debug!(peer_id, message_id, "the message has no media to fetch");
             return Err(FrameworkError::MediaUnavailable {
                 peer_id,
