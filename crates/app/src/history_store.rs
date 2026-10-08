@@ -21,18 +21,6 @@
 //! the run or fails a logout — diagnostics go to `tracing`, never the
 //! terminal, which this program is drawing on.
 
-// Built ahead of its callers: this stage constructs the file and clears it on
-// sign-out, and the reads and writes arrive with the stages that put them in
-// the render path and behind the fetches. The expectation fails the build once
-// they do, so it cannot outlive its reason.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "loaded and saved by the history-cache stages that follow"
-    )
-)]
-
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
@@ -140,6 +128,10 @@ impl HistoryCache {
     }
 
     /// Forgets everything cached for `peer`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "built with the store, ahead of any caller")
+    )]
     pub(crate) fn remove(&mut self, peer: i64) {
         self.peers.remove(&peer);
     }
@@ -428,31 +420,48 @@ impl HistoryFile {
         }
     }
 
-    /// Stores `cache` under `account`, atomically.
+    /// Stores `cache` under `account`, atomically: [`HistoryFile::encode`]
+    /// then [`HistoryFile::write`], on one thread.
     ///
-    /// Best-effort: a failure is warned about and the run carries on with the
-    /// messages still in memory — the file is a head start for the next
-    /// launch, and the wire can always refill it.
+    /// The loop does not call this — it encodes where the cache lives and
+    /// writes off the loop's thread — so only the tests that pin the file's
+    /// shape do.
+    #[cfg(test)]
     pub(crate) fn save(&self, cache: &HistoryCache, account: Option<&str>) {
+        if let Some(bytes) = Self::encode(cache, account) {
+            self.write(&bytes);
+        }
+    }
+
+    /// The bytes that store `cache` under `account`, or `None` when it could
+    /// not be serialised, which is warned about.
+    ///
+    /// Apart from [`HistoryFile::write`] so the two can run on different
+    /// threads: the snapshot is taken where the cache is, and only the disk
+    /// work is handed off.
+    pub(crate) fn encode(cache: &HistoryCache, account: Option<&str>) -> Option<Vec<u8>> {
         let payload = Payload {
             account: account.map(str::to_owned),
             peers: cache.peers.clone(),
         };
-        let bytes = match serde_json::to_vec(&payload) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::warn!(%error, "history could not be serialised");
-                return;
-            }
-        };
+        serde_json::to_vec(&payload)
+            .inspect_err(|error| tracing::warn!(%error, "history could not be serialised"))
+            .ok()
+    }
 
+    /// Replaces the file with `bytes` from [`HistoryFile::encode`], atomically.
+    ///
+    /// Best-effort: a failure is warned about and the run carries on with the
+    /// messages still in memory — the file is a head start for the next
+    /// launch, and the wire can always refill it.
+    pub(crate) fn write(&self, bytes: &[u8]) {
         if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty())
             && let Err(error) = fs::create_dir_all(parent)
         {
             tracing::warn!(%error, "history directory could not be created");
             return;
         }
-        write_atomically(&self.path, &bytes);
+        write_atomically(&self.path, bytes);
     }
 
     /// Removes the file; a missing file is success.

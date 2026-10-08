@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::draft_store::{DraftFile, drafts_acceptable};
-use crate::history_store::HistoryFile;
+use crate::history_store::{HistoryCache, HistoryFile, history_acceptable};
 use crate::net;
 use tui::app::App;
 use tui::state::ui::StickerMode;
@@ -268,8 +268,9 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 /// `drafts_path` is the drafts file beside the configuration: loaded here
 /// once, re-synced every pass, and cleared on sign-out.
 ///
-/// `history_path` is the history file beside it: handed to the network state
-/// so signing out can remove it. Nothing reads or writes it yet.
+/// `history_path` is the history file beside it: loaded here once, handed to
+/// the network state with what it held, written behind every page that
+/// changes it, and removed on sign-out.
 async fn event_loop(
     cfg: &Config,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -310,6 +311,24 @@ async fn event_loop(
     // stored settles the file (or its absence) at once.
     let mut last_synced: Option<Vec<(i64, String)>> = None;
 
+    // The history file beside it, loaded once at launch too, under the
+    // stricter rule: only a file saved under exactly this account seeds the
+    // cache, because a false accept paints a stranger's conversation and a
+    // false clear costs one fetch. A file that may not seed is removed rather
+    // than left for the first write to overwrite, so another account's
+    // messages do not wait on disk for a page that may never come.
+    let history_file = HistoryFile::new(history_path.to_path_buf());
+    let loaded_history = history_file.load();
+    let history = if history_acceptable(loaded_history.account.as_deref(), cfg.phone.as_deref()) {
+        loaded_history.cache
+    } else {
+        if loaded_history.cache != HistoryCache::default() {
+            tracing::warn!("history stored for another account was discarded");
+        }
+        history_file.clear();
+        HistoryCache::default()
+    };
+
     // What the configuration carries goes into the sign-in flow as pre-fills,
     // and nothing more: the flow is where a phone number, a code and a password
     // are read, and these are what a launch with a reader in a hurry saves them
@@ -328,9 +347,11 @@ async fn event_loop(
     let mut network = net::State::new(cfg.clone(), tx.clone());
     // And the drafts file, so signing out can remove it.
     network.set_draft_file(draft_file.clone());
-    // And the history file, for the same reason: the messages go with the
-    // account that is leaving.
-    network.set_history_file(HistoryFile::new(history_path.to_path_buf()));
+    // And the history file and what it held: every fetched page is merged
+    // into the cache and written behind, and the messages go with the account
+    // that is leaving.
+    network.set_history_file(history_file);
+    network.restore_history(history);
 
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an
@@ -394,8 +415,13 @@ async fn event_loop(
         }
         copy_if_asked(&mut app);
         sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
+        // Unlike the drafts, written off the loop's thread: the file is up to
+        // a window per conversation, and it is a write behind the pages that
+        // already reached the screen, so nothing waits on it.
+        network.persist_history();
     }
 
+    network.finish_history().await;
     Ok(())
 }
 
