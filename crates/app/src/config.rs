@@ -419,6 +419,10 @@ mod tests {
     /// The cache directory is read from the file under its own key.
     #[test]
     fn the_media_cache_dir_is_read_from_the_file() {
+        // The environment wins over the file, and the env test sets the same
+        // key under `ENV`, so this one takes its turn too.
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
         let path =
             std::env::temp_dir().join(format!("televim-cfg-media-{}.toml", std::process::id()));
         std::fs::write(&path, "media_cache_dir = \"/var/tmp/televim-media\"\n")
