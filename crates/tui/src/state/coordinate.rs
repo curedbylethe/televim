@@ -2887,6 +2887,10 @@ pub(crate) fn handle_normal(
             conversation.dismiss_failed_at_cursor();
             false
         }
+        'o' => {
+            request_open_media(&mut *ui, &mut *conversation, &mut *outbox);
+            false
+        }
         'v' => {
             begin_selection(&mut *ui, &mut *conversation, Some(0));
             false
@@ -2932,6 +2936,36 @@ pub(crate) fn handle_normal(
         ),
         _ => false,
     }
+}
+
+/// Refusal for `o` on a message with no media. Names the key that would have
+/// opened something, as [`NOT_A_REPLY`] does for `gd`.
+pub(crate) const NO_ATTACHMENT: &str =
+    "No attachment here: o opens the media on the message under the cursor.";
+
+/// Queues the open of the media on the cursor message, or flashes why not.
+///
+/// Read-only over the window: the download is the network's, so this records
+/// which message the reader asked for and nothing more. A caption does not
+/// matter; a message with media opens whether or not it has text.
+pub(crate) fn request_open_media(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    outbox: &mut Outbox,
+) {
+    let Some(message) = conversation
+        .cursor_message()
+        .filter(|message| message.media.is_some())
+    else {
+        ui.flash(NO_ATTACHMENT);
+        return;
+    };
+
+    let action = Action::OpenMedia {
+        chat_id: message.chat_id,
+        message_id: message.id,
+    };
+    queue_action(&mut *outbox, &mut *ui, action);
 }
 
 /// Handles a key while the chat list has the focus.

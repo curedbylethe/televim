@@ -1766,8 +1766,12 @@ fn request_plain(client: &Arc<ProtoClient>, action: Action, tx: &UnboundedSender
             // reach the state before this function exists. `Logout` is there too:
             // it needs the client, so it is asked for there rather than here.
             // Unreachable rather than wrong: a value is one of the three, never
-            // two.
-            Action::Login { .. } | Action::LoginCancelled | Action::Logout => {}
+            // two. OpenMedia shares the arm until its download lands: the key
+            // queues the action, nothing fetches it yet.
+            Action::Login { .. }
+            | Action::LoginCancelled
+            | Action::Logout
+            | Action::OpenMedia { .. } => {}
 
             // A person lookup is a question about a person rather than an
             // operation on a conversation, and it shares this task's shape for

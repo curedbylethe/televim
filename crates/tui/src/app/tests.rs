@@ -6013,3 +6013,79 @@ fn a_presence_update_leaves_the_cursor_selection_and_search_alone() {
         "the same presence again changes nothing on screen"
     );
 }
+
+// ---- `o`, the media on the cursor message --------------------------------
+
+/// A message of the sample conversation that carries `media`.
+fn with_media(id: i64, text: &'static str, media: domain::message::MediaKind) -> Message {
+    Message {
+        media: Some(media),
+        ..message(id, text)
+    }
+}
+
+/// `o` on a message with media queues one open, carrying the cursor
+/// message's conversation and identifier, and nothing else.
+#[test]
+fn o_on_a_media_message_queues_its_open() {
+    let mut app = App::mock();
+    app.apply_latest(vec![
+        message(1, "text"),
+        with_media(2, "", domain::message::MediaKind::Photo),
+        message(3, "text"),
+    ]);
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(
+        reading(&app),
+        Some(2),
+        "the media message is under the cursor"
+    );
+
+    key(&mut app, 'o');
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::OpenMedia {
+            chat_id: MOCK_CHAT,
+            message_id: 2,
+        })
+    );
+    assert_eq!(app.take_action(), None, "one open, not two");
+}
+
+/// A caption does not stop a photo from opening: the media is what is asked
+/// for, and the text is only shown beside it.
+#[test]
+fn o_on_a_captioned_media_message_still_queues_its_open() {
+    let mut app = App::mock();
+    app.apply_latest(vec![with_media(
+        1,
+        "a caption",
+        domain::message::MediaKind::Video,
+    )]);
+
+    key(&mut app, 'o');
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::OpenMedia {
+            chat_id: MOCK_CHAT,
+            message_id: 1,
+        })
+    );
+}
+
+/// `o` on a message without media queues nothing and says which key would
+/// have opened something.
+#[test]
+fn o_on_a_message_without_media_refuses() {
+    let mut app = App::mock();
+    app.apply_latest(page(&[1, 2, 3]));
+    app.handle_key(press(KeyCode::Char('k')));
+
+    key(&mut app, 'o');
+
+    assert_eq!(app.status_text(), crate::state::coordinate::NO_ATTACHMENT);
+    assert_eq!(app.take_action(), None, "nothing is queued");
+    assert_eq!(reading(&app), Some(2), "and the reader stays put");
+}
