@@ -105,6 +105,7 @@ A **first-party crate** that wraps `grammers-client` and provides:
 - `ClientBuilder` with ergonomic user-account login (phone → code → 2FA).
 - `SessionStore` trait with pluggable backends (keyring, encrypted file, memory).
 - Typed event stream: `Updates` filtered to messages in private conversations with people — groups, channels and bots never reach the caller.
+- Peer presence: `UpdateKind::PeerStatus` from `updateUserStatus`, and the `status` a profile read already carries, both classified into `UserPresence` (`Online`, `Offline { was_online }`, `Recently`, `LastWeek`, `LastMonth`, `Hidden`). An empty status is `Hidden`.
 - Chat listing with automatic `InputPeer` resolution and caching.
 - The account's own profile, which is the only call that discloses the account's
   own user identifier: `grammers` reports none for a peer that is the account
@@ -138,6 +139,13 @@ person is addressable by every other call afterwards — without that seed, ever
 typed path (`send_message`, `fetch_history`) would refuse the stranger as an
 unknown peer.
 
+`UserPresence` is the framework's own enum, not `domain::presence::Presence`: the
+framework does not depend on `domain`, so `proto` translates it. The classifier
+`presence_from_status` is a free function over `tl::enums::UserStatus`, and its
+mapping of a restricted status to `Recently`/`LastWeek`/`LastMonth` is an assumed
+wire behaviour, not one confirmed against a live account (see
+[`known-gaps.md`](./known-gaps.md)).
+
 This is the only crate permitted to depend on `grammers-*`.
 
 The `grammers` dependency is optional, behind the crate's `live` feature, and is
@@ -151,6 +159,8 @@ what `live` gates.
 
 A **thin translation layer**. Consumes `telegram-framework` and maps its types into `domain` types. It must not expose any `grammers` or `telegram-framework` types to `domain` or `tui`.
 
+`to_presence` (`types.rs`) maps each `UserPresence` to its `domain::presence::Presence` twin. The `Offline` timestamp passes through unchanged, so what the time means and how it reads stays in `tui`. `account.rs` carries the presence into the domain `Account`, and `stream.rs` maps `UpdateKind::PeerStatus` to `UpdateEvent::PeerStatus`.
+
 ```
 crates/proto/
 ├── src/
@@ -159,7 +169,7 @@ crates/proto/
 │   ├── client.rs       # Wraps telegram-framework::Client
 │   ├── account.rs      # The account's own profile -> a domain Account
 │   ├── auth.rs         # Login, 2FA, session management
-│   ├── types.rs        # Internal DTOs (never expose grammers types)
+│   ├── types.rs        # Internal DTOs (never expose grammers types); to_presence
 │   ├── stream.rs       # Update subscription & event mapping
 │   ├── history.rs      # History page -> domain window
 │   ├── messages.rs     # Send/edit/delete, and identifier widening
@@ -180,14 +190,15 @@ reader might start a conversation with.
 crates/domain/
 ├── src/
 │   ├── lib.rs
-│   ├── account.rs      # The signed-in account, and its two display questions
-│   ├── chat.rs         # Chat entity, filtering rules
+│   ├── account.rs      # The signed-in account, its two display questions, its presence
+│   ├── presence.rs     # Presence: online, or the raw Unix time last online. No clock, no formatting
+│   ├── chat.rs         # Chat entity, filtering rules, the peer's last presence
 │   ├── message.rs      # Message entity
 │   ├── history.rs      # ConversationWindow, and the page/anchor rules
 │   ├── search.rs       # Query parsing, match scoring, local scanning
 │   ├── selection.rs    # Mark, Selection: the two ends of a selection
 │   ├── session.rs      # Session state
-│   ├── updates.rs      # UpdateEvent vocabulary
+│   ├── updates.rs      # UpdateEvent vocabulary, including PeerStatus
 │   ├── user.rs         # UserCandidate, UserSearchState: finding a person
 │   └── vim.rs          # Pure Vim motion calculator (no UI): VimState between
 │                       #   items, char_motion within one item's text
@@ -200,6 +211,12 @@ person the server offered (their identifier, display name and optional
 reader's place among them — with `adopt` refusing an answer whose query the
 reader has already replaced, the same stale-answer discipline `SearchState`
 keeps.
+
+`domain::presence::Presence` is a peer's standing as reported: `Online`, `Offline`
+with the raw Unix seconds it was last online, the three restricted buckets, or
+`Hidden`. It carries no clock and no wording. `Chat` and `Account` hold it as
+`presence: Option<Presence>`, and `UpdateEvent::PeerStatus` sets it on the private
+chat only and stays until the next update for that peer.
 
 `domain::history::ConversationWindow` is a flat, bounded `VecDeque` capped at
 `CONVERSATION_WINDOW` (200). It is a window over the messages the client has
@@ -233,11 +250,12 @@ crates/tui/
 │   │   ├── conversation.rs # ConversationState: the open view, registers, searches
 │   │   ├── input.rs        # InputState: the live line and the emoji popup
 │   │   ├── drafts.rs       # DraftStore: per-peer parked drafts and read receipts
-│   │   └── ui.rs           # UiState, FrameMetrics: mode, focus, the frame's cells
+│   │   └── ui.rs           # UiState, FrameMetrics: mode, focus, the frame's cells, each peer's presence
 │   ├── card.rs         # One profile panel over two subjects: the row model, the
 │                      #   drawing, and which rows exist
 │   ├── date.rs         # Civil dates: day keys, labels and `HH:MM`. Pure; no clock
 │   ├── emoji.rs        # The `:query` under the caret, and its candidates
+│   ├── presence.rs     # Presence -> the words on screen ("online", "last seen today"). Pure; the caller passes now
 │   ├── event.rs        # crossterm KeyEvent -> AppAction (partly unwired)
 │   ├── bidi.rs         # Which way a message reads, and the logical ranges one
 │                      #   wrapped row is drawn in, already permuted
@@ -268,6 +286,16 @@ crates/tui/
                        #        unicode-width, unicode-segmentation, unicode-bidi, emojis,
                        #        image-webp, tracing
 ```
+
+Peer presence is held in `UiState::peer_presence`, a map from peer id to the last
+`Presence` reported, and `set_presence` says whether it changed what is shown. A
+`PeerStatus` is routed there by `coordinate.rs` and touches neither the cursor, the
+selection nor the search. Presence is read in two places only: the conversation
+title (`widgets/conversation.rs`, `presence_note`, which yields to the typing note
+and is dropped whole when it does not fit) and one `status` row on a contact's
+card (`card.rs`, where the live report wins over the profile read's). The chat
+list draws none. The wording is `presence.rs`'s, so `tui` alone decides how a
+timestamp reads.
 
 `App` is nine fields — `ui`, `session`, `profile`, `list`, `outbox`, `pending`,
 `conversation`, `input` and `drafts` — one sub-struct per concern, each owning

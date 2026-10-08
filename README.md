@@ -213,6 +213,15 @@ Working today:
   rather than a message row, so it never displaces a message; when the title has
   no room it is dropped whole rather than truncated. Advertising our own typing is
   not built.
+- **Online / last seen:** the conversation title shows the open peer's status as a
+  dim `· online`, `· last seen today`, `· last seen yesterday`, `· last seen on <day
+  or date>`, or — for a peer who restricts it — `· last seen recently`, `· last seen
+  within a week` or `· last seen within a month`. A contact's card carries the same
+  words on one `status` row. A peer who hides presence shows nothing: no title note
+  and no row. The title note yields to the typing note while the peer types, and is
+  dropped whole when the title has no room. The status is sticky: it stands until
+  the next update for that peer, with no expiry, so it can be stale. The chat list
+  shows no presence.
 - **Yank / paste:** `y` in Visual puts the selection in a register — the selected
   characters for a text selection, one line per message oldest-first for a set of
   them — and `p` in Normal opens the line with it. A yank is also offered to the

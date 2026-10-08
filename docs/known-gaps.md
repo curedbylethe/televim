@@ -264,6 +264,26 @@ Real, and named so they are not mistaken for oversights:
   to wipe.
 - **The 19 MiB Argon2id allocation is declared, not measured.** `make measure` runs
   with no credentials, so no RSS figure includes it; see [`memory.md`](./memory.md).
+- **Live wire behaviour for restricted presence is unconfirmed.** The mapping of
+  `UserStatus::Recently`, `LastWeek`, `LastMonth` and `Empty` (to `UserPresence`
+  `Recently`, `LastWeek`, `LastMonth` and `Hidden`) is unit-tested against the schema,
+  but what Telegram actually sends a peer who hides last-seen is not. The gate cannot
+  check it without a datacenter. `proto_integration` does not assert presence today,
+  so a hand run (`TELEVIM_TEST_DC=1 … cargo test --all --all-features --test
+  proto_integration`) proves the suite passes, not the presence shape. Confirm by
+  hand against a restricted account, and extend the suite if the answer differs.
+- **Presence is sticky and can go stale.** A peer's status stands until the next
+  `PeerStatus` for them. There is no expiry, and Telegram's `expires` deadline on
+  `Online` is ignored, so a peer who goes offline without an update still reads
+  `online` until one arrives. Revisit on a reader complaint, not before.
+- **The chat list shows no presence.** This is deliberate: presence reaches the
+  screen through the open conversation's title and one contact-card row only. Chat-list
+  rows are not decorated, and `widgets/chat_list.rs` has no test module to put a row
+  assertion in.
+- **The peer presence map is unbounded per session and unmeasured.** `UiState::peer_presence`
+  gains one entry for each distinct peer that reports presence and is never evicted
+  for the length of the session. It is not measured against the memory budget
+  ([`memory.md`](./memory.md)).
 
 ## v2 Hooks
 

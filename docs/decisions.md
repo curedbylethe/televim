@@ -634,3 +634,21 @@ are in [`../AGENTS.md`](../AGENTS.md).
   key rather than replaced. The list does not move until Telegram has agreed, and
   an unpin restores the chat's recency position. The list is not re-sorted on
   updates: a background re-sort would move the highlight under the reader.
+- **Why presence carries a raw Unix time and `tui` does the formatting:** `domain`
+  is clock-free, and "5 min ago" or "last seen today" is a function of the reader's
+  clock. So `Presence::Offline` holds the `was_online` seconds as Telegram sent
+  them, and `tui::presence::wording` takes `now` from the frame's clock. A formatted
+  string in `domain` would freeze the reader's day into the value, and a
+  `Presence` that held the words would be untestable without a clock.
+- **Why presence is sticky and has no expiry tick:** Telegram's `Online` carries an
+  `expires` deadline, but a deadline needs a clock, a tick on every `drive` pass and
+  a new field beside `typing_until`. The failure of sticky presence is a title that
+  reads "online" a little too long, which the next update for that peer corrects.
+  That is milder than a new timer, so presence stays sticky until the next
+  `PeerStatus`. Revisit only on a reader complaint.
+- **Why `UserPresence` is a framework enum and not `domain::presence::Presence`:**
+  the framework is the only crate that reads `grammers`, and it must not depend on
+  `domain` to say what Telegram said. Two enums of six variants cost a translation
+  function in `proto` (`to_presence`), and that function is where the mapping is
+  tested against both sides. Sharing one type would make `telegram-framework` depend
+  on `domain` for a single enum.
