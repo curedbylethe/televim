@@ -140,7 +140,7 @@ impl DraftStore {
 mod tests {
     use super::*;
     use crate::app::{App, PromptKind};
-    use crate::state::coordinate::{park_draft, resume_draft};
+    use crate::state::coordinate::{park_draft, resume_draft, submit_edit, submit_message};
     use crate::state::input::InputState;
 
     /// A line opened for `purpose` with `text` in it.
@@ -287,6 +287,57 @@ mod tests {
             app.drafts.snapshot(Some((chat_id, &app.input.line))),
             vec![(chat_id, "mid-sentence".to_owned())],
             "resume takes the entry out, so the live line reports it exactly once"
+        );
+    }
+
+    #[test]
+    fn submit_message_clears_the_open_chat_parked_entry() {
+        let mut app = App::mock();
+        let chat_id = app.conversation.conversation.window.chat_id;
+        app.drafts.restore(vec![
+            (chat_id, "parked".to_owned()),
+            (4242, "someone else's".to_owned()),
+        ]);
+        app.input
+            .set_line(line(PromptKind::Message, "sending this"));
+
+        submit_message(
+            &mut app.ui,
+            &mut app.conversation,
+            &mut app.input,
+            &mut app.outbox,
+            &mut app.drafts,
+        );
+
+        assert!(
+            !app.drafts.drafts.contains_key(&chat_id),
+            "a sent message leaves no draft behind, or `Enter` would send it twice"
+        );
+        assert!(
+            app.drafts.drafts.contains_key(&4242),
+            "but a send clears only the peer it went to"
+        );
+    }
+
+    #[test]
+    fn submit_edit_clears_the_open_chat_parked_entry() {
+        let mut app = App::mock();
+        let chat_id = app.conversation.conversation.window.chat_id;
+        app.drafts.restore(vec![(chat_id, "parked".to_owned())]);
+        app.conversation.editing = Some(77);
+        app.input.set_line(line(PromptKind::Edit, "edited"));
+
+        submit_edit(
+            &mut app.ui,
+            &mut app.conversation,
+            &mut app.input,
+            &mut app.outbox,
+            &mut app.drafts,
+        );
+
+        assert!(
+            !app.drafts.drafts.contains_key(&chat_id),
+            "a queued edit leaves no draft behind either"
         );
     }
 }

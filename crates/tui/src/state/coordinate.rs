@@ -1156,11 +1156,16 @@ pub(crate) fn paste(
 /// a time: Telegram throttles per conversation, and a second send would only
 /// earn a `FLOOD_WAIT` — but a silent no-op reads as a hang, so the refusal
 /// says so.
+///
+/// A queued send clears the peer's parked entry, if there is one: the words
+/// are on their way, so there is no draft left to keep. Mirrors what
+/// [`park_draft`] does for empty lines.
 pub(crate) fn submit_message(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
     outbox: &mut Outbox,
+    drafts: &mut DraftStore,
 ) {
     if conversation.sending.is_some() {
         ui.flash("a message is already on its way");
@@ -1188,6 +1193,7 @@ pub(crate) fn submit_message(
         },
     );
     conversation.after_window_change(anchor);
+    drafts.drafts.remove(&chat_id);
 }
 
 /// Queues the edit of the message the buffer was opened with.
@@ -1195,11 +1201,15 @@ pub(crate) fn submit_message(
 /// Nothing is shown optimistically: an edit is reflected when the server's
 /// `MessageEdited` arrives, which is the only path by which its new text
 /// reaches the window.
+///
+/// Like [`submit_message`], a queued edit clears the peer's parked entry:
+/// the words are on their way, so there is no draft left to keep.
 pub(crate) fn submit_edit(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
     outbox: &mut Outbox,
+    drafts: &mut DraftStore,
 ) {
     let Some(message_id) = conversation.editing else {
         return;
@@ -1219,6 +1229,7 @@ pub(crate) fn submit_edit(
             text,
         },
     );
+    drafts.drafts.remove(&chat_id);
 }
 
 /// Starts a search for a person, purely locally.
@@ -2358,11 +2369,23 @@ pub(crate) fn submit(
 ) -> bool {
     let opened = match input.line.purpose() {
         PromptKind::Message | PromptKind::Reply => {
-            submit_message(&mut *ui, &mut *conversation, &mut *input, &mut *outbox);
+            submit_message(
+                &mut *ui,
+                &mut *conversation,
+                &mut *input,
+                &mut *outbox,
+                &mut *drafts,
+            );
             false
         }
         PromptKind::Edit => {
-            submit_edit(&mut *ui, &mut *conversation, &mut *input, &mut *outbox);
+            submit_edit(
+                &mut *ui,
+                &mut *conversation,
+                &mut *input,
+                &mut *outbox,
+                &mut *drafts,
+            );
             false
         }
         PromptKind::Command => {
