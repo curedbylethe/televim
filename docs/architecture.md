@@ -479,8 +479,12 @@ that a scan rebuilds at launch, holds both `MEDIA_CACHE_MAX_BYTES` and
 `MEDIA_CACHE_MAX_ENTRIES` by evicting the oldest modification time, and writes each
 file atomically at `0600`, as the history file does. `runtime.rs` opens it at launch
 with the configured account, which clears the directory on a mismatch; `net::State`
-holds it behind an `Arc<Mutex>`, clears it at sign-out, and `save_media` looks up
-and stores through it — the store under `spawn_blocking`.
+holds it behind an `Arc<Mutex>`, cancels every download in flight and clears it at
+sign-out, and `save_media` looks up and stores through it — the store under
+`spawn_blocking`. A store takes the lock twice and writes between: it reserves a file
+under the lock, writes with the lock released, and commits under the lock. `clear`
+bumps a generation, so a store that reserved before a clear removes its late file
+instead of indexing it, and sign-out never waits out a 16 MiB write.
 
 `history_store.rs` owns the history file (`televim.toml` → `televim.history.json`)
 and the cache it holds: the newest `HISTORY_CACHE_DEPTH` (200, asserted equal to
