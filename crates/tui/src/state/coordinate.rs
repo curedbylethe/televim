@@ -299,6 +299,7 @@ pub(crate) fn select_chat_none(
     // page on show still names.
     park_draft(&mut *conversation, &mut *input, &mut *drafts);
     conversation.conversation = ConversationView::new(0);
+    conversation.cached = false;
     // The note belongs to the chat being left: returning must not revive it,
     // so the deadline goes with the view rather than with the reader's memory.
     ui.set_typing(None);
@@ -514,6 +515,8 @@ pub(crate) fn apply_jump(
         .conversation
         .window
         .replace(page.iter().cloned());
+    // The page is the server's, so whatever the cache put there is gone.
+    conversation.cached = false;
     conversation.clear_selection();
 
     // A window that jumped is surrounded by the unknown on both sides,

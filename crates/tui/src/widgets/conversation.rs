@@ -2570,6 +2570,46 @@ mod tests {
         );
     }
 
+    /// A conversation opened from the cache paints its messages before its
+    /// newest page has landed, and the `Loading…` row gives way to them: it
+    /// stands in for messages, and there are messages to show.
+    #[test]
+    fn a_cached_conversation_paints_before_its_page_lands() {
+        let mut app = App::mock();
+        let seed: Vec<Message> = app
+            .conversation
+            .conversation
+            .window
+            .iter()
+            .skip(7)
+            .map(|message| Message {
+                chat_id: 2,
+                ..message.clone()
+            })
+            .collect();
+        app.select_chat(1);
+        assert!(app.seed_from_cache(2, seed));
+        app.begin_fetch(FetchDirection::Latest);
+
+        let screen = screen(&app, 80, 10);
+        let panel: Vec<String> = (1..9).map(|y| row(&screen, y)).collect();
+
+        for text in [
+            "50 MB RSS or bust.",
+            "No pressure then :)",
+            "See you at the demo.",
+        ] {
+            assert!(
+                panel.iter().any(|line| line.contains(text)),
+                "{text:?} is not on the panel: {panel:#?}"
+            );
+        }
+        assert!(
+            !panel.iter().any(|line| line.contains("Loading…")),
+            "the wait is not drawn over the messages: {panel:#?}"
+        );
+    }
+
     /// A jump replaces the window rather than extending it, so there is no edge
     /// of the window on show for its row to sit at: it is said where the messages
     /// are, and the messages follow it.

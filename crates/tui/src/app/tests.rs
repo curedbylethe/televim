@@ -4068,6 +4068,226 @@ fn a_direction_the_conversation_has_run_out_of_is_not_asked_for() {
     assert!(!app.wants_newer(), "nor behind the newest one");
 }
 
+// ---- a conversation opened from the cache --------------------------
+
+/// The conversation the cache tests open: the second in the sample list,
+/// which has nothing loaded for it.
+const CACHED_CHAT: i64 = 2;
+
+/// Messages of [`CACHED_CHAT`], as the cache would hand them over.
+fn cached(ids: &[i64]) -> Vec<Message> {
+    ids.iter()
+        .map(|id| Message {
+            chat_id: CACHED_CHAT,
+            ..message(*id, "cached")
+        })
+        .collect()
+}
+
+/// The identifiers the window holds, oldest first.
+fn window_ids(app: &App) -> Vec<i64> {
+    app.conversation
+        .conversation
+        .window
+        .iter()
+        .map(|message| message.id)
+        .collect()
+}
+
+/// [`CACHED_CHAT`] opened, seeded from the cache, and its newest page asked
+/// for — the order the driver does them in.
+fn revalidating(ids: &[i64]) -> App {
+    let mut app = App::mock();
+    app.select_chat(1);
+    assert!(
+        app.seed_from_cache(CACHED_CHAT, cached(ids)),
+        "the seed was expected to land"
+    );
+    app.begin_fetch(FetchDirection::Latest);
+    app
+}
+
+/// A warm cache paints the conversation before the network has answered: the
+/// rows are there, the reader is at the newest of them, and the page that will
+/// replace them is still on its way.
+#[test]
+fn a_warm_cache_fills_a_conversation_before_its_page_lands() {
+    let mut app = App::mock();
+    app.select_chat(1);
+    assert!(app.apply_update(&read(CACHED_CHAT, 6)));
+
+    assert!(app.seed_from_cache(CACHED_CHAT, cached(&[5, 6, 7])));
+
+    assert_eq!(window_ids(&app), [5, 6, 7]);
+    assert_eq!(app.conversation.vim.total(), 3);
+    assert_eq!(app.conversation.vim.cursor(), 2, "at the newest message");
+    assert!(app.conversation.conversation.auto_follow());
+    assert_eq!(
+        app.conversation.conversation.read_watermark(),
+        Some(6),
+        "the watermark is the feed's, and the cache does not move it"
+    );
+    assert!(
+        !app.is_revalidating(),
+        "nothing is on its way until the page is asked for"
+    );
+
+    app.begin_fetch(FetchDirection::Latest);
+
+    assert!(app.is_revalidating());
+    assert_eq!(app.status_text(), REVALIDATING_LABEL);
+}
+
+/// The server's newest page replaces the cached rows through the path every
+/// newest page takes, and the wait is over.
+#[test]
+fn the_newest_page_replaces_what_the_cache_showed() {
+    let mut app = revalidating(&[5, 6, 7]);
+    app.conversation.vim.set_cursor(0);
+
+    app.end_fetch(FetchDirection::Latest);
+    assert!(app.apply_latest(cached(&[6, 7, 8, 9])));
+
+    assert_eq!(
+        window_ids(&app),
+        [6, 7, 8, 9],
+        "nothing of the seed is left"
+    );
+    assert_eq!(app.conversation.vim.total(), 4);
+    assert_eq!(app.conversation.vim.cursor(), 3, "at the newest message");
+    assert!(!app.conversation.cached);
+    assert!(!app.is_revalidating());
+    assert_ne!(app.status_text(), REVALIDATING_LABEL);
+}
+
+/// A seed is only for a conversation that has just been opened and has
+/// nothing better on show: any other is refused and leaves the window as it
+/// was.
+#[test]
+fn a_seed_is_refused_where_it_would_cover_something() {
+    // Nothing open.
+    let mut app = App::new();
+    assert!(!app.seed_from_cache(CACHED_CHAT, cached(&[1])));
+
+    // Another conversation than the one on show.
+    let mut app = App::mock();
+    app.select_chat(1);
+    assert!(!app.seed_from_cache(3, cached(&[1])));
+    assert!(app.conversation.conversation.window.is_empty());
+
+    // The right identifier, but messages from somewhere else.
+    assert!(!app.seed_from_cache(CACHED_CHAT, page(&[1, 2])));
+    assert!(app.conversation.conversation.window.is_empty());
+    assert!(!app.conversation.cached);
+
+    // A window that already holds the conversation.
+    let mut app = App::mock();
+    assert!(!app.seed_from_cache(MOCK_CHAT, page(&[1, 2])));
+    assert_eq!(window_ids(&app), (1..=10).collect::<Vec<_>>());
+
+    // The newest page has already landed.
+    let mut app = App::mock();
+    app.select_chat(1);
+    assert!(app.apply_latest(cached(&[8, 9])));
+    assert!(!app.seed_from_cache(CACHED_CHAT, cached(&[1, 2, 3])));
+    assert_eq!(window_ids(&app), [8, 9]);
+    assert!(!app.conversation.cached);
+}
+
+/// An empty cache is no seed at all, and the conversation opens exactly as
+/// it did before there was one: empty, and waiting on the `Loading…` row.
+#[test]
+fn a_cold_cache_opens_a_conversation_as_before() {
+    let mut app = App::mock();
+    app.select_chat(1);
+
+    assert!(!app.seed_from_cache(CACHED_CHAT, Vec::new()));
+    app.begin_fetch(FetchDirection::Latest);
+
+    assert!(app.conversation.conversation.window.is_empty());
+    assert!(!app.conversation.cached);
+    assert!(!app.is_revalidating(), "the `Loading…` row says this one");
+    assert_ne!(app.status_text(), REVALIDATING_LABEL);
+}
+
+/// The feed does not wait for the revalidation: an arrival lands on the
+/// cached rows the way it lands on any window, and the newest page then
+/// replaces both.
+#[test]
+fn an_arrival_lands_on_a_cached_window() {
+    let mut app = revalidating(&[5, 6, 7]);
+
+    assert!(app.apply_update(&UpdateEvent::NewMessage(Message {
+        chat_id: CACHED_CHAT,
+        ..message(8, "live")
+    })));
+
+    assert_eq!(window_ids(&app), [5, 6, 7, 8]);
+    assert_eq!(
+        app.conversation.vim.cursor(),
+        3,
+        "a following view follows it"
+    );
+    assert!(app.is_revalidating(), "an arrival is not the newest page");
+
+    app.end_fetch(FetchDirection::Latest);
+    assert!(app.apply_latest(cached(&[6, 7, 8])));
+    assert_eq!(window_ids(&app), [6, 7, 8]);
+}
+
+/// A cached window is not paged from while its newest page is on its way:
+/// that page replaces it, and the cursor that would anchor a page describes
+/// nothing yet. Once the page lands, paging is what it always was.
+#[test]
+fn a_cached_window_is_not_paged_from_until_its_page_lands() {
+    let mut app = revalidating(&[5]);
+
+    assert!(!app.wants_older());
+    app.conversation.conversation.unfollow();
+    assert!(!app.wants_newer());
+    app.conversation.conversation.follow();
+
+    app.end_fetch(FetchDirection::Latest);
+    assert!(app.apply_latest(cached(&[5])));
+
+    assert!(
+        app.wants_older(),
+        "a one-message window is near its start, and asks"
+    );
+}
+
+/// A revalidation that fails says so like any other page, and the cached
+/// rows stay readable underneath: the cache never talks over a failure.
+#[test]
+fn a_failed_revalidation_still_says_so() {
+    let mut app = revalidating(&[5, 6, 7]);
+
+    // Written while the page is still on its way, the failure outranks the
+    // wait.
+    app.ui.status = "history: flood wait".to_owned();
+    assert_eq!(app.status_text(), "history: flood wait");
+
+    app.end_fetch(FetchDirection::Latest);
+
+    assert_eq!(app.status_text(), "history: flood wait");
+    assert!(!app.is_revalidating(), "nothing is on its way now");
+    assert_eq!(window_ids(&app), [5, 6, 7], "and the rows are still there");
+}
+
+/// Leaving a cached conversation leaves its flag behind: the next one opens
+/// as though nothing had been seeded.
+#[test]
+fn leaving_a_cached_conversation_forgets_where_it_came_from() {
+    let mut app = revalidating(&[5, 6, 7]);
+
+    app.select_chat(2);
+    assert!(!app.conversation.cached);
+
+    app.select_chat(1);
+    app.begin_fetch(FetchDirection::Latest);
+    assert!(!app.is_revalidating());
+}
+
 // ---- `gg` and the unread messages ----------------------------------
 
 /// `gg` is Vim's top-of-buffer when there is nothing unread to be taken to,
