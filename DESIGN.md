@@ -881,7 +881,8 @@ title when the chat is pinned, the title, two spaces, and its newest message as 
 preview in dim ink. A chat with no messages shows no preview. `j`/`k` or `↑`/`↓`
 move the highlight and wrap at either end. The highlighted row is reverse video.
 `⏎` queues the forward into the highlighted chat. `Esc` puts the picker away and
-returns to the selection it was raised from, unchanged.
+returns to the selection it was raised from, unchanged. A deleted account is not
+a row: the picker leaves it out, though the chat list still shows it.
 
 **What a send does.** `⏎` queues the forward and ends the selection: the picker
 goes, the mode returns to Normal, and the reader stays in the conversation they

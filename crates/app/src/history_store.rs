@@ -633,6 +633,10 @@ struct CachedChat {
     last_timestamp: Option<i64>,
     #[serde(default)]
     pinned: bool,
+    /// Missing from caches written before the flag existed: those read back as
+    /// live accounts until the next fetch says otherwise.
+    #[serde(default)]
+    deleted: bool,
 }
 
 impl CachedChat {
@@ -645,6 +649,7 @@ impl CachedChat {
             last_message_id: chat.last_message_id,
             last_timestamp: chat.last_timestamp,
             pinned: chat.pinned,
+            deleted: chat.deleted,
         }
     }
 
@@ -659,6 +664,7 @@ impl CachedChat {
             last_timestamp: self.last_timestamp,
             pinned: self.pinned,
             presence: None,
+            deleted: self.deleted,
         }
     }
 
@@ -672,6 +678,7 @@ impl CachedChat {
             && self.last_message_id == chat.last_message_id
             && self.last_timestamp == chat.last_timestamp
             && self.pinned == chat.pinned
+            && self.deleted == chat.deleted
     }
 }
 
@@ -1141,6 +1148,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             presence: None,
+            deleted: false,
         }
     }
 

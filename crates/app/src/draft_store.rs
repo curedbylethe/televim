@@ -364,6 +364,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             presence: None,
+            deleted: false,
         }]);
         app.select_chat(0);
         app.apply_latest(vec![

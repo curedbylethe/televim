@@ -330,6 +330,7 @@ impl ChatList {
             last_timestamp: None,
             pinned: false,
             presence: None,
+            deleted: false,
         });
 
         self.chats.len() - 1
@@ -394,6 +395,7 @@ mod tests {
             last_timestamp: Some(1_000),
             pinned: false,
             presence: None,
+            deleted: false,
         }
     }
 

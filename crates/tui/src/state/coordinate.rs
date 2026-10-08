@@ -1029,7 +1029,7 @@ pub(crate) fn begin_forward(
         return;
     };
 
-    if list.list.chats.is_empty() {
+    if list.forward_destinations().is_empty() {
         conversation.clear_selection();
         ui.set_mode(Mode::Normal);
         ui.flash("no chat to forward to");
@@ -1057,7 +1057,8 @@ pub(crate) fn handle_forward_pick(
             let Some(pick) = conversation.picking() else {
                 return;
             };
-            let Some(dest) = list.list.chats.get(pick.selected) else {
+            let destinations = list.forward_destinations();
+            let Some(dest) = destinations.get(pick.selected) else {
                 conversation.dismiss_forward();
                 return;
             };
@@ -1077,10 +1078,10 @@ pub(crate) fn handle_forward_pick(
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            conversation.move_forward(list.list.chats.len(), true);
+            conversation.move_forward(list.forward_destinations().len(), true);
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            conversation.move_forward(list.list.chats.len(), false);
+            conversation.move_forward(list.forward_destinations().len(), false);
         }
         KeyCode::Esc => conversation.dismiss_forward(),
         _ => {}

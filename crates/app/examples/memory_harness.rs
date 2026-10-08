@@ -201,6 +201,7 @@ fn fixture_chats() -> Vec<Chat> {
                 last_timestamp: Some(FIXED_NOW - to_id(n) * 60),
                 pinned: false,
                 presence: None,
+                deleted: false,
             }
         })
         .collect()

@@ -56,8 +56,8 @@ pub fn render(app: &App, conversation: Rect, frame: &mut Frame<'_>) {
     );
 
     let items: Vec<ListItem> = app
-        .chats()
-        .iter()
+        .forward_destinations()
+        .into_iter()
         .map(|chat| {
             let pin = if chat.pinned { "📌 " } else { "" };
             let preview = chat

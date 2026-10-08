@@ -65,6 +65,10 @@ pub(crate) struct ProtoChat {
 
     /// Whether the account has pinned this chat to the top of the list.
     pub pinned: bool,
+
+    /// Whether the peer is a deleted account. Carried through so the forward
+    /// picker can leave it out; the chat list still shows it.
+    pub deleted: bool,
 }
 
 /// A message on its way from the framework into `domain`.
@@ -110,6 +114,7 @@ impl From<ProtoChat> for Chat {
             last_message_id: chat.last_message_id,
             last_timestamp: chat.last_timestamp,
             pinned: chat.pinned,
+            deleted: chat.deleted,
             presence: None,
         }
     }
@@ -164,6 +169,7 @@ impl From<DialogInfo> for ProtoChat {
             last_timestamp: dialog.last_timestamp,
             last_message: dialog.last_text,
             pinned: dialog.pinned,
+            deleted: dialog.deleted,
         }
     }
 }
@@ -287,6 +293,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             last_message: None,
+            deleted: false,
         }
     }
 
@@ -455,6 +462,7 @@ mod live_tests {
             peer_id,
             title: format!("chat {peer_id}"),
             kind,
+            deleted: false,
             unread_count: 0,
             last_message_id: None,
             last_timestamp: None,
@@ -489,6 +497,17 @@ mod live_tests {
             let chat: Chat = ProtoChat::from(dialog(1, source)).into();
             assert_eq!(chat.kind, expected, "{source:?} was mistranslated");
         }
+    }
+
+    #[test]
+    fn a_deleted_account_stays_deleted_in_the_domain() {
+        let mut source = dialog(1, DialogKind::PrivateUser);
+        source.deleted = true;
+
+        let chat: Chat = ProtoChat::from(source).into();
+
+        assert!(chat.deleted);
+        assert!(!Chat::from(ProtoChat::from(dialog(2, DialogKind::PrivateUser))).deleted);
     }
 
     #[test]

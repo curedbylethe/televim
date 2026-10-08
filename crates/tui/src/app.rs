@@ -1158,6 +1158,14 @@ impl App {
         &self.list.list.chats
     }
 
+    /// The chats a forward can land in: the chat list without deleted accounts.
+    ///
+    /// Delegates to [`ChatListState::forward_destinations`].
+    #[must_use]
+    pub fn forward_destinations(&self) -> Vec<&Chat> {
+        self.list.forward_destinations()
+    }
+
     /// The jump the reader is waiting on, if any.
     ///
     /// What the caller fetches: a jump the window cannot answer is recorded here
@@ -2707,6 +2715,7 @@ fn mock_chats() -> Vec<Chat> {
             last_timestamp: Some(1_730_000_000),
             pinned: false,
             presence: None,
+            deleted: false,
         },
         Chat {
             id: 2,
@@ -2718,6 +2727,7 @@ fn mock_chats() -> Vec<Chat> {
             last_timestamp: Some(1_729_999_000),
             pinned: false,
             presence: None,
+            deleted: false,
         },
         Chat {
             id: 3,
@@ -2729,6 +2739,7 @@ fn mock_chats() -> Vec<Chat> {
             last_timestamp: Some(1_729_998_000),
             pinned: false,
             presence: None,
+            deleted: false,
         },
     ]
 }

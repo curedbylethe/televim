@@ -1937,6 +1937,7 @@ mod tests {
             last_timestamp: Some(1_730_000_000),
             pinned: false,
             presence: None,
+            deleted: false,
         }]);
         app.select_chat(0);
         app.apply_latest(
@@ -4046,6 +4047,7 @@ mod tests {
             last_timestamp: Some(0),
             pinned: false,
             presence: None,
+            deleted: false,
         }]);
         app.select_chat(0);
         app.apply_latest(vec![Message {
