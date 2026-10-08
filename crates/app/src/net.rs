@@ -63,6 +63,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
 
 use crate::config::Config;
 use crate::draft_store::DraftFile;
+use crate::history_store::HistoryFile;
 use crate::runtime::AppEvent;
 
 /// How many messages one page holds.
@@ -481,6 +482,12 @@ pub struct State {
     /// `None` wherever no loop set one, which is every test.
     draft_file: Option<DraftFile>,
 
+    /// Where read messages live on disk, so signing out can remove them.
+    ///
+    /// Set by the loop beside [`State::draft_file`], and `None` in the same
+    /// places for the same reason.
+    history_file: Option<HistoryFile>,
+
     /// The configuration, and the channel to answer on — the pair bring-up needs
     /// to be run again.
     ///
@@ -572,6 +579,13 @@ impl State {
     /// existing caller builds a loop-less state that has no file.
     pub fn set_draft_file(&mut self, file: DraftFile) {
         self.draft_file = Some(file);
+    }
+
+    /// Points sign-out at the history file, so it can remove it.
+    ///
+    /// A setter for [`State::set_draft_file`]'s reason.
+    pub(crate) fn set_history_file(&mut self, file: HistoryFile) {
+        self.history_file = Some(file);
     }
 
     /// The client, once bring-up has installed one.
@@ -1570,6 +1584,11 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             if let Some(file) = &state.draft_file {
                 file.clear();
             }
+            // The cached messages go too, for the same reason and with the
+            // same best-effort: another account must never open onto them.
+            if let Some(file) = &state.history_file {
+                file.clear();
+            }
             // The empty reason is the signed-out *state*, not a missing one: the
             // reader chose this, so a line saying why it could not read a
             // profile would be an excuse nobody asked for.
@@ -2419,6 +2438,7 @@ mod tests {
     use domain::message::MessageStatus;
 
     use super::*;
+    use crate::history_store::HistoryCache;
     use tui::app::AccountState;
     use tui::app::CHAT_SWITCH_DELAY;
     use tui::app::ConnectionState;
@@ -3356,6 +3376,24 @@ mod tests {
             "and the sign-out itself is unaffected: {:?}",
             app.ui.status
         );
+    }
+
+    /// Signing out removes the history file too: the cached messages belong
+    /// to the account that is leaving.
+    #[test]
+    fn signing_out_removes_the_history_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        HistoryFile::new(path.clone()).save(&HistoryCache::default(), Some("+1555"));
+        assert!(path.exists());
+
+        let mut app = app_with_a_conversation(CHAT, 2);
+        let mut state = State::default();
+        state.set_history_file(HistoryFile::new(path.clone()));
+        apply_logged_out(&mut app, &mut state, Ok(()));
+
+        assert!(!path.exists(), "the messages went with the account");
+        assert_eq!(app.ui.status, "signed out");
     }
 
     /// Signing out with no drafts file is still a sign-out: `clear` on a
