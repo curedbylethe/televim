@@ -27,11 +27,12 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use domain::history::ConversationWindow;
-use domain::message::{Message, MessageStatus};
+use domain::message::{MediaKind, Message, MessageStatus};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
 use crate::date;
+use crate::sticker::{STICKER_FIT_ROWS, StickerCache};
 use crate::wrap::{columns, wrap_decorated};
 
 /// The columns a message's sender is named in: `[you] ` or `[them] `.
@@ -467,8 +468,31 @@ pub fn message_rows(
     grouped: Grouped,
     width: u16,
 ) -> Vec<Range<usize>> {
+    // A decoded sticker has no text rows: the token the body names is what a
+    // miss draws instead, and the picture's rows are counted below.
+    if sticker_block_rows(message, &app.conversation.stickers) > 0 {
+        return Vec::new();
+    }
+
     let (prefix, suffix) = decoration_columns(app, message, grouped, width);
     wrap_decorated(message.display_body(), prefix, suffix, width)
+}
+
+/// How many rows a decoded sticker message paints its picture on: none without
+/// bytes, the fit box's rows with them.
+///
+/// AFTER [`message_rows`]: [`RowSpan::len`] is the two added together (see
+/// [`App::row_layout`]), while [`RowSpan::text`] stays message-level — a block
+/// has no text range. The panel draws the block between the text rows and the
+/// trailing note.
+#[must_use]
+pub fn sticker_block_rows(message: &Message, cache: &StickerCache) -> usize {
+    match message.media {
+        Some(MediaKind::Sticker) if message.text.is_empty() && cache.get(message.id).is_some() => {
+            STICKER_FIT_ROWS as usize
+        }
+        _ => 0,
+    }
 }
 
 /// How many rows a layout occupies.
@@ -1521,6 +1545,51 @@ mod tests {
                 "{media:?} is one row of the very string the panel wraps"
             );
         }
+    }
+
+    /// A sticker with no bytes is a placeholder like any other: one text row,
+    /// no block rows.
+    #[test]
+    fn a_sticker_without_bytes_is_one_text_row_and_no_block() {
+        let app = App::mock();
+        let message = carrying(domain::message::MediaKind::Sticker);
+
+        assert_eq!(
+            message_rows(&app, &message, Grouped::alone(), 40),
+            vec![0..message.display_body().len()]
+        );
+        assert_eq!(sticker_block_rows(&message, &app.conversation.stickers), 0);
+    }
+
+    /// A decoded sticker has no text rows at all: the token the body names is
+    /// what a miss draws instead, and the picture takes the fit box's rows.
+    #[test]
+    fn a_decoded_sticker_is_eight_block_rows_and_no_text() {
+        let mut app = App::mock();
+        let message = carrying(domain::message::MediaKind::Sticker);
+        app.conversation
+            .stickers
+            .insert_bytes(message.id, crate::sticker::STICKER_TEST_WEBP)
+            .expect("the fixture decodes");
+
+        assert!(message_rows(&app, &message, Grouped::alone(), 40).is_empty());
+        assert_eq!(sticker_block_rows(&message, &app.conversation.stickers), 8);
+    }
+
+    /// A caption wins over the picture the way it wins over the token: bytes
+    /// or not, a sticker that says something is text.
+    #[test]
+    fn a_captioned_sticker_has_text_rows_and_no_block() {
+        let mut app = App::mock();
+        let mut message = carrying(domain::message::MediaKind::Sticker);
+        message.text = String::from("back at you").into();
+        app.conversation
+            .stickers
+            .insert_bytes(message.id, crate::sticker::STICKER_TEST_WEBP)
+            .expect("the fixture decodes");
+
+        assert!(!message_rows(&app, &message, Grouped::alone(), 40).is_empty());
+        assert_eq!(sticker_block_rows(&message, &app.conversation.stickers), 0);
     }
 
     /// The columns a note takes are subtracted before the body is cut, so a note

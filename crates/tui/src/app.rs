@@ -2219,7 +2219,11 @@ impl App {
             // the bidi mode: a row is broken logically and permuted at paint
             // time, so the same window is the same height in either mode.
             let text = 0..message.display_body().len();
-            let len = rows::message_rows(self, message, rows::group_of(self, index), width).len();
+            let rows = rows::message_rows(self, message, rows::group_of(self, index), width);
+            // A decoded sticker paints its picture below its (empty) text: the
+            // block rows come after the text rows, so the two heights add.
+            let block = rows::sticker_block_rows(message, &self.conversation.stickers);
+            let len = rows.len() + block;
 
             laid_out.push(RowSpan {
                 kind: RowKind::Message { index },
