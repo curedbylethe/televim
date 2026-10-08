@@ -14,7 +14,7 @@
   const HINT = {
     normal: ' i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct',
     list: ' j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin',
-    visual: ' d: delete  y: yank  r: reply  Esc: cancel',
+    visual: ' d: delete  y: yank  s: forward  r: reply  Esc: cancel',
     /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
     draft: ' ⏎ draft — i to continue, ^J/⏎ to discard',
     typing: ' ⏎: send  ^J: newline  shift+⏎: newline where supported',
@@ -28,7 +28,10 @@
     cardSelf: ' j/k: row  h/l: within  v: vis  y: yank  d: act  Esc: back',
     cardContact: ' j/k: row  h/l: within  v: vis  y/yy: yank  Esc: back',
     cardSignedOut: ' ::signin  q:quit',
-    cardReading: ' q:quit'
+    cardReading: ' q:quit',
+    /* the status line while the forward picker is up: the picker's own hint, which the Rust
+       names FORWARD_PICKER_HINT and which carries the mode's name, unlike the rest. */
+    forward: 'VISUAL  j/k: choose  ⏎: forward  Esc: cancel'
   };
   const ALL_HINTS = Object.values(HINT);
   /* reader's own text. The popup lists these; the chrome never paints the glyph. */
@@ -512,7 +515,7 @@
         y('Twice. I have both tickets in the blue folder, concert on top.'),
         t('Leave the train ones on the fridge. I only need the concert pair tonight.'),
         y('Understood. Saving the seat was the whole of the favour.')
-      ], { cur: 5, older: true, base: 100, history: [
+      ], { cur: 5, older: true, base: 100, pin: true, history: [
         t('Morning. Has the programme arrived?', { id: 91 }),
         y('Not yet. Which hall is it?', { id: 92 }),
         t('The old hall on the canal.', { id: 93 }),
@@ -544,7 +547,7 @@
         y('Train is moving.', { at: at(0, '21:31'), rcpt: 'delivered' }),
         y('Sent from the carriage.', { at: at(0, '21:32'), status: 'sending…' }),
         y('Is the gate open?', { at: at(0, '21:38'), status: 'failed: no route' })
-      ]),
+      ], { pin: true }),
       C('Alan Turing', 1, [y('Did the paper come back?'), t('Reviewers want one more proof.')], { newer: true }),
       C('Katherine Johnson', 0, [t('Numbers check out.'), y('Good. Send the table.')]),
       C('Margaret Hamilton', 0, [], { loading: true }),
@@ -646,7 +649,7 @@
   function fresh(view, bidi) {
     const s = {
       view: 'chat', right: 'conv', focus: 'conv', chat: 0, chats: makeChats(),
-      vis: null, search: null, newchat: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
+      vis: null, search: null, newchat: null, fwd: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
       sset: 0, signin: null, card: null, count: 0,
       bidi: BIDI_MODES.includes(bidi) ? bidi : 'terminal',
       profile: { name: 'Noor Haddad', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
@@ -765,6 +768,7 @@
     if (s.focus === 'settings') settingsKey(s, k, p);
     else if (s.focus === 'profile') cardKey(s, k, p);
     else if (s.focus === 'newchat') newchatKey(s, k, p);
+    else if (s.focus === 'forward') fwdKey(s, k, p);
     else if (s.focus === 'list') listKey(s, k, p);
     else if (s.vis) visKey(s, k, p);
     else convKey(s, k, p);
@@ -921,6 +925,11 @@
       case 'g': if (p === 'g') c.cur = 0; else s.pend = 'g'; break;
       case 'G': c.cur = c.msgs.length - 1; break;
       case 'Escape': case 'v': s.vis = null; break;
+      case 's': {
+        const [lo, hi] = range(s);
+        s.fwd = { at: 0, lo, hi };
+        s.focus = 'forward'; break;
+      }
       case 'y': {
         const [lo, hi] = range(s); s.reg = c.msgs.slice(lo, hi + 1).map((m) => m.text).join('\n');
         s.vis = null; s.flash = (hi - lo + 1) + ' message(s) yanked'; break;
@@ -947,6 +956,24 @@
       for (let i = idxs.length - 1; i >= 0; i--) c.msgs.splice(idxs[i], 1);
       c.cur = clamp(idxs[0], 0, c.msgs.length - 1); x.vis = null;
     });
+  }
+
+  /* ---------- forwarding: the selection, then the destination ---------- */
+  /* The picker owns every key while it is up. Enter queues the forward into the chat it is on
+     and ends the selection; the open chat does not change. Esc puts the picker away and keeps
+     the selection. Only j/k and the arrows move the highlight, and they wrap. */
+  function fwdKey(s, k, p) {
+    const f = s.fwd, n = s.chats.length;
+    if (!f || !n) { s.focus = 'conv'; return; }
+    switch (k) {
+      case 'j': case 'Down': f.at = (f.at + 1) % n; break;
+      case 'k': case 'Up': f.at = (f.at + n - 1) % n; break;
+      case 'Enter': forwardTo(s); break;
+      case 'Escape': s.fwd = null; s.focus = 'conv'; break;
+    }
+  }
+  function forwardTo(s) {
+    s.fwd = null; s.vis = null; s.focus = 'conv';
   }
 
   /* ---------- search ---------- */
@@ -1400,7 +1427,7 @@
       if (i >= 0) { c.cur = i; key(s, 'd'); key(s, 'd'); } else { key(s, 'q'); }
     }
   }
-  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', newchat: 'new-chat results', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell' };
+  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', newchat: 'new-chat results', forward: 'forward picker', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell' };
 
   /* ---------- the grid ---------- */
   const newGrid = () => Array.from({ length: H }, () => Array.from({ length: W }, () => [' ', 't']));
@@ -1542,6 +1569,7 @@
     }
     if (s.view === 'signin' && s.signin && s.signin.away) return { t: ' sign-in paused; Tab brings it back', a: 'd' };
     if (s.view === 'nocreds') return { t: HINT.cardReading, a: 'd' };
+    if (s.focus === 'forward' && s.fwd) return { t: HINT.forward, a: 'd' };
     if (s.vis) return { t: HINT.visual, a: 'd' };
     if (s.focus === 'newchat' && s.newchat) return { t: ' ' + newChatStatus(s), a: 't' };
     if (s.search) {
@@ -2097,9 +2125,38 @@
     else drawConv(g, s, LW, top);
     drawComplete(g, s, top);
     drawNewChat(g, s, top);
+    drawForward(g, s, top);
     drawBar(g, s, b, top);
     drawStatus(g, s);
     return g;
+  }
+
+  /* The forward picker: drawn over the whole conversation column the selection was raised
+     from, the way the Rust clears that column before drawing it. The first interior row is
+     the header, which names the count; each row is a chat's title (with a pin marker in front
+     of a pinned one) and its newest message as a preview. Reverse video is the highlight. */
+  function drawForward(g, s, h) {
+    const f = s.fwd;
+    if (s.focus !== 'forward' || !f || !s.chats.length) return;
+    const x0 = LW, bw = RW, bh = h;
+    put(g, x0, 0, '┌' + '─'.repeat(bw - 2) + '┐', 'b');
+    for (let r = 1; r < bh - 1; r++) {
+      put(g, x0, r, '│', 'b'); put(g, x0 + bw - 1, r, '│', 'b');
+      fill(g, x0 + 1, r, bw - 2, 't');
+    }
+    put(g, x0, bh - 1, '└' + '─'.repeat(bw - 2) + '┘', 'b');
+    const count = f.hi - f.lo + 1;
+    put(g, x0 + 2, 1, 'Forward ' + count + ' message' + (count === 1 ? '' : 's') + ' to…', 't');
+    const rows = Math.max(0, bh - 3), start = Math.max(0, f.at - rows + 1);
+    for (let i = 0; i < rows && start + i < s.chats.length; i++) {
+      const idx = start + i, c = s.chats[idx], on = idx === f.at, yy = 2 + i;
+      const base = on ? 'tr' : 't', quiet = on ? 'tr' : 'd';
+      fill(g, x0 + 1, yy, bw - 2, base);
+      const title = trunc((c.pin ? '📌 ' : '') + c.name, 24);
+      put(g, x0 + 2, yy, title, base);
+      const x = x0 + 2 + cells(title) + 2, last = c.msgs.length ? c.msgs[c.msgs.length - 1].text : '';
+      if (x < x0 + bw - 2) put(g, x, yy, trunc(last, x0 + bw - 2 - x), quiet);
+    }
   }
 
   /* ---------- output ---------- */
@@ -2208,6 +2265,12 @@
       { name: 'Delete yours', keys: 'jdd' },
       { name: 'Delete 3 of yours', keys: 'kvjjjjjd' },
       { name: 'Quit, list focused', keys: '<Tab>q' }] },
+    /* Forwarding a selection. `s` in Visual raises the destination picker over the
+       conversation pane it came from; the picker lists the reader's chats, so the frames come
+       from the real handler with the selection still held behind the overlay. */
+    { id: 'forward', name: 'Forward', variants: [
+      { name: 'Visual: three messages selected, the forward key named', keys: 'kkkkvjj' },
+      { name: 'The forward picker: choose a destination', keys: 'kkkkvjjs' }] },
     { id: 'settings', name: 'Profile · editable', variants: [
       { name: 'Account', keys: ':settings<CR>' },
       { name: 'Editing name', keys: ':settings<CR>i' },
