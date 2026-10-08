@@ -45,6 +45,22 @@ pub(crate) const HISTORY_CACHE_DEPTH: usize = 200;
 
 const _: () = assert!(HISTORY_CACHE_DEPTH == CONVERSATION_WINDOW);
 
+/// How many conversations the file keeps messages for.
+///
+/// The depth bounds one conversation and this bounds how many, so the cache
+/// has a worst case that can be written down rather than one that grows with
+/// every conversation the reader ever opens. Thirty-two is a working set, not
+/// an archive: more conversations than a reader moves between in a sitting,
+/// and far fewer than an account holds — the chat list still names every one
+/// of them, and a conversation past the bound opens the way an uncached one
+/// always has, from the wire. At [`HISTORY_CACHE_DEPTH`] rows each it is 6 400
+/// rows at most, which at a typical message's size is about a megabyte, on
+/// disk and in memory alike.
+///
+/// The one past the bound that goes is the one least recently *touched* — see
+/// [`HistoryCache::touch`] for what that means and why.
+pub(crate) const HISTORY_CACHE_PEERS: usize = 32;
+
 /// The history file beside the configuration.
 ///
 /// Owns its path, which is `config_path.with_extension("history.json")`
@@ -82,7 +98,8 @@ impl LoadedHistory {
 /// business — the chat list has already vetted them by the time a window is
 /// open. Every peer holds at least one message and at most
 /// [`HISTORY_CACHE_DEPTH`], and none of them is a local placeholder; an empty
-/// peer is no entry rather than an empty one.
+/// peer is no entry rather than an empty one. At most
+/// [`HISTORY_CACHE_PEERS`] peers are held.
 ///
 /// A `BTreeMap` for the drafts file's reason: the same cache always
 /// serialises to the same bytes.
@@ -92,11 +109,23 @@ pub(crate) struct HistoryCache {
 
     /// What this session's update feed has said about the cached runs.
     feed: FeedMarks,
+
+    /// When each peer was last touched, as a count of touches: what picks the
+    /// peer to evict past [`HISTORY_CACHE_PEERS`].
+    ///
+    /// **Memory only**, like the feed marks. A file's peers come back
+    /// untouched, and among untouched peers the one whose newest message is
+    /// oldest goes first — the nearest thing to recency a file records without
+    /// growing a field for it.
+    touched: BTreeMap<i64, u64>,
+
+    /// The count the next touch is stamped with.
+    clock: u64,
 }
 
 /// Two caches are equal when they would write the same file: the feed marks
-/// belong to the session that made them, are never written, and a cache
-/// loaded from disk has none.
+/// and the touches belong to the session that made them, are never written,
+/// and a cache loaded from disk has neither.
 impl PartialEq for HistoryCache {
     fn eq(&self, other: &Self) -> bool {
         self.peers == other.peers
@@ -160,19 +189,67 @@ impl HistoryCache {
         rows.drain(..excess);
 
         if rows.is_empty() {
-            self.peers.remove(&peer);
+            self.remove(peer);
         } else {
             self.peers.insert(peer, rows);
+            self.evict();
         }
     }
 
     /// Forgets everything cached for `peer`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built with the store, ahead of any caller")
-    )]
     pub(crate) fn remove(&mut self, peer: i64) {
         self.peers.remove(&peer);
+        self.touched.remove(&peer);
+    }
+
+    /// Stamps `peer` as the most recently touched, which keeps it out of the
+    /// next eviction.
+    ///
+    /// **Touched means written from the wire**: a page folded into its run —
+    /// whether or not it changed a row, because a newest page landing is the
+    /// reader opening the conversation — or a message added to it. Those are
+    /// the only ways a peer enters the cache, so they are where a peer has to
+    /// be stamped before an eviction can run. Seeding a window is not a touch:
+    /// a conversation seeded online is followed by its newest page, which is
+    /// one; and offline nothing enters the cache, so nothing is evicted.
+    fn touch(&mut self, peer: i64) {
+        self.clock += 1;
+        self.touched.insert(peer, self.clock);
+    }
+
+    /// Drops peers until at most [`HISTORY_CACHE_PEERS`] are left, the least
+    /// recently touched first.
+    ///
+    /// Untouched peers — what a file held — go before any touched one, the
+    /// one whose newest message is oldest first; the peer id breaks a tie, so
+    /// the choice is the same on every run.
+    ///
+    /// **The feed marks follow.** An evicted peer is no longer current: its
+    /// run is gone, and a current mark on nothing would let the next arrival
+    /// start a run of one message and call it the conversation's newest end
+    /// with everything before it missing. What the feed has *seen* stays, for
+    /// [`FeedMarks::seen`]'s reason — the message exists whether or not it is
+    /// cached — so a page fetched before it still cannot mark a returning
+    /// peer current.
+    fn evict(&mut self) {
+        while self.peers.len() > HISTORY_CACHE_PEERS {
+            let touched = &self.touched;
+            let Some(oldest) = self
+                .peers
+                .iter()
+                .min_by_key(|(peer, rows)| {
+                    (
+                        touched.get(peer).copied().unwrap_or(0),
+                        rows.last().map_or(i64::MIN, |row| row.timestamp),
+                    )
+                })
+                .map(|(peer, _)| *peer)
+            else {
+                return;
+            };
+            self.remove(oldest);
+            self.feed.current.remove(&oldest);
+        }
     }
 
     /// Folds a page the wire answered with into what is cached for `peer`,
@@ -300,10 +377,13 @@ impl HistoryCache {
             }
         }
 
-        if cached == Some(&merged) {
+        let unchanged = cached == Some(&merged);
+        self.touch(peer);
+        if unchanged {
             return false;
         }
         self.peers.insert(peer, merged);
+        self.evict();
         true
     }
 
@@ -381,6 +461,8 @@ impl HistoryCache {
         }
         let excess = rows.len().saturating_sub(HISTORY_CACHE_DEPTH);
         rows.drain(..excess);
+        self.touch(peer);
+        self.evict();
         true
     }
 
@@ -408,6 +490,7 @@ impl HistoryCache {
     /// one the feed had overtaken.
     fn delete(&mut self, ids: &[i64]) -> bool {
         let FeedMarks { current, seen } = &mut self.feed;
+        let touched = &mut self.touched;
         let mut changed = false;
         self.peers.retain(|peer, rows| {
             let before = rows.len();
@@ -420,6 +503,9 @@ impl HistoryCache {
                         None => seen.remove(peer),
                     };
                 }
+            }
+            if rows.is_empty() {
+                touched.remove(peer);
             }
             !rows.is_empty()
         });
@@ -570,7 +656,8 @@ impl HistoryFile {
     /// other read failure are warned about and empty too. What a readable
     /// file holds goes through [`HistoryCache::put`], so a hand-edited or
     /// older file is held to the same bounds as one this build wrote: no
-    /// placeholders, no peer deeper than [`HISTORY_CACHE_DEPTH`].
+    /// placeholders, no peer deeper than [`HISTORY_CACHE_DEPTH`], and no more
+    /// than [`HISTORY_CACHE_PEERS`] peers — the ones with the newest messages.
     pub(crate) fn load(&self) -> LoadedHistory {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -1522,6 +1609,116 @@ mod tests {
         ] {
             assert!(!cache.apply_update(&event), "{event:?}");
         }
+    }
+
+    // ---- the peer bound --------------------------------------------------
+
+    fn peer_count() -> i64 {
+        i64::try_from(HISTORY_CACHE_PEERS).expect("the bound fits an id")
+    }
+
+    /// A latest page of one message for `peer`, with an id of its own.
+    fn land(cache: &mut HistoryCache, peer: i64) -> bool {
+        cache.merge(peer, &[message(peer * 1000, peer, "row")], LATEST)
+    }
+
+    #[test]
+    fn the_peer_bound_evicts_the_least_recently_touched() {
+        let mut cache = HistoryCache::default();
+        for peer in 1..=peer_count() {
+            assert!(land(&mut cache, peer));
+        }
+        assert!(
+            !land(&mut cache, 1),
+            "the same page again changes no row, and still touches the peer"
+        );
+
+        assert!(land(&mut cache, peer_count() + 1));
+
+        assert_eq!(cache.peers.len(), HISTORY_CACHE_PEERS);
+        assert!(!cache.get(1).is_empty(), "touched last but one, so kept");
+        assert!(
+            cache.get(2).is_empty(),
+            "the least recently touched is the one that went"
+        );
+        assert!(!cache.get(peer_count() + 1).is_empty());
+        assert!(
+            !cache.touched.contains_key(&2),
+            "and nothing is kept about it"
+        );
+    }
+
+    #[test]
+    fn an_arrival_touches_its_peer() {
+        let mut cache = HistoryCache::default();
+        for peer in 1..=peer_count() {
+            assert!(land(&mut cache, peer));
+        }
+        assert!(cache.arrive(&message(1001, 1, "new")), "1 is current");
+
+        assert!(land(&mut cache, peer_count() + 1));
+
+        assert!(!cache.get(1).is_empty(), "the arrival kept 1");
+        assert!(cache.get(2).is_empty());
+    }
+
+    /// An evicted peer has no run, so it is not current — the next arrival
+    /// does not start a run of one — while what the feed saw of it stays, so
+    /// a page fetched before that message cannot mark it current either.
+    #[test]
+    fn eviction_keeps_the_feed_marks_consistent() {
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(1..=3), LATEST));
+        assert!(cache.apply_update(&arrival(4)));
+        for peer in 100..100 + peer_count() {
+            assert!(land(&mut cache, peer));
+        }
+        assert!(cache.get(PEER).is_empty(), "evicted");
+        assert!(!cache.feed.current.contains(&PEER));
+        assert_eq!(cache.feed.seen.get(&PEER), Some(&4));
+
+        assert!(
+            !cache.apply_update(&arrival(5)),
+            "no run, so nothing to join and nothing started"
+        );
+        assert!(cache.get(PEER).is_empty());
+
+        assert!(cache.merge(PEER, &page(1..=3), LATEST), "it comes back");
+        assert!(
+            !cache.apply_update(&arrival(6)),
+            "a page short of 5 is not current"
+        );
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
+    }
+
+    /// A file holding more peers than the bound — written before the bound,
+    /// or by hand — keeps those whose newest message is newest.
+    #[test]
+    fn a_file_past_the_peer_bound_keeps_the_newest_conversations() {
+        let (_dir, file) = scratch("history.json");
+        let peers: BTreeMap<i64, Vec<CachedMessage>> = (1..=peer_count() + 2)
+            .map(|peer| {
+                // Peer 1's message is the newest of all; 2 and 3 the oldest.
+                let at = if peer == 1 { 10_000 } else { peer };
+                let mut row = CachedMessage::from_message(&message(peer, peer, "row"));
+                row.timestamp = at;
+                (peer, vec![row])
+            })
+            .collect();
+        let payload = Payload {
+            account: None,
+            peers,
+        };
+        fs::write(
+            &file.path,
+            serde_json::to_vec(&payload).expect("the payload serialises"),
+        )
+        .expect("the wide file");
+
+        let cache = file.load().cache;
+        assert_eq!(cache.peers.len(), HISTORY_CACHE_PEERS);
+        assert!(!cache.get(1).is_empty());
+        assert!(cache.get(2).is_empty() && cache.get(3).is_empty());
     }
 
     /// A hand-written peer deeper than the cap is cut on load, oldest first.
