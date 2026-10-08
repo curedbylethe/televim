@@ -28,6 +28,7 @@ use crate::bidi::BidiMode;
 use crate::emoji;
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
 use crate::state::chat_list::ChatListState;
+pub use crate::state::connection::ConnectionState;
 use crate::state::conversation::ConversationState;
 use crate::state::coordinate;
 use crate::state::drafts::DraftStore;
@@ -1979,6 +1980,25 @@ impl App {
     /// Delegates to [`SessionState::set_client_available`].
     pub fn set_client_available(&mut self, available: bool) {
         self.session.set_client_available(available);
+    }
+
+    /// What the network has last told the screen about the connection.
+    ///
+    /// Reads [`UiState::connection`]: the structured half of what the status
+    /// sentences say in words, for the indicator that will draw it.
+    #[must_use]
+    pub fn connection(&self) -> ConnectionState {
+        self.ui.connection
+    }
+
+    /// Records what the network last told the screen about the connection.
+    ///
+    /// Delegates to [`UiState::set_connection`]. Called from `app`'s
+    /// `net::apply` beside the sentence for the same event, and nowhere else:
+    /// the state and the sentence are two answers about one event, and two
+    /// writers would let them disagree.
+    pub fn set_connection(&mut self, connection: ConnectionState) {
+        self.ui.set_connection(connection);
     }
 
     /// The one way in, whatever the reader came from: the signed-out card's
