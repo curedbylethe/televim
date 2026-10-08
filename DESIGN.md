@@ -516,7 +516,7 @@ code.
 | `> [message not loaded] ‖ body` | a reply whose target the window does not hold; `gd` on it fetches the target | asserted in `rows.rs` |
 | `[image]` | **a message that carries a photo and no caption**: its whole body, in `text-dim` | `MediaKind::label` |
 | `[video]` `[gif]` `[voice]` | ditto for a video, an animated GIF, a voice note | ditto |
-| `[file]` | ditto, and the **catch-all**: a sticker, a contact, a document, or any kind this build does not model, which degrades rather than vanishing | ditto |
+| `[file]` | ditto, and the **catch-all**: a contact, a document, or any kind this build does not model, which degrades rather than vanishing | ditto |
 | a caption beside a placeholder | never: `display_body()` returns the caption when there is one, so the label is drawn only for a message that says nothing; the caption is body ink | `Message::display_body` |
 | `[sending…]` | on the message's **last** row, which is the one with room | asserted |
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |
@@ -604,7 +604,7 @@ the one place that cost would be spent for nothing.
 
 ### Media placeholders
 
-Decided: the five tokens are **unchanged**. This section adds what the table above
+Decided: the six tokens are **unchanged**. This section adds what the table above
 could not say, the ink, and the constraints the row vocabulary already implies.
 
 | `MediaKind` | Token | Carries | Ink |
@@ -613,9 +613,10 @@ could not say, the ink, and the constraints the row vocabulary already implies.
 | `Video` | `[video]` | a video | `text-dim` |
 | `Gif` | `[gif]` | an animated GIF | `text-dim` |
 | `Voice` | `[voice]` | a voice note | `text-dim` |
-| `File` | `[file]` | a document, sticker, contact, or any kind the build does not model | `text-dim` |
+| `Sticker` | `[sticker]` | a static sticker | `text-dim` |
+| `File` | `[file]` | a document, contact, or any kind the build does not model | `text-dim` |
 
-**The ink is `text-dim`, not body `text`.** One role for all five, no new token, and
+**The ink is `text-dim`, not body `text`.** One role for all six, no new token, and
 no bold, italic or underline (there is no second weight or slant in this surface).
 
 - *Why not body ink.* The token is the program's word for something the sender did
@@ -669,10 +670,47 @@ no bold, italic or underline (there is no second weight or slant in this surface
    filename, size or duration inside the brackets). That is a decision for another day,
    not this one.
 
+**A static sticker draws as a bounded block, not a token.** The decoded image is
+scaled to fit a box 24 columns wide and 8 rows high, keeping its shape and never
+stretching a smaller image up, and set left-aligned in the body column. Each
+terminal row carries two rows of the picture as half-block cells (the graphics
+protocol where the terminal speaks one, half-blocks otherwise). Eight rows is the
+middle of the 6–10 acceptance band: the sticker reads at a glance and the
+conversation around it stays on screen.
+
+**The block is body ink, and takes no new role.** The picture is what the sender
+sent, the way a caption is, so the scene paints it in `text` — the binary paints
+true colours where the model paints `text`, and the decision the scene pins is
+"content, not chrome". The `[sticker]` token underneath is the program's word for
+the same thing and stays `text-dim`, like the other five.
+
+**Ink in each state** (the block follows the message rules, row for row):
+
+| State | The block |
+| :---- | :-------- |
+| plain | `text` |
+| cursor row | every block row is `selection` (reverse video), tag cell included |
+| message selected (Visual) | the block takes the selection's own ink; the range stays message-granular |
+| search match | a `/sticker` hit can land the cursor on the message but paints no match marks on the picture |
+| beside `[sending…]` / `[failed: …]` | the note keeps its own ink on the last block row, by the trailing-note rule |
+
+**Whole-selection yanks the literal `[sticker]`.** There is no text on the block
+to select character by character, so `vy` over the message yanks the token — the
+same string a reply quotes (`> [sticker] ‖`) and the fallback row shows. An
+animated sticker is out of scope and stays `File` → `[file]`; a captioned sticker
+shows the caption and no block, by the caption rule above.
+
+**`[sticker]` is also the fallback.** Flag off, no bytes, or a failed decode all
+draw the token row in `text-dim`, exactly like `[image]`: the message's whole
+`text` is the token, so search, yank and reply need no second path.
+
 Scenes: `media` in the engine (start `media`, a chat put first by the scene), eight
 frames at 80×24: `[image]` alone, `[voice]`, `[file]`, a caption suppressing the
 placeholder, the wrapped-note row, a Visual selection over a placeholder, the yank,
-and all five kinds in one window.
+and all five kinds in one window; plus `sticker` in the engine (starts `sticker`
+and `stickerFallback`, the same chat put first by each), three frames at 80×24: the
+inline block with the cursor on it, the Visual yank of the block, and the `[sticker]`
+fallback token with the flag off or decoding failed.
 
 ### Jump to the quoted message
 
@@ -847,7 +885,7 @@ regressing.
    sit a jump in flight, the full reason a failed message failed, and then
    whatever was last written to the status.
 
-      **Above all of them is a keystroke inside the line — all but a sign-in
+   **Above all of them is a keystroke inside the line — all but a sign-in
    refusal, which outranks even the hint.** A key being pressed
    cannot be answered by a sentence about a state the reader is in the middle of
    changing, so the hint wins; a refusal is Telegram's answer about the value
