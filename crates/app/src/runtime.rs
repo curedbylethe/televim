@@ -93,11 +93,12 @@ static LAUNCHED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 /// To the log, never the terminal: a `tracing` line written mid-frame lands on
 /// the screen this program is in the middle of drawing (see [`init_tracing`]).
 ///
-/// Only the first frame, and it is the **empty** one: the frame drawn before
-/// any network round trip, which with no account is the screen saying it has
-/// nothing to connect as. It is not the chat list — no populated chat list is
-/// reachable without credentials, and see `docs/memory.md` for why that figure
-/// is therefore not measured here.
+/// Only the first frame: the frame drawn before any network round trip, which
+/// with no account is the **empty** screen saying it has nothing to connect
+/// as. It is not the fetched chat list — no populated chat list is reachable
+/// without credentials, and see `docs/memory.md` for why that figure is
+/// therefore not measured here. A run with a warm history file draws the
+/// cached list in this frame instead, still before any round trip.
 ///
 /// Every later frame is the loop doing its ordinary work, and reporting those
 /// would fill the log with numbers nobody is measuring.
@@ -262,8 +263,10 @@ impl<W: Write> Drop for EnhancedKeys<W> {
 
 /// Draw, wait for something to happen, apply it, then ask for what comes next.
 ///
-/// `initial_chat` is the `--chat` id, recorded below and selected once the
-/// first chat list lands (see `net::apply_ready_to_screen`).
+/// `initial_chat` is the `--chat` id, recorded below and selected from the
+/// cached chat list when it holds the id (see `net::open_from_cache`), or
+/// otherwise once the first fetched list lands (see
+/// `net::apply_ready_to_screen`).
 ///
 /// `drafts_path` is the drafts file beside the configuration: loaded here
 /// once, re-synced every pass, and cleared on sign-out.
@@ -352,6 +355,10 @@ async fn event_loop(
     // that is leaving.
     network.set_history_file(history_file);
     network.restore_history(history);
+    // Before the first frame: a warm cache draws the reader's list and their
+    // conversation now, under `connecting…`, rather than after the round trip
+    // the bring-up below is about to start.
+    net::open_from_cache(&mut app, &network);
 
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an

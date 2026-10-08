@@ -2221,20 +2221,30 @@ fn apply_ready_to_screen(
 ) {
     // The client is up: connected, whatever the screen says underneath it.
     app.set_connection(ConnectionState::Connected);
+    let no_session = matches!(&account, Err(reason) if reason.is_empty());
     // A conversation already on screen is the reader's place, and a `Ready` that
-    // lands on top of one is the client being brought back up — so the list is
-    // refreshed around that place rather than the reader being moved to the top
-    // of it. A launch with nothing open keeps the old landing. Either way the
-    // stale network anchors go: the cursor, the in-flight jump and the retry
-    // gate all described the list and the feed that are gone, and holding them
-    // makes `wanted` fall to a paging direction whose page can never arrive
-    // (G5), because the preserved window is not empty.
+    // lands on top of one is the client being brought back up — or a launch the
+    // cache drew before the wire answered — so the list is refreshed around that
+    // place rather than the reader being moved to the top of it. A launch with
+    // nothing open keeps the old landing. Either way the stale network anchors
+    // go: the cursor, the in-flight jump and the retry gate all described the
+    // list and the feed that are gone, and holding them makes `wanted` fall to a
+    // paging direction whose page can never arrive (G5), because the preserved
+    // window is not empty.
     // The cache's word that a run is current was a word about the old feed,
     // and this client brings a new one: forgotten for every peer, so each is
     // trusted again only once its next newest page lands — which, for the
     // conversation on show, the reset below asks for at once.
     state.cached.messages.feed_interrupted();
-    let restored = if app.conversation.conversation.window.chat_id != 0 {
+    // **No session is no place to keep.** The cache was read for a session that
+    // is gone, and the form about to open takes any number — so it goes the way
+    // a sign-out sends it, from memory and from disk, and the landing below
+    // closes whatever conversation the cache had open rather than leaving its
+    // rows behind the form. Whoever signs in next fetches their own.
+    if no_session {
+        state.forget_history();
+    }
+    let restored = if app.conversation.conversation.window.chat_id != 0 && !no_session {
         state.history.cursor = None;
         state.history.jump = None;
         state.history.retry_at = None;
@@ -2262,7 +2272,6 @@ fn apply_ready_to_screen(
 
     app.set_session_store(session_store.clone());
     state.session_store = Some(session_store);
-    let no_session = matches!(&account, Err(reason) if reason.is_empty());
     let interrupted = app.signin().is_some();
     if !no_session || !interrupted {
         app.login_complete();
@@ -2548,6 +2557,39 @@ fn apply_user_lookup_failed(app: &mut App, query: &str, reason: String) {
     if app.fail_users(query, reason.clone()) {
         app.flash(reason);
     }
+}
+
+/// Draws what the history file held, before the client is up: the cached chat
+/// list, and the conversation a launch lands in, seeded from the cache.
+///
+/// The launch landing run early, so the first frame is the reader's
+/// conversations rather than an empty screen saying `connecting…`. The
+/// sentence stays — nothing has connected — and nothing is asked for: the
+/// [`Event::Ready`] that follows finds a conversation open and takes
+/// [`apply_ready_to_screen`]'s refresh path, which keeps the reader where they
+/// are and clears the cursor, so the next pass asks for the newest page.
+///
+/// **`--chat` is spent here only when the cache can answer it.** An id the
+/// cached list holds is opened now and consumed. One it does not hold is put
+/// back for the `Ready`, whose fresh list may hold it — and which names it when
+/// it does not — and the cached head is opened in the meantime.
+///
+/// A cold cache draws nothing, and the launch is what it always was.
+pub(crate) fn open_from_cache(app: &mut App, state: &State) {
+    let chats = state.cached.messages.chats();
+    if chats.is_empty() {
+        return;
+    }
+    app.set_chats(chats);
+    match app.take_initial_chat() {
+        Some(id) if app.select_chat_by_id(id) => {}
+        Some(id) => {
+            app.set_initial_chat(id);
+            app.select_chat(0);
+        }
+        None => app.select_chat(0),
+    }
+    seed_opened(app, state);
 }
 
 /// Puts a fetched chat list on screen, and the reader into it.
@@ -4501,6 +4543,237 @@ mod tests {
 
         drive(&mut app, &mut state, &tx);
 
+        assert!(app.conversation.conversation.window.is_empty());
+    }
+
+    // ---- a launch drawn from the cache ----------------------------------
+
+    /// A state as a warm launch restores it: the list `[CHAT, CHAT + 1]`, and
+    /// `1..=3` cached for [`CHAT`].
+    fn warm_state() -> State {
+        let mut cache = HistoryCache::default();
+        cache.put(CHAT, &messages(CHAT, 1..=3));
+        assert!(cache.set_chats(&[chat(CHAT), chat(CHAT + 1)]));
+        let mut state = State::default();
+        state.restore_history(cache);
+        state
+    }
+
+    /// An application as the runtime builds it before the first frame.
+    fn launching() -> App {
+        let mut app = App::new();
+        "connecting…".clone_into(&mut app.ui.status);
+        app
+    }
+
+    /// The conversation the window holds — not the highlight, which a list
+    /// that lost the conversation moves off it.
+    fn open_id(app: &App) -> i64 {
+        app.conversation.conversation.window.chat_id
+    }
+
+    fn ready(app: &mut App, state: &mut State, chats: Vec<Chat>) {
+        apply_ready_to_screen(
+            app,
+            state,
+            chats,
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+    }
+
+    /// Before any `Ready`, with no client: the cached list and the first
+    /// conversation, seeded — and the status line and the dot still saying
+    /// that nothing has connected, because nothing has.
+    #[test]
+    fn a_warm_start_draws_the_cached_list_and_conversation_before_any_ready() {
+        let mut app = launching();
+        let state = warm_state();
+
+        open_from_cache(&mut app, &state);
+
+        assert!(state.client.is_none());
+        assert_eq!(
+            app.chats().iter().map(|chat| chat.id).collect::<Vec<_>>(),
+            vec![CHAT, CHAT + 1]
+        );
+        assert_eq!(open_id(&app), CHAT);
+        assert_eq!(window_ids(&app), vec![1, 2, 3], "the cache is on screen");
+        assert!(
+            !app.is_fetching(FetchDirection::Latest),
+            "nothing asked for"
+        );
+        assert_eq!(app.status_text(), "connecting…");
+        assert_eq!(app.connection(), ConnectionState::Connecting);
+        assert_eq!(state.history.cursor, None, "the newest page is still owed");
+    }
+
+    /// The `Ready` lands over the open conversation: the list is refreshed
+    /// around it, the reader stays, and the next pass asks for the newest page,
+    /// which replaces the cached rows.
+    #[test]
+    fn a_ready_over_the_cached_launch_refreshes_around_it_and_asks_for_latest() {
+        let mut app = launching();
+        let mut state = warm_state();
+        open_from_cache(&mut app, &state);
+
+        ready(&mut app, &mut state, vec![chat(CHAT + 1), chat(CHAT)]);
+
+        assert_eq!(app.connection(), ConnectionState::Connected);
+        assert_eq!(open_id(&app), CHAT, "the reader stays");
+        assert_eq!(window_ids(&app), vec![1, 2, 3]);
+        assert_eq!(app.list.selected_chat, 1, "the highlight followed the id");
+        assert_ne!(app.status_text(), "connecting…", "it has connected");
+
+        open_pass(&mut app, &mut state);
+        assert_eq!(window_ids(&app), vec![1, 2, 3], "not seeded twice");
+        assert_eq!(app.status_text(), REVALIDATING_LABEL);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 4..=6),
+        );
+        assert_eq!(window_ids(&app), vec![4, 5, 6]);
+    }
+
+    /// The cached conversation is gone from the fresh list: the reconnect
+    /// rule holds — the window stays, the highlight goes to the top, and the
+    /// sentence says so — and the newest page is still asked for.
+    #[test]
+    fn a_ready_without_the_cached_conversation_keeps_it_and_says_so() {
+        let mut app = launching();
+        let mut state = warm_state();
+        open_from_cache(&mut app, &state);
+
+        ready(&mut app, &mut state, vec![chat(CHAT + 1)]);
+
+        assert_eq!(open_id(&app), CHAT);
+        assert_eq!(app.list.selected_chat, 0);
+        assert!(
+            app.ui.status.contains("no longer"),
+            "got {:?}",
+            app.ui.status
+        );
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Latest(CHAT)
+        );
+    }
+
+    /// `--chat` naming a cached conversation is opened before the wire answers,
+    /// and spent: the `Ready` leaves the reader there.
+    #[test]
+    fn a_cached_initial_chat_opens_before_the_ready_and_is_spent() {
+        let mut app = launching();
+        app.set_initial_chat(CHAT + 1);
+        let mut state = warm_state();
+
+        open_from_cache(&mut app, &state);
+        assert_eq!(open_id(&app), CHAT + 1);
+
+        ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
+        assert_eq!(open_id(&app), CHAT + 1);
+        assert_eq!(app.take_initial_chat(), None);
+        assert!(!app.ui.status.contains("no chat with id"));
+    }
+
+    /// `--chat` naming a conversation the cache does not list is left for the
+    /// `Ready`: the cached head is open meanwhile, and the fresh list either
+    /// holds the id and moves the reader there, or does not and names it.
+    #[test]
+    fn an_uncached_initial_chat_waits_for_the_ready() {
+        let mut app = launching();
+        app.set_initial_chat(99);
+        let mut state = warm_state();
+        open_from_cache(&mut app, &state);
+        assert_eq!(open_id(&app), CHAT, "the cached head meanwhile");
+
+        ready(&mut app, &mut state, vec![chat(99), chat(CHAT)]);
+        assert_eq!(open_id(&app), 99, "the fresh list held it");
+
+        let mut app = launching();
+        app.set_initial_chat(99);
+        let mut state = warm_state();
+        open_from_cache(&mut app, &state);
+
+        ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
+        assert_eq!(open_id(&app), CHAT, "nowhere to go, so it stays");
+        assert!(
+            app.ui.status.contains("99"),
+            "and the id is named: {:?}",
+            app.ui.status
+        );
+    }
+
+    /// A `Ready` with no session closes the cached conversation and forgets
+    /// the cache, in memory and on disk, before the form opens: whoever signs
+    /// in next may be another account.
+    #[test]
+    fn a_ready_with_no_session_takes_the_cache_down_before_the_form() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = launching();
+        app.session.credentials_configured = true;
+        let mut state = warm_state();
+        HistoryFile::new(path.clone()).save(&state.cached.messages, None);
+        state.set_history_file(HistoryFile::new(path.clone()));
+        open_from_cache(&mut app, &state);
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(open_id(&app), 0, "no conversation behind the form");
+        assert!(app.chats().is_empty());
+        assert_eq!(app.signin_field(), Some(tui::app::LoginField::Phone));
+        assert!(state.cached_history(CHAT).is_empty());
+        assert!(state.cached.messages.chats().is_empty());
+        assert!(!path.exists(), "and the file is gone");
+        state.persist_history(app.chats());
+        assert!(!state.cached.dirty, "nothing owed to the file");
+    }
+
+    /// A bring-up that fails leaves the cached list and conversation readable
+    /// under the `offline:` sentence.
+    #[test]
+    fn a_failed_bring_up_leaves_the_cached_launch_readable() {
+        let mut app = launching();
+        let mut state = warm_state();
+        open_from_cache(&mut app, &state);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("no route to the datacenter")),
+        );
+
+        assert_eq!(app.chats().len(), 2);
+        assert_eq!(window_ids(&app), vec![1, 2, 3]);
+        assert!(app.status_text().starts_with("offline:"));
+        assert_eq!(app.connection(), ConnectionState::Offline);
+    }
+
+    /// A cold cache draws nothing, and the `Ready` lands as it always has.
+    #[test]
+    fn a_cold_cache_launches_as_it_always_has() {
+        let mut app = launching();
+        let mut state = State::default();
+
+        open_from_cache(&mut app, &state);
+
+        assert!(app.chats().is_empty());
+        assert_eq!(open_id(&app), 0);
+        assert_eq!(app.status_text(), "connecting…");
+
+        ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
+        assert_eq!(open_id(&app), CHAT);
         assert!(app.conversation.conversation.window.is_empty());
     }
 

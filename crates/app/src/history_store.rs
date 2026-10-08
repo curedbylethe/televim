@@ -196,10 +196,6 @@ impl HistoryCache {
     /// comes back without a presence: a peer's status is stale the moment it
     /// is read back, and the feed says the current one soon enough.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "cached ahead of the launch that draws it")
-    )]
     pub(crate) fn chats(&self) -> Vec<Chat> {
         self.chats.iter().map(CachedChat::to_chat).collect()
     }
@@ -652,10 +648,6 @@ impl CachedChat {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "cached ahead of the launch that draws it")
-    )]
     fn to_chat(&self) -> Chat {
         Chat {
             id: self.id,
