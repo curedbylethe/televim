@@ -94,8 +94,16 @@ pub(crate) struct MediaCache {
 
 impl MediaCache {
     /// Opens the cache in `dir` for `account`, clearing it first if it was
-    /// written for another account or for none.
+    /// written for another account or for none. An unwritable `dir` opens a
+    /// per-launch fallback in the temp directory instead.
     pub(crate) fn open(dir: PathBuf, account: Option<&str>) -> Self {
+        Self::open_in(dir, &std::env::temp_dir(), account)
+    }
+
+    /// [`MediaCache::open`] with the fallback root passed in, so tests can
+    /// point it at a temp dir of their own.
+    fn open_in(dir: PathBuf, fallback_root: &Path, account: Option<&str>) -> Self {
+        let dir = usable_dir(dir, fallback_root, account);
         Self::with_limits(dir, MEDIA_CACHE_MAX_BYTES, MEDIA_CACHE_MAX_ENTRIES, account)
     }
 
@@ -318,6 +326,41 @@ impl MediaCache {
                 tracing::warn!(%error, "an evicted media file could not be removed");
             }
         }
+    }
+}
+
+/// `dir` if it can be written, else the temp-directory fallback for `account`.
+///
+/// The probe is a create and a write-and-remove of a pid-named file, which
+/// catches what `claim`'s tag write would: a regular file where the directory
+/// should be, or a read-only directory. The probe itself is not tagged; `claim`
+/// tags whichever directory is chosen. The fallback is not probed: if it cannot
+/// be written, the store warns and returns `None` as an unwritable `dir` does.
+fn usable_dir(dir: PathBuf, fallback_root: &Path, account: Option<&str>) -> PathBuf {
+    let probe = dir.join(format!(".probe-{}", std::process::id()));
+    let writable = fs::create_dir_all(&dir).is_ok() && fs::write(&probe, b"").is_ok();
+    let _ = fs::remove_file(&probe);
+    if writable {
+        return dir;
+    }
+    let fallback = fallback_root.join(format!("televim.media-{}", account_tag(account)));
+    tracing::warn!(
+        configured = %dir.display(),
+        fallback = %fallback.display(),
+        "the media cache directory is not writable; using a temporary one for this run"
+    );
+    fallback
+}
+
+/// The account's name for the fallback directory: its phone with every
+/// character outside `[A-Za-z0-9_-]` stripped, or `none` for no account.
+fn account_tag(account: Option<&str>) -> String {
+    match account {
+        Some(phone) => phone
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect(),
+        None => "none".to_owned(),
     }
 }
 
@@ -555,5 +598,107 @@ mod tests {
 
         assert_eq!(cache.lookup(1, 2), Some(path.clone()));
         assert!(path.exists());
+    }
+
+    /// A configured directory that cannot exist: its parent is a regular file.
+    fn unwritable_dir(root: &Path) -> PathBuf {
+        let blocker = root.join("blocker");
+        fs::write(&blocker, b"a file").expect("a file can be written");
+        blocker.join("media")
+    }
+
+    #[test]
+    fn an_unwritable_configured_dir_opens_a_working_fallback_in_the_temp_root() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let fallback_root = root.path().join("tmp");
+        fs::create_dir(&fallback_root).expect("the fallback root is made");
+
+        let mut cache = MediaCache::open_in(
+            unwritable_dir(root.path()),
+            &fallback_root,
+            Some("+15550001"),
+        );
+        let path = cache
+            .store(7, 9, MediaKind::Photo, b"picture")
+            .expect("the fallback caches it");
+
+        assert!(path.starts_with(fallback_root.join("televim.media-15550001")));
+        assert_eq!(cache.lookup(7, 9), Some(path.clone()));
+        assert_eq!(fs::read(&path).expect("the file is there"), b"picture");
+        assert_eq!(cache.max_bytes, MEDIA_CACHE_MAX_BYTES);
+        assert_eq!(cache.max_entries, MEDIA_CACHE_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn nothing_is_created_under_the_unwritable_configured_path() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let fallback_root = root.path().join("tmp");
+        fs::create_dir(&fallback_root).expect("the fallback root is made");
+        let configured = unwritable_dir(root.path());
+
+        let cache = MediaCache::open_in(configured.clone(), &fallback_root, None);
+
+        assert!(cache.entries.is_empty());
+        assert!(!configured.exists(), "the configured path stays absent");
+        assert_eq!(
+            fs::read(root.path().join("blocker")).expect("the blocker is there"),
+            b"a file",
+            "and the file in its way is untouched"
+        );
+    }
+
+    #[test]
+    fn the_fallback_keeps_the_byte_cap_eviction_and_owner_only_files() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let fallback_root = root.path().join("tmp");
+        fs::create_dir(&fallback_root).expect("the fallback root is made");
+        let dir = usable_dir(unwritable_dir(root.path()), &fallback_root, None);
+
+        let mut cache = MediaCache::with_limits(dir.clone(), 10, 256, None);
+        cache.store(1, 1, MediaKind::File, b"aaaa");
+        cache.store(1, 2, MediaKind::File, b"bbbb");
+        cache
+            .entries
+            .get_mut(&(1, 1))
+            .expect("the first file is indexed")
+            .modified = SystemTime::UNIX_EPOCH;
+        cache.store(1, 3, MediaKind::File, b"cccc");
+
+        assert_eq!(cache.lookup(1, 1), None, "the oldest is evicted");
+        assert!(cache.total() <= 10);
+        assert!(!dir.join("1-1.bin").exists(), "and removed from disk");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fallback_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("a temp dir");
+        let fallback_root = root.path().join("tmp");
+        fs::create_dir(&fallback_root).expect("the fallback root is made");
+        let mut cache = MediaCache::open_in(unwritable_dir(root.path()), &fallback_root, None);
+        let path = cache
+            .store(1, 2, MediaKind::Voice, b"voice")
+            .expect("cached");
+
+        let mode = fs::metadata(&path)
+            .expect("the file is there")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn an_unwritable_fallback_too_degrades_to_no_cache_without_panicking() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let configured = unwritable_dir(root.path());
+        // The fallback root is under the same regular file, so it is unwritable too.
+        let fallback_root = root.path().join("blocker").join("tmp");
+
+        let mut cache = MediaCache::open_in(configured, &fallback_root, None);
+
+        assert_eq!(cache.store(1, 2, MediaKind::Gif, b"gif"), None);
+        assert_eq!(cache.lookup(1, 2), None);
     }
 }

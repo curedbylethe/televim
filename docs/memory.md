@@ -384,6 +384,9 @@ bytes are held in memory as they were before the cache, bounded by `MEDIA_LIMIT`
 (16 MiB), and written off the loop. The disk worst case is the byte cap plus one file
 of up to 16 MiB in flight during a write.
 
+The temp-directory fallback used when the configured directory is unwritable keeps the
+same two caps and the same eviction; the figures above hold there too.
+
 These are **declared, not measured**, and the RSS budget is unaffected by the disk bound.
 
 ### The history cache

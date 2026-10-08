@@ -181,7 +181,10 @@ Working today:
   kept beside the config as `televim.media` unless `media_cache_dir` (or
   `TELEVIM_MEDIA_CACHE_DIR`) names another. It keeps at most 1 GiB and 256 files;
   past either, the oldest by modification time goes first. The directory is
-  emptied when the account changes and on sign-out. Files saved by earlier
+  emptied when the account changes and on sign-out. If that directory cannot be
+  written, this run uses `televim.media-<account>` under the system temp directory
+  instead, with the same limits; the configured directory is left as it is and the
+  next launch tries it again. Files saved by earlier
   versions under the temp directory are not migrated or removed; the OS reclaims
   them. The terminal leaves the alternate screen and raw mode for the viewer and
   comes back where it was. A file over the 16 MiB limit is refused and nothing is

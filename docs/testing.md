@@ -95,7 +95,11 @@ below.
   never fit refused without evicting anything, strangers' and temp files ignored, an
   account mismatch clearing the directory, `clear` on a missing directory, the
   owner-only mode before the rename, and a clear landing between a store's write and
-  its commit, which refuses the late file. The loop's half (`net.rs`) checks that a
+  its commit, which refuses the late file. An unwritable configured directory (a path
+  under a regular file) opens the temp-directory fallback, where a store round-trips
+  and the configured path is never created; the fallback keeps the byte cap, eviction
+  and `0600` mode; and an unwritable fallback too degrades to `None` without panicking.
+  The loop's half (`net.rs`) checks that a
   download is stored once and the next open is served from disk, with the download
   never asked for again, and that signing out cancels every download in flight.
 - **Integration Tests:** `crates/app/tests/proto_integration.rs` exercises the whole stack — the framework's login, the session store, the session cache, and the `proto` wrapper over both — against a real datacenter: it proves a stored session rebuilds an authorised client, that the client produces a private chat list in newest-first order, that the update feed and the chat list name conversations by the same identifier, and that history pages come back oldest first, without gaps or repeats, from an anchor that is exclusive. It lives in `app` because that is the only crate that may hold a framework `Client` and a `ProtoClient` at once. Three cases cannot be provoked with one account and are documented as deferred in the test's module docs: an update arriving for real, the offline gap `catch_up` closes, and a conversation with a known amount of history. A run prints how many updates it examined, how many the framework discarded, and how far it walked the history, so a run that proved little says so.
