@@ -225,7 +225,9 @@ Working today:
   cursor, the chat-list highlight, the jumplist, the selection, the register and
   the draft all survive. The status line says `reconnecting` while it happens, and
   one automatic reconnect is tried; if the feed stops again before any update
-  arrives, the status line says `offline:` and `:retry` asks again.
+  arrives, the status line says `offline:` and `:retry` asks again. A `●` beside
+  the sentence always shows which holds: green while the feed delivers, yellow
+  while a bring-up or rebuild is under way, red once the budget is spent.
 
 Not built, and named here so nobody reads the roadmap below as current:
 
