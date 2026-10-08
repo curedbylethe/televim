@@ -143,6 +143,143 @@ impl HistoryCache {
     pub(crate) fn remove(&mut self, peer: i64) {
         self.peers.remove(&peer);
     }
+
+    /// Folds a page the wire answered with into what is cached for `peer`,
+    /// and says whether anything changed.
+    ///
+    /// What is cached for a peer is one unbroken run of numbered messages,
+    /// oldest first, at most one per id, ending at the newest message the wire
+    /// has shown — so a cache hit is a window that needs no gap filled. Every
+    /// rule below keeps that true; a page that cannot be folded in without
+    /// breaking it is ignored, because a gap the cache cannot see is one it
+    /// would paint over.
+    ///
+    /// **What a page speaks for.** A page is the whole of the stretch of
+    /// history it was fetched from, so every cached row inside that stretch
+    /// that the page does not carry has been deleted, and every one it does
+    /// carry is replaced by the page's copy, which may be an edit:
+    ///
+    /// * [`PageKind::Latest`] speaks for everything from its oldest message
+    ///   up — anything newer than its newest is gone too — and, when it was
+    ///   shorter than asked for, for the whole conversation.
+    /// * [`PageKind::Older`] speaks for its oldest message up to, not
+    ///   including, the anchor it was counted from; when short, for everything
+    ///   below the anchor.
+    /// * [`PageKind::Newer`] the same the other way: just above its anchor up
+    ///   to its newest message, or everything above the anchor when short.
+    /// * [`PageKind::Around`] speaks for its oldest to its newest message,
+    ///   and nothing past them: whether it was short says nothing about which
+    ///   end ran out.
+    ///
+    /// **When it may be folded in.** Only when that stretch overlaps the cached
+    /// run or, for an anchored page, starts from an anchor inside it — the
+    /// anchors are exclusive, so a page counted from the cached oldest message
+    /// is contiguous with the run without sharing a row with it. Ids alone
+    /// cannot prove two stretches touch: a conversation's ids are not dense.
+    ///
+    /// * A latest page that does not overlap the run *replaces* it: the newest
+    ///   end moved on past a gap nobody fetched, and the newest end is what
+    ///   the cache is for. With nothing cached, a latest page is the cache.
+    /// * Any other page that does not reach the run is ignored, as is any
+    ///   other page while nothing is cached: the cache holds the newest end
+    ///   only, and a page from somewhere else cannot be shown to join it.
+    ///
+    /// Then the newest [`HISTORY_CACHE_DEPTH`] are kept, so an older page past
+    /// the cap falls off the far end as the window's would.
+    ///
+    /// Placeholders and rows naming another conversation are dropped first,
+    /// for [`HistoryCache::put`]'s reasons, and a page with nothing left — an
+    /// empty one included — changes nothing: an empty answer is as likely to
+    /// be a fetch that short-circuited as a conversation that was cleared, and
+    /// wiping the cache on the strength of it would throw away a launch's
+    /// head start for nothing.
+    pub(crate) fn merge(&mut self, peer: i64, page: &[Message], kind: PageKind) -> bool {
+        let mut fresh: Vec<CachedMessage> = page
+            .iter()
+            .filter(|message| message.id > 0 && message.chat_id == peer)
+            .map(CachedMessage::from_message)
+            .collect();
+        fresh.sort_by_key(|row| row.id);
+        fresh.dedup_by_key(|row| row.id);
+        let (Some(first), Some(last)) = (fresh.first(), fresh.last()) else {
+            return false;
+        };
+        let (first, last) = (first.id, last.id);
+
+        // The ids the page speaks for, inclusive, and how far it reaches: the
+        // stretch plus the anchor it was counted from, which is what lets a
+        // page that shares no row with the run still be shown to join it.
+        let (low, high, reach) = match kind {
+            PageKind::Latest { whole } => (
+                if whole { i64::MIN } else { first },
+                i64::MAX,
+                (first, i64::MAX),
+            ),
+            PageKind::Older {
+                before,
+                reached_start,
+            } => (
+                if reached_start { i64::MIN } else { first },
+                before.saturating_sub(1),
+                (first, before),
+            ),
+            PageKind::Newer { after, reached_end } => (
+                after.saturating_add(1),
+                if reached_end { i64::MAX } else { last },
+                (after, last),
+            ),
+            PageKind::Around => (first, last, (first, last)),
+        };
+
+        let cached = self.peers.get(&peer);
+        let joins = cached.and_then(|rows| Some((rows.first()?.id, rows.last()?.id)));
+        let mut merged = match (cached, joins) {
+            (Some(rows), Some((oldest, newest))) if reach.0 <= newest && reach.1 >= oldest => {
+                // The page first, so that where an id is in both — which only
+                // a page carrying rows outside its own stretch could cause —
+                // the stable sort and the dedupe keep the wire's copy.
+                let kept = rows.iter().filter(|row| row.id < low || row.id > high);
+                let mut merged = fresh;
+                merged.extend(kept.cloned());
+                merged.sort_by_key(|row| row.id);
+                merged.dedup_by_key(|row| row.id);
+                merged
+            }
+            _ if matches!(kind, PageKind::Latest { .. }) => fresh,
+            _ => return false,
+        };
+        let excess = merged.len().saturating_sub(HISTORY_CACHE_DEPTH);
+        merged.drain(..excess);
+
+        if cached == Some(&merged) {
+            return false;
+        }
+        self.peers.insert(peer, merged);
+        true
+    }
+}
+
+/// Which stretch of a conversation a page was fetched from, as
+/// [`HistoryCache::merge`] needs to know it.
+///
+/// The fetch's own terms, restated so this module names no `proto` type: the
+/// anchors are the ids a page was counted from, exclusive, the way the wire
+/// counts them, and the flags are whether the page came back shorter than
+/// asked for — the rule the cursor uses to call a direction exhausted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageKind {
+    /// The newest page; `whole` when it was short, so it is the whole
+    /// conversation.
+    Latest { whole: bool },
+
+    /// The page just older than `before`; `reached_start` when it was short.
+    Older { before: i64, reached_start: bool },
+
+    /// The page just newer than `after`; `reached_end` when it was short.
+    Newer { after: i64, reached_end: bool },
+
+    /// A page centred on a message the reader jumped to.
+    Around,
 }
 
 /// The file payload:
@@ -666,6 +803,277 @@ mod tests {
         assert_eq!(read[1].status, MessageStatus::Received);
         assert_eq!(read[1].media, Some(MediaKind::Voice));
         assert_eq!(read[1].display_body(), "[voice]");
+    }
+
+    // ---- merging a page --------------------------------------------------
+
+    /// Messages of [`PEER`] with these ids, in the order given.
+    fn page(ids: impl IntoIterator<Item = i64>) -> Vec<Message> {
+        ids.into_iter().map(|id| message(id, PEER, "row")).collect()
+    }
+
+    /// A cache holding these ids for [`PEER`].
+    fn cached(ids: impl IntoIterator<Item = i64>) -> HistoryCache {
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(ids));
+        cache
+    }
+
+    const LATEST: PageKind = PageKind::Latest { whole: false };
+
+    #[test]
+    fn a_page_into_an_empty_cache_is_the_cache_only_when_it_is_the_latest() {
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(1..=3), LATEST));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
+
+        for kind in [
+            PageKind::Older {
+                before: 10,
+                reached_start: false,
+            },
+            PageKind::Newer {
+                after: 0,
+                reached_end: false,
+            },
+            PageKind::Around,
+        ] {
+            let mut cache = HistoryCache::default();
+            assert!(
+                !cache.merge(PEER, &page(1..=3), kind),
+                "{kind:?} cannot be shown to be the newest end"
+            );
+            assert_eq!(cache, HistoryCache::default());
+        }
+    }
+
+    #[test]
+    fn an_identical_page_changes_nothing() {
+        let mut cache = cached(1..=5);
+        let before = cache.clone();
+
+        assert!(!cache.merge(PEER, &page(1..=5), LATEST));
+        assert!(!cache.merge(PEER, &page(2..=4), PageKind::Around));
+        assert_eq!(cache, before);
+    }
+
+    #[test]
+    fn an_overlapping_latest_page_keeps_the_older_rows_and_adds_the_newer() {
+        let mut cache = cached(1..=5);
+
+        assert!(cache.merge(PEER, &page(4..=8), LATEST));
+        assert_eq!(ids(&cache.get(PEER)), (1..=8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn an_edited_message_is_replaced_by_the_wire_copy() {
+        let mut cache = cached(1..=3);
+        let mut edited = page(1..=3);
+        edited[1].text = Cow::Borrowed("edited");
+
+        assert!(cache.merge(PEER, &edited, LATEST));
+        let read = cache.get(PEER);
+        assert_eq!(ids(&read), vec![1, 2, 3]);
+        assert_eq!(&*read[1].text, "edited");
+    }
+
+    #[test]
+    fn a_message_missing_inside_the_page_is_deleted() {
+        let mut cache = cached(1..=6);
+
+        assert!(cache.merge(PEER, &page([3, 5, 6]), LATEST));
+        assert_eq!(
+            ids(&cache.get(PEER)),
+            vec![1, 2, 3, 5, 6],
+            "4 is inside what the page speaks for, so it is gone; 1 and 2 are not"
+        );
+
+        let mut cache = cached(1..=6);
+        assert!(cache.merge(PEER, &page([2, 5]), PageKind::Around));
+        assert_eq!(
+            ids(&cache.get(PEER)),
+            vec![1, 2, 5, 6],
+            "an around page speaks for its own oldest to newest only"
+        );
+    }
+
+    #[test]
+    fn a_latest_page_drops_cached_rows_newer_than_it() {
+        let mut cache = cached(1..=6);
+
+        assert!(cache.merge(PEER, &page(3..=4), LATEST));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_short_latest_page_is_the_whole_conversation() {
+        let mut cache = cached(1..=6);
+
+        assert!(cache.merge(PEER, &page(3..=4), PageKind::Latest { whole: true }));
+        assert_eq!(
+            ids(&cache.get(PEER)),
+            vec![3, 4],
+            "a page that reached the start leaves nothing older to keep"
+        );
+    }
+
+    #[test]
+    fn a_latest_page_past_a_gap_replaces_the_cache() {
+        let mut cache = cached(1..=5);
+
+        assert!(cache.merge(PEER, &page(20..=25), LATEST));
+        assert_eq!(
+            ids(&cache.get(PEER)),
+            (20..=25).collect::<Vec<_>>(),
+            "nothing proves 6..20 empty, so the old run cannot be kept"
+        );
+    }
+
+    #[test]
+    fn an_older_page_from_the_cached_oldest_is_prepended() {
+        let mut cache = cached(10..=15);
+        let older = PageKind::Older {
+            before: 10,
+            reached_start: false,
+        };
+
+        assert!(cache.merge(PEER, &page([3, 5, 7]), older));
+        assert_eq!(ids(&cache.get(PEER)), vec![3, 5, 7, 10, 11, 12, 13, 14, 15]);
+    }
+
+    #[test]
+    fn a_short_older_page_speaks_for_everything_below_its_anchor() {
+        let mut cache = cached(1..=15);
+        let older = PageKind::Older {
+            before: 10,
+            reached_start: true,
+        };
+
+        assert!(cache.merge(PEER, &page([5, 7]), older));
+        assert_eq!(ids(&cache.get(PEER)), vec![5, 7, 10, 11, 12, 13, 14, 15]);
+    }
+
+    #[test]
+    fn a_page_that_does_not_reach_the_cached_run_is_ignored() {
+        let mut cache = cached(10..=15);
+        let before = cache.clone();
+
+        for kind in [
+            // Counted from below the cached oldest: 9 may be missing.
+            PageKind::Older {
+                before: 8,
+                reached_start: false,
+            },
+            // Counted from above the cached newest: 16 may be missing.
+            PageKind::Newer {
+                after: 17,
+                reached_end: false,
+            },
+        ] {
+            assert!(!cache.merge(PEER, &page(1..=5), kind), "{kind:?}");
+            assert!(!cache.merge(PEER, &page(20..=25), kind), "{kind:?}");
+        }
+        assert!(!cache.merge(PEER, &page(1..=5), PageKind::Around));
+        assert!(!cache.merge(PEER, &page(20..=25), PageKind::Around));
+        assert_eq!(cache, before);
+    }
+
+    #[test]
+    fn a_newer_page_from_the_cached_newest_extends_the_run() {
+        let mut cache = cached(1..=5);
+        let newer = PageKind::Newer {
+            after: 5,
+            reached_end: false,
+        };
+
+        assert!(cache.merge(PEER, &page([8, 9]), newer));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3, 4, 5, 8, 9]);
+    }
+
+    #[test]
+    fn a_jump_page_that_overlaps_the_run_is_merged() {
+        let mut cache = cached(10..=15);
+
+        assert!(cache.merge(PEER, &page([7, 9, 11, 12]), PageKind::Around));
+        assert_eq!(
+            ids(&cache.get(PEER)),
+            vec![7, 9, 11, 12, 13, 14, 15],
+            "10 sat between the page's ends and is gone"
+        );
+    }
+
+    #[test]
+    fn placeholders_and_other_conversations_are_dropped_from_a_page() {
+        let mut cache = cached(1..=3);
+        let mut mixed = page([-2, 0, 3, 4]);
+        mixed.push(message(5, 99, "another conversation"));
+
+        assert!(cache.merge(PEER, &mixed, LATEST));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3, 4]);
+        assert!(cache.get(99).is_empty());
+
+        assert!(
+            !cache.merge(PEER, &page([-1, 0]), LATEST),
+            "a page of placeholders only is an empty page"
+        );
+    }
+
+    #[test]
+    fn the_cap_keeps_the_newest_when_pages_merge() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let mut cache = cached(101..=100 + depth);
+        let full = cache.clone();
+        let older = PageKind::Older {
+            before: 101,
+            reached_start: false,
+        };
+
+        assert!(
+            !cache.merge(PEER, &page(1..=100), older),
+            "a full cache has no room for older rows"
+        );
+        assert_eq!(cache, full);
+
+        let newer = PageKind::Newer {
+            after: 100 + depth,
+            reached_end: true,
+        };
+        assert!(cache.merge(PEER, &page(101 + depth..=110 + depth), newer));
+        let kept = ids(&cache.get(PEER));
+        assert_eq!(kept.len(), HISTORY_CACHE_DEPTH);
+        assert_eq!(kept.first(), Some(&111), "the ten oldest went");
+        assert_eq!(kept.last(), Some(&(110 + depth)));
+    }
+
+    #[test]
+    fn an_empty_page_never_wipes_the_cache() {
+        let mut cache = cached(1..=3);
+        let before = cache.clone();
+
+        for kind in [
+            LATEST,
+            PageKind::Latest { whole: true },
+            PageKind::Older {
+                before: 1,
+                reached_start: true,
+            },
+            PageKind::Newer {
+                after: 3,
+                reached_end: true,
+            },
+            PageKind::Around,
+        ] {
+            assert!(!cache.merge(PEER, &[], kind), "{kind:?}");
+        }
+        assert_eq!(cache, before);
+    }
+
+    #[test]
+    fn a_page_out_of_order_or_with_repeats_is_cached_oldest_first_once() {
+        let mut cache = HistoryCache::default();
+
+        assert!(cache.merge(PEER, &page([3, 1, 2, 3]), LATEST));
+        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
     }
 
     /// A hand-written peer deeper than the cap is cut on load, oldest first.
