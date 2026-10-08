@@ -700,9 +700,9 @@ impl State {
     /// the account.
     ///
     /// Synchronous, like the history file's clear on the same path. A download
-    /// still in flight may store one more file after this; the next launch
-    /// under another account, or none, clears the directory anyway
-    /// ([`MediaCache::open`]).
+    /// still in flight is refused when it stores, so it leaves no file behind;
+    /// the next launch under another account, or none, clears the directory
+    /// anyway ([`MediaCache::open`]).
     fn forget_media(&self) {
         if let Some(cache) = &self.media_cache {
             cache
@@ -2369,10 +2369,7 @@ fn keep_download(
     kind: MediaKind,
     bytes: &[u8],
 ) -> Event {
-    let stored = cache
-        .lock()
-        .expect("the media cache lock is not poisoned")
-        .store(chat_id, message_id, kind, bytes);
+    let stored = MediaCache::store_shared(cache, chat_id, message_id, kind, bytes);
     match stored {
         Some(path) => Event::MediaSaved {
             chat_id,

@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
@@ -72,12 +73,23 @@ struct Entry {
     modified: SystemTime,
 }
 
+/// A store's claim on its file, taken under the lock before any I/O.
+struct Reservation {
+    dir: PathBuf,
+    path: PathBuf,
+    size: u64,
+    generation: u64,
+}
+
 /// The media cache in one directory, with its index in memory.
 pub(crate) struct MediaCache {
     dir: PathBuf,
     max_bytes: u64,
     max_entries: usize,
     entries: BTreeMap<(i64, i64), Entry>,
+    /// Bumped by [`MediaCache::clear`], so a store that began before a clear
+    /// knows not to index its file after it.
+    generation: u64,
 }
 
 impl MediaCache {
@@ -98,6 +110,7 @@ impl MediaCache {
             max_bytes,
             max_entries,
             entries: BTreeMap::new(),
+            generation: 0,
         };
         cache.claim(account);
         cache.scan();
@@ -113,28 +126,85 @@ impl MediaCache {
 
     /// Caches `bytes` for a message and returns the file they landed in.
     ///
-    /// Refuses what could never fit: bytes over [`MEDIA_LIMIT`], or over the
-    /// byte cap. A failed write returns `None` and is warned about.
-    pub(crate) fn store(
+    /// Takes the lock twice and writes between: the file I/O never runs under
+    /// the lock, so a clear waits out a lock-held swap, not a 16 MiB write.
+    pub(crate) fn store_shared(
+        cache: &Mutex<Self>,
+        chat_id: i64,
+        message_id: i64,
+        kind: MediaKind,
+        bytes: &[u8],
+    ) -> Option<PathBuf> {
+        let reservation = cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .reserve(chat_id, message_id, kind, bytes.len())?;
+        write_reserved(&reservation, bytes)?;
+        cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .commit(reservation, chat_id, message_id)
+    }
+
+    /// The single-owner store, for tests: the same three steps as
+    /// [`MediaCache::store_shared`] with nothing between them to interleave.
+    #[cfg(test)]
+    fn store(
         &mut self,
         chat_id: i64,
         message_id: i64,
         kind: MediaKind,
         bytes: &[u8],
     ) -> Option<PathBuf> {
-        let size = u64::try_from(bytes.len()).ok()?;
-        if bytes.len() > MEDIA_LIMIT || size > self.max_bytes {
+        let reservation = self.reserve(chat_id, message_id, kind, bytes.len())?;
+        write_reserved(&reservation, bytes)?;
+        self.commit(reservation, chat_id, message_id)
+    }
+
+    /// Claims a file for a store of `size` bytes. Refuses what could never fit:
+    /// bytes over [`MEDIA_LIMIT`], or over the byte cap. No I/O.
+    fn reserve(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        kind: MediaKind,
+        size: usize,
+    ) -> Option<Reservation> {
+        let size = u64::try_from(size).ok()?;
+        if size > MEDIA_LIMIT as u64 || size > self.max_bytes {
             return None;
         }
+        Some(Reservation {
+            dir: self.dir.clone(),
+            path: self
+                .dir
+                .join(format!("{chat_id}-{message_id}.{}", suffix(kind))),
+            size,
+            generation: self.generation,
+        })
+    }
 
-        let path = self
-            .dir
-            .join(format!("{chat_id}-{message_id}.{}", suffix(kind)));
-        let written = fs::create_dir_all(&self.dir)
-            .context("creating the media cache directory")
-            .and_then(|()| write_atomically(&path, bytes));
-        if let Err(error) = written {
-            tracing::warn!(%error, "media could not be cached");
+    /// Indexes a written file, unless a clear ran since it was reserved. A
+    /// failed write has no reservation to commit, so no index entry is made
+    /// for a file that does not exist.
+    fn commit(
+        &mut self,
+        reservation: Reservation,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Option<PathBuf> {
+        let Reservation {
+            path,
+            size,
+            generation,
+            ..
+        } = reservation;
+        if generation != self.generation {
+            // The clear already swept the cache; the late file must not survive
+            // it. A later store may own this name by now, so leave indexed files.
+            if !self.entries.values().any(|entry| entry.path == path) {
+                let _ = fs::remove_file(&path);
+            }
             return None;
         }
 
@@ -155,8 +225,9 @@ impl MediaCache {
     }
 
     /// Empties the cache: its files and its account tag. A missing directory
-    /// is already empty.
+    /// is already empty. Any store still in flight is refused when it commits.
     pub(crate) fn clear(&mut self) {
+        self.generation += 1;
         self.entries.clear();
         let Ok(read) = fs::read_dir(&self.dir) else {
             return;
@@ -248,6 +319,18 @@ impl MediaCache {
             }
         }
     }
+}
+
+/// Writes a reserved file. A failed write is warned about and returns `None`.
+fn write_reserved(reservation: &Reservation, bytes: &[u8]) -> Option<()> {
+    let written = fs::create_dir_all(&reservation.dir)
+        .context("creating the media cache directory")
+        .and_then(|()| write_atomically(&reservation.path, bytes));
+    if let Err(error) = written {
+        tracing::warn!(%error, "media could not be cached");
+        return None;
+    }
+    Some(())
 }
 
 /// Writes `bytes` so the target only ever appears as a whole file.
@@ -424,5 +507,53 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_clear_between_a_store_write_and_its_commit_refuses_the_late_file() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), Some("+15550001"));
+        let reservation = cache
+            .reserve(7, 9, MediaKind::Photo, 6)
+            .expect("the file is reserved");
+        let path = reservation.path.clone();
+        write_reserved(&reservation, b"late!!").expect("the file is written");
+
+        cache.clear();
+
+        assert_eq!(cache.commit(reservation, 7, 9), None, "refused");
+        assert_eq!(cache.lookup(7, 9), None);
+        assert!(!path.exists(), "and the late file is removed");
+    }
+
+    #[test]
+    fn a_refused_store_leaves_a_file_a_later_store_committed_under_the_same_name() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let stale = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
+        write_reserved(&stale, b"old").expect("written");
+        cache.clear();
+
+        let fresh = cache.store(7, 9, MediaKind::Photo, b"new").expect("cached");
+        assert_eq!(
+            cache.commit(stale, 7, 9),
+            None,
+            "the stale store is refused"
+        );
+
+        assert_eq!(cache.lookup(7, 9), Some(fresh.clone()));
+        assert_eq!(fs::read(&fresh).expect("the fresh file is there"), b"new");
+    }
+
+    #[test]
+    fn a_store_after_a_clear_is_indexed_as_usual() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        cache.clear();
+
+        let path = cache.store(1, 2, MediaKind::Gif, b"gif").expect("cached");
+
+        assert_eq!(cache.lookup(1, 2), Some(path.clone()));
+        assert!(path.exists());
     }
 }
