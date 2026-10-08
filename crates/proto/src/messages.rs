@@ -1,4 +1,4 @@
-//! Sending, editing and deleting messages, as `domain` types.
+//! Sending, editing, deleting and forwarding messages, as `domain` types.
 //!
 //! `telegram-framework` hands over the result of an operation already narrowed
 //! to primitives and strings. All that is left is to put a sent message into the
@@ -61,6 +61,20 @@ pub(crate) fn narrow_id(id: i64, peer_id: i64) -> Result<i32, ProtoError> {
         );
         ProtoError::MessageIdOutOfRange { peer_id, id }
     })
+}
+
+/// Narrows every identifier in `ids`, keeping their order.
+///
+/// Stops at the first identifier that does not fit, so nothing is sent for a
+/// batch that names an impossible message.
+///
+/// # Errors
+///
+/// Returns [`ProtoError::MessageIdOutOfRange`] for the first identifier outside
+/// the wire's range.
+#[cfg(any(feature = "live", test))]
+fn narrow_ids(ids: &[i64], peer_id: i64) -> Result<Vec<i32>, ProtoError> {
+    ids.iter().map(|id| narrow_id(*id, peer_id)).collect()
 }
 
 /// The message operations, which need the framework's client.
@@ -146,6 +160,39 @@ impl crate::ProtoClient {
 
         Ok(())
     }
+
+    /// Forwards messages from one conversation into another, as new messages.
+    ///
+    /// Returns how many landed. Telegram may decline one message while taking
+    /// the rest, so the count can be less than `ids.len()` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) when either
+    /// conversation is not in the session's peer cache, when Telegram rejects the
+    /// request, or when the connection fails. A batch that fails after an earlier
+    /// one landed arrives as that same variant, wrapping
+    /// [`FrameworkError::PartialForward`](telegram_framework::FrameworkError::PartialForward),
+    /// which carries the count that landed.
+    ///
+    /// [`ProtoError::MessageIdOutOfRange`](crate::ProtoError::MessageIdOutOfRange)
+    /// when any identifier is outside Telegram's range. Nothing is forwarded when
+    /// one is: the identifiers are narrowed before the request is sent.
+    pub async fn forward_messages(
+        &self,
+        source_id: i64,
+        destination_id: i64,
+        ids: &[i64],
+    ) -> Result<usize, ProtoError> {
+        let ids = narrow_ids(ids, source_id)?;
+
+        let forwarded = self
+            .inner()
+            .forward_messages(source_id, destination_id, &ids)
+            .await?;
+
+        Ok(forwarded)
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +208,50 @@ mod tests {
             narrow_id(-1, 42).ok(),
             Some(-1),
             "the check is about the wire's range, not about which values telegram would use"
+        );
+    }
+
+    #[test]
+    fn a_batch_of_identifiers_is_narrowed_in_the_order_it_was_given() {
+        assert_eq!(narrow_ids(&[3, 1, 2], 42).ok(), Some(vec![3, 1, 2]));
+        assert_eq!(narrow_ids(&[], 42).ok(), Some(vec![]));
+    }
+
+    #[test]
+    fn a_batch_with_one_identifier_outside_telegram_s_range_is_refused_whole() {
+        let out = i64::from(i32::MAX) + 1;
+
+        assert!(
+            matches!(
+                narrow_ids(&[1, out, 2], 42),
+                Err(ProtoError::MessageIdOutOfRange {
+                    peer_id: 42,
+                    id,
+                }) if id == out
+            ),
+            "the batch names an impossible message, so none of it may be sent"
+        );
+    }
+
+    #[test]
+    fn a_partial_forward_keeps_the_count_that_landed() {
+        use telegram_framework::{FrameworkError, RequestError};
+
+        let error = ProtoError::from(FrameworkError::PartialForward {
+            forwarded: 200,
+            source: Box::new(RequestError::Rpc {
+                code: 420,
+                name: "FLOOD_WAIT".to_owned(),
+                value: Some(31),
+            }),
+        });
+
+        assert!(
+            matches!(
+                error,
+                ProtoError::Framework(FrameworkError::PartialForward { forwarded: 200, .. })
+            ),
+            "the caller says 'forwarded 200', so the count has to survive the mapping"
         );
     }
 
