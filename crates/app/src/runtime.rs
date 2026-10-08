@@ -366,19 +366,17 @@ async fn event_loop(
         // reader who scrolled to the top and stopped into a page request, and
         // what starts the next page once one has landed.
         net::drive(&mut app, &mut network, &tx);
-        // Stickers the panel asked for while drawing, downloaded and settled
-        // before the next frame — in series on this thread, because a sticker
-        // that arrives a tick later draws `[sticker]` that frame either way.
-        // Flag off never reaches here: the drain is not called, so no download
-        // traffic runs and the cache stays empty for the token path.
-        if app.sticker_mode() == StickerMode::Inline
-            && let Some(client) = network.client()
-        {
-            let download = |chat_id: i64, message_id: i64| {
+        // Stickers the panel asked for while drawing are taken off the queue
+        // here and downloaded in a task, so the tick never waits on the network:
+        // each answer comes back as an event and settles on the next pass. Flag
+        // off never reaches the spawn, so no download traffic runs.
+        if let Some(client) = network.client() {
+            let batch = sticker_batch(app.sticker_mode(), &mut app);
+            let download = move |chat_id: i64, message_id: i64| {
                 let client = std::sync::Arc::clone(&client);
                 async move { client.download_media(chat_id, message_id).await }
             };
-            drain_stickers(StickerMode::Inline, &mut app, download).await;
+            spawn_sticker_drain(batch, download, tx.clone());
         }
         copy_if_asked(&mut app);
         sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
@@ -401,42 +399,59 @@ fn unix_seconds() -> i64 {
         })
 }
 
-/// Settles one tick's sticker requests: every `(chat_id, message_id)` pair the
-/// panel asked for is downloaded and resolved into the cache.
-///
-/// The downloader is a parameter rather than the client, so the loop's own
-/// plumbing stays testable without a datacenter: production passes a closure
-/// over the client's download, and a test passes a counter. Awaited in series
-/// on the loop's own thread — no spawned tasks, no channels — because a
-/// sticker that arrives a tick later draws `[sticker]` that frame either way,
-/// and the queue remembers what is still wanted.
+/// Takes one tick's sticker requests off the queue, to be downloaded.
 ///
 /// With [`StickerMode::Token`] the requests are dropped, never downloaded:
 /// flag off means zero fetch traffic, and the cache stays empty so geometry
-/// and draw take the token path on their own. A failed download is settled,
-/// not retried here: settling releases the in-flight mark, and the next miss
-/// re-requests. Nothing panics: a refusal is a log line beside the
-/// configuration, never the terminal (see [`resolve_fetch`](tui::sticker::resolve_fetch)).
-///
-/// The production call lives beside the flag in the loop below, where the
-/// client is in reach: each tick drains what the panel asked for while
-/// drawing. The downloader stays a parameter so the plumbing is also
-/// exercised by its tests, without a datacenter.
-async fn drain_stickers<F, Fut, E>(mode: StickerMode, app: &mut App, download: F)
-where
-    F: Fn(i64, i64) -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<u8>, E>>,
-    E: std::fmt::Display,
-{
+/// and draw take the token path on their own.
+fn sticker_batch(mode: StickerMode, app: &mut App) -> Vec<(i64, i64)> {
     let pending = app.conversation.stickers.take_pending();
     if mode != StickerMode::Inline {
+        return Vec::new();
+    }
+    pending
+}
+
+/// Downloads a batch of `(chat_id, message_id)` pairs in a spawned task, and
+/// sends each outcome back as a [`net::Event::StickerSettled`].
+///
+/// The loop calls this and returns to its channel at once: no download is
+/// awaited on the loop's thread. Within the batch the downloads run in series,
+/// so one task per batch rather than one per request keeps task churn down on
+/// a sticker wall. A failed download is sent back as a settle, not retried
+/// here: settling releases the in-flight mark, and the next miss re-requests.
+///
+/// The downloader is a parameter rather than the client, so the plumbing is
+/// testable without a datacenter: production passes a closure over the
+/// client's download, and a test passes a counter.
+fn spawn_sticker_drain<F, Fut, E>(
+    batch: Vec<(i64, i64)>,
+    download: F,
+    tx: mpsc::UnboundedSender<AppEvent>,
+) where
+    F: Fn(i64, i64) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<Vec<u8>, E>> + Send,
+    E: std::fmt::Display,
+{
+    if batch.is_empty() {
         return;
     }
 
-    for (chat_id, message_id) in pending {
-        let fetched = download(chat_id, message_id).await;
-        tui::sticker::resolve_fetch(&mut app.conversation.stickers, chat_id, message_id, fetched);
-    }
+    tokio::spawn(async move {
+        for (chat_id, message_id) in batch {
+            let fetched = download(chat_id, message_id)
+                .await
+                .map_err(|error| error.to_string());
+            let settled = net::Event::StickerSettled {
+                chat_id,
+                message_id,
+                fetched,
+            };
+            if tx.send(AppEvent::Net(settled)).is_err() {
+                break;
+            }
+        }
+    });
 }
 
 /// Hands the reader's last yank to the terminal's clipboard, if one is waiting.
@@ -841,21 +856,57 @@ mod tests {
         );
     }
 
-    /// Inline, the drain downloads every requested pair exactly once and
-    /// settles each outcome — here a refusal, which releases the pair rather
-    /// than caching anything.
+    /// Spawning the drain returns before any download runs: the loop hands the
+    /// batch off and goes back to its channel, and the fetch happens only once
+    /// the task is driven.
+    #[tokio::test]
+    async fn spawning_the_drain_downloads_nothing_on_the_loop() {
+        let downloads = std::sync::Arc::new(Counter::new());
+        let mut app = App::new();
+        app.conversation.stickers.request(42, 7);
+        let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+
+        let batch = sticker_batch(StickerMode::Inline, &mut app);
+        let counted = std::sync::Arc::clone(&downloads);
+        spawn_sticker_drain(batch, move |c, m| counted.download(c, m), tx);
+
+        assert!(
+            downloads.calls().is_empty(),
+            "the call that spawns the drain returned before the task ran"
+        );
+        assert!(
+            matches!(
+                rx.recv().await,
+                Some(AppEvent::Net(net::Event::StickerSettled { .. }))
+            ),
+            "the answer comes back as a settle event"
+        );
+        assert_eq!(downloads.calls(), vec![(42, 7)]);
+    }
+
+    /// Inline, the drain downloads every requested pair exactly once, in
+    /// order, and each answer settles through the net loop — here a refusal,
+    /// which releases the pair rather than caching anything.
     #[tokio::test]
     async fn the_drain_downloads_every_request_and_settles_it() {
-        let downloads = Counter::new();
+        let downloads = std::sync::Arc::new(Counter::new());
         let mut app = App::new();
+        let mut state = net::State::default();
         app.conversation.stickers.request(42, 7);
         app.conversation.stickers.request(42, 8);
         app.conversation.stickers.request(42, 7);
+        let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
-        drain_stickers(StickerMode::Inline, &mut app, |chat_id, message_id| {
-            downloads.download(chat_id, message_id)
-        })
-        .await;
+        let batch = sticker_batch(StickerMode::Inline, &mut app);
+        let counted = std::sync::Arc::clone(&downloads);
+        spawn_sticker_drain(batch, move |c, m| counted.download(c, m), tx);
+
+        for _ in 0..2 {
+            let Some(AppEvent::Net(event)) = rx.recv().await else {
+                panic!("the drain answers each pair with a settle event");
+            };
+            net::apply(&mut app, &mut state, event);
+        }
 
         assert_eq!(
             downloads.calls(),
@@ -872,24 +923,26 @@ mod tests {
         );
     }
 
-    /// Flag off, the drain never downloads: the requests are dropped, the
-    /// counter stays at zero, and the cache stays empty — so every sticker
-    /// message draws `[sticker]` with zero fetch traffic.
+    /// Flag off, the drain never downloads: the requests are dropped, nothing
+    /// is spawned, and the cache stays empty — so every sticker message draws
+    /// `[sticker]` with zero fetch traffic.
     #[tokio::test]
     async fn flag_off_means_zero_fetch_traffic() {
-        let downloads = Counter::new();
+        let downloads = std::sync::Arc::new(Counter::new());
         let mut app = App::new();
         app.conversation.stickers.request(42, 7);
+        let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
 
-        drain_stickers(StickerMode::Token, &mut app, |chat_id, message_id| {
-            downloads.download(chat_id, message_id)
-        })
-        .await;
+        let batch = sticker_batch(StickerMode::Token, &mut app);
+        let counted = std::sync::Arc::clone(&downloads);
+        spawn_sticker_drain(batch, move |c, m| counted.download(c, m), tx);
+        tokio::task::yield_now().await;
 
         assert!(
             downloads.calls().is_empty(),
             "no download ran for a dropped request"
         );
+        assert!(rx.try_recv().is_err(), "and no settle came back");
         assert!(
             app.conversation.stickers.take_pending().is_empty(),
             "and the dropped requests do not pile up"

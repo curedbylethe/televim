@@ -388,6 +388,21 @@ pub enum Event {
         /// Why the lookup failed, worded for the status line and the label.
         reason: String,
     },
+
+    /// A sticker download that ran off the loop has finished. Settled here,
+    /// on the loop, because the cache is single-threaded: the fetch lives in
+    /// a task, the answer comes back as this event.
+    StickerSettled {
+        /// The chat the message is in, echoed back so a reader who has moved
+        /// on is not handed a picture for the chat on show.
+        chat_id: i64,
+
+        /// The message the sticker belongs to.
+        message_id: i64,
+
+        /// The bytes, or why the fetch failed, worded for the log.
+        fetched: Result<Vec<u8>, String>,
+    },
 }
 
 /// What a chat-list retry in progress has to say about itself.
@@ -1684,7 +1699,28 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             cursor,
             result,
         } => apply_jumped(app, state, jump, cursor, result),
+
+        Event::StickerSettled {
+            chat_id,
+            message_id,
+            fetched,
+        } => apply_sticker_settled(app, chat_id, message_id, fetched),
     }
+}
+
+fn apply_sticker_settled(
+    app: &mut App,
+    chat_id: i64,
+    message_id: i64,
+    fetched: Result<Vec<u8>, String>,
+) {
+    // A reader who has moved to another chat has had the cache cleared, the
+    // in-flight mark with it. The picture belongs to the chat on show, so this
+    // one is dropped rather than cached under a message id it does not match.
+    if app.current_chat_id() != chat_id {
+        return;
+    }
+    tui::sticker::resolve_fetch(&mut app.conversation.stickers, chat_id, message_id, fetched);
 }
 
 fn apply_ready(
@@ -5297,6 +5333,33 @@ mod tests {
         assert_eq!(
             app.user_search().label(),
             "/ada — no candidates (search failed: flood wait, retry in 5s)"
+        );
+    }
+
+    /// A settled sticker releases its in-flight mark only when it is for the
+    /// chat on show: a settle for another chat leaves the mark held, so the
+    /// pair is not queued twice, and a failed fetch for this chat releases it,
+    /// so the next miss re-requests.
+    #[test]
+    fn a_settled_sticker_releases_its_mark_only_for_the_chat_on_show() {
+        let mut app = App::new();
+        let chat = app.current_chat_id();
+        app.conversation.stickers.request(chat, 7);
+        assert_eq!(app.conversation.stickers.take_pending(), vec![(chat, 7)]);
+
+        apply_sticker_settled(&mut app, chat + 1, 7, Err("gone".to_owned()));
+        app.conversation.stickers.request(chat, 7);
+        assert!(
+            app.conversation.stickers.take_pending().is_empty(),
+            "a settle for another chat leaves the pair in flight"
+        );
+
+        apply_sticker_settled(&mut app, chat, 7, Err("gone".to_owned()));
+        app.conversation.stickers.request(chat, 7);
+        assert_eq!(
+            app.conversation.stickers.take_pending(),
+            vec![(chat, 7)],
+            "a failed fetch for this chat is re-requested on the next miss"
         );
     }
 }
