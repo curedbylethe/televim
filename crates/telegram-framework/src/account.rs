@@ -29,6 +29,7 @@ use grammers_client::session::types::PeerRef;
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::tl;
+use crate::updates::{UserPresence, presence_from_status};
 
 /// A calendar date, as Telegram reports one.
 ///
@@ -72,6 +73,9 @@ pub struct Account {
 
     /// The account's bio. `None` when unset. May be several lines.
     pub bio: Option<String>,
+
+    /// The account's own online state. `None` when Telegram sent no status.
+    pub presence: Option<UserPresence>,
 }
 
 impl Client {
@@ -255,7 +259,18 @@ fn account_from(response: tl::enums::users::UserFull) -> Option<Account> {
         phone: text(user.phone.as_deref().unwrap_or_default()),
         birthday: birthday(full.birthday.as_ref()),
         bio: text(full.about.as_deref().unwrap_or_default()),
+        presence: presence_of(user),
     })
+}
+
+/// The presence a user carries, if Telegram sent a status for it.
+///
+/// `None` when the field is absent, which is not the same as [`UserPresence::Hidden`]:
+/// hidden is a status Telegram sent, and absent is no status at all. Kept out of
+/// `account_from` so the one read of `status` is testable without a whole
+/// `userFull` to build around it.
+pub(crate) fn presence_of(user: &tl::types::User) -> Option<UserPresence> {
+    user.status.as_ref().map(presence_from_status)
 }
 
 /// Where in the list the user with this identifier is.

@@ -482,6 +482,31 @@ mod tests {
         assert!(users[0].is_bot);
     }
 
+    /// The profile's status is read off the user Telegram sent: absent is no
+    /// presence, and a sent status is kept, `Offline`'s timestamp included.
+    #[test]
+    fn a_profile_keeps_the_status_telegram_sent() {
+        use crate::account::presence_of;
+        use crate::updates::UserPresence;
+
+        let tl::enums::User::User(mut ada) = user(42, Some("Ada"), None, None, false) else {
+            panic!("the fixture is a full user");
+        };
+        assert_eq!(presence_of(&ada), None, "no status sent is no presence");
+
+        ada.status = Some(tl::enums::UserStatus::Offline(
+            tl::types::UserStatusOffline {
+                was_online: 1_700_000_000,
+            },
+        ));
+        assert_eq!(
+            presence_of(&ada),
+            Some(UserPresence::Offline {
+                was_online: 1_700_000_000
+            })
+        );
+    }
+
     #[test]
     fn a_name_made_of_blanks_falls_back_to_the_username() {
         let users = users_from(found(vec![user(42, Some("   "), None, Some("ada"), false)]));

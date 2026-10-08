@@ -108,6 +108,32 @@ pub struct MessageInfo {
     pub media: Option<MediaKind>,
 }
 
+/// What Telegram says about a person's online state.
+///
+/// This crate's own vocabulary, not `domain::presence::Presence`: the framework
+/// does not depend on `domain`. `proto` translates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserPresence {
+    /// Online now.
+    Online,
+
+    /// Offline, last online at `was_online` (Unix seconds).
+    Offline { was_online: i32 },
+
+    /// Seen within the last few days.
+    Recently,
+
+    /// Seen within the last week.
+    LastWeek,
+
+    /// Seen within the last month.
+    LastMonth,
+
+    /// Telegram says nothing about the person's last seen: the status is
+    /// hidden by privacy settings, or they have never been seen.
+    Hidden,
+}
+
 /// Something that happened to a conversation televim displays.
 ///
 /// The variants are deliberately few. Anything Telegram sends that is not a
@@ -182,6 +208,20 @@ pub enum UpdateKind {
         /// Whether they are typing now; `false` is the cancel.
         typing: bool,
     },
+
+    /// A person's online state changed, or was reported.
+    ///
+    /// Read from the raw update for the same reason as the typing flag:
+    /// `grammers` models no named update for `updateUserStatus`, so it arrives
+    /// as `Update::Raw`. Only private chats reach here; a status update names a
+    /// user, never a group or a channel.
+    PeerStatus {
+        /// The conversation whose peer's status this is.
+        chat_peer_id: i64,
+
+        /// The peer's presence as Telegram reported it.
+        presence: UserPresence,
+    },
 }
 
 impl Client {
@@ -250,6 +290,9 @@ impl Client {
     ///         }
     ///         UpdateKind::PeerTyping { chat_peer_id, typing } => {
     ///             println!("{chat_peer_id} is typing: {typing}")
+    ///         }
+    ///         UpdateKind::PeerStatus { chat_peer_id, presence } => {
+    ///             println!("{chat_peer_id} is {presence:?}")
     ///         }
     ///     }
     /// }
@@ -546,11 +589,11 @@ fn update_to_kind(update: &Update) -> Option<UpdateKind> {
 /// not display it.
 ///
 /// The raw update is matched on its own variant rather than through a `grammers`
-/// wrapper because grammers models none of them: `updateReadHistoryOutbox` and
-/// `updateUserTyping` reach the catch-all at the end of `Update::from_raw` and
-/// arrive as `Update::Raw`. Both are matched here, in the one place the raw
-/// enum is matched at all, so what the bucket is read for is answerable by
-/// reading one function.
+/// wrapper because grammers models none of them: `updateReadHistoryOutbox`,
+/// `updateUserTyping` and `updateUserStatus` reach the catch-all at the end of
+/// `Update::from_raw` and arrive as `Update::Raw`. All three are matched here,
+/// in the one place the raw enum is matched at all, so what the bucket is read
+/// for is answerable by reading one function.
 ///
 /// The `pts` and `pts_count` numbers are left behind in both cases: they are the
 /// gap-tracking this crate does not use — the update position is already in the
@@ -571,6 +614,12 @@ fn read_raw(raw: &grammers_client::update::Raw) -> Option<UpdateKind> {
             chat_peer_id: typing.user_id,
             typing: typing_action(&typing.action)?,
         }),
+        // Same shape as the `UserTyping` arm above: `updateUserStatus` names its
+        // user by bare identifier, which is the private conversation itself.
+        tl::enums::Update::UserStatus(status) => Some(UpdateKind::PeerStatus {
+            chat_peer_id: status.user_id,
+            presence: presence_from_status(&status.status),
+        }),
         // The inbox watermark, the group and channel forms of the same fact, and
         // everything else grammers does not model. None of it is a message in a
         // private conversation, which is all this feed carries.
@@ -588,6 +637,31 @@ fn typing_action(action: &tl::enums::SendMessageAction) -> Option<bool> {
         tl::enums::SendMessageAction::SendMessageTypingAction => Some(true),
         tl::enums::SendMessageAction::SendMessageCancelAction => Some(false),
         _ => None,
+    }
+}
+
+/// The framework's reading of a user's status, as a [`UserPresence`].
+///
+/// `Online` and `Offline` carry what Telegram sent, and the expiry of `Online` is
+/// dropped: televim shows that the peer is online, not until when. The `by_me`
+/// flags on the three `Recently`-style variants are dropped for the same reason.
+///
+/// Assumed mapping for restricted users (G6, unverified against a live
+/// account): a peer who hides their last seen is assumed to arrive as `Empty`,
+/// which becomes [`UserPresence::Hidden`], or as one of the coarse
+/// `Recently`/`LastWeek`/`LastMonth` buckets, which keep their meaning. No
+/// unit test can confirm what Telegram actually sends; the variants below are
+/// pinned to what the schema defines, not to observed behaviour.
+pub(crate) fn presence_from_status(status: &tl::enums::UserStatus) -> UserPresence {
+    match status {
+        tl::enums::UserStatus::Online(_) => UserPresence::Online,
+        tl::enums::UserStatus::Offline(offline) => UserPresence::Offline {
+            was_online: offline.was_online,
+        },
+        tl::enums::UserStatus::Recently(_) => UserPresence::Recently,
+        tl::enums::UserStatus::LastWeek(_) => UserPresence::LastWeek,
+        tl::enums::UserStatus::LastMonth(_) => UserPresence::LastMonth,
+        tl::enums::UserStatus::Empty => UserPresence::Hidden,
     }
 }
 
@@ -947,6 +1021,71 @@ mod tests {
                 Some(UpdateKind::ReadReceipt { max_id, .. }) if max_id == i64::from(i32::MAX)
             ),
             "and the domain counts in the same units the rest of the workspace does"
+        );
+    }
+
+    /// Every `UserStatus` variant maps to its presence, and `Offline` keeps the
+    /// timestamp it was sent with rather than losing it to the mapping.
+    #[test]
+    fn every_user_status_variant_is_classified() {
+        use tl::enums::UserStatus as S;
+        use tl::types::*;
+
+        assert_eq!(
+            presence_from_status(&S::Online(UserStatusOnline { expires: 99 })),
+            UserPresence::Online
+        );
+        assert_eq!(
+            presence_from_status(&S::Offline(UserStatusOffline {
+                was_online: 1_700_000_000
+            })),
+            UserPresence::Offline {
+                was_online: 1_700_000_000
+            }
+        );
+        assert_eq!(
+            presence_from_status(&S::Recently(UserStatusRecently { by_me: false })),
+            UserPresence::Recently
+        );
+        assert_eq!(
+            presence_from_status(&S::LastWeek(UserStatusLastWeek { by_me: true })),
+            UserPresence::LastWeek
+        );
+        assert_eq!(
+            presence_from_status(&S::LastMonth(UserStatusLastMonth { by_me: false })),
+            UserPresence::LastMonth
+        );
+        assert_eq!(
+            presence_from_status(&S::Empty),
+            UserPresence::Hidden,
+            "nothing sent is nothing to show"
+        );
+    }
+
+    /// A status update is read out of the raw bucket by its bare user identifier,
+    /// and the presence it carries comes through unchanged.
+    #[test]
+    fn a_status_update_becomes_the_conversation_presence() {
+        let status = read_raw(&raw_update(tl::enums::Update::UserStatus(
+            tl::types::UpdateUserStatus {
+                user_id: 42,
+                status: tl::enums::UserStatus::Offline(tl::types::UserStatusOffline {
+                    was_online: 1_700_000_000,
+                }),
+            },
+        )));
+
+        assert!(
+            matches!(
+                status,
+                Some(UpdateKind::PeerStatus {
+                    chat_peer_id: 42,
+                    presence: UserPresence::Offline {
+                        was_online: 1_700_000_000
+                    }
+                })
+            ),
+            "the user and the presence, from the raw update: {status:?}"
         );
     }
 

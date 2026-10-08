@@ -12,7 +12,7 @@ use domain::updates::UpdateEvent;
 use telegram_framework::{MessageInfo, UpdateKind};
 
 use crate::error::ProtoError;
-use crate::types::ProtoMessage;
+use crate::types::{ProtoMessage, to_presence};
 
 /// A live feed of the updates for the conversations televim displays.
 ///
@@ -111,6 +111,16 @@ fn to_event(kind: UpdateKind) -> UpdateEvent {
             chat_id: chat_peer_id,
             typing,
         },
+
+        // A rename plus the presence mapping: the timestamp inside `Offline`
+        // rides through `to_presence` untouched.
+        UpdateKind::PeerStatus {
+            chat_peer_id,
+            presence,
+        } => UpdateEvent::PeerStatus {
+            chat_id: chat_peer_id,
+            presence: to_presence(presence),
+        },
     }
 }
 
@@ -130,7 +140,9 @@ fn to_message(info: MessageInfo) -> Message {
 mod tests {
     use super::*;
     use domain::message::MessageStatus;
+    use domain::presence::Presence;
     use telegram_framework::MessageInfo;
+    use telegram_framework::UserPresence;
 
     /// A message as the framework describes one.
     fn info(chat_peer_id: i64) -> MessageInfo {
@@ -251,6 +263,45 @@ mod tests {
 
             assert_eq!(chat_id, 42);
             assert_eq!(flag, typing);
+        }
+    }
+
+    /// Every framework presence reaches its domain twin, and the timestamp in
+    /// `Offline` is the same number on both sides of the trip.
+    #[test]
+    fn a_status_update_becomes_the_conversation_and_its_presence() {
+        let cases = [
+            (UserPresence::Online, Presence::Online),
+            (
+                UserPresence::Offline {
+                    was_online: 1_700_000_000,
+                },
+                Presence::Offline {
+                    was_online: 1_700_000_000,
+                },
+            ),
+            (UserPresence::Recently, Presence::Recently),
+            (UserPresence::LastWeek, Presence::LastWeek),
+            (UserPresence::LastMonth, Presence::LastMonth),
+            (UserPresence::Hidden, Presence::Hidden),
+        ];
+
+        for (presence, expected) in cases {
+            let event = to_event(UpdateKind::PeerStatus {
+                chat_peer_id: 42,
+                presence,
+            });
+
+            let UpdateEvent::PeerStatus {
+                chat_id,
+                presence: mapped,
+            } = event
+            else {
+                panic!("a status update is a conversation and a presence");
+            };
+
+            assert_eq!(chat_id, 42);
+            assert_eq!(mapped, expected, "{presence:?}");
         }
     }
 }

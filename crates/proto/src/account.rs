@@ -19,6 +19,9 @@ use domain::account::{Account, Birthday};
 use crate::ProtoError;
 
 #[cfg(feature = "live")]
+use crate::types::to_presence;
+
+#[cfg(feature = "live")]
 impl crate::ProtoClient {
     /// Reads the account's own profile.
     ///
@@ -89,7 +92,7 @@ fn translate(account: telegram_framework::Account) -> Account {
         phone: account.phone,
         birthday: account.birthday.map(birthday),
         bio: account.bio,
-        presence: None,
+        presence: account.presence.map(to_presence),
     }
 }
 
@@ -117,7 +120,29 @@ mod tests {
             phone: None,
             birthday: None,
             bio: None,
+            presence: None,
         }
+    }
+
+    /// Presence is the one field the framework may leave absent, and absent has
+    /// to stay absent: `None` is "no status reported", not a hidden one.
+    #[test]
+    fn presence_survives_the_translation_with_its_timestamp() {
+        let seen = translate(telegram_framework::Account {
+            presence: Some(telegram_framework::UserPresence::Offline {
+                was_online: 1_700_000_000,
+            }),
+            ..framework(7)
+        });
+        assert_eq!(
+            seen.presence,
+            Some(domain::presence::Presence::Offline {
+                was_online: 1_700_000_000
+            })
+        );
+
+        let unknown = translate(framework(7));
+        assert_eq!(unknown.presence, None);
     }
 
     /// The translation has to carry every field, because the panel's rows are
