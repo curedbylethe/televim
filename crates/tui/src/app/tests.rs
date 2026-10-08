@@ -5672,3 +5672,30 @@ fn a_draft_taller_than_the_panel_leaves_the_messages_one_row() {
     assert_eq!(view.budget, 1, "and one is left for the messages");
     assert_eq!(view.rows, 1);
 }
+
+/// Scrolled up, the draft would be drawn under an older message, so it is not
+/// drawn at all: it reserves no rows below the messages, and the messages have
+/// the whole panel.
+#[test]
+fn a_draft_reserves_nothing_while_scrolled_up() {
+    let mut app = App::mock();
+    app.record_body(53);
+    app.apply_latest(tall_page(10));
+    let height = 8;
+
+    draft_then_leave(&mut app, "see you there");
+    go_to_top(&mut app);
+    assert!(
+        !app.conversation.conversation.auto_follow(),
+        "the reader is scrolled up"
+    );
+    let layout = app.row_layout();
+    assert!(drafted(&app), "the draft is still there, only not shown");
+
+    let reserved = app.reserved(&layout, height);
+    assert_eq!(reserved.draft, 0, "no rows for the draft");
+    assert_eq!(reserved.below(), 0, "and none below the messages");
+
+    let view = app.viewport(&layout, height - reserved.above() - reserved.below());
+    assert_eq!(view.budget, height, "the messages get the full panel");
+}
