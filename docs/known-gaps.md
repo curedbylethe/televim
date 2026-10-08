@@ -94,8 +94,10 @@ Real, and named so they are not mistaken for oversights:
   suite cannot tell a dead feed from a quiet one, so the backoff and the reconnect
   are verified by unit tests over `App` and `State`. The boundary with the
   overlapping reliability issues, recorded so they cannot silently re-tread each
-  other: **CUR-45** owns a connection-state indicator (this build writes only the
-  existing persistent status string); **CUR-49** owns a manual `:reconnect` command
+  other: **CUR-45** owns a connection-state indicator (a `●` beside the ranked
+  sentence — green while the feed delivers, yellow while a bring-up or a
+  rebuild is under way, red once the budget is spent — while the sentences
+  keep saying what happened in words); **CUR-49** owns a manual `:reconnect` command
   (there is none); **CUR-47** owns queued in-flight sends (none are queued). This
   is a separate request from the chat-list fetch, which is the one thing a launch
   cannot start without.

@@ -463,3 +463,20 @@ are in [`../AGENTS.md`](../AGENTS.md).
   sentences — retrying, `reconnecting`, `offline:` — clear the flash deadline on
   the way in, because a sentence that ends in an event must not expire back to
   idle while what it reports is still true.
+- **Why the connection indicator is an always-visible dot beside the ranked
+  sentence:** the sentences say what happened and the state says which of the
+  four holds, and a rank-9 sentence is hidden under every selection,
+  confirmation and search — exactly when the reader most needs the signal. So
+  the indicator is not a rank at all: a `●` drawn beside the sentence in every
+  state, green while the feed delivers, yellow while a bring-up or a rebuild is
+  under way, red once the budget is spent. The connected form renders rather
+  than vanishing, because absence is not a state a reader can tell from a
+  sentence that outranks it. The detailed retry sentences stay byte-identical
+  at rank 9 beside the dot. Two deliberate breaks follow. The dot ends the
+  one-sentence invariant: `status_bar.rs` renders two spans now, the dot and
+  whatever `status_text()` returns. And it adds three `Theme` roles
+  (`conn_connected`, `conn_transient`, `conn_offline`) against the stage plan's
+  "no new role" line — the maintainer explicitly asked for coloured dots, and
+  the colours are proper roles rather than literals, in the mode labels' own
+  hues as foregrounds. The state itself stays rendering-neutral in
+  `state::connection`: wording and colour live with the draw, not the type.
