@@ -451,6 +451,7 @@ mod tests {
     use crate::testing::{
         attribute_audio, attribute_filename, attribute_sticker, attribute_video, media_document,
         media_empty, media_photo, media_refused_by_grammers, media_typed, media_unmodelled,
+        raw_message,
     };
 
     use tl::enums::DocumentAttribute;
@@ -740,5 +741,57 @@ mod tests {
     #[test]
     fn the_ceiling_leaves_room_inside_the_memory_budget() {
         const { assert!(MEDIA_LIMIT < 50 * 1024 * 1024) };
+    }
+
+    /// A raw message with `id` and `media`, the page entry `select_media` reads.
+    fn message_at(id: i32, media: Option<tl::enums::MessageMedia>) -> tl::enums::Message {
+        let mut message = raw_message(media);
+        if let tl::enums::Message::Message(message) = &mut message {
+            message.id = id;
+        }
+        message
+    }
+
+    /// The page `GetHistory` answers with when the named message is `target`
+    /// and its older neighbour is text: the case the old request returned.
+    #[test]
+    fn the_named_message_is_selected_when_an_older_sibling_comes_first() {
+        let page = [
+            message_at(9, None),
+            message_at(10, Some(media_document(vec![attribute_sticker()], false))),
+        ];
+
+        assert!(select_media(&page, 10).is_some());
+    }
+
+    #[test]
+    fn a_named_message_absent_from_the_page_selects_nothing() {
+        let page = [message_at(9, Some(media_document(vec![], false)))];
+
+        assert!(select_media(&page, 10).is_none());
+    }
+
+    /// Telegram sends `Empty` for a message that was deleted, and the page
+    /// answers with it rather than omitting it, so it must not be selected.
+    #[test]
+    fn a_page_of_empty_entries_selects_nothing() {
+        let empty = tl::enums::Message::Empty(tl::types::MessageEmpty {
+            id: 10,
+            peer_id: None,
+        });
+
+        assert!(select_media(&[empty], 10).is_none());
+    }
+
+    /// The id is the guard: a sibling that carries fetchable media is not the
+    /// message asked for, so its bytes must never be returned for this id.
+    #[test]
+    fn a_sibling_with_media_is_not_fetched_for_another_id() {
+        let page = [message_at(
+            11,
+            Some(media_document(vec![attribute_sticker()], false)),
+        )];
+
+        assert!(select_media(&page, 10).is_none());
     }
 }
