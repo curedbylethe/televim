@@ -7,6 +7,7 @@
 
 mod config;
 mod draft_store;
+mod history_store;
 mod net;
 mod runtime;
 
