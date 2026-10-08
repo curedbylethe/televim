@@ -23,9 +23,13 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use telegram_framework::session::FileStore;
-use telegram_framework::{AuthError, Client, ClientBuilder, LoginToken, SignInResult, tl};
+use telegram_framework::{
+    AuthError, Client, ClientBuilder, FileKey, KeyProvider, LoginToken, SessionError, SignInResult,
+    tl,
+};
 
 /// Credentials and configuration for the opt-in tests.
 struct TestDc {
@@ -59,10 +63,27 @@ impl TestDc {
     }
 }
 
+/// A fixed file key, so a test never reaches the OS credential store.
+#[derive(Debug)]
+struct TestKey;
+
+impl KeyProvider for TestKey {
+    fn sealing_key(&self) -> Result<([u8; 16], FileKey), SessionError> {
+        Ok(([1; 16], FileKey::from_bytes([1; 32])))
+    }
+
+    fn opening_key(&self, _salt: &[u8; 16]) -> Result<FileKey, SessionError> {
+        Ok(FileKey::from_bytes([1; 32]))
+    }
+}
+
 /// Builds a client backed by the session file at `path`.
 async fn build_client(dc: &TestDc, path: &Path) -> Client {
     ClientBuilder::new(dc.api_id, dc.api_hash.clone())
-        .session_store(Box::new(FileStore::new(path)))
+        .session_store(Box::new(FileStore::with_key_provider(
+            path,
+            Arc::new(TestKey),
+        )))
         .build()
         .await
         .expect("the client builds")
