@@ -478,7 +478,9 @@ server's ids, so the name survives a restart. `MediaCache` keeps an in-memory in
 that a scan rebuilds at launch, holds both `MEDIA_CACHE_MAX_BYTES` and
 `MEDIA_CACHE_MAX_ENTRIES` by evicting the oldest modification time, and writes each
 file atomically at `0600`, as the history file does. `runtime.rs` opens it at launch
-with the configured account, which clears the directory on a mismatch; `net::State`
+with the configured account, which clears the directory on a mismatch. If the configured
+directory cannot be created or written (a probe file), `open` uses
+`temp_dir()/televim.media-<account>` for that run, with a `tracing::warn!`; `net::State`
 holds it behind an `Arc<Mutex>`, cancels every download in flight and clears it at
 sign-out, and `save_media` looks up and stores through it — the store under
 `spawn_blocking`. A store takes the lock twice and writes between: it reserves a file
