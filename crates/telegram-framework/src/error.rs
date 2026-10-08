@@ -332,6 +332,19 @@ pub enum FrameworkError {
         /// The most bytes a download may hold.
         limit: usize,
     },
+
+    /// A download was stopped by its progress callback before it finished.
+    ///
+    /// Partial bytes are dropped rather than returned: an aborted download is
+    /// not a file, and a caller must not be able to mistake one for a whole.
+    #[error("the download of message {message_id} in conversation {peer_id} was aborted")]
+    DownloadAborted {
+        /// Bare identifier of the conversation the message belongs to.
+        peer_id: i64,
+
+        /// Identifier of the message.
+        message_id: i64,
+    },
 }
 
 #[cfg(feature = "live")]

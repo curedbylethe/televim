@@ -300,6 +300,28 @@ impl Download {
         Ok(())
     }
 
+    /// Adds one chunk, then reports the progress to `progress`, which may abort.
+    ///
+    /// An abort returns the error and drops the download, so the chunks already
+    /// collected are freed with it rather than handed on.
+    fn push_reporting(
+        &mut self,
+        chunk: Vec<u8>,
+        declared: Option<usize>,
+        progress: &mut impl FnMut(usize, Option<usize>) -> bool,
+    ) -> Result<(), FrameworkError> {
+        self.push(chunk)?;
+
+        if progress(self.bytes.len(), declared) {
+            return Ok(());
+        }
+
+        Err(FrameworkError::DownloadAborted {
+            peer_id: self.peer_id,
+            message_id: self.message_id,
+        })
+    }
+
     /// The bytes, once the whole transfer has landed.
     fn into_bytes(self) -> Vec<u8> {
         self.bytes
@@ -340,6 +362,28 @@ impl Client {
         &self,
         peer_id: i64,
         message_id: i64,
+    ) -> Result<Vec<u8>, FrameworkError> {
+        self.download_media_with_progress(peer_id, message_id, |_, _| true)
+            .await
+    }
+
+    /// [`download_media`](Self::download_media), reporting each chunk as it lands.
+    ///
+    /// `progress` runs after every chunk with the bytes collected so far and the
+    /// size Telegram declared, when it declared one. Returning `false` aborts the
+    /// transfer: the bytes collected so far are dropped and the call returns
+    /// [`FrameworkError::DownloadAborted`]. Every other refusal is the same as
+    /// the whole-bytes call's.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`download_media`](Self::download_media) returns, and
+    /// [`FrameworkError::DownloadAborted`] when `progress` returns `false`.
+    pub async fn download_media_with_progress(
+        &self,
+        peer_id: i64,
+        message_id: i64,
+        mut progress: impl FnMut(usize, Option<usize>) -> bool,
     ) -> Result<Vec<u8>, FrameworkError> {
         let Some(peer) = self.peer_ref(peer_id) else {
             tracing::warn!(
@@ -419,8 +463,9 @@ impl Client {
             });
         };
 
+        let declared = media.size();
         let mut download = Download::new(peer_id, message_id);
-        download.check_declared(media.size())?;
+        download.check_declared(declared)?;
 
         let mut chunks = self.inner().iter_download(&media);
 
@@ -429,7 +474,7 @@ impl Client {
             .await
             .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?
         {
-            download.push(chunk)?;
+            download.push_reporting(chunk, declared, &mut progress)?;
         }
 
         let bytes = download.into_bytes();
@@ -793,5 +838,85 @@ mod tests {
         )];
 
         assert!(select_media(&page, 10).is_none());
+    }
+
+    /// What the progress callback saw, one `(downloaded, total)` per chunk.
+    type Seen = Vec<(usize, Option<usize>)>;
+
+    /// Runs chunks through the progress seam, recording what the callback saw.
+    /// `stop_after` makes the callback answer `false` at that count of chunks.
+    fn run_chunks(
+        chunks: &[usize],
+        declared: Option<usize>,
+        stop_after: Option<usize>,
+    ) -> (Result<Vec<u8>, FrameworkError>, Seen) {
+        let mut download = Download::new(42, 7);
+        let mut seen = Vec::new();
+        let mut progress = |downloaded: usize, total: Option<usize>| {
+            seen.push((downloaded, total));
+            stop_after.is_none_or(|stop| seen.len() < stop)
+        };
+
+        let result = chunks
+            .iter()
+            .try_for_each(|&size| download.push_reporting(vec![0; size], declared, &mut progress));
+
+        (result.map(|()| download.into_bytes()), seen)
+    }
+
+    /// The bar advances by what landed, never backwards, and finishes at the
+    /// full length — with the declared total passed through unchanged.
+    #[test]
+    fn progress_counts_each_chunk_and_carries_the_declared_total() {
+        let (result, seen) = run_chunks(&[3, 4, 5], Some(12), None);
+
+        assert_eq!(result.expect("nothing aborted").len(), 12);
+        assert_eq!(
+            seen,
+            vec![(3, Some(12)), (7, Some(12)), (12, Some(12))],
+            "monotone counts, ending at the length, with the total on every call"
+        );
+    }
+
+    /// A size Telegram did not declare still reports progress; the total is
+    /// just unknown, which is the case the byte-count fallback exists for.
+    #[test]
+    fn progress_reports_an_unknown_total_as_none() {
+        let (_, seen) = run_chunks(&[2, 2], None, None);
+
+        assert_eq!(seen, vec![(2, None), (4, None)]);
+    }
+
+    /// Abort stops the transfer on the chunk it was asked to, drops the bytes
+    /// collected so far, and says it was an abort rather than a failure.
+    #[test]
+    fn an_aborted_download_returns_no_bytes_and_stops_the_transfer() {
+        let (result, seen) = run_chunks(&[3, 4, 5], Some(12), Some(2));
+
+        assert_eq!(
+            seen,
+            vec![(3, Some(12)), (7, Some(12))],
+            "the third chunk is never pushed once the callback said stop"
+        );
+        assert!(
+            matches!(
+                result,
+                Err(FrameworkError::DownloadAborted {
+                    peer_id: 42,
+                    message_id: 7
+                })
+            ),
+            "partial bytes are not a result"
+        );
+    }
+
+    /// The ceiling still refuses on the chunk that crosses it, and the callback
+    /// is not told about a chunk that was never accepted.
+    #[test]
+    fn the_limit_refusal_comes_before_progress_for_the_refused_chunk() {
+        let (result, seen) = run_chunks(&[MEDIA_LIMIT, 1], None, None);
+
+        assert_eq!(seen, vec![(MEDIA_LIMIT, None)], "only the accepted chunk");
+        assert!(matches!(result, Err(FrameworkError::MediaTooLarge { .. })));
     }
 }
