@@ -192,6 +192,15 @@ impl FetchDirection {
     }
 }
 
+/// What the status line says while a conversation drawn from the cache waits
+/// for the server's newest page.
+///
+/// The `Loading…` row is not drawn for it: that row stands in for messages, and
+/// a cached window has messages to show. So the wait is said on the status line
+/// instead, and in the same voice — what is on screen, then what is coming —
+/// because a reader looking at rows that may be stale is owed being told so.
+pub const REVALIDATING_LABEL: &str = "Cached messages — loading the latest…";
+
 /// What the panel and the status line say while a jump is on its way.
 ///
 /// A jump replaces the window rather than extending it, so there is no edge for
@@ -1611,6 +1620,31 @@ impl App {
         self.conversation.apply_latest(page)
     }
 
+    /// Fills the conversation `chat_id` names with what the cache holds for it,
+    /// if it is the one on show and nothing has filled it yet.
+    ///
+    /// Meant to be called once, as a conversation is opened — after
+    /// [`Self::select_chat`] and before the newest page lands — with the cached
+    /// messages oldest first. The newest page is still asked for and still
+    /// replaces what this put on screen: this is the first frame, not the answer.
+    ///
+    /// Delegates to [`ConversationState::seed`].
+    pub fn seed_from_cache(&mut self, chat_id: i64, messages: Vec<Message>) -> bool {
+        self.conversation.seed(chat_id, messages)
+    }
+
+    /// Whether the window on show came from the cache and the server's newest
+    /// page for it is on its way.
+    ///
+    /// Both halves, because neither alone is a revalidation: a cached window with
+    /// nothing in flight — offline, or holding back after a failure — has nothing
+    /// coming to say, and a newest page in flight over an empty window is the
+    /// `Loading…` row's to announce.
+    #[must_use]
+    pub fn is_revalidating(&self) -> bool {
+        self.conversation.cached && self.is_fetching(FetchDirection::Latest)
+    }
+
     /// Puts a page in front of what the window holds.
     ///
     /// Delegates to [`ConversationState::apply_older`].
@@ -1697,11 +1731,17 @@ impl App {
     ///
     /// Counted in rows rather than in messages, which is the only way "near the
     /// top" means what a reader scrolling upwards thinks it means.
+    ///
+    /// Never while the newest page is on its way: that page replaces the window,
+    /// so a page from either end of the one on show is work it would throw away —
+    /// and the cursor that would anchor it describes nothing yet. An empty window
+    /// used to be the whole of that guard; a cached one is not empty.
     #[must_use]
     pub fn wants_older(&self) -> bool {
         let window = &self.conversation.conversation.window;
 
         !self.outbox.fetching.is_in_flight(FetchDirection::Older)
+            && !self.outbox.fetching.is_in_flight(FetchDirection::Latest)
             && !window.is_empty()
             && !window.exhausted_older
             && self.cursor_extent().0 < FETCH_MARGIN
@@ -1711,12 +1751,14 @@ impl App {
     ///
     /// Only while the reader is away from the bottom. A view pinned to the
     /// newest message is already there, and an arrival reaches it through the
-    /// feed rather than through a fetch.
+    /// feed rather than through a fetch. Never while the newest page is on its
+    /// way, for the reason [`Self::wants_older`] gives.
     #[must_use]
     pub fn wants_newer(&self) -> bool {
         let window = &self.conversation.conversation.window;
 
         !self.outbox.fetching.is_in_flight(FetchDirection::Newer)
+            && !self.outbox.fetching.is_in_flight(FetchDirection::Latest)
             && !window.is_empty()
             && !window.exhausted_newer
             && !self.conversation.conversation.auto_follow()
@@ -2443,8 +2485,9 @@ impl App {
     /// status, because each describes state the reader must not lose: neither is
     /// a `flash`, so `expire_status` must not be able to take one away. Below
     /// them, a jump in flight — what the reader has just asked for — and then the
-    /// full reason a failed message failed while the cursor is on it, and finally
-    /// whatever was written to the status.
+    /// full reason a failed message failed while the cursor is on it, then
+    /// whatever was written to the status, and last a cached window's wait for
+    /// its newest page, which outranks only the resting hint.
     ///
     /// A key inside the line is above all of them, because a keystroke cannot be
     /// deferred and none of the rest is a question waiting for a reply: a reader
@@ -2510,6 +2553,12 @@ impl App {
         // in it, which is exactly what a half-written message used to look like.
         if self.ui.status != IDLE_STATUS {
             return self.ui.status.clone();
+        }
+        // Below everything that was written to the status, so a cache can never
+        // talk over a failure: a revalidation that fails says `history:` like any
+        // other page, and `offline:` keeps the line it always had.
+        if self.is_revalidating() {
+            return REVALIDATING_LABEL.to_owned();
         }
 
         widgets::input_bar::hint(self).to_owned()

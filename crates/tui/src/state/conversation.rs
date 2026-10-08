@@ -86,6 +86,21 @@ pub struct ConversationState {
     /// an entry belongs to the chat on show and [`Self::open_conversation`]
     /// forgets them all on switch.
     pub stickers: StickerCache,
+
+    /// Whether the window on show came from the local cache rather than from the
+    /// wire.
+    ///
+    /// A flag beside the view rather than a property of the messages, because
+    /// what it records is where the window as a whole came from: a cached message
+    /// and the one the server sends for it are the same message. It is set by
+    /// [`Self::seed`] alone, and anything that replaces the window with a page
+    /// the server sent clears it — the newest page above all, which is the
+    /// revalidation it waits for.
+    ///
+    /// It never stands for an answer. Nothing that decides what to fetch reads
+    /// it, so a cached window is asked about exactly as an empty one is, and a
+    /// revalidation that fails is reported as any other failed page is.
+    pub(crate) cached: bool,
 }
 
 impl ConversationState {
@@ -105,6 +120,7 @@ impl ConversationState {
             confirm: None,
             jumplist: Jumplist::default(),
             stickers: StickerCache::default(),
+            cached: false,
         }
     }
 
@@ -114,6 +130,7 @@ impl ConversationState {
     /// and the one before it is gone.
     pub(crate) fn open_conversation(&mut self, chat_id: i64) {
         self.conversation = ConversationView::new(chat_id);
+        self.cached = false;
         // The pictures belong to the chat on show, as the marks do: a reader
         // who returns finds them fetched again rather than mislabelled.
         self.stickers.clear();
@@ -212,12 +229,44 @@ impl ConversationState {
         }
 
         self.conversation.window.replace(page);
+        // The server's newest page is the answer a cached window was waiting
+        // for, and it has replaced every row the cache put there.
+        self.cached = false;
         self.selection = None;
         self.vim.set_total(self.conversation.window.len());
         self.conversation.follow();
         self.vim.apply_motion(Motion::Last);
 
         true
+    }
+
+    /// Fills a conversation that has just been opened with what the cache
+    /// holds for it, oldest first.
+    ///
+    /// Accepted only for the conversation on show, and only while its window is
+    /// empty: a window with anything in it already has something better than the
+    /// cache — the server's newest page, or an arrival the feed delivered — and a
+    /// cached page laid over either would show the reader older facts than the
+    /// ones they had.
+    ///
+    /// Laid out exactly as the newest page is, through [`Self::apply_latest`]:
+    /// the cache holds the end of the conversation, so the reader is put at its
+    /// newest message and the view follows. The page the window is waiting for is
+    /// not touched — it is still wanted, still in flight if it was, and it
+    /// replaces these rows when it lands.
+    ///
+    /// Reports whether anything was shown.
+    pub(crate) fn seed(&mut self, chat_id: i64, messages: Vec<Message>) -> bool {
+        if !self.has_conversation()
+            || self.conversation.window.chat_id != chat_id
+            || !self.conversation.window.is_empty()
+        {
+            return false;
+        }
+
+        let seeded = self.apply_latest(messages);
+        self.cached = seeded;
+        seeded
     }
 
     /// Puts a page in front of what the window holds.

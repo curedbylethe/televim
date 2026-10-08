@@ -52,6 +52,8 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::{FetchDirection, REVALIDATING_LABEL};
+    use domain::message::Message;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -142,6 +144,36 @@ mod tests {
         assert!(
             row.contains("offline: the feed ended"),
             "the ranked sentence is still beside it: {row:?}"
+        );
+    }
+
+    /// A conversation drawn from the cache says on the status line that its
+    /// newest page is on its way, and a failure written there talks over it.
+    #[test]
+    fn a_cached_conversation_says_it_is_waiting_for_its_page() {
+        let mut app = App::mock();
+        let seed: Vec<Message> = app
+            .conversation
+            .conversation
+            .window
+            .iter()
+            .map(|message| Message {
+                chat_id: 2,
+                ..message.clone()
+            })
+            .collect();
+        app.select_chat(1);
+        assert!(app.seed_from_cache(2, seed));
+        app.begin_fetch(FetchDirection::Latest);
+
+        let (_, row) = bottom_row(&screen(&app));
+        assert!(row.contains(REVALIDATING_LABEL), "{row:?}");
+
+        app.flash("offline: the feed ended");
+        let (_, row) = bottom_row(&screen(&app));
+        assert!(
+            row.contains("offline: the feed ended") && !row.contains(REVALIDATING_LABEL),
+            "the failure owns the line: {row:?}"
         );
     }
 }
