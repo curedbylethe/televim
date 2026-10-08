@@ -249,6 +249,23 @@ Working today:
   arrives, the status line says `offline:` and `:retry` asks again. A `●` beside
   the sentence always shows which holds: green while the feed delivers, yellow
   while a bring-up or rebuild is under way, red once the budget is spent.
+- **History cache:** the newest 200 messages of each of the 32 most recently
+  touched private conversations, and the first 500 rows of the chat list, are kept
+  in `televim.history.json` beside the config — plain JSON, `0600`, written
+  atomically and off the loop's thread, behind every page, feed event and list
+  change. A launch with a warm cache draws the cached chat list and the first
+  conversation (or the `--chat` one, when the cache holds it) **before any network
+  round trip**, under `connecting…`; the `Ready` that follows refreshes the list
+  around the reader, and the newest page replaces the cached rows, with
+  `Cached messages — loading the latest…` on the status line while it is on its
+  way. Every page the client fetches is merged into the cache, and an edit, a
+  deletion or an arrival over the feed is folded in too. If the launch ends at
+  `offline:`, the cached list and the cached conversations stay readable and
+  switchable, and the status line still says `offline:`. Text and the media
+  *kind* are kept; media bytes, presence and unsent placeholders never are. The
+  file is used only by a launch configured with the same phone it was written
+  under, and is removed on sign-out and when a launch finds no session. It is
+  **not encrypted** — see [`docs/known-gaps.md`](./docs/known-gaps.md).
 
 Not built, and named here so nobody reads the roadmap below as current:
 
