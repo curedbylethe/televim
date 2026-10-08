@@ -906,6 +906,19 @@ pub enum Action {
         /// The message whose media to open.
         message_id: i64,
     },
+
+    /// Stop the download of `message_id` in `chat_id`, if one is in flight.
+    ///
+    /// Only the network can stop a transfer, so `tui` records the reader's
+    /// request and the loop sets the flag the download checks per chunk. A
+    /// download that has already finished is not affected.
+    CancelMediaDownload {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message whose download to stop.
+        message_id: i64,
+    },
 }
 
 /// A `f`, `t`, `F` or `T` that has been pressed and is waiting for its character.

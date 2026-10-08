@@ -45,6 +45,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -459,6 +460,32 @@ pub enum Event {
         /// Why no file was written, with the fact that none was.
         reason: String,
     },
+
+    /// A media download has collected another chunk. Nothing settles on it: the
+    /// reader's view of the transfer is drawn from it, and the transfer goes on.
+    MediaProgress {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message whose media is downloading.
+        message_id: i64,
+
+        /// The bytes collected so far.
+        downloaded: usize,
+
+        /// The size Telegram declared, when it declared one.
+        total: Option<usize>,
+    },
+
+    /// A media download was stopped on the reader's request. No file was
+    /// written, so there is nothing for a viewer to open.
+    MediaCancelled {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message whose download was stopped.
+        message_id: i64,
+    },
 }
 
 /// What a chat-list retry in progress has to say about itself.
@@ -554,6 +581,10 @@ pub struct State {
     /// Pushed by [`apply`] when a download lands, and taken by the loop with
     /// [`State::take_media`] before it hands the terminal to a viewer.
     media: tui::state::pending::MediaQueue,
+
+    /// The media downloads started and not yet settled, each with the flag its
+    /// cancel sets. Settling a download removes its entry.
+    media_cancel: Vec<MediaCancel>,
 
     /// The configuration, and the channel to answer on — the pair bring-up needs
     /// to be run again.
@@ -788,6 +819,17 @@ impl State {
     /// viewer. Leaves the queue empty.
     pub fn take_media(&mut self) -> Vec<PathBuf> {
         self.media.take_pending()
+    }
+
+    /// Sets the cancel flag of every download of `message_id` in `chat_id` that
+    /// is in flight. The transfer checks the flag before each chunk and stops; a
+    /// download that has already settled has no entry, so nothing happens.
+    fn cancel_media(&self, chat_id: i64, message_id: i64) {
+        for cancel in &self.media_cancel {
+            if cancel.chat_id == chat_id && cancel.message_id == message_id {
+                cancel.flag.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     /// The client, once bring-up has installed one.
@@ -1309,10 +1351,16 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                 message_id,
             } => {
                 let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
-                if kind.is_some() {
+                kind.map(|kind| {
                     "downloading media…".clone_into(&mut app.ui.status);
-                }
-                kind
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    state.media_cancel.push(MediaCancel {
+                        chat_id: *chat_id,
+                        message_id: *message_id,
+                        flag: Arc::clone(&cancel),
+                    });
+                    MediaJob { kind, cancel }
+                })
             }
             _ => None,
         };
@@ -1596,7 +1644,7 @@ fn request_action(
     client: &Arc<ProtoClient>,
     state: &mut State,
     action: Action,
-    media: Option<MediaKind>,
+    media: Option<MediaJob>,
     tx: &UnboundedSender<AppEvent>,
 ) {
     // The sign-out. It needs the client, so it cannot fall through to
@@ -1609,6 +1657,17 @@ fn request_action(
             let result = client.logout().await.map_err(|error| format!("{error:#}"));
             let _ = tx.send(AppEvent::Net(Event::LoggedOut { result }));
         });
+        return;
+    }
+
+    // The reader's cancel sets a flag the transfer reads, so it is answered from
+    // the state the flags live in and never reaches the network.
+    if let Action::CancelMediaDownload {
+        chat_id,
+        message_id,
+    } = action
+    {
+        state.cancel_media(chat_id, message_id);
         return;
     }
 
@@ -1764,7 +1823,7 @@ async fn report_sign_in(
 fn request_plain(
     client: &Arc<ProtoClient>,
     action: Action,
-    media: Option<MediaKind>,
+    media: Option<MediaJob>,
     tx: &UnboundedSender<AppEvent>,
 ) {
     let client = Arc::clone(client);
@@ -1856,7 +1915,12 @@ fn request_plain(
             // it needs the client, so it is asked for there rather than here.
             // Unreachable rather than wrong: a value is one of the three, never
             // two.
-            Action::Login { .. } | Action::LoginCancelled | Action::Logout => {}
+            // The cancel is answered by `request_action`, which holds the flag;
+            // nothing is asked of the network for it either.
+            Action::Login { .. }
+            | Action::LoginCancelled
+            | Action::Logout
+            | Action::CancelMediaDownload { .. } => {}
 
             // The download is the network's and the file it leaves is the
             // viewer's. A message with no kind resolved is refused here rather
@@ -1866,14 +1930,7 @@ fn request_plain(
                 chat_id,
                 message_id,
             } => {
-                let event = match media {
-                    Some(kind) => save_media(client.as_ref(), chat_id, message_id, kind).await,
-                    None => Event::MediaFailed {
-                        chat_id,
-                        message_id,
-                        reason: MEDIA_NOT_LOADED.to_owned(),
-                    },
-                };
+                let event = save_media(client.as_ref(), &tx, chat_id, message_id, media).await;
                 let _ = tx.send(AppEvent::Net(event));
             }
 
@@ -1950,6 +2007,8 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
 }
 
 /// Folds something that arrived from the network into the screen's state.
+// One arm per event by design; the media events are four patterns of it.
+#[allow(clippy::too_many_lines)]
 pub fn apply(app: &mut App, state: &mut State, event: Event) {
     match event {
         Event::Ready {
@@ -2093,9 +2152,10 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             fetched,
         } => apply_sticker_settled(app, chat_id, message_id, fetched),
 
-        // The file is the viewer's from here: queued for the launch, and said
-        // on the status line so the reader is not left with the progress sentence.
-        Event::MediaSaved { .. } | Event::MediaFailed { .. } => apply_media(app, state, event),
+        Event::MediaSaved { .. }
+        | Event::MediaFailed { .. }
+        | Event::MediaCancelled { .. }
+        | Event::MediaProgress { .. } => apply_media(app, state, event),
     }
 }
 
@@ -2112,6 +2172,21 @@ fn apply_sticker_settled(
         return;
     }
     tui::sticker::resolve_fetch(&mut app.conversation.stickers, chat_id, message_id, fetched);
+}
+
+/// A media download in flight, as the loop keeps it: the message, and the flag
+/// its cancel sets. The flag is the only thing the loop and the transfer share.
+struct MediaCancel {
+    chat_id: i64,
+    message_id: i64,
+    flag: Arc<AtomicBool>,
+}
+
+/// What one media download needs to run: the kind its file is named by, and the
+/// flag that stops it.
+struct MediaJob {
+    kind: MediaKind,
+    cancel: Arc<AtomicBool>,
 }
 
 /// The status sentence for an open whose message is not on the screen, so its
@@ -2178,13 +2253,67 @@ fn media_failure(error: &ProtoError) -> String {
     }
 }
 
+/// The progress callback of one download: reports each chunk on the loop's
+/// channel, and answers `false` once the reader has cancelled, which stops the
+/// transfer before the next chunk.
+///
+/// The send is unbounded, so the chunk loop never waits on the loop draining
+/// events; progress is one event per chunk, which bounds how many there are.
+fn media_progress(
+    tx: UnboundedSender<AppEvent>,
+    chat_id: i64,
+    message_id: i64,
+    cancel: Arc<AtomicBool>,
+) -> impl FnMut(usize, Option<usize>) -> bool {
+    move |downloaded, total| {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let _ = tx.send(AppEvent::Net(Event::MediaProgress {
+            chat_id,
+            message_id,
+            downloaded,
+            total,
+        }));
+
+        true
+    }
+}
+
 /// Downloads the media on a message and writes it to the temp directory.
 ///
 /// The file is written whole or not at all, by [`write_private`], so a download
 /// that failed or was refused leaves nothing for a viewer to open half-read.
-async fn save_media(client: &ProtoClient, chat_id: i64, message_id: i64, kind: MediaKind) -> Event {
-    let bytes = match client.download_media(chat_id, message_id).await {
+async fn save_media(
+    client: &ProtoClient,
+    tx: &UnboundedSender<AppEvent>,
+    chat_id: i64,
+    message_id: i64,
+    media: Option<MediaJob>,
+) -> Event {
+    // A message with no kind resolved is refused here, so the refusal reaches the
+    // status line the same way a failed fetch does: as an event.
+    let Some(job) = media else {
+        return Event::MediaFailed {
+            chat_id,
+            message_id,
+            reason: MEDIA_NOT_LOADED.to_owned(),
+        };
+    };
+
+    let progress = media_progress(tx.clone(), chat_id, message_id, job.cancel);
+    let bytes = match client
+        .download_media_with_progress(chat_id, message_id, progress)
+        .await
+    {
         Ok(bytes) => bytes,
+        Err(ProtoError::Framework(FrameworkError::DownloadAborted { .. })) => {
+            return Event::MediaCancelled {
+                chat_id,
+                message_id,
+            };
+        }
         Err(error) => {
             return Event::MediaFailed {
                 chat_id,
@@ -2194,7 +2323,7 @@ async fn save_media(client: &ProtoClient, chat_id: i64, message_id: i64, kind: M
         }
     };
 
-    let name = media_file_name(std::process::id(), chat_id, message_id, kind);
+    let name = media_file_name(std::process::id(), chat_id, message_id, job.kind);
     let path = std::env::temp_dir().join(name);
     match write_private(&path, &bytes) {
         Ok(()) => Event::MediaSaved {
@@ -2257,7 +2386,45 @@ fn create_private(path: &Path) -> io::Result<fs::File> {
 /// Settles a media download: a saved file is queued for the viewer and said on
 /// the status line, and a failed one is said there and queues nothing.
 fn apply_media(app: &mut App, state: &mut State, event: Event) {
+    // Every settled download leaves the in-flight list, so a cancel that arrives
+    // after it has finished finds no flag and does nothing.
+    if let Event::MediaSaved {
+        chat_id,
+        message_id,
+        ..
+    }
+    | Event::MediaFailed {
+        chat_id,
+        message_id,
+        ..
+    }
+    | Event::MediaCancelled {
+        chat_id,
+        message_id,
+    } = &event
+    {
+        let (chat_id, message_id) = (*chat_id, *message_id);
+        state
+            .media_cancel
+            .retain(|cancel| cancel.chat_id != chat_id || cancel.message_id != message_id);
+    }
+
     match event {
+        // Progress is for the conversation view to draw; nothing settles on it.
+        Event::MediaProgress {
+            chat_id,
+            message_id,
+            downloaded,
+            total,
+        } => {
+            tracing::trace!(chat_id, message_id, downloaded, ?total, "media progress");
+        }
+        Event::MediaCancelled {
+            chat_id,
+            message_id,
+        } => {
+            tracing::debug!(chat_id, message_id, "media download cancelled");
+        }
         Event::MediaSaved {
             chat_id,
             message_id,
@@ -7507,6 +7674,83 @@ mod media_tests {
         let missing = dir.path().join("no-such-dir").join("televim-1-2-3.jpg");
         assert!(write_private(&missing, b"x").is_err());
         assert!(!missing.exists());
+    }
+
+    /// The progress callback reports each chunk on the channel, in order; once the
+    /// cancel flag is set it answers `false`, and that chunk is not reported.
+    #[test]
+    fn progress_reports_each_chunk_and_a_cancel_stops_the_next() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut progress = media_progress(tx, CHAT, 9, Arc::clone(&cancel));
+
+        assert!(progress(3, Some(10)));
+        assert!(progress(7, Some(10)));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(
+            !progress(8, Some(10)),
+            "a cancel stops the transfer before its next chunk"
+        );
+
+        let mut seen = Vec::new();
+        while let Ok(AppEvent::Net(Event::MediaProgress {
+            downloaded, total, ..
+        })) = rx.try_recv()
+        {
+            seen.push((downloaded, total));
+        }
+        assert_eq!(
+            seen,
+            vec![(3, Some(10)), (7, Some(10))],
+            "the refused chunk is not reported"
+        );
+    }
+
+    /// A cancel reaches the in-flight download of its own message only, and a
+    /// download that settles leaves the in-flight list, so a later cancel finds
+    /// nothing to set.
+    #[test]
+    fn a_cancel_sets_only_its_own_download_and_settling_forgets_it() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(Config::default(), tx);
+        let mut app = App::new();
+        let ours = Arc::new(AtomicBool::new(false));
+        let other = Arc::new(AtomicBool::new(false));
+        state.media_cancel.push(MediaCancel {
+            chat_id: CHAT,
+            message_id: 9,
+            flag: Arc::clone(&ours),
+        });
+        state.media_cancel.push(MediaCancel {
+            chat_id: CHAT,
+            message_id: 10,
+            flag: Arc::clone(&other),
+        });
+
+        state.cancel_media(CHAT, 9);
+        assert!(ours.load(Ordering::Relaxed));
+        assert!(
+            !other.load(Ordering::Relaxed),
+            "a neighbour is not cancelled"
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::MediaCancelled {
+                chat_id: CHAT,
+                message_id: 9,
+            },
+        );
+        assert_eq!(
+            state.media_cancel.len(),
+            1,
+            "the settled download is forgotten"
+        );
+        assert!(
+            state.take_media().is_empty(),
+            "a cancelled download queues no viewer"
+        );
     }
 
     /// A saved file is queued for the viewer and said on the status line; a
