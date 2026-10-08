@@ -653,6 +653,7 @@ mod tests {
             phone: None,
             birthday: None,
             bio: None,
+            presence: None,
         };
         assert_eq!(identity(&bare), None, "there is no identity to show");
         assert_eq!(

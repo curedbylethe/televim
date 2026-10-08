@@ -2402,6 +2402,7 @@ mod tests {
             last_message_id: None,
             last_timestamp: None,
             pinned: false,
+            presence: None,
         }
     }
 

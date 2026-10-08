@@ -2560,6 +2560,7 @@ pub(crate) fn mock_account() -> Account {
             year: Some(1815),
         }),
         bio: Some("Notes on the analytical engine.".into()),
+        presence: None,
     }
 }
 
@@ -2582,6 +2583,7 @@ fn mock_chats() -> Vec<Chat> {
             last_message_id: Some(10),
             last_timestamp: Some(1_730_000_000),
             pinned: false,
+            presence: None,
         },
         Chat {
             id: 2,
@@ -2592,6 +2594,7 @@ fn mock_chats() -> Vec<Chat> {
             last_message_id: None,
             last_timestamp: Some(1_729_999_000),
             pinned: false,
+            presence: None,
         },
         Chat {
             id: 3,
@@ -2602,6 +2605,7 @@ fn mock_chats() -> Vec<Chat> {
             last_message_id: None,
             last_timestamp: Some(1_729_998_000),
             pinned: false,
+            presence: None,
         },
     ]
 }

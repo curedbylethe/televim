@@ -282,6 +282,7 @@ mod sign_in {
             // would be a guess; this says they are absent, which is what they are.
             birthday: None,
             bio: None,
+            presence: None,
         }
     }
 

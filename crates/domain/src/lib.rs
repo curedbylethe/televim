@@ -13,6 +13,7 @@ pub mod account;
 pub mod chat;
 pub mod history;
 pub mod message;
+pub mod presence;
 pub mod search;
 pub mod selection;
 pub mod session;

@@ -31,6 +31,7 @@ use std::collections::{HashSet, VecDeque};
 
 use crate::chat::{Chat, ChatKind};
 use crate::message::Message;
+use crate::presence::Presence;
 
 /// Something that happened to a conversation.
 ///
@@ -118,6 +119,22 @@ pub enum UpdateEvent {
         /// Whether they are typing now; `false` is the cancel.
         typing: bool,
     },
+
+    /// A peer's online status changed.
+    ///
+    /// Keyed by the conversation, which for a person is the peer's own
+    /// identifier, the same join key [`PeerTyping`](UpdateEvent::PeerTyping) uses.
+    /// Incoming only, and only for a private conversation.
+    ///
+    /// The presence is sticky: it stands until the next update for this peer.
+    /// The event carries no expiry and this crate has no clock to decide one.
+    PeerStatus {
+        /// The conversation whose peer's status changed.
+        chat_id: i64,
+
+        /// The status the peer now reports.
+        presence: Presence,
+    },
 }
 
 /// How many messages [`ChatList`] holds before the oldest is dropped.
@@ -176,6 +193,7 @@ impl ChatList {
                 new_text,
             } => self.apply_edit(chat_id, message_id, new_text),
             UpdateEvent::MessagesDeleted { message_ids } => self.apply_deletion(&message_ids),
+            UpdateEvent::PeerStatus { chat_id, presence } => self.apply_presence(chat_id, presence),
             // Neither of these is part of a list entry: the list counts what has *not*
             // been read, and this says what has, and a peer composing a message is
             // not a message at all. Nothing here observes either, so nothing
@@ -269,6 +287,23 @@ impl ChatList {
         self.messages.len() != before
     }
 
+    /// Records a peer's presence on their private conversation.
+    ///
+    /// Sticky, as the event is: nothing expires it here. Reports whether the
+    /// stored value changed, so a repeat of the same status is not a redraw.
+    fn apply_presence(&mut self, chat_id: i64, presence: Presence) -> bool {
+        let Some(chat) = self.chat_mut(chat_id).filter(|chat| chat.is_private()) else {
+            return false;
+        };
+
+        if chat.presence == Some(presence) {
+            return false;
+        }
+
+        chat.presence = Some(presence);
+        true
+    }
+
     /// Focuses the private conversation with `user_id`, adding it if absent.
     ///
     /// Returns the index of the chat with this `user_id`, whether it was already
@@ -294,6 +329,7 @@ impl ChatList {
             last_message_id: None,
             last_timestamp: None,
             pinned: false,
+            presence: None,
         });
 
         self.chats.len() - 1
@@ -357,6 +393,7 @@ mod tests {
             last_message_id: Some(9),
             last_timestamp: Some(1_000),
             pinned: false,
+            presence: None,
         }
     }
 
@@ -536,6 +573,92 @@ mod tests {
         );
         assert_eq!(list.chats[0].unread_count, 1, "and the count is untouched");
         assert_eq!(list.messages.len(), 1, "as is the window");
+    }
+
+    fn status(chat_id: i64, presence: Presence) -> UpdateEvent {
+        UpdateEvent::PeerStatus { chat_id, presence }
+    }
+
+    #[test]
+    fn a_status_update_sets_presence_on_the_private_chat_and_nothing_else() {
+        let mut list = list();
+
+        applied(&mut list, status(1, Presence::Online));
+
+        assert_eq!(list.chats[0].presence, Some(Presence::Online));
+        assert_eq!(list.chats[1].presence, None, "the other chat is untouched");
+        assert_eq!(list.chats[0].title, "chat-1");
+        assert_eq!(list.chats[0].unread_count, 0);
+        assert_eq!(list.chats[0].last_message.as_deref(), Some("earlier"));
+        assert_eq!(list.chats[0].last_message_id, Some(9));
+        assert_eq!(list.chats[0].last_timestamp, Some(1_000));
+        assert!(!list.chats[0].pinned);
+        assert!(list.messages.is_empty(), "and the window is untouched");
+    }
+
+    #[test]
+    fn a_status_update_carries_the_offline_timestamp_as_given() {
+        let mut list = list();
+
+        applied(
+            &mut list,
+            status(
+                1,
+                Presence::Offline {
+                    was_online: 1_700_000_000,
+                },
+            ),
+        );
+
+        assert_eq!(
+            list.chats[0].presence,
+            Some(Presence::Offline {
+                was_online: 1_700_000_000
+            })
+        );
+    }
+
+    #[test]
+    fn a_repeated_status_is_not_a_change() {
+        let mut list = list();
+        applied(&mut list, status(1, Presence::Recently));
+
+        assert!(!list.apply_update(status(1, Presence::Recently)));
+        applied(&mut list, status(1, Presence::Hidden));
+        assert_eq!(list.chats[0].presence, Some(Presence::Hidden));
+    }
+
+    #[test]
+    fn a_status_stays_until_the_next_update_for_that_peer() {
+        let mut list = list();
+        applied(&mut list, status(1, Presence::Online));
+
+        applied(&mut list, arrival(1, 10, "hello", 2_000));
+
+        assert_eq!(
+            list.chats[0].presence,
+            Some(Presence::Online),
+            "an unrelated message does not expire it"
+        );
+    }
+
+    #[test]
+    fn a_status_for_an_unknown_or_group_chat_changes_nothing() {
+        let mut list = ChatList::with_chats(vec![
+            Chat {
+                kind: ChatKind::Group,
+                ..chat(3)
+            },
+            chat(1),
+        ]);
+
+        assert!(!list.apply_update(status(99, Presence::Online)), "not held");
+        assert!(
+            !list.apply_update(status(3, Presence::Online)),
+            "a group is not a person, even under the same identifier"
+        );
+        assert_eq!(list.chats[0].presence, None);
+        assert_eq!(list.chats[1].presence, None);
     }
 
     #[test]

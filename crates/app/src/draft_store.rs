@@ -363,6 +363,7 @@ mod tests {
             last_message_id: None,
             last_timestamp: None,
             pinned: false,
+            presence: None,
         }]);
         app.select_chat(0);
         app.apply_latest(vec![

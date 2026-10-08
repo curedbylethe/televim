@@ -6,6 +6,8 @@
 //! two `Option`s in here are the reason a panel never has to ask whether a field
 //! is missing or empty.
 
+use crate::presence::Presence;
+
 /// A calendar date, as Telegram reports one.
 ///
 /// Not a timestamp and not a `NaiveDate`. Telegram sends a birthday as a day, a
@@ -53,6 +55,9 @@ pub struct Account {
 
     /// The account's bio. `None` when unset. May be several lines.
     pub bio: Option<String>,
+
+    /// The account's own presence, if one has been reported. `None` when unknown.
+    pub presence: Option<Presence>,
 }
 
 impl Account {

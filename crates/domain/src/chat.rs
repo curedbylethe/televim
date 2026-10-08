@@ -2,6 +2,8 @@
 
 use std::borrow::Cow;
 
+use crate::presence::Presence;
+
 /// The kind of a chat. `televim` displays **only** `Private`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChatKind {
@@ -43,6 +45,9 @@ pub struct Chat {
     pub last_timestamp: Option<i64>,
     /// Whether the account has pinned this chat to the top of the list.
     pub pinned: bool,
+    /// The peer's last reported presence, if one has been seen. Sticky until the
+    /// next update for this peer; nothing here expires it.
+    pub presence: Option<Presence>,
 }
 
 impl Chat {
@@ -76,6 +81,7 @@ mod tests {
             last_message_id: None,
             last_timestamp: None,
             pinned: false,
+            presence: None,
         }
     }
 
