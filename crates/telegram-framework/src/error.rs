@@ -260,6 +260,23 @@ pub enum FrameworkError {
         source: Box<RequestError>,
     },
 
+    /// Some of a batched forward went through before one of the batches failed.
+    ///
+    /// The forwarding twin of [`FrameworkError::PartialDelete`]: a forward of more
+    /// than [`FORWARD_BATCH`](crate::messages::FORWARD_BATCH) identifiers is several
+    /// requests, and the count is what landed, so a caller can say "forwarded 200
+    /// of 250" rather than "failed". A failure before anything landed is an
+    /// ordinary [`FrameworkError::Request`].
+    #[error("forwarded {forwarded} message(s) before the rest failed: {source}")]
+    PartialForward {
+        /// How many messages were forwarded before the failure.
+        forwarded: usize,
+
+        /// What the request that failed said.
+        #[source]
+        source: Box<RequestError>,
+    },
+
     /// The message carries nothing that can be fetched.
     ///
     /// A fact about the answer rather than a failure of the request, so it gets
