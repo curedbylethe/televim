@@ -340,6 +340,27 @@ while calibrating this one.
 - Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = true`,
   `panic = "abort"`.
 
+### The session file's key derivation
+
+A passphrase is stretched with Argon2id at `m` = 19 MiB, so a launch that uses
+`TELEVIM_SESSION_PASSPHRASE` makes one transient allocation of about 19 MiB while
+the key is derived, and frees it when the derivation returns. The key is kept for
+the salt it was derived with, so a load followed by a save pays once per process,
+not once per call; a `:retry` or a reconnect resolves a fresh provider and pays
+again. The harness and the shipped-binary measurement run with no credentials, so
+**this peak is not in any RSS figure above** and nothing here claims a number for
+it; it is a declared allocation, not a measured one. A launch that uses the keyring
+key instead derives nothing.
+
+What the change does move is binary size, which the regression budget measures.
+A stripped release build of the tree just before this change was 6,007,456 B and
+of the tree with it 6,057,248 B: **+49,792 B (+0.83%)** for `aes-gcm-siv`, `argon2`
+and what they pull in, inside the 1% band (about 57.6 KB). The stored baseline
+(5,759,280 B) is older than both builds, and the tree had already drifted past its
+band before this change (+248,176 B), so `make measure-check` reports a binary-size
+breach that this change did not cause. The baseline was not re-recorded here; that
+is a maintainer decision.
+
 ### No arena, by measurement
 
 No arena allocator is used anywhere, and the baseline above is why rather than a

@@ -100,8 +100,15 @@ Working today:
   flash. `⏎` sends the field once — a second `⏎` while `Checking…` says so and
   sends nothing, and `⏎` with no client up flashes
   `not connected yet — the client is not up` and keeps the draft. The session is
-  stored in the OS keyring (or a file, per `session_path`), written atomically, and
-  a stored session that cannot be read is discarded at launch: the status line says
+  stored in the OS keyring, or in an **encrypted** file when `session_path` is set
+  (AES-256-GCM-SIV, `0600`, written atomically; the profile card says
+  `encrypted file <path>`). The file's key is `TELEVIM_SESSION_PASSPHRASE` (or
+  `session_passphrase` in the configuration; prefer the variable), else a random key
+  kept in the OS keyring. With neither, the launch ends at `offline:` naming the
+  missing key and the file is left as it was — it is never written in plaintext —
+  and a wrong passphrase ends the same way and never discards the session. A file
+  written by an older build is encrypted on its first launch. A stored session that
+  cannot be parsed is discarded at launch: the status line says
   so and the sign-in field opens, rather than the launch ending at an `offline:`
   the reader can do nothing with. A launch that does end at `offline:` has asked
   for the chat list three times and waited between them, naming the reason, the

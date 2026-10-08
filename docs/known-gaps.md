@@ -244,6 +244,26 @@ Real, and named so they are not mistaken for oversights:
 - **The draft row's `BidiMode::Visual` path has no test.** `draft_items` permutes
   the words the way `message_row` does, but no test in `widgets/conversation.rs`
   sets that mode on a draft; the draft tests all run in the default mode.
+- **The session file's key has no prompt.** The key is `TELEVIM_SESSION_PASSPHRASE`
+  or the OS keyring and nothing else, so a machine with neither ends at `offline:`
+  and the reader sets the variable and types `:retry`. An interactive launch-time
+  prompt is the deferred alternative: it needs a new prompt kind, a widget and a
+  design pass. There is also no re-keying — changing the passphrase makes the old
+  file unopenable, and the way out is to remove it and sign in again.
+- **A wrong passphrase is never recovered, only reported.** An envelope that does
+  not open is `offline:` with the file untouched, by design (see
+  [`decisions.md`](./decisions.md)); a reader who has lost the passphrase for good
+  removes the file by hand.
+- **Legacy plaintext is still read, and its wipe is best effort.** A file from an
+  older build loads and is encrypted in place, and the old bytes are zero-filled —
+  on Unix only, and not past SSD wear levelling, a journaling or copy-on-write
+  filesystem, a snapshot or a backup. Dropping the plaintext reader is a dated
+  follow-up, not part of this change.
+- **The expanded AES key schedule is not zeroized.** The `FileKey` and the
+  passphrase are wiped on drop; the round keys inside the cipher are not reachable
+  to wipe.
+- **The 19 MiB Argon2id allocation is declared, not measured.** `make measure` runs
+  with no credentials, so no RSS figure includes it; see [`memory.md`](./memory.md).
 
 ## v2 Hooks
 

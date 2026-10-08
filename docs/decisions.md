@@ -53,6 +53,8 @@ are in [`../AGENTS.md`](../AGENTS.md).
   session path do not write the same temp. Renaming rather than writing in place is
   also what keeps the mode: the target inherits the temp's inode and the
   permissions it was restricted to instead of being a fresh file behind the umask.
+  What is written is the sealed envelope (see the entries below), so this is now
+  ciphertext being kept whole.
   A failed write removes the temp, since a half-written one is not a session file
   and nothing else would clean it up. It is `std` only — no temporary-file crate,
   no dependency, and nothing to audit beyond four calls.
@@ -74,6 +76,92 @@ are in [`../AGENTS.md`](../AGENTS.md).
   `Event::Ready`: `Ready`'s sign-in path clears the status line, so a sentence sent
   first would be overwritten before it was ever drawn, and the one account of what
   happened to the session they were signed in with has to survive a minute.
+- **Why the session file is an envelope, and why `VERSION` stays 1:** a session
+  file holds a permanent authorisation key, and at `0600` it was still readable by
+  anything running as the reader, any backup, and any disk image. So `FileStore`
+  seals what it saves: `TVIM1 | salt(16) | nonce(12) | ciphertext | tag(16)`,
+  AES-256-GCM-SIV, where the magic and the salt are bound as associated data so
+  that editing either fails the tag instead of silently changing the key
+  derivation. The salt is the Argon2id salt for a passphrase and is carried but
+  unused for a keyring-held key, so the layout is one layout whichever key source
+  made the file. The magic is how a legacy file is told apart *before* any parsing:
+  plaintext is JSON and begins with `{`, which can never be `T`. That is the
+  reason for an envelope rather than a version bump. `SessionData::VERSION`
+  stays `1` — the JSON inside the envelope is byte-for-byte what it was — because
+  a bump would make every reader's existing file fail the version check on the
+  first launch after upgrading and log them all out, which is exactly the failure
+  `VERSION`'s own docs exist to prevent. The `0600` and the atomic rename are kept:
+  they now protect ciphertext, as defence in depth. `save` also opens what it just
+  sealed before writing it, because a provider that sealed under a key it could
+  not hand back would turn a good session into a file nothing can read. The
+  Argon2id cost (`m` = 19 MiB, `t` = 2, `p` = 1) is frozen in `sealed.rs`; a new
+  cost needs a new magic.
+- **Why the file key comes from the environment first, the keyring second, and
+  nowhere else:** the order is `TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase`
+  in the configuration, which the environment wins over), then a random 256-bit key
+  kept in the OS credential store (`service "televim"`, `account "file-key"`, beside
+  the `"session"` entry), created on the first save; with neither the session is
+  not read or written. The passphrase is first because `FileStore`'s reason to exist
+  is a machine with *no* credential store — a headless box, a container, CI — and a
+  keyring-only design would strand exactly those readers; an environment variable
+  works everywhere and needs no new surface. **There is no plaintext fallback.**
+  A silent fallback would reintroduce the exposure this order exists to close, so a
+  reader with no key gets the `offline:` sentence instead: `the session file is
+  encrypted and no key is available: set TELEVIM_SESSION_PASSPHRASE or make the OS
+  keyring available (…); the file was left as it was`. **There is no interactive
+  prompt**, deliberately deferred: it needs a new prompt kind, a widget and a
+  design pass, and none of that is in this change. The second `offline:` sentence
+  is for a key that exists but is wrong: `could not read the stored session: could
+  not decrypt the session: wrong passphrase or key, or the file was modified; check
+  TELEVIM_SESSION_PASSPHRASE or the OS keyring; the file was left as it was`. A
+  blank passphrase is no
+  passphrase — an empty `TELEVIM_SESSION_PASSPHRASE=` is what an unset template
+  variable looks like, and deriving a key from it would encrypt the session under
+  nothing. The environment variable is preferred to the configuration key because a
+  file is a second place the secret rests. The store and its key source are
+  resolved afresh at every bring-up (launch, `:retry`, auto-reconnect, sign-back-in)
+  and cached nowhere: a cached key is a longer-lived secret, and a passphrase
+  changed in the environment is read on the next `:retry`. The profile card names
+  the result as `encrypted file <path>`, so a path is never read as a plaintext
+  one.
+- **Why a file that will not open is `Load` and is never discarded:** an envelope
+  that does not open — the wrong passphrase, an unreachable keyring, a modified or
+  truncated file — is `SessionError::Load`, which is fatal to bring-up and ends at
+  `offline:`; a key source that cannot be reached is `Unavailable`, the same way.
+  Neither is `Corrupt`. `discard_corrupt_session` answers `Corrupt` by clearing the
+  store, so mapping a typo in a passphrase to `Corrupt` would delete a good session
+  over a keystroke. Only a legacy plaintext file that fails the JSON or version
+  checks is still `Corrupt`, as it always was. The cost of the rule is that a
+  reader who has genuinely lost the passphrase must remove the file by hand and
+  sign in again; the sentence says the file was left as it was, because the thing
+  they will fear is that it was thrown away. `:retry` re-runs bring-up, so fixing
+  the variable and typing it is enough.
+- **Why the wipe is best effort and says so:** a plaintext file from an older build
+  is encrypted on its first `load` (migrate-on-load). The ciphertext replaces it
+  atomically, and only then is the old inode — opened *before* the replace, because
+  the replace unlinks it — overwritten with zeros and synced, and any stale
+  `<file_name>.<pid>.tmp` sibling wiped and removed; `clear` zero-fills before it
+  unlinks. Wiping before replacing was rejected, since a crash between the two steps
+  would leave neither a session nor anything to recover. The wipe is a best effort
+  and not a guarantee of unrecoverability, and the docs do not claim one. SSD wear
+  levelling remaps writes, so the overwrite can land in a different cell than the
+  original; a journaling or copy-on-write filesystem can keep the earlier blocks; a
+  snapshot or a backup holds the file as it was. The pre-migration wipe is
+  Unix-only, because it depends on holding the old inode open across the rename,
+  and a rename over an open file is not reliable elsewhere, so on Windows the legacy file is replaced and
+  not overwritten. A migration that cannot finish (no key, a read-only directory)
+  never fails the load: the legacy file stays as it was and the next load or save
+  tries again. A session that was ever stored in plaintext should be treated as
+  exposed to whoever could read that disk, and the reader should sign the device out
+  of Telegram if that matters.
+- **Known limit: the expanded AES key schedule is not zeroized.** `FileKey` and the
+  passphrase are wiped when dropped (`Zeroizing`), the ciphertext's plaintext
+  buffers are `Zeroizing`, and `Debug` for each is redacted. But the cipher expands
+  its key into round keys inside `Aes256GcmSiv`, and that state is not reachable
+  from here to wipe, so a copy of the key's material outlives the `FileKey` until
+  the allocation is reused. This protects against a log or a core dump read by
+  accident, not against an attacker who can read this process's memory — who could
+  read the passphrase from the environment in any case.
 - **Why the chat-list fetch is retried three times, why the wait is the one
   history paging already uses, and why `:retry` is a command:** the launch fetch
   ran once, and one `?` turned a single transient refusal into a terminal
