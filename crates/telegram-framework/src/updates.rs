@@ -185,6 +185,21 @@ pub enum UpdateKind {
         max_id: i64,
     },
 
+    /// This account has read a conversation's incoming messages, on any device.
+    ///
+    /// Read from the raw `updateReadHistoryInbox`, for the same reason as
+    /// [`UpdateKind::ReadReceipt`]: grammers models no named variant for it.
+    /// Carries the count Telegram still holds as unread, so a reader's own
+    /// read, or one made on another device, lands as the server's figure.
+    InboxRead {
+        /// The conversation whose incoming messages were read.
+        chat_peer_id: i64,
+
+        /// Incoming messages Telegram still counts as unread in it, clamped to
+        /// zero should the wire ever carry a negative figure.
+        still_unread_count: u32,
+    },
+
     /// Someone in a conversation has started typing, or has stopped.
     ///
     /// A flag rather than a row, because that is what Telegram says it: the
@@ -287,6 +302,9 @@ impl Client {
     ///         UpdateKind::MessagesDeleted { message_ids } => println!("{message_ids:?}"),
     ///         UpdateKind::ReadReceipt { chat_peer_id, max_id } => {
     ///             println!("{chat_peer_id} read up to {max_id}")
+    ///         }
+    ///         UpdateKind::InboxRead { chat_peer_id, still_unread_count } => {
+    ///             println!("{chat_peer_id} has {still_unread_count} unread")
     ///         }
     ///         UpdateKind::PeerTyping { chat_peer_id, typing } => {
     ///             println!("{chat_peer_id} is typing: {typing}")
@@ -590,8 +608,9 @@ fn update_to_kind(update: &Update) -> Option<UpdateKind> {
 ///
 /// The raw update is matched on its own variant rather than through a `grammers`
 /// wrapper because grammers models none of them: `updateReadHistoryOutbox`,
-/// `updateUserTyping` and `updateUserStatus` reach the catch-all at the end of
-/// `Update::from_raw` and arrive as `Update::Raw`. All three are matched here,
+/// `updateReadHistoryInbox`, `updateUserTyping` and `updateUserStatus` reach the
+/// catch-all at the end of `Update::from_raw` and arrive as `Update::Raw`. All
+/// four are matched here,
 /// in the one place the raw enum is matched at all, so what the bucket is read
 /// for is answerable by reading one function.
 ///
@@ -620,8 +639,18 @@ fn read_raw(raw: &grammers_client::update::Raw) -> Option<UpdateKind> {
             chat_peer_id: status.user_id,
             presence: presence_from_status(&status.status),
         }),
-        // The inbox watermark, the group and channel forms of the same fact, and
-        // everything else grammers does not model. None of it is a message in a
+        // The inbox read is this account's own reading of a peer's messages, so
+        // the peer is the conversation. Groups and channels are dropped as
+        // everywhere else.
+        tl::enums::Update::ReadHistoryInbox(read) => {
+            let chat_peer_id = read_peer(&read.peer)?;
+
+            Some(UpdateKind::InboxRead {
+                chat_peer_id,
+                still_unread_count: u32::try_from(read.still_unread_count).unwrap_or(0),
+            })
+        }
+        // Everything else grammers does not model. None of it is a message in a
         // private conversation, which is all this feed carries.
         _ => None,
     }
@@ -948,23 +977,51 @@ mod tests {
         assert!(read_raw(&channel).is_none(), "nor is a channel");
     }
 
-    /// `Update::Raw` is the catch-all for everything `grammers` does not model, so
-    /// reading one update out of it must not mistake another for it — and the
-    /// update that looks most like this one is the *inbox* watermark, which is
-    /// this account's own reading and not the peer's.
+    /// The inbox read is the one that looks most like the acknowledgement, and it
+    /// is not one: it is this account's own reading of the peer's messages, so it
+    /// must not come out as the peer reading ours. It keeps the count Telegram
+    /// still holds, and the watermark is left behind.
     #[test]
-    fn another_raw_update_is_not_a_read_acknowledgement() {
-        let inbox = tl::enums::Update::ReadHistoryInbox(tl::types::UpdateReadHistoryInbox {
-            folder_id: None,
-            peer: user(42),
-            top_msg_id: None,
-            max_id: 7,
-            still_unread_count: 0,
-            pts: 1,
-            pts_count: 1,
-        });
+    fn an_inbox_read_is_this_accounts_reading_not_the_peers_receipt() {
+        let inbox = read_raw(&raw_inbox(user(42), 0));
 
-        assert!(read_raw(&raw_update(inbox)).is_none());
+        assert!(
+            matches!(
+                inbox,
+                Some(UpdateKind::InboxRead {
+                    chat_peer_id: 42,
+                    still_unread_count: 0
+                })
+            ),
+            "the peer and the server's remaining count: {inbox:?}"
+        );
+    }
+
+    /// The server's remaining count is an `i32` on the wire. A negative figure is
+    /// not one it sends, but the domain counts unsigned, so it lands at zero.
+    #[test]
+    fn a_negative_remaining_count_is_read_as_none_left() {
+        assert!(
+            matches!(
+                read_raw(&raw_inbox(user(42), -3)),
+                Some(UpdateKind::InboxRead {
+                    still_unread_count: 0,
+                    ..
+                })
+            ),
+            "clamped rather than wrapped"
+        );
+    }
+
+    /// A group's inbox read is dropped with its outbox twin, for the same reason.
+    #[test]
+    fn an_inbox_read_for_a_group_is_dropped() {
+        let group = raw_inbox(
+            tl::enums::Peer::Chat(tl::types::PeerChat { chat_id: 42 }),
+            1,
+        );
+
+        assert!(read_raw(&group).is_none(), "a group is not displayed");
     }
 
     /// A typing action names the peer as a bare user identifier, which is the
@@ -1100,6 +1157,22 @@ mod tests {
             tl::types::UpdateReadHistoryOutbox {
                 peer,
                 max_id,
+                pts: 1,
+                pts_count: 1,
+            },
+        ))
+    }
+
+    /// This account's own read of a peer's messages, in the same bucket for the
+    /// same reason. Its watermark is not read, only the count left after it.
+    fn raw_inbox(peer: tl::enums::Peer, still_unread_count: i32) -> grammers_client::update::Raw {
+        raw_update(tl::enums::Update::ReadHistoryInbox(
+            tl::types::UpdateReadHistoryInbox {
+                folder_id: None,
+                peer,
+                top_msg_id: None,
+                max_id: 7,
+                still_unread_count,
                 pts: 1,
                 pts_count: 1,
             },

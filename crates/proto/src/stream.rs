@@ -102,6 +102,16 @@ fn to_event(kind: UpdateKind) -> UpdateEvent {
             max_id,
         },
 
+        // A rename of the conversation, with the count taken as the domain's own
+        // unit: the framework has already clamped it to zero or above.
+        UpdateKind::InboxRead {
+            chat_peer_id,
+            still_unread_count,
+        } => UpdateEvent::InboxRead {
+            chat_id: chat_peer_id,
+            unread_count: still_unread_count,
+        },
+
         // A rename again, and the flag is the whole event: there is no message
         // to convert and no position to keep, so nothing else happens here.
         UpdateKind::PeerTyping {
@@ -240,6 +250,27 @@ mod tests {
 
         assert_eq!(chat_id, 42);
         assert_eq!(max_id, 7);
+    }
+
+    /// The reader's own read carries the count Telegram still holds, and the
+    /// translation keeps both the conversation and that count.
+    #[test]
+    fn an_inbox_read_becomes_the_conversation_and_the_remaining_count() {
+        let event = to_event(UpdateKind::InboxRead {
+            chat_peer_id: 42,
+            still_unread_count: 3,
+        });
+
+        let UpdateEvent::InboxRead {
+            chat_id,
+            unread_count,
+        } = event
+        else {
+            panic!("an inbox read is a conversation and a count");
+        };
+
+        assert_eq!(chat_id, 42);
+        assert_eq!(unread_count, 3);
     }
 
     /// The same rename carries the typing flag in both directions: a composing

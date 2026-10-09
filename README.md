@@ -122,7 +122,9 @@ Working today:
   unread messages tells Telegram it is read, up to the newest message the list
   knows of, and the count clears once Telegram accepts that; a refused marker
   leaves the count where it was, and the next open asks again. A message that
-  arrives in the conversation on show is marked read the same way. `p` pins the highlighted chat, or
+  arrives in the conversation on show is marked read the same way, and a read
+  done on another device sets the count to whatever Telegram still counts as
+  unread. `p` pins the highlighted chat, or
   unpins it; the pin is kept by Telegram, so it survives a restart, and pinned
   chats lead the list, newest first within each section. The focused pane's border is
   drawn in `Theme::border_focused`; `h`/`l` and `Tab` move between the two panes,
