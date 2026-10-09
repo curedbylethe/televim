@@ -377,25 +377,28 @@ from the same place as the binary, so it does not prove who built it.
 
 ### Credentials
 
-televim signs in as a Telegram application, and it needs an `api_id` and an
-`api_hash` from [my.telegram.org](https://my.telegram.org). They are not in the
-binary. Give them to it either way:
+televim signs in as a Telegram application. The release binaries are built with
+the maintainer's `api_id` and `api_hash`, so they run with no setup. The
+credentials are not secret from someone who looks inside the binary, so you can
+use your own instead. Register an application at
+[my.telegram.org](https://my.telegram.org) and set either:
 
 ```console
 $ export TELEVIM_API_ID=1234567
 $ export TELEVIM_API_HASH=0123456789abcdef0123456789abcdef
 ```
 
-or in a `televim.toml` in the directory you run it from:
+or, in a `televim.toml` in the directory you run it from:
 
 ```toml
 api_id = 1234567
 api_hash = "0123456789abcdef0123456789abcdef"
 ```
 
-Pass another path with `televim --config path/to/televim.toml`. The drafts and
-history files are written beside the config file. The login session goes to the
-OS credential store unless `session_path` is set.
+Either overrides the built-in pair. Pass another config path with
+`televim --config path/to/televim.toml`. The drafts and history files are written
+beside the config file. The login session goes to the OS credential store unless
+`session_path` is set.
 
 ## Building
 
