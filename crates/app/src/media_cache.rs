@@ -1,9 +1,12 @@
 //! Downloaded media kept on disk, so a re-open does not download it again.
 //!
-//! One file per message, named `<chat>-<message>.<suffix>` — the ids are the
-//! server's, so the name is the same after a restart, where the old temp-dir
-//! name carried the process id. The directory is bounded by a byte total and an
-//! entry count; past either, the oldest file by modification time goes first.
+//! Each distinct file is stored once, as a blob named `<sha256>.<suffix>` for
+//! the hash of its bytes. Each `(chat, message)` key has a pointer file,
+//! `<chat>-<message>.ref`, holding the hash of its blob. The pointers are the
+//! index: a restart rebuilds it from their names and contents. The directory is
+//! bounded by the bytes of its distinct blobs and by its pointer count; past
+//! either, the least recently used pointer goes first, and its blob with it
+//! once no other pointer names it.
 //!
 //! **Plaintext, like the history and drafts files.** Files are restricted to
 //! their owner and the directory is tagged with the account, but nothing is
@@ -25,6 +28,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
 use domain::message::MediaKind;
+use sha2::{Digest, Sha256};
 use telegram_framework::MEDIA_LIMIT;
 
 /// The most bytes the cache keeps on disk. Per entry, [`MEDIA_LIMIT`] is the
@@ -55,30 +59,89 @@ pub(crate) fn suffix(kind: MediaKind) -> &'static str {
     }
 }
 
-/// The ids a cached file's name encodes, or `None` for anything that is not one
-/// of this cache's files — temps, the account file, a stranger's file.
-fn parse_name(name: &str) -> Option<(i64, i64)> {
+/// The hash a blob's name carries, or `None` for anything that is not one of
+/// this cache's blobs.
+fn parse_blob(name: &str) -> Option<String> {
+    let (stem, extension) = name.rsplit_once('.')?;
+    let hash_shaped = stem.len() == 64
+        && stem
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (SUFFIXES.contains(&extension) && hash_shaped).then(|| stem.to_owned())
+}
+
+/// The key a pointer's name carries, or `None` for anything else.
+fn parse_pointer(name: &str) -> Option<(i64, i64)> {
+    parse_ids(name.strip_suffix(".ref")?)
+}
+
+/// The ids a pre-content-addressing file's name encodes, or `None` for anything
+/// that is not one. Those names are `<chat>-<message>.<suffix>`.
+fn parse_legacy(name: &str) -> Option<(i64, i64)> {
     let (stem, extension) = name.rsplit_once('.')?;
     if !SUFFIXES.contains(&extension) {
         return None;
     }
-    // Split on the last dash so a negative chat id keeps its sign.
+    parse_ids(stem)
+}
+
+/// `<chat>-<message>`, split on the last dash so a negative chat id keeps its
+/// sign.
+fn parse_ids(stem: &str) -> Option<(i64, i64)> {
     let (chat, message) = stem.rsplit_once('-')?;
     Some((chat.parse().ok()?, message.parse().ok()?))
 }
 
+/// Whether a name is one this cache wrote, in any of its three forms.
+fn is_cache_file(name: &str) -> bool {
+    parse_blob(name).is_some() || parse_pointer(name).is_some() || parse_legacy(name).is_some()
+}
+
+fn blob_name(hash: &str, kind: MediaKind) -> String {
+    format!("{hash}.{}", suffix(kind))
+}
+
+fn pointer_name(chat_id: i64, message_id: i64) -> String {
+    format!("{chat_id}-{message_id}.ref")
+}
+
+/// The sha256 of `bytes`, as lowercase hex: the name a blob is stored under.
+fn content_hash(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    hex
+}
+
+/// One `(chat, message)` key: the blob its pointer names, and when it was last
+/// used.
 struct Entry {
-    path: PathBuf,
-    bytes: u64,
+    hash: String,
     modified: SystemTime,
 }
 
-/// A store's claim on its file, taken under the lock before any I/O.
+/// One blob on disk, shared by every key whose pointer names its hash.
+struct Blob {
+    path: PathBuf,
+    bytes: u64,
+    /// The pointers that name this blob, plus the stores holding it while they
+    /// write. The blob goes when this reaches zero.
+    refs: usize,
+}
+
+/// A store's claim on its blob, taken under the lock before any I/O.
 struct Reservation {
     dir: PathBuf,
+    hash: String,
     path: PathBuf,
     size: u64,
     generation: u64,
+    /// Whether this store writes the blob. `false` means the blob was already
+    /// here and this store holds one reference to it instead.
+    write: bool,
 }
 
 /// The media cache in one directory, with its index in memory.
@@ -87,11 +150,13 @@ pub(crate) struct MediaCache {
     max_bytes: u64,
     max_entries: usize,
     entries: BTreeMap<(i64, i64), Entry>,
+    blobs: BTreeMap<String, Blob>,
     /// Bumped by [`MediaCache::clear`], so a store that began before a clear
     /// knows not to index its file after it.
     generation: u64,
-    /// Paths reserved since the last clear, with how many reservations hold
-    /// each. A stale store must not remove a file a current reservation owns.
+    /// Blob paths reserved for writing since the last clear, with how many
+    /// reservations hold each. A stale store must not remove a file a current
+    /// reservation owns.
     pending: BTreeMap<PathBuf, usize>,
 }
 
@@ -121,6 +186,7 @@ impl MediaCache {
             max_bytes,
             max_entries,
             entries: BTreeMap::new(),
+            blobs: BTreeMap::new(),
             generation: 0,
             pending: BTreeMap::new(),
         };
@@ -131,15 +197,15 @@ impl MediaCache {
 
     /// The file a message's media is cached in, if it is.
     pub(crate) fn lookup(&self, chat_id: i64, message_id: i64) -> Option<PathBuf> {
-        self.entries
-            .get(&(chat_id, message_id))
-            .map(|entry| entry.path.clone())
+        let entry = self.entries.get(&(chat_id, message_id))?;
+        self.blobs.get(&entry.hash).map(|blob| blob.path.clone())
     }
 
     /// Caches `bytes` for a message and returns the file they landed in.
     ///
     /// Takes the lock twice and writes between: the file I/O never runs under
-    /// the lock, so a clear waits out a lock-held swap, not a 16 MiB write.
+    /// the lock, so a clear waits out a lock-held swap, not a 16 MiB write. The
+    /// hash is taken before the first lock for the same reason.
     pub(crate) fn store_shared(
         cache: &Mutex<Self>,
         chat_id: i64,
@@ -147,11 +213,12 @@ impl MediaCache {
         kind: MediaKind,
         bytes: &[u8],
     ) -> Option<PathBuf> {
+        let hash = content_hash(bytes);
         let reservation = cache
             .lock()
             .expect("the media cache lock is not poisoned")
-            .reserve(chat_id, message_id, kind, bytes.len())?;
-        if write_reserved(&reservation, bytes).is_none() {
+            .reserve(&hash, kind, bytes.len())?;
+        if write_reserved(&reservation, chat_id, message_id, bytes).is_none() {
             cache
                 .lock()
                 .expect("the media cache lock is not poisoned")
@@ -174,43 +241,55 @@ impl MediaCache {
         kind: MediaKind,
         bytes: &[u8],
     ) -> Option<PathBuf> {
-        let reservation = self.reserve(chat_id, message_id, kind, bytes.len())?;
-        if write_reserved(&reservation, bytes).is_none() {
+        let reservation = self.reserve(&content_hash(bytes), kind, bytes.len())?;
+        if write_reserved(&reservation, chat_id, message_id, bytes).is_none() {
             self.abandon(&reservation);
             return None;
         }
         self.commit(reservation, chat_id, message_id)
     }
 
-    /// Claims a file for a store of `size` bytes. Refuses what could never fit:
-    /// bytes over [`MEDIA_LIMIT`], or over the byte cap. No I/O.
-    fn reserve(
-        &mut self,
-        chat_id: i64,
-        message_id: i64,
-        kind: MediaKind,
-        size: usize,
-    ) -> Option<Reservation> {
+    /// Claims the blob for `hash`, a store of `size` bytes. Refuses what could
+    /// never fit: bytes over [`MEDIA_LIMIT`], or over the byte cap. A blob
+    /// already here is held rather than rewritten. No I/O.
+    fn reserve(&mut self, hash: &str, kind: MediaKind, size: usize) -> Option<Reservation> {
         let size = u64::try_from(size).ok()?;
         if size > MEDIA_LIMIT as u64 || size > self.max_bytes {
             return None;
         }
-        let path = self
-            .dir
-            .join(format!("{chat_id}-{message_id}.{}", suffix(kind)));
-        *self.pending.entry(path.clone()).or_insert(0) += 1;
+        // The hold is taken now, so an eviction cannot unlink the blob before
+        // this store's pointer names it.
+        let (path, write) = if let Some(blob) = self.blobs.get_mut(hash) {
+            blob.refs += 1;
+            (blob.path.clone(), false)
+        } else {
+            let path = self.dir.join(blob_name(hash, kind));
+            *self.pending.entry(path.clone()).or_insert(0) += 1;
+            (path, true)
+        };
         Some(Reservation {
             dir: self.dir.clone(),
+            hash: hash.to_owned(),
             path,
             size,
             generation: self.generation,
+            write,
         })
     }
 
-    /// Gives back a reservation whose write failed, so its name is free again.
+    /// Gives back a reservation whose write failed: its pending name, or its
+    /// hold on a blob that was already cached.
     fn abandon(&mut self, reservation: &Reservation) {
-        if reservation.generation == self.generation {
+        if reservation.generation != self.generation {
+            return;
+        }
+        if reservation.write {
             self.release(&reservation.path);
+            if !self.owns(&reservation.path, &reservation.hash) {
+                let _ = fs::remove_file(&reservation.path);
+            }
+        } else {
+            self.drop_ref(&reservation.hash);
         }
     }
 
@@ -225,8 +304,31 @@ impl MediaCache {
         }
     }
 
-    /// Indexes a written file, unless a clear ran since it was reserved. A
-    /// late file is removed unless a newer reservation or entry owns its name.
+    /// Whether a newer reservation or a blob already owns this blob's name.
+    fn owns(&self, path: &Path, hash: &str) -> bool {
+        self.pending.contains_key(path) || self.blobs.contains_key(hash)
+    }
+
+    /// Gives back one reference to a blob, and unlinks the blob at zero.
+    fn drop_ref(&mut self, hash: &str) {
+        let Some(blob) = self.blobs.get_mut(hash) else {
+            return;
+        };
+        blob.refs = blob.refs.saturating_sub(1);
+        if blob.refs == 0
+            && let Some(blob) = self.blobs.remove(hash)
+            && let Err(error) = fs::remove_file(&blob.path)
+        {
+            tracing::warn!(%error, "an unreferenced media file could not be removed");
+        }
+    }
+
+    fn pointer_path(&self, chat_id: i64, message_id: i64) -> PathBuf {
+        self.dir.join(pointer_name(chat_id, message_id))
+    }
+
+    /// Indexes a written store, unless a clear ran since it was reserved. A
+    /// late store's files are removed unless a newer reservation owns them.
     fn commit(
         &mut self,
         reservation: Reservation,
@@ -234,37 +336,51 @@ impl MediaCache {
         message_id: i64,
     ) -> Option<PathBuf> {
         let Reservation {
+            hash,
             path,
             size,
             generation,
+            write,
             ..
         } = reservation;
+        let key = (chat_id, message_id);
         if generation != self.generation {
-            // The clear already swept the cache; the late file must not survive
-            // it. A newer store may own this name by now, so leave it to them.
-            let owned = self.pending.contains_key(&path)
-                || self.entries.values().any(|entry| entry.path == path);
-            if !owned {
+            // The clear already swept the cache; the late files must not survive
+            // it. A newer store may own them by now, so leave what it owns.
+            if !self.owns(&path, &hash) {
                 let _ = fs::remove_file(&path);
+            }
+            if !self.entries.contains_key(&key) {
+                let _ = fs::remove_file(self.pointer_path(chat_id, message_id));
             }
             return None;
         }
-        self.release(&path);
+        if write {
+            self.release(&path);
+            // The new pointer takes a reference to the blob it names.
+            self.blobs
+                .entry(hash.clone())
+                .or_insert_with(|| Blob {
+                    path,
+                    bytes: size,
+                    refs: 0,
+                })
+                .refs += 1;
+        } else if !self.blobs.contains_key(&hash) {
+            // A hold keeps its blob indexed, so this is not reached in practice.
+            return None;
+        }
 
-        let key = (chat_id, message_id);
         let entry = Entry {
-            path: path.clone(),
-            bytes: size,
+            hash: hash.clone(),
             modified: SystemTime::now(),
         };
         if let Some(old) = self.entries.insert(key, entry) {
-            // One file per message: a re-store under another kind replaces it.
-            if old.path != path {
-                let _ = fs::remove_file(&old.path);
-            }
+            // The key's old pointer no longer names its old blob.
+            self.drop_ref(&old.hash);
         }
         self.evict(Some(key));
-        Some(path)
+        self.blobs.get(&hash).map(|blob| blob.path.clone())
     }
 
     /// Empties the cache: its files and its account tag. A missing directory
@@ -272,13 +388,14 @@ impl MediaCache {
     pub(crate) fn clear(&mut self) {
         self.generation += 1;
         self.entries.clear();
+        self.blobs.clear();
         self.pending.clear();
         let Ok(read) = fs::read_dir(&self.dir) else {
             return;
         };
         for entry in read.flatten() {
             let name = entry.file_name();
-            let ours = name == ACCOUNT_FILE || name.to_str().and_then(parse_name).is_some();
+            let ours = name == ACCOUNT_FILE || name.to_str().is_some_and(is_cache_file);
             if ours && let Err(error) = fs::remove_file(entry.path()) {
                 tracing::warn!(%error, "a cached media file could not be removed");
             }
@@ -311,9 +428,10 @@ impl MediaCache {
         let Ok(read) = fs::read_dir(&self.dir) else {
             return;
         };
+        let mut pointers = Vec::new();
         for entry in read.flatten() {
             let name = entry.file_name();
-            let Some(key) = name.to_str().and_then(parse_name) else {
+            let Some(name) = name.to_str() else {
                 continue;
             };
             let Ok(meta) = entry.metadata() else {
@@ -322,25 +440,50 @@ impl MediaCache {
             if !meta.is_file() {
                 continue;
             }
-            let found = Entry {
-                path: entry.path(),
-                bytes: meta.len(),
-                modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            };
-            if let Some(old) = self.entries.insert(key, found) {
-                // Two files for one message: keep the one indexed last and
-                // remove the other, so no file exists outside the bound.
-                let _ = fs::remove_file(&old.path);
+            if let Some(key) = parse_pointer(name) {
+                let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                pointers.push((key, entry.path(), modified));
+            } else if let Some(hash) = parse_blob(name) {
+                let blob = Blob {
+                    path: entry.path(),
+                    bytes: meta.len(),
+                    refs: 0,
+                };
+                if let Some(old) = self.blobs.insert(hash, blob) {
+                    // Two blobs for one hash, under two suffixes: keep one.
+                    let _ = fs::remove_file(&old.path);
+                }
+            }
+        }
+        // The pointers are read after the blobs, so each can be checked against
+        // the blob it names. A pointer naming no blob is dangling and goes.
+        for (key, path, modified) in pointers {
+            let hash = fs::read_to_string(&path)
+                .ok()
+                .map(|text| text.trim().to_owned())
+                .filter(|hash| self.blobs.contains_key(hash));
+            match hash {
+                Some(hash) => {
+                    if let Some(blob) = self.blobs.get_mut(&hash) {
+                        blob.refs += 1;
+                    }
+                    self.entries.insert(key, Entry { hash, modified });
+                }
+                None => {
+                    let _ = fs::remove_file(&path);
+                }
             }
         }
         self.evict(None);
     }
 
     fn total(&self) -> u64 {
-        self.entries.values().map(|entry| entry.bytes).sum()
+        self.blobs.values().map(|blob| blob.bytes).sum()
     }
 
-    /// Removes the oldest files until both caps hold, never the `keep` entry.
+    /// Removes the least recently used keys until both caps hold, never the
+    /// `keep` entry. Each removed key drops its pointer and its reference to
+    /// its blob.
     ///
     /// A file that will not remove is dropped from the index anyway: the cap
     /// is then a count of what this cache still tracks, and the warning says
@@ -356,10 +499,11 @@ impl MediaCache {
             let Some(key) = oldest else {
                 break;
             };
-            if let Some(entry) = self.entries.remove(&key)
-                && let Err(error) = fs::remove_file(&entry.path)
-            {
-                tracing::warn!(%error, "an evicted media file could not be removed");
+            if let Some(entry) = self.entries.remove(&key) {
+                if let Err(error) = fs::remove_file(self.pointer_path(key.0, key.1)) {
+                    tracing::warn!(%error, "an evicted media pointer could not be removed");
+                }
+                self.drop_ref(&entry.hash);
             }
         }
     }
@@ -400,11 +544,25 @@ fn account_tag(account: Option<&str>) -> String {
     }
 }
 
-/// Writes a reserved file. A failed write is warned about and returns `None`.
-fn write_reserved(reservation: &Reservation, bytes: &[u8]) -> Option<()> {
+/// Writes what a reserved store owes the disk: the blob, when this store is the
+/// one writing it, then the key's pointer. A failed write is warned about and
+/// returns `None`.
+fn write_reserved(
+    reservation: &Reservation,
+    chat_id: i64,
+    message_id: i64,
+    bytes: &[u8],
+) -> Option<()> {
     let written = fs::create_dir_all(&reservation.dir)
         .context("creating the media cache directory")
-        .and_then(|()| write_atomically(&reservation.path, bytes));
+        .and_then(|()| {
+            if reservation.write {
+                write_atomically(&reservation.path, bytes)?;
+            }
+            let pointer = format!("{}\n", reservation.hash);
+            let pointer_path = reservation.dir.join(pointer_name(chat_id, message_id));
+            write_atomically(&pointer_path, pointer.as_bytes())
+        });
     if let Err(error) = written {
         tracing::warn!(%error, "media could not be cached");
         return None;
@@ -471,15 +629,101 @@ mod tests {
 
         let reopened = cache_in(dir.path(), Some("+15550001"));
         assert_eq!(reopened.lookup(7, 9), Some(path.clone()));
-        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("7-9.jpg"));
+        let name = format!("{}.jpg", content_hash(b"picture"));
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(name.as_str())
+        );
         assert_eq!(fs::read(&path).expect("the file is there"), b"picture");
+    }
+
+    #[test]
+    fn the_file_is_named_by_the_hash_of_its_bytes() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        // sha256("abc"), from FIPS 180-2.
+        let path = cache.store(1, 2, MediaKind::Photo, b"abc").expect("cached");
+
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.jpg")
+        );
+    }
+
+    #[test]
+    fn two_messages_with_the_same_bytes_share_one_file() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let first = cache
+            .store(1, 1, MediaKind::Photo, b"same")
+            .expect("cached");
+        let second = cache
+            .store(1, 2, MediaKind::Photo, b"same")
+            .expect("cached");
+
+        assert_eq!(first, second);
+        assert_eq!(cache.lookup(1, 1), Some(first.clone()));
+        assert_eq!(cache.lookup(1, 2), Some(second));
+        let files = fs::read_dir(dir.path())
+            .expect("the directory is there")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "jpg"))
+            .count();
+        assert_eq!(files, 1, "one blob for both messages");
+    }
+
+    #[test]
+    fn a_pointer_is_rebuilt_on_restart() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), Some("+15550001"));
+        let path = cache
+            .store(7, 9, MediaKind::Photo, b"same")
+            .expect("cached");
+        cache
+            .store(7, 10, MediaKind::Photo, b"same")
+            .expect("cached");
+        drop(cache);
+
+        let reopened = cache_in(dir.path(), Some("+15550001"));
+
+        assert_eq!(reopened.lookup(7, 9), Some(path.clone()));
+        assert_eq!(reopened.lookup(7, 10), Some(path));
+        let hash = content_hash(b"same");
+        assert_eq!(reopened.blobs[&hash].refs, 2, "both pointers are counted");
+        assert!(dir.path().join("7-9.ref").exists());
+    }
+
+    #[test]
+    fn a_shared_blob_is_removed_only_when_its_last_entry_goes() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = MediaCache::with_limits(dir.path().to_path_buf(), 1024, 2, None);
+        let shared = cache.store(1, 1, MediaKind::File, b"same").expect("cached");
+        cache.store(1, 2, MediaKind::File, b"same").expect("cached");
+        cache
+            .entries
+            .get_mut(&(1, 1))
+            .expect("the first key is indexed")
+            .modified = SystemTime::UNIX_EPOCH;
+
+        cache
+            .store(1, 3, MediaKind::File, b"other")
+            .expect("cached");
+        assert!(shared.exists(), "one of its two keys is left");
+        assert!(cache.lookup(1, 2).is_some());
+
+        cache.store(1, 4, MediaKind::File, b"more").expect("cached");
+        assert_eq!(cache.lookup(1, 2), None, "the second key goes next");
+        assert!(
+            !shared.exists(),
+            "and with it the last reference to the blob"
+        );
     }
 
     #[test]
     fn the_oldest_file_by_modification_goes_first_when_the_byte_cap_is_passed() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = MediaCache::with_limits(dir.path().to_path_buf(), 10, 256, None);
-        cache.store(1, 1, MediaKind::File, b"aaaa");
+        let first = cache.store(1, 1, MediaKind::File, b"aaaa").expect("cached");
         cache.store(1, 2, MediaKind::File, b"bbbb");
         cache
             .entries
@@ -493,10 +737,7 @@ mod tests {
         assert!(cache.lookup(1, 2).is_some());
         assert!(cache.lookup(1, 3).is_some());
         assert!(cache.total() <= 10);
-        assert!(
-            !dir.path().join("1-1.bin").exists(),
-            "and removed from disk"
-        );
+        assert!(!first.exists(), "and removed from disk");
     }
 
     #[test]
@@ -593,10 +834,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), Some("+15550001"));
         let reservation = cache
-            .reserve(7, 9, MediaKind::Photo, 6)
+            .reserve(&content_hash(b"late!!"), MediaKind::Photo, 6)
             .expect("the file is reserved");
         let path = reservation.path.clone();
-        write_reserved(&reservation, b"late!!").expect("the file is written");
+        write_reserved(&reservation, 7, 9, b"late!!").expect("the file is written");
 
         cache.clear();
 
@@ -609,8 +850,10 @@ mod tests {
     fn a_refused_store_leaves_a_file_a_later_store_committed_under_the_same_name() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), None);
-        let stale = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
-        write_reserved(&stale, b"old").expect("written");
+        let stale = cache
+            .reserve(&content_hash(b"new"), MediaKind::Photo, 3)
+            .expect("reserved");
+        write_reserved(&stale, 7, 9, b"new").expect("written");
         cache.clear();
 
         let fresh = cache.store(7, 9, MediaKind::Photo, b"new").expect("cached");
@@ -691,7 +934,7 @@ mod tests {
         let dir = usable_dir(unwritable_dir(root.path()), &fallback_root, None);
 
         let mut cache = MediaCache::with_limits(dir.clone(), 10, 256, None);
-        cache.store(1, 1, MediaKind::File, b"aaaa");
+        let first = cache.store(1, 1, MediaKind::File, b"aaaa").expect("cached");
         cache.store(1, 2, MediaKind::File, b"bbbb");
         cache
             .entries
@@ -702,7 +945,7 @@ mod tests {
 
         assert_eq!(cache.lookup(1, 1), None, "the oldest is evicted");
         assert!(cache.total() <= 10);
-        assert!(!dir.join("1-1.bin").exists(), "and removed from disk");
+        assert!(!first.exists(), "and removed from disk");
     }
 
     #[cfg(unix)]
@@ -742,12 +985,16 @@ mod tests {
     fn a_late_store_leaves_the_file_a_newer_reservation_is_about_to_index() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), None);
-        let stale = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
-        write_reserved(&stale, b"old").expect("written");
+        let stale = cache
+            .reserve(&content_hash(b"new"), MediaKind::Photo, 3)
+            .expect("reserved");
+        write_reserved(&stale, 7, 9, b"new").expect("written");
         cache.clear();
-        let fresh = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
+        let fresh = cache
+            .reserve(&content_hash(b"new"), MediaKind::Photo, 3)
+            .expect("reserved");
         let path = fresh.path.clone();
-        write_reserved(&fresh, b"new").expect("written over the late file");
+        write_reserved(&fresh, 7, 9, b"new").expect("written over the late file");
 
         assert_eq!(cache.commit(stale, 7, 9), None, "the late store is refused");
         assert_eq!(fs::read(&path).expect("the newer file survives"), b"new");
@@ -760,11 +1007,12 @@ mod tests {
     fn a_failed_write_gives_its_name_back_to_a_late_store() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), None);
-        let stale = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
+        let hash = content_hash(b"old");
+        let stale = cache.reserve(&hash, MediaKind::Photo, 3).expect("reserved");
         let path = stale.path.clone();
-        write_reserved(&stale, b"old").expect("written");
+        write_reserved(&stale, 7, 9, b"old").expect("written");
         cache.clear();
-        let failed = cache.reserve(7, 9, MediaKind::Photo, 3).expect("reserved");
+        let failed = cache.reserve(&hash, MediaKind::Photo, 3).expect("reserved");
         cache.abandon(&failed);
 
         assert_eq!(cache.commit(stale, 7, 9), None);
