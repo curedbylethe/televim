@@ -161,6 +161,26 @@ impl crate::ProtoClient {
         Ok(())
     }
 
+    /// Marks a conversation read on the account's own side, up to `max_id`.
+    ///
+    /// Only the request is sent. Nothing changes locally, and the chat list is
+    /// not updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) when the
+    /// conversation is not in the session's peer cache, or when Telegram rejects
+    /// the request; and
+    /// [`ProtoError::MessageIdOutOfRange`](crate::ProtoError::MessageIdOutOfRange)
+    /// when `max_id` is outside Telegram's range.
+    pub async fn mark_read(&self, peer_id: i64, max_id: i64) -> Result<(), ProtoError> {
+        let max_id = narrow_id(max_id, peer_id)?;
+
+        self.inner().mark_read(peer_id, max_id).await?;
+
+        Ok(())
+    }
+
     /// Forwards messages from one conversation into another, as new messages.
     ///
     /// Returns how many landed. Telegram may decline one message while taking
@@ -230,6 +250,21 @@ mod tests {
                 }) if id == out
             ),
             "the batch names an impossible message, so none of it may be sent"
+        );
+    }
+
+    #[test]
+    fn a_read_marker_refused_by_the_framework_stays_a_framework_error() {
+        use telegram_framework::FrameworkError;
+
+        let error = ProtoError::from(FrameworkError::UnknownPeer(42));
+
+        assert!(
+            matches!(
+                error,
+                ProtoError::Framework(FrameworkError::UnknownPeer(42))
+            ),
+            "an unknown conversation is the framework's error, passed through unchanged"
         );
     }
 
