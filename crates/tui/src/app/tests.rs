@@ -6601,6 +6601,76 @@ fn with_no_draft_j_stops_at_the_last_message() {
     assert_eq!(app.conversation.vim.cursor(), last, "and back down to it");
 }
 
+/// `i` on the draft's row enters Insert on the draft itself: the line still
+/// holds the words, and the caret is in it, so resuming is one key.
+#[test]
+fn i_on_the_draft_row_resumes_the_draft_in_insert() {
+    let mut app = App::mock();
+    app.record_body(53);
+    draft_then_leave(&mut app, "see you there");
+    let last = app.conversation.conversation.window.len() - 1;
+    app.conversation.vim.set_cursor(last);
+    app.handle_key(press(KeyCode::Char('j')));
+    assert_eq!(
+        app.conversation.vim.cursor(),
+        last + 1,
+        "on the draft's row"
+    );
+
+    app.handle_key(press(KeyCode::Char('i')));
+
+    assert_eq!(app.ui.focus, Focus::Input, "the line has the focus");
+    assert_eq!(
+        app.input.line.text(),
+        "see you there",
+        "with the draft pre-loaded"
+    );
+    assert_eq!(
+        app.input.line.caret(),
+        "see you there".len(),
+        "caret at end"
+    );
+    type_text(&mut app, "!");
+    assert_eq!(
+        app.input.line.text(),
+        "see you there!",
+        "and typing lands: Insert"
+    );
+}
+
+/// `i` on a message, not the draft's row, still opens the line with the draft
+/// kept in it.
+#[test]
+fn i_on_a_message_keeps_the_draft() {
+    let mut app = App::mock();
+    app.record_body(53);
+    draft_then_leave(&mut app, "see you there");
+    let last = app.conversation.conversation.window.len() - 1;
+    app.conversation.vim.set_cursor(last);
+
+    app.handle_key(press(KeyCode::Char('i')));
+
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert_eq!(app.input.line.text(), "see you there");
+}
+
+/// `a` on the draft's row is unchanged: it opens the same line with the same
+/// words, so only `i` is the resume key (open question Q1).
+#[test]
+fn a_on_the_draft_row_opens_the_same_draft() {
+    let mut app = App::mock();
+    app.record_body(53);
+    draft_then_leave(&mut app, "see you there");
+    let last = app.conversation.conversation.window.len() - 1;
+    app.conversation.vim.set_cursor(last);
+    app.handle_key(press(KeyCode::Char('j')));
+
+    app.handle_key(press(KeyCode::Char('a')));
+
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert_eq!(app.input.line.text(), "see you there");
+}
+
 // ---- `o`, the media on the cursor message --------------------------------
 
 /// A message of the sample conversation that carries `media`.
