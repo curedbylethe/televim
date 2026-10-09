@@ -19,6 +19,10 @@
 //! in one place. A limit written down in two crates is a limit that will be
 //! changed in one of them.
 
+use domain::message::MediaKind;
+
+#[cfg(feature = "live")]
+use crate::types::media_kind;
 #[cfg(any(feature = "live", test))]
 use domain::search::SEARCH_MATCHES;
 
@@ -50,6 +54,9 @@ pub struct GlobalHit {
 
     /// The message text, as Telegram sent it.
     pub text: String,
+
+    /// The attachment the message carries, if it carries one.
+    pub media: Option<MediaKind>,
 
     /// When the message was sent, as unix seconds.
     pub sent_at: i64,
@@ -102,6 +109,7 @@ fn to_global_results(
             chat_id: hit.chat_id,
             message_id: i64::from(hit.message_id),
             text: hit.text,
+            media: hit.media.map(media_kind),
             sent_at: hit.sent_at,
             outgoing: hit.outgoing,
         })
@@ -276,9 +284,32 @@ mod live_tests {
             chat_id,
             message_id,
             text: text.to_owned(),
+            media: None,
             sent_at: 1_700_000_000,
             outgoing: false,
         }
+    }
+
+    #[test]
+    fn a_global_hit_keeps_its_media_kind_in_the_domain_vocabulary() {
+        let photo = telegram_framework::search::GlobalHit {
+            media: Some(telegram_framework::media::MediaKind::Photo),
+            ..framework_hit(1, 1, "")
+        };
+        let bare = framework_hit(1, 2, "words");
+
+        let results = to_global_results(telegram_framework::search::GlobalSearchResults {
+            hits: vec![photo, bare],
+            total: 2,
+        });
+
+        // Reversed by the turn: the text-only hit is the older of the two.
+        assert_eq!(results.hits[0].media, None);
+        assert_eq!(results.hits[1].media, Some(MediaKind::Photo));
+        assert!(
+            results.hits[1].text.is_empty(),
+            "a bare attachment has no text"
+        );
     }
 
     #[test]
