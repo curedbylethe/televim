@@ -13,7 +13,7 @@ jobs:
     name: fmt / lint / test / design / build-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -75,7 +75,7 @@ jobs:
       # Uploaded even when the comparison failed: the report is what says why.
       - name: upload memory report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: memory-report
           path: target/memory-report.json
