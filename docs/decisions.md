@@ -426,6 +426,41 @@ are in [`../AGENTS.md`](../AGENTS.md).
   `Theme::text_dim`: a placeholder stands in for something the peer sent rather
   than for something they wrote, so it does not carry the weight of their words.
   A caption is the peer's own text and keeps the body ink.
+
+  **Refined by the media id (see the entry below):** the kind stays payload-free
+  as described above. The Telegram media id is not added to the kind; it is a
+  separate `media_id` field on `Message`, beside `media`.
+- **Why the media id is a field on `Message`, and the cache is keyed by it too:**
+  a file forwarded from one chat into another is the same file to Telegram, with
+  the same media id, but a new `(chat, message)` key. Keyed only by message, the
+  cache downloaded it again. The hash of the bytes cannot be the lookup key, because
+  it is known only after the download. The media id is known before one, so it is
+  the key that lets a forwarded copy be served from disk.
+
+  The id travels as `media_id: Option<i64>` on `domain::Message`, through
+  `telegram-framework` (`classify_raw` and `classify_typed` return it beside the
+  kind) and `proto`. `domain::MediaKind` stays `Copy` and payload-free, so none of its
+  match sites change; the id is an extra field, and the literals that do not know
+  it take `None`. The reason it is not a payload on the kind is the same reason the
+  kind is not a locator: the id is a value on the message, not a property of the
+  vocabulary.
+
+  Only the id is kept. The access hash and the file reference are never stored, in
+  the message, the history file, or the cache. They belong to the message that
+  carried them and go stale, which is why the framework re-derives them when a file
+  is fetched. A cache hit does not need them, and a miss fetches as before.
+
+  The cache keeps two kinds of pointer in one set. `<chat>-<message>.ref` is the
+  `(chat, message)` index, as before; `m<id>.ref` is the media id. A download is
+  stored under both when the id is known, both count as references to the blob,
+  and both are evicted least recently used by their mtime. An open looks the id up
+  first and the message second, so a message without an id is served exactly as it
+  was before.
+
+  What this does not do: the id is not yet written to the history file, so a
+  message restored from it before any fetch carries no id and falls back to its
+  message key until it is fetched again. The cache is still cleared when the account
+  changes, so no file is shared between accounts.
 - **Why a download returns owned bytes for now:** `Client::download_media`
   answers `Vec<u8>` rather than writing to a file or handing back a stream. The
   caller today is a test and a caller that wants to know whether the fetch works,
