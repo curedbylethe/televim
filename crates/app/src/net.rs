@@ -41,6 +41,7 @@
 //! the store the session went into. [`State`] holds them, so the one module that
 //! may see both halves sees them in one place.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,6 +49,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use domain::chat::Chat;
+use domain::global_search::{GlobalHit, GlobalSearchState};
 use domain::history::ConversationView;
 use domain::message::{MediaKind, Message};
 use domain::search::SEARCH_MATCHES;
@@ -389,6 +391,20 @@ pub enum Event {
         result: Result<SearchResults, ProtoError>,
     },
 
+    /// A global search answered, or failed.
+    ///
+    /// The query is echoed back for the same reason as [`Event::Searched`]'s: an
+    /// answer to a query the reader has replaced must not replace the newer list.
+    GlobalSearched {
+        /// The query it was for, echoed back.
+        query: String,
+
+        /// The matches across private conversations, oldest first, or why there
+        /// are none. Hits in chats that are not known private chats are dropped
+        /// when this is applied, not here.
+        result: Result<proto::search::GlobalSearchResults, ProtoError>,
+    },
+
     /// A username resolved to the person who owns it, or found nobody.
     ///
     /// `user: None` is not an answer to show: the query was not a handle anyone
@@ -594,6 +610,18 @@ pub struct State {
 
     /// The cached messages, and where writing them to that file has got to.
     cached: CachedHistory,
+
+    /// The last global search: its query, its hits and whether it is in flight.
+    ///
+    /// Kept here rather than on `App` because `tui` may not hold proto-fed
+    /// state directly; the screen reads it once it is wired (STAGE-04).
+    global_search: GlobalSearchState,
+
+    /// How many hits of the last global answer were dropped at the seam for
+    /// being outside the known private chats. Counted per answer; reset when
+    /// a search begins or fails. Not in [`GlobalSearchState::label`] yet (G7),
+    /// which STAGE-04 wires.
+    global_dropped: usize,
 
     /// The media files saved for the viewer, oldest first.
     ///
@@ -1866,6 +1894,17 @@ fn request_action(
         other => other,
     };
 
+    // A global search is recorded before its task is spawned, so that the answer
+    // has a query to be matched against. An empty query is no search: nothing is
+    // asked of the network for it.
+    if let Action::GlobalSearch { query } = &action {
+        state.global_search.begin(query);
+        state.global_dropped = 0;
+        if query.is_empty() {
+            return;
+        }
+    }
+
     let Action::Login { field, value } = action else {
         request_plain(client, action, media, tx);
         return;
@@ -2093,6 +2132,13 @@ fn request_plain(
                 }));
             }
 
+            // One request for every private conversation, not one per chat: the
+            // action queue is bounded, and the server already ranks across peers.
+            Action::GlobalSearch { query } => {
+                let result = client.search_global(&query, SEARCH_MATCHES).await;
+                let _ = tx.send(AppEvent::Net(Event::GlobalSearched { query, result }));
+            }
+
             // The sign-in actions are handled by `request_action`, which has to
             // reach the state before this function exists. `Logout` is there too:
             // it needs the client, so it is asked for there rather than here.
@@ -2285,6 +2331,10 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             query,
             result,
         } => apply_searched(app, chat_id, &query, result),
+
+        Event::GlobalSearched { query, result } => {
+            apply_global_searched(app, state, &query, result);
+        }
 
         Event::UserResolved { query, user } => apply_user_resolved(app, &query, user),
         Event::UsersListed { query, users } => apply_users_listed(app, &query, users),
@@ -3247,6 +3297,64 @@ fn apply_searched(
             app.search_failed(query, failure_reason(&error));
         }
     }
+}
+
+/// Folds a global search's answer in, or says why there is not one.
+///
+/// The answer replaces the list rather than joining it: the server's answer is
+/// the whole search, and a local list would be a partial one. Hits outside the
+/// known private chats are dropped here and counted in
+/// [`State::global_dropped`], because search results do not seed the peer cache.
+/// A stale query is refused by [`GlobalSearchState`] itself.
+///
+/// Like [`apply_searched`], a failure does **not** touch [`History::retry_at`]:
+/// it leaves the open conversation as it was.
+fn apply_global_searched(
+    app: &App,
+    state: &mut State,
+    query: &str,
+    result: Result<proto::search::GlobalSearchResults, ProtoError>,
+) {
+    match result {
+        Ok(results) => {
+            let (hits, dropped) = private_hits(app.chats(), results.hits);
+            if state.global_search.adopt(query, hits, results.total) {
+                state.global_dropped = dropped;
+            }
+        }
+        Err(error) => {
+            tracing::debug!(query, %error, "a global search failed");
+            if state.global_search.fail(query, failure_reason(&error)) {
+                state.global_dropped = 0;
+            }
+        }
+    }
+}
+
+/// The hits whose chat is a known private conversation, and how many were
+/// dropped for being anything else, including a chat the list does not hold.
+fn private_hits(chats: &[Chat], hits: Vec<proto::search::GlobalHit>) -> (Vec<GlobalHit>, usize) {
+    let private: HashSet<i64> = chats
+        .iter()
+        .filter(|chat| chat.is_private())
+        .map(|chat| chat.id)
+        .collect();
+    let total = hits.len();
+    let kept: Vec<GlobalHit> = hits
+        .into_iter()
+        .filter(|hit| private.contains(&hit.chat_id))
+        .map(|hit| GlobalHit {
+            chat_id: hit.chat_id,
+            message_id: hit.message_id,
+            text: hit.text,
+            // The DTO carries no attachment kind yet, so a media-only hit has no
+            // text to show. Known gap; not a drop.
+            media: None,
+        })
+        .collect();
+    let dropped = total - kept.len();
+
+    (kept, dropped)
 }
 
 /// Opens the person a resolution named, when it is still the answer wanted.
@@ -7043,6 +7151,209 @@ mod tests {
             "got {:?}",
             app.search().label()
         );
+    }
+
+    // ---- what a global search answers -----------------------------------
+
+    /// A global answer carrying the given `(chat, message, text)` hits, oldest
+    /// first, as the proto layer hands them over.
+    fn global_answer(
+        hits: &[(i64, i64, &str)],
+        total: usize,
+    ) -> proto::search::GlobalSearchResults {
+        proto::search::GlobalSearchResults {
+            hits: hits
+                .iter()
+                .map(|&(chat_id, message_id, text)| proto::search::GlobalHit {
+                    chat_id,
+                    message_id,
+                    text: text.to_owned(),
+                })
+                .collect(),
+            total,
+        }
+    }
+
+    #[test]
+    fn a_global_answer_lands_on_the_global_state() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        state.global_search.begin("hello");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                query: "hello".to_owned(),
+                result: Ok(global_answer(
+                    &[(CHAT, 1, "hello one"), (CHAT, 4, "hello two")],
+                    9,
+                )),
+            },
+        );
+
+        assert_eq!(state.global_search.query(), Some("hello"));
+        assert!(!state.global_search.in_flight());
+        assert_eq!(state.global_search.hits().len(), 2);
+        assert_eq!(state.global_search.hits()[1].message_id, 4);
+        assert_eq!(state.global_search.hits()[0].display_body(), "hello one");
+        assert_eq!(state.global_search.total(), 9, "the server's total stands");
+    }
+
+    #[test]
+    fn a_global_answer_replaces_rather_than_joins_what_was_there() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        state.global_search.begin("hello");
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                query: "hello".to_owned(),
+                result: Ok(global_answer(&[(CHAT, 1, "old")], 1)),
+            },
+        );
+
+        state.global_search.begin("hello");
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                query: "hello".to_owned(),
+                result: Ok(global_answer(&[(CHAT, 2, "new")], 1)),
+            },
+        );
+
+        assert_eq!(state.global_search.hits().len(), 1);
+        assert_eq!(state.global_search.hits()[0].display_body(), "new");
+    }
+
+    #[test]
+    fn a_global_result_for_a_replaced_query_is_dropped() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        state.global_search.begin("first");
+        state.global_search.begin("second");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                query: "first".to_owned(),
+                result: Ok(global_answer(&[(CHAT, 1, "first hit")], 1)),
+            },
+        );
+
+        assert_eq!(state.global_search.query(), Some("second"));
+        assert!(
+            state.global_search.in_flight(),
+            "still waiting on the second"
+        );
+        assert!(
+            state.global_search.hits().is_empty(),
+            "and not the first's hits"
+        );
+    }
+
+    /// A failed global search leaves the open conversation alone, and must not
+    /// hold history paging: `retry_at` keeps exactly the value it had.
+    #[test]
+    fn a_failed_global_search_keeps_the_conversation_and_the_paging_gate() {
+        let mut app = awaiting("text");
+        let mut state = State::default();
+        let gate = Instant::now() + RETRY;
+        state.history.retry_at = Some(gate);
+        state.global_search.begin("hello");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                query: "hello".to_owned(),
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert_eq!(
+            app.search().ids().to_vec(),
+            vec![1, 2, 3],
+            "the open conversation's matches are untouched"
+        );
+        assert_eq!(
+            state.history.retry_at,
+            Some(gate),
+            "the paging gate is not moved"
+        );
+        assert!(state.global_search.label().contains("search failed"));
+    }
+
+    #[test]
+    fn a_flood_wait_on_a_global_search_is_labelled_with_the_wait_it_asks_for() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        state.global_search.begin("hello");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                query: "hello".to_owned(),
+                result: Err(ProtoError::Framework(FrameworkError::Request(
+                    RequestError::Rpc {
+                        code: 420,
+                        name: "FLOOD_WAIT".to_owned(),
+                        value: Some(42),
+                    },
+                ))),
+            },
+        );
+
+        assert!(
+            state
+                .global_search
+                .label()
+                .contains("flood wait, retry in 42s"),
+            "got {:?}",
+            state.global_search.label()
+        );
+    }
+
+    /// Hits in chats that are not known private chats are dropped at the seam,
+    /// and the drop is counted: a group, and a chat the list does not hold.
+    #[test]
+    fn non_private_global_hits_are_dropped_and_counted() {
+        let mut app = App::new();
+        let mut group = chat(CHAT + 2);
+        group.kind = ChatKind::Group;
+        app.set_chats(vec![chat(CHAT), group]);
+        let mut state = State::default();
+        state.global_search.begin("hello");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                query: "hello".to_owned(),
+                result: Ok(global_answer(
+                    &[
+                        (CHAT, 1, "private"),
+                        (CHAT + 2, 2, "in a group"),
+                        (CHAT + 9, 3, "unknown peer"),
+                        (CHAT, 4, "private again"),
+                    ],
+                    4,
+                )),
+            },
+        );
+
+        let kept: Vec<i64> = state
+            .global_search
+            .hits()
+            .iter()
+            .map(|hit| hit.message_id)
+            .collect();
+        assert_eq!(kept, vec![1, 4], "only the private chat's hits remain");
+        assert_eq!(state.global_dropped, 2, "and the two others are counted");
     }
 
     /// The old `gg` jump path is untouched by search, and a jump landing keeps
