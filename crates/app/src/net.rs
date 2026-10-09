@@ -1346,14 +1346,10 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         state.history.jump = None;
     }
 
-    // A conversation the reader has highlighted and stopped on. Taken before the
-    // client is looked up, because opening a conversation is what asks for its
-    // newest page, and the two have to happen on the same pass or the window is
-    // replaced and then asked about a quarter of a second later.
-    if let Some(index) = app.take_pending_chat(Instant::now()) {
-        app.select_chat(index);
-        state.history.cursor = None;
-    }
+    // A chat the reader has highlighted and stopped on shows its card. Taken
+    // before the client is looked up, so the card's one contact read is asked
+    // for on the same pass the highlight settled on.
+    app.open_settled_card(Instant::now());
 
     // Read here, before the client is looked up, and not as an action: the state a
     // retry is asked for in is the state with no client, where the action drain
@@ -4210,17 +4206,21 @@ mod tests {
         std::thread::sleep(CHAT_SWITCH_DELAY);
         drive(&mut app, &mut state, &tx);
 
-        assert_eq!(app.conversation.conversation.window.chat_id, CHAT + 1);
-        assert!(
-            state.history.cursor.is_none(),
-            "the old cursor is forgotten"
+        assert_eq!(
+            app.ui.pane,
+            tui::app::Pane::Profile(tui::app::ProfileId::User(CHAT + 1)),
+            "the reader stopped on the second chat, so its card is shown"
+        );
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, CHAT,
+            "and the conversation is left as it was: browsing does not open it"
         );
 
         drive(&mut app, &mut state, &tx);
-        assert_eq!(
+        assert_ne!(
             wanted(&app, state.history, Instant::now()),
             Wanted::Latest(CHAT + 1),
-            "so the new conversation's first page is asked for on the next pass"
+            "so nothing asks for the second chat's messages while only its card shows"
         );
     }
 
