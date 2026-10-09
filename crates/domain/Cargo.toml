@@ -8,5 +8,20 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "history_window"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[bench]]
+name = "vim"
+harness = false
+
 [lints]
 workspace = true
