@@ -383,6 +383,7 @@ pub fn title(app: &App) -> String {
             (Focus::Input, PromptKind::Command, _) => " Command ".to_owned(),
             (Focus::Input, PromptKind::Search, _) => " Find ".to_owned(),
             (Focus::Input, PromptKind::NewChat, _) => " New chat ".to_owned(),
+            (Focus::Input, PromptKind::GlobalSearch, _) => " Search ".to_owned(),
             (_, _, false) => " draft ".to_owned(),
             _ => " Input ".to_owned(),
         },

@@ -913,3 +913,14 @@ are in [`../AGENTS.md`](../AGENTS.md).
   minor while `0.x`, `feat` bumps the minor, and `fix` bumps the patch. The first
   `1.0.0` is the v1 public release; from there, full semver applies: major for a
   break, minor for an addition, patch for a fix.
+- **Why global search is bound to `?` and `:search`, not a `g/` chord or the command line alone:**
+  `?` is free on both panes, is the vim key for a backward search, and is one
+  keystroke from the home row, which is the keyboard path this client promises.
+  `/` stays what it is on each pane, because the conversation and the chat list
+  already mean different searches by it, and a third meaning would make one of
+  them the wrong one. A `g/` chord was rejected because `g` already starts the
+  motions (`gg`, `gd`), so `g/` would wait on a second key and misfire on the
+  first. The command alone satisfies the letter of the criterion but leaves a
+  keyboard reader without a key; `:search` stays as the way to reach the same
+  search from a line the reader is already typing in. `?` is recorded as a veto-able
+  key: rebinding it touches one arm in each pane and the prompt's prefix.

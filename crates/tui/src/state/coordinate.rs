@@ -1487,6 +1487,32 @@ pub(crate) fn run_search(
     }
 }
 
+/// Answers `?` and `:search`: asks every private chat for `query` at once.
+///
+/// The search begins here, once per submit, and the request is queued for the
+/// caller to make; the answer comes back through [`App::adopt_global_search`].
+/// An empty query repeats the last global search, as `/` repeats its own. With
+/// nothing to repeat, the refusal is visible rather than the key doing nothing.
+pub(crate) fn run_global_search(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    outbox: &mut Outbox,
+    query: &str,
+) {
+    let query = if query.is_empty() {
+        conversation.global_search.query().map(str::to_owned)
+    } else {
+        Some(query.to_owned())
+    };
+    let Some(query) = query else {
+        ui.flash("no previous global search");
+        return;
+    };
+
+    conversation.begin_global_search(&query);
+    queue_action(&mut *outbox, &mut *ui, Action::GlobalSearch { query });
+}
+
 /// The one way in, whatever the reader came from: the signed-out card's
 /// `:signin`, and a launch with no session are the same flow, because they
 /// are the same question. The card is closed rather than covered — a
@@ -2598,6 +2624,11 @@ pub(crate) fn submit(
             submit_new_chat(&mut *ui, &mut *conversation, &mut *outbox, query.trim());
             false
         }
+        PromptKind::GlobalSearch => {
+            let query = input.line.take();
+            run_global_search(&mut *ui, &mut *conversation, &mut *outbox, query.trim());
+            false
+        }
         // Unreachable: a sign-in field answers `Enter` itself, so that its
         // `⏎` can be refused while a request is on its way — which a submit
         // with no way to refuse is.
@@ -2671,6 +2702,16 @@ pub(crate) fn run_command(
         }
         _ if cmd.starts_with("new ") => {
             begin_new_chat(&mut *ui, &mut *input, cmd[4..].trim());
+            false
+        }
+        // The same search `?` opens a prompt for, run at once: the query is
+        // already on the command line, so there is nothing left to edit.
+        "search" => {
+            run_global_search(&mut *ui, &mut *conversation, &mut *outbox, "");
+            false
+        }
+        _ if cmd.starts_with("search ") => {
+            run_global_search(&mut *ui, &mut *conversation, &mut *outbox, cmd[7..].trim());
             false
         }
         _ if cmd.starts_with("chat ") => {
@@ -3119,6 +3160,14 @@ pub(crate) fn handle_normal(
             input.line.open(PromptKind::Command);
             false
         }
+        // `?` is the global search: messages in every private chat. Unbound
+        // on both panes before this, so it is a free key rather than an
+        // overload of `/`, which keeps its per-pane meaning.
+        '?' => {
+            ui.set_focus(Focus::Input);
+            input.line.open(PromptKind::GlobalSearch);
+            false
+        }
         'q' => {
             request_quit(&mut *ui, &mut *conversation);
             false
@@ -3210,6 +3259,15 @@ pub(crate) fn handle_chat_list(
         KeyCode::Char('/') => {
             pending.set_g(false);
             begin_new_chat(&mut *ui, &mut *input, "");
+            false
+        }
+
+        // `?` searches messages in every private chat, from the list as well as
+        // from a conversation: the same prompt, so the two cannot drift apart.
+        KeyCode::Char('?') => {
+            pending.set_g(false);
+            ui.set_focus(Focus::Input);
+            input.line.open(PromptKind::GlobalSearch);
             false
         }
 
