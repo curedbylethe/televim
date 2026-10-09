@@ -195,10 +195,23 @@ impl MediaCache {
         cache
     }
 
-    /// The file a message's media is cached in, if it is.
-    pub(crate) fn lookup(&self, chat_id: i64, message_id: i64) -> Option<PathBuf> {
-        let entry = self.entries.get(&(chat_id, message_id))?;
-        self.blobs.get(&entry.hash).map(|blob| blob.path.clone())
+    /// The file a message's media is cached in, if it is. A hit is a use: the
+    /// key's recency moves to now, and so does its pointer's mtime, which is
+    /// what carries the order across a restart.
+    pub(crate) fn lookup(&mut self, chat_id: i64, message_id: i64) -> Option<PathBuf> {
+        let pointer = self.pointer_path(chat_id, message_id);
+        let entry = self.entries.get_mut(&(chat_id, message_id))?;
+        let now = SystemTime::now();
+        entry.modified = now;
+        let blob = self.blobs.get(&entry.hash)?;
+        // ponytail: the pointer's mtime is set under the cache lock, one syscall
+        // per hit. Ceiling: a slow filesystem stalls the lock, so a concurrent
+        // store waits, not the UI loop. Upgrade path: move this touch off-lock
+        // with spawn_blocking, as the store's write already is.
+        if let Err(error) = set_mtime(&pointer, now) {
+            tracing::warn!(%error, "a media pointer's recency could not be recorded");
+        }
+        Some(blob.path.clone())
     }
 
     /// Caches `bytes` for a message and returns the file they landed in.
@@ -598,6 +611,11 @@ fn temp_sibling(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Sets a file's modification time to `when`.
+fn set_mtime(path: &Path, when: SystemTime) -> std::io::Result<()> {
+    fs::File::open(path)?.set_modified(when)
+}
+
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -618,6 +636,11 @@ mod tests {
         MediaCache::open(dir.to_path_buf(), account)
     }
 
+    /// Sets a key's pointer mtime, to make one key older than another on disk.
+    fn set_pointer_time(dir: &Path, chat_id: i64, message_id: i64, when: SystemTime) {
+        set_mtime(&dir.join(pointer_name(chat_id, message_id)), when).expect("the mtime is set");
+    }
+
     #[test]
     fn a_stored_file_is_found_again_after_a_restart_under_a_pid_free_name() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -627,7 +650,7 @@ mod tests {
             .expect("a small file is cached");
         drop(cache);
 
-        let reopened = cache_in(dir.path(), Some("+15550001"));
+        let mut reopened = cache_in(dir.path(), Some("+15550001"));
         assert_eq!(reopened.lookup(7, 9), Some(path.clone()));
         let name = format!("{}.jpg", content_hash(b"picture"));
         assert_eq!(
@@ -684,7 +707,7 @@ mod tests {
             .expect("cached");
         drop(cache);
 
-        let reopened = cache_in(dir.path(), Some("+15550001"));
+        let mut reopened = cache_in(dir.path(), Some("+15550001"));
 
         assert_eq!(reopened.lookup(7, 9), Some(path.clone()));
         assert_eq!(reopened.lookup(7, 10), Some(path));
@@ -709,7 +732,7 @@ mod tests {
             .store(1, 3, MediaKind::File, b"other")
             .expect("cached");
         assert!(shared.exists(), "one of its two keys is left");
-        assert!(cache.lookup(1, 2).is_some());
+        assert!(cache.entries.contains_key(&(1, 2)));
 
         cache.store(1, 4, MediaKind::File, b"more").expect("cached");
         assert_eq!(cache.lookup(1, 2), None, "the second key goes next");
@@ -717,6 +740,52 @@ mod tests {
             !shared.exists(),
             "and with it the last reference to the blob"
         );
+    }
+
+    #[test]
+    fn a_hit_protects_a_file_from_eviction() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = MediaCache::with_limits(dir.path().to_path_buf(), 10, 256, None);
+        let kept = cache.store(1, 1, MediaKind::File, b"aaaa").expect("cached");
+        let evicted = cache.store(1, 2, MediaKind::File, b"bbbb").expect("cached");
+        cache
+            .entries
+            .get_mut(&(1, 2))
+            .expect("the second file is indexed")
+            .modified = SystemTime::UNIX_EPOCH;
+
+        assert!(cache.lookup(1, 1).is_some());
+        cache.store(1, 3, MediaKind::File, b"cccc");
+
+        assert_eq!(cache.lookup(1, 2), None, "the file no one asked for goes");
+        assert!(!evicted.exists());
+        assert_eq!(cache.lookup(1, 1), Some(kept.clone()), "the hit is kept");
+        assert!(kept.exists());
+    }
+
+    #[test]
+    fn a_hit_survives_a_restart() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = MediaCache::with_limits(dir.path().to_path_buf(), 10, 256, None);
+        let kept = cache.store(1, 1, MediaKind::File, b"aaaa").expect("cached");
+        let evicted = cache.store(1, 2, MediaKind::File, b"bbbb").expect("cached");
+        // Without a hit the first key would be the older; the hit moves it to now.
+        set_pointer_time(dir.path(), 1, 1, SystemTime::UNIX_EPOCH);
+        let later = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        set_pointer_time(dir.path(), 1, 2, later);
+        assert!(cache.lookup(1, 1).is_some());
+        drop(cache);
+
+        let mut reopened = MediaCache::with_limits(dir.path().to_path_buf(), 10, 256, None);
+        reopened.store(1, 3, MediaKind::File, b"cccc");
+
+        assert_eq!(reopened.lookup(1, 1), Some(kept), "the hit is kept");
+        assert_eq!(
+            reopened.lookup(1, 2),
+            None,
+            "the file no one asked for goes"
+        );
+        assert!(!evicted.exists());
     }
 
     #[test]
@@ -790,7 +859,7 @@ mod tests {
             .store(7, 9, MediaKind::Photo, b"theirs")
             .expect("cached");
 
-        let other = cache_in(dir.path(), Some("+15550002"));
+        let mut other = cache_in(dir.path(), Some("+15550002"));
 
         assert_eq!(other.lookup(7, 9), None);
         assert!(!path.exists(), "the other account's media is removed");
