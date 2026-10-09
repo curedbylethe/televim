@@ -685,8 +685,29 @@ impl LineEditor {
                 self.editor.set_cursor(last, &self.text);
                 Some(LineVerdict::Ignored)
             }
+            ('o', false) => Some(self.open_below()),
             _ => None,
         }
+    }
+
+    /// `o` in the line's normal mode: a new line under the caret's row, and
+    /// insert mode on it.
+    ///
+    /// The library's `o` puts the newline on the row's last character, not after
+    /// it (see the `spike` module), so the wrapper does the insert itself. `A` is
+    /// the library's own answer for the end of the row, and it is the one that
+    /// leaves the caret past the last character, where the newline belongs. The
+    /// `A` edits nothing and is not handed back; the newline goes through
+    /// [`Self::splice`], as the wrapper's other newline does.
+    fn open_below(&mut self) -> LineVerdict {
+        if !self.fits(1) {
+            return LineVerdict::TooLong;
+        }
+
+        self.snap_cursor();
+        self.editor.handle_key(Key::char('A'), &self.text);
+        self.splice("\n");
+        LineVerdict::Edited
     }
 
     /// Puts the library's cursor back on a character boundary.
@@ -2046,6 +2067,74 @@ mod tests {
 
         keys(&mut line, "gg");
         assert_eq!(line.caret(), 0, "and the g after it was a fresh prefix");
+    }
+
+    // ---- o, which the library would open one character early ------------
+
+    /// `o` opens a line below the row the caret is on, whatever the caret's
+    /// column, and the typing that follows goes onto that line.
+    #[test]
+    fn o_opens_a_line_below_a_one_line_draft_and_keeps_its_text() {
+        let mut line = normal_with("hello");
+
+        keys(&mut line, "o");
+        assert_eq!(
+            line.text(),
+            "hello\n",
+            "no character moved onto the new line"
+        );
+        assert_eq!(line.caret(), 6, "on the empty line below");
+        assert_eq!(line.status(), "INSERT");
+
+        type_text(&mut line, "x");
+        assert_eq!(line.text(), "hello\nx");
+    }
+
+    #[test]
+    fn o_from_the_middle_of_a_draft_opens_below_the_row() {
+        let mut line = normal_with("hello");
+        keys(&mut line, "0ll");
+
+        keys(&mut line, "o");
+
+        assert_eq!(line.text(), "hello\n", "the row is not split at the caret");
+        assert_eq!(line.caret(), 6);
+    }
+
+    #[test]
+    fn o_on_an_empty_row_opens_one_more_below_it() {
+        let mut line = composing();
+        line.feed(combo(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut line, "abc");
+        line.feed(press(KeyCode::Esc));
+        keys(&mut line, "gg");
+        assert_eq!(line.caret(), 0, "on the empty first row");
+
+        keys(&mut line, "o");
+
+        assert_eq!(
+            line.text(),
+            "\n\nabc",
+            "the empty row is kept, and so is abc"
+        );
+        assert_eq!(line.caret(), 1, "on the new row below it");
+        assert_eq!(line.status(), "INSERT");
+    }
+
+    #[test]
+    fn o_on_a_multi_line_draft_opens_below_the_caret_row_only() {
+        let mut line = composing();
+        type_text(&mut line, "abc");
+        line.feed(combo(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut line, "def");
+        line.feed(press(KeyCode::Esc));
+        keys(&mut line, "0");
+
+        keys(&mut line, "o");
+
+        assert_eq!(line.text(), "abc\ndef\n");
+        assert_eq!(line.caret(), 8, "on the new line after def");
+        assert_eq!(line.status(), "INSERT");
     }
 
     /// `Esc` spends a pending `g` like any other key. A prefix that survived it
