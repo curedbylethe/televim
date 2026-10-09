@@ -5,14 +5,6 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
-## [Unreleased]
-
-### Added
-
-### Changed
-
-### Fixed
-
 ## [0.1.5]
 
 Baseline reconstructed from `git log` and the README feature set. No release

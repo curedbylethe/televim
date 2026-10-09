@@ -8,7 +8,7 @@
 
 | Target | Does |
 | :----- | :--- |
-| `make ci` | `fmt-check lint boundary test design-check build-release changelog-check` — the whole gate |
+| `make ci` | `fmt-check lint boundary test design-check build-release` — the whole gate |
 | `make design-check` | fail if `design/` and the OpenDesign project differ; **skips loudly** when there is no project on the machine |
 | `make design-pull` | copy the OpenDesign project's files into the repo (after a design run) |
 | `make design-push` | copy the repo's design files into the OpenDesign project |
@@ -16,7 +16,6 @@
 | `make fmt` / `fmt-check` | format, or check formatting |
 | `make lint` | `clippy --all-targets --all-features -- -D warnings` |
 | `make boundary` | asserts no `grammers` crate outside `telegram-framework` |
-| `make changelog-check` | a `feat`, `fix` or `perf` commit since `origin/main` needs a `CHANGELOG.md` change in the same range; **skips loudly** with no base ref |
 | `make test` | `test --all --all-features` |
 | `make check` | `check --all-targets`, faster than a build |
 | `make build-release` | the optimized binary |

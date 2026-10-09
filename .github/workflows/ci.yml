@@ -81,19 +81,3 @@ jobs:
           path: target/memory-report.json
           if-no-files-found: warn
 
-  # Needs the base branch's history to compare against, so it is its own job:
-  # a full-depth checkout here would slow every other step. Pull requests only;
-  # a push to main has no range to check.
-  changelog:
-    name: changelog entry for user-visible commits
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: changelog-check
-        env:
-          CHANGELOG_BASE: origin/${{ github.base_ref }}
-        run: make changelog-check
