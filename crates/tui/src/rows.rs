@@ -616,6 +616,21 @@ pub fn first_row_of_message(layout: &[RowSpan], index: usize) -> Option<usize> {
         .map(|span| span.first)
 }
 
+/// The first row the cursor stands on: its message's, or the open draft's when
+/// the cursor is one past the last message and the layout ends on the draft.
+///
+/// `None` only when the cursor names neither, which a cursor kept inside the
+/// window and the draft's presence never produce.
+#[must_use]
+pub fn cursor_row(layout: &[RowSpan], cursor: usize) -> Option<usize> {
+    first_row_of_message(layout, cursor).or_else(|| {
+        layout
+            .last()
+            .filter(|span| span.kind == RowKind::Draft)
+            .map(|span| span.first)
+    })
+}
+
 /// The last message in the layout, as its position in the window.
 ///
 /// What a slice starting past every message falls back on, so that
@@ -637,7 +652,7 @@ fn last_message(layout: &[RowSpan]) -> Option<usize> {
 pub fn slice(layout: &[RowSpan], cursor: usize, budget: usize, follow: bool) -> Slice {
     let budget = budget.max(1);
     let total = total_rows(layout);
-    let cursor_row = first_row_of_message(layout, cursor).unwrap_or(0);
+    let cursor_row = cursor_row(layout, cursor).unwrap_or(0);
     let target = if follow {
         total.saturating_sub(budget)
     } else {

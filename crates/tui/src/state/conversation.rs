@@ -293,6 +293,17 @@ impl ConversationState {
         self.conversation.window.get(self.vim.cursor())
     }
 
+    /// Lets the cursor rest one past the last message, on the open draft's row.
+    ///
+    /// `VimState` clamps the cursor to its total, so the total has to count the
+    /// draft's row for the cursor to stand on it. Called before each normal-mode
+    /// motion with whether the layout carries the draft, so the motion sees the
+    /// draft that is on screen; the total goes back to the messages when it is not.
+    pub(crate) fn rest_on_draft(&mut self, draft: bool) {
+        self.vim
+            .set_total(self.conversation.window.len() + usize::from(draft));
+    }
+
     /// Identifier of the message the cursor is on, if the window holds anything.
     pub(crate) fn cursor_message_id(&self) -> Option<i64> {
         self.cursor_message().map(|message| message.id)
