@@ -376,6 +376,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            media_id: None,
         }
     }
 

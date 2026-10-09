@@ -3485,6 +3485,7 @@ mod tests {
                 is_outgoing: false,
                 reply_to: None,
                 media: None,
+                media_id: None,
             })
             .collect()
     }
@@ -8040,6 +8041,7 @@ mod media_tests {
             is_outgoing: false,
             reply_to: None,
             media: kind,
+            media_id: None,
         }
     }
 

@@ -72,10 +72,18 @@ pub struct Message {
     /// This is a fact about the message itself, not a fact about the
     /// conversation, which is why it lives here rather than beside the window.
     /// It is a plain `Copy` flag with no payload: no filename, no path, no
-    /// locator. Nothing can be fetched from here yet, and keeping it
-    /// payload-free means adding a field later costs a literal and no memory.
+    /// locator. The kind stays payload-free so that it stays `Copy`; the
+    /// attachment's identity travels in [`Message::media_id`] beside it.
     /// A locally composed placeholder is outgoing text and carries `None`.
     pub media: Option<MediaKind>,
+
+    /// Telegram's stable identifier for the attachment, if it has one.
+    ///
+    /// The same file has the same id in every conversation and for every
+    /// account, so it can name a cached copy that a message in another chat
+    /// shares. It is the id alone: the access hash and file reference belong to
+    /// the message that carried them and go stale, so they are never kept here.
+    pub media_id: Option<i64>,
 }
 
 impl Message {
@@ -117,6 +125,7 @@ mod tests {
             is_outgoing: true,
             reply_to: None,
             media: None,
+            media_id: None,
         };
         assert!(m.is_from_self());
     }
@@ -131,6 +140,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media,
+            media_id: None,
         }
     }
 

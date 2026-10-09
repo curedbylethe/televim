@@ -1100,6 +1100,7 @@ mod tests {
             is_outgoing: outgoing,
             reply_to: None,
             media: None,
+            media_id: None,
         }
     }
 
@@ -1325,6 +1326,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            media_id: None,
         }
     }
 
@@ -1951,6 +1953,7 @@ mod tests {
                     is_outgoing: false,
                     reply_to: None,
                     media: None,
+                    media_id: None,
                 })
                 .collect(),
         );
@@ -3634,6 +3637,7 @@ mod tests {
                 is_outgoing: false,
                 reply_to: None,
                 media: None,
+                media_id: None,
             },
             Message {
                 id: 91,
@@ -3644,6 +3648,7 @@ mod tests {
                 is_outgoing: true,
                 reply_to: Some(90),
                 media: None,
+                media_id: None,
             },
         ]);
 
@@ -3820,6 +3825,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            media_id: None,
         }]);
         press(&mut app, KeyCode::Char('/'));
         type_text(&mut app, "benchmarks");
@@ -4059,6 +4065,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            media_id: None,
         }]);
 
         app

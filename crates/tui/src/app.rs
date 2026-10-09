@@ -2819,6 +2819,7 @@ fn mock_messages() -> Vec<Message> {
             is_outgoing: i % 2 == 0,
             reply_to: None,
             media: None,
+            media_id: None,
         })
         .collect()
 }

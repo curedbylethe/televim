@@ -515,6 +515,7 @@ impl ConversationView {
             is_outgoing: true,
             reply_to,
             media: None,
+            media_id: None,
         };
         self.window.push_back(std::iter::once(message));
 
@@ -684,6 +685,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            media_id: None,
         }
     }
 
