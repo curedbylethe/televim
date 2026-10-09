@@ -2561,7 +2561,7 @@ pub(crate) fn page(
 ) {
     let step = ui.metrics.rows.get().max(1);
     let total = rows::total_rows(layout);
-    let here = rows::first_row_of_message(layout, conversation.vim.cursor()).unwrap_or(0);
+    let here = rows::cursor_row(layout, conversation.vim.cursor()).unwrap_or(0);
 
     let target = if down {
         here.saturating_add(step).min(total.saturating_sub(1))
@@ -3082,6 +3082,14 @@ pub(crate) fn handle_normal(
         return false;
     };
 
+    // The draft's row is a stop past the last message, and the motion can only
+    // reach it while the total counts it: so the total is set from the layout
+    // the panel draws, before the motion reads it.
+    conversation.rest_on_draft(
+        layout
+            .last()
+            .is_some_and(|span| span.kind == rows::RowKind::Draft),
+    );
     if let Some(motion) = conversation.vim.handle_char(c) {
         match motion {
             // `gg` is where the unread messages start when there are

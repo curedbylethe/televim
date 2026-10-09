@@ -2003,8 +2003,7 @@ impl App {
     /// because both are about where the reader is on the screen.
     fn cursor_extent(&self) -> (usize, usize) {
         let layout = self.row_layout();
-        let first =
-            rows::first_row_of_message(&layout, self.conversation.vim.cursor()).unwrap_or(0);
+        let first = rows::cursor_row(&layout, self.conversation.vim.cursor()).unwrap_or(0);
 
         (first, rows::total_rows(&layout))
     }
@@ -2559,8 +2558,9 @@ impl App {
     /// them: a separator takes a row of the screen between two days and is
     /// counted by the scrollbar beside it, so it belongs in here rather than
     /// counted on the side. [`RowKind`] is what tells the two apart, and the
-    /// cursor — which is a message index — never rests on one. The open draft,
-    /// when it has words, is the last entry; it is drawn but never counted.
+    /// cursor — which is a message index — never rests on a separator. The open
+    /// draft, when it has words, is the last entry; it is drawn but never counted,
+    /// and the cursor rests on it one past the last message.
     #[must_use]
     pub fn row_layout(&self) -> Vec<RowSpan> {
         let width = self.body_width();

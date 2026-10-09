@@ -79,6 +79,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     let budget = usize::from(body.height).saturating_sub(above + reserved.below());
 
     let view = app.viewport(layout, budget);
+    let on_draft = cursor_on_draft(app, layout);
 
     let mut items: Vec<ListItem> =
         Vec::with_capacity(reserved.above() + reserved.below() + view.rows);
@@ -176,7 +177,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
             .get(draft.text.clone())
             .unwrap_or_default();
         items.extend(
-            draft_items(app, words, body.width)
+            draft_items(app, words, body.width, on_draft)
                 .into_iter()
                 .take(reserved.draft),
         );
@@ -190,7 +191,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
     // indicator rows are not places the cursor can be, and neither is a row of
     // the layout that names no message.
     let mut state = ListState::default();
-    state.select((!window.is_empty()).then(|| view.selection + above));
+    state.select((!window.is_empty() && !on_draft).then(|| view.selection + above));
 
     let list = List::new(items).highlight_style(app.ui.theme.selection);
     frame.render_stateful_widget(list, body, &mut state);
@@ -245,7 +246,12 @@ fn conversation_title(app: &App, width: u16) -> Line<'static> {
     let count = if total == 0 {
         String::new()
     } else {
-        format!(" ({}/{total})", app.conversation.vim.cursor() + 1)
+        // On the draft the cursor is one past the last message, which is the
+        // same count as the last message's, not one more.
+        format!(
+            " ({}/{total})",
+            (app.conversation.vim.cursor() + 1).min(total)
+        )
     };
     let head = format!(" Conversation{count}{notes}");
 
@@ -840,6 +846,17 @@ fn block_ink(pixel: Option<[u8; 4]>) -> Option<Color> {
         .map(|pixel| Color::Rgb(pixel[0], pixel[1], pixel[2]))
 }
 
+/// Whether the cursor is on the open draft's row.
+///
+/// That is the row one past the last message, when the layout ends on the draft.
+/// No message is selected then, and the draft is the row that is reversed.
+fn cursor_on_draft(app: &App, layout: &[RowSpan]) -> bool {
+    layout
+        .last()
+        .is_some_and(|span| span.kind == rows::RowKind::Draft)
+        && app.conversation.vim.cursor() == app.conversation.conversation.window.len()
+}
+
 /// The name a draft is drawn behind on its first row.
 ///
 /// Its width is [`rows::DRAFT_WHO_WIDTH`], which the layout wraps the words to.
@@ -851,8 +868,9 @@ const DRAFT_TAG: &str = "[you|draft] ";
 /// begin at the panel's first column, as a message's continuation rows do: the
 /// layout wraps them at the full width, so an indent would push their end off the
 /// panel. The words are [`text_row`]'s, with no selection, match or caret: a draft
-/// is read here, not moved through, so nothing about the row is reversed.
-fn draft_items<'a>(app: &'a App, words: &'a str, width: u16) -> Vec<ListItem<'a>> {
+/// is read here, not moved through. The cursor on it reverses the whole row, as it
+/// does a selected message, and nothing else about it changes.
+fn draft_items<'a>(app: &'a App, words: &'a str, width: u16, on_draft: bool) -> Vec<ListItem<'a>> {
     rows::draft_rows(words, width)
         .into_iter()
         .enumerate()
@@ -881,7 +899,12 @@ fn draft_items<'a>(app: &'a App, words: &'a str, width: u16) -> Vec<ListItem<'a>
                 }
             }
 
-            ListItem::new(Line::from(spans))
+            let item = ListItem::new(Line::from(spans));
+            if on_draft {
+                item.style(app.ui.theme.selection)
+            } else {
+                item
+            }
         })
         .collect()
 }
@@ -3088,31 +3111,38 @@ mod tests {
     }
 
     #[test]
-    fn the_draft_row_is_never_reversed_and_the_cursor_never_stands_on_it() {
+    fn the_cursor_can_rest_on_the_draft_row_and_reverses_only_that_row() {
         use ratatui::style::Modifier;
 
-        let app = drafting(
+        let mut app = drafting(
             vec![at(1, 0, false, "a"), at(2, 60, true, "b")],
             "not yet sent",
+        );
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            app.conversation.vim.cursor(),
+            2,
+            "one past the last message"
         );
         let screen = screen(&app, 80, 24);
         let y = draft_row(&app).expect("the draft is laid out");
 
-        assert_cursor_stands_on_a_message(&app, &screen);
         for x in BODY_X..78 {
             let cell = cell(&screen, x, y);
             assert!(
-                !cell.modifier.contains(Modifier::REVERSED),
-                "the draft is not reversed at column {x}"
+                cell.modifier.contains(Modifier::REVERSED),
+                "the draft is reversed under the cursor at column {x}"
             );
-            assert_ne!(cell.bg, selection_bg(), "nor selected at column {x}");
+            assert_ne!(cell.bg, selection_bg(), "and not selected at column {x}");
         }
-        assert!(
-            cell(&screen, BODY_X, message_row_of(&app, 1))
-                .modifier
-                .contains(Modifier::REVERSED),
-            "the cursor is on the newest message, which is the row above the draft"
-        );
+        for index in 0..2 {
+            assert!(
+                !cell(&screen, BODY_X, message_row_of(&app, index))
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "no message is reversed while the cursor is on the draft: {index}"
+            );
+        }
     }
 
     #[test]
