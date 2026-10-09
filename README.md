@@ -62,8 +62,9 @@ Working today:
   and focus stays where it was, so `j`/`k` keep moving the list. `Enter` on the list
   shows the same card and moves focus to it. `Enter` on the card **confirms**: the
   conversation opens through the same path as choosing the chat from the list, and
-  the card goes. A card for someone with no chat in the list, such as a user-search
-  result, has nothing to open, so `Enter` leaves it on show. `Esc` closes the card
+  the card goes. A card whose chat is not in the list lists that private chat under
+  the name the card holds (the peer id when it holds none) and opens it, the same way
+  a new conversation from user search does. `Esc` closes the card
   and leaves the conversation as it was. `S` is unchanged and shows the account's own
   card.
   A row exists **only when the peer says something**, so a birthday a privacy

@@ -308,7 +308,8 @@ timestamp reads.
 A highlight settle shows the profile card through `App::open_settled_card`, called
 from `net::drive`. It puts the card in the conversation's rectangle and restores the
 focus and mode it found, so the window is left as it was. A card's `Enter` confirms
-through `coordinate::select_chat_by_id`.
+through `coordinate::confirm_card`: `select_chat_by_id` when the list holds the chat,
+otherwise `coordinate::open_private_chat`, the helper `open_user` also uses.
 
 `App` is nine fields — `ui`, `session`, `profile`, `list`, `outbox`, `pending`,
 `conversation`, `input` and `drafts` — one sub-struct per concern, each owning

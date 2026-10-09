@@ -302,8 +302,8 @@ are in [`../AGENTS.md`](../AGENTS.md).
   going through `select_chat`, and clears the pending settle, so the settle cannot
   re-open the card and fire a second `FetchContact`. `Enter` on the card is the
   confirm, through the same path as choosing the chat from the list. A card for
-  someone with no chat in the list has nothing to confirm, so `Enter` leaves it on
-  show.
+  someone with no chat in the list lists the private chat and opens it, as
+  `open_user` does, so the confirm always lands somewhere.
 - **Why `h` does two jobs on a card:** it is a motion everywhere else, and the way
   back at a row's first cell. It is sound because a card is **one column of
   values**: there is no column to the left of the first one, so at that edge the
