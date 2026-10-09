@@ -140,7 +140,9 @@ Working today:
   conversation on show is marked read the same way, and one that arrives under a
   card is kept and marked on the pass after `Esc`; a read
   done on another device sets the count to whatever Telegram still counts as
-  unread. `p` pins the highlighted chat, or
+  unread. A peer's read of your messages is kept across restarts, and a read the
+  live feed missed is recovered when the chat list is next fetched, so `[read]`
+  is shown for it. `p` pins the highlighted chat, or
   unpins it; the pin is kept by Telegram, so it survives a restart, and pinned
   chats lead the list, newest first within each section. The focused pane's border is
   drawn in `Theme::border_focused`; `h`/`l` and `Tab` move between the two panes,

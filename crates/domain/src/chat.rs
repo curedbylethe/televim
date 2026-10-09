@@ -51,6 +51,11 @@ pub struct Chat {
     /// Whether the peer is a deleted account. The chat list still shows it;
     /// the forward picker leaves it out, since a message to it cannot land.
     pub deleted: bool,
+    /// The highest of this account's outgoing messages the peer has read, as
+    /// the chat list last reported it; `None` when it reported none. A reading
+    /// the feed may have missed, not this account's read marker: it never
+    /// clears [`Chat::unread_count`].
+    pub read_outbox_max_id: Option<i64>,
 }
 
 impl Chat {
@@ -76,6 +81,7 @@ mod tests {
 
     fn chat(id: i64, kind: ChatKind) -> Chat {
         Chat {
+            read_outbox_max_id: None,
             id,
             title: format!("chat-{id}"),
             kind,

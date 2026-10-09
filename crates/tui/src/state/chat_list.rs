@@ -104,6 +104,7 @@ mod tests {
 
     fn chat(id: i64, deleted: bool) -> Chat {
         Chat {
+            read_outbox_max_id: None,
             id,
             title: format!("chat-{id}"),
             kind: ChatKind::Private,

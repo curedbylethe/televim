@@ -656,6 +656,7 @@ impl CachedChat {
 
     fn to_chat(&self) -> Chat {
         Chat {
+            read_outbox_max_id: None,
             id: self.id,
             title: self.title.clone(),
             kind: ChatKind::Private,
@@ -1142,6 +1143,7 @@ mod tests {
 
     fn chat(id: i64, title: &str) -> Chat {
         Chat {
+            read_outbox_max_id: None,
             id,
             title: title.to_owned(),
             kind: ChatKind::Private,

@@ -421,7 +421,9 @@ never evicted until the process ends.
 The outbox read marks (`DraftStore::read_receipts`, `tui/src/state/drafts.rs`)
 are the same kind of map: one `ReadMark` (a message id and a recency stamp, 16
 bytes of payload) for each conversation that has reported a read position in the
-session, plus the map's node overhead, **never evicted until sign-out or exit**.
+session, by a receipt or by a chat-list fetch (which can name every private chat
+the list holds, so the map's typical size may grow towards the list's size, still
+within the same bound), plus the map's node overhead, **never evicted until sign-out or exit**.
 It is outside the peer bound for the same reason as `FeedMarks::seen`: a receipt
 can name any peer the chat list holds, and dropping a mark would redraw a sent
 message as `[delivered]` after it was read. The persisted form is bounded: the

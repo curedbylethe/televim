@@ -1391,6 +1391,13 @@ impl App {
         );
     }
 
+    /// Folds the read positions a fetched chat list carried into the record.
+    ///
+    /// Delegates to [`coordinate::record_read_positions`].
+    pub fn record_read_positions(&mut self, chats: &[Chat]) {
+        coordinate::record_read_positions(&mut self.drafts, &mut self.conversation, chats);
+    }
+
     /// Installs a freshly fetched chat list while keeping the open conversation.
     ///
     /// Delegates to [`coordinate::refresh_chats`].
@@ -2877,6 +2884,7 @@ fn mock_chats() -> Vec<Chat> {
 
     vec![
         Chat {
+            read_outbox_max_id: None,
             id: MOCK_CHAT,
             title: "Ada Lovelace".into(),
             kind: ChatKind::Private,
@@ -2894,6 +2902,7 @@ fn mock_chats() -> Vec<Chat> {
             deleted: false,
         },
         Chat {
+            read_outbox_max_id: None,
             id: 2,
             title: "Grace Hopper".into(),
             kind: ChatKind::Private,
@@ -2906,6 +2915,7 @@ fn mock_chats() -> Vec<Chat> {
             deleted: false,
         },
         Chat {
+            read_outbox_max_id: None,
             id: 3,
             title: "Alan Turing".into(),
             kind: ChatKind::Private,

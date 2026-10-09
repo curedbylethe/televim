@@ -86,6 +86,14 @@ pub struct DialogInfo {
 
     /// Whether the account has pinned this conversation to the top of its list.
     pub pinned: bool,
+
+    /// Highest of this account's outgoing messages the peer has read, as
+    /// Telegram last reported it; `0` when the peer has read none.
+    ///
+    /// Telegram sends it on every dialog, so a read the feed missed is
+    /// recovered from the list itself. Outgoing only: the peer's reading of
+    /// this account's messages, never this account's reading of theirs.
+    pub read_outbox_max_id: i64,
 }
 
 impl Client {
@@ -263,6 +271,7 @@ fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
             .and_then(|message| message_timestamp(message.date().timestamp())),
         last_text: last_message.and_then(|message| last_text(message.text())),
         pinned: raw.pinned,
+        read_outbox_max_id: read_outbox_max_id(raw.read_outbox_max_id),
     })
 }
 
@@ -361,6 +370,15 @@ fn unread_count(raw: i32) -> u32 {
     u32::try_from(raw).unwrap_or(0)
 }
 
+/// Normalises the outgoing read position Telegram reports.
+///
+/// `0` means the peer has read nothing of this account's; a negative value is
+/// not a position at all, so it is read as nothing rather than as a watermark
+/// to move to.
+fn read_outbox_max_id(raw: i32) -> i64 {
+    i64::from(raw.max(0))
+}
+
 /// Normalises the timestamp `grammers` reports for a message.
 ///
 /// An empty or service message carries no date, which `grammers` reports as
@@ -412,6 +430,7 @@ mod tests {
     /// A dialog with everything but the fields under test filled in.
     fn dialog(peer_id: i64, last_timestamp: Option<i64>) -> DialogInfo {
         DialogInfo {
+            read_outbox_max_id: 0,
             peer_id,
             title: format!("chat {peer_id}"),
             kind: DialogKind::PrivateUser,
@@ -500,6 +519,18 @@ mod tests {
             "telegram marks a count it will not disclose with a negative value"
         );
         assert_eq!(unread_count(i32::MIN), 0, "and it must not wrap around");
+    }
+
+    #[test]
+    fn an_outbox_read_position_is_never_negative() {
+        assert_eq!(read_outbox_max_id(0), 0, "zero is nothing read");
+        assert_eq!(read_outbox_max_id(41), 41);
+        assert_eq!(read_outbox_max_id(-1), 0);
+        assert_eq!(
+            read_outbox_max_id(i32::MIN),
+            0,
+            "and it must not wrap around"
+        );
     }
 
     #[test]

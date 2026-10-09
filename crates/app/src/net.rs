@@ -2968,6 +2968,10 @@ fn apply_ready_to_screen(
     if no_session {
         state.forget_history();
     }
+    // The list is the feed's word on what this account's messages the peer has
+    // read, which may be a read the feed never delivered. It is folded in
+    // before the list lands, so the open view and the record agree on it.
+    app.record_read_positions(&chats);
     let restored = if app.conversation.conversation.window.chat_id != 0 && !no_session {
         state.history.cursor = None;
         state.history.jump = None;
@@ -3650,6 +3654,7 @@ mod tests {
 
     fn chat(id: i64) -> Chat {
         Chat {
+            read_outbox_max_id: None,
             id,
             title: format!("chat-{id}"),
             kind: ChatKind::Private,
@@ -4317,6 +4322,106 @@ mod tests {
             app.conversation.conversation.read_watermark(),
             Some(12),
             "restored from the receipt the feed delivered while it was closed"
+        );
+    }
+
+    // ---- a chat-list refresh recovers a missed read ---------------------
+
+    /// A chat-list refresh carries each conversation's outgoing read position, so
+    /// a read the feed never delivered reaches the watermark with no receipt in
+    /// flight, and is what the next launch restores.
+    #[test]
+    fn a_list_refresh_recovers_a_missed_read_into_the_record() {
+        let mut app = app_with_a_conversation(CHAT, 40);
+        let mut listed = chat(CHAT);
+        listed.read_outbox_max_id = Some(30);
+
+        app.record_read_positions(&[listed]);
+
+        assert_eq!(
+            app.conversation.conversation.read_watermark(),
+            Some(30),
+            "the open view takes the position the list reported"
+        );
+        assert_eq!(app.drafts.recent_read_marks(32), vec![(CHAT, 30)]);
+    }
+
+    /// A stale list cannot take a reading back: a position below the one already
+    /// recorded, from a live receipt or an earlier list, moves nothing.
+    #[test]
+    fn a_stale_list_never_moves_a_mark_backwards() {
+        let mut app = app_with_a_conversation(CHAT, 40);
+        app.drafts.restore_read_marks(vec![(CHAT, 50)]);
+        let mut stale = chat(CHAT);
+        stale.read_outbox_max_id = Some(30);
+
+        app.record_read_positions(&[stale]);
+
+        assert_eq!(app.drafts.recent_read_marks(32), vec![(CHAT, 50)]);
+        assert_eq!(
+            app.conversation.conversation.read_watermark(),
+            Some(50),
+            "the open view shows the record, not the stale figure"
+        );
+    }
+
+    /// A list refresh is not a read by this account: it leaves the peer's unread
+    /// counts as the list reported them.
+    #[test]
+    fn a_list_refresh_does_not_clear_own_unread_counts() {
+        let mut app = app_with_a_conversation(CHAT, 40);
+        let mut listed = chat(CHAT);
+        listed.unread_count = 3;
+        listed.read_outbox_max_id = Some(30);
+        app.set_chats(vec![listed.clone()]);
+
+        app.record_read_positions(&[listed]);
+
+        assert_eq!(app.chats()[0].unread_count, 3);
+    }
+
+    /// The list is newest first and the persisted window keeps the most recently
+    /// moved marks, so the most recent conversation is the one recorded last.
+    #[test]
+    fn the_newest_conversation_keeps_its_mark_in_the_persisted_window() {
+        let mut app = App::new();
+        let listed: Vec<Chat> = [(1, 10), (2, 20), (3, 30)]
+            .into_iter()
+            .map(|(id, read)| {
+                let mut c = chat(id);
+                c.read_outbox_max_id = Some(read);
+                c
+            })
+            .collect();
+
+        app.record_read_positions(&listed);
+
+        assert_eq!(
+            app.drafts.recent_read_marks(1),
+            vec![(1, 10)],
+            "the first, newest conversation outlasts the older ones"
+        );
+    }
+
+    /// A list for another account does not adopt marks stored for the one before
+    /// it: the launch gate drops a file tagged for another account, so the stored
+    /// figure is never restored, and the refresh records only what its own list
+    /// reports.
+    #[test]
+    fn a_list_for_another_account_does_not_adopt_stored_marks() {
+        let mut app = App::new();
+        if crate::draft_store::drafts_acceptable(Some("+1 previous"), Some("+1 current")) {
+            app.drafts.restore_read_marks(vec![(CHAT, 50)]);
+        }
+        let mut listed = chat(CHAT);
+        listed.read_outbox_max_id = Some(12);
+
+        app.record_read_positions(&[listed]);
+
+        assert_eq!(
+            app.drafts.recent_read_marks(32),
+            vec![(CHAT, 12)],
+            "the other account's 50 was never adopted, so this list's 12 is the record"
         );
     }
 

@@ -1929,6 +1929,7 @@ mod tests {
 
         let mut app = App::new();
         app.set_chats(vec![Chat {
+            read_outbox_max_id: None,
             id: CHAT,
             title: "Ada Lovelace".into(),
             kind: ChatKind::Private,
@@ -4044,6 +4045,7 @@ mod tests {
 
         let mut app = App::new();
         app.set_chats(vec![Chat {
+            read_outbox_max_id: None,
             id: CHAT,
             title: "Ada".into(),
             kind: ChatKind::Private,
