@@ -227,7 +227,11 @@ pub(crate) fn restore_read_watermark(
     conversation: &mut ConversationState,
     chat_id: i64,
 ) -> bool {
-    let recorded = drafts.read_receipts.borrow().get(&chat_id).copied();
+    let recorded = drafts
+        .read_receipts
+        .borrow()
+        .get(&chat_id)
+        .map(|mark| mark.max_id);
     match recorded {
         Some(max_id) => conversation.conversation.set_read_watermark(max_id),
         None => false,
