@@ -184,6 +184,28 @@ impl Client {
         .await?;
         Ok(())
     }
+
+    /// Marks a conversation read on the account's own side, up to `max_id`.
+    ///
+    /// Sends `messages.readHistory`. Telegram marks every message of the
+    /// conversation up to and including `max_id` as read, and the other
+    /// participant's client learns about it through its own update feed. This
+    /// method takes `max_id` as given: choosing the ceiling is the caller's job.
+    ///
+    /// Nothing is changed locally. The request only reaches Telegram.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] when the conversation is not in
+    /// the session's peer cache, and the request's own error if Telegram refuses
+    /// or the connection fails.
+    pub async fn mark_read(&self, peer_id: i64, max_id: i32) -> Result<(), FrameworkError> {
+        let peer = self
+            .peer_ref(peer_id)
+            .ok_or(FrameworkError::UnknownPeer(peer_id))?;
+        self.invoke(&read_history_request(peer, max_id)).await?;
+        Ok(())
+    }
 }
 
 /// The `inputDialogPeer` that names this conversation.
@@ -192,6 +214,17 @@ impl Client {
 /// can be tested without a datacenter.
 fn input_dialog_peer(peer: PeerRef) -> tl::enums::InputDialogPeer {
     tl::enums::InputDialogPeer::Peer(tl::types::InputDialogPeer { peer: peer.into() })
+}
+
+/// The `messages.readHistory` request that marks this conversation read.
+///
+/// A free function over a value, so the request [`Client::mark_read`] sends can
+/// be tested without a datacenter.
+fn read_history_request(peer: PeerRef, max_id: i32) -> tl::functions::messages::ReadHistory {
+    tl::functions::messages::ReadHistory {
+        peer: peer.into(),
+        max_id,
+    }
 }
 
 /// Maps a dialog `grammers` built into this crate's own description.
@@ -516,6 +549,23 @@ mod tests {
         };
         assert_eq!(user.user_id, 42);
         assert_eq!(user.access_hash, 7);
+    }
+
+    #[test]
+    fn a_read_marker_names_the_conversation_and_its_ceiling() {
+        let request = read_history_request(
+            PeerRef {
+                id: PeerId::user(42).expect("42 is in the user range"),
+                auth: PeerAuth::from_hash(7),
+            },
+            99,
+        );
+        let tl::enums::InputPeer::User(user) = request.peer else {
+            panic!("a person addresses as an input user peer");
+        };
+        assert_eq!(user.user_id, 42);
+        assert_eq!(user.access_hash, 7);
+        assert_eq!(request.max_id, 99);
     }
 
     #[test]
