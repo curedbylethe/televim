@@ -24,14 +24,17 @@
 //! `None` instead of inventing a date. Grouping and separators inherit the
 //! neighbouring message's day rather than starting a 1970 bucket.
 //!
-//! ## Timezone (provisional — OQ-08)
+//! ## Timezone
 //!
 //! Every function that turns a timestamp into a day or an `HH:MM` takes the
 //! local offset from UTC, in seconds, as its `offset` argument and adds it
 //! before any arithmetic. [`day_key`] and [`clock`] apply it; [`civil_from_timestamp`],
 //! [`weekday_name`] and [`day_label`] apply the same offset. An offset of `0` is
 //! UTC. The sentinel check reads the raw timestamp, before the offset is added.
-//! The caller supplies the offset: this module reads no zone.
+//! The caller supplies the offset: this module reads no zone. Why the reader's
+//! zone is used, and why it is passed in rather than read here, is the entry
+//! "Why message times and day breaks render in the reader's local zone" in
+//! `docs/decisions.md`.
 
 use std::borrow::Cow;
 

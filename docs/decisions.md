@@ -931,3 +931,20 @@ are in [`../AGENTS.md`](../AGENTS.md).
   keyboard reader without a key; `:search` stays as the way to reach the same
   search from a line the reader is already typing in. `?` is recorded as a veto-able
   key: rebinding it touches one arm in each pane and the prompt's prefix.
+- **Why message times and day breaks render in the reader's local zone:** a
+  Telegram timestamp is zone-neutral unix seconds, and the reader reads the time
+  on their own clock. Labelling it in UTC put every day break and `HH:MM` at the
+  wrong hour for anyone not on UTC, which is the reader this client is for. The
+  zone is resolved in `app`, the one crate that owns a clock, by `time`'s
+  `local-offset` in `runtime.rs::local_offset`, and handed to `tui` as plain
+  seconds beside `now`, the same way the other display settings reach it. `tui`
+  never reads a zone, so its tests inject an offset and pass on any host, CI's UTC
+  included. One offset is read per pass, not once at launch, so a DST change in a
+  long session is corrected on the next frame, and the instant and its offset are
+  read together so a frame never mixes two moments. What this leaves is one
+  offset for every message on screen: a message from before a DST change is shown
+  with the offset in force now. Per-message historical zones were not built,
+  because the wire carries no zone to read them from, and a zone the reader's
+  machine does not know is not something the program can name. When the platform
+  will not say what the zone is, the offset is UTC, which is what every label
+  showed before the zone was read at all.
