@@ -399,7 +399,7 @@ pub enum Event {
         /// The query it was for, echoed back.
         query: String,
 
-        /// The matches across private conversations, oldest first, or why there
+        /// The matches across private conversations, newest first, or why there
         /// are none. Hits in chats that are not known private chats are dropped
         /// when this is applied, not here.
         result: Result<proto::search::GlobalSearchResults, ProtoError>,
@@ -7761,7 +7761,7 @@ mod tests {
 
     // ---- what a global search answers -----------------------------------
 
-    /// A global answer carrying the given `(chat, message, text)` hits, oldest
+    /// A global answer carrying the given `(chat, message, text)` hits, newest
     /// first, as the proto layer hands them over.
     fn global_answer(
         hits: &[(i64, i64, &str)],
@@ -7795,7 +7795,7 @@ mod tests {
             Event::GlobalSearched {
                 query: "hello".to_owned(),
                 result: Ok(global_answer(
-                    &[(CHAT, 1, "hello one"), (CHAT, 4, "hello two")],
+                    &[(CHAT, 4, "hello two"), (CHAT, 1, "hello one")],
                     9,
                 )),
             },
@@ -7804,8 +7804,9 @@ mod tests {
         assert_eq!(app.global_search().query(), Some("hello"));
         assert!(!app.global_search().in_flight());
         assert_eq!(app.global_search().hits().len(), 2);
-        assert_eq!(app.global_search().hits()[1].message_id, 4);
-        assert_eq!(app.global_search().hits()[0].display_body(), "hello one");
+        assert_eq!(app.global_search().hits()[0].message_id, 4);
+        assert_eq!(app.global_search().hits()[0].display_body(), "hello two");
+        assert_eq!(app.global_search().hits()[1].message_id, 1);
         assert_eq!(app.global_search().total(), 9, "the server's total stands");
     }
 
@@ -7964,10 +7965,10 @@ mod tests {
                 query: "hello".to_owned(),
                 result: Ok(global_answer(
                     &[
-                        (CHAT, 1, "private"),
-                        (CHAT + 2, 2, "in a group"),
-                        (CHAT + 9, 3, "unknown peer"),
                         (CHAT, 4, "private again"),
+                        (CHAT + 9, 3, "unknown peer"),
+                        (CHAT + 2, 2, "in a group"),
+                        (CHAT, 1, "private"),
                     ],
                     4,
                 )),
@@ -7980,7 +7981,7 @@ mod tests {
             .iter()
             .map(|hit| hit.message_id)
             .collect();
-        assert_eq!(kept, vec![1, 4], "only the private chat's hits remain");
+        assert_eq!(kept, vec![4, 1], "only the private chat's hits remain");
         assert_eq!(app.global_dropped(), 2, "and the two others are counted");
     }
 
