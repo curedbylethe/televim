@@ -1825,8 +1825,13 @@ enum Lookup {
 /// resolver first, and only a handle nobody owns falls through to the contact
 /// search — a stranger is reachable by handle and by nothing else, while a name
 /// is never lost to the handle path because that path declines it first. A
-/// name-shaped query goes straight to the search.
+/// name-shaped query goes straight to the search. An empty query names nobody, so
+/// it skips both and lists the reader's top correspondents instead.
 async fn lookup(client: &ProtoClient, query: &str) -> Result<Lookup, ProtoError> {
+    if query.trim().is_empty() {
+        return Ok(Lookup::Listed(client.top_peers().await?));
+    }
+
     if looks_like_username(query)
         && let Some(user) = client.resolve_user(query).await?
     {
