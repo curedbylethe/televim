@@ -1,6 +1,6 @@
 //! Per-peer parked drafts and read receipts.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use crate::app::PromptKind;
@@ -41,11 +41,25 @@ pub struct DraftStore {
     /// a later, lower one. Grows with the conversations the client is told about,
     /// which is no more than the chat list already holds.
     ///
-    /// Not written to disk: a launch starts with nothing recorded, so a receipt
-    /// the reader has not been shown is never drawn from a previous session's
-    /// memory of it. That is the "never claim more than was received" rule at the
-    /// storage layer.
-    pub(crate) read_receipts: RefCell<HashMap<i64, i64>>,
+    /// Persisted by `app` beside the parked drafts, as the newest
+    /// [`DraftStore::recent_read_marks`] peers. Restored only through
+    /// [`DraftStore::restore_read_marks`], which never moves a mark backwards, so
+    /// a stored figure can only add a reading the reader was shown last session.
+    /// A sign-out forgets them ([`DraftStore::clear_read_marks`]).
+    pub(crate) read_receipts: RefCell<HashMap<i64, ReadMark>>,
+
+    /// The stamp the next recorded mark takes. Orders the marks by when they
+    /// last moved, so the persisted window keeps the most recent peers.
+    read_clock: Cell<u64>,
+}
+
+/// One conversation's recorded read position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReadMark {
+    /// The highest message id the peer has read.
+    pub(crate) max_id: i64,
+    /// When the mark last moved, against [`DraftStore::read_clock`].
+    stamp: u64,
 }
 
 impl DraftStore {
@@ -55,6 +69,7 @@ impl DraftStore {
         Self {
             drafts: HashMap::new(),
             read_receipts: RefCell::new(HashMap::new()),
+            read_clock: Cell::new(0),
         }
     }
 
@@ -129,12 +144,73 @@ impl DraftStore {
         }
 
         let mut recorded = self.read_receipts.borrow_mut();
-        let moved = recorded.get(&chat_id).is_none_or(|read| max_id > *read);
+        let moved = recorded
+            .get(&chat_id)
+            .is_none_or(|mark| max_id > mark.max_id);
         if moved {
-            recorded.insert(chat_id, max_id);
+            let mark = ReadMark {
+                max_id,
+                stamp: self.next_stamp(),
+            };
+            recorded.insert(chat_id, mark);
         }
 
         moved
+    }
+
+    /// The `limit` most recently moved marks, as `(peer id, max id)` pairs
+    /// sorted by peer id, so the persisted form is the same bytes for the same
+    /// marks.
+    #[must_use]
+    pub fn recent_read_marks(&self, limit: usize) -> Vec<(i64, i64)> {
+        let recorded = self.read_receipts.borrow();
+        let mut newest: Vec<(i64, ReadMark)> = recorded.iter().map(|(id, m)| (*id, *m)).collect();
+        newest.sort_by_key(|(_, mark)| std::cmp::Reverse(mark.stamp));
+        newest.truncate(limit);
+
+        let mut out: Vec<(i64, i64)> = newest
+            .into_iter()
+            .map(|(chat_id, mark)| (chat_id, mark.max_id))
+            .collect();
+        out.sort_by_key(|(chat_id, _)| *chat_id);
+        out
+    }
+
+    /// Merges marks loaded from disk, keeping the higher figure for each peer.
+    ///
+    /// A stored mark can only add to what is recorded: one that is not above
+    /// the figure already held is dropped, so a stale file never moves a
+    /// watermark backwards. Non-positive figures are dropped, as [`note_read`]
+    /// drops them.
+    ///
+    /// [`note_read`]: DraftStore::note_read
+    pub fn restore_read_marks(&mut self, marks: Vec<(i64, i64)>) {
+        for (chat_id, max_id) in marks {
+            if max_id <= 0 {
+                continue;
+            }
+            let held = self.read_receipts.get_mut().get(&chat_id).map(|m| m.max_id);
+            if held.is_none_or(|held| max_id > held) {
+                let mark = ReadMark {
+                    max_id,
+                    stamp: self.next_stamp(),
+                };
+                self.read_receipts.get_mut().insert(chat_id, mark);
+            }
+        }
+    }
+
+    /// Forgets every recorded read position: a sign-out, so the next account
+    /// never inherits the last one's marks.
+    pub fn clear_read_marks(&mut self) {
+        self.read_receipts.get_mut().clear();
+    }
+
+    /// The next stamp, after the last one handed out.
+    fn next_stamp(&self) -> u64 {
+        let stamp = self.read_clock.get() + 1;
+        self.read_clock.set(stamp);
+        stamp
     }
 }
 
@@ -341,5 +417,62 @@ mod tests {
             !app.drafts.drafts.contains_key(&chat_id),
             "a queued edit leaves no draft behind either"
         );
+    }
+
+    #[test]
+    fn a_loaded_mark_never_moves_a_watermark_backwards() {
+        let mut store = DraftStore::new();
+        assert!(store.note_read(7, 9));
+
+        store.restore_read_marks(vec![(7, 4), (8, 3), (9, 0), (10, -1)]);
+        assert_eq!(
+            store.recent_read_marks(10),
+            vec![(7, 9), (8, 3)],
+            "a stale load keeps the figure held, and a non-positive one is no mark"
+        );
+
+        store.restore_read_marks(vec![(7, 12)]);
+        assert_eq!(
+            store.recent_read_marks(10),
+            vec![(7, 12), (8, 3)],
+            "a higher loaded figure does raise it"
+        );
+    }
+
+    #[test]
+    fn restored_marks_come_back_sorted_by_peer() {
+        let mut store = DraftStore::new();
+        store.restore_read_marks(vec![(4, 10), (2, 7)]);
+
+        assert_eq!(store.recent_read_marks(10), vec![(2, 7), (4, 10)]);
+    }
+
+    #[test]
+    fn the_persisted_window_keeps_the_most_recently_moved_peers() {
+        let store = DraftStore::new();
+        assert!(store.note_read(1, 5));
+        assert!(store.note_read(2, 5));
+        assert!(store.note_read(3, 5));
+        assert!(
+            store.note_read(1, 6),
+            "peer 1 moves again, so it is the newest"
+        );
+
+        assert_eq!(
+            store.recent_read_marks(2),
+            vec![(1, 6), (3, 5)],
+            "the two most recently moved, sorted by peer id"
+        );
+    }
+
+    #[test]
+    fn clearing_read_marks_forgets_them_all() {
+        let mut store = DraftStore::new();
+        assert!(store.note_read(7, 3));
+
+        store.clear_read_marks();
+
+        assert!(store.recent_read_marks(32).is_empty());
+        assert!(store.note_read(7, 3), "and a cleared peer records afresh");
     }
 }

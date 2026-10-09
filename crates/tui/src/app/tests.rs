@@ -3864,6 +3864,29 @@ fn a_read_watermark_survives_a_switch_away_and_back() {
     );
 }
 
+/// A restart: the mark the last session saved is restored before the first
+/// frame, so a conversation opened afterwards carries it, and the next receipt
+/// moves the watermark past it. The messages up to it draw as `[read]`.
+#[test]
+fn a_mark_from_the_last_session_is_on_the_conversation_when_opened() {
+    let mut app = App::mock();
+    app.drafts.restore_read_marks(vec![(MOCK_CHAT, 6)]);
+
+    app.select_chat(1);
+    app.select_chat(0);
+    assert_eq!(
+        app.conversation.conversation.read_watermark(),
+        Some(6),
+        "the previous session's reading is back on the page"
+    );
+
+    assert!(
+        app.apply_update(&read(MOCK_CHAT, 9)),
+        "the next receipt is news, and it moves the watermark past the restored one"
+    );
+    assert_eq!(app.conversation.conversation.read_watermark(), Some(9));
+}
+
 /// The wire's watermark can repeat or arrive late, so a lower one is dropped
 /// rather than applied, and an acknowledgement that named nothing real is not
 /// recorded at all. Both report no change, which is what tells the loop there
