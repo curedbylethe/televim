@@ -213,6 +213,56 @@ impl Client {
         Ok(users_from(response))
     }
 
+    /// Lists the people the account talks to most, highest-rated first.
+    ///
+    /// Telegram rates each peer by how often the account writes to them, so
+    /// this is the account's own frequency signal rather than a guess from the
+    /// chat list. Only correspondents are asked for: a contact the account has
+    /// never written to is not a conversation it is in, and bots, groups and
+    /// channels are not people.
+    ///
+    /// `limit` is clamped into what Telegram accepts, and the result is also
+    /// cut to `limit`. A peer Telegram names without sending its user, or
+    /// whose user carries no `access_hash`, is left out: it could not be opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::Request`] when Telegram rejects the request,
+    /// when the connection fails, when the answer cannot be decoded, or when
+    /// the account has top peers switched off on Telegram's side.
+    pub async fn top_peers(&self, limit: usize) -> Result<Vec<ResolvedUser>, FrameworkError> {
+        let request = tl::functions::contacts::GetTopPeers {
+            correspondents: true,
+            bots_pm: false,
+            bots_inline: false,
+            phone_calls: false,
+            forward_users: false,
+            forward_chats: false,
+            groups: false,
+            channels: false,
+            bots_app: false,
+            bots_guestchat: false,
+            offset: 0,
+            limit: clamp_limit(limit),
+            // Always a full answer. A non-zero hash would let Telegram reply
+            // `NotModified`, and remembering that hash is state this client
+            // does not keep.
+            hash: 0,
+        };
+
+        let response = self.invoke(&request).await?;
+        let users = top_peers_from(response, limit)?;
+
+        // The same seeding as `search_users`: a top peer found here has to be
+        // addressable when the reader opens it.
+        for user in &users {
+            self.remember_peer(PeerInfo::from(user)).await;
+        }
+        self.flush_session();
+
+        Ok(users.iter().filter_map(user_from_tl).collect())
+    }
+
     /// Puts a peer where [`Client::peer_ref`](crate::Client) reads it.
     ///
     /// A peer with no `access_hash` cannot be addressed at all, so it is not
@@ -256,6 +306,70 @@ fn users_from(response: tl::enums::contacts::Found) -> Vec<ResolvedUser> {
         .into_iter()
         .filter_map(|user| user_from_tl(&user))
         .collect()
+}
+
+/// How many top peers a caller is shown: the empty search's whole list.
+pub const TOP_PEERS_LIMIT: usize = 5;
+
+/// Maps a `contacts.GetTopPeers` answer to the users it names, in rating order.
+///
+/// The answer carries peers and users apart: a peer names its user by identifier
+/// only, and the `access_hash` that makes it addressable is in the top-level
+/// `users` list, so the two are joined here. Only correspondent peers that are
+/// users count, and a joined user that is `min` or has no `access_hash` is
+/// dropped, the same rule `remember_peer` applies.
+///
+/// `NotModified` is empty: it is only sent against a non-zero hash, which this
+/// client never sends. `Disabled` is an error, because the reader asked for a
+/// list the account's settings do not give out.
+fn top_peers_from(
+    response: tl::enums::contacts::TopPeers,
+    limit: usize,
+) -> Result<Vec<tl::enums::User>, FrameworkError> {
+    let peers = match response {
+        tl::enums::contacts::TopPeers::Peers(peers) => peers,
+        tl::enums::contacts::TopPeers::NotModified => return Ok(Vec::new()),
+        // `RequestError` has no variant for a feature the server switched off,
+        // and the caller needs only a reason to show. `Deserialize` is the
+        // closest, and the reason names the actual fact.
+        tl::enums::contacts::TopPeers::Disabled => {
+            return Err(FrameworkError::Request(RequestError::Deserialize(
+                "top peers are disabled for this account".to_owned(),
+            )));
+        }
+    };
+
+    Ok(peers
+        .categories
+        .iter()
+        .filter(|category| {
+            let tl::enums::TopPeerCategoryPeers::Peers(category) = category;
+            matches!(category.category, tl::enums::TopPeerCategory::Correspondents)
+        })
+        .flat_map(|category| {
+            let tl::enums::TopPeerCategoryPeers::Peers(category) = category;
+            category.peers.iter()
+        })
+        .filter_map(|top| {
+            let tl::enums::TopPeer::Peer(top) = top;
+            match &top.peer {
+                tl::enums::Peer::User(user) => Some(user.user_id),
+                _ => None,
+            }
+        })
+        .filter_map(|id| {
+            peers
+                .users
+                .iter()
+                .find(|user| match user {
+                    tl::enums::User::User(user) => user.id == id,
+                    tl::enums::User::Empty(user) => user.id == id,
+                })
+                .cloned()
+        })
+        .filter(|user| matches!(user, tl::enums::User::User(user) if !user.min && user.access_hash.is_some()))
+        .take(limit)
+        .collect())
 }
 
 /// Maps one wire user to a [`ResolvedUser`], when it is a user at all.
@@ -564,6 +678,194 @@ mod tests {
         assert!(
             client.peer_ref(42).is_some(),
             "a peer the answer named can be opened"
+        );
+    }
+
+    /// A correspondent peer naming the user with the given identifier.
+    fn top_peer(id: i64) -> tl::enums::TopPeer {
+        tl::enums::TopPeer::Peer(tl::types::TopPeer {
+            peer: tl::enums::Peer::User(tl::types::PeerUser { user_id: id }),
+            rating: 1.0,
+        })
+    }
+
+    /// One category of a top-peers answer. The count is not read by the mapping,
+    /// so it is left at zero.
+    fn category(
+        category: tl::enums::TopPeerCategory,
+        peers: Vec<tl::enums::TopPeer>,
+    ) -> tl::enums::TopPeerCategoryPeers {
+        tl::enums::TopPeerCategoryPeers::Peers(tl::types::TopPeerCategoryPeers {
+            category,
+            count: 0,
+            peers,
+        })
+    }
+
+    /// A top-peers answer with the given categories and users.
+    fn top_peers_answer(
+        categories: Vec<tl::enums::TopPeerCategoryPeers>,
+        users: Vec<tl::enums::User>,
+    ) -> tl::enums::contacts::TopPeers {
+        tl::enums::contacts::TopPeers::Peers(tl::types::contacts::TopPeers {
+            categories,
+            chats: Vec::new(),
+            users,
+        })
+    }
+
+    /// `user` with one of its flags or its access hash changed by `edit`.
+    fn edited(user: tl::enums::User, edit: impl FnOnce(&mut tl::types::User)) -> tl::enums::User {
+        let tl::enums::User::User(mut user) = user else {
+            panic!("the fixture is a full user");
+        };
+        edit(&mut user);
+        tl::enums::User::User(user)
+    }
+
+    fn id_of(user: &tl::enums::User) -> i64 {
+        match user {
+            tl::enums::User::User(user) => user.id,
+            tl::enums::User::Empty(user) => user.id,
+        }
+    }
+
+    #[test]
+    fn top_peers_keep_telegrams_rating_order() {
+        let answer = top_peers_answer(
+            vec![category(
+                tl::enums::TopPeerCategory::Correspondents,
+                vec![top_peer(42), top_peer(7)],
+            )],
+            vec![
+                user(7, Some("Grace"), None, None, false),
+                user(42, Some("Ada"), None, None, false),
+            ],
+        );
+
+        let users = top_peers_from(answer, 5).expect("a list is not an error");
+        let ids: Vec<i64> = users.iter().map(id_of).collect();
+
+        assert_eq!(
+            ids,
+            vec![42, 7],
+            "the rating order, not the order of the users list"
+        );
+    }
+
+    #[test]
+    fn only_the_correspondents_category_counts() {
+        let answer = top_peers_answer(
+            vec![category(
+                tl::enums::TopPeerCategory::BotsPm,
+                vec![top_peer(9)],
+            )],
+            vec![user(9, Some("Helper"), None, None, true)],
+        );
+
+        assert!(
+            top_peers_from(answer, 5).expect("a list").is_empty(),
+            "a bot the account messages is not a correspondent"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_is_not_a_user_is_skipped() {
+        let chat = tl::enums::TopPeer::Peer(tl::types::TopPeer {
+            peer: tl::enums::Peer::Chat(tl::types::PeerChat { chat_id: 42 }),
+            rating: 2.0,
+        });
+        let answer = top_peers_answer(
+            vec![category(
+                tl::enums::TopPeerCategory::Correspondents,
+                vec![chat, top_peer(7)],
+            )],
+            vec![
+                user(42, Some("Group"), None, None, false),
+                user(7, Some("Grace"), None, None, false),
+            ],
+        );
+
+        let ids: Vec<i64> = top_peers_from(answer, 5)
+            .expect("a list")
+            .iter()
+            .map(id_of)
+            .collect();
+        assert_eq!(ids, vec![7], "a chat is not a person, even with a user id");
+    }
+
+    #[test]
+    fn a_peer_with_no_user_entry_is_skipped() {
+        let answer = top_peers_answer(
+            vec![category(
+                tl::enums::TopPeerCategory::Correspondents,
+                vec![top_peer(5)],
+            )],
+            Vec::new(),
+        );
+
+        assert!(
+            top_peers_from(answer, 5).expect("a list").is_empty(),
+            "without a user there is no access hash, so nothing to open"
+        );
+    }
+
+    #[test]
+    fn a_min_or_hashless_user_is_skipped() {
+        let answer = top_peers_answer(
+            vec![category(
+                tl::enums::TopPeerCategory::Correspondents,
+                vec![top_peer(1), top_peer(2), top_peer(3)],
+            )],
+            vec![
+                edited(user(1, Some("Min"), None, None, false), |u| u.min = true),
+                edited(user(2, Some("Hashless"), None, None, false), |u| {
+                    u.access_hash = None;
+                }),
+                user(3, Some("Ada"), None, None, false),
+            ],
+        );
+
+        let ids: Vec<i64> = top_peers_from(answer, 5)
+            .expect("a list")
+            .iter()
+            .map(id_of)
+            .collect();
+        assert_eq!(ids, vec![3], "only the addressable user is kept");
+    }
+
+    #[test]
+    fn the_answer_is_cut_to_the_limit() {
+        let answer = top_peers_answer(
+            vec![category(
+                tl::enums::TopPeerCategory::Correspondents,
+                vec![top_peer(1), top_peer(2), top_peer(3)],
+            )],
+            vec![
+                user(1, Some("One"), None, None, false),
+                user(2, Some("Two"), None, None, false),
+                user(3, Some("Three"), None, None, false),
+            ],
+        );
+
+        let ids: Vec<i64> = top_peers_from(answer, 2)
+            .expect("a list")
+            .iter()
+            .map(id_of)
+            .collect();
+        assert_eq!(ids, vec![1, 2], "the first two in rating order");
+    }
+
+    #[test]
+    fn not_modified_is_an_empty_list_and_disabled_is_an_error() {
+        assert!(
+            top_peers_from(tl::enums::contacts::TopPeers::NotModified, 5)
+                .expect("not modified is not an error")
+                .is_empty()
+        );
+        assert!(
+            top_peers_from(tl::enums::contacts::TopPeers::Disabled, 5).is_err(),
+            "a list the account does not have is reported, not hidden as empty"
         );
     }
 }
