@@ -360,7 +360,9 @@ buffer: the wrapper applies the edits the library calculates, decides `Enter`
 and refuses the keys the library cannot run — a newline in `:` or `/`, and a byte-
 counted motion *behind an operator* on non-ASCII text. A delete is widened to
 the grapheme cluster it touches, because the library removes one code point and
-a family is several. A `:` line and a `/` line
+a family is several. `o` is answered there too: the library's newline lands in
+front of the row's last character, so the wrapper takes the library's `A` to the
+row's end and splices the newline. A `:` line and a `/` line
 are prompts rather than buffers and get insert only. The bar draws the draft the
 wrapper lays out with `wrap_keeping_whitespace` — the conversation's `wrap`,
 except that a run of
