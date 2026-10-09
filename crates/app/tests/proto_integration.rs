@@ -1448,11 +1448,12 @@ async fn read_pair(dc: &TestDc) -> Option<ReadPair> {
 
 /// Sends a message to the reader and says what has to happen next.
 ///
-/// The read is **not** requested from here: the framework now wraps a read
-/// marker (`ProtoClient::mark_read`), but nothing in the product sends one yet,
-/// and `clear_mentions` is still unwrapped. This case only receives read state,
-/// and inventing a request for it in a test would exercise a path the product
-/// does not have. So the case asks for the one thing it cannot do by
+/// The read is **not** requested from here: the product sends one itself, from
+/// `net.rs` (`read_target` → `request_read` → `ProtoClient::mark_read`), and only
+/// once the reader has confirmed the conversation open, never while a profile
+/// card covers it. `clear_mentions` is still unwrapped. This case only receives
+/// read state, and the marker's gating is tested on `read_target` in `net.rs`,
+/// not here. So the case asks for the one thing it cannot do by
 /// itself — a person opening the conversation on the other account — and asserts
 /// that the sender's feed says so.
 async fn send_and_ask_to_be_read(pair: &ReadPair, text: &str) -> i64 {
