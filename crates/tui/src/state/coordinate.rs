@@ -238,6 +238,34 @@ pub(crate) fn restore_read_watermark(
     }
 }
 
+/// Folds the read positions a chat-list refresh carried into what is recorded.
+///
+/// A position the feed may have missed goes through [`DraftStore::note_read`],
+/// so it moves a mark only upward and a stale list cannot take a reading back.
+/// The open view takes what is then recorded for the conversation on show, so
+/// the view and the record cannot disagree.
+/// The list's unread counts are left alone: a position is a reading of this
+/// account's messages, not its read marker, and only an accepted read clears a
+/// count ([`domain::updates::ChatList::mark_read`]).
+///
+/// Walks the list oldest first, so the most recent conversation's mark is the
+/// one moved last, which is the one the persisted window keeps.
+pub(crate) fn record_read_positions(
+    drafts: &mut DraftStore,
+    conversation: &mut ConversationState,
+    chats: &[Chat],
+) {
+    for chat in chats.iter().rev() {
+        let Some(max_id) = chat.read_outbox_max_id else {
+            continue;
+        };
+        drafts.note_read(chat.id, max_id);
+        if chat.id == conversation.conversation.window.chat_id {
+            restore_read_watermark(drafts, conversation, chat.id);
+        }
+    }
+}
+
 /// Puts a conversation's parked draft back on the line.
 ///
 /// The mirror of [`park_draft`]: the value is moved out of the map, so

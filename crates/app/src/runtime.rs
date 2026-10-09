@@ -895,6 +895,7 @@ mod tests {
 
         let mut app = App::new();
         app.set_chats(vec![Chat {
+            read_outbox_max_id: None,
             id: 7,
             title: "seven".to_owned(),
             kind: ChatKind::Private,
@@ -939,6 +940,7 @@ mod tests {
         // already empty, and the snapshot is nothing.
         let mut empty = App::new();
         empty.set_chats(vec![Chat {
+            read_outbox_max_id: None,
             id: 7,
             title: "seven".to_owned(),
             kind: ChatKind::Private,

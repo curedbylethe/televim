@@ -313,6 +313,26 @@ Real, and named so they are not mistaken for oversights:
   so a hand run (`TELEVIM_TEST_DC=1 … cargo test --all --all-features --test
   proto_integration`) proves the suite passes, not the presence shape. Confirm by
   hand against a restricted account, and extend the suite if the answer differs.
+- **A missed peer read is recovered only when the chat list is fetched.** The
+  live `updateReadHistoryOutbox` receipt is best-effort: Telegram delivers each
+  update to one randomly chosen active session, so a session can miss it. The
+  chat list's per-dialog outgoing read position (`read_outbox_max_id`) recovers
+  it, and it is folded into the record on each bring-up that fetches the list
+  (launch, reconnect, sign-in), with no receipt in flight. A read the peer makes
+  while this session is running and the feed misses is therefore not shown until
+  the next bring-up. Private chats only: groups and channels stay out of scope.
+- **The persisted read window forgets recency across a restart.** The drafts file
+  writes its read marks sorted by peer id, and a launch restores them in that order,
+  so each restored mark is stamped as if it had just moved in peer-id order. The
+  32-peer window then keeps the highest peer ids among the restored marks, not the
+  most recently read. Within a session the window is recency-ordered. Keeping the
+  stamp in the file is the follow-up.
+- **The dialogs read position is unverified against a live account.** Its
+  mapping is unit-tested against the pinned layer-227 schema, and `proto_integration`
+  does not assert it. Whether Telegram fills it for a private peer is shown only by
+  an opt-in run (`TELEVIM_TEST_DC=1 cargo test --all --all-features --test
+  proto_integration`), which has not been run with that field asserted. Until it
+  is, the recovery's live behaviour is inferred from the schema.
 - **Presence is sticky and can go stale.** A peer's status stands until the next
   `PeerStatus` for them. There is no expiry, and Telegram's `expires` deadline on
   `Online` is ignored, so a peer who goes offline without an update still reads

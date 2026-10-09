@@ -373,6 +373,7 @@ mod tests {
     fn app_with_a_conversation(chat_id: i64) -> App {
         let mut app = App::new();
         app.set_chats(vec![Chat {
+            read_outbox_max_id: None,
             id: chat_id,
             title: format!("chat-{chat_id}"),
             kind: ChatKind::Private,

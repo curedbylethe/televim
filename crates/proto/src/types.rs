@@ -69,6 +69,10 @@ pub(crate) struct ProtoChat {
     /// Whether the peer is a deleted account. Carried through so the forward
     /// picker can leave it out; the chat list still shows it.
     pub deleted: bool,
+
+    /// Highest outgoing message the peer has read, or `0` for none. Carried
+    /// through so a list refresh can recover a read the feed missed.
+    pub read_outbox_max_id: i64,
 }
 
 /// A message on its way from the framework into `domain`.
@@ -120,6 +124,8 @@ impl From<ProtoChat> for Chat {
             pinned: chat.pinned,
             deleted: chat.deleted,
             presence: None,
+            // Zero is Telegram's "nothing read", which is no position at all.
+            read_outbox_max_id: (chat.read_outbox_max_id > 0).then_some(chat.read_outbox_max_id),
         }
     }
 }
@@ -175,6 +181,7 @@ impl From<DialogInfo> for ProtoChat {
             last_message: dialog.last_text,
             pinned: dialog.pinned,
             deleted: dialog.deleted,
+            read_outbox_max_id: dialog.read_outbox_max_id,
         }
     }
 }
@@ -300,6 +307,7 @@ mod tests {
             pinned: false,
             last_message: None,
             deleted: false,
+            read_outbox_max_id: 0,
         }
     }
 
@@ -486,7 +494,25 @@ mod live_tests {
             last_timestamp: None,
             pinned: false,
             last_text: None,
+            read_outbox_max_id: 0,
         }
+    }
+
+    #[test]
+    fn a_read_position_reaches_the_domain_only_when_one_was_reported() {
+        let mut read = dialog(5, DialogKind::PrivateUser);
+        read.read_outbox_max_id = 41;
+        assert_eq!(
+            Chat::from(ProtoChat::from(read)).read_outbox_max_id,
+            Some(41)
+        );
+
+        let unread = dialog(6, DialogKind::PrivateUser);
+        assert_eq!(
+            Chat::from(ProtoChat::from(unread)).read_outbox_max_id,
+            None,
+            "zero is Telegram's nothing-read, not a position"
+        );
     }
 
     /// A message as the framework describes it.

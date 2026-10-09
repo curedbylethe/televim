@@ -188,6 +188,7 @@ fn fixture_chats() -> Vec<Chat> {
         .map(|n| {
             let title = TITLES[n % TITLES.len()];
             Chat {
+                read_outbox_max_id: None,
                 id: to_id(n + 1),
                 title: format!("{title} #{n}"),
                 kind: if n % 3 == 0 {

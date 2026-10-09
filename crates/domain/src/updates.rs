@@ -343,6 +343,7 @@ impl ChatList {
         }
 
         self.chats.push(Chat {
+            read_outbox_max_id: None,
             id: user_id,
             title,
             kind: ChatKind::Private,
@@ -435,6 +436,7 @@ mod tests {
     /// A conversation whose preview already reads `earlier`.
     fn chat(id: i64) -> Chat {
         Chat {
+            read_outbox_max_id: None,
             id,
             title: format!("chat-{id}"),
             kind: ChatKind::Private,
