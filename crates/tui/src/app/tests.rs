@@ -3656,6 +3656,54 @@ fn an_arrival_does_not_move_a_reader_who_scrolled_away() {
     assert!(!app.conversation.conversation.auto_follow());
 }
 
+/// The screen, not only the window, shows the arrival: a pinned view draws the
+/// new message at its bottom on the next frame, with no keypress in between.
+#[test]
+fn an_arrival_is_drawn_on_the_next_frame_of_a_pinned_view() {
+    let mut app = App::mock();
+    assert!(app.apply_update(&UpdateEvent::NewMessage(message(11, "zq9"))));
+
+    let rows = frame_rows(&app);
+    let row = rows
+        .iter()
+        .position(|row| row.contains("zq9"))
+        .expect("the arrival is drawn in the conversation");
+    assert!(
+        rows[row + 1..].iter().all(|row| !row.contains("See you")),
+        "and nothing older is drawn below it"
+    );
+}
+
+/// The same arrival, on a reader scrolled back to the top: the frame keeps the
+/// message they were reading on the row it was on, and the arrival is not drawn.
+#[test]
+fn an_arrival_leaves_a_scrolled_back_frame_where_the_reader_left_it() {
+    let mut app = App::mock();
+    go_to_top(&mut app);
+    let cursor_before = app.conversation.vim.cursor();
+    let anchor = reading(&app).expect("the reader is on a message");
+    let anchor_text = text_of(&app, anchor)
+        .expect("the message has text")
+        .to_owned();
+    let row_before = frame_rows(&app)
+        .iter()
+        .position(|row| row.contains(&anchor_text));
+
+    assert!(app.apply_update(&UpdateEvent::NewMessage(message(11, "zq9"))));
+
+    let rows = frame_rows(&app);
+    assert_eq!(
+        rows.iter().position(|row| row.contains(&anchor_text)),
+        row_before,
+        "the message the reader is on keeps its row"
+    );
+    assert_eq!(
+        app.conversation.vim.cursor(),
+        cursor_before,
+        "the cursor did not move"
+    );
+}
+
 /// An arrival the conversation already holds leaves it alone: the window
 /// deduplicates by identifier, so a message cannot sit in it twice.
 ///
