@@ -49,6 +49,16 @@ measure: ## Measure RSS at idle, startup, input latency, and binary size
 measure-check: ## Check the last measurement against the stored baseline
 	scripts/memory/check.py
 
+# A/B compare of the criterion micro-benches. Writes target/bench-compare.json
+# and .md. BENCH_MODE=smoke (default, short fixed flags) or full (long fixed
+# flags, the numbers a claim may cite). BENCH_ARGS="--save-baseline NAME" saves
+# this run; BENCH_ARGS="--baseline NAME" compares against a saved one. Reports
+# deltas only: slowness does not fail it, a harness fault does.
+BENCH_MODE ?= smoke
+.PHONY: bench
+bench: ## Run the micro-benches and write the A/B comparison report
+	scripts/bench/compare.py --mode $(BENCH_MODE) $(BENCH_ARGS)
+
 # --- Quality Assurance ---
 .PHONY: fmt
 fmt: ## Format all code in the workspace
