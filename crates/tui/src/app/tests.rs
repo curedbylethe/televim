@@ -6765,6 +6765,8 @@ fn a_global_search_leaves_both_slash_prompts_alone() {
     assert_eq!(app.input.line.purpose(), PromptKind::Search);
     app.handle_key(press(KeyCode::Esc));
 
+    // The overlay owns the pane keys while it is up, so Esc closes it first.
+    app.handle_key(press(KeyCode::Esc));
     app.handle_key(press(KeyCode::Char('h')));
     app.handle_key(press(KeyCode::Char('/')));
     assert_eq!(app.input.line.purpose(), PromptKind::NewChat);
@@ -6821,8 +6823,338 @@ fn a_replaced_global_answer_does_not_reach_the_status_line() {
 #[test]
 fn the_user_search_label_outranks_the_global_search_label() {
     let mut app = App::mock();
-    run_command_line(&mut app, "search hello");
     start_user_search(&mut app, "ada");
+    run_command_line(&mut app, "search hello");
 
     assert_eq!(app.status_text(), "/ada — searching…");
+}
+
+// ---- the global search overlay: render, walk, accept, dismiss ----------
+
+/// A global hit in `chat_id` whose text is `text`, sent at a fixed moment.
+fn global_text(chat_id: i64, message_id: i64, text: &str) -> domain::global_search::GlobalHit {
+    domain::global_search::GlobalHit {
+        chat_id,
+        message_id,
+        text: text.to_owned(),
+        media: None,
+        sent_at: 1_730_000_000,
+        outgoing: false,
+    }
+}
+
+/// Starts a global search for `query` and answers it with `hits`.
+fn answer_global(app: &mut App, query: &str, hits: Vec<domain::global_search::GlobalHit>) {
+    app.begin_global_search(query);
+    let total = hits.len();
+    assert!(app.adopt_global_search(query, hits, total, 0));
+}
+
+/// The 80x24 frame as one string per row.
+fn frame_rows(app: &App) -> Vec<String> {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
+        .expect("the test backend builds");
+    terminal
+        .draw(|frame| app.render(frame))
+        .expect("the frame draws");
+    let buffer = terminal.backend().buffer().clone();
+    (0..24)
+        .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect()
+}
+
+/// The row of the frame that holds `needle`, if any.
+fn row_of(rows: &[String], needle: &str) -> Option<usize> {
+    rows.iter().position(|row| row.contains(needle))
+}
+
+/// Two chats' worth of hits: two in Ada (chat 1) and one in Grace (chat 2).
+fn two_chat_hits() -> Vec<domain::global_search::GlobalHit> {
+    vec![
+        global_text(MOCK_CHAT, 900, "hit one"),
+        global_text(MOCK_CHAT, 901, "hit two"),
+        global_text(2, 902, "hit three"),
+    ]
+}
+
+#[test]
+fn the_overlay_groups_hits_under_a_header_with_each_chats_count() {
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", two_chat_hits());
+
+    let rows = frame_rows(&app);
+    assert!(
+        row_of(&rows, "──── Ada Lovelace · 2 ").is_some(),
+        "{rows:#?}"
+    );
+    assert!(
+        row_of(&rows, "──── Grace Hopper · 1 ").is_some(),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn the_cursor_row_is_reverse_video_across_the_interior_and_nothing_else_is() {
+    use ratatui::style::Modifier;
+
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", two_chat_hits());
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
+        .expect("the test backend builds");
+    terminal.draw(|frame| app.render(frame)).expect("draws");
+    let buffer = terminal.backend().buffer().clone();
+    let rows = frame_rows(&app);
+    let cursor = row_of(&rows, "hit one").expect("the first hit is drawn");
+    let other = row_of(&rows, "hit two").expect("the second hit is drawn");
+
+    for x in 1..79 {
+        assert!(
+            buffer[(x, cursor as u16)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "cell {x} of the cursor row"
+        );
+        assert!(
+            !buffer[(x, other as u16)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "cell {x} of a row the cursor is not on"
+        );
+    }
+}
+
+#[test]
+fn a_long_snippet_is_cut_around_its_match_with_ellipses() {
+    let mut app = App::mock();
+    let text = format!("{}needle{}", "a".repeat(120), "b".repeat(120));
+    answer_global(&mut app, "needle", vec![global_text(MOCK_CHAT, 900, &text)]);
+
+    let rows = frame_rows(&app);
+    let row = row_of(&rows, "needle").expect("the match is drawn");
+    let cut = &rows[row];
+    assert!(cut.contains("needle"), "{cut:?}");
+    assert_eq!(cut.matches('…').count(), 2, "both ends are cut: {cut:?}");
+}
+
+#[test]
+fn the_foot_names_the_keys_while_the_list_is_up_and_only_esc_otherwise() {
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", two_chat_hits());
+    let rows = frame_rows(&app);
+    let foot = row_of(&rows, "j/k: move").expect("the full hint is on the foot");
+    assert!(rows[foot].contains("Esc: close"), "{:?}", rows[foot]);
+
+    let mut app = App::mock();
+    app.begin_global_search("tickets");
+    let rows = frame_rows(&app);
+    assert!(row_of(&rows, "j/k: move").is_none(), "{rows:#?}");
+    assert!(row_of(&rows, "Esc: close").is_some(), "{rows:#?}");
+    assert!(row_of(&rows, "searching…").is_some(), "{rows:#?}");
+}
+
+#[test]
+fn the_empty_states_leave_the_body_blank_and_name_the_state_on_the_status_line() {
+    let mut app = App::mock();
+    app.begin_global_search("tickets");
+    let rows = frame_rows(&app);
+    assert!(row_of(&rows, "?tickets — searching…").is_some());
+    assert!(
+        row_of(&rows, "Ada Lovelace ·").is_none(),
+        "no header while searching"
+    );
+
+    let mut app = App::mock();
+    answer_global(&mut app, "zebra", Vec::new());
+    let rows = frame_rows(&app);
+    assert!(row_of(&rows, "?zebra — no matches").is_some(), "{rows:#?}");
+    assert!(row_of(&rows, "Esc: close").is_some(), "{rows:#?}");
+
+    let mut app = App::mock();
+    app.begin_global_search("tickets");
+    assert!(app.fail_global_search("tickets", "timeout".to_owned()));
+    let rows = frame_rows(&app);
+    assert!(
+        row_of(&rows, "search failed (timeout)").is_some(),
+        "{rows:#?}"
+    );
+    assert!(row_of(&rows, "Esc: close").is_some(), "{rows:#?}");
+}
+
+/// The chat and message ids the cursor is on.
+fn cursor_hit(app: &App) -> Option<(i64, i64)> {
+    app.global_search()
+        .selected_hit()
+        .map(|hit| (hit.chat_id, hit.message_id))
+}
+
+#[test]
+fn j_and_k_skip_the_chat_headers_and_wrap_at_both_ends() {
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", two_chat_hits());
+
+    key_press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.global_search().selected(), 1);
+    key_press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.global_search().selected(),
+        2,
+        "the Grace hit, past her header"
+    );
+    key_press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.global_search().selected(), 0, "j wraps to the top");
+    key_press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.global_search().selected(), 2, "k wraps to the bottom");
+}
+
+/// A key press with no modifiers, for the overlay's walk keys.
+fn key_press(app: &mut App, code: KeyCode) {
+    app.handle_key(press(code));
+}
+
+#[test]
+fn braces_jump_between_chat_headers() {
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", two_chat_hits());
+    key_press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.global_search().selected(), 1, "inside Ada's chat");
+
+    key_press(&mut app, KeyCode::Char('{'));
+    assert_eq!(app.global_search().selected(), 0, "back to Ada's header");
+    key_press(&mut app, KeyCode::Char('}'));
+    assert_eq!(app.global_search().selected(), 2, "on to Grace's header");
+    key_press(&mut app, KeyCode::Char('}'));
+    assert_eq!(app.global_search().selected(), 2, "no chat after Grace");
+    key_press(&mut app, KeyCode::Char('{'));
+    assert_eq!(app.global_search().selected(), 0, "back over Ada's header");
+}
+
+#[test]
+fn gg_and_capital_g_go_to_the_first_and_last_hit() {
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", two_chat_hits());
+
+    key_press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.global_search().selected(), 2);
+    key(&mut app, 'g');
+    assert_eq!(
+        app.global_search().selected(),
+        2,
+        "one g waits for its pair"
+    );
+    key(&mut app, 'g');
+    assert_eq!(app.global_search().selected(), 0);
+}
+
+#[test]
+fn enter_on_a_loaded_message_opens_its_chat_with_the_cursor_on_it() {
+    let mut app = App::mock();
+    let loaded = app
+        .conversation
+        .conversation
+        .window
+        .get(3)
+        .expect("the sample conversation holds a fourth message")
+        .id;
+    answer_global(&mut app, "hit", vec![global_text(MOCK_CHAT, loaded, "hit")]);
+
+    key_press(&mut app, KeyCode::Enter);
+
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert_eq!(
+        app.conversation.vim.cursor(),
+        3,
+        "the cursor moved to the message"
+    );
+    assert!(!app.global_search().is_active(), "the overlay is closed");
+    assert_eq!(app.pending_jump(), None, "nothing was fetched");
+}
+
+#[test]
+fn enter_on_an_unloaded_message_fetches_around_it_with_the_jumping_label() {
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", vec![global_text(2, 9_000, "hit in Grace")]);
+
+    key_press(&mut app, KeyCode::Enter);
+
+    assert_eq!(
+        app.conversation.conversation.window.chat_id, 2,
+        "Grace's chat is open"
+    );
+    let jump = app.pending_jump().expect("the message is not loaded");
+    assert_eq!(jump.target_id, 9_000);
+    assert_eq!(jump.kind, JumpKind::Search);
+    let rows = frame_rows(&app);
+    assert!(row_of(&rows, "Jumping…").is_some(), "{rows:#?}");
+}
+
+#[test]
+fn esc_cancels_a_jump_in_flight() {
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", vec![global_text(2, 9_000, "hit in Grace")]);
+    key_press(&mut app, KeyCode::Enter);
+    assert!(app.pending_jump().is_some());
+
+    key_press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.pending_jump(), None);
+}
+
+#[test]
+fn esc_closes_the_overlay_clears_the_query_and_returns_to_the_chat_list() {
+    let mut app = App::mock();
+    on_the_chat_list_then_search(&mut app);
+    answer_global(
+        &mut app,
+        "tickets",
+        vec![global_text(MOCK_CHAT, 900, "tickets")],
+    );
+    assert_eq!(
+        app.ui.focus,
+        Focus::Conversation,
+        "the prompt returns focus to the pane"
+    );
+
+    key_press(&mut app, KeyCode::Esc);
+
+    assert!(!app.global_search().is_active(), "the query is discarded");
+    assert_eq!(app.global_search().query(), None);
+    assert_eq!(
+        app.ui.focus,
+        Focus::ChatList,
+        "back on the pane it was raised from"
+    );
+    let rows = frame_rows(&app);
+    assert!(
+        row_of(&rows, "?tickets").is_none(),
+        "the status label is gone: {rows:#?}"
+    );
+}
+
+/// The chat list with `?` submitted, so the overlay is up and focus has moved on.
+fn on_the_chat_list_then_search(app: &mut App) {
+    app.handle_key(press(KeyCode::Char('h')));
+    app.handle_key(press(KeyCode::Char('?')));
+    type_text(app, "tickets");
+    app.handle_key(press(KeyCode::Enter));
+    app.take_action();
+}
+
+#[test]
+fn question_mark_is_refused_while_the_new_chat_overlay_is_open() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "x");
+    assert!(app.user_search().is_active(), "the person overlay is up");
+
+    app.handle_key(press(KeyCode::Char('?')));
+
+    assert_ne!(app.input.line.purpose(), PromptKind::GlobalSearch);
+    assert_ne!(app.ui.focus, Focus::Input, "no prompt opened over it");
+}
+
+#[test]
+fn the_cursor_hit_is_read_back_through_the_walk_keys() {
+    let mut app = App::mock();
+    answer_global(&mut app, "hit", two_chat_hits());
+    key_press(&mut app, KeyCode::Char('j'));
+    assert_eq!(cursor_hit(&app), Some((MOCK_CHAT, 901)));
 }

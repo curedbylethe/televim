@@ -164,12 +164,22 @@ Working today:
   conversation and from the chat list alike, and `:search <query>` runs the same
   search from anywhere `:` reaches; a bare `:search` or an empty `?` repeats the
   last one. The search asks the server once for matches across every private
-  chat, and the status line says where it stands: `?<query> — searching…`, then
+  chat. The answer is drawn as an overlay over the whole body: one rule per chat
+  with the chat's name and its count, then one row per message with the time, the
+  sender as `[them]` or `[you]`, and a snippet cut around the first match, with
+  every match inked `match`. `j`/`k` or the arrows move between messages, `{` and
+  `}` between chat headers, and `gg`/`G` to the first and last message. `Enter`
+  opens the message's chat with the cursor on that message: a message already on
+  screen is a cursor move, and one that is not is fetched, as `gd` fetches a quoted
+  message, with `Jumping…` on the bar until it lands. `Esc` closes the overlay,
+  returns focus to the pane the search was raised from, and forgets the query. The
+  overlay owns the keys while it is up, so none of them writes to a chat; `/`, `:`
+  and `?` still open their prompts, and `?` is refused while the new-chat list is
+  up. The status line says where the search stands: `?<query> — searching…`, then
   `?<query> — N results in M chats` when it lands, `no matches`, or
   `search failed (<reason>)`. A result list that is more than 100 matches says
-  `100 of <total>`. Only private chats are searched; groups and channels are
-  dropped. The grouped results are not drawn yet, so for now the search is a
-  status line and nothing to open. `/` keeps its meaning on each pane.
+  `100 of <total>`, and only the first 100 are shown. Only private chats are
+  searched; groups and channels are dropped. `/` keeps its meaning on each pane.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
   screenful, `gg` to the first unread, `n` to cycle search matches. `gd` on a
   message that quotes another goes to the quoted message: a cursor move when it
