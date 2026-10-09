@@ -43,8 +43,8 @@ pub struct GlobalHit {
     /// The attachment the message carries, if it carries one.
     pub media: Option<MediaKind>,
 
-    /// When the message was sent, as unix seconds.
-    pub sent_at: i64,
+    /// When the message was sent, as unix seconds; `None` when Telegram sent no date.
+    pub sent_at: Option<i64>,
 
     /// Whether the signed-in account sent the message.
     pub outgoing: bool,
@@ -315,7 +315,7 @@ mod tests {
             message_id,
             text: format!("m{message_id}"),
             media: None,
-            sent_at: 0,
+            sent_at: None,
             outgoing: false,
         }
     }
@@ -503,7 +503,7 @@ mod tests {
             message_id: 2,
             text: String::new(),
             media: Some(MediaKind::Photo),
-            sent_at: 0,
+            sent_at: None,
             outgoing: false,
         };
         assert_eq!(photo.display_body(), "[image]");

@@ -6707,7 +6707,7 @@ fn global_hit(chat_id: i64, message_id: i64) -> domain::global_search::GlobalHit
         message_id,
         text: format!("hit {message_id}"),
         media: None,
-        sent_at: 0,
+        sent_at: None,
         outgoing: false,
     }
 }
@@ -6921,7 +6921,7 @@ fn global_text(chat_id: i64, message_id: i64, text: &str) -> domain::global_sear
         message_id,
         text: text.to_owned(),
         media: None,
-        sent_at: 1_730_000_000,
+        sent_at: Some(1_730_000_000),
         outgoing: false,
     }
 }

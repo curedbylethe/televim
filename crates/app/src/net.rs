@@ -6211,7 +6211,7 @@ mod tests {
             message_id,
             text: "hit".to_owned(),
             media: None,
-            sent_at: 0,
+            sent_at: None,
             outgoing: false,
         }
     }
@@ -7775,7 +7775,7 @@ mod tests {
                     message_id,
                     text: text.to_owned(),
                     media: None,
-                    sent_at: 0,
+                    sent_at: None,
                     outgoing: false,
                 })
                 .collect(),
