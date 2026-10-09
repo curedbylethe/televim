@@ -1295,6 +1295,14 @@ impl App {
         self.list.set_pinned(chat_id, pinned);
     }
 
+    /// Clears a conversation's unread count once Telegram has accepted the read
+    /// marker, and says whether there was a count to clear.
+    ///
+    /// Delegates to [`domain::updates::ChatList::mark_read`].
+    pub fn mark_chat_read(&mut self, chat_id: i64) -> bool {
+        self.list.list.mark_read(chat_id)
+    }
+
     /// Installs a freshly fetched chat list.
     ///
     /// Delegates to [`coordinate::set_chats`].
