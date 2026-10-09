@@ -2,8 +2,9 @@
 """A/B benchmark compare for the criterion micro-benches (`make bench`).
 
 Two legs, one report shape:
-  in-binary  two bench ids in one criterion group, from the same run. The first
-             id in sorted order is the reference; the others are candidates.
+  in-binary  a criterion group that declares one `reference` id and one or more
+             `candidate` ids (the last path segment of each id), from the same run.
+             Groups without that declaration are not paired.
   revision   this run against a named saved baseline (`--baseline NAME`), or
              this run saved as one (`--save-baseline NAME`) for a later compare.
 
@@ -110,6 +111,12 @@ def delta(new, old):
     return {"abs_ns": abs_ns, "pct": pct, "cis_overlap": overlap}
 
 
+def role(bench_id):
+    """`reference` or `candidate` when the id's last segment says so, else None."""
+    last = bench_id.rsplit("/", 1)[-1]
+    return last if last in ("reference", "candidate") else None
+
+
 def find_benches():
     """bench id -> {group, dir} for every criterion bench with a `new` run on disk."""
     found = {}
@@ -154,12 +161,14 @@ def build_report(mode, save, baseline):
 
     in_binary = []
     for group, entries in sorted(groups.items()):
-        if len(entries) < 2:
+        refs = [e for e in entries if role(e["id"]) == "reference"]
+        cands = [e for e in entries if role(e["id"]) == "candidate"]
+        if len(refs) != 1 or not cands:
             continue
-        ref = entries[0]
+        ref = refs[0]
         pairs = [
             {"id": e["id"], "current": e["current"], "delta": delta(e["current"], ref["current"])}
-            for e in entries[1:]
+            for e in cands
         ]
         in_binary.append({"group": group, "reference": ref["id"], "reference_current": ref["current"], "candidates": pairs})
 
@@ -222,10 +231,10 @@ def render_md(report):
         lines.append(row)
     lines += ["", "## In-binary pairs", ""]
     if not report["in_binary"]:
-        lines.append("No group in this run has two or more bench ids.")
+        lines.append("No group in this run declares a `reference` and `candidate` pair.")
     else:
         lines += [
-            "Candidate minus reference, same run. Reference = first id in sorted order.",
+            "Candidate minus reference, same run. Pairs are declared by bench id: a group with one `reference` id and `candidate` ids.",
             "",
             "| group | candidate | reference | candidate median | reference median | delta | delta % | CIs overlap |",
             "|---|---|---|---:|---:|---:|---:|:---:|",
