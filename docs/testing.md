@@ -216,11 +216,11 @@ below.
     `word_prefix_match/scan/candidate`). Any other id is reported alone and is never
     paired. The *revision* leg runs against a saved criterion baseline:
     `BENCH_ARGS="--save-baseline NAME"` saves a run, `BENCH_ARGS="--baseline NAME"`
-    compares this run with it. **Caveat:** no bench declares a pair yet. The current
-    groups measure workloads of one function (e.g. `word_prefix_match/scan_corpus/hit_early`
-    vs `.../miss`), not two competing implementations, so the in-binary section is
-    empty until a candidate is benched beside the current code. See
-    [`known-gaps.md`](./known-gaps.md).
+    compares this run with it. **Caveat:** one pair exists, `word_prefix_match`
+    (`word_prefix_match_ab/hit` and `/miss`). Its candidate is a byte scan defined in
+    the bench file, not in production code, and the bench asserts it answers the same
+    as the reference before timing. Other groups measure workloads of one function,
+    not two implementations. See [`known-gaps.md`](./known-gaps.md).
   - **Modes.** `BENCH_MODE=smoke` (default) uses short fixed flags and checks that
     the harness runs; its numbers are noisy and are not evidence. `BENCH_MODE=full`
     uses long fixed flags and is the only mode whose numbers a claim may cite.
