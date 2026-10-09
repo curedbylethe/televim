@@ -293,6 +293,17 @@ are in [`../AGENTS.md`](../AGENTS.md).
   than a character in the stream. Only a position one past the end of a value has
   no character to mark, and that one takes a cell of its own, which is at the end
   of a value where a column of movement is invisible.
+- **Why browsing shows a card and only confirming opens the conversation:** the
+  highlight is a look, and opening a conversation is a fetch and a read marker, so a
+  settle that opened the conversation would fetch and mark every chat the reader
+  scrolled past. The card goes in the conversation's rectangle and the window is
+  left as it was, which is also why browsing keeps focus on the chat list: `j` and
+  `k` must keep moving the list. `Enter` on the list ends on the card's pane without
+  going through `select_chat`, and clears the pending settle, so the settle cannot
+  re-open the card and fire a second `FetchContact`. `Enter` on the card is the
+  confirm, through the same path as choosing the chat from the list. A card for
+  someone with no chat in the list has nothing to confirm, so `Enter` leaves it on
+  show.
 - **Why `h` does two jobs on a card:** it is a motion everywhere else, and the way
   back at a row's first cell. It is sound because a card is **one column of
   values**: there is no column to the left of the first one, so at that edge the
@@ -805,6 +816,11 @@ are in [`../AGENTS.md`](../AGENTS.md).
   the window's end or the unread arithmetic, and the local count is cleared by the
   answer that says it was accepted. A failure is logged and dropped rather than
   retried, because the next open is the retry the reader already gets for free.
+  A profile card on show is not an open, so `read_target` also refuses while
+  `Pane::Profile` covers the window. The card covers the conversation without
+  replacing it, so the window's chat can be one the reader is not looking at, and
+  a marker sent for it would read a chat the reader has not confirmed. An arrival
+  under a card is kept and marked on the pass after the card closes.
   Sending from the list's `Latest` open, rather than from a `tui` action, keeps the
   client out of the screen's hands and leaves the four-slot action queue for sends.
 - **Why the history file is plaintext for now:** message bodies are as

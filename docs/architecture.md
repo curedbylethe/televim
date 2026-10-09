@@ -305,6 +305,11 @@ card (`card.rs`, where the live report wins over the profile read's). The chat
 list draws none. The wording is `presence.rs`'s, so `tui` alone decides how a
 timestamp reads.
 
+A highlight settle shows the profile card through `App::open_settled_card`, called
+from `net::drive`. It puts the card in the conversation's rectangle and restores the
+focus and mode it found, so the window is left as it was. A card's `Enter` confirms
+through `coordinate::select_chat_by_id`.
+
 `App` is nine fields — `ui`, `session`, `profile`, `list`, `outbox`, `pending`,
 `conversation`, `input` and `drafts` — one sub-struct per concern, each owning
 the mutations that touch only it. The mutations no single state type owns —
@@ -460,7 +465,7 @@ up (build, fetch the chat list, take the feed — it does **not** sign in; see
 [`decisions.md`](./decisions.md)), asks for a page whenever the conversation on
 show is near one
 of its ends, sends a read marker when a conversation is opened with unread
-messages (`read_target` picks it, `request_read` sends it, and
+messages (`read_target` picks it and refuses while a profile card covers the window, `request_read` sends it, and
 `Event::ReadMarked` clears the count only once it is accepted), drives the sign-in flow the panel asks for, and folds in whatever
 arrives. A recoverable feed read failure is waited out in the pump's task up to
 the same bound the launch fetch uses, reporting `Event::FeedRetrying` with the
