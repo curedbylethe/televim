@@ -835,6 +835,16 @@ pub enum Action {
         query: String,
     },
 
+    /// Search every private conversation for `query`.
+    ///
+    /// One action for the whole search, not one per chat: the answer is the
+    /// server's, matched back to the query it was asked for, and the action
+    /// queue is bounded.
+    GlobalSearch {
+        /// What to look for.
+        query: String,
+    },
+
     /// Find a person named or handle-matching `query`, to start a conversation
     /// with.
     ///
