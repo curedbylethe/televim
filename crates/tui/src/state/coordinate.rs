@@ -743,9 +743,38 @@ pub(crate) fn open_user(
     profile: &mut ProfileCard,
     user: &UserCandidate,
 ) {
-    let index = list
-        .list
-        .ensure_private_chat(user.user_id, user.display_name.clone());
+    open_private_chat(
+        ui,
+        list,
+        outbox,
+        pending,
+        conversation,
+        input,
+        drafts,
+        profile,
+        user.user_id,
+        user.display_name.clone(),
+    );
+}
+
+/// Opens the private conversation with `user_id`, listing it as `title` first
+/// if the list does not hold it yet.
+///
+/// The steps [`open_user`] takes, shared with the card's confirm for a chat
+/// that is not in the list.
+pub(crate) fn open_private_chat(
+    ui: &mut UiState,
+    list: &mut ChatListState,
+    outbox: &mut Outbox,
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    drafts: &mut DraftStore,
+    profile: &mut ProfileCard,
+    user_id: i64,
+    title: String,
+) {
+    let index = list.list.ensure_private_chat(user_id, title);
 
     select_chat(
         &mut *ui,
@@ -765,6 +794,59 @@ pub(crate) fn open_user(
         Focus::Conversation,
     );
     conversation.user_search.clear();
+}
+
+/// Confirms a card: opens the chat it is about, listing it first when the list
+/// does not hold it, and puts the card away. A chat the list holds is opened as
+/// choosing it from the list would open it.
+fn confirm_card(
+    ui: &mut UiState,
+    list: &mut ChatListState,
+    outbox: &mut Outbox,
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    drafts: &mut DraftStore,
+    profile: &mut ProfileCard,
+    chat_id: i64,
+) {
+    if !select_chat_by_id(
+        &mut *ui,
+        &mut *list,
+        &mut *outbox,
+        &mut *pending,
+        &mut *conversation,
+        &mut *input,
+        &mut *drafts,
+        chat_id,
+    ) {
+        let title = unlisted_title(&*profile, chat_id);
+        open_private_chat(
+            &mut *ui,
+            &mut *list,
+            &mut *outbox,
+            &mut *pending,
+            &mut *conversation,
+            &mut *input,
+            &mut *drafts,
+            &mut *profile,
+            chat_id,
+            title,
+        );
+    }
+    close_profile(&mut *ui, &mut *profile);
+}
+
+/// The name an unlisted chat is listed under: the card's own name when it has
+/// read the account, otherwise the peer id as text. Never invented.
+fn unlisted_title(profile: &ProfileCard, chat_id: i64) -> String {
+    match profile.contact.as_ref().filter(|c| c.peer_id == chat_id) {
+        Some(ContactProfile {
+            state: AccountState::Known(account),
+            ..
+        }) => account.display_name(),
+        _ => chat_id.to_string(),
+    }
 }
 
 /// Puts the conversation back in the right-hand pane.
@@ -3344,11 +3426,10 @@ pub(crate) fn handle_profile(
             false
         }
         // Enter confirms the card: the chat it is about is opened for real, and
-        // only then is its conversation on show. A card with no chat in the list
-        // has nothing to open, so Enter leaves it where it is.
+        // only then is its conversation on show.
         KeyCode::Enter => {
-            if let Pane::Profile(ProfileId::User(chat_id)) = ui.pane
-                && select_chat_by_id(
+            if let Pane::Profile(ProfileId::User(chat_id)) = ui.pane {
+                confirm_card(
                     &mut *ui,
                     &mut *list,
                     &mut *outbox,
@@ -3356,10 +3437,9 @@ pub(crate) fn handle_profile(
                     &mut *conversation,
                     &mut *input,
                     &mut *drafts,
+                    &mut *profile,
                     chat_id,
-                )
-            {
-                close_profile(&mut *ui, &mut *profile);
+                );
             }
             false
         }

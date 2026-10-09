@@ -817,6 +817,45 @@ fn enter_on_the_card_opens_its_conversation() {
     assert_eq!(app.list.selected_chat, 1);
 }
 
+/// A card whose chat the list does not hold: Enter lists the private chat and
+/// opens it, as `open_user` does for a new conversation. The card is put away
+/// and the conversation is on show with the focus on it.
+#[test]
+fn enter_on_a_card_for_an_unlisted_chat_lists_and_opens_it() {
+    const UNLISTED: i64 = 987_654;
+    let mut app = on_the_chat_list();
+    assert!(
+        app.list.list.chats.iter().all(|chat| chat.id != UNLISTED),
+        "the set-up is an id the list does not hold"
+    );
+    // What `open_card` leaves behind: the card on show, the focus on it.
+    app.ui.set_pane(Pane::Profile(ProfileId::User(UNLISTED)));
+    app.ui.set_focus(Focus::Conversation);
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.conversation.conversation.window.chat_id, UNLISTED);
+    assert_eq!(app.ui.pane, Pane::Conversation);
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    let listed = app
+        .list
+        .list
+        .chats
+        .iter()
+        .position(|chat| chat.id == UNLISTED)
+        .expect("the chat is now in the list");
+    assert_eq!(
+        app.list.list.chats[listed].kind,
+        domain::chat::ChatKind::Private
+    );
+    assert_eq!(
+        app.list.list.chats[listed].title,
+        UNLISTED.to_string(),
+        "no card name was read, so the peer id is the title"
+    );
+    assert_eq!(app.list.selected_chat, listed);
+}
+
 /// A movement in one pane must not answer for the other: the sample
 /// conversation's `k` walks messages, and the list's walks conversations.
 #[test]
