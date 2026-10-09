@@ -37,6 +37,36 @@ use crate::error::{FrameworkError, RequestError};
 use crate::history::clamp_limit;
 use crate::tl;
 
+/// One message a global search matched: where it is, and what it says.
+///
+/// Unlike [`SearchResults`], a global hit carries its text. A global search has
+/// no open conversation to draw the match from, so the identifiers alone cannot
+/// be shown. `text` is passed through as Telegram sent it, which is empty for a
+/// media-only message; choosing what to show in that case is the caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalHit {
+    /// The bare identifier of the conversation the message is in.
+    pub chat_id: i64,
+
+    /// The message's identifier within that conversation.
+    pub message_id: i32,
+
+    /// The message text, untruncated.
+    pub text: String,
+}
+
+/// The matches of a global search, and how many there are in all.
+///
+/// The same invariant as [`SearchResults`]: `total >= hits.len()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalSearchResults {
+    /// The matched messages, in the order Telegram sent them (newest first).
+    pub hits: Vec<GlobalHit>,
+
+    /// How many matches Telegram holds across every private conversation.
+    pub total: usize,
+}
+
 /// The largest page a search will return.
 ///
 /// The same wire bound as [`HISTORY_LIMIT`](crate::HISTORY_LIMIT): Telegram
@@ -213,18 +243,76 @@ impl Client {
 
         Ok(results)
     }
+
+    /// Searches every private conversation for messages matching `query`.
+    ///
+    /// One request, and the result is its first page: `limit` is clamped into
+    /// what Telegram accepts, and the matches are not continued past it. The
+    /// request sets `users_only`, so Telegram restricts the search to one-to-one
+    /// chats; groups and channels are not searched at all.
+    ///
+    /// The hits come back in Telegram's order, **newest first**.
+    ///
+    /// Peers in the response are not added to the peer cache, so a hit whose
+    /// conversation is not already known cannot be opened by this client; the
+    /// caller decides what to do with such a hit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::Request`] when Telegram rejects the request,
+    /// when the connection fails, or when the answer cannot be decoded. A query
+    /// that matches nothing is an ordinary empty result.
+    pub async fn search_global(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> Result<GlobalSearchResults, FrameworkError> {
+        let request = tl::functions::messages::SearchGlobal {
+            broadcasts_only: false,
+            groups_only: false,
+            users_only: true,
+            folder_id: None,
+            q: query,
+            filter: tl::enums::MessagesFilter::InputMessagesFilterEmpty,
+            min_date: 0,
+            max_date: 0,
+            // The first page: no anchor peer and no anchor message.
+            offset_rate: 0,
+            offset_peer: tl::enums::InputPeer::Empty,
+            offset_id: 0,
+            limit: clamp_limit(limit),
+        };
+
+        let response = self
+            .inner()
+            .invoke(&request)
+            .await
+            .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
+
+        let results = global_hits_from(response);
+
+        self.flush_session();
+
+        tracing::debug!(
+            returned = results.hits.len(),
+            total = results.total,
+            "searched every private conversation"
+        );
+
+        Ok(results)
+    }
 }
 
-/// Reads the identifiers and the total off a search response.
+/// Reads the messages and the total off a search response.
 ///
-/// Extracted so that the only real logic in this module is testable without a
-/// client: the four response variants differ in where the total comes from, and
-/// the unsliced one is the case that would otherwise read as zero — or panic —
-/// on a conversation small enough to fit one page.
-fn results_from(response: tl::enums::messages::Messages) -> SearchResults {
+/// Shared by the per-conversation and the global answer: the four response
+/// variants differ in where the total comes from, and the unsliced one is the
+/// case that would otherwise read as zero — or panic — on a conversation small
+/// enough to fit one page.
+fn page_of(response: tl::enums::messages::Messages) -> (Vec<tl::enums::Message>, usize) {
     use tl::enums::messages::Messages;
 
-    let (raw, total) = match response {
+    match response {
         // Unsliced: every match fits one page, and carries no `count` field.
         Messages::Messages(page) => {
             let total = page.messages.len();
@@ -237,12 +325,52 @@ fn results_from(response: tl::enums::messages::Messages) -> SearchResults {
         // aborts on a panic, so an answer this build cannot read yields an empty
         // list and the count it did carry rather than crashing the process.
         Messages::NotModified(page) => (Vec::new(), count_of(page.count)),
-    };
+    }
+}
+
+/// Reads the identifiers and the total off a per-conversation search response.
+fn results_from(response: tl::enums::messages::Messages) -> SearchResults {
+    let (raw, total) = page_of(response);
 
     let ids: Vec<i32> = raw.into_iter().map(|message| message.id()).collect();
     let total = total.max(ids.len());
 
     SearchResults { ids, total }
+}
+
+/// Reads the hits and the total off a global search response.
+fn global_hits_from(response: tl::enums::messages::Messages) -> GlobalSearchResults {
+    let (raw, total) = page_of(response);
+
+    let hits: Vec<GlobalHit> = raw.into_iter().filter_map(hit_of).collect();
+    let total = total.max(hits.len());
+
+    GlobalSearchResults { hits, total }
+}
+
+/// Describes a message as a hit, if it has text to show.
+///
+/// Empty and service messages are not hits: neither carries text. They still
+/// count in the total, because Telegram counted them.
+fn hit_of(message: tl::enums::Message) -> Option<GlobalHit> {
+    let tl::enums::Message::Message(message) = message else {
+        return None;
+    };
+
+    Some(GlobalHit {
+        chat_id: bare_id_of(&message.peer_id),
+        message_id: message.id,
+        text: message.message,
+    })
+}
+
+/// The bare identifier of a peer, the same number `grammers` reports as one.
+fn bare_id_of(peer: &tl::enums::Peer) -> i64 {
+    match peer {
+        tl::enums::Peer::User(peer) => peer.user_id,
+        tl::enums::Peer::Chat(peer) => peer.chat_id,
+        tl::enums::Peer::Channel(peer) => peer.channel_id,
+    }
 }
 
 /// Narrows a wire count into a length.
@@ -393,5 +521,52 @@ mod tests {
             "a count that disagreed with the page is raised to the page"
         );
         assert_eq!(results_from(sliced(&[], 0)).total, 0);
+    }
+
+    #[test]
+    fn a_global_hit_names_the_conversation_of_each_peer_kind() {
+        assert_eq!(
+            bare_id_of(&tl::enums::Peer::User(tl::types::PeerUser { user_id: 42 })),
+            42
+        );
+        assert_eq!(
+            bare_id_of(&tl::enums::Peer::Chat(tl::types::PeerChat { chat_id: 7 })),
+            7
+        );
+        assert_eq!(
+            bare_id_of(&tl::enums::Peer::Channel(tl::types::PeerChannel {
+                channel_id: 9
+            })),
+            9
+        );
+    }
+
+    /// An empty message carries no text, so it is counted but is not a hit.
+    #[test]
+    fn a_message_without_text_is_counted_but_not_a_hit() {
+        let response = tl::enums::messages::Messages::Slice(tl::types::messages::MessagesSlice {
+            inexact: false,
+            count: 4,
+            next_rate: None,
+            offset_id_offset: None,
+            search_flood: None,
+            messages: vec![empty(3), empty(2)],
+            topics: Vec::new(),
+            chats: Vec::new(),
+            users: Vec::new(),
+        });
+
+        let results = global_hits_from(response);
+
+        assert!(results.hits.is_empty(), "nothing to show");
+        assert_eq!(results.total, 4, "Telegram counted them, so the total does");
+    }
+
+    #[test]
+    fn an_empty_global_answer_is_an_empty_result() {
+        let results = global_hits_from(unsliced(&[]));
+
+        assert!(results.hits.is_empty());
+        assert_eq!(results.total, 0);
     }
 }
