@@ -341,7 +341,7 @@ pub fn continues(previous: &Message, current: &Message) -> bool {
         && current.reply_to.is_none()
         && date::has_time(previous.timestamp)
         && date::has_time(current.timestamp)
-        && date::day_key(previous.timestamp) == date::day_key(current.timestamp)
+        && date::day_key(previous.timestamp, 0) == date::day_key(current.timestamp, 0)
         && current.timestamp.saturating_sub(previous.timestamp) <= GROUP_MIN
 }
 
@@ -453,7 +453,7 @@ fn group_is_waiting(window: &ConversationWindow, index: usize) -> bool {
 /// layout walks the window with this to notice where the day changed.
 #[must_use]
 pub fn day_of(timestamp: i64) -> Option<i64> {
-    date::day_key(timestamp)
+    date::day_key(timestamp, 0)
 }
 
 /// Whether a separator is due in front of a message of this day.
@@ -480,11 +480,11 @@ pub fn opens_day(timestamp: i64, after: Option<i64>) -> bool {
 /// which is a fact about the message rather than about when it is being read.
 #[must_use]
 pub fn separator_label(timestamp: i64, now: i64) -> Cow<'static, str> {
-    if let Some(relative) = date::day_label(timestamp, now) {
+    if let Some(relative) = date::day_label(timestamp, now, 0) {
         return relative;
     }
 
-    let date = date::civil_from_timestamp(timestamp);
+    let date = date::civil_from_timestamp(timestamp, 0);
     let month = MONTHS
         .get(usize::try_from(date.month).expect("month of a civil date is 1-12") - 1)
         .expect("month names cover 1-12");
@@ -719,7 +719,7 @@ pub(crate) fn trailing_note(app: &App, message: &Message, grouped: Grouped) -> O
             note.push_str("  ");
             note.push_str(receipt);
         }
-        if let Some(time) = date::clock(message.timestamp) {
+        if let Some(time) = date::clock(message.timestamp, 0) {
             note.push_str("  ");
             note.push_str(&time);
         }
@@ -1216,7 +1216,7 @@ mod tests {
     /// 00:01 are two groups an hour apart.
     #[test]
     fn a_day_boundary_starts_a_group() {
-        let midnight = date::day_key(AT + 86_400).expect("a day key");
+        let midnight = date::day_key(AT + 86_400, 0).expect("a day key");
         let last_of_the_day = midnight * 86_400 - 1;
         let app = holding(vec![
             at(1, last_of_the_day, false),
@@ -1488,7 +1488,7 @@ mod tests {
             .get(1)
             .expect("the window holds it")
             .clone();
-        let time = date::clock(message.timestamp).expect("the fixture has a time");
+        let time = date::clock(message.timestamp, 0).expect("the fixture has a time");
 
         assert_eq!(
             trailing_note(&read, &message, group_of(&read, 1)).as_deref(),
@@ -2022,7 +2022,7 @@ mod tests {
             .get(0)
             .expect("the window holds it")
             .clone();
-        let time = date::clock(sent.timestamp).expect("the sample messages have a time");
+        let time = date::clock(sent.timestamp, 0).expect("the sample messages have a time");
         let alone = Grouped::alone();
         let within = Grouped {
             first: false,

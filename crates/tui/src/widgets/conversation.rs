@@ -1135,7 +1135,7 @@ mod tests {
 
     /// The `HH:MM` a message `seconds` after [`AT`] shows.
     fn clock_at(seconds: i64) -> String {
-        crate::date::clock(AT + seconds).expect("a moment in a day has a clock")
+        crate::date::clock(AT + seconds, 0).expect("a moment in a day has a clock")
     }
 
     /// The day a message `seconds` after [`AT`] is named by, with no clock
