@@ -3962,6 +3962,106 @@ mod tests {
         assert_eq!(read_target(&app, &state), None);
     }
 
+    /// Shows `CHAT`'s card over the open conversation, as the chat list does when
+    /// the highlight stops on the chat that is already open.
+    fn card_over_the_open_chat(app: &mut App) {
+        app.ui.pane = tui::app::Pane::Profile(tui::app::ProfileId::User(CHAT));
+    }
+
+    #[test]
+    fn a_card_only_show_marks_nothing_and_keeps_the_count_until_confirm() {
+        let mut app = listed(2, Some(20));
+        let mut state = State::default();
+        card_over_the_open_chat(&mut app);
+
+        assert_eq!(
+            read_target(&app, &state),
+            None,
+            "the card alone asks for nothing"
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 21..=21).remove(0))),
+        );
+
+        assert_eq!(
+            state.read_on_arrival,
+            Some(CHAT),
+            "the arrival is kept, not spent on a refused marker"
+        );
+        assert_eq!(read_target(&app, &state), None);
+        assert_eq!(
+            app.chats()[0].unread_count,
+            3,
+            "the arrival is counted, not read"
+        );
+
+        // Backing out of the card puts the conversation back on show, and the
+        // arrival it was owed is then the marker's to ask for.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
+    }
+
+    #[test]
+    fn confirming_the_card_marks_the_conversation_as_an_open_does() {
+        let mut app = listed(2, Some(20));
+        let mut state = State::default();
+        card_over_the_open_chat(&mut app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.ui.pane, tui::app::Pane::Conversation);
+        assert_eq!(app.conversation.conversation.window.chat_id, CHAT);
+        assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ReadMarked {
+                chat_id: CHAT,
+                max_id: 20,
+            },
+        );
+        assert_eq!(app.chats()[0].unread_count, 0);
+    }
+
+    #[test]
+    fn confirming_after_an_arrival_marks_once_with_the_newest_message() {
+        let mut app = listed(2, Some(20));
+        let mut state = State::default();
+        card_over_the_open_chat(&mut app);
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 21..=21).remove(0))),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            read_target(&app, &state),
+            Some((CHAT, 21)),
+            "the confirm asks for the newest message, once"
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ReadMarked {
+                chat_id: CHAT,
+                max_id: 21,
+            },
+        );
+
+        assert_eq!(app.chats()[0].unread_count, 0);
+        assert_eq!(
+            read_target(&app, &state),
+            None,
+            "a second drive after the single accepted marker sends nothing"
+        );
+    }
+
     #[test]
     fn an_arrival_with_no_client_sends_nothing_and_is_not_carried_forward() {
         let mut app = listed(0, Some(3));

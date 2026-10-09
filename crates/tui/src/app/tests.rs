@@ -796,6 +796,27 @@ fn a_settled_highlight_shows_the_card_not_the_conversation() {
     );
 }
 
+/// Enter on the card is the confirm: the chat it is about is opened as choosing
+/// it from the list would open it, and the card is put away.
+#[test]
+fn enter_on_the_card_opens_its_conversation() {
+    let mut app = on_the_chat_list();
+    app.handle_key(press(KeyCode::Char('j')));
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(app.ui.pane, Pane::Profile(ProfileId::User(2)));
+    assert_ne!(
+        app.conversation.conversation.window.chat_id, 2,
+        "the card alone does not open the conversation"
+    );
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.conversation.conversation.window.chat_id, 2);
+    assert_eq!(app.ui.pane, Pane::Conversation);
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert_eq!(app.list.selected_chat, 1);
+}
+
 /// A movement in one pane must not answer for the other: the sample
 /// conversation's `k` walks messages, and the list's walks conversations.
 #[test]
