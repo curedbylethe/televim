@@ -220,6 +220,9 @@ pub const JUMP_BACK_LABEL: &str = "Jumping back…";
 /// What is said while a jump forward through it is.
 pub const JUMP_FORWARD_LABEL: &str = "Jumping forward…";
 
+/// What is said while a jump to a message a global search found is on its way.
+pub const JUMP_SEARCH_LABEL: &str = "Jumping…";
+
 /// `gd` on a message that quotes nothing.
 pub const NOT_A_REPLY: &str = "Not a reply: gd jumps to the message a reply quotes.";
 
@@ -237,6 +240,8 @@ pub enum JumpKind {
     Reply,
     Back,
     Forward,
+    /// A message a global search found, which the window does not hold.
+    Search,
 }
 
 impl JumpKind {
@@ -252,6 +257,7 @@ impl JumpKind {
             Self::Reply => JUMP_REPLY_LABEL,
             Self::Back => JUMP_BACK_LABEL,
             Self::Forward => JUMP_FORWARD_LABEL,
+            Self::Search => JUMP_SEARCH_LABEL,
         }
     }
 }
@@ -1067,6 +1073,13 @@ pub struct App {
 
     /// Per-peer parked drafts and read receipts.
     pub drafts: DraftStore,
+
+    /// The pane the global search was raised from, which `Esc` returns focus to.
+    ///
+    /// Recorded on each key while no search is up, because the prompt moves the
+    /// focus to the line and leaving the line puts it on the conversation: by the
+    /// time the overlay is up the origin would otherwise be lost.
+    pub global_origin: Focus,
 }
 
 impl Default for App {
@@ -1093,6 +1106,7 @@ impl App {
             conversation: ConversationState::new(),
             input: InputState::new(),
             drafts: DraftStore::new(),
+            global_origin: Focus::ChatList,
         }
     }
 
@@ -2107,6 +2121,9 @@ impl App {
         let is_contact = matches!(self.card_subject(), crate::card::CardSubject::Contact(_));
         let cursor = self.profile_cursor();
         let layout = self.row_layout();
+        if !self.conversation.global_search.is_active() && self.ui.focus != Focus::Input {
+            self.global_origin = self.ui.focus;
+        }
         let opened = coordinate::handle_key(
             &mut self.ui,
             &mut self.session,
@@ -2122,6 +2139,7 @@ impl App {
             is_contact,
             cursor,
             &layout,
+            self.global_origin,
             key,
         );
         if opened {
@@ -2409,6 +2427,9 @@ impl App {
         // The forward picker is drawn over the conversation column it forwards
         // from, above the messages and the bar, and below the status line.
         widgets::forward_picker::render(self, horizontal[1], frame);
+        // The global search covers the body, rows above the status line, so the
+        // panes are not drawn behind it: it is given the whole frame.
+        widgets::global_list::render(self, area, frame);
         widgets::status_bar::render(self, vertical[2], frame);
     }
 

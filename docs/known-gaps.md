@@ -51,6 +51,12 @@ Real, and named so they are not mistaken for oversights:
     opener's exit code.
   - *Windows is untested.* `cmd /C start` returns without waiting, so the terminal is
     back at once there. No Windows leg runs in CI.
+- **Global search shows only the first page, capped at 100 hits.** `?` and
+  `:search` ask the server once. The overlay keeps the oldest 100 matches, and the
+  status line says `100 of <total>` when there are more; there is no way to page
+  past them (server pagination is not built). There is no local pre-pass, so a
+  match that exists only in the local cache and is not on the server's first page
+  does not appear.
 - **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
   between a contact's `name` and `username`, draws nothing, is not selectable, is
   not something `d` can act on, is skipped by a yank, and is neither counted nor

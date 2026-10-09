@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
+use domain::global_search::GlobalSearchState;
 use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
 use domain::message::Message;
 use domain::search::word_prefix_match;
@@ -3164,6 +3165,10 @@ pub(crate) fn handle_normal(
         // on both panes before this, so it is a free key rather than an
         // overload of `/`, which keeps its per-pane meaning.
         '?' => {
+            if conversation.user_search.is_active() {
+                ui.flash("close the new-chat list first (Esc)");
+                return false;
+            }
             ui.set_focus(Focus::Input);
             input.line.open(PromptKind::GlobalSearch);
             false
@@ -3266,6 +3271,10 @@ pub(crate) fn handle_chat_list(
         // from a conversation: the same prompt, so the two cannot drift apart.
         KeyCode::Char('?') => {
             pending.set_g(false);
+            if conversation.user_search.is_active() {
+                ui.flash("close the new-chat list first (Esc)");
+                return false;
+            }
             ui.set_focus(Focus::Input);
             input.line.open(PromptKind::GlobalSearch);
             false
@@ -3595,6 +3604,200 @@ pub(crate) fn handle_user_search(
     true
 }
 
+/// Handles a key while the global search overlay is up.
+///
+/// `j`/`k` and the arrows walk the messages, `{` and `}` walk the chat headers,
+/// `gg` and `G` reach the ends, `Enter` opens the cursor's chat at that message,
+/// and `Esc` closes the overlay and forgets the query. Every other key is refused
+/// silently: the overlay owns them all, and no key here writes to a chat.
+fn handle_global_search(
+    ui: &mut UiState,
+    list: &mut ChatListState,
+    outbox: &mut Outbox,
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    drafts: &mut DraftStore,
+    profile: &mut ProfileCard,
+    origin: Focus,
+    key: KeyEvent,
+) {
+    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    // `gg` is two keys: the first arms the pending `g`, and any other key
+    // disarms it.
+    let armed = pending.pending_g;
+    pending.set_g(false);
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => conversation.global_search.move_selection(1),
+        KeyCode::Char('k') | KeyCode::Up => conversation.global_search.move_selection(-1),
+        KeyCode::Char('{') if plain => step_chat(&mut conversation.global_search, false),
+        KeyCode::Char('}') if plain => step_chat(&mut conversation.global_search, true),
+        KeyCode::Char('g') if plain => {
+            if armed {
+                let selected = conversation.global_search.selected();
+                conversation
+                    .global_search
+                    .move_selection(-to_isize(selected));
+            } else {
+                pending.set_g(true);
+            }
+        }
+        KeyCode::Char('G') if plain => {
+            let search = &mut conversation.global_search;
+            let rest = search.len().saturating_sub(search.selected() + 1);
+            search.move_selection(to_isize(rest));
+        }
+        KeyCode::Enter if plain => accept_global_search(
+            &mut *ui,
+            &mut *list,
+            &mut *outbox,
+            &mut *pending,
+            &mut *conversation,
+            &mut *input,
+            &mut *drafts,
+            &mut *profile,
+        ),
+        KeyCode::Esc => dismiss_global_search(
+            &mut *ui,
+            &mut *conversation,
+            &mut *input,
+            &mut *profile,
+            origin,
+        ),
+        _ => {}
+    }
+}
+
+/// Moves the global selection to the previous or next chat header.
+///
+/// Backward goes to the header of the chat the cursor is in when the cursor is
+/// past it, and to the one before otherwise, as a paragraph motion does. Forward
+/// stops at the last chat rather than wrapping.
+fn step_chat(search: &mut GlobalSearchState, forward: bool) {
+    let selected = search.selected();
+    let groups = search.groups();
+    let Some(current) = groups
+        .iter()
+        .rposition(|group| group.first_index <= selected)
+    else {
+        return;
+    };
+    let target = if forward {
+        groups.get(current + 1).map(|group| group.first_index)
+    } else if selected > groups[current].first_index {
+        Some(groups[current].first_index)
+    } else {
+        current
+            .checked_sub(1)
+            .map(|previous| groups[previous].first_index)
+    };
+
+    if let Some(target) = target {
+        search.move_selection(to_isize(target) - to_isize(selected));
+    }
+}
+
+/// Opens the cursor's chat at the cursor's message, and closes the overlay.
+///
+/// A message already on screen in the open chat is a cursor move. Otherwise the
+/// chat is selected the way `:chat` selects it, so read-marking follows the same
+/// rule as opening a chat by any other route, and the message is landed on as
+/// `gd` lands on a quoted one: selecting a chat empties its window, so the page
+/// around the message is fetched with a jump.
+fn accept_global_search(
+    ui: &mut UiState,
+    list: &mut ChatListState,
+    outbox: &mut Outbox,
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    drafts: &mut DraftStore,
+    profile: &mut ProfileCard,
+) {
+    let Some(hit) = conversation.global_search.selected_hit().cloned() else {
+        return;
+    };
+    conversation.global_search.clear();
+    conversation.global_dropped = 0;
+
+    let on_screen = conversation.conversation.window.chat_id == hit.chat_id
+        && conversation
+            .conversation
+            .window
+            .position_of(hit.message_id)
+            .is_some();
+    if on_screen {
+        set_focus(
+            &mut *ui,
+            &mut *conversation,
+            &mut *input,
+            &mut *profile,
+            Focus::Conversation,
+        );
+        go_to(
+            &mut *pending,
+            &mut *conversation,
+            hit.message_id,
+            JumpKind::Search,
+        );
+        return;
+    }
+
+    if !select_chat_by_id(
+        &mut *ui,
+        &mut *list,
+        &mut *outbox,
+        &mut *pending,
+        &mut *conversation,
+        &mut *input,
+        &mut *drafts,
+        hit.chat_id,
+    ) {
+        ui.flash("that chat is not in the list");
+        return;
+    }
+    go_to(
+        &mut *pending,
+        &mut *conversation,
+        hit.message_id,
+        JumpKind::Search,
+    );
+}
+
+/// Closes the global search overlay, forgets its query, and returns focus to the
+/// pane it was raised from.
+fn dismiss_global_search(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    profile: &mut ProfileCard,
+    origin: Focus,
+) {
+    conversation.global_search.clear();
+    conversation.global_dropped = 0;
+    set_focus(
+        &mut *ui,
+        &mut *conversation,
+        &mut *input,
+        &mut *profile,
+        origin,
+    );
+}
+
+/// Whether `key` opens a prompt (`/`, `:` or `?`), which the global overlay lets
+/// through to the pane rather than answering itself.
+fn opens_prompt(key: KeyEvent) -> bool {
+    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    plain && matches!(key.code, KeyCode::Char('/' | ':' | '?'))
+}
+
+/// A count as the signed step the selection moves by. A count too large for it
+/// is not a count any search holds, so it saturates rather than wraps.
+fn to_isize(count: usize) -> isize {
+    isize::try_from(count).unwrap_or(isize::MAX)
+}
+
 /// Keys something else owns before the panes see them: a jump in flight, the
 /// completion, the new-conversation overlay.
 ///
@@ -3608,6 +3811,7 @@ fn intercept_key(
     input: &mut InputState,
     drafts: &mut DraftStore,
     profile: &mut ProfileCard,
+    origin: Focus,
     key: KeyEvent,
 ) -> bool {
     // A jump in flight is a page on its way to replace the window under the
@@ -3656,6 +3860,27 @@ fn intercept_key(
             key,
         )
     {
+        return true;
+    }
+
+    // The global search overlay owns every key while it is up: a key that reached
+    // a pane could move the cursor out from under the list or write to a chat.
+    // The prompt has the focus while a query is typed, so the line keeps its keys.
+    // `/`, `:` and `?` are the exception: they open a prompt and write nothing, and
+    // `/` keeps its meaning on each pane whether or not a global search is up.
+    if ui.focus != Focus::Input && conversation.global_search.is_active() && !opens_prompt(key) {
+        handle_global_search(
+            &mut *ui,
+            &mut *list,
+            &mut *outbox,
+            &mut *pending,
+            &mut *conversation,
+            &mut *input,
+            &mut *drafts,
+            &mut *profile,
+            origin,
+            key,
+        );
         return true;
     }
 
@@ -3861,6 +4086,7 @@ pub(crate) fn handle_key(
     is_contact: bool,
     cursor: usize,
     layout: &[RowSpan],
+    origin: Focus,
     key: KeyEvent,
 ) -> bool {
     if let Some(answered) = preempt_key(
@@ -3887,6 +4113,7 @@ pub(crate) fn handle_key(
         &mut *input,
         &mut *drafts,
         &mut *profile,
+        origin,
         key,
     ) {
         return false;
