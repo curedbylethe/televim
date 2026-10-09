@@ -57,6 +57,15 @@ Working today:
   the way back, because there is nothing to its left for the motion to reach. Pane
   movement is `Ctrl-w h`/`Ctrl-w l`, since `h`/`l` are a motion; `Ctrl-w l` says
   nothing is drawn to the right of a card.
+  A card opens from the chat list without replacing the conversation. Stopping on a
+  chat after moving the highlight shows its card in the conversation's rectangle,
+  and focus stays where it was, so `j`/`k` keep moving the list. `Enter` on the list
+  shows the same card and moves focus to it. `Enter` on the card **confirms**: the
+  conversation opens through the same path as choosing the chat from the list, and
+  the card goes. A card for someone with no chat in the list, such as a user-search
+  result, has nothing to open, so `Enter` leaves it on show. `Esc` closes the card
+  and leaves the conversation as it was. `S` is unchanged and shows the account's own
+  card.
   A row exists **only when the peer says something**, so a birthday a privacy
   setting hides is a row that is not there rather than one reading "not set", and
   the title's `(n/m)` is what tells a reader a row went. `y` with no selection is
@@ -115,14 +124,19 @@ Working today:
   wait and the count on the status line each time — and `:retry` asks again.
 - **Chat List:** private chats only, filtered to exclude bots, groups and
   channels, with unread counts and last-message previews. `j`/`k` move the
-  highlight, `gg`/`G` reach both ends, and `Enter` opens the highlighted
-  conversation. `:chat <id>` still works. Moving the highlight opens the
-  conversation it lands on, once the reader has stopped moving — a held key would
-  otherwise fetch every chat it scrolled past. Opening a conversation that has
-  unread messages tells Telegram it is read, up to the newest message the list
-  knows of, and the count clears once Telegram accepts that; a refused marker
-  leaves the count where it was, and the next open asks again. A message that
-  arrives in the conversation on show is marked read the same way, and a read
+  highlight, `gg`/`G` reach both ends, and `Enter` shows the highlighted chat's
+  profile card, which `Enter` in turn confirms into the conversation (see the
+  profile card above). `:chat <id>` still works. Moving the
+  highlight shows the card of the chat it lands on, once the reader has stopped
+  moving — a held key would otherwise fetch the card of every chat it scrolled
+  past, and the conversation itself is neither opened nor marked by browsing.
+  Confirming a chat that has unread messages tells Telegram it is read, up to the
+  newest message the list knows of, and the count clears once Telegram accepts
+  that; a refused marker leaves the count where it was, and the next open asks
+  again. While any card covers the conversation nothing is marked: the mark waits
+  for the card to be confirmed or closed. A message that arrives in the
+  conversation on show is marked read the same way, and one that arrives under a
+  card is kept and marked on the pass after `Esc`; a read
   done on another device sets the count to whatever Telegram still counts as
   unread. `p` pins the highlighted chat, or
   unpins it; the pin is kept by Telegram, so it survives a restart, and pinned
