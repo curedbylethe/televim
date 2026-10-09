@@ -3329,6 +3329,8 @@ fn private_hits(chats: &[Chat], hits: Vec<proto::search::GlobalHit>) -> (Vec<Glo
             // The DTO carries no attachment kind yet, so a media-only hit has no
             // text to show. Known gap; not a drop.
             media: None,
+            sent_at: hit.sent_at,
+            outgoing: hit.outgoing,
         })
         .collect();
     let dropped = total - kept.len();
@@ -7147,6 +7149,8 @@ mod tests {
                     chat_id,
                     message_id,
                     text: text.to_owned(),
+                    sent_at: 0,
+                    outgoing: false,
                 })
                 .collect(),
             total,

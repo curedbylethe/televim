@@ -53,6 +53,12 @@ pub struct GlobalHit {
 
     /// The message text, untruncated.
     pub text: String,
+
+    /// When the message was sent, as unix seconds.
+    pub sent_at: i64,
+
+    /// Whether the signed-in account sent the message.
+    pub outgoing: bool,
 }
 
 /// The matches of a global search, and how many there are in all.
@@ -361,6 +367,8 @@ fn hit_of(message: tl::enums::Message) -> Option<GlobalHit> {
         chat_id: bare_id_of(&message.peer_id),
         message_id: message.id,
         text: message.message,
+        sent_at: i64::from(message.date),
+        outgoing: message.out,
     })
 }
 
@@ -560,6 +568,72 @@ mod tests {
 
         assert!(results.hits.is_empty(), "nothing to show");
         assert_eq!(results.total, 4, "Telegram counted them, so the total does");
+    }
+
+    /// A plain text message from user 42, with the given direction and send time.
+    fn text_message(id: i32, date: i32, out: bool, text: &str) -> tl::enums::Message {
+        tl::enums::Message::Message(tl::types::Message {
+            out,
+            mentioned: false,
+            media_unread: false,
+            silent: false,
+            post: false,
+            from_scheduled: false,
+            legacy: false,
+            edit_hide: false,
+            pinned: false,
+            noforwards: false,
+            invert_media: false,
+            offline: false,
+            video_processing_pending: false,
+            paid_suggested_post_stars: false,
+            paid_suggested_post_ton: false,
+            id,
+            from_id: None,
+            from_boosts_applied: None,
+            from_rank: None,
+            peer_id: tl::enums::Peer::User(tl::types::PeerUser { user_id: 42 }),
+            saved_peer_id: None,
+            fwd_from: None,
+            via_bot_id: None,
+            via_business_bot_id: None,
+            guestchat_via_from: None,
+            reply_to: None,
+            date,
+            message: text.to_owned(),
+            media: None,
+            reply_markup: None,
+            entities: None,
+            views: None,
+            forwards: None,
+            replies: None,
+            edit_date: None,
+            post_author: None,
+            grouped_id: None,
+            reactions: None,
+            restriction_reason: None,
+            ttl_period: None,
+            quick_reply_shortcut_id: None,
+            effect: None,
+            factcheck: None,
+            report_delivery_until_date: None,
+            paid_message_stars: None,
+            suggested_post: None,
+            schedule_repeat_period: None,
+            summary_from_language: None,
+            rich_message: None,
+        })
+    }
+
+    #[test]
+    fn a_global_hit_carries_its_send_time_and_direction() {
+        let outgoing = hit_of(text_message(5, 1_700_000_000, true, "mine")).expect("has text");
+        assert_eq!(outgoing.sent_at, 1_700_000_000);
+        assert!(outgoing.outgoing);
+
+        let incoming = hit_of(text_message(6, 1_700_000_000, false, "theirs")).expect("has text");
+        assert_eq!(incoming.sent_at, 1_700_000_000);
+        assert!(!incoming.outgoing);
     }
 
     #[test]
