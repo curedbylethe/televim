@@ -218,7 +218,7 @@ impl Client {
     /// A peer with no `access_hash` cannot be addressed at all, so it is not
     /// worth storing: a `min` user, or a `userEmpty`, is reported that way, and
     /// caching one would only take a slot that says nothing.
-    async fn remember_peer(&self, info: PeerInfo) {
+    pub(crate) async fn remember_peer(&self, info: PeerInfo) {
         if info.auth().is_none() {
             return;
         }
@@ -537,6 +537,33 @@ mod tests {
         assert!(
             info.auth().is_some(),
             "an addressable user must carry an access hash"
+        );
+    }
+
+    /// A global search answer names the conversation of each hit, so the peer it
+    /// names must be addressable once the answer is in. The user helper lives in
+    /// this module, which is why the test does too; the seeding is the one the
+    /// search runs before it returns.
+    #[tokio::test]
+    async fn a_search_answer_leaves_its_peers_in_the_cache() {
+        let client = crate::client::ClientBuilder::new(1, "hash")
+            .session_store(Box::new(crate::session::MemoryStore::new()))
+            .build()
+            .await
+            .expect("a client builds without a network");
+        assert!(client.peer_ref(42).is_none(), "nothing is cached yet");
+
+        let response = tl::enums::messages::Messages::Messages(tl::types::messages::Messages {
+            messages: Vec::new(),
+            topics: Vec::new(),
+            chats: Vec::new(),
+            users: vec![user(42, Some("Ada"), None, Some("ada"), false)],
+        });
+        client.remember_answer_peers(&response).await;
+
+        assert!(
+            client.peer_ref(42).is_some(),
+            "a peer the answer named can be opened"
         );
     }
 }
