@@ -80,6 +80,11 @@ sha2 = "0.10.9"
 # on every platform; on Linux the Secret Service backend needs `libdbus`.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 
+# One use: the machine's UTC offset, read in `app::runtime` and handed to `tui` as
+# seconds. `local-offset` is the feature that reads it. Already in the lockfile
+# via ratatui-widgets, so the tree gains no crate.
+time = { version = "0.3.55", features = ["local-offset"] }
+
 # Session file encryption, in `telegram-framework::sealed`. AES-256-GCM-SIV is
 # nonce-misuse-resistant (RFC 8452) and shares the `aes` build already in the
 # lockfile; Argon2id stretches a passphrase into the file key. Both are pure

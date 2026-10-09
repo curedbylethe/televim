@@ -326,7 +326,7 @@ fn contact_rows(app: &App) -> Vec<CardRow> {
     let presence = app
         .peer_presence(contact.peer_id)
         .or(account.presence)
-        .and_then(|presence| wording(presence, app.now()));
+        .and_then(|presence| wording(presence, app.now(), app.offset()));
     if let Some(status) = presence {
         rows.push(CardRow::value("status", status));
     }

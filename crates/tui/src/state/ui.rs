@@ -103,6 +103,12 @@ pub struct FrameMetrics {
     /// recorded, which the day labels read as "say the date rather than `Today`"
     /// rather than as 1970.
     pub now: Cell<i64>,
+
+    /// The reader's UTC offset in seconds, as of the last frame, read with
+    /// [`Self::now`] in the same pass so the two always name one zone and one
+    /// instant. Zero means UTC, which is also what it reads before the host
+    /// records one.
+    pub offset: Cell<i64>,
 }
 
 /// Dispatch mode, focus, and the chrome around the conversation.
@@ -221,6 +227,7 @@ impl UiState {
                 rows: Cell::new(ASSUMED_ROWS),
                 body_width: Cell::new(ASSUMED_BODY_WIDTH),
                 now: Cell::new(0),
+                offset: Cell::new(0),
             },
         }
     }
@@ -401,8 +408,10 @@ impl UiState {
     ///
     /// Called by the host once a frame, alongside the other measurements it
     /// records: what a day is called depends on when it is being read, and
-    /// nothing here can know that.
-    pub(crate) fn record_now(&self, now: i64) {
+    /// nothing here can know that. `offset` is the zone it is read in, in seconds
+    /// east of UTC, resolved by the host for that same `now`.
+    pub(crate) fn record_now(&self, now: i64, offset: i64) {
         self.metrics.now.set(now);
+        self.metrics.offset.set(offset);
     }
 }

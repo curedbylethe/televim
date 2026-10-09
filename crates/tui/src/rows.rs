@@ -336,12 +336,12 @@ impl Grouped {
 /// against. A timed message after one is in the same position — the previous
 /// message is the one it would be measured against — and starts its own group.
 #[must_use]
-pub fn continues(previous: &Message, current: &Message) -> bool {
+pub fn continues(previous: &Message, current: &Message, offset: i64) -> bool {
     previous.is_outgoing == current.is_outgoing
         && current.reply_to.is_none()
         && date::has_time(previous.timestamp)
         && date::has_time(current.timestamp)
-        && date::day_key(previous.timestamp, 0) == date::day_key(current.timestamp, 0)
+        && date::day_key(previous.timestamp, offset) == date::day_key(current.timestamp, offset)
         && current.timestamp.saturating_sub(previous.timestamp) <= GROUP_MIN
 }
 
@@ -358,18 +358,19 @@ pub fn continues(previous: &Message, current: &Message) -> bool {
 #[must_use]
 pub fn group_of(app: &App, index: usize) -> Grouped {
     let window = &app.conversation.conversation.window;
+    let offset = app.offset();
     let Some(current) = window.get(index) else {
         return Grouped::alone();
     };
     let last = window
         .get(index + 1)
-        .is_none_or(|next| !continues(current, next));
+        .is_none_or(|next| !continues(current, next, offset));
 
     Grouped {
         first: index == 0
             || window
                 .get(index - 1)
-                .is_none_or(|previous| !continues(previous, current)),
+                .is_none_or(|previous| !continues(previous, current, offset)),
         last,
         receipt: if last {
             receipt_of(app, index)
@@ -403,7 +404,7 @@ fn receipt_of(app: &App, index: usize) -> Receipt {
 
     if !newest.is_outgoing
         || !matches!(newest.status, MessageStatus::Sent)
-        || group_is_waiting(window, index)
+        || group_is_waiting(window, index, app.offset())
     {
         return Receipt::None;
     }
@@ -421,7 +422,7 @@ fn receipt_of(app: &App, index: usize) -> Receipt {
 /// The group's own run, walked backwards from the message it ends on, so a group
 /// of fifty costs the same as a group of one and a window of two hundred costs one
 /// pass rather than one per message.
-fn group_is_waiting(window: &ConversationWindow, index: usize) -> bool {
+fn group_is_waiting(window: &ConversationWindow, index: usize, offset: i64) -> bool {
     let mut at = index;
 
     loop {
@@ -440,7 +441,7 @@ fn group_is_waiting(window: &ConversationWindow, index: usize) -> bool {
         let Some(previous) = window.get(previous_at) else {
             return false;
         };
-        if !continues(previous, current) {
+        if !continues(previous, current, offset) {
             return false;
         }
         at = previous_at;
@@ -452,8 +453,8 @@ fn group_is_waiting(window: &ConversationWindow, index: usize) -> bool {
 /// [`crate::date::day_key`] under a name that says what it is for here: the
 /// layout walks the window with this to notice where the day changed.
 #[must_use]
-pub fn day_of(timestamp: i64) -> Option<i64> {
-    date::day_key(timestamp, 0)
+pub fn day_of(timestamp: i64, offset: i64) -> Option<i64> {
+    date::day_key(timestamp, offset)
 }
 
 /// Whether a separator is due in front of a message of this day.
@@ -467,8 +468,8 @@ pub fn day_of(timestamp: i64) -> Option<i64> {
 /// first message of this one: a day boundary is a group break too, so this row and
 /// that break are the same seam rather than two rows for it.
 #[must_use]
-pub fn opens_day(timestamp: i64, after: Option<i64>) -> bool {
-    day_of(timestamp).is_some_and(|today| Some(today) != after)
+pub fn opens_day(timestamp: i64, after: Option<i64>, offset: i64) -> bool {
+    day_of(timestamp, offset).is_some_and(|today| Some(today) != after)
 }
 
 /// What a separator says.
@@ -479,12 +480,12 @@ pub fn opens_day(timestamp: i64, after: Option<i64>) -> bool {
 /// a clock this workspace does not have, so the label says the date instead —
 /// which is a fact about the message rather than about when it is being read.
 #[must_use]
-pub fn separator_label(timestamp: i64, now: i64) -> Cow<'static, str> {
-    if let Some(relative) = date::day_label(timestamp, now, 0) {
+pub fn separator_label(timestamp: i64, now: i64, offset: i64) -> Cow<'static, str> {
+    if let Some(relative) = date::day_label(timestamp, now, offset) {
         return relative;
     }
 
-    let date = date::civil_from_timestamp(timestamp, 0);
+    let date = date::civil_from_timestamp(timestamp, offset);
     let month = MONTHS
         .get(usize::try_from(date.month).expect("month of a civil date is 1-12") - 1)
         .expect("month names cover 1-12");
@@ -719,7 +720,7 @@ pub(crate) fn trailing_note(app: &App, message: &Message, grouped: Grouped) -> O
             note.push_str("  ");
             note.push_str(receipt);
         }
-        if let Some(time) = date::clock(message.timestamp, 0) {
+        if let Some(time) = date::clock(message.timestamp, app.offset()) {
             note.push_str("  ");
             note.push_str(&time);
         }
@@ -1085,8 +1086,8 @@ mod tests {
         assert_eq!(
             separators(&app),
             vec![
-                (0, separator_label(AT, 0).into_owned()),
-                (3, separator_label(AT + 86_400, 0).into_owned()),
+                (0, separator_label(AT, 0, 0).into_owned()),
+                (3, separator_label(AT + 86_400, 0, 0).into_owned()),
             ],
             "one separator per day, in order"
         );
@@ -1111,8 +1112,8 @@ mod tests {
 
             let last_of_yesterday = layout[row - 1].kind.index().expect("a message above it");
             assert_ne!(
-                day_of(stamped(&app, last_of_yesterday)),
-                day_of(stamped(&app, first_of_day)),
+                day_of(stamped(&app, last_of_yesterday), 0),
+                day_of(stamped(&app, first_of_day), 0),
                 "the two messages either side of row {row} are of different days"
             );
             assert_eq!(
@@ -1163,10 +1164,10 @@ mod tests {
     fn a_separator_label_is_relative_where_the_clock_is_known_and_absolute_where_it_is_not() {
         let now = AT;
 
-        assert_eq!(separator_label(now, now), "Today");
-        assert_eq!(separator_label(now - 86_400, now), "Yesterday");
+        assert_eq!(separator_label(now, now, 0), "Today");
+        assert_eq!(separator_label(now - 86_400, now, 0), "Yesterday");
         assert_eq!(
-            separator_label(now, 0),
+            separator_label(now, 0, 0),
             "Oct 27, 2024",
             "and with no clock recorded it says the date rather than `Today`"
         );
@@ -1180,6 +1181,55 @@ mod tests {
         let reloaded = holding(messages.clone());
 
         assert_eq!(holding(messages).row_layout(), reloaded.row_layout());
+    }
+
+    /// The day flip, through the layout and the groups together. At 00:00 UTC
+    /// on 2026-09-20 it is 05:30 in IST, so local midnight is 18:30 UTC on the
+    /// 19th: a message either side of it is one day in UTC and two in IST. The
+    /// separator, the group break and the clock all move with the zone, and agree.
+    #[test]
+    fn a_zone_east_of_utc_moves_the_day_break_the_group_and_the_clock_together() {
+        const UTC_MIDNIGHT: i64 = 1_789_862_400;
+        const IST: i64 = 19_800;
+        let local_midnight = UTC_MIDNIGHT - IST;
+        let messages = vec![
+            at(1, local_midnight - 60, false),
+            at(2, local_midnight + 60, false),
+        ];
+        let now = local_midnight + 120;
+
+        let utc = holding(messages.clone());
+        utc.record_now(now, 0);
+        assert_eq!(separators(&utc), vec![(0, "Today".to_owned())]);
+        assert!(
+            !group_of(&utc, 1).first,
+            "one day and within the window: one group"
+        );
+        assert_eq!(trailing_note(&utc, &messages[0], group_of(&utc, 0)), None);
+
+        let ist = holding(messages.clone());
+        ist.record_now(now, IST);
+        assert_eq!(
+            separators(&ist),
+            vec![(0, "Yesterday".to_owned()), (2, "Today".to_owned())],
+            "the break is at local midnight, and the labels are read in the same zone"
+        );
+        assert!(group_of(&ist, 1).first, "a new day starts a new group");
+        assert_eq!(
+            trailing_note(&ist, &messages[0], group_of(&ist, 0)).as_deref(),
+            Some("  23:59"),
+        );
+        assert_eq!(
+            trailing_note(&ist, &messages[1], group_of(&ist, 1)).as_deref(),
+            Some("  00:01"),
+        );
+
+        let queued = holding(vec![at(3, 0, true)]);
+        queued.record_now(now, IST);
+        assert!(
+            separators(&queued).is_empty(),
+            "a send with no time opens no day, in any zone"
+        );
     }
 
     /// Landing on the first message of a day — `gg`, a search, any move that puts

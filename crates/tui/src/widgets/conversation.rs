@@ -305,7 +305,7 @@ fn typing_note(app: &App) -> Option<&'static str> {
 /// restricted or unknown presence says nothing, so there is no note for it.
 fn presence_note(app: &App) -> Option<String> {
     let peer = app.conversation.conversation.window.chat_id;
-    let words = crate::presence::wording(app.peer_presence(peer)?, app.now())?;
+    let words = crate::presence::wording(app.peer_presence(peer)?, app.now(), app.offset())?;
     Some(format!(" · {words}"))
 }
 
@@ -1142,7 +1142,7 @@ mod tests {
     /// recorded: a date, which is a fact about the message rather than about when
     /// it is being read.
     fn day_at(seconds: i64) -> String {
-        rows::separator_label(AT + seconds, 0).into_owned()
+        rows::separator_label(AT + seconds, 0, 0).into_owned()
     }
 
     /// The cursor is on a message, and the panel's own selection is on the row the
@@ -3459,7 +3459,7 @@ mod tests {
             "no clock, no claim"
         );
 
-        app.record_now(AT);
+        app.record_now(AT, 0);
         let screen = screen(&app, 80, 24);
 
         assert_eq!(occurrences(&screen, "Yesterday"), 1);
@@ -4466,7 +4466,7 @@ mod tests {
         let app = peer_reporting(Presence::Offline {
             was_online: i32::try_from(SEEN).expect("the fixture fits a protocol timestamp"),
         });
-        app.record_now(NOW);
+        app.record_now(NOW, 0);
 
         assert!(
             row(&screen(&app, 80, 24), 0).contains("· last seen on Sep 20, 2026"),
