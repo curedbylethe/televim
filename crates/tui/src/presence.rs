@@ -18,7 +18,7 @@ pub fn wording(presence: Presence, now: i64) -> Option<String> {
     match presence {
         Presence::Online => Some("online".to_owned()),
         Presence::Offline { was_online } => {
-            day_label(i64::from(was_online), now).map(|day| match day.as_ref() {
+            day_label(i64::from(was_online), now, 0).map(|day| match day.as_ref() {
                 "Today" => "last seen today".to_owned(),
                 "Yesterday" => "last seen yesterday".to_owned(),
                 _ => format!("last seen on {day}"),
