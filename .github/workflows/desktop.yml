@@ -27,7 +27,7 @@ jobs:
     name: keyring round trip
     runs-on: [self-hosted, desktop]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -45,7 +45,7 @@ jobs:
     name: login / 2FA / pong against a real datacenter
     runs-on: [self-hosted, desktop]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
