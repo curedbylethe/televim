@@ -375,6 +375,11 @@ Real, and named so they are not mistaken for oversights:
   `connecting…`.** A warm launch lets the reader type into the cached
   conversation's draft before the wire answers; the draft is kept across the
   `Ready`, but the focus is settled by it, so the line can lose focus mid-word.
+- **Focus regain is proven against state, not a live terminal.** On `FocusLost`
+  and `FocusGained` the event loop clears the pending key latches, and a gain asks
+  for the keyboard flags again. Whether a given terminal reports focus, and whether
+  it resets the flags on blur, is not checked: nothing has run in one. Suspend
+  (`SIGTSTP`/`SIGCONT`) is not handled; it is job control, not a window blur.
 - **The history cache's worst case is past the memory budget.** Typically about a
   megabyte; with every cached message at Telegram's maximum length it is about
   80 MB in memory and a write briefly needs about three times that. The figures
