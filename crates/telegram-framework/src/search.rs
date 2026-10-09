@@ -60,8 +60,8 @@ pub struct GlobalHit {
     /// The attachment the message carries, if it carries one.
     pub media: Option<MediaKind>,
 
-    /// When the message was sent, as unix seconds.
-    pub sent_at: i64,
+    /// When the message was sent, as unix seconds; `None` when Telegram sent no date.
+    pub sent_at: Option<i64>,
 
     /// Whether the signed-in account sent the message.
     pub outgoing: bool,
@@ -405,7 +405,7 @@ fn hit_of(message: tl::enums::Message) -> Option<GlobalHit> {
         message_id: message.id,
         text: message.message,
         media,
-        sent_at: i64::from(message.date),
+        sent_at: crate::dialogs::message_timestamp(i64::from(message.date)),
         outgoing: message.out,
     })
 }
@@ -693,12 +693,18 @@ mod tests {
     #[test]
     fn a_global_hit_carries_its_send_time_and_direction() {
         let outgoing = hit_of(text_message(5, 1_700_000_000, true, "mine")).expect("has text");
-        assert_eq!(outgoing.sent_at, 1_700_000_000);
+        assert_eq!(outgoing.sent_at, Some(1_700_000_000));
         assert!(outgoing.outgoing);
 
         let incoming = hit_of(text_message(6, 1_700_000_000, false, "theirs")).expect("has text");
-        assert_eq!(incoming.sent_at, 1_700_000_000);
+        assert_eq!(incoming.sent_at, Some(1_700_000_000));
         assert!(!incoming.outgoing);
+
+        let undated = hit_of(text_message(7, 0, false, "no date")).expect("has text");
+        assert_eq!(
+            undated.sent_at, None,
+            "a zero date is no time, as in dialogs"
+        );
     }
 
     #[test]

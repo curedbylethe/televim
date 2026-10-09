@@ -59,8 +59,8 @@ pub struct GlobalHit {
     /// The attachment the message carries, if it carries one.
     pub media: Option<MediaKind>,
 
-    /// When the message was sent, as unix seconds.
-    pub sent_at: i64,
+    /// When the message was sent, as unix seconds; `None` when Telegram sent no date.
+    pub sent_at: Option<i64>,
 
     /// Whether the signed-in account sent the message.
     pub outgoing: bool,
@@ -282,7 +282,7 @@ mod live_tests {
             message_id,
             text: text.to_owned(),
             media: None,
-            sent_at: 1_700_000_000,
+            sent_at: Some(1_700_000_000),
             outgoing: false,
         }
     }
@@ -336,7 +336,7 @@ mod live_tests {
             hits: vec![
                 framework_hit(i64::MAX, i32::MAX, "x"),
                 telegram_framework::search::GlobalHit {
-                    sent_at: 1_700_000_001,
+                    sent_at: Some(1_700_000_001),
                     outgoing: true,
                     ..framework_hit(-5, 7, "y")
                 },
@@ -346,14 +346,14 @@ mod live_tests {
 
         assert_eq!(results.hits[0].chat_id, i64::MAX);
         assert_eq!(results.hits[0].message_id, i64::from(i32::MAX));
-        assert_eq!(results.hits[0].sent_at, 1_700_000_000);
+        assert_eq!(results.hits[0].sent_at, Some(1_700_000_000));
         assert!(
             !results.hits[0].outgoing,
             "an incoming message stays incoming"
         );
         assert_eq!(results.hits[1].chat_id, -5);
         assert_eq!(results.hits[1].message_id, 7);
-        assert_eq!(results.hits[1].sent_at, 1_700_000_001);
+        assert_eq!(results.hits[1].sent_at, Some(1_700_000_001));
         assert!(
             results.hits[1].outgoing,
             "an outgoing message stays outgoing"

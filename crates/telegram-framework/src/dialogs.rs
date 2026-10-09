@@ -383,7 +383,7 @@ fn read_outbox_max_id(raw: i32) -> i64 {
 ///
 /// An empty or service message carries no date, which `grammers` reports as
 /// zero — indistinguishable from 1970 without this.
-fn message_timestamp(raw: i64) -> Option<i64> {
+pub(crate) fn message_timestamp(raw: i64) -> Option<i64> {
     (raw > 0).then_some(raw)
 }
 
