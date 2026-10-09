@@ -8,8 +8,9 @@
 //!
 //! # Grouping
 //!
-//! Hits arrive oldest first, as [`crate::search`] keeps them. Grouping keeps
-//! that order and splits it into contiguous runs of one chat: a chat that the
+//! Hits arrive newest first, as the server sends global matches (unlike
+//! [`crate::search`], which keeps oldest first). Grouping keeps that order and
+//! splits it into contiguous runs of one chat: a chat that the
 //! server interleaves with another appears as two groups, not one. There is
 //! deliberately no per-chat cap; the total cap is the only limit.
 //!
@@ -75,7 +76,7 @@ pub struct ChatGroup<'a> {
     /// can map the selection onto the groups.
     pub first_index: usize,
 
-    /// The hits of the run, in server order.
+    /// The hits of the run, newest first, in server order.
     pub hits: &'a [GlobalHit],
 }
 
@@ -89,7 +90,7 @@ pub struct GlobalSearchState {
     /// The query, or empty when there has been no search.
     query: String,
 
-    /// The matches, oldest first, capped at [`SEARCH_MATCHES`].
+    /// The matches, newest first, capped at [`SEARCH_MATCHES`].
     hits: Vec<GlobalHit>,
 
     /// The selected hit, an index into `hits`, or zero on an empty list.
@@ -129,7 +130,7 @@ impl GlobalSearchState {
     ///
     /// Returns `false` when `query` is not the one being searched for, so an
     /// answer to a replaced query cannot overwrite the current one. The list is
-    /// capped at [`SEARCH_MATCHES`] keeping the oldest, and the total is never
+    /// capped at [`SEARCH_MATCHES`] keeping the newest, and the total is never
     /// less than what is held.
     pub fn adopt(&mut self, query: &str, mut hits: Vec<GlobalHit>, total: usize) -> bool {
         if !self.is_for(query) {
@@ -187,7 +188,7 @@ impl GlobalSearchState {
         self.in_flight
     }
 
-    /// The matches, oldest first, in server order.
+    /// The matches, newest first, in server order.
     #[must_use]
     pub fn hits(&self) -> &[GlobalHit] {
         &self.hits
@@ -225,6 +226,9 @@ impl GlobalSearchState {
 
     /// Moves the selection `delta` hits, wrapping at both ends.
     ///
+    /// The list is shown newest first, so `+1` moves toward older hits (down the
+    /// list) and `-1` toward newer ones (up the list).
+    ///
     /// Wrapping rather than clamping, as in the user search: a reader who has
     /// run off one end is reaching for the other. A move on an empty list does
     /// nothing.
@@ -242,7 +246,7 @@ impl GlobalSearchState {
         };
     }
 
-    /// The held hits split into runs of one chat, in server order.
+    /// The held hits split into runs of one chat, newest first, in server order.
     #[must_use]
     pub fn groups(&self) -> Vec<ChatGroup<'_>> {
         let mut groups = Vec::new();
@@ -333,7 +337,7 @@ mod tests {
 
     #[test]
     fn hits_group_into_contiguous_runs_in_server_order() {
-        let state = answered("x", vec![hit(1, 10), hit(1, 11), hit(2, 12), hit(1, 13)], 4);
+        let state = answered("x", vec![hit(1, 13), hit(1, 12), hit(2, 11), hit(1, 10)], 4);
 
         let groups = state.groups();
         let shape: Vec<(i64, usize, usize)> = groups
@@ -343,12 +347,12 @@ mod tests {
 
         // A chat the server interleaves with another is two groups, not one.
         assert_eq!(shape, vec![(1, 0, 2), (2, 2, 1), (1, 3, 1)]);
-        assert_eq!(groups[2].hits[0].message_id, 13);
+        assert_eq!(groups[2].hits[0].message_id, 10);
     }
 
     #[test]
     fn selection_wraps_at_both_ends() {
-        let mut state = answered("x", vec![hit(1, 1), hit(1, 2), hit(2, 3)], 3);
+        let mut state = answered("x", vec![hit(1, 3), hit(1, 2), hit(2, 1)], 3);
 
         state.move_selection(1);
         assert_eq!(state.selected(), 1);
@@ -409,16 +413,23 @@ mod tests {
     }
 
     #[test]
-    fn the_list_is_capped_keeping_the_oldest_and_the_total_is_reported() {
-        let state = answered("q", one_chat(SEARCH_MATCHES + 50), SEARCH_MATCHES + 50);
+    fn the_list_is_capped_keeping_the_newest_and_the_total_is_reported() {
+        let count = SEARCH_MATCHES + 50;
+        let newest_first: Vec<GlobalHit> = one_chat(count).into_iter().rev().collect();
+        let state = answered("q", newest_first, count);
 
+        // Ids run count down to 1 in server order; the cap keeps the first N,
+        // which are the newest N: count down to count - N + 1.
         assert_eq!(state.len(), SEARCH_MATCHES);
-        assert_eq!(state.hits()[0].message_id, 1);
+        assert_eq!(
+            state.hits()[0].message_id,
+            i64::try_from(count).expect("the count fits in an i64")
+        );
         assert_eq!(
             state.hits()[SEARCH_MATCHES - 1].message_id,
-            i64::try_from(SEARCH_MATCHES).expect("the cap fits in an i64")
+            i64::try_from(count - SEARCH_MATCHES + 1).expect("the cap fits in an i64")
         );
-        assert_eq!(state.total(), SEARCH_MATCHES + 50);
+        assert_eq!(state.total(), count);
     }
 
     #[test]
