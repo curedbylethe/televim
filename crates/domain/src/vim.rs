@@ -335,6 +335,15 @@ impl VimState {
         self.clamp();
     }
 
+    /// Drops a half-typed `g`, so the next key is read as a fresh one.
+    ///
+    /// Idempotent: on a state with no prefix pending it changes nothing. The
+    /// caller uses it where a key sequence can no longer finish, such as when the
+    /// terminal lost focus between the two presses.
+    pub fn clear_prefix(&mut self) {
+        self.pending_g = false;
+    }
+
     /// Feed a single character as if typed in Normal mode.
     ///
     /// Returns the motion the character applied, if it applied one: a character
@@ -459,6 +468,19 @@ mod tests {
         v.handle_char('G');
         assert_eq!(v.cursor(), 9);
         v.handle_char('g');
+        v.handle_char('g');
+        assert_eq!(v.cursor(), 0);
+    }
+
+    #[test]
+    fn clear_prefix_drops_a_half_typed_g() {
+        let mut v = VimState::new(10);
+        v.handle_char('G');
+        v.handle_char('g');
+        v.clear_prefix();
+        v.clear_prefix();
+        assert_eq!(v.handle_char('g'), None);
+        assert_eq!(v.cursor(), 9);
         v.handle_char('g');
         assert_eq!(v.cursor(), 0);
     }
