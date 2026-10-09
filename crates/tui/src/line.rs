@@ -2137,6 +2137,35 @@ mod tests {
         assert_eq!(line.status(), "INSERT");
     }
 
+    /// `O` is the library's own, and it opens above the row. It was checked
+    /// alongside `o` and has no defect: its newline goes at the row's start, so
+    /// no character moves. Pinned here so a change to it is seen.
+    #[test]
+    fn capital_o_opens_a_line_above_without_moving_a_character() {
+        let mut line = normal_with("hello");
+        keys(&mut line, "0ll");
+
+        keys(&mut line, "O");
+
+        assert_eq!(line.text(), "\nhello", "the row is kept whole");
+        assert_eq!(line.caret(), 0, "on the new empty line above");
+        assert_eq!(line.status(), "INSERT");
+    }
+
+    #[test]
+    fn capital_o_on_a_lower_row_opens_between_the_rows() {
+        let mut line = composing();
+        type_text(&mut line, "abc");
+        line.feed(combo(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        type_text(&mut line, "def");
+        line.feed(press(KeyCode::Esc));
+
+        keys(&mut line, "O");
+
+        assert_eq!(line.text(), "abc\n\ndef");
+        assert_eq!(line.caret(), 4, "on the new line between abc and def");
+    }
+
     /// `Esc` spends a pending `g` like any other key. A prefix that survived it
     /// would be waiting behind a mode the reader had already left, and the `g`
     /// of the next `gg` would be spent completing nothing.
