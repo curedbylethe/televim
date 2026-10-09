@@ -907,6 +907,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            media_id: None,
         }]);
         app.drafts.restore(vec![(7, "unsent".to_owned())]);
 

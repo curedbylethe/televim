@@ -377,6 +377,7 @@ mod tests {
                 is_outgoing: false,
                 reply_to: None,
                 media: None,
+                media_id: None,
             },
             Message {
                 id: 2,
@@ -387,6 +388,7 @@ mod tests {
                 is_outgoing: false,
                 reply_to: None,
                 media: None,
+                media_id: None,
             },
         ]);
         app

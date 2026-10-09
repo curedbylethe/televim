@@ -131,6 +131,7 @@ impl From<ProtoMessage> for Message {
             is_outgoing: message.is_outgoing,
             reply_to: message.reply_to,
             media: message.media,
+            media_id: None,
         }
     }
 }

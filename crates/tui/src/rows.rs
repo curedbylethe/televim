@@ -911,6 +911,7 @@ mod tests {
                 is_outgoing: false,
                 reply_to: None,
                 media: None,
+                media_id: None,
             };
             let len = message_rows(&app, &message, Grouped::alone(), width).len();
             spans.push(RowSpan {
@@ -981,6 +982,7 @@ mod tests {
             is_outgoing: outgoing,
             reply_to: None,
             media: None,
+            media_id: None,
         }
     }
 
@@ -1591,6 +1593,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: Some(media),
+            media_id: None,
         }
     }
 
@@ -1966,6 +1969,7 @@ mod tests {
             is_outgoing: false,
             reply_to: Some(1),
             media: None,
+            media_id: None,
         }]);
 
         let quoted = reply_prefix(&app, 1, 39);
@@ -2156,6 +2160,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            media_id: None,
         }]);
         let reply = Message {
             id: 91,
@@ -2166,6 +2171,7 @@ mod tests {
             is_outgoing: true,
             reply_to: Some(90),
             media: None,
+            media_id: None,
         };
 
         let (prefix, suffix) = decoration_columns(&app, &reply, Grouped::alone(), 40);

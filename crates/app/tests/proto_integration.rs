@@ -1653,6 +1653,7 @@ fn message(chat_id: i64, id: i64) -> Message {
         is_outgoing: false,
         reply_to: None,
         media: None,
+        media_id: None,
     }
 }
 

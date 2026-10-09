@@ -728,6 +728,7 @@ impl CachedMessage {
             is_outgoing: self.is_outgoing,
             reply_to: self.reply_to,
             media: self.media.map(MediaKind::from),
+            media_id: None,
         }
     }
 }
@@ -963,6 +964,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            media_id: None,
         }
     }
 
