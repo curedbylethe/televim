@@ -290,6 +290,7 @@ impl ConversationWindow {
             // composing one is not a message. Nothing here expires a typing flag
             // either: the update that says the peer stopped is what clears it.
             UpdateEvent::ReadReceipt { .. }
+            | UpdateEvent::InboxRead { .. }
             | UpdateEvent::PeerTyping { .. }
             | UpdateEvent::PeerStatus { .. } => false,
         }

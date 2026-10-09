@@ -471,6 +471,7 @@ impl HistoryCache {
             } => self.edit(*chat_id, *message_id, new_text),
             UpdateEvent::MessagesDeleted { message_ids } => self.delete(message_ids),
             UpdateEvent::ReadReceipt { .. }
+            | UpdateEvent::InboxRead { .. }
             | UpdateEvent::PeerTyping { .. }
             | UpdateEvent::PeerStatus { .. } => false,
         }
