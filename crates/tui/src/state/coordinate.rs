@@ -3085,9 +3085,9 @@ pub(crate) fn request_open_media(
 
 /// Handles a key while the chat list has the focus.
 ///
-/// `j`, `k`, `gg` and `G` move the highlight and record the conversation it
-/// now names; `Enter` opens it at once, because a reader who presses it is
-/// not going to press anything else. `h` and `l` are the pane movement, and
+/// `j`, `k`, `gg` and `G` move the highlight and record the chat it now
+/// names; `Enter` shows that chat's card at once, because a reader who presses
+/// it is not going to press anything else. `h` and `l` are the pane movement, and
 /// both mean the same thing from here: the conversation is the only pane
 /// beside this one, so there is nothing for the two of them to choose
 /// between.
@@ -3101,7 +3101,6 @@ pub(crate) fn handle_chat_list(
     input: &mut InputState,
     profile: &mut ProfileCard,
     outbox: &mut Outbox,
-    drafts: &mut DraftStore,
     client_available: bool,
     key: KeyEvent,
 ) -> bool {
@@ -3192,24 +3191,16 @@ pub(crate) fn handle_chat_list(
 
         KeyCode::Enter => {
             pending.set_g(false);
-            select_chat(
-                &mut *ui,
-                &mut *list,
-                &mut *outbox,
-                &mut *pending,
-                &mut *conversation,
-                &mut *input,
-                &mut *drafts,
-                here,
-            );
-            set_focus(
-                &mut *ui,
-                &mut *conversation,
-                &mut *input,
+            // The card now, so a settle still waiting on the highlight has
+            // nothing left to open.
+            pending.set_pending_chat(None);
+            open_contact(
+                &*list,
                 &mut *profile,
-                Focus::Conversation,
-            );
-            false
+                &mut *ui,
+                &mut *conversation,
+                &mut *outbox,
+            )
         }
 
         // Any other key ends the sequence, so a lone `g` does not become a
@@ -3759,7 +3750,6 @@ pub(crate) fn handle_key(
             &mut *input,
             &mut *profile,
             &mut *outbox,
-            &mut *drafts,
             session.client_available,
             key,
         ),
