@@ -6,11 +6,12 @@
 //!
 //! - **Widen** the wire's `i32` identifiers into the domain's `i64`, which is a
 //!   conversion that cannot fail and so has no error of its own.
-//! - **Turn the list around.** Telegram answers newest first, and a match list is
-//!   walked oldest first: `n` means the next, newer match and `N` the previous,
-//!   older one. The turn happens once, here, so that every caller gets a list it
-//!   can walk without sorting — the same rule, and the same reasoning, as
-//!   `history`'s page reversal.
+//! - **Turn the conversation's list around.** Telegram answers newest first, and a
+//!   conversation's match list is walked oldest first: `n` means the next, newer
+//!   match and `N` the previous, older one. The turn happens once, here, so that
+//!   every caller gets a list it can walk without sorting — the same rule, and the
+//!   same reasoning, as `history`'s page reversal. A global answer is not turned:
+//!   its hits stay newest first, as Telegram sent them.
 //!
 //! # Why the cap is here
 //!
@@ -65,11 +66,10 @@ pub struct GlobalHit {
     pub outgoing: bool,
 }
 
-/// The matches of a global search, oldest first, and how many there are.
+/// The matches of a global search, newest first, and how many there are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalSearchResults {
-    /// The hits, oldest first, so that a walk forward is always towards newer
-    /// messages.
+    /// The hits, newest first, in the order Telegram answered them.
     pub hits: Vec<GlobalHit>,
 
     /// How many matches Telegram holds across every private conversation, which
@@ -97,12 +97,12 @@ fn to_results(results: telegram_framework::SearchResults) -> SearchResults {
     }
 }
 
-/// Turns a framework global result into the domain's: widened, and oldest first.
+/// Turns a framework global result into the domain's: widened, and still newest first.
 #[cfg(feature = "live")]
 fn to_global_results(
     results: telegram_framework::search::GlobalSearchResults,
 ) -> GlobalSearchResults {
-    let mut hits: Vec<GlobalHit> = results
+    let hits: Vec<GlobalHit> = results
         .hits
         .into_iter()
         .map(|hit| GlobalHit {
@@ -114,9 +114,6 @@ fn to_global_results(
             outgoing: hit.outgoing,
         })
         .collect();
-
-    // Telegram answers newest first; the hits are walked oldest first.
-    hits.reverse();
 
     GlobalSearchResults {
         hits,
@@ -168,8 +165,8 @@ impl crate::ProtoClient {
     /// Searches every private conversation for messages matching `query`.
     ///
     /// One request and one page, bounded by [`SEARCH_MATCHES`] for the same
-    /// reason as [`search`](Self::search). The hits are oldest first, each with
-    /// the text the caller shows for it.
+    /// reason as [`search`](Self::search). The hits are newest first, as Telegram
+    /// answered them, each with the text the caller shows for it.
     ///
     /// # Errors
     ///
@@ -303,17 +300,17 @@ mod live_tests {
             total: 2,
         });
 
-        // Reversed by the turn: the text-only hit is the older of the two.
-        assert_eq!(results.hits[0].media, None);
-        assert_eq!(results.hits[1].media, Some(MediaKind::Photo));
+        // Kept in Telegram's order: the photo is the newer of the two, first.
+        assert_eq!(results.hits[0].media, Some(MediaKind::Photo));
         assert!(
-            results.hits[1].text.is_empty(),
+            results.hits[0].text.is_empty(),
             "a bare attachment has no text"
         );
+        assert_eq!(results.hits[1].media, None);
     }
 
     #[test]
-    fn a_newest_first_global_answer_comes_out_oldest_first() {
+    fn a_newest_first_global_answer_stays_newest_first() {
         let results = to_global_results(telegram_framework::search::GlobalSearchResults {
             hits: vec![
                 framework_hit(1, 30, "c"),
@@ -324,11 +321,11 @@ mod live_tests {
         });
 
         let message_ids: Vec<i64> = results.hits.iter().map(|hit| hit.message_id).collect();
-        assert_eq!(message_ids, vec![10, 20, 30]);
+        assert_eq!(message_ids, vec![30, 20, 10]);
         let texts: Vec<&str> = results.hits.iter().map(|hit| hit.text.as_str()).collect();
         assert_eq!(
             texts,
-            vec!["a", "b", "c"],
+            vec!["c", "b", "a"],
             "each text stays with its message"
         );
     }
@@ -347,20 +344,19 @@ mod live_tests {
             total: 2,
         });
 
-        // Reversed, so the expected list reads in the turned order.
-        assert_eq!(results.hits[0].chat_id, -5);
-        assert_eq!(results.hits[0].message_id, 7);
-        assert_eq!(results.hits[0].sent_at, 1_700_000_001);
+        assert_eq!(results.hits[0].chat_id, i64::MAX);
+        assert_eq!(results.hits[0].message_id, i64::from(i32::MAX));
+        assert_eq!(results.hits[0].sent_at, 1_700_000_000);
         assert!(
-            results.hits[0].outgoing,
-            "an outgoing message stays outgoing"
-        );
-        assert_eq!(results.hits[1].chat_id, i64::MAX);
-        assert_eq!(results.hits[1].message_id, i64::from(i32::MAX));
-        assert_eq!(results.hits[1].sent_at, 1_700_000_000);
-        assert!(
-            !results.hits[1].outgoing,
+            !results.hits[0].outgoing,
             "an incoming message stays incoming"
+        );
+        assert_eq!(results.hits[1].chat_id, -5);
+        assert_eq!(results.hits[1].message_id, 7);
+        assert_eq!(results.hits[1].sent_at, 1_700_000_001);
+        assert!(
+            results.hits[1].outgoing,
+            "an outgoing message stays outgoing"
         );
     }
 
