@@ -1,7 +1,9 @@
 //! The new-conversation results overlay.
 //!
 //! It answers `/` on the chat list: the reader names a person, the server offers
-//! whoever matches, and this is the short list they pick from. It is modelled on
+//! whoever matches, and this is the short list they pick from. An empty query
+//! asks for the people the reader contacts most, in the server's order, and the
+//! same list shows them. It is modelled on
 //! [`crate::widgets::emoji_popup`] because the shape is the same one — a
 //! transient list drawn over a pane the reader is not editing — and it keeps the
 //! same two rules.

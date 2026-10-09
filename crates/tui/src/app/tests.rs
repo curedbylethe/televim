@@ -7166,3 +7166,115 @@ fn the_cursor_hit_is_read_back_through_the_walk_keys() {
     key_press(&mut app, KeyCode::Char('j'));
     assert_eq!(cursor_hit(&app), Some((MOCK_CHAT, 901)));
 }
+
+// ---- the top people on an empty new-chat query ------------------------
+
+/// The status line while the empty lookup is out, and once it answers.
+#[test]
+fn the_empty_lookup_is_labelled_searching_then_by_its_count() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "");
+    assert_eq!(app.status_text(), "/ — searching…");
+    assert!(
+        !frame_rows(&app).iter().any(|row| row.contains("user-")),
+        "in flight with nothing to show draws no overlay"
+    );
+
+    assert!(app.apply_users("", vec![candidate(7), candidate(3), candidate(9)]));
+
+    assert_eq!(app.status_text(), "/ — 3 candidates");
+}
+
+/// The answer is the server's order, untouched: the rows are drawn in the
+/// order they came, with the handle and the standing beside each name.
+#[test]
+fn the_top_people_draw_in_the_server_order_with_handles_and_standing() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "");
+    let first = candidate(MOCK_CHAT);
+    let second = candidate(MOCK_CHAT + 99);
+    assert!(app.apply_users("", vec![first.clone(), second.clone()]));
+
+    let rows = frame_rows(&app);
+    let at_first = row_of(&rows, &first.display_name).expect("the first person is drawn");
+    let at_second = row_of(&rows, &second.display_name).expect("the second person is drawn");
+    assert!(at_first < at_second, "server order is kept: {rows:?}");
+    assert!(rows[at_first].contains("@user"), "{}", rows[at_first]);
+    assert!(rows[at_first].contains("chat"), "{}", rows[at_first]);
+    assert!(rows[at_second].contains("new"), "{}", rows[at_second]);
+}
+
+/// An empty answer is the label and nothing else: no overlay, no flash
+/// asking the reader to type anything.
+#[test]
+fn an_empty_answer_says_no_candidates_and_draws_nothing() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "");
+
+    assert!(app.apply_users("", vec![]));
+
+    assert_eq!(app.status_text(), "/ — no candidates");
+    assert!(
+        !frame_rows(&app).iter().any(|row| row.contains('@')),
+        "no empty box is drawn over the list"
+    );
+}
+
+/// A failed empty lookup names the failure on the status line; the reason is
+/// flashed by the net layer, which owns the lookup's answer.
+#[test]
+fn a_failed_empty_lookup_names_the_reason_on_the_label() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "");
+
+    assert!(app.fail_users("", "offline".to_owned()));
+
+    assert_eq!(
+        app.status_text(),
+        "/ — no candidates (search failed: offline)"
+    );
+}
+
+/// `j` walks the top people and `Enter` opens the one highlighted, the same
+/// as any other search.
+#[test]
+fn enter_on_a_top_person_opens_their_chat() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "");
+    let person = candidate(MOCK_CHAT + 99);
+    assert!(app.apply_users("", vec![candidate(MOCK_CHAT), person.clone()]));
+
+    app.handle_key(press(KeyCode::Char('j')));
+    assert_eq!(app.user_search().selected(), 1);
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert_eq!(app.current_chat_id(), person.user_id);
+    assert!(!app.user_search().is_active(), "and the list is put away");
+}
+
+/// `Esc` puts the empty search away like any other.
+#[test]
+fn escape_clears_the_empty_search_too() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "");
+    assert!(app.apply_users("", vec![candidate(1)]));
+
+    app.handle_key(press(KeyCode::Esc));
+
+    assert!(!app.user_search().is_active());
+    assert_eq!(app.user_search().candidates().len(), 0);
+}
+
+/// A top-people answer that arrives after the reader typed another query is
+/// refused: the empty answer must not overwrite a newer search.
+#[test]
+fn a_late_top_people_answer_is_refused_after_a_typed_query() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "");
+    start_user_search(&mut app, "ada");
+
+    assert!(!app.apply_users("", vec![candidate(1)]));
+    assert_eq!(app.user_search().query(), Some("ada"));
+    assert!(app.user_search().candidates().is_empty());
+}
