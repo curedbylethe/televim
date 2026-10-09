@@ -1381,7 +1381,10 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         }
     }
 
-    let arrived = state.read_on_arrival.take().is_some();
+    // An arrival under a card is kept rather than spent: the marker it is owed
+    // is refused for as long as the card covers the conversation, and the pass
+    // after the reader backs out of it asks again.
+    let arrived = !card_covers_conversation(app) && state.read_on_arrival.take().is_some();
     let Some(client) = state.client.clone() else {
         // No client, so nothing is asked for — but a conversation opened
         // while there is none is still owed what the cache holds for it, or
@@ -1595,7 +1598,7 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
 /// accepted is not sent again.
 fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
     let open = app.conversation.conversation.window.chat_id;
-    if open == 0 {
+    if open == 0 || card_covers_conversation(app) {
         return None;
     }
     let chat = app.chats().iter().find(|chat| chat.id == open)?;
@@ -1604,6 +1607,17 @@ fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
     }
     let max_id = chat.last_message_id.filter(|id| *id > 0)?;
     (state.read_acked != Some((open, max_id))).then_some((open, max_id))
+}
+
+/// Whether a profile card is on show in the conversation's place.
+///
+/// The window is only ever replaced by a real open, so a conversation the
+/// reader has not confirmed is never the one on show: the card is what covers
+/// it. Browsing a card therefore keeps the marker back, and confirming the card
+/// (or backing out of it) is what puts the conversation in front of the reader
+/// again.
+fn card_covers_conversation(app: &App) -> bool {
+    matches!(app.ui.pane, tui::app::Pane::Profile(_))
 }
 
 /// Tells Telegram the reader has read a conversation up to `max_id`, and hands
