@@ -4095,6 +4095,28 @@ mod tests {
     }
 
     #[test]
+    fn a_pass_under_the_open_chats_own_card_keeps_the_arrival_owed() {
+        let mut app = listed(2, Some(20));
+        let mut state = State::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        card_over_the_open_chat(&mut app);
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 21..=21).remove(0))),
+        );
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "the card sends no marker");
+        assert_eq!(
+            state.read_owed,
+            Some(CHAT),
+            "a pass under the card does not spend the arrival"
+        );
+    }
+
+    #[test]
     fn a_latest_under_a_card_owes_its_read_marker_to_the_pass_after_back() {
         let mut app = listed(2, Some(20));
         let mut state = State::default();
