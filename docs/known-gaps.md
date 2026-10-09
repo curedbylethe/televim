@@ -270,10 +270,6 @@ Real, and named so they are not mistaken for oversights:
   existing order alone rather than guessing a comparator). Both are properties of
   the lookup and the chat list rather than of the widget.
 
-- **The open draft row is not a cursor stop.** It takes no caret, selection or
-  motion, and the cursor never rests on it. Acting on it from the panel, reaching
-  it and resuming the draft there, is CUR-25 and is not built; until then the bar
-  is the only place a draft is edited.
 - **The draft row is shown only while following the newest message.** Scrolled
   up, it is not drawn and reserves no rows, because it is drawn after the slice
   and would sit under an older message, misplacing the draft. The input bar still

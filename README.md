@@ -261,7 +261,9 @@ Working today:
   candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
   keeps typing into the draft. Reply with `r`, edit with `e` — and since a
   reply carries the message it quotes, `gd` on one goes to that message and
-  `Ctrl-o` brings the reader back.
+  `Ctrl-o` brings the reader back. `j` from the newest message rests the cursor
+  on the draft's row below it, and `i` there resumes the draft in Insert with the
+  caret at its end.
 - **Text direction:** the draft in the bar is drawn by the same rules as an
   incoming message. In the default mode the row is emitted as it is stored and the
   terminal's shaper reverses a right-to-left run; in the opt-in `BidiMode::Visual`
