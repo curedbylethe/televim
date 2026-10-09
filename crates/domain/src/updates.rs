@@ -357,6 +357,20 @@ impl ChatList {
         true
     }
 
+    /// Clears a conversation's unread count, reporting whether there was one.
+    ///
+    /// Only the count moves: the preview and the chat's place in the list stay
+    /// as they are. `false` when the list does not hold the chat, or it had
+    /// nothing unread.
+    pub fn mark_read(&mut self, chat_id: i64) -> bool {
+        let Some(chat) = self.chat_mut(chat_id) else {
+            return false;
+        };
+        let changed = chat.unread_count != 0;
+        chat.unread_count = 0;
+        changed
+    }
+
     fn chat_mut(&mut self, chat_id: i64) -> Option<&mut Chat> {
         self.chats.iter_mut().find(|chat| chat.id == chat_id)
     }
@@ -954,5 +968,57 @@ mod tests {
         assert_eq!(list.chats[0].id, 1, "the first existing chat has not moved");
         assert_eq!(list.chats[1].id, 2, "nor the second");
         assert_eq!(list.chats[2].id, 42, "and the new one is appended");
+    }
+
+    #[test]
+    fn mark_read_clears_the_named_chat_and_no_other() {
+        let mut list = ChatList::with_chats(vec![
+            Chat {
+                unread_count: 3,
+                ..chat_at(1, 100)
+            },
+            Chat {
+                unread_count: 5,
+                ..chat_at(2, 500)
+            },
+        ]);
+
+        assert!(list.mark_read(1));
+        assert_eq!(list.chats[0].unread_count, 0);
+        assert_eq!(
+            list.chats[1].unread_count, 5,
+            "the other chat keeps its count"
+        );
+        assert_eq!(ids(&list), vec![1, 2], "the order is not touched");
+    }
+
+    #[test]
+    fn mark_read_reports_false_for_a_chat_the_list_does_not_hold() {
+        let mut list = ChatList::with_chats(vec![Chat {
+            unread_count: 3,
+            ..chat(1)
+        }]);
+
+        assert!(!list.mark_read(9));
+        assert_eq!(list.chats[0].unread_count, 3, "and nothing else moves");
+    }
+
+    #[test]
+    fn mark_read_reports_false_when_nothing_was_unread() {
+        let mut list = list();
+
+        assert!(!list.mark_read(1));
+        assert_eq!(list.chats[0].unread_count, 0);
+    }
+
+    #[test]
+    fn mark_read_clears_a_saturated_count() {
+        let mut list = ChatList::with_chats(vec![Chat {
+            unread_count: u32::MAX,
+            ..chat(1)
+        }]);
+
+        assert!(list.mark_read(1));
+        assert_eq!(list.chats[0].unread_count, 0);
     }
 }
