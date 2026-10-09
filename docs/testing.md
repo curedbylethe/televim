@@ -21,6 +21,7 @@
 | `make build-release` | the optimized binary |
 | `make run` / `watch` | run it, or under `cargo-watch` |
 | `make audit` | `cargo audit` (needs `cargo-audit` installed) |
+| `make bench` | A/B compare of the criterion micro-benches; writes `target/bench-compare.json` and `.md`. `BENCH_MODE=smoke` (default) or `full`; `BENCH_ARGS="--save-baseline NAME"` or `"--baseline NAME"`. Reports deltas and never fails on slowness |
 | `make update` | `cargo update` — **drops the `glass_pumpkin` pin**; see Dependency Notes |
 
 `lint` and `test` both pass `--all-features` for the reason given above.
@@ -201,6 +202,46 @@ below.
     which takes the median across several reports.
   - **Recording a baseline is deliberate.** The driver never writes one: someone
     reads the report and decides what the tree costs.
+- **Micro-benchmarks (A/B compare):** criterion 0.8.2, a dev-only dependency, runs
+  the benches in `crates/domain/benches` (`history_window`, `search`, `vim`) and
+  `crates/tui/benches` (`wrap_rows`). `make bench` drives them through
+  `scripts/bench/compare.py`, which runs each target with fixed flags and writes
+  `target/bench-compare.json` (the report, schema `televim.bench-compare/1`) and
+  `target/bench-compare.md`. It is not in `ci`: it gates nothing, and a full run
+  takes minutes, so it stays beside `make measure` rather than inside the gate.
+  - **Two legs, one report.** The *in-binary* leg puts bench ids in one criterion
+    group and reports each candidate minus the first id in sorted order, from the
+    same run. The *revision* leg runs against a saved criterion baseline:
+    `BENCH_ARGS="--save-baseline NAME"` saves a run, `BENCH_ARGS="--baseline NAME"`
+    compares this run with it. **Caveat:** the current in-binary groups compare
+    workloads of one function (e.g. `word_prefix_match/scan_corpus/hit_early` vs
+    `.../miss`, `wrap/wrap/40` vs `wrap/wrap/120`), not two competing
+    implementations; none is benched in-tree yet. The leg pairs every id in a group
+    with the first, so a pair means something only when both ids run the same job:
+    read the rows that do, and ignore the rest. See
+    [`known-gaps.md`](./known-gaps.md).
+  - **Modes.** `BENCH_MODE=smoke` (default) uses short fixed flags and checks that
+    the harness runs; its numbers are noisy and are not evidence. `BENCH_MODE=full`
+    uses long fixed flags and is the only mode whose numbers a claim may cite.
+  - **Report shape.** Each bench gives a criterion median with a 95% confidence
+    interval on it, and min/max over per-iteration samples, in nanoseconds. Deltas
+    are descriptive (`abs_ns`, `pct`, and whether the CIs overlap). The report has
+    no winner field and no pass/fail verdict; a harness fault (failed `cargo bench`,
+    missing criterion output, missing baseline) exits 1 and names the leg or bench.
+  - **Citing a benchmark claim.** Run the full mode, then cite the JSON:
+
+    ```console
+    $ make bench BENCH_MODE=full
+    $ make bench BENCH_MODE=full BENCH_ARGS="--save-baseline main"   # on the reference revision
+    $ make bench BENCH_MODE=full BENCH_ARGS="--baseline main"        # on the candidate revision
+    ```
+
+    Cite `target/bench-compare.json` (with its `.md` beside it) for the run that
+    produced the claim. The report records the `mode`, the `criterion_flags`, the
+    `toolchain`, the `host` and the `legs` block (which baseline names were saved
+    and compared), but **not** the git commit: name the commit in the claim
+    yourself. Raw criterion output is under `target/criterion/`. Never cite a smoke
+    run's numbers.
 - **Probes in the event loop:** `app/src/runtime.rs` records launch → first frame
   and keypress → frame, gated on `TELEVIM_MEASURE` and written to the log file
   beside the config, never to the terminal. An ordinary run reads an empty

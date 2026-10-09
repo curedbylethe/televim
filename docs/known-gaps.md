@@ -181,8 +181,15 @@ Real, and named so they are not mistaken for oversights:
   with one. The allocator question itself is closed rather than open: the
   global allocator is the system allocator, chosen on the measured margins, and
   no arena pays — see [`decisions.md`](./decisions.md).
-- **No benchmarks.** `make measure` is a measurement harness, not a benchmark
-  suite: it reports what a run costs, and nothing compares two implementations.
+- **No competing implementation is benchmarked yet.** The gap that "nothing
+  compares two implementations" is retired for the harness: `make bench` (criterion
+  micro-benches, A/B compare report; see [`testing.md`](./testing.md)) can compare
+  two bench ids in one run and one revision against a saved baseline. What remains:
+  the in-binary pairs compare *workloads* of one function (`hit_early` vs `miss`,
+  `wrap/wrap/40` vs `wrap/wrap/120`, `step` vs `find`), not two competing implementations,
+  and no candidate implementation exists in-tree. So a claim that one algorithm
+  beats another has no bench to cite; a revision-to-revision claim does, once both
+  sides are saved. `make measure` still measures one tree and does not compare.
 - **Three PTY tests are deferred, `#[ignore]`d with reasons.** In
   `app/tests/tui_e2e.rs`: AC5 `an_arrival_scrolls_a_pinned_view`, AC6
   `an_arrival_leaves_a_scrolled_back_view_alone`, and AC7

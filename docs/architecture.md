@@ -52,7 +52,14 @@ crate that owns the seam they exercise: `app`'s because it is the only crate tha
 can hold a framework `Client` and a `ProtoClient` at once, `telegram-framework`'s
 for the login flow. `app/tests/tui_e2e.rs` runs the binary in a pty through
 `termlens` and asserts on the screen; its tests run in the normal gate, and the
-three deferred cases (AC5–AC7) are `#[ignore]`d. There are no benchmarks.
+three deferred cases (AC5–AC7) are `#[ignore]`d. Benchmarks follow the same rule:
+the micro-benches on pure functions live beside the code they measure, in
+`crates/domain/benches` (`history_window`, `search`, `vim`) and
+`crates/tui/benches` (`wrap_rows`). `domain` owns the window, search and motion
+logic and `tui` owns the wrap and row layout, so each bench sits in the crate that
+owns its subject and needs nothing from a crate above it. The suite is a
+dependency-rule-clean home for them, not a new layer. There is still no
+workspace-level `benches/`.
 
 **Dependency rule (strict):** `domain` knows nothing of `telegram-framework` or
 `tui`; `app` orchestrates them. `tui` depends on `domain` but **not** on `proto`
