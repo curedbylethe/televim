@@ -5,6 +5,36 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.3.0] - 2026-10-09
+
+### Added
+
+- **app:** Name cached media by the hash of its bytes
+- **app:** Refresh a cached file's recency on hit
+- **app:** Drop legacy message-named media files on open
+- **telegram-framework:** Carry the media's stable id on messages
+- **domain:** Add the media id to messages
+- **proto:** Pass the media id from the framework to the domain
+- **app:** Cache media under its Telegram id as well as its message
+- **app:** Config key media_cache_max_bytes, overridable by env
+- **app:** Drop a cached message's media on edit and delete
+- **domain:** Add grouped global search state
+- **telegram-framework:** Search all chats with users_only global search
+- **proto:** Map global search answers to snippet DTOs
+- **app:** Run cross-chat search as one action and land grouped results
+- **tui:** Add :search command and ? binding for cross-chat search
+- **telegram-framework:** Carry send time and direction on search hits
+- **tui:** Show cross-chat results grouped by chat, open the chat on Enter
+- **telegram-framework:** Carry the media kind on global search hits
+- **telegram-framework:** Seed the peer cache from global search answers
+- **app:** Open a cached global search hit without a fetch
+- **telegram-framework:** List the top correspondents by server rating
+- **proto:** Expose the top correspondents as user candidates
+- **app:** List top correspondents on an empty lookup
+- **tui:** Look up the top people on an empty new-chat submit
+- **tui:** Pin the top people on an empty new-chat query
+- **tui:** Format the empty new-chat submit test
+
 ## [0.2.0] - 2026-10-09
 
 ### Added
