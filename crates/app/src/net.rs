@@ -6162,6 +6162,36 @@ mod tests {
         assert!(app.conversation.conversation.window.is_empty());
     }
 
+    // ---- a focus change with a key half-typed ---------------------------
+
+    /// A window that loses focus between the two presses of `gg` must not leave
+    /// the first press armed: the next `k` is a motion, not the second half of a
+    /// sequence that can no longer finish. The event loop calls the reset on
+    /// `FocusLost` and again on `FocusGained`.
+    #[test]
+    fn a_regain_after_a_half_typed_g_lets_the_next_motion_through() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        app.ui.focus = Focus::Conversation;
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        let last = app.conversation.vim.cursor();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        app.reset_pending_input();
+        app.reset_pending_input();
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+
+        assert_eq!(
+            app.ui.focus,
+            Focus::Conversation,
+            "focus stays where it was"
+        );
+        assert_eq!(
+            app.conversation.vim.cursor(),
+            last - 1,
+            "k moved, not swallowed"
+        );
+    }
+
     // ---- a launch drawn from the cache ----------------------------------
 
     /// A state as a warm launch restores it: the list `[CHAT, CHAT + 1]`, and
