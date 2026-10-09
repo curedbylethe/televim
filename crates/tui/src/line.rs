@@ -2861,6 +2861,32 @@ mod spike {
         );
     }
 
+    // ---- o, which the library opens one character early ------------------
+
+    /// The defect the wrapper routes around (`LineEditor::goto`): in normal
+    /// mode `o` moves the caret with `move_line_end`, which stops **on** the
+    /// last character, and then inserts the newline there — in front of `o`.
+    /// Pinned so that a `vim-line` that fixes it fails here, and the wrapper's
+    /// `o` can go with it.
+    #[test]
+    fn o_inserts_its_newline_in_front_of_the_last_character() {
+        let mut editor = editor();
+        let text = "hello";
+        editor.set_cursor(4, text);
+
+        let out = editor.handle_key(Key::char('o'), text);
+
+        assert_eq!(editor.status(), "INSERT", "it does open a line");
+        assert_eq!(
+            out.edits,
+            vec![vim_line::TextEdit::Insert {
+                at: 4,
+                text: "\n".to_string()
+            }],
+            "and the newline lands one character early"
+        );
+    }
+
     // ---- the order edits are applied in ----------------------------------
 
     /// `r` followed by a character emits `Insert` and then `Delete` over the same
