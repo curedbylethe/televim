@@ -1022,6 +1022,10 @@ struct History {
 
     /// The earliest instant a page may be asked for again.
     retry_at: Option<Instant>,
+
+    /// The conversation whose page failed, which is the only one `retry_at`
+    /// holds. `None` holds every conversation, as a hold with no owner always did.
+    retry_peer: Option<i64>,
 }
 
 /// What the conversation on show needs next.
@@ -1608,10 +1612,12 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
         return Wanted::Nothing;
     }
 
-    // A fetch that failed holds every direction for a while. Asking again at
-    // once is what turns a throttle into a storm, and the page is not going
-    // anywhere.
-    if history.retry_at.is_some_and(|at| now < at) {
+    // A fetch that failed holds every direction of its own conversation for a
+    // while. Asking again at once is what turns a throttle into a storm, and the
+    // page is not going anywhere. Another conversation is not held by it.
+    if history.retry_at.is_some_and(|at| now < at)
+        && history.retry_peer.is_none_or(|peer| peer == open)
+    {
         return Wanted::Nothing;
     }
 
@@ -2832,6 +2838,7 @@ fn apply_history(
         Err(error) => {
             app.ui.status = format!("history: {error}");
             state.history.retry_at = Some(Instant::now() + backoff(&error));
+            state.history.retry_peer = Some(cursor.peer_id());
 
             // A first page that failed leaves nothing to count from, so
             // the conversation is opened again once the backoff has
@@ -2961,6 +2968,7 @@ fn apply_ready_to_screen(
         state.history.cursor = None;
         state.history.jump = None;
         state.history.retry_at = None;
+        state.history.retry_peer = None;
         app.refresh_chats(chats)
     } else {
         open_first_chat(app, chats);
@@ -3725,6 +3733,7 @@ mod tests {
             cursor: Some(HistoryCursor::new(peer_id)),
             jump: None,
             retry_at: None,
+            retry_peer: None,
         }
     }
 
@@ -3990,6 +3999,7 @@ mod tests {
             cursor: Some(HistoryCursor::new(CHAT)),
             jump: None,
             retry_at: Some(now + RETRY),
+            retry_peer: None,
         };
         assert_eq!(wanted(&app, holding, now), Wanted::Nothing);
 
@@ -4114,6 +4124,48 @@ mod tests {
             wanted(&app, state.history, at),
             Wanted::Latest(CHAT),
             "and the open is asked for again once it has passed"
+        );
+    }
+
+    /// The hold is for the conversation whose newest page failed. Another
+    /// conversation opened during it is owed its own newest page now: the hold
+    /// would leave its window empty for as long as the other one's backoff runs
+    /// (Telegram's flood wait, when it gave one), and back on the failed one it
+    /// still holds.
+    #[test]
+    fn a_failed_open_holds_its_own_conversation_and_no_other() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(0);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        let now = Instant::now();
+        app.select_chat(1);
+        assert_eq!(
+            wanted(&app, state.history, now),
+            Wanted::Latest(CHAT + 1),
+            "the other conversation is not held by the failure"
+        );
+
+        app.select_chat(0);
+        assert_eq!(
+            wanted(&app, state.history, now),
+            Wanted::Nothing,
+            "and the failed one still is"
         );
     }
 
@@ -6762,6 +6814,7 @@ mod tests {
                     kind: JumpKind::Unread,
                 }),
                 retry_at: Some(Instant::now() + RETRY),
+                retry_peer: None,
             },
             ..State::default()
         };
@@ -8054,6 +8107,7 @@ mod tests {
                     kind: JumpKind::Unread,
                 }),
                 retry_at: Some(Instant::now() + RETRY),
+                retry_peer: None,
             },
             ..State::default()
         };
