@@ -6951,12 +6951,13 @@ fn row_of(rows: &[String], needle: &str) -> Option<usize> {
     rows.iter().position(|row| row.contains(needle))
 }
 
-/// Two chats' worth of hits: two in Ada (chat 1) and one in Grace (chat 2).
+/// Two chats' worth of hits, newest first as the domain keeps them: two in Ada
+/// (chat 1) and one in Grace (chat 2), whose hit is the oldest of the three.
 fn two_chat_hits() -> Vec<domain::global_search::GlobalHit> {
     vec![
-        global_text(MOCK_CHAT, 900, "hit one"),
+        global_text(MOCK_CHAT, 902, "hit one"),
         global_text(MOCK_CHAT, 901, "hit two"),
-        global_text(2, 902, "hit three"),
+        global_text(2, 900, "hit three"),
     ]
 }
 
