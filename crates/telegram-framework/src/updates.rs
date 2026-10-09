@@ -106,6 +106,14 @@ pub struct MessageInfo {
     /// not read as one that does not. Only a message carrying no media at all
     /// is `None`.
     pub media: Option<MediaKind>,
+
+    /// Telegram's stable identifier for the media, if it carries one.
+    ///
+    /// The same file has the same id in every conversation and for every
+    /// account, which is what lets a cached copy be found from a message in
+    /// another chat. Only the id is carried: the access hash and file reference
+    /// are not, because they go stale.
+    pub media_id: Option<i64>,
 }
 
 /// What Telegram says about a person's online state.
@@ -792,7 +800,8 @@ fn peer_kind_from_id(kind: PeerKind) -> DialogKind {
 /// and the same message arriving over the feed are described identically —
 /// which is what lets the two be deduplicated against each other. That is why
 /// `media` is passed in already classified: each path reads it off its own
-/// message type, and this is where the two answers are forced to agree.
+/// message type, and this is where the two answers are forced to agree. The
+/// kind and the id travel together, so the call keeps its arity.
 pub(crate) fn message_info(
     id: i32,
     chat_peer_id: i64,
@@ -800,8 +809,9 @@ pub(crate) fn message_info(
     timestamp: i64,
     is_outgoing: bool,
     reply_to_msg_id: Option<i32>,
-    media: Option<MediaKind>,
+    media: Option<(MediaKind, Option<i64>)>,
 ) -> MessageInfo {
+    let (media, media_id) = media.map_or((None, None), |(kind, id)| (Some(kind), id));
     MessageInfo {
         id: i64::from(id),
         chat_peer_id,
@@ -810,6 +820,7 @@ pub(crate) fn message_info(
         is_outgoing,
         reply_to_msg_id,
         media,
+        media_id,
     }
 }
 
@@ -1224,7 +1235,7 @@ mod tests {
             1_700_000_000,
             true,
             Some(5),
-            Some(MediaKind::Photo),
+            Some((MediaKind::Photo, Some(9001))),
         );
 
         assert_eq!(info.id, 7);
@@ -1238,11 +1249,16 @@ mod tests {
             "a reply names the message it answers, or the reply context is lost"
         );
         assert_eq!(info.media, Some(MediaKind::Photo));
+        assert_eq!(
+            info.media_id,
+            Some(9001),
+            "the media's id travels with the message"
+        );
     }
 
     #[test]
     fn a_message_without_text_is_still_described() {
-        let info = message_info(7, 42, "", 0, false, None, Some(MediaKind::Photo));
+        let info = message_info(7, 42, "", 0, false, None, Some((MediaKind::Photo, None)));
 
         assert!(info.text.is_empty(), "a photo and a sticker have no text");
         assert_eq!(
