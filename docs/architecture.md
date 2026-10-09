@@ -459,7 +459,9 @@ saying what it wants.
 up (build, fetch the chat list, take the feed — it does **not** sign in; see
 [`decisions.md`](./decisions.md)), asks for a page whenever the conversation on
 show is near one
-of its ends, drives the sign-in flow the panel asks for, and folds in whatever
+of its ends, sends a read marker when a conversation is opened with unread
+messages (`read_target` picks it, `request_read` sends it, and
+`Event::ReadMarked` clears the count only once it is accepted), drives the sign-in flow the panel asks for, and folds in whatever
 arrives. A recoverable feed read failure is waited out in the pump's task up to
 the same bound the launch fetch uses, reporting `Event::FeedRetrying` with the
 reason, the wait and the count; past the bound the feed is ended the way a dead

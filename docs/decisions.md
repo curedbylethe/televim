@@ -798,6 +798,15 @@ are in [`../AGENTS.md`](../AGENTS.md).
   is the reader's draft, so it is kept. When bring-up fails, `offline:` still
   means what it meant: the cached rows are readable and switchable, and they are
   not an answer.
+- **Why opening a conversation clears its count only once Telegram accepts the marker:** the
+  count is the server's, and clearing it on the screen before the answer would let
+  a refused marker persist as a false zero through the next cache write. So the
+  marker goes up to the newest message the list knows of (`last_message_id`), not
+  the window's end or the unread arithmetic, and the local count is cleared by the
+  answer that says it was accepted. A failure is logged and dropped rather than
+  retried, because the next open is the retry the reader already gets for free.
+  Sending from the list's `Latest` open, rather than from a `tui` action, keeps the
+  client out of the screen's hands and leaves the four-slot action queue for sends.
 - **Why the history file is plaintext for now:** message bodies are as
   sensitive as the drafts, and the drafts file is plaintext JSON beside the
   configuration, restricted to its owner (`0600`) and tagged with the account. The

@@ -346,6 +346,11 @@ Real, and named so they are not mistaken for oversights:
   write.** A launch draws them as they were when the file was last written, and
   the `Ready` replaces them; between the two, a count can be wrong. Presence is not
   cached at all, so a cached list draws none until the feed reports it.
+- **Messages that arrive while a conversation is open are not marked read.** The
+  read marker is sent once, when the conversation is opened, so a message that
+  lands while it is on show keeps its unread count until the reader opens it
+  again. A read marker that is refused is not retried; the count stays until the
+  next open.
 - **`Ready` moves the focus to the conversation while the reader is typing under
   `connecting…`.** A warm launch lets the reader type into the cached
   conversation's draft before the wire answers; the draft is kept across the
