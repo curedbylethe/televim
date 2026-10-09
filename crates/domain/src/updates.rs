@@ -98,6 +98,24 @@ pub enum UpdateEvent {
         max_id: i64,
     },
 
+    /// This account has read a conversation's incoming messages, on any device.
+    ///
+    /// Carries the count the server still holds as unread rather than a
+    /// watermark: the server has already worked out what is left, so the
+    /// conversation takes that number as it is. A read done here comes back as
+    /// this too, so the local clear and this one agree.
+    ///
+    /// Incoming only: this is the reader's own reading of the peer's messages,
+    /// the mirror of [`UpdateEvent::ReadReceipt`], which is the peer reading
+    /// theirs.
+    InboxRead {
+        /// The conversation whose incoming messages were read.
+        chat_id: i64,
+
+        /// Incoming messages the server still counts as unread in it.
+        unread_count: u32,
+    },
+
     /// Someone in a conversation has started typing, or has stopped.
     ///
     /// A flag and a conversation, which is all the protocol carries: the peer
@@ -194,6 +212,10 @@ impl ChatList {
             } => self.apply_edit(chat_id, message_id, new_text),
             UpdateEvent::MessagesDeleted { message_ids } => self.apply_deletion(&message_ids),
             UpdateEvent::PeerStatus { chat_id, presence } => self.apply_presence(chat_id, presence),
+            UpdateEvent::InboxRead {
+                chat_id,
+                unread_count,
+            } => self.apply_inbox_read(chat_id, unread_count),
             // Neither of these is part of a list entry: the list counts what has *not*
             // been read, and this says what has, and a peer composing a message is
             // not a message at all. Nothing here observes either, so nothing
@@ -368,6 +390,19 @@ impl ChatList {
         };
         let changed = chat.unread_count != 0;
         chat.unread_count = 0;
+        changed
+    }
+
+    /// Takes the server's unread count for a conversation as it stands.
+    ///
+    /// Reports whether the stored count moved, so a repeat of the same figure
+    /// is not a redraw. `false` when the list does not hold the chat.
+    fn apply_inbox_read(&mut self, chat_id: i64, unread_count: u32) -> bool {
+        let Some(chat) = self.chat_mut(chat_id) else {
+            return false;
+        };
+        let changed = chat.unread_count != unread_count;
+        chat.unread_count = unread_count;
         changed
     }
 
@@ -1020,5 +1055,58 @@ mod tests {
 
         assert!(list.mark_read(1));
         assert_eq!(list.chats[0].unread_count, 0);
+    }
+
+    #[test]
+    fn an_inbox_read_takes_the_servers_remaining_count() {
+        let mut list = ChatList::with_chats(vec![
+            Chat {
+                unread_count: 3,
+                ..chat_at(1, 100)
+            },
+            Chat {
+                unread_count: 5,
+                ..chat_at(2, 500)
+            },
+        ]);
+
+        assert!(list.apply_update(UpdateEvent::InboxRead {
+            chat_id: 1,
+            unread_count: 1,
+        }));
+        assert_eq!(
+            list.chats[0].unread_count, 1,
+            "the server's figure, not zero"
+        );
+        assert_eq!(
+            list.chats[1].unread_count, 5,
+            "the other chat keeps its count"
+        );
+        assert_eq!(ids(&list), vec![1, 2], "the order is not touched");
+    }
+
+    #[test]
+    fn a_repeated_inbox_read_is_not_a_change() {
+        let mut list = ChatList::with_chats(vec![Chat {
+            unread_count: 2,
+            ..chat(1)
+        }]);
+
+        assert!(!list.apply_update(UpdateEvent::InboxRead {
+            chat_id: 1,
+            unread_count: 2,
+        }));
+        assert_eq!(list.chats[0].unread_count, 2);
+    }
+
+    #[test]
+    fn an_inbox_read_for_a_chat_the_list_does_not_hold_is_nothing() {
+        let mut list = list();
+
+        assert!(!list.apply_update(UpdateEvent::InboxRead {
+            chat_id: 9,
+            unread_count: 4,
+        }));
+        assert_eq!(ids(&list), vec![1, 2], "and no chat appears for it");
     }
 }
