@@ -528,6 +528,7 @@ async fn event_loop(
     network.set_media_cache(MediaCache::open(
         media_path.to_path_buf(),
         cfg.phone.as_deref(),
+        cfg.media_cache_max_bytes,
     ));
     // And the history file and what it held: every fetched page is merged
     // into the cache and written behind, and the messages go with the account

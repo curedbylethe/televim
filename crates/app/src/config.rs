@@ -183,6 +183,12 @@ pub struct Config {
     /// drafts files do. Files in it are plaintext, readable by the account that
     /// runs this program, and the directory is emptied when the account changes.
     pub media_cache_dir: Option<PathBuf>,
+
+    /// The most bytes the media cache keeps on disk.
+    ///
+    /// Unset, the cap is 1 GiB. The cache also keeps at most 256 files, whatever
+    /// their size; this is the byte half of that bound.
+    pub media_cache_max_bytes: Option<u64>,
 }
 
 impl Default for Config {
@@ -201,6 +207,7 @@ impl Default for Config {
             session_path: None,
             session_passphrase: None,
             media_cache_dir: None,
+            media_cache_max_bytes: None,
         }
     }
 }
@@ -445,6 +452,46 @@ mod tests {
             cfg.media_cache_dir, None,
             "beside the config file is the default"
         );
+        assert_eq!(
+            cfg.media_cache_max_bytes, None,
+            "the cache's own 1 GiB is the default"
+        );
+    }
+
+    /// The byte cap is read from the file under its own key.
+    #[test]
+    fn the_media_cache_max_bytes_is_read_from_the_file() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
+        let path =
+            std::env::temp_dir().join(format!("televim-cfg-media-cap-{}.toml", std::process::id()));
+        std::fs::write(&path, "media_cache_max_bytes = 2147483648\n")
+            .expect("a temp file can be written");
+
+        let cfg = Config::load(&path).expect("a file with the key loads");
+        std::fs::remove_file(&path).expect("the temp file can be removed");
+
+        assert_eq!(cfg.media_cache_max_bytes, Some(2_147_483_648));
+    }
+
+    /// `TELEVIM_MEDIA_CACHE_MAX_BYTES` sets the cap with no file at all.
+    #[test]
+    fn the_environment_supplies_the_media_cache_max_bytes() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
+        // SAFETY: process-wide environment, written only by the tests in this
+        // module and only while holding `ENV`.
+        unsafe {
+            std::env::set_var("TELEVIM_MEDIA_CACHE_MAX_BYTES", "536870912");
+        }
+
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+
+        // SAFETY: as above — clearing a name this module's tests set.
+        unsafe { std::env::remove_var("TELEVIM_MEDIA_CACHE_MAX_BYTES") };
+
+        assert_eq!(cfg.media_cache_max_bytes, Some(536_870_912));
     }
 
     /// The cache directory is read from the file under its own key.

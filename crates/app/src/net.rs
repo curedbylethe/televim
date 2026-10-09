@@ -8124,7 +8124,7 @@ mod media_tests {
     #[test]
     fn a_download_is_stored_once_and_the_next_open_is_served_from_disk() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None));
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
 
         assert!(
             cached_media(&cache, CHAT, 5, None).is_none(),
@@ -8156,7 +8156,7 @@ mod media_tests {
     #[test]
     fn a_forwarded_file_in_another_chat_is_served_from_the_cache() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None));
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
         let Event::MediaSaved { path, .. } =
             keep_download(&cache, CHAT, 5, Some(77), MediaKind::Video, b"clip")
         else {
@@ -8181,7 +8181,7 @@ mod media_tests {
     #[test]
     fn a_file_without_an_id_falls_back_to_the_message_key() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None));
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
         keep_download(&cache, CHAT, 5, None, MediaKind::Video, b"clip");
 
         assert!(
