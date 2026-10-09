@@ -68,7 +68,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
 use crate::config::Config;
 use crate::draft_store::DraftFile;
 use crate::history_store::{HistoryCache, HistoryFile, PageKind};
-use crate::media_cache::MediaCache;
+use crate::media_cache::{Key, MediaCache};
 use crate::runtime::AppEvent;
 
 /// How many messages one page holds.
@@ -1410,6 +1410,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                 message_id,
             } => {
                 let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
+                let media_id = open_media_id(&app.conversation.conversation, *chat_id, *message_id);
                 kind.zip(state.media_cache.clone()).map(|(kind, cache)| {
                     "downloading media…".clone_into(&mut app.ui.status);
                     app.conversation.downloads.start(*chat_id, *message_id);
@@ -1421,6 +1422,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                     });
                     MediaJob {
                         kind,
+                        media_id,
                         cancel,
                         cache,
                     }
@@ -2345,9 +2347,11 @@ struct MediaCancel {
 }
 
 /// What one media download needs to run: the kind its file is stored under, the
+/// Telegram media id it is also stored under when the message carries one, the
 /// flag that stops it, and the cache it is looked up in and stored into.
 struct MediaJob {
     kind: MediaKind,
+    media_id: Option<i64>,
     cancel: Arc<AtomicBool>,
     cache: Arc<Mutex<MediaCache>>,
 }
@@ -2366,6 +2370,14 @@ fn open_media_kind(view: &ConversationView, chat_id: i64, message_id: i64) -> Op
     view.message(message_id)
         .filter(|message| message.chat_id == chat_id)
         .and_then(|message| message.media)
+}
+
+/// The Telegram media id of the media on `message_id` in `chat_id`, when the
+/// conversation on show holds that message and it carries one.
+fn open_media_id(view: &ConversationView, chat_id: i64, message_id: i64) -> Option<i64> {
+    view.message(message_id)
+        .filter(|message| message.chat_id == chat_id)
+        .and_then(|message| message.media_id)
 }
 
 /// The status sentence for a download that wrote no file.
@@ -2439,7 +2451,7 @@ async fn save_media(
         };
     };
 
-    if let Some(event) = cached_media(&job.cache, chat_id, message_id) {
+    if let Some(event) = cached_media(&job.cache, chat_id, message_id, job.media_id) {
         return event;
     }
 
@@ -2466,21 +2478,35 @@ async fn save_media(
 
     let cache = Arc::clone(&job.cache);
     let kind = job.kind;
-    tokio::task::spawn_blocking(move || keep_download(&cache, chat_id, message_id, kind, &bytes))
-        .await
-        .unwrap_or_else(|error| Event::MediaFailed {
-            chat_id,
-            message_id,
-            reason: format!("could not cache the media: {error}; nothing was saved"),
-        })
+    let media_id = job.media_id;
+    tokio::task::spawn_blocking(move || {
+        keep_download(&cache, chat_id, message_id, media_id, kind, &bytes)
+    })
+    .await
+    .unwrap_or_else(|error| Event::MediaFailed {
+        chat_id,
+        message_id,
+        reason: format!("could not cache the media: {error}; nothing was saved"),
+    })
 }
 
 /// The answer for a message already in the cache, if it is.
-fn cached_media(cache: &Mutex<MediaCache>, chat_id: i64, message_id: i64) -> Option<Event> {
-    let path = cache
-        .lock()
-        .expect("the media cache lock is not poisoned")
-        .lookup(chat_id, message_id)?;
+///
+/// The media id is asked first, when the message carries one: a copy forwarded
+/// from another chat is cached under the id, not under this message. Only then
+/// the message's own key, which is all a message without an id has.
+fn cached_media(
+    cache: &Mutex<MediaCache>,
+    chat_id: i64,
+    message_id: i64,
+    media_id: Option<i64>,
+) -> Option<Event> {
+    let path = {
+        let mut cache = cache.lock().expect("the media cache lock is not poisoned");
+        media_id
+            .and_then(|id| cache.lookup_media(id))
+            .or_else(|| cache.lookup(chat_id, message_id))?
+    };
     Some(Event::MediaSaved {
         chat_id,
         message_id,
@@ -2496,10 +2522,15 @@ fn keep_download(
     cache: &Mutex<MediaCache>,
     chat_id: i64,
     message_id: i64,
+    media_id: Option<i64>,
     kind: MediaKind,
     bytes: &[u8],
 ) -> Event {
-    let stored = MediaCache::store_shared(cache, chat_id, message_id, kind, bytes);
+    // The file is named for the message it was downloaded for, and for its media
+    // id when it has one, so a later copy in another chat finds it.
+    let mut keys = vec![Key::Message(chat_id, message_id)];
+    keys.extend(media_id.map(Key::Media));
+    let stored = MediaCache::store_shared(cache, &keys, kind, bytes);
     match stored {
         Some(path) => Event::MediaSaved {
             chat_id,
@@ -8096,12 +8127,12 @@ mod media_tests {
         let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None));
 
         assert!(
-            cached_media(&cache, CHAT, 5).is_none(),
+            cached_media(&cache, CHAT, 5, None).is_none(),
             "nothing cached yet"
         );
 
         let Event::MediaSaved { path, .. } =
-            keep_download(&cache, CHAT, 5, MediaKind::Video, b"clip")
+            keep_download(&cache, CHAT, 5, None, MediaKind::Video, b"clip")
         else {
             panic!("a stored download answers with its file");
         };
@@ -8111,12 +8142,57 @@ mod media_tests {
             path: again,
             message_id,
             ..
-        }) = cached_media(&cache, CHAT, 5)
+        }) = cached_media(&cache, CHAT, 5, None)
         else {
             panic!("the cached message is served from disk");
         };
         assert_eq!(again, path);
         assert_eq!(message_id, 5);
+    }
+
+    /// A file downloaded for one chat is cached under its media id too, so the
+    /// same file forwarded into another chat is served from disk. A hit is an
+    /// answer, and `save_media` returns it before any download is asked for.
+    #[test]
+    fn a_forwarded_file_in_another_chat_is_served_from_the_cache() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None));
+        let Event::MediaSaved { path, .. } =
+            keep_download(&cache, CHAT, 5, Some(77), MediaKind::Video, b"clip")
+        else {
+            panic!("a stored download answers with its file");
+        };
+
+        let Some(Event::MediaSaved {
+            path: forwarded,
+            chat_id,
+            message_id,
+        }) = cached_media(&cache, CHAT + 1, 9, Some(77))
+        else {
+            panic!("the forwarded copy is served from disk");
+        };
+        assert_eq!(forwarded, path);
+        assert_eq!((chat_id, message_id), (CHAT + 1, 9));
+    }
+
+    /// Without an id a message is looked up by its own key alone, as it always
+    /// was: another chat's copy is not its file, and an id that was never stored
+    /// falls back to the message's key.
+    #[test]
+    fn a_file_without_an_id_falls_back_to_the_message_key() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None));
+        keep_download(&cache, CHAT, 5, None, MediaKind::Video, b"clip");
+
+        assert!(
+            cached_media(&cache, CHAT + 1, 9, None).is_none(),
+            "no id and another chat is a miss"
+        );
+        assert!(cached_media(&cache, CHAT, 5, None).is_some());
+        assert!(
+            cached_media(&cache, CHAT, 5, Some(77)).is_some(),
+            "an id that is not stored falls back to the message's own key"
+        );
     }
 
     /// The progress callback reports each chunk on the channel, in order; once the

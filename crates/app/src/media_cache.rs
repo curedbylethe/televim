@@ -1,12 +1,14 @@
 //! Downloaded media kept on disk, so a re-open does not download it again.
 //!
 //! Each distinct file is stored once, as a blob named `<sha256>.<suffix>` for
-//! the hash of its bytes. Each `(chat, message)` key has a pointer file,
-//! `<chat>-<message>.ref`, holding the hash of its blob. The pointers are the
-//! index: a restart rebuilds it from their names and contents. The directory is
-//! bounded by the bytes of its distinct blobs and by its pointer count; past
-//! either, the least recently used pointer goes first, and its blob with it
-//! once no other pointer names it.
+//! the hash of its bytes. Each key has a pointer file holding the hash of its
+//! blob. A key is either the `(chat, message)` a file was downloaded for,
+//! `<chat>-<message>.ref`, or the Telegram media id it carries, `m<id>.ref`, which
+//! is the same for a file forwarded into any chat. The pointers are the index: a
+//! restart rebuilds it from their names and contents. The directory is bounded by
+//! the bytes of its distinct blobs and by its pointer count; past either, the
+//! least recently used pointer goes first, and its blob with it once no other
+//! pointer names it.
 //!
 //! **Plaintext, like the history and drafts files.** Files are restricted to
 //! their owner and the directory is tagged with the account, but nothing is
@@ -70,9 +72,34 @@ fn parse_blob(name: &str) -> Option<String> {
     (SUFFIXES.contains(&extension) && hash_shaped).then(|| stem.to_owned())
 }
 
+/// What a cached file is looked up by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Key {
+    /// The message a file was downloaded for: `<chat>-<message>.ref`.
+    Message(i64, i64),
+    /// Telegram's stable media id, which a forwarded copy shares: `m<id>.ref`.
+    Media(i64),
+}
+
+impl Key {
+    /// The pointer file's name. The `m` keeps a media id apart from a chat id,
+    /// which may be negative.
+    fn pointer_name(self) -> String {
+        match self {
+            Self::Message(chat_id, message_id) => format!("{chat_id}-{message_id}.ref"),
+            Self::Media(media_id) => format!("m{media_id}.ref"),
+        }
+    }
+}
+
 /// The key a pointer's name carries, or `None` for anything else.
-fn parse_pointer(name: &str) -> Option<(i64, i64)> {
-    parse_ids(name.strip_suffix(".ref")?)
+fn parse_pointer(name: &str) -> Option<Key> {
+    let stem = name.strip_suffix(".ref")?;
+    if let Some(media_id) = stem.strip_prefix('m') {
+        return media_id.parse().ok().map(Key::Media);
+    }
+    let (chat_id, message_id) = parse_ids(stem)?;
+    Some(Key::Message(chat_id, message_id))
 }
 
 /// The ids a pre-content-addressing file's name encodes, or `None` for anything
@@ -101,10 +128,6 @@ fn blob_name(hash: &str, kind: MediaKind) -> String {
     format!("{hash}.{}", suffix(kind))
 }
 
-fn pointer_name(chat_id: i64, message_id: i64) -> String {
-    format!("{chat_id}-{message_id}.ref")
-}
-
 /// The sha256 of `bytes`, as lowercase hex: the name a blob is stored under.
 fn content_hash(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -116,8 +139,7 @@ fn content_hash(bytes: &[u8]) -> String {
     hex
 }
 
-/// One `(chat, message)` key: the blob its pointer names, and when it was last
-/// used.
+/// One key: the blob its pointer names, and when it was last used.
 struct Entry {
     hash: String,
     modified: SystemTime,
@@ -139,8 +161,11 @@ struct Reservation {
     path: PathBuf,
     size: u64,
     generation: u64,
+    /// The references this store holds: one per pointer it will write. Taken now
+    /// so an eviction cannot unlink a blob that a store is about to name.
+    refs: usize,
     /// Whether this store writes the blob. `false` means the blob was already
-    /// here and this store holds one reference to it instead.
+    /// here and this store holds its references to it instead.
     write: bool,
 }
 
@@ -149,7 +174,7 @@ pub(crate) struct MediaCache {
     dir: PathBuf,
     max_bytes: u64,
     max_entries: usize,
-    entries: BTreeMap<(i64, i64), Entry>,
+    entries: BTreeMap<Key, Entry>,
     blobs: BTreeMap<String, Blob>,
     /// Bumped by [`MediaCache::clear`], so a store that began before a clear
     /// knows not to index its file after it.
@@ -195,12 +220,22 @@ impl MediaCache {
         cache
     }
 
-    /// The file a message's media is cached in, if it is. A hit is a use: the
-    /// key's recency moves to now, and so does its pointer's mtime, which is
-    /// what carries the order across a restart.
+    /// The file a message's media is cached in, if it is.
     pub(crate) fn lookup(&mut self, chat_id: i64, message_id: i64) -> Option<PathBuf> {
-        let pointer = self.pointer_path(chat_id, message_id);
-        let entry = self.entries.get_mut(&(chat_id, message_id))?;
+        self.hit(Key::Message(chat_id, message_id))
+    }
+
+    /// The file a Telegram media id is cached in, if it is: whichever message it
+    /// was downloaded for, so a copy forwarded from another chat is found too.
+    pub(crate) fn lookup_media(&mut self, media_id: i64) -> Option<PathBuf> {
+        self.hit(Key::Media(media_id))
+    }
+
+    /// A lookup is a use: the key's recency moves to now, and so does its
+    /// pointer's mtime, which is what carries the order across a restart.
+    fn hit(&mut self, key: Key) -> Option<PathBuf> {
+        let pointer = self.pointer_path(key);
+        let entry = self.entries.get_mut(&key)?;
         let now = SystemTime::now();
         entry.modified = now;
         let blob = self.blobs.get(&entry.hash)?;
@@ -214,15 +249,14 @@ impl MediaCache {
         Some(blob.path.clone())
     }
 
-    /// Caches `bytes` for a message and returns the file they landed in.
+    /// Caches `bytes` under each of `keys` and returns the file they landed in.
     ///
     /// Takes the lock twice and writes between: the file I/O never runs under
     /// the lock, so a clear waits out a lock-held swap, not a 16 MiB write. The
     /// hash is taken before the first lock for the same reason.
     pub(crate) fn store_shared(
         cache: &Mutex<Self>,
-        chat_id: i64,
-        message_id: i64,
+        keys: &[Key],
         kind: MediaKind,
         bytes: &[u8],
     ) -> Option<PathBuf> {
@@ -230,8 +264,8 @@ impl MediaCache {
         let reservation = cache
             .lock()
             .expect("the media cache lock is not poisoned")
-            .reserve(&hash, kind, bytes.len())?;
-        if write_reserved(&reservation, chat_id, message_id, bytes).is_none() {
+            .reserve(&hash, kind, bytes.len(), keys.len())?;
+        if write_reserved(&reservation, keys, bytes).is_none() {
             cache
                 .lock()
                 .expect("the media cache lock is not poisoned")
@@ -241,7 +275,7 @@ impl MediaCache {
         cache
             .lock()
             .expect("the media cache lock is not poisoned")
-            .commit(reservation, chat_id, message_id)
+            .commit(reservation, keys)
     }
 
     /// The single-owner store, for tests: the same three steps as
@@ -254,26 +288,39 @@ impl MediaCache {
         kind: MediaKind,
         bytes: &[u8],
     ) -> Option<PathBuf> {
-        let reservation = self.reserve(&content_hash(bytes), kind, bytes.len())?;
-        if write_reserved(&reservation, chat_id, message_id, bytes).is_none() {
+        self.store_keys(&[Key::Message(chat_id, message_id)], kind, bytes)
+    }
+
+    /// [`MediaCache::store`] under any set of keys.
+    #[cfg(test)]
+    fn store_keys(&mut self, keys: &[Key], kind: MediaKind, bytes: &[u8]) -> Option<PathBuf> {
+        let reservation = self.reserve(&content_hash(bytes), kind, bytes.len(), keys.len())?;
+        if write_reserved(&reservation, keys, bytes).is_none() {
             self.abandon(&reservation);
             return None;
         }
-        self.commit(reservation, chat_id, message_id)
+        self.commit(reservation, keys)
     }
 
-    /// Claims the blob for `hash`, a store of `size` bytes. Refuses what could
-    /// never fit: bytes over [`MEDIA_LIMIT`], or over the byte cap. A blob
-    /// already here is held rather than rewritten. No I/O.
-    fn reserve(&mut self, hash: &str, kind: MediaKind, size: usize) -> Option<Reservation> {
+    /// Claims the blob for `hash`, a store of `size` bytes that will name it
+    /// under `refs` pointers. Refuses what could never fit: bytes over
+    /// [`MEDIA_LIMIT`], or over the byte cap. A blob already here is held rather
+    /// than rewritten. No I/O.
+    fn reserve(
+        &mut self,
+        hash: &str,
+        kind: MediaKind,
+        size: usize,
+        refs: usize,
+    ) -> Option<Reservation> {
         let size = u64::try_from(size).ok()?;
         if size > MEDIA_LIMIT as u64 || size > self.max_bytes {
             return None;
         }
-        // The hold is taken now, so an eviction cannot unlink the blob before
-        // this store's pointer names it.
+        // The holds are taken now, so an eviction cannot unlink the blob before
+        // this store's pointers name it.
         let (path, write) = if let Some(blob) = self.blobs.get_mut(hash) {
-            blob.refs += 1;
+            blob.refs += refs;
             (blob.path.clone(), false)
         } else {
             let path = self.dir.join(blob_name(hash, kind));
@@ -286,6 +333,7 @@ impl MediaCache {
             path,
             size,
             generation: self.generation,
+            refs,
             write,
         })
     }
@@ -302,7 +350,9 @@ impl MediaCache {
                 let _ = fs::remove_file(&reservation.path);
             }
         } else {
-            self.drop_ref(&reservation.hash);
+            for _ in 0..reservation.refs {
+                self.drop_ref(&reservation.hash);
+            }
         }
     }
 
@@ -336,18 +386,14 @@ impl MediaCache {
         }
     }
 
-    fn pointer_path(&self, chat_id: i64, message_id: i64) -> PathBuf {
-        self.dir.join(pointer_name(chat_id, message_id))
+    fn pointer_path(&self, key: Key) -> PathBuf {
+        self.dir.join(key.pointer_name())
     }
 
-    /// Indexes a written store, unless a clear ran since it was reserved. A
-    /// late store's files are removed unless a newer reservation owns them.
-    fn commit(
-        &mut self,
-        reservation: Reservation,
-        chat_id: i64,
-        message_id: i64,
-    ) -> Option<PathBuf> {
+    /// Indexes a written store under each of `keys`, unless a clear ran since it
+    /// was reserved. A late store's files are removed unless a newer reservation
+    /// owns them.
+    fn commit(&mut self, reservation: Reservation, keys: &[Key]) -> Option<PathBuf> {
         let Reservation {
             hash,
             path,
@@ -356,21 +402,22 @@ impl MediaCache {
             write,
             ..
         } = reservation;
-        let key = (chat_id, message_id);
         if generation != self.generation {
             // The clear already swept the cache; the late files must not survive
             // it. A newer store may own them by now, so leave what it owns.
             if !self.owns(&path, &hash) {
                 let _ = fs::remove_file(&path);
             }
-            if !self.entries.contains_key(&key) {
-                let _ = fs::remove_file(self.pointer_path(chat_id, message_id));
+            for key in keys {
+                if !self.entries.contains_key(key) {
+                    let _ = fs::remove_file(self.pointer_path(*key));
+                }
             }
             return None;
         }
         if write {
             self.release(&path);
-            // The new pointer takes a reference to the blob it names.
+            // Each new pointer takes a reference to the blob it names.
             self.blobs
                 .entry(hash.clone())
                 .or_insert_with(|| Blob {
@@ -378,21 +425,24 @@ impl MediaCache {
                     bytes: size,
                     refs: 0,
                 })
-                .refs += 1;
+                .refs += keys.len();
         } else if !self.blobs.contains_key(&hash) {
             // A hold keeps its blob indexed, so this is not reached in practice.
             return None;
         }
 
-        let entry = Entry {
-            hash: hash.clone(),
-            modified: SystemTime::now(),
-        };
-        if let Some(old) = self.entries.insert(key, entry) {
-            // The key's old pointer no longer names its old blob.
-            self.drop_ref(&old.hash);
+        let now = SystemTime::now();
+        for key in keys {
+            let entry = Entry {
+                hash: hash.clone(),
+                modified: now,
+            };
+            if let Some(old) = self.entries.insert(*key, entry) {
+                // The key's old pointer no longer names its old blob.
+                self.drop_ref(&old.hash);
+            }
         }
-        self.evict(Some(key));
+        self.evict(keys);
         self.blobs.get(&hash).map(|blob| blob.path.clone())
     }
 
@@ -504,33 +554,32 @@ impl MediaCache {
             }
             false
         });
-        self.evict(None);
+        self.evict(&[]);
     }
 
     fn total(&self) -> u64 {
         self.blobs.values().map(|blob| blob.bytes).sum()
     }
 
-    /// Removes the least recently used keys until both caps hold, never the
-    /// `keep` entry. Each removed key drops its pointer and its reference to
-    /// its blob.
+    /// Removes the least recently used keys until both caps hold, never a `keep`
+    /// key. Each removed key drops its pointer and its reference to its blob.
     ///
     /// A file that will not remove is dropped from the index anyway: the cap
     /// is then a count of what this cache still tracks, and the warning says
     /// which file survived.
-    fn evict(&mut self, keep: Option<(i64, i64)>) {
+    fn evict(&mut self, keep: &[Key]) {
         while self.entries.len() > self.max_entries || self.total() > self.max_bytes {
             let oldest = self
                 .entries
                 .iter()
-                .filter(|(key, _)| Some(**key) != keep)
+                .filter(|(key, _)| !keep.contains(key))
                 .min_by_key(|(_, entry)| entry.modified)
                 .map(|(key, _)| *key);
             let Some(key) = oldest else {
                 break;
             };
             if let Some(entry) = self.entries.remove(&key) {
-                if let Err(error) = fs::remove_file(self.pointer_path(key.0, key.1)) {
+                if let Err(error) = fs::remove_file(self.pointer_path(key)) {
                     tracing::warn!(%error, "an evicted media pointer could not be removed");
                 }
                 self.drop_ref(&entry.hash);
@@ -575,14 +624,9 @@ fn account_tag(account: Option<&str>) -> String {
 }
 
 /// Writes what a reserved store owes the disk: the blob, when this store is the
-/// one writing it, then the key's pointer. A failed write is warned about and
-/// returns `None`.
-fn write_reserved(
-    reservation: &Reservation,
-    chat_id: i64,
-    message_id: i64,
-    bytes: &[u8],
-) -> Option<()> {
+/// one writing it, then a pointer for each key. A failed write is warned about
+/// and returns `None`.
+fn write_reserved(reservation: &Reservation, keys: &[Key], bytes: &[u8]) -> Option<()> {
     let written = fs::create_dir_all(&reservation.dir)
         .context("creating the media cache directory")
         .and_then(|()| {
@@ -590,8 +634,12 @@ fn write_reserved(
                 write_atomically(&reservation.path, bytes)?;
             }
             let pointer = format!("{}\n", reservation.hash);
-            let pointer_path = reservation.dir.join(pointer_name(chat_id, message_id));
-            write_atomically(&pointer_path, pointer.as_bytes())
+            keys.iter().try_for_each(|key| {
+                write_atomically(
+                    &reservation.dir.join(key.pointer_name()),
+                    pointer.as_bytes(),
+                )
+            })
         });
     if let Err(error) = written {
         tracing::warn!(%error, "media could not be cached");
@@ -655,7 +703,8 @@ mod tests {
 
     /// Sets a key's pointer mtime, to make one key older than another on disk.
     fn set_pointer_time(dir: &Path, chat_id: i64, message_id: i64, when: SystemTime) {
-        set_mtime(&dir.join(pointer_name(chat_id, message_id)), when).expect("the mtime is set");
+        let pointer = Key::Message(chat_id, message_id).pointer_name();
+        set_mtime(&dir.join(pointer), when).expect("the mtime is set");
     }
 
     #[test]
@@ -741,7 +790,7 @@ mod tests {
         cache.store(1, 2, MediaKind::File, b"same").expect("cached");
         cache
             .entries
-            .get_mut(&(1, 1))
+            .get_mut(&Key::Message(1, 1))
             .expect("the first key is indexed")
             .modified = SystemTime::UNIX_EPOCH;
 
@@ -749,7 +798,7 @@ mod tests {
             .store(1, 3, MediaKind::File, b"other")
             .expect("cached");
         assert!(shared.exists(), "one of its two keys is left");
-        assert!(cache.entries.contains_key(&(1, 2)));
+        assert!(cache.entries.contains_key(&Key::Message(1, 2)));
 
         cache.store(1, 4, MediaKind::File, b"more").expect("cached");
         assert_eq!(cache.lookup(1, 2), None, "the second key goes next");
@@ -760,6 +809,84 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_also_named_by_its_media_id_and_each_name_is_a_reference() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache
+            .store_keys(
+                &[Key::Message(7, 9), Key::Media(77)],
+                MediaKind::Video,
+                b"clip",
+            )
+            .expect("cached");
+
+        assert_eq!(cache.lookup_media(77), Some(path.clone()));
+        assert_eq!(cache.lookup(7, 9), Some(path));
+        assert_eq!(cache.blobs[&content_hash(b"clip")].refs, 2);
+        assert!(
+            dir.path().join("m77.ref").exists(),
+            "the id has its own name"
+        );
+    }
+
+    #[test]
+    fn an_id_pointer_is_rebuilt_on_restart() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache
+            .store_keys(&[Key::Media(77)], MediaKind::Video, b"clip")
+            .expect("cached");
+        drop(cache);
+
+        let mut reopened = cache_in(dir.path(), None);
+
+        assert_eq!(reopened.lookup_media(77), Some(path));
+    }
+
+    #[test]
+    fn an_id_pointer_is_dropped_with_its_blob() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = MediaCache::with_limits(dir.path().to_path_buf(), 1024, 2, None);
+        let shared = cache
+            .store_keys(
+                &[Key::Message(1, 1), Key::Media(77)],
+                MediaKind::File,
+                b"same",
+            )
+            .expect("cached");
+        for key in [Key::Message(1, 1), Key::Media(77)] {
+            cache
+                .entries
+                .get_mut(&key)
+                .expect("the key is indexed")
+                .modified = SystemTime::UNIX_EPOCH;
+        }
+
+        // The message key is the older of the two, so it goes first; the id
+        // outlives it, and the blob stays for the one reference left.
+        cache
+            .store(1, 2, MediaKind::File, b"other")
+            .expect("cached");
+        assert!(cache.entries.contains_key(&Key::Media(77)));
+        assert!(shared.exists(), "one reference is left");
+
+        cache
+            .entries
+            .get_mut(&Key::Media(77))
+            .expect("the id is indexed")
+            .modified = SystemTime::UNIX_EPOCH;
+        cache.store(1, 3, MediaKind::File, b"more").expect("cached");
+
+        assert_eq!(
+            cache.lookup_media(77),
+            None,
+            "the id goes with its last reference"
+        );
+        assert!(!shared.exists(), "and so does the blob");
+        assert!(!dir.path().join("m77.ref").exists());
+    }
+
+    #[test]
     fn a_hit_protects_a_file_from_eviction() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = MediaCache::with_limits(dir.path().to_path_buf(), 10, 256, None);
@@ -767,7 +894,7 @@ mod tests {
         let evicted = cache.store(1, 2, MediaKind::File, b"bbbb").expect("cached");
         cache
             .entries
-            .get_mut(&(1, 2))
+            .get_mut(&Key::Message(1, 2))
             .expect("the second file is indexed")
             .modified = SystemTime::UNIX_EPOCH;
 
@@ -813,7 +940,7 @@ mod tests {
         cache.store(1, 2, MediaKind::File, b"bbbb");
         cache
             .entries
-            .get_mut(&(1, 1))
+            .get_mut(&Key::Message(1, 1))
             .expect("the first file is indexed")
             .modified = SystemTime::UNIX_EPOCH;
 
@@ -957,14 +1084,19 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), Some("+15550001"));
         let reservation = cache
-            .reserve(&content_hash(b"late!!"), MediaKind::Photo, 6)
+            .reserve(&content_hash(b"late!!"), MediaKind::Photo, 6, 1)
             .expect("the file is reserved");
         let path = reservation.path.clone();
-        write_reserved(&reservation, 7, 9, b"late!!").expect("the file is written");
+        write_reserved(&reservation, &[Key::Message(7, 9)], b"late!!")
+            .expect("the file is written");
 
         cache.clear();
 
-        assert_eq!(cache.commit(reservation, 7, 9), None, "refused");
+        assert_eq!(
+            cache.commit(reservation, &[Key::Message(7, 9)]),
+            None,
+            "refused"
+        );
         assert_eq!(cache.lookup(7, 9), None);
         assert!(!path.exists(), "and the late file is removed");
     }
@@ -974,14 +1106,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), None);
         let stale = cache
-            .reserve(&content_hash(b"new"), MediaKind::Photo, 3)
+            .reserve(&content_hash(b"new"), MediaKind::Photo, 3, 1)
             .expect("reserved");
-        write_reserved(&stale, 7, 9, b"new").expect("written");
+        write_reserved(&stale, &[Key::Message(7, 9)], b"new").expect("written");
         cache.clear();
 
         let fresh = cache.store(7, 9, MediaKind::Photo, b"new").expect("cached");
         assert_eq!(
-            cache.commit(stale, 7, 9),
+            cache.commit(stale, &[Key::Message(7, 9)]),
             None,
             "the stale store is refused"
         );
@@ -1061,7 +1193,7 @@ mod tests {
         cache.store(1, 2, MediaKind::File, b"bbbb");
         cache
             .entries
-            .get_mut(&(1, 1))
+            .get_mut(&Key::Message(1, 1))
             .expect("the first file is indexed")
             .modified = SystemTime::UNIX_EPOCH;
         cache.store(1, 3, MediaKind::File, b"cccc");
@@ -1109,20 +1241,27 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), None);
         let stale = cache
-            .reserve(&content_hash(b"new"), MediaKind::Photo, 3)
+            .reserve(&content_hash(b"new"), MediaKind::Photo, 3, 1)
             .expect("reserved");
-        write_reserved(&stale, 7, 9, b"new").expect("written");
+        write_reserved(&stale, &[Key::Message(7, 9)], b"new").expect("written");
         cache.clear();
         let fresh = cache
-            .reserve(&content_hash(b"new"), MediaKind::Photo, 3)
+            .reserve(&content_hash(b"new"), MediaKind::Photo, 3, 1)
             .expect("reserved");
         let path = fresh.path.clone();
-        write_reserved(&fresh, 7, 9, b"new").expect("written over the late file");
+        write_reserved(&fresh, &[Key::Message(7, 9)], b"new").expect("written over the late file");
 
-        assert_eq!(cache.commit(stale, 7, 9), None, "the late store is refused");
+        assert_eq!(
+            cache.commit(stale, &[Key::Message(7, 9)]),
+            None,
+            "the late store is refused"
+        );
         assert_eq!(fs::read(&path).expect("the newer file survives"), b"new");
 
-        assert_eq!(cache.commit(fresh, 7, 9), Some(path.clone()));
+        assert_eq!(
+            cache.commit(fresh, &[Key::Message(7, 9)]),
+            Some(path.clone())
+        );
         assert_eq!(cache.lookup(7, 9), Some(path));
     }
 
@@ -1131,14 +1270,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), None);
         let hash = content_hash(b"old");
-        let stale = cache.reserve(&hash, MediaKind::Photo, 3).expect("reserved");
+        let stale = cache
+            .reserve(&hash, MediaKind::Photo, 3, 1)
+            .expect("reserved");
         let path = stale.path.clone();
-        write_reserved(&stale, 7, 9, b"old").expect("written");
+        write_reserved(&stale, &[Key::Message(7, 9)], b"old").expect("written");
         cache.clear();
-        let failed = cache.reserve(&hash, MediaKind::Photo, 3).expect("reserved");
+        let failed = cache
+            .reserve(&hash, MediaKind::Photo, 3, 1)
+            .expect("reserved");
         cache.abandon(&failed);
 
-        assert_eq!(cache.commit(stale, 7, 9), None);
+        assert_eq!(cache.commit(stale, &[Key::Message(7, 9)]), None);
         assert!(!path.exists(), "and the late file is removed");
     }
 }
