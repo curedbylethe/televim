@@ -17,8 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableFocusChange, EnableFocusChange, Event, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -207,6 +207,7 @@ async fn run_async(
     enable_raw_mode().context("enabling raw mode")?;
     let mut screen = stdout();
     execute!(screen, EnterAlternateScreen).context("entering alternate screen")?;
+    execute!(screen, EnableFocusChange).context("reporting focus changes")?;
 
     // Pushed before the reader thread starts, because a key arriving between the
     // two would be read without it — and popped by the guard when this function
@@ -229,7 +230,11 @@ async fn run_async(
 
     // Always restore the terminal, even if the loop errored.
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = execute!(
+        terminal.backend_mut(),
+        DisableFocusChange,
+        LeaveAlternateScreen
+    );
     let _ = terminal.show_cursor();
     drop(keys);
 
@@ -322,7 +327,11 @@ fn suspend_tui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     keys: &mut EnhancedKeys<Stdout>,
 ) -> std::io::Result<()> {
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableFocusChange,
+        LeaveAlternateScreen
+    )?;
     disable_raw_mode()?;
     keys.suspend()?;
     terminal.show_cursor()
@@ -338,11 +347,32 @@ fn resume_tui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     keys: &mut EnhancedKeys<Stdout>,
 ) -> std::io::Result<()> {
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableFocusChange
+    )?;
     enable_raw_mode()?;
     keys.resume()?;
     terminal.hide_cursor()?;
     terminal.clear()
+}
+
+/// Reacts to the terminal gaining or losing focus.
+///
+/// A blur can strand a half-typed key or reset the terminal's keyboard flags,
+/// so every change clears the latches and a gain puts the flags back. Focus
+/// events never reach the key chain.
+fn focus_changed(
+    app: &mut App,
+    keys: &mut EnhancedKeys<Stdout>,
+    gained: bool,
+) -> std::io::Result<()> {
+    app.reset_pending_input();
+    if gained {
+        keys.resume()?;
+    }
+    Ok(())
 }
 
 /// The platform's file opener, and the arguments that come before the path.
@@ -583,6 +613,8 @@ async fn event_loop(
                     keypress_to_probe = Some(Instant::now());
                 }
             }
+            Ok(Some(AppEvent::Input(Event::FocusGained))) => focus_changed(&mut app, keys, true)?,
+            Ok(Some(AppEvent::Input(Event::FocusLost))) => focus_changed(&mut app, keys, false)?,
             Ok(Some(AppEvent::Input(_))) | Err(_) => {}
             Ok(Some(AppEvent::Net(event))) => net::apply(&mut app, &mut network, event),
             Ok(None) => break,
