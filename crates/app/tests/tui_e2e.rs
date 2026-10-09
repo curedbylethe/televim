@@ -78,6 +78,46 @@ fn insert_mode_echoes_typing() {
         .expect("back in NORMAL mode");
 }
 
+/// `i` on the open draft's row resumes the draft in one key: the words typed
+/// and left are back in the line, INSERT is shown, and a key typed there lands
+/// after them.
+#[test]
+fn i_on_the_draft_row_resumes_the_draft() {
+    let sandbox = common::sandbox();
+    common::seed_history(&sandbox, &[(1, "Ada")], &[(1, vec!["hi", "are you there"])]);
+    let mut t = common::spawn_offline(&sandbox);
+    t.wait_until(|s| s.contains("NORMAL"))
+        .expect("ready in NORMAL mode");
+
+    // The G7 prelude: clear the sign-in card so the conversation takes keys.
+    t.send_str(":").expect("open command line");
+    t.send(Key::Esc).expect("close command line");
+    t.wait_until(|s| !s.contains("Sign in to Telegram"))
+        .expect("sign-in card cleared");
+
+    t.send(Key::Char('i')).expect("enter insert mode");
+    t.wait_until(|s| s.contains("INSERT"))
+        .expect("INSERT mode shown");
+    t.send_str("see you there").expect("type the draft");
+    t.wait_until(|s| s.contains("see you there"))
+        .expect("draft echoed");
+    t.send(Key::Esc).expect("leave insert mode");
+    t.wait_until(|s| s.contains("NORMAL"))
+        .expect("back in NORMAL mode");
+    t.send(Key::Esc)
+        .expect("leave the line for the conversation");
+
+    // `j` from the newest message rests the cursor on the draft's row.
+    t.send(Key::Char('j')).expect("move onto the draft row");
+
+    t.send(Key::Char('i')).expect("resume the draft");
+    t.wait_until(|s| s.contains("INSERT"))
+        .expect("INSERT mode shown on the draft");
+    t.send_str("!").expect("type after the draft");
+    t.wait_until(|s| s.contains("see you there!"))
+        .expect("the draft is back in the line, and the key lands after it");
+}
+
 #[test]
 fn command_prompt_quits() {
     let sandbox = common::sandbox();
