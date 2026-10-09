@@ -745,6 +745,27 @@ impl State {
         }
     }
 
+    /// Drops a message's cached media after an edit: the message may now carry
+    /// different media, so its cached file is no longer its answer.
+    fn forget_media_message(&self, chat_id: i64, message_id: i64) {
+        if let Some(cache) = &self.media_cache {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .remove_message(chat_id, message_id);
+        }
+    }
+
+    /// Drops the cached media of deleted messages, in any chat.
+    fn forget_media_messages(&self, message_ids: &[i64]) {
+        if let Some(cache) = &self.media_cache {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .remove_messages(message_ids);
+        }
+    }
+
     /// Hands over what the history file held at launch, already vetted
     /// against the configured account.
     ///
@@ -776,6 +797,15 @@ impl State {
     fn remember_update(&mut self, event: &UpdateEvent) {
         if self.cached.messages.apply_update(event) {
             self.cached.dirty = true;
+        }
+        match event {
+            UpdateEvent::MessageEdited {
+                chat_id,
+                message_id,
+                ..
+            } => self.forget_media_message(*chat_id, *message_id),
+            UpdateEvent::MessagesDeleted { message_ids } => self.forget_media_messages(message_ids),
+            _ => {}
         }
     }
 
@@ -2288,7 +2318,11 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             chat_id,
             message_ids,
             result,
-        } => apply_deleted(app, chat_id, &message_ids, result),
+        } => {
+            // Before the answer: a failed batch may have removed some of them.
+            state.forget_media_messages(&message_ids);
+            apply_deleted(app, chat_id, &message_ids, result);
+        }
 
         Event::Forwarded {
             chat_id,
@@ -8148,6 +8182,77 @@ mod media_tests {
         };
         assert_eq!(again, path);
         assert_eq!(message_id, 5);
+    }
+
+    /// An edit drops its message's cached file, and only that one.
+    #[test]
+    fn an_edited_message_drops_its_cache_entry() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut app = App::new();
+        let mut state = State::default();
+        state.set_media_cache(MediaCache::open(dir.path().to_path_buf(), None, None));
+        let cache = state.media_cache.clone().expect("the cache is set");
+        keep_download(&cache, CHAT, 5, None, MediaKind::Video, b"clip");
+        keep_download(&cache, CHAT, 6, None, MediaKind::Video, b"more");
+        keep_download(&cache, CHAT, 7, None, MediaKind::Video, b"own");
+        keep_download(&cache, CHAT + 1, 5, None, MediaKind::Video, b"other");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::MessageEdited {
+                chat_id: CHAT,
+                message_id: 6,
+                new_text: Cow::Borrowed("edited"),
+            }),
+        );
+        assert!(
+            cached_media(&cache, CHAT, 6, None).is_none(),
+            "the edited file goes"
+        );
+        assert!(cached_media(&cache, CHAT, 5, None).is_some(), "others stay");
+    }
+
+    /// A deletion drops the cached file whichever way it arrives, the feed's or
+    /// the reader's own. The feed names no chat, so the id's copy in every chat
+    /// goes.
+    #[test]
+    fn a_deleted_message_is_dropped_from_the_cache_in_every_chat() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut app = App::new();
+        let mut state = State::default();
+        state.set_media_cache(MediaCache::open(dir.path().to_path_buf(), None, None));
+        let cache = state.media_cache.clone().expect("the cache is set");
+        keep_download(&cache, CHAT, 5, None, MediaKind::Video, b"clip");
+        keep_download(&cache, CHAT + 1, 5, None, MediaKind::Video, b"other");
+        keep_download(&cache, CHAT, 7, None, MediaKind::Video, b"own");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::MessagesDeleted {
+                message_ids: vec![5],
+            }),
+        );
+        assert!(cached_media(&cache, CHAT, 5, None).is_none());
+        assert!(
+            cached_media(&cache, CHAT + 1, 5, None).is_none(),
+            "the same id in another chat goes too"
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Deleted {
+                chat_id: CHAT,
+                message_ids: vec![7],
+                result: Ok(()),
+            },
+        );
+        assert!(
+            cached_media(&cache, CHAT, 7, None).is_none(),
+            "the reader's own delete too"
+        );
     }
 
     /// A file downloaded for one chat is cached under its media id too, so the
