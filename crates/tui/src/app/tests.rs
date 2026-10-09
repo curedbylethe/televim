@@ -743,6 +743,7 @@ fn a_lone_g_does_not_wait_to_be_the_first_half_of_gg() {
 fn enter_in_the_chat_list_shows_its_card_at_once() {
     let mut app = on_the_chat_list();
     app.handle_key(press(KeyCode::Char('j')));
+    let shown = app.conversation.conversation.window.chat_id;
 
     app.handle_key(press(KeyCode::Enter));
 
@@ -750,9 +751,48 @@ fn enter_in_the_chat_list_shows_its_card_at_once() {
     assert_eq!(app.ui.pane, Pane::Profile(ProfileId::User(2)));
     assert_eq!(app.list.selected_chat, 1);
     assert_eq!(
+        app.conversation.conversation.window.chat_id, shown,
+        "the conversation window is not replaced by the card"
+    );
+    assert_eq!(
         app.take_pending_chat(settled()),
         None,
         "and there is nothing left to open afterwards"
+    );
+}
+
+/// The highlight settling shows the card for the chat it landed on, and only
+/// the card: the conversation is neither opened nor replaced, and the focus
+/// stays on the list so `j` and `k` keep browsing.
+#[test]
+fn a_settled_highlight_shows_the_card_not_the_conversation() {
+    let mut app = on_the_chat_list();
+    let shown = app.conversation.conversation.window.chat_id;
+    assert_ne!(
+        shown, 2,
+        "the conversation on show is not the one browsed to"
+    );
+
+    app.handle_key(press(KeyCode::Char('j')));
+    assert_ne!(
+        app.ui.pane,
+        Pane::Profile(ProfileId::User(2)),
+        "the card waits for the reader to stop"
+    );
+
+    assert!(app.open_settled_card(settled()));
+
+    assert_eq!(app.ui.pane, Pane::Profile(ProfileId::User(2)));
+    assert_eq!(
+        app.conversation.conversation.window.chat_id, shown,
+        "the conversation window was not replaced"
+    );
+    assert_eq!(app.ui.focus, Focus::ChatList);
+
+    app.handle_key(press(KeyCode::Char('j')));
+    assert_eq!(
+        app.list.selected_chat, 2,
+        "the list still moves under the card"
     );
 }
 
