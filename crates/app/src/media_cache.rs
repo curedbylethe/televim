@@ -188,16 +188,27 @@ pub(crate) struct MediaCache {
 impl MediaCache {
     /// Opens the cache in `dir` for `account`, clearing it first if it was
     /// written for another account or for none. An unwritable `dir` opens a
-    /// per-launch fallback in the temp directory instead.
-    pub(crate) fn open(dir: PathBuf, account: Option<&str>) -> Self {
-        Self::open_in(dir, &std::env::temp_dir(), account)
+    /// per-launch fallback in the temp directory instead. `max_bytes` is the
+    /// byte cap, [`MEDIA_CACHE_MAX_BYTES`] when `None`.
+    pub(crate) fn open(dir: PathBuf, account: Option<&str>, max_bytes: Option<u64>) -> Self {
+        Self::open_in(dir, &std::env::temp_dir(), account, max_bytes)
     }
 
     /// [`MediaCache::open`] with the fallback root passed in, so tests can
     /// point it at a temp dir of their own.
-    fn open_in(dir: PathBuf, fallback_root: &Path, account: Option<&str>) -> Self {
+    fn open_in(
+        dir: PathBuf,
+        fallback_root: &Path,
+        account: Option<&str>,
+        max_bytes: Option<u64>,
+    ) -> Self {
         let dir = usable_dir(dir, fallback_root, account);
-        Self::with_limits(dir, MEDIA_CACHE_MAX_BYTES, MEDIA_CACHE_MAX_ENTRIES, account)
+        Self::with_limits(
+            dir,
+            max_bytes.unwrap_or(MEDIA_CACHE_MAX_BYTES),
+            MEDIA_CACHE_MAX_ENTRIES,
+            account,
+        )
     }
 
     fn with_limits(
@@ -698,7 +709,7 @@ mod tests {
     use super::*;
 
     fn cache_in(dir: &Path, account: Option<&str>) -> MediaCache {
-        MediaCache::open(dir.to_path_buf(), account)
+        MediaCache::open(dir.to_path_buf(), account, None)
     }
 
     /// Sets a key's pointer mtime, to make one key older than another on disk.
@@ -975,6 +986,23 @@ mod tests {
     }
 
     #[test]
+    fn a_small_configured_cap_evicts_at_that_size() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = MediaCache::open(dir.path().to_path_buf(), None, Some(1024));
+        let first = cache
+            .store(1, 1, MediaKind::File, &[1; 600])
+            .expect("cached");
+        cache
+            .store(1, 2, MediaKind::File, &[2; 600])
+            .expect("cached");
+
+        assert!(cache.total() <= 1024, "the configured cap holds");
+        assert_eq!(cache.lookup(1, 1), None, "the older file goes");
+        assert!(!first.exists(), "and is removed from disk");
+        assert!(cache.lookup(1, 2).is_some());
+    }
+
+    #[test]
     fn the_production_caps_are_a_gibibyte_and_256_files() {
         assert_eq!(MEDIA_CACHE_MAX_BYTES, 1024 * 1024 * 1024);
         assert_eq!(MEDIA_CACHE_MAX_ENTRIES, 256);
@@ -1151,6 +1179,7 @@ mod tests {
             unwritable_dir(root.path()),
             &fallback_root,
             Some("+15550001"),
+            None,
         );
         let path = cache
             .store(7, 9, MediaKind::Photo, b"picture")
@@ -1170,7 +1199,7 @@ mod tests {
         fs::create_dir(&fallback_root).expect("the fallback root is made");
         let configured = unwritable_dir(root.path());
 
-        let cache = MediaCache::open_in(configured.clone(), &fallback_root, None);
+        let cache = MediaCache::open_in(configured.clone(), &fallback_root, None, None);
 
         assert!(cache.entries.is_empty());
         assert!(!configured.exists(), "the configured path stays absent");
@@ -1211,7 +1240,8 @@ mod tests {
         let root = tempfile::tempdir().expect("a temp dir");
         let fallback_root = root.path().join("tmp");
         fs::create_dir(&fallback_root).expect("the fallback root is made");
-        let mut cache = MediaCache::open_in(unwritable_dir(root.path()), &fallback_root, None);
+        let mut cache =
+            MediaCache::open_in(unwritable_dir(root.path()), &fallback_root, None, None);
         let path = cache
             .store(1, 2, MediaKind::Voice, b"voice")
             .expect("cached");
@@ -1230,7 +1260,7 @@ mod tests {
         // The fallback root is under the same regular file, so it is unwritable too.
         let fallback_root = root.path().join("blocker").join("tmp");
 
-        let mut cache = MediaCache::open_in(configured, &fallback_root, None);
+        let mut cache = MediaCache::open_in(configured, &fallback_root, None, None);
 
         assert_eq!(cache.store(1, 2, MediaKind::Gif, b"gif"), None);
         assert_eq!(cache.lookup(1, 2), None);
