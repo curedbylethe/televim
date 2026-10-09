@@ -1881,6 +1881,48 @@ impl App {
         )
     }
 
+    /// Ends a global search jump whose message the window already holds, by
+    /// landing the cursor on it, so that no fetch is made for it.
+    ///
+    /// Called once the cache has been put in the window: a hit the cache holds
+    /// is a cursor move, as it is for a message on screen. Returns the jump it
+    /// ended, for the driver to land again when the newest page replaces the
+    /// window; `None` when there is no search jump or the window lacks its
+    /// message.
+    ///
+    /// Delegates to [`coordinate::go_to`], which lands on a message in the window.
+    pub fn land_search_jump(&mut self) -> Option<Jump> {
+        let jump = self
+            .pending
+            .pending_jump
+            .filter(|jump| jump.kind == JumpKind::Search)?;
+        self.conversation
+            .conversation
+            .window
+            .position_of(jump.target_id)?;
+        self.pending.clear_jump(jump.target_id);
+        coordinate::go_to(
+            &mut self.pending,
+            &mut self.conversation,
+            jump.target_id,
+            jump.kind,
+        );
+        Some(jump)
+    }
+
+    /// Lands on a message a global search found: a cursor move when the window
+    /// holds it, otherwise a search jump for the driver to fetch.
+    ///
+    /// Delegates to [`coordinate::go_to`].
+    pub fn go_to_search_hit(&mut self, message_id: i64) {
+        coordinate::go_to(
+            &mut self.pending,
+            &mut self.conversation,
+            message_id,
+            JumpKind::Search,
+        );
+    }
+
     // ---- events from the feed -------------------------------------------
 
     /// Applies an event from the feed to everything it touches.
