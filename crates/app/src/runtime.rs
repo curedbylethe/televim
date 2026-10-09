@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::draft_store::{DraftFile, drafts_acceptable};
-use crate::history_store::{HistoryCache, HistoryFile, history_acceptable};
+use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, history_acceptable};
 use crate::media_cache::MediaCache;
 use crate::net;
 use tui::app::App;
@@ -479,13 +479,14 @@ async fn event_loop(
     let loaded = draft_file.load();
     if drafts_acceptable(loaded.account.as_deref(), cfg.phone.as_deref()) {
         app.drafts.restore(loaded.drafts);
+        app.drafts.restore_read_marks(loaded.reads);
     } else {
         tracing::warn!("drafts stored for another account were discarded");
     }
     // Nothing synced yet, so the first pass always writes: a discarded file
     // is overwritten rather than left behind, and a launch with nothing
     // stored settles the file (or its absence) at once.
-    let mut last_synced: Option<Vec<(i64, String)>> = None;
+    let mut last_synced: Option<SyncedDrafts> = None;
 
     // The history file beside it, loaded once at launch too, under the
     // stricter rule: only a file saved under exactly this account seeds the
@@ -746,21 +747,28 @@ fn copy_if_asked(app: &mut App) {
 fn sync_drafts(
     app: &App,
     file: &DraftFile,
-    last: &mut Option<Vec<(i64, String)>>,
+    last: &mut Option<SyncedDrafts>,
     account: Option<&str>,
 ) {
     let chat_id = app.conversation.conversation.window.chat_id;
-    let snapshot = app.drafts.snapshot(Some((chat_id, &app.input.line)));
-    if last.as_ref() == Some(&snapshot) {
+    let drafts = app.drafts.snapshot(Some((chat_id, &app.input.line)));
+    let reads = app.drafts.recent_read_marks(HISTORY_CACHE_PEERS);
+    if let Some((last_drafts, last_reads)) = last.as_ref()
+        && *last_drafts == drafts
+        && *last_reads == reads
+    {
         return;
     }
-    if snapshot.is_empty() {
+    if drafts.is_empty() && reads.is_empty() {
         file.clear();
     } else {
-        file.save(&snapshot, account);
+        file.save(&drafts, &reads, account);
     }
-    *last = Some(snapshot);
+    *last = Some((drafts, reads));
 }
+
+/// What [`sync_drafts`] last wrote: the parked words and the read marks.
+type SyncedDrafts = (Vec<(i64, String)>, Vec<(i64, i64)>);
 
 /// The most bytes of escape sequence this will write for a clipboard.
 ///
@@ -912,7 +920,7 @@ mod tests {
         }]);
         app.drafts.restore(vec![(7, "unsent".to_owned())]);
 
-        let mut last: Option<Vec<(i64, String)>> = None;
+        let mut last: Option<SyncedDrafts> = None;
         sync_drafts(&app, &file, &mut last, Some("+1555"));
         assert_eq!(
             file.load().drafts,
@@ -947,6 +955,28 @@ mod tests {
         assert!(
             !dir.path().join("televim.drafts.json").exists(),
             "no words means no file, so logout's clear survives later passes"
+        );
+    }
+
+    /// The read marks ride the same file: a restored mark is written by the
+    /// first pass, reloads for the same account, and is removed with the file
+    /// when a sign-out forgets it.
+    #[test]
+    fn the_sync_persists_read_marks_until_a_sign_out_forgets_them() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = DraftFile::new(dir.path().join("televim.drafts.json"));
+        let mut app = App::new();
+
+        app.drafts.restore_read_marks(vec![(7, 9)]);
+        let mut last: Option<SyncedDrafts> = None;
+        sync_drafts(&app, &file, &mut last, Some("+1555"));
+        assert_eq!(file.load().reads, vec![(7, 9)], "the mark is on disk");
+
+        app.drafts.clear_read_marks();
+        sync_drafts(&app, &file, &mut last, Some("+1555"));
+        assert!(
+            !dir.path().join("televim.drafts.json").exists(),
+            "forgotten marks leave no file behind"
         );
     }
 

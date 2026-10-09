@@ -2222,6 +2222,10 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             if let Some(file) = &state.draft_file {
                 file.clear();
             }
+            // The read marks go with the account too: the file above is gone,
+            // and the next sync would otherwise write this account's marks
+            // back out under the next one.
+            app.drafts.clear_read_marks();
             // The cached messages go too, for the same reason and with the
             // same best-effort: another account must never open onto them.
             // From memory as well as from disk, or the next write would put
@@ -5203,10 +5207,11 @@ mod tests {
     fn signing_out_removes_the_drafts_file() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let file = DraftFile::new(dir.path().join("televim.drafts.json"));
-        file.save(&[(CHAT, "unsent".to_owned())], Some("+1555"));
+        file.save(&[(CHAT, "unsent".to_owned())], &[], Some("+1555"));
         assert!(dir.path().join("televim.drafts.json").exists());
 
         let mut app = app_with_a_conversation(CHAT, 2);
+        app.drafts.restore_read_marks(vec![(CHAT, 2)]);
         let mut state = State::default();
         state.set_draft_file(file);
         apply_logged_out(&mut app, &mut state, Ok(()));
@@ -5214,6 +5219,10 @@ mod tests {
         assert!(
             !dir.path().join("televim.drafts.json").exists(),
             "the words went with the account"
+        );
+        assert!(
+            app.drafts.recent_read_marks(32).is_empty(),
+            "and so did the read positions, in memory as well as on disk"
         );
         assert_eq!(
             app.ui.status, "signed out",
