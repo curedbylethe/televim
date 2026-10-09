@@ -418,6 +418,17 @@ parsed payload together while it reads. The feed's *seen* map
 map's node overhead, for each peer that received an arrival in the session, and
 never evicted until the process ends.
 
+The outbox read marks (`DraftStore::read_receipts`, `tui/src/state/drafts.rs`)
+are the same kind of map: one `ReadMark` (a message id and a recency stamp, 16
+bytes of payload) for each conversation that has reported a read position in the
+session, plus the map's node overhead, **never evicted until sign-out or exit**.
+It is outside the peer bound for the same reason as `FeedMarks::seen`: a receipt
+can name any peer the chat list holds, and dropping a mark would redraw a sent
+message as `[delivered]` after it was read. The persisted form is bounded: the
+drafts file writes the `HISTORY_CACHE_PEERS` (32) most recently moved marks
+(`app/src/runtime.rs` `sync_drafts`), so the file cannot grow past that, and a
+launch restores at most that many. Declared, not measured.
+
 **The worst case is past the 50 MB budget, and that is a known gap, not a
 claim that it fits.** At about 80 MB resident and about three times that during
 a write, a reader whose 32 most recent conversations were all maximum-length
