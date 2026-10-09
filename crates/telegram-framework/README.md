@@ -472,6 +472,12 @@ Three things are known gaps rather than deliberate scope cuts:
   session, `catch_up` is off by default, and the update queue can drop one under
   load. A watermark therefore only ever moves forward, and a message whose read
   acknowledgement never arrived is shown as not read rather than as lost.
+- **This account's own reads come back as `InboxRead`.** `updateReadHistoryInbox`
+  is read out of the same raw bucket, for the same reason, and carries the count
+  Telegram still holds as unread in the conversation: `UpdateKind::InboxRead`. It
+  arrives for a read made here and for one made on another device, so the count
+  converges on the server's figure rather than on what this client assumed. A
+  group or channel is dropped as elsewhere.
 - **`check_password` takes the password as `&str`.** Its bytes stay in memory for
   as long as the caller's buffer does. Zeroising our own copy would not help —
   `grammers` holds the value across the SRP exchange — so this needs a decision
