@@ -36,6 +36,34 @@ pub struct SearchResults {
     pub total: usize,
 }
 
+/// One message a global search matched, in the domain's identifier space.
+///
+/// Carries its text, because a global hit has no open conversation to be read
+/// from. `text` is what Telegram sent, so it is empty for a media-only message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalHit {
+    /// The conversation the message is in.
+    pub chat_id: i64,
+
+    /// The message's identifier within that conversation.
+    pub message_id: i64,
+
+    /// The message text, as Telegram sent it.
+    pub text: String,
+}
+
+/// The matches of a global search, oldest first, and how many there are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalSearchResults {
+    /// The hits, oldest first, so that a walk forward is always towards newer
+    /// messages.
+    pub hits: Vec<GlobalHit>,
+
+    /// How many matches Telegram holds across every private conversation, which
+    /// may exceed `hits`.
+    pub total: usize,
+}
+
 /// The page size a search asks for, capped at what the domain will hold.
 #[cfg(any(feature = "live", test))]
 fn limit_of(limit: usize) -> usize {
@@ -52,6 +80,30 @@ fn to_results(results: telegram_framework::SearchResults) -> SearchResults {
 
     SearchResults {
         ids,
+        total: results.total,
+    }
+}
+
+/// Turns a framework global result into the domain's: widened, and oldest first.
+#[cfg(feature = "live")]
+fn to_global_results(
+    results: telegram_framework::search::GlobalSearchResults,
+) -> GlobalSearchResults {
+    let mut hits: Vec<GlobalHit> = results
+        .hits
+        .into_iter()
+        .map(|hit| GlobalHit {
+            chat_id: hit.chat_id,
+            message_id: i64::from(hit.message_id),
+            text: hit.text,
+        })
+        .collect();
+
+    // Telegram answers newest first; the hits are walked oldest first.
+    hits.reverse();
+
+    GlobalSearchResults {
+        hits,
         total: results.total,
     }
 }
@@ -95,6 +147,36 @@ impl crate::ProtoClient {
         );
 
         Ok(to_results(results))
+    }
+
+    /// Searches every private conversation for messages matching `query`.
+    ///
+    /// One request and one page, bounded by [`SEARCH_MATCHES`] for the same
+    /// reason as [`search`](Self::search). The hits are oldest first, each with
+    /// the text the caller shows for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) if Telegram
+    /// rejects the request, or if the answer cannot be decoded. A query that
+    /// matches nothing is an ordinary empty result, not an error.
+    pub async fn search_global(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<GlobalSearchResults, crate::ProtoError> {
+        let results = self
+            .inner()
+            .search_global(query.to_owned(), limit_of(limit))
+            .await?;
+
+        tracing::debug!(
+            returned = results.hits.len(),
+            total = results.total,
+            "searched every private conversation"
+        );
+
+        Ok(to_global_results(results))
     }
 }
 
@@ -174,6 +256,78 @@ mod live_tests {
         });
 
         assert!(results.ids.is_empty(), "nothing is not a failure");
+        assert_eq!(results.total, 0);
+    }
+
+    fn framework_hit(
+        chat_id: i64,
+        message_id: i32,
+        text: &str,
+    ) -> telegram_framework::search::GlobalHit {
+        telegram_framework::search::GlobalHit {
+            chat_id,
+            message_id,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_newest_first_global_answer_comes_out_oldest_first() {
+        let results = to_global_results(telegram_framework::search::GlobalSearchResults {
+            hits: vec![
+                framework_hit(1, 30, "c"),
+                framework_hit(2, 20, "b"),
+                framework_hit(3, 10, "a"),
+            ],
+            total: 3,
+        });
+
+        let message_ids: Vec<i64> = results.hits.iter().map(|hit| hit.message_id).collect();
+        assert_eq!(message_ids, vec![10, 20, 30]);
+        let texts: Vec<&str> = results.hits.iter().map(|hit| hit.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["a", "b", "c"],
+            "each text stays with its message"
+        );
+    }
+
+    #[test]
+    fn a_global_hit_keeps_its_chat_and_widens_its_message_identifier() {
+        let results = to_global_results(telegram_framework::search::GlobalSearchResults {
+            hits: vec![
+                framework_hit(i64::MAX, i32::MAX, "x"),
+                framework_hit(-5, 7, "y"),
+            ],
+            total: 2,
+        });
+
+        // Reversed, so the expected list reads in the turned order.
+        assert_eq!(results.hits[0].chat_id, -5);
+        assert_eq!(results.hits[0].message_id, 7);
+        assert_eq!(results.hits[1].chat_id, i64::MAX);
+        assert_eq!(results.hits[1].message_id, i64::from(i32::MAX));
+    }
+
+    #[test]
+    fn a_global_total_survives_the_turn_unchanged() {
+        let results = to_global_results(telegram_framework::search::GlobalSearchResults {
+            hits: vec![framework_hit(1, 2, "a"), framework_hit(1, 1, "b")],
+            total: 1_243,
+        });
+
+        assert_eq!(results.total, 1_243, "a page is not the count of matches");
+        assert_eq!(results.hits.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_global_answer_is_an_empty_result() {
+        let results = to_global_results(telegram_framework::search::GlobalSearchResults {
+            hits: Vec::new(),
+            total: 0,
+        });
+
+        assert!(results.hits.is_empty(), "nothing is not a failure");
         assert_eq!(results.total, 0);
     }
 }
