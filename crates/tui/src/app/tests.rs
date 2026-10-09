@@ -6526,6 +6526,81 @@ fn a_presence_update_leaves_the_cursor_selection_and_search_alone() {
     );
 }
 
+/// `j` from the newest message moves the cursor onto the open draft's row, one
+/// past the last message, and the cursor names no message there. Following is
+/// kept, so the row stays drawn and reserves its rows.
+#[test]
+fn j_from_the_last_message_lands_on_the_open_draft() {
+    let mut app = App::mock();
+    app.record_body(53);
+    draft_then_leave(&mut app, "see you there");
+    let last = app.conversation.conversation.window.len() - 1;
+    app.conversation.vim.set_cursor(last);
+
+    app.handle_key(press(KeyCode::Char('j')));
+
+    assert_eq!(
+        app.conversation.vim.cursor(),
+        last + 1,
+        "one past the last message"
+    );
+    assert!(app.conversation.cursor_message().is_none(), "on no message");
+    assert!(
+        app.conversation.conversation.auto_follow(),
+        "and following is kept"
+    );
+    let layout = app.row_layout();
+    assert!(
+        app.reserved(&layout, 24).draft > 0,
+        "so the row the cursor is on is drawn"
+    );
+}
+
+/// `k` from the draft's row returns the cursor to the newest message, and a
+/// further `k` walks up as it always has.
+#[test]
+fn k_from_the_draft_row_returns_to_the_last_message() {
+    let mut app = App::mock();
+    app.record_body(53);
+    draft_then_leave(&mut app, "see you there");
+    let last = app.conversation.conversation.window.len() - 1;
+    app.conversation.vim.set_cursor(last);
+    app.handle_key(press(KeyCode::Char('j')));
+
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(
+        app.conversation.vim.cursor(),
+        last,
+        "back on the last message"
+    );
+    assert!(app.conversation.cursor_message().is_some());
+
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(app.conversation.vim.cursor(), last - 1, "and up as usual");
+}
+
+/// With no draft the motion is the messages' alone: `j` stops at the newest
+/// message and never reaches a row past it.
+#[test]
+fn with_no_draft_j_stops_at_the_last_message() {
+    let mut app = App::mock();
+    app.record_body(53);
+    assert!(!drafted(&app), "an empty line is no row");
+    let last = app.conversation.conversation.window.len() - 1;
+    app.conversation.vim.set_cursor(last);
+
+    app.handle_key(press(KeyCode::Char('j')));
+    assert_eq!(
+        app.conversation.vim.cursor(),
+        last,
+        "j does not move past it"
+    );
+
+    app.handle_key(press(KeyCode::Char('k')));
+    app.handle_key(press(KeyCode::Char('j')));
+    assert_eq!(app.conversation.vim.cursor(), last, "and back down to it");
+}
+
 // ---- `o`, the media on the cursor message --------------------------------
 
 /// A message of the sample conversation that carries `media`.
