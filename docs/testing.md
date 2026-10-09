@@ -209,16 +209,17 @@ below.
   `target/bench-compare.json` (the report, schema `televim.bench-compare/1`) and
   `target/bench-compare.md`. It is not in `ci`: it gates nothing, and a full run
   takes minutes, so it stays beside `make measure` rather than inside the gate.
-  - **Two legs, one report.** The *in-binary* leg puts bench ids in one criterion
-    group and reports each candidate minus the first id in sorted order, from the
-    same run. The *revision* leg runs against a saved criterion baseline:
+  - **Two legs, one report.** The *in-binary* leg reports each candidate minus a
+    reference, from the same run. A pair is declared by bench id: a criterion group
+    holding exactly one id whose last segment is `reference` and one or more whose
+    last segment is `candidate` (e.g. `word_prefix_match/scan/reference` and
+    `word_prefix_match/scan/candidate`). Any other id is reported alone and is never
+    paired. The *revision* leg runs against a saved criterion baseline:
     `BENCH_ARGS="--save-baseline NAME"` saves a run, `BENCH_ARGS="--baseline NAME"`
-    compares this run with it. **Caveat:** the current in-binary groups compare
-    workloads of one function (e.g. `word_prefix_match/scan_corpus/hit_early` vs
-    `.../miss`, `wrap/wrap/40` vs `wrap/wrap/120`), not two competing
-    implementations; none is benched in-tree yet. The leg pairs every id in a group
-    with the first, so a pair means something only when both ids run the same job:
-    read the rows that do, and ignore the rest. See
+    compares this run with it. **Caveat:** no bench declares a pair yet. The current
+    groups measure workloads of one function (e.g. `word_prefix_match/scan_corpus/hit_early`
+    vs `.../miss`), not two competing implementations, so the in-binary section is
+    empty until a candidate is benched beside the current code. See
     [`known-gaps.md`](./known-gaps.md).
   - **Modes.** `BENCH_MODE=smoke` (default) uses short fixed flags and checks that
     the harness runs; its numbers are noisy and are not evidence. `BENCH_MODE=full`
