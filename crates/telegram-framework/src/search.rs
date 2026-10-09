@@ -32,6 +32,8 @@
 //! search is most used in, which is why [`results_from`] reads whichever the
 //! variant offers.
 
+use grammers_client::session::types::PeerInfo;
+
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::history::clamp_limit;
@@ -263,9 +265,8 @@ impl Client {
     ///
     /// The hits come back in Telegram's order, **newest first**.
     ///
-    /// Peers in the response are not added to the peer cache, so a hit whose
-    /// conversation is not already known cannot be opened by this client; the
-    /// caller decides what to do with such a hit.
+    /// The peers the response names are added to the peer cache, so a hit in a
+    /// conversation the chat list has not shown can still be opened.
     ///
     /// # Errors
     ///
@@ -299,6 +300,7 @@ impl Client {
             .await
             .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
 
+        self.remember_answer_peers(&response).await;
         let results = global_hits_from(response);
 
         self.flush_session();
@@ -346,6 +348,34 @@ fn results_from(response: tl::enums::messages::Messages) -> SearchResults {
     let total = total.max(ids.len());
 
     SearchResults { ids, total }
+}
+
+impl Client {
+    /// Puts the peers a search answer names into the peer cache.
+    ///
+    /// A search names the conversations its hits are in, with the
+    /// `access_hash` each one needs to be addressed. Nothing else in the
+    /// search fills the cache, so without this a hit in a conversation the
+    /// chat list has not shown could not be opened. The user search seeds its
+    /// candidates the same way.
+    pub(crate) async fn remember_answer_peers(&self, response: &tl::enums::messages::Messages) {
+        for user in users_of(response) {
+            self.remember_peer(PeerInfo::from(user)).await;
+        }
+    }
+}
+
+/// The users a search response names.
+fn users_of(response: &tl::enums::messages::Messages) -> &[tl::enums::User] {
+    use tl::enums::messages::Messages;
+
+    match response {
+        Messages::Messages(page) => &page.users,
+        Messages::Slice(page) => &page.users,
+        Messages::ChannelMessages(page) => &page.users,
+        // "Nothing changed" carries no users, so there is nothing to seed.
+        Messages::NotModified(_) => &[],
+    }
 }
 
 /// Reads the hits and the total off a global search response.
