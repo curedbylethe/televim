@@ -737,17 +737,17 @@ fn a_lone_g_does_not_wait_to_be_the_first_half_of_gg() {
     assert_eq!(app.list.selected_chat, 0);
 }
 
-/// `Enter` is a reader saying "this one", not a movement, so it opens at once
-/// and takes the focus to the messages.
+/// `Enter` is a reader saying "this one", not a movement, so it shows the
+/// card at once and takes the focus to the card's pane.
 #[test]
-fn enter_in_the_chat_list_opens_it_and_moves_to_the_conversation() {
+fn enter_in_the_chat_list_shows_its_card_at_once() {
     let mut app = on_the_chat_list();
     app.handle_key(press(KeyCode::Char('j')));
 
     app.handle_key(press(KeyCode::Enter));
 
     assert_eq!(app.ui.focus, Focus::Conversation);
-    assert_eq!(app.conversation.conversation.window.chat_id, 2);
+    assert_eq!(app.ui.pane, Pane::Profile(ProfileId::User(2)));
     assert_eq!(app.list.selected_chat, 1);
     assert_eq!(
         app.take_pending_chat(settled()),
