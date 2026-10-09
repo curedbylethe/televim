@@ -576,6 +576,12 @@ pub struct State {
     /// alone.
     history: History,
 
+    /// The global search jump that a cached message landed on when the
+    /// conversation was seeded from the cache, held until the newest page
+    /// replaces the window: that page moves the cursor to the end, and the
+    /// reader is put back on the message if the page still holds it.
+    cached_landing: Option<Jump>,
+
     /// The sign-in tokens, and the store the session is in.
     ///
     /// Both here for the same reason [`History`] is: they are `proto` and
@@ -1566,7 +1572,7 @@ fn begin_latest(app: &mut App, state: &mut State, peer_id: i64) -> HistoryCursor
 /// Needs no client, so it is the whole of an open when there is none:
 /// [`begin_latest`] runs it and then asks; [`drive`] runs it alone while
 /// offline.
-fn seed_opened(app: &mut App, state: &State) {
+fn seed_opened(app: &mut App, state: &mut State) {
     let open = app.conversation.conversation.window.chat_id;
     if open == 0
         || state
@@ -1578,6 +1584,9 @@ fn seed_opened(app: &mut App, state: &State) {
         return;
     }
     app.seed_from_cache(open, state.cached_history(open));
+    // A search hit the cache holds is landed on now, so that no jump is fetched
+    // for it. Every path that seeds a window comes through here.
+    state.cached_landing = app.land_search_jump();
 }
 
 /// Whether a feed that has just ended may be reconnected, or has spent its one
@@ -2801,6 +2810,16 @@ fn apply_history(
                 cursor.reset_to(&page);
             }
             apply_page(app, direction, page);
+            // The newest page moved the cursor to the end. A search hit that
+            // the cache landed on is put back on: if the page does not hold it,
+            // `go_to_search_hit` asks for it as a jump, as it would have had
+            // the cache not held it.
+            if direction == FetchDirection::Latest
+                && let Some(landed) = state.cached_landing.take()
+                && landed.peer_id == cursor.peer_id()
+            {
+                app.go_to_search_hit(landed.target_id);
+            }
             settle(app, cursor);
             state.history.cursor = Some(cursor);
         }
@@ -3399,7 +3418,7 @@ fn apply_user_lookup_failed(app: &mut App, query: &str, reason: String) {
 /// it does not — and the cached head is opened in the meantime.
 ///
 /// A cold cache draws nothing, and the launch is what it always was.
-pub(crate) fn open_from_cache(app: &mut App, state: &State) {
+pub(crate) fn open_from_cache(app: &mut App, state: &mut State) {
     let chats = state.cached.messages.chats();
     if chats.is_empty() {
         return;
@@ -3605,6 +3624,7 @@ mod tests {
     use tui::app::CHAT_SWITCH_DELAY;
     use tui::app::ConnectionState;
     use tui::app::Focus;
+    use tui::app::JUMP_SEARCH_LABEL;
     use tui::app::JumpKind;
     use tui::app::REVALIDATING_LABEL;
 
@@ -5720,6 +5740,147 @@ mod tests {
         state
     }
 
+    fn search_hit(chat_id: i64, message_id: i64) -> domain::global_search::GlobalHit {
+        domain::global_search::GlobalHit {
+            chat_id,
+            message_id,
+            text: "hit".to_owned(),
+            media: None,
+            sent_at: 0,
+            outgoing: false,
+        }
+    }
+
+    /// The reader in the second of two conversations, with a global search for
+    /// `hit` answered by a hit at `message_id` in the first, and the key that
+    /// accepts it pressed. The first conversation has unread messages up to 20.
+    fn accepted_search_hit(message_id: i64) -> App {
+        let mut app = App::new();
+        let mut first = chat(CHAT);
+        first.unread_count = 2;
+        first.last_message_id = Some(20);
+        app.set_chats(vec![first, chat(CHAT + 1)]);
+        app.select_chat(1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        for c in "hit".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.take_action();
+        assert!(app.adopt_global_search("hit", vec![search_hit(CHAT, message_id)], 1, 0));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.pending_jump().map(|jump| jump.kind),
+            Some(JumpKind::Search),
+            "accepting it leaves a search jump for the driver"
+        );
+        app
+    }
+
+    /// The message the cursor is on in the window, if the window holds one.
+    fn cursor_id(app: &App) -> Option<i64> {
+        app.conversation
+            .conversation
+            .window
+            .get(app.conversation.vim.cursor())
+            .map(|message| message.id)
+    }
+
+    /// An accepted hit the cache holds opens on its message: the cache seeds the
+    /// window, the jump is landed rather than fetched, and the newest page that
+    /// follows does not take the reader off it.
+    #[test]
+    fn an_accepted_hit_in_the_cache_opens_on_its_message_without_a_fetch() {
+        let mut app = accepted_search_hit(2);
+        let mut state = warm_state();
+
+        open_pass(&mut app, &mut state);
+
+        assert_eq!(app.pending_jump(), None, "no jump is left to fetch");
+        assert_eq!(cursor_id(&app), Some(2), "the cursor is on the hit");
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Nothing,
+            "only the newest page is on its way"
+        );
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=3),
+        );
+
+        assert_eq!(
+            cursor_id(&app),
+            Some(2),
+            "the newest page keeps the reader on it"
+        );
+        assert_eq!(app.pending_jump(), None);
+        assert!(
+            !matches!(wanted(&app, state.history, Instant::now()), Wanted::Jump(_)),
+            "and no jump is asked for"
+        );
+    }
+
+    /// The newest page does not hold the cached hit: the reader is still taken
+    /// to it, by the jump the page's arrival leaves for the driver to fetch.
+    #[test]
+    fn a_cached_hit_the_newest_page_lacks_is_fetched_as_a_jump() {
+        let mut app = accepted_search_hit(2);
+        let mut state = warm_state();
+        open_pass(&mut app, &mut state);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 5..=8),
+        );
+
+        let jump = app.pending_jump().expect("the hit is still wanted");
+        assert_eq!((jump.target_id, jump.kind), (2, JumpKind::Search));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Jump(jump)
+        );
+    }
+
+    /// A hit the cache does not hold is fetched as before, under the same label,
+    /// and `Esc` cancels that fetch.
+    #[test]
+    fn a_hit_the_cache_lacks_is_fetched_and_esc_cancels_it() {
+        let mut app = accepted_search_hit(9);
+        let mut state = warm_state();
+        open_pass(&mut app, &mut state);
+
+        let jump = app.pending_jump().expect("the jump is still wanted");
+        assert_eq!(jump.target_id, 9);
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Jump(jump)
+        );
+        assert_eq!(app.jump_label(), JUMP_SEARCH_LABEL);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(app.pending_jump(), None, "`Esc` drops the jump");
+        assert_eq!(wanted(&app, state.history, Instant::now()), Wanted::Nothing);
+    }
+
+    /// Opening the hit from the cache leaves the read marker owed to the
+    /// conversation's newest message, as opening it any other way does.
+    #[test]
+    fn an_accepted_cached_hit_still_owes_the_read_marker_to_the_newest() {
+        let mut app = accepted_search_hit(2);
+        let mut state = warm_state();
+        open_pass(&mut app, &mut state);
+
+        assert_eq!(latest_read(&app, &mut state), Some((CHAT, 20)));
+    }
+
     /// An application as the runtime builds it before the first frame.
     fn launching() -> App {
         let mut app = App::new();
@@ -5749,9 +5910,9 @@ mod tests {
     #[test]
     fn a_warm_start_draws_the_cached_list_and_conversation_before_any_ready() {
         let mut app = launching();
-        let state = warm_state();
+        let mut state = warm_state();
 
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
 
         assert!(state.client.is_none());
         assert_eq!(
@@ -5776,7 +5937,7 @@ mod tests {
     fn a_ready_over_the_cached_launch_refreshes_around_it_and_asks_for_latest() {
         let mut app = launching();
         let mut state = warm_state();
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
 
         ready(&mut app, &mut state, vec![chat(CHAT + 1), chat(CHAT)]);
 
@@ -5807,7 +5968,7 @@ mod tests {
     fn a_ready_without_the_cached_conversation_keeps_it_and_says_so() {
         let mut app = launching();
         let mut state = warm_state();
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
 
         ready(&mut app, &mut state, vec![chat(CHAT + 1)]);
 
@@ -5832,7 +5993,7 @@ mod tests {
         app.set_initial_chat(CHAT + 1);
         let mut state = warm_state();
 
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
         assert_eq!(open_id(&app), CHAT + 1);
 
         ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
@@ -5849,7 +6010,7 @@ mod tests {
         let mut app = launching();
         app.set_initial_chat(99);
         let mut state = warm_state();
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
         assert_eq!(open_id(&app), CHAT, "the cached head meanwhile");
 
         ready(&mut app, &mut state, vec![chat(99), chat(CHAT)]);
@@ -5858,7 +6019,7 @@ mod tests {
         let mut app = launching();
         app.set_initial_chat(99);
         let mut state = warm_state();
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
 
         ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
         assert_eq!(open_id(&app), CHAT, "nowhere to go, so it stays");
@@ -5881,7 +6042,7 @@ mod tests {
         let mut state = warm_state();
         HistoryFile::new(path.clone()).save(&state.cached.messages, None);
         state.set_history_file(HistoryFile::new(path.clone()));
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
 
         apply_ready_to_screen(
             &mut app,
@@ -5909,7 +6070,7 @@ mod tests {
         for (what, mut state) in [("warm", warm_state()), ("cold", State::default())] {
             let mut app = launching();
             app.drafts.restore(vec![(CHAT, "unsent".to_owned())]);
-            open_from_cache(&mut app, &state);
+            open_from_cache(&mut app, &mut state);
 
             ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
 
@@ -5923,7 +6084,7 @@ mod tests {
     fn a_failed_bring_up_leaves_the_cached_launch_readable() {
         let mut app = launching();
         let mut state = warm_state();
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
 
         apply(
             &mut app,
@@ -5943,7 +6104,7 @@ mod tests {
         let mut app = launching();
         let mut state = State::default();
 
-        open_from_cache(&mut app, &state);
+        open_from_cache(&mut app, &mut state);
 
         assert!(app.chats().is_empty());
         assert_eq!(open_id(&app), 0);

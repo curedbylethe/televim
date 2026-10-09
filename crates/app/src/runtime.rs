@@ -538,7 +538,7 @@ async fn event_loop(
     // Before the first frame: a warm cache draws the reader's list and their
     // conversation now, under `connecting…`, rather than after the round trip
     // the bring-up below is about to start.
-    net::open_from_cache(&mut app, &network);
+    net::open_from_cache(&mut app, &mut network);
 
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an

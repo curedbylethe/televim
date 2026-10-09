@@ -170,8 +170,8 @@ Working today:
   every match inked `match`. `j`/`k` or the arrows move between messages, `{` and
   `}` between chat headers, and `gg`/`G` to the first and last message. `Enter`
   opens the message's chat with the cursor on that message: a message already on
-  screen is a cursor move, and one that is not is fetched, as `gd` fetches a quoted
-  message, with `Jumping…` on the bar until it lands. `Esc` closes the overlay,
+  screen, or in the local history cache, is a cursor move, and one that is neither is
+  fetched, as `gd` fetches a quoted message, with `Jumping…` on the bar until it lands. `Esc` closes the overlay,
   returns focus to the pane the search was raised from, and forgets the query. The
   overlay owns the keys while it is up, so none of them writes to a chat; `/`, `:`
   and `?` still open their prompts, and `?` is refused while the new-chat list is
