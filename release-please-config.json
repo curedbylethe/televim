@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "bootstrap-sha": "fa69be717a2bf44117b1c4eb35ca48db70f6ad31",
+  "bump-minor-pre-major": true,
+  "skip-changelog": true,
+  "extra-files": [
+    {
+      "type": "generic",
+      "path": "Cargo.toml"
+    }
+  ],
+  "packages": {
+    ".": {}
+  }
+}

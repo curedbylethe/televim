@@ -840,26 +840,30 @@ are in [`../AGENTS.md`](../AGENTS.md).
   says `history:`, and `offline:` keeps its line — and it is said only while the
   window came from the cache *and* its newest page is in flight, so an offline
   reader is not promised something that is not coming.
-- **Why the version is bumped by a release, not by a feature:** the version is one
-  line, `[workspace.package] version` in the root `Cargo.toml`, inherited by every
-  crate, so a bump is a statement about what shipped. A feature or fix commit does
-  not touch it; its entry goes under `## [Unreleased]` in
-  [`CHANGELOG.md`](../CHANGELOG.md). When the maintainer cuts a release, one commit
-  moves the `Unreleased` entries under a new `## [X.Y.Z]` heading and bumps that
-  line in the same commit, so the version and its changelog section cannot drift
-  apart. Nothing bumps the version on a schedule. The version stays `0.1.5` until
-  that release is cut.
-- **Why a release is tagged `vX.Y.Z` on its bump commit:** the tag names the one
-  commit a release was built from, and `v` keeps it distinct from a crate version
-  string in a lockfile or a `--version` line. The tag is annotated and created by the
-  maintainer when the release is cut, never by a feature change. No tag exists yet:
-  the `0.1.5` baseline is recorded in the changelog, and tagging it is a release act
-  left to the maintainer.
+- **Why the version is bumped by merging a release PR, not by a feature:** the
+  version is one line, `[workspace.package] version` in the root `Cargo.toml`,
+  inherited by every crate, so a bump is a statement about what shipped. It
+  carries an `x-release-please-version` annotation, and release-please rewrites
+  it on a release PR, with `Cargo.lock`'s workspace entries following. Feature and
+  fix commits never touch it. release-please keeps one release PR open on `main`,
+  and merging that PR is the release act. The version is bumped on the merge, not
+  on a schedule.
+- **Why the changelog section is generated, and the tag is `vX.Y.Z`:** the
+  section in [`CHANGELOG.md`](../CHANGELOG.md) is written by git-cliff from the
+  conventional commits since the last tag, onto the release PR, so the notes a
+  reviewer reads are the notes that ship. `feat`, `fix` and `perf` are listed;
+  other types are not, because they are not user-visible (see
+  [`cliff.toml`](../cliff.toml)). release-please creates the `vX.Y.Z` tag on merge
+  and the GitHub release, and the `v` keeps the tag distinct from a version string
+  in a lockfile or a `--version` line. The `0.1.5` baseline predates both tools and
+  is hand-written; git-cliff starts from the last tag, or from the baseline commit
+  `fa69be7` while no tag exists.
 - **Why `0.x` minor bumps mean breaking or user-visible change, and patch means fixes
   only:** while the major version is `0`, the public surface (keybindings, commands,
   the session and history file formats, and the CLI) is still moving, so a minor bump
   is where a user would notice a change they must act on. A patch bump carries only
-  fixes that change nothing a user sees except the bug going away. The first `1.0.0`
-  is the v1 public release; from there, full semver applies: major for a break, minor
-  for an addition, patch for a fix. The changelog's `Changed` and `Removed` sections
-  are where a `0.x` minor bump is justified.
+  fixes that change nothing a user sees except the bug going away. release-please
+  is configured to match: `bump-minor-pre-major` makes a breaking change bump the
+  minor while `0.x`, `feat` bumps the minor, and `fix` bumps the patch. The first
+  `1.0.0` is the v1 public release; from there, full semver applies: major for a
+  break, minor for an addition, patch for a fix.

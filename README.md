@@ -21,7 +21,7 @@ RSS at idle after loading 50+ chats.
 | [`docs/memory.md`](./docs/memory.md) | The memory budget: measured baseline, declared work, and what the harness does not measure |
 | [`docs/known-gaps.md`](./docs/known-gaps.md) | Known gaps and v2 hooks |
 | [`DESIGN.md`](./DESIGN.md) | The design system |
-| [`CHANGELOG.md`](./CHANGELOG.md) | Release history: Unreleased changes and the 0.1.5 baseline |
+| [`CHANGELOG.md`](./CHANGELOG.md) | Release history, generated per release from the commits |
 
 ## Project Goals
 
@@ -349,6 +349,53 @@ Not built, and named here so nobody reads the roadmap below as current:
   OSC 52 at all is not something this program can find out, so a refused or capped
   write is not a failure of the yank and is not reported as one. `y` reaching the
   register and `p` is the whole feature; the clipboard is a convenience on top.
+
+## Installing
+
+Each release is on the [GitHub Releases](https://github.com/curedbylethe/televim/releases)
+page, with a binary per platform and a `SHA256SUMS` file. Binaries are built for
+Apple silicon macOS (`aarch64-apple-darwin`) and Linux on x86_64
+(`x86_64-unknown-linux-gnu`). On Intel macOS, build from source (see
+[Building](#building)).
+
+On Linux, the binary links DBus for the credential store. Install the runtime
+library first, for example `sudo apt install libdbus-1-3` on Debian and Ubuntu.
+
+```console
+$ VERSION=0.2.0      # the release you want, without the v
+$ TARGET=aarch64-apple-darwin      # or x86_64-unknown-linux-gnu
+$ BASE=https://github.com/curedbylethe/televim/releases/download/v$VERSION
+$ curl -LO $BASE/televim-$VERSION-$TARGET.tar.gz
+$ curl -LO $BASE/SHA256SUMS
+$ sha256sum --ignore-missing -c SHA256SUMS      # shasum -a 256 on macOS
+$ tar -xzf televim-$VERSION-$TARGET.tar.gz
+$ install -m 755 televim ~/.local/bin/televim   # any directory on your PATH
+```
+
+`SHA256SUMS` confirms the download matches what the release published. It comes
+from the same place as the binary, so it does not prove who built it.
+
+### Credentials
+
+televim signs in as a Telegram application, and it needs an `api_id` and an
+`api_hash` from [my.telegram.org](https://my.telegram.org). They are not in the
+binary. Give them to it either way:
+
+```console
+$ export TELEVIM_API_ID=1234567
+$ export TELEVIM_API_HASH=0123456789abcdef0123456789abcdef
+```
+
+or in a `televim.toml` in the directory you run it from:
+
+```toml
+api_id = 1234567
+api_hash = "0123456789abcdef0123456789abcdef"
+```
+
+Pass another path with `televim --config path/to/televim.toml`. The drafts and
+history files are written beside the config file. The login session goes to the
+OS credential store unless `session_path` is set.
 
 ## Building
 

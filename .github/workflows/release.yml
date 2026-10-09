@@ -1,0 +1,170 @@
+name: Release
+
+# Every push to main does three things, in order.
+#
+# 1. release-please keeps one release PR open. It bumps the workspace version
+#    and, when that PR is merged, tags vX.Y.Z and creates the GitHub release.
+# 2. While a release PR is open, git-cliff writes its CHANGELOG.md section from
+#    the commits since the last tag, so the PR carries the notes it publishes.
+# 3. When a release is created, the binaries are built and attached to it.
+#
+# No secrets are used. The binary reads TELEVIM_API_ID and TELEVIM_API_HASH at
+# run time, from the environment or televim.toml, so nothing is compiled in.
+# See the README's "Installing" section.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      # Reads release-please-config.json and .release-please-manifest.json.
+      - uses: googleapis/release-please-action@v4
+        id: release
+
+  changelog:
+    needs: release-please
+    # On the run that cut a release, the release PR has just been merged.
+    if: needs.release-please.outputs.release_created != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.14.2
+
+      - name: write the release section on the release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch=$(gh pr list --label 'autorelease: pending' --json headRefName --jq '.[0].headRefName')
+          if [ -z "$branch" ]; then
+            echo "no open release PR"
+            exit 0
+          fi
+          git switch -C "$branch" "origin/$branch"
+
+          version=$(sed -n 's/^version = "\([^"]*\)".*x-release-please-version.*/\1/p' Cargo.toml)
+          # The last release tag, or the baseline commit before the first tag.
+          base=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo fa69be717a2bf44117b1c4eb35ca48db70f6ad31)
+
+          # Start from main's CHANGELOG.md, so a re-run adds one section rather
+          # than stacking a second copy on the first.
+          git show origin/main:CHANGELOG.md > CHANGELOG.md
+          git-cliff "$base..HEAD" --tag "v$version" --strip header -o "$RUNNER_TEMP/section.md"
+          python3 scripts/release/splice-changelog.py CHANGELOG.md "$RUNNER_TEMP/section.md"
+
+          # release-please bumped Cargo.toml; the lockfile's workspace entries
+          # follow on the next resolve. A plain resolve keeps every other pin.
+          cargo metadata --format-version 1 >/dev/null
+
+          git add CHANGELOG.md Cargo.lock
+          if git diff --cached --quiet; then
+            echo "changelog section already current"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "docs: changelog for $version"
+          git push origin "HEAD:$branch"
+
+  build:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      # Same system dependency as ci.yml: keyring's Linux backend links DBus.
+      - name: system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release --locked
+
+      - name: package
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          tar -czf "dist/televim-${VERSION}-${TARGET}.tar.gz" -C target/release televim
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: televim-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [release-please, build]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: televim-*
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: attach binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
+
+      # The release notes are the same section CHANGELOG.md carries.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff@2.14.2
+
+      - name: release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git-cliff --latest --strip header -o "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

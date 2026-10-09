@@ -49,6 +49,13 @@ new machine and enforcing from the second.
 `libdbus-1-dev` and `pkg-config` are installed first, because `keyring`'s Linux
 backend links against DBus at build time.
 
+`.github/workflows/release.yml`, on every push to `main`, is not a gate. It keeps
+a release PR open (release-please), writes that PR's `CHANGELOG.md` section
+(git-cliff, see `cliff.toml`), and when a release is cut builds
+`x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` binaries, attaches them with
+a `SHA256SUMS` file, and sets the release notes. It uses no secrets: credentials
+are read at run time, not compiled in.
+
 `.github/workflows/desktop.yml` is `workflow_dispatch` only, and covers the two
 things a hosted runner cannot do:
 
