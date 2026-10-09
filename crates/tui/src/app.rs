@@ -1599,6 +1599,33 @@ impl App {
         self.pending.take_pending_chat(now)
     }
 
+    /// Shows the profile card for the chat the highlight has settled on.
+    ///
+    /// The conversation is neither opened nor replaced, so browsing never
+    /// fetches or marks a chat. The focus and mode stay where the reader left
+    /// them: a settle can land while they are still on the list.
+    ///
+    /// Returns whether a card opened.
+    pub fn open_settled_card(&mut self, now: Instant) -> bool {
+        let Some(index) = self.take_pending_chat(now) else {
+            return false;
+        };
+        self.list.select(index);
+        let (focus, mode) = (self.ui.focus, self.ui.mode);
+        coordinate::open_contact(
+            &self.list,
+            &mut self.profile,
+            &mut self.ui,
+            &mut self.conversation,
+            &mut self.outbox,
+        );
+        self.ui.set_focus(focus);
+        self.ui.set_mode(mode);
+        let rows = crate::card::rows(self);
+        self.profile.resize(crate::card::navigable(&rows));
+        true
+    }
+
     /// Opens the conversation at `index` in the chat list.
     ///
     /// Delegates to [`coordinate::select_chat`].
