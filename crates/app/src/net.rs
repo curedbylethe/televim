@@ -4000,6 +4000,270 @@ mod tests {
         );
     }
 
+    // ---- what an idle arrival waits on ----------------------------------
+    //
+    // Triage (CUR-330 STAGE-01). A live arrival in the open conversation reaches
+    // the screen through `Event::Update` alone: `apply` appends it to the window
+    // whatever the cursor, the backoff or the client say. `wanted` is never
+    // consulted for it. So an idle arrival fails only when the feed is not
+    // delivering it, and the suppressions below are the ones that stop a
+    // *fetch* (the open-time refetch, the only recovery for what the feed missed).
+
+    /// Two chats, the first open with its window holding `1..=count`.
+    fn two_chats_open_on_first(count: i64) -> App {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(0);
+        app.apply_latest(messages(CHAT, 1..=count));
+        app
+    }
+
+    /// Idle at the newest page, `wanted` asks for nothing: the feed is the only
+    /// thing that brings a message in, by design. An arrival that the feed
+    /// delivers lands in the window, and nothing is requested for it.
+    #[test]
+    fn an_idle_arrival_is_delivered_by_the_feed_and_nothing_is_asked_for() {
+        let mut app = app_with_a_conversation(CHAT, 40);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 41..=41).remove(0))),
+        );
+
+        assert_eq!(window_ids(&app).last(), Some(&41), "the feed delivered it");
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Nothing,
+            "so the idle screen owes no page: wanted() is feed-only at idle"
+        );
+    }
+
+    /// A held backoff stops fetches, not arrivals: `retry_at` is consulted by
+    /// `wanted` alone, so a feed arrival lands while every direction is held.
+    #[test]
+    fn a_feed_arrival_lands_while_a_fetch_is_held_by_its_backoff() {
+        let mut app = app_with_a_conversation(CHAT, 40);
+        let now = Instant::now();
+        let holding = History {
+            retry_at: Some(now + RETRY),
+            ..opened(CHAT)
+        };
+        let mut state = State {
+            history: holding,
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 41..=41).remove(0))),
+        );
+
+        assert_eq!(window_ids(&app).last(), Some(&41));
+        assert_eq!(
+            wanted(&app, holding, now),
+            Wanted::Nothing,
+            "the backoff holds the fetch, which is what the reader's refetch waits on"
+        );
+    }
+
+    /// Suppression cause: `retry_at` backoff after a failed newest page. The
+    /// status the reader sees is the `history:` sentence, the cursor is cleared,
+    /// and the open is re-asked only once the backoff has passed.
+    #[test]
+    fn a_failed_open_holds_the_refetch_until_its_backoff_passes_and_says_so() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        app.select_chat(0);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        let at = state
+            .history
+            .retry_at
+            .expect("a failed newest page sets a backoff");
+        assert!(app.status_text().starts_with("history:"));
+        assert_eq!(state.history.cursor, None);
+        let just_before = at
+            .checked_sub(Duration::from_millis(1))
+            .expect("a backoff is longer than a millisecond");
+        assert_eq!(
+            wanted(&app, state.history, just_before),
+            Wanted::Nothing,
+            "held while the backoff runs"
+        );
+        assert_eq!(
+            wanted(&app, state.history, at),
+            Wanted::Latest(CHAT),
+            "and the open is asked for again once it has passed"
+        );
+    }
+
+    /// Suppression cause: no client. `wanted` does ask for the newest page, but
+    /// `drive` returns before it is carried: nothing is sent, nothing is in
+    /// flight, and the cursor stays unset for the client that comes up.
+    #[test]
+    fn an_open_with_no_client_is_owed_its_newest_page_and_asks_for_none() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        app.select_chat(0);
+        let mut state = State::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "no client, so no request");
+        assert!(!app.is_fetching(FetchDirection::Latest));
+        assert_eq!(state.history.cursor, None);
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Latest(CHAT),
+            "the newest page is still owed, to whichever client comes up"
+        );
+    }
+
+    /// Suppression cause: the feed ended. No feed means no arrival, and the
+    /// screen says `reconnecting` with no client to ask. The idle view still
+    /// asks for nothing.
+    #[test]
+    fn a_feed_end_says_reconnecting_and_asks_for_nothing_while_no_client_is_up() {
+        let mut app = app_with_a_conversation(CHAT, 40);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(app.connection(), ConnectionState::Reconnecting);
+        assert_eq!(app.status_text(), "reconnecting");
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Nothing,
+            "idle at the newest page"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Suppression cause: offline. A chat opened while offline is owed its
+    /// newest page and gets nothing from the wire; the status says `offline:`.
+    #[test]
+    fn an_offline_open_is_owed_its_newest_page_and_the_status_says_offline() {
+        let mut app = two_chats_open_on_first(40);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Offline(anyhow::anyhow!("no route to the datacenter")),
+        );
+        app.select_chat(1);
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "nothing is requested offline");
+        assert_eq!(app.connection(), ConnectionState::Offline);
+        assert!(app.status_text().starts_with("offline:"));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Latest(CHAT + 1),
+            "still owed, to the client that comes back"
+        );
+    }
+
+    // ---- live read receipts reach the watermark -------------------------
+
+    /// The receipt half of the live path that `net` owns: a `ReadReceipt` on
+    /// the feed moves the open conversation's watermark, monotonically, and
+    /// leaves the reader's own read marker (`read_acked`) alone.
+    #[test]
+    fn a_live_read_receipt_moves_the_open_watermark_monotonically() {
+        let mut app = app_with_a_conversation(CHAT, 40);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::ReadReceipt {
+                chat_id: CHAT,
+                max_id: 30,
+            }),
+        );
+        assert_eq!(
+            app.conversation.conversation.read_watermark(),
+            Some(30),
+            "the peer read up to 30"
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::ReadReceipt {
+                chat_id: CHAT,
+                max_id: 25,
+            }),
+        );
+        assert_eq!(
+            app.conversation.conversation.read_watermark(),
+            Some(30),
+            "a late, lower receipt cannot take the read back"
+        );
+        assert_eq!(state.read_acked, None, "a receipt is not our marker");
+    }
+
+    /// A receipt for a conversation that is not open is recorded, not dropped,
+    /// and it is restored when that conversation is opened in this session. It
+    /// does not reach the open view's watermark.
+    #[test]
+    fn a_receipt_for_a_closed_conversation_is_kept_for_its_next_open() {
+        let mut app = two_chats_open_on_first(40);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::ReadReceipt {
+                chat_id: CHAT + 1,
+                max_id: 12,
+            }),
+        );
+        assert_eq!(
+            app.conversation.conversation.read_watermark(),
+            None,
+            "the open view is not the conversation the receipt names"
+        );
+
+        app.select_chat(1);
+        assert_eq!(
+            app.conversation.conversation.read_watermark(),
+            Some(12),
+            "restored from the receipt the feed delivered while it was closed"
+        );
+    }
+
     // ---- marking a conversation read on open ----------------------------
 
     /// An application with the conversation open, its list entry showing
