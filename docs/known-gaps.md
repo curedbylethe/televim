@@ -321,12 +321,6 @@ Real, and named so they are not mistaken for oversights:
   (launch, reconnect, sign-in), with no receipt in flight. A read the peer makes
   while this session is running and the feed misses is therefore not shown until
   the next bring-up. Private chats only: groups and channels stay out of scope.
-- **The persisted read window forgets recency across a restart.** The drafts file
-  writes its read marks sorted by peer id, and a launch restores them in that order,
-  so each restored mark is stamped as if it had just moved in peer-id order. The
-  32-peer window then keeps the highest peer ids among the restored marks, not the
-  most recently read. Within a session the window is recency-ordered. Keeping the
-  stamp in the file is the follow-up.
 - **The dialogs read position is unverified against a live account.** Its
   mapping is unit-tested against the pinned layer-227 schema, and `proto_integration`
   does not assert it. Whether Telegram fills it for a private peer is shown only by
