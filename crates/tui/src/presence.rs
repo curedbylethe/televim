@@ -1,7 +1,8 @@
 //! What a peer's presence reads as on screen.
 //!
-//! Pure: the caller passes `now`, as [`crate::date::day_label`] requires, so the
-//! words are a function of the presence and the reader's clock and nothing else.
+//! Pure: the caller passes `now` and the UTC offset, as [`crate::date::day_label`]
+//! requires, so the words are a function of the presence, the reader's clock and
+//! the zone it is read in, and nothing else.
 
 use domain::presence::Presence;
 
@@ -14,11 +15,11 @@ use crate::date::day_label;
 /// whose time is the "no time" sentinel says nothing for the same reason: a
 /// "last seen" with no date would claim a time nobody reported.
 #[must_use]
-pub fn wording(presence: Presence, now: i64) -> Option<String> {
+pub fn wording(presence: Presence, now: i64, offset: i64) -> Option<String> {
     match presence {
         Presence::Online => Some("online".to_owned()),
         Presence::Offline { was_online } => {
-            day_label(i64::from(was_online), now, 0).map(|day| match day.as_ref() {
+            day_label(i64::from(was_online), now, offset).map(|day| match day.as_ref() {
                 "Today" => "last seen today".to_owned(),
                 "Yesterday" => "last seen yesterday".to_owned(),
                 _ => format!("last seen on {day}"),
@@ -41,17 +42,17 @@ mod tests {
 
     #[test]
     fn each_restricted_bucket_reads_as_its_own_sentence() {
-        assert_eq!(wording(Presence::Online, NOW).as_deref(), Some("online"));
+        assert_eq!(wording(Presence::Online, NOW, 0).as_deref(), Some("online"));
         assert_eq!(
-            wording(Presence::Recently, NOW).as_deref(),
+            wording(Presence::Recently, NOW, 0).as_deref(),
             Some("last seen recently")
         );
         assert_eq!(
-            wording(Presence::LastWeek, NOW).as_deref(),
+            wording(Presence::LastWeek, NOW, 0).as_deref(),
             Some("last seen within a week")
         );
         assert_eq!(
-            wording(Presence::LastMonth, NOW).as_deref(),
+            wording(Presence::LastMonth, NOW, 0).as_deref(),
             Some("last seen within a month")
         );
     }
@@ -60,16 +61,16 @@ mod tests {
     fn an_offline_peer_reads_as_the_date_they_were_last_online() {
         let was_online = i32::try_from(SEEN).expect("the fixture fits a protocol timestamp");
         assert_eq!(
-            wording(Presence::Offline { was_online }, NOW).as_deref(),
+            wording(Presence::Offline { was_online }, NOW, 0).as_deref(),
             Some("last seen on Sep 20, 2026")
         );
     }
 
     #[test]
     fn a_hidden_peer_and_an_offline_one_with_no_time_say_nothing() {
-        assert_eq!(wording(Presence::Hidden, NOW), None);
+        assert_eq!(wording(Presence::Hidden, NOW, 0), None);
         assert_eq!(
-            wording(Presence::Offline { was_online: 0 }, NOW),
+            wording(Presence::Offline { was_online: 0 }, NOW, 0),
             None,
             "the sentinel is no time, not 1970"
         );

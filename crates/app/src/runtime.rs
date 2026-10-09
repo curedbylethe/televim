@@ -26,6 +26,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
@@ -580,7 +581,7 @@ async fn event_loop(
         // Before the draw, and every pass: what a day is called — `Today`
         // rather than a date — depends on when the frame is being read, and the
         // screen owns no clock of its own.
-        app.record_now(unix_seconds());
+        record_clock(&app);
 
         terminal
             .draw(|frame| app.render(frame))
@@ -672,6 +673,27 @@ fn unix_seconds() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+/// Records what the reader's clock says and the zone it is read in, for one pass.
+/// The instant and its offset are read together, so they always name one moment.
+fn record_clock(app: &App) {
+    let now = unix_seconds();
+    app.record_now(now, local_offset(now));
+}
+
+/// The reader's UTC offset at `now`, in seconds east of UTC.
+///
+/// Read on every pass beside `unix_seconds`, so a DST change during a long
+/// session is picked up on the next frame rather than baked in at launch. UTC
+/// when no local zone can be read: `time` returns an error rather than a guess
+/// when the platform will not say, and UTC is what every label showed before
+/// the zone was read at all.
+fn local_offset(now: i64) -> i64 {
+    OffsetDateTime::from_unix_timestamp(now)
+        .ok()
+        .and_then(|at| UtcOffset::local_offset_at(at).ok())
+        .map_or(0, |offset| i64::from(offset.whole_seconds()))
 }
 
 /// Takes one tick's sticker requests off the queue, to be downloaded.

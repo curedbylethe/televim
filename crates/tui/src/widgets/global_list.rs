@@ -144,7 +144,7 @@ fn message_line(
     };
     let quiet = if cursor { theme.text } else { theme.text_dim };
     let tag = if hit.outgoing { "[you]" } else { "[them]" };
-    let time = crate::date::clock(hit.sent_at, 0).unwrap_or_default();
+    let time = crate::date::clock(hit.sent_at, app.offset()).unwrap_or_default();
 
     let mut spans = vec![Span::styled(
         format!("  {time:<5}  {tag:<6} "),

@@ -2534,11 +2534,18 @@ impl App {
         self.ui.metrics.now.get()
     }
 
-    /// Records what the reader's clock says, in unix seconds.
+    /// The reader's UTC offset in seconds, as of the last frame. Zero is UTC.
+    #[must_use]
+    pub fn offset(&self) -> i64 {
+        self.ui.metrics.offset.get()
+    }
+
+    /// Records what the reader's clock says, in unix seconds, and the UTC offset
+    /// of the zone it is read in.
     ///
     /// Delegates to [`UiState::record_now`].
-    pub fn record_now(&self, now: i64) {
-        self.ui.record_now(now);
+    pub fn record_now(&self, now: i64, offset: i64) {
+        self.ui.record_now(now, offset);
     }
 
     /// The rows every message in the window occupies, laid out at the panel's
@@ -2565,6 +2572,7 @@ impl App {
     pub fn row_layout(&self) -> Vec<RowSpan> {
         let width = self.body_width();
         let now = self.now();
+        let offset = self.offset();
         let mut laid_out: Vec<RowSpan> =
             Vec::with_capacity(self.conversation.conversation.window.len());
         let mut first = 0;
@@ -2574,10 +2582,10 @@ impl App {
         let mut day: Option<i64> = None;
 
         for (index, message) in self.conversation.conversation.window.iter().enumerate() {
-            if rows::opens_day(message.timestamp, day) {
+            if rows::opens_day(message.timestamp, day, offset) {
                 laid_out.push(RowSpan {
                     kind: RowKind::Other {
-                        label: rows::separator_label(message.timestamp, now).into_owned(),
+                        label: rows::separator_label(message.timestamp, now, offset).into_owned(),
                     },
                     message_id: None,
                     first,
@@ -2586,7 +2594,7 @@ impl App {
                 });
                 first += 1;
             }
-            day = rows::day_of(message.timestamp).or(day);
+            day = rows::day_of(message.timestamp, offset).or(day);
 
             // The row's own slice of the message, and its height. Neither reads
             // the bidi mode: a row is broken logically and permuted at paint
