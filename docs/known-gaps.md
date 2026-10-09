@@ -437,6 +437,16 @@ Real, and named so they are not mistaken for oversights:
   over `ChatListState`, and the person picker in `user_list.rs` is not reused, since
   it resolves people rather than chats. When Epic 3 lands, the picker should
   converge on its interface rather than keep a second one.
+- **Times are shown in one offset: the reader's current zone, applied to every message.** The
+  zone is read once per frame in `app`, so a DST change is picked up on the next frame, but
+  every message on screen takes the offset in force now, including one sent before the change.
+  Per-message historical zones are not built, because the wire carries zone-neutral unix
+  seconds and no zone to read them from. There is no bundled tz database: the offset is the
+  system's own zone as `time` reads it, and a platform that will not say falls back to UTC.
+  The offset is read on each pass rather than cached, so it costs one `localtime_r` per frame.
+  A change of zone within a running process (a `TZ` change, or a system zone change while the
+  program is open) is not exercised by any test; the per-frame read is expected to follow it,
+  but that path is unverified.
 
 ## v2 Hooks
 
