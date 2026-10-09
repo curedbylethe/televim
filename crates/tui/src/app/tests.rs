@@ -5977,7 +5977,11 @@ fn submitting_an_empty_new_chat_query_looks_up_the_top_people() {
     assert_eq!(app.ui.focus, Focus::Conversation);
     assert!(app.user_search().is_active(), "and the search is on show");
     assert_eq!(app.user_search().query(), Some(""));
-    assert!(app.status_text().contains("searching"), "{}", app.status_text());
+    assert!(
+        app.status_text().contains("searching"),
+        "{}",
+        app.status_text()
+    );
 }
 
 /// `:new` opens the same prompt with the query already in it, and the line
