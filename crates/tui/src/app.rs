@@ -2152,6 +2152,23 @@ impl App {
 
     // ---- key handling --------------------------------------------------
 
+    /// Clears every half-typed key a terminal blur can strand.
+    ///
+    /// A key pressed before the window lost focus may never see its second
+    /// half, and a latch left armed would swallow the next navigation key.
+    /// Idempotent: on a clean state it changes nothing, so it is safe on both
+    /// focus loss and focus gain. `pending_chat` and `pending_initial_chat` are
+    /// left alone — the first is time-debounced and fires on its own, and the
+    /// second is consumed once by the list.
+    pub fn reset_pending_input(&mut self) {
+        self.pending.set_g(false);
+        self.pending.set_find(None);
+        self.pending.set_jump(None);
+        self.conversation.vim.clear_prefix();
+        self.profile.profile_vim.clear_prefix();
+        self.profile.profile_pending_w = false;
+    }
+
     /// The top-level key dispatch.
     ///
     /// Delegates to [`coordinate::handle_key`]. Sizing the highlight afterwards
