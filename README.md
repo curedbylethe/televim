@@ -149,9 +149,8 @@ Working today:
   *person* rather than a message — there is no open conversation for it to
   search, so it does not borrow the conversation's meaning — and `:new <query>`
   opens the same prompt from anywhere `:` reaches, pre-filled. It is the same
-  surface as the message search, which is what "same search surface as global
-  search" is read to mean while no separate global search exists: a prompt on the
-  bar behind a `/` prefix with a status label, submitted with `Enter`. The server
+  surface as the message search: a prompt on the bar behind a `/` prefix with a
+  status label, submitted with `Enter`. The server
   answers with candidates; an ambiguous set is drawn as a short overlay list over
   the chat list, walked with `j`/`k` or `↑`/`↓` and opened with `Enter`, and
   dismissed with `Esc`. Each row is the person's name, their `@username` when
@@ -161,6 +160,16 @@ Working today:
   creating a second; picking someone new lists and opens one. The status line says
   where the search stands: `searching…` while an answer is in flight, the count
   when it lands, and why when it finds nobody or fails.
+- **Searching every private chat:** `?` opens a prompt on the bar, from the
+  conversation and from the chat list alike, and `:search <query>` runs the same
+  search from anywhere `:` reaches; a bare `:search` or an empty `?` repeats the
+  last one. The search asks the server once for matches across every private
+  chat, and the status line says where it stands: `?<query> — searching…`, then
+  `?<query> — N results in M chats` when it lands, `no matches`, or
+  `search failed (<reason>)`. A result list that is more than 100 matches says
+  `100 of <total>`. Only private chats are searched; groups and channels are
+  dropped. The grouped results are not drawn yet, so for now the search is a
+  status line and nothing to open. `/` keeps its meaning on each pane.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
   screenful, `gg` to the first unread, `n` to cycle search matches. `gd` on a
   message that quotes another goes to the quoted message: a cursor move when it
@@ -290,8 +299,8 @@ Working today:
   another conversation. `p` is not bound in Visual. The line keeps its own
   internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
   registers are deliberately not shared, because their formats differ.
-- **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:settings`,
-  `:signin` and `:retry`.
+- **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
+  `:settings`, `:signin` and `:retry`.
   `:retry` re-runs the bring-up — the client, the chat list, the feed — and is how
   a launch that exhausted its three chat-list attempts is cleared without a
   restart; while a bring-up is already in flight it says so and does nothing.

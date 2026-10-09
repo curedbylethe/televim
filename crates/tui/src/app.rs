@@ -12,6 +12,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 use domain::account::Account;
 use domain::chat::Chat;
+use domain::global_search::{GlobalHit, GlobalSearchState};
 #[cfg(test)]
 use domain::history::{CONVERSATION_WINDOW, ConversationWindow};
 use domain::message::Message;
@@ -486,6 +487,12 @@ pub enum PromptKind {
     /// query that matched a message must not be mistaken for one that names a
     /// person.
     NewChat,
+    /// Finding messages across every private chat, from `?` or `:search`.
+    ///
+    /// Its own prompt rather than [`PromptKind::Search`]: that one searches the
+    /// open conversation, and a global query must not be answered by its
+    /// matches.
+    GlobalSearch,
     Reply,
     Edit,
     Phone,
@@ -1219,6 +1226,47 @@ impl App {
     #[must_use]
     pub fn user_search(&self) -> &UserSearchState {
         &self.conversation.user_search
+    }
+
+    /// The global search, for the status line and, later, the overlay to draw.
+    #[must_use]
+    pub fn global_search(&self) -> &GlobalSearchState {
+        &self.conversation.global_search
+    }
+
+    /// How many hits of the last global answer were outside the private chats.
+    #[must_use]
+    pub fn global_dropped(&self) -> usize {
+        self.conversation.global_dropped
+    }
+
+    /// Starts a global search for `query`.
+    ///
+    /// Delegates to [`ConversationState::begin_global_search`]. Called by the
+    /// submit path before the action is queued.
+    pub fn begin_global_search(&mut self, query: &str) {
+        self.conversation.begin_global_search(query);
+    }
+
+    /// Fills the global list with the answer to `query`, if it is still wanted.
+    ///
+    /// Delegates to [`ConversationState::adopt_global_search`].
+    pub fn adopt_global_search(
+        &mut self,
+        query: &str,
+        hits: Vec<GlobalHit>,
+        total: usize,
+        dropped: usize,
+    ) -> bool {
+        self.conversation
+            .adopt_global_search(query, hits, total, dropped)
+    }
+
+    /// Records that the global search for `query` failed, if it is still wanted.
+    ///
+    /// Delegates to [`ConversationState::fail_global_search`].
+    pub fn fail_global_search(&mut self, query: &str, reason: String) -> bool {
+        self.conversation.fail_global_search(query, reason)
     }
 
     /// What the reader has selected, for the panel to mark and the operations to
@@ -2598,6 +2646,7 @@ impl App {
             // status label and the pane the list is drawn over — not by a
             // second glyph.
             PromptKind::Search | PromptKind::NewChat => "/",
+            PromptKind::GlobalSearch => "?",
         }
     }
 
@@ -2666,6 +2715,11 @@ impl App {
         // label names where the answer stands.
         if self.conversation.user_search.is_active() {
             return self.conversation.user_search.label();
+        }
+        // Directly below the person search: the other question the reader can
+        // ask from the chat list, and the one whose answer is not a person.
+        if self.conversation.global_search.is_active() {
+            return self.conversation.global_search.label();
         }
         if self.conversation.search.is_active() {
             return self.conversation.search.label();

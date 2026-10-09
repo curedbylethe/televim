@@ -2,6 +2,7 @@
 
 use std::ops::Range;
 
+use domain::global_search::{GlobalHit, GlobalSearchState};
 use domain::history::ConversationView;
 use domain::message::{Message, MessageStatus};
 use domain::search::SearchState;
@@ -62,6 +63,20 @@ pub struct ConversationState {
     /// open conversation: this one is about the chat list, and the two can be
     /// live at once without either overwriting the other.
     pub(crate) user_search: UserSearchState,
+
+    /// Set by a global search: the query, the messages found in every private
+    /// chat, and where the reader is among them.
+    ///
+    /// Its own state for the same reason as [`Self::user_search`]: a global
+    /// answer is not about the open conversation, so it cannot share
+    /// [`Self::search`]. The answer is written by the net layer through
+    /// [`Self::adopt_global_search`], which refuses a stale query.
+    pub(crate) global_search: GlobalSearchState,
+
+    /// How many hits of the last global answer were dropped for being outside
+    /// the known private chats. Reset with each search; not in the status label
+    /// yet, which the overlay stage will decide.
+    pub(crate) global_dropped: usize,
 
     /// What the reader last yanked.
     ///
@@ -149,6 +164,8 @@ impl ConversationState {
             vim: VimState::new(0),
             search: SearchState::default(),
             user_search: UserSearchState::default(),
+            global_search: GlobalSearchState::default(),
+            global_dropped: 0,
             register: Register::default(),
             selection: None,
             forward: None,
@@ -683,6 +700,44 @@ impl ConversationState {
     pub(crate) fn move_user_selection(&mut self, forward: bool) {
         self.user_search
             .move_selection(if forward { 1 } else { -1 });
+    }
+
+    /// Starts a global search for `query` and resets the dropped count.
+    ///
+    /// The one place a global search begins, so the net layer only ever answers
+    /// one: it is called from the submit path, once per submit.
+    pub(crate) fn begin_global_search(&mut self, query: &str) {
+        self.global_search.begin(query);
+        self.global_dropped = 0;
+    }
+
+    /// Fills the global list with the answer to `query`, if it is still wanted.
+    ///
+    /// Returns whether the answer landed. The dropped count travels with the
+    /// hits so the two cannot disagree about which answer they came from.
+    pub(crate) fn adopt_global_search(
+        &mut self,
+        query: &str,
+        hits: Vec<GlobalHit>,
+        total: usize,
+        dropped: usize,
+    ) -> bool {
+        if !self.global_search.adopt(query, hits, total) {
+            return false;
+        }
+        self.global_dropped = dropped;
+        true
+    }
+
+    /// Records that the global search for `query` failed, if it is still wanted.
+    ///
+    /// Returns whether it landed.
+    pub(crate) fn fail_global_search(&mut self, query: &str, reason: String) -> bool {
+        if !self.global_search.fail(query, reason) {
+            return false;
+        }
+        self.global_dropped = 0;
+        true
     }
 
     /// Puts the new-conversation overlay away and forgets the search.

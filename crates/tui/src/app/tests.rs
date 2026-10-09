@@ -6614,3 +6614,213 @@ fn a_plain_key_does_not_quit_on_the_global_path() {
     app.handle_key(press(KeyCode::Char('j')));
     assert!(!app.ui.should_quit);
 }
+
+// ---- the global search: `?`, `:search`, and the status line ------------
+
+/// A global hit in `chat_id` with `text`, as the net layer hands it over.
+fn global_hit(chat_id: i64, message_id: i64) -> domain::global_search::GlobalHit {
+    domain::global_search::GlobalHit {
+        chat_id,
+        message_id,
+        text: format!("hit {message_id}"),
+        media: None,
+    }
+}
+
+/// `?` opens the global prompt from the conversation, where `/` opens the
+/// window search.
+#[test]
+fn a_question_mark_in_the_conversation_opens_the_global_prompt() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('?')));
+
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert_eq!(app.input.line.purpose(), PromptKind::GlobalSearch);
+    assert_eq!(app.prompt_prefix(), "?", "it echoes the key that asked");
+    assert!(
+        !app.input.line.purpose().is_buffer(),
+        "one line, insert only"
+    );
+    assert_eq!(app.input.line.text(), "", "nothing is pre-filled");
+}
+
+/// `?` opens the same prompt from the chat list, which has no window to search.
+#[test]
+fn a_question_mark_on_the_chat_list_opens_the_global_prompt() {
+    let mut app = on_the_chat_list();
+    app.handle_key(press(KeyCode::Char('?')));
+
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert_eq!(app.input.line.purpose(), PromptKind::GlobalSearch);
+}
+
+/// The title names the prompt; the hint row is the line's own, as it is for
+/// the other one-line queries.
+#[test]
+fn the_global_prompt_is_titled_search() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('?')));
+
+    assert_eq!(widgets::input_bar::title(&app), " Search ");
+}
+
+/// Submitting queues exactly one global search, trimmed, and begins it.
+#[test]
+fn submitting_a_global_query_queues_exactly_one_search() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('?')));
+    type_text(&mut app, "  hello  ");
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::GlobalSearch {
+            query: "hello".to_owned()
+        }),
+        "the query is trimmed on its way out"
+    );
+    assert_eq!(app.take_action(), None, "one action per submit");
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert_eq!(app.global_search().query(), Some("hello"));
+    assert!(app.global_search().in_flight(), "the search has begun");
+}
+
+/// `:search <query>` runs the search at once, with nothing left to edit.
+#[test]
+fn colon_search_with_a_query_queues_exactly_one_search() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "search  ada lovelace ");
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::GlobalSearch {
+            query: "ada lovelace".to_owned()
+        })
+    );
+    assert_eq!(app.take_action(), None);
+    assert_eq!(app.global_search().query(), Some("ada lovelace"));
+}
+
+/// `:search` with no query repeats the last global search, as `/` does.
+#[test]
+fn an_empty_colon_search_repeats_the_last_global_search() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "search hello");
+    let _ = app.take_action();
+
+    run_command_line(&mut app, "search");
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::GlobalSearch {
+            query: "hello".to_owned()
+        }),
+        "asked again, because the answer may have changed"
+    );
+    assert_eq!(app.global_search().query(), Some("hello"));
+}
+
+/// With no earlier global search, a bare `:search` says so and asks nothing.
+#[test]
+fn a_bare_colon_search_with_nothing_to_repeat_asks_nothing() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "search");
+
+    assert_eq!(app.take_action(), None);
+    assert_eq!(app.ui.status, "no previous global search");
+    assert!(!app.global_search().is_active());
+}
+
+/// An empty `?` submit repeats the last global search, as an empty `/` does.
+#[test]
+fn an_empty_question_mark_submit_repeats_the_last_global_search() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "search hello");
+    let _ = app.take_action();
+
+    app.handle_key(press(KeyCode::Char('?')));
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::GlobalSearch {
+            query: "hello".to_owned()
+        })
+    );
+    assert_eq!(app.take_action(), None);
+}
+
+/// The `/` on each pane keeps its meaning: the window search in the
+/// conversation, the person search on the list. `?` changes neither.
+#[test]
+fn a_global_search_leaves_both_slash_prompts_alone() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "search hello");
+    let _ = app.take_action();
+
+    app.handle_key(press(KeyCode::Char('/')));
+    assert_eq!(app.input.line.purpose(), PromptKind::Search);
+    app.handle_key(press(KeyCode::Esc));
+
+    app.handle_key(press(KeyCode::Char('h')));
+    app.handle_key(press(KeyCode::Char('/')));
+    assert_eq!(app.input.line.purpose(), PromptKind::NewChat);
+}
+
+/// The status line names the global search through every state.
+#[test]
+fn the_status_line_names_the_global_search_through_every_state() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "search hello");
+    assert_eq!(app.status_text(), "?hello — searching…");
+
+    assert!(app.adopt_global_search(
+        "hello",
+        vec![global_hit(1, 1), global_hit(1, 2), global_hit(2, 3)],
+        3,
+        0,
+    ));
+    assert_eq!(app.status_text(), "?hello — 3 results in 2 chats");
+
+    run_command_line(&mut app, "search zebra");
+    assert!(app.adopt_global_search("zebra", Vec::new(), 0, 0));
+    assert_eq!(app.status_text(), "?zebra — no matches");
+
+    run_command_line(&mut app, "search hi");
+    assert!(app.adopt_global_search("hi", vec![global_hit(1, 1)], 1, 0));
+    assert_eq!(app.status_text(), "?hi — 1 result in 1 chat");
+
+    run_command_line(&mut app, "search big");
+    let hits: Vec<_> = (1..=100).map(|id| global_hit(1, id)).collect();
+    assert!(app.adopt_global_search("big", hits, 240, 0));
+    assert_eq!(app.status_text(), "?big — 100 of 240 results in 1 chat");
+
+    run_command_line(&mut app, "search tickets");
+    assert!(app.fail_global_search("tickets", "flood wait".to_owned()));
+    assert_eq!(app.status_text(), "?tickets — search failed (flood wait)");
+}
+
+/// An answer to a query the reader has since replaced is refused, and the
+/// status line keeps naming the newer query.
+#[test]
+fn a_replaced_global_answer_does_not_reach_the_status_line() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "search first");
+    run_command_line(&mut app, "search second");
+
+    assert!(!app.adopt_global_search("first", vec![global_hit(1, 1)], 1, 1));
+    assert_eq!(app.status_text(), "?second — searching…");
+    assert_eq!(app.global_dropped(), 0);
+}
+
+/// The person search outranks the global one: it is the question the reader
+/// asked most recently from the list, and its label names where it stands.
+#[test]
+fn the_user_search_label_outranks_the_global_search_label() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "search hello");
+    start_user_search(&mut app, "ada");
+
+    assert_eq!(app.status_text(), "/ada — searching…");
+}

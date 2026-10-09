@@ -258,8 +258,8 @@ impl GlobalSearchState {
 
     /// What the status line says about the search.
     ///
-    /// One function owns every wording, in the shape of
-    /// [`crate::search::SearchState::label`]: `/query — …`.
+    /// One function owns every wording: `?query — …`, the query echoed with the
+    /// `?` that asked for it, as the conversation's search echoes `/`.
     #[must_use]
     pub fn label(&self) -> String {
         let Some(query) = self.query() else {
@@ -269,7 +269,7 @@ impl GlobalSearchState {
         let description = if self.in_flight {
             "searching…".to_owned()
         } else if let Some(reason) = &self.failure {
-            format!("no matches (search failed: {reason})")
+            format!("search failed ({reason})")
         } else if self.hits.is_empty() {
             "no matches".to_owned()
         } else {
@@ -285,7 +285,7 @@ impl GlobalSearchState {
             }
         };
 
-        format!("/{query} — {description}")
+        format!("?{query} — {description}")
     }
 
     /// Whether `query` is the search being waited on or shown.
@@ -440,38 +440,38 @@ mod tests {
         assert!(state.fail("q", "flood wait"));
 
         assert!(!state.in_flight());
-        assert_eq!(state.label(), "/q — no matches (search failed: flood wait)");
+        assert_eq!(state.label(), "?q — search failed (flood wait)");
     }
 
     #[test]
     fn label_while_searching() {
         let mut state = GlobalSearchState::default();
         state.begin("hi");
-        assert_eq!(state.label(), "/hi — searching…");
+        assert_eq!(state.label(), "?hi — searching…");
     }
 
     #[test]
     fn label_with_no_matches() {
         let state = answered("hi", Vec::new(), 0);
-        assert_eq!(state.label(), "/hi — no matches");
+        assert_eq!(state.label(), "?hi — no matches");
     }
 
     #[test]
     fn label_with_one_result_in_one_chat() {
         let state = answered("hi", vec![hit(1, 1)], 1);
-        assert_eq!(state.label(), "/hi — 1 result in 1 chat");
+        assert_eq!(state.label(), "?hi — 1 result in 1 chat");
     }
 
     #[test]
     fn label_with_several_results_across_chats() {
         let state = answered("hi", vec![hit(1, 1), hit(1, 2), hit(2, 3)], 3);
-        assert_eq!(state.label(), "/hi — 3 results in 2 chats");
+        assert_eq!(state.label(), "?hi — 3 results in 2 chats");
     }
 
     #[test]
     fn label_when_the_server_holds_more_than_it_sends() {
         let state = answered("hi", one_chat(SEARCH_MATCHES), 240);
-        assert_eq!(state.label(), "/hi — 100 of 240 results in 1 chat");
+        assert_eq!(state.label(), "?hi — 100 of 240 results in 1 chat");
     }
 
     #[test]
