@@ -52,7 +52,7 @@ Real, and named so they are not mistaken for oversights:
   - *Windows is untested.* `cmd /C start` returns without waiting, so the terminal is
     back at once there. No Windows leg runs in CI.
 - **Global search shows only the first page, capped at 100 hits.** `?` and
-  `:search` ask the server once. The overlay keeps the oldest 100 matches, and the
+  `:search` ask the server once. The overlay keeps the newest 100 matches, and the
   status line says `100 of <total>` when there are more; there is no way to page
   past them (server pagination is not built). There is no local pre-pass, so a
   match that exists only in the local cache and is not on the server's first page
