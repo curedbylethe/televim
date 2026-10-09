@@ -100,6 +100,25 @@ impl crate::ProtoClient {
 
         Ok(users.into_iter().map(to_candidate).collect())
     }
+
+    /// Lists the people the account talks to most, highest-rated first.
+    ///
+    /// The list is one page of [`TOP_PEERS_LIMIT`] people, and Telegram's rating
+    /// is the order: a caller does not sort it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) on the
+    /// same failures as `resolve_user`, and when the account has top peers
+    /// switched off.
+    pub async fn top_peers(&self) -> Result<Vec<domain::user::UserCandidate>, crate::ProtoError> {
+        let users = self
+            .inner()
+            .top_peers(telegram_framework::users::TOP_PEERS_LIMIT)
+            .await?;
+
+        Ok(users.into_iter().map(to_candidate).collect())
+    }
 }
 
 #[cfg(test)]
