@@ -523,10 +523,10 @@ code.
 | a caption beside a placeholder | never: `display_body()` returns the caption when there is one, so the label is drawn only for a message that says nothing; the caption is body ink | `Message::display_body` |
 | `[sending…]` | on the message's **last** row, which is the one with room | asserted |
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |
-| `[delivered]` | an outgoing group the peer's client has acknowledged and not read; the group's **last** row, beside any time | specified here; not yet in `rows.rs` |
+| `[delivered]` | an outgoing group the peer's client has acknowledged and not read; the group's **last** row, beside any time | `rows::receipt_word` |
 | `[read]` | an outgoing group the peer has read; same row, same place | ditto |
-| `21:04` | a group's time, `HH:MM`, once, on the group's **last** row, right-aligned after any state | specified here; not yet in `rows.rs` |
-| `──── Today ────` | a day separator: a rule the width of the text with the day set into it | specified here; not yet in `rows.rs` |
+| `21:04` | a group's time, `HH:MM`, once, on the group's **last** row, right-aligned after any state | `rows::trailing_note` |
+| `──── Today ────` | a day separator: a rule the width of the text with the day set into it | `rows::day_of` |
 | `· 2 selected` | joined onto a panel title by `·` | `selection_note` |
 | `· 3 match(es)` | a search's count, in the title | `search_note` |
 | `· typing` | the peer is typing in the open conversation: a note on the conversation's title, in `text-dim`; the one title note that is not a count | `typing_note` |
