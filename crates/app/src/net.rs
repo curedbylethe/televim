@@ -663,14 +663,15 @@ pub struct State {
     /// for. A conversation opened again at the same ceiling is not sent again.
     read_acked: Option<(i64, i64)>,
 
-    /// The conversation on show, when a message arrived in it since the driver
-    /// last ran, so its read marker is asked for again.
+    /// The conversation whose read marker is owed: one that a message arrived in
+    /// since the driver last ran, or a Latest page that a card refused the marker
+    /// for. Its marker is asked for again on a later pass.
     ///
     /// A request rather than a call from [`apply`], for the same reason as the
     /// reconnect request: the client and the channel are the driver's. Taken on
     /// every pass, client or not, so an arrival that lands with no client is not
     /// carried into the next one.
-    read_on_arrival: Option<i64>,
+    read_owed: Option<i64>,
 }
 
 impl State {
@@ -1384,7 +1385,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // An arrival under a card is kept rather than spent: the marker it is owed
     // is refused for as long as the card covers the conversation, and the pass
     // after the reader backs out of it asks again.
-    let arrived = !card_covers_conversation(app) && state.read_on_arrival.take().is_some();
+    let arrived = !card_covers_conversation(app) && state.read_owed.take().is_some();
     let Some(client) = state.client.clone() else {
         // No client, so nothing is asked for — but a conversation opened
         // while there is none is still owed what the cache holds for it, or
@@ -1446,7 +1447,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
 
         Wanted::Latest(peer_id) => {
             let cursor = begin_latest(app, state, peer_id);
-            if let Some((chat_id, max_id)) = read_target(app, state) {
+            if let Some((chat_id, max_id)) = latest_read(app, state) {
                 request_read(&client, chat_id, max_id, tx);
             }
             request(&client, FetchDirection::Latest, cursor, tx);
@@ -1607,6 +1608,20 @@ fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
     }
     let max_id = chat.last_message_id.filter(|id| *id > 0)?;
     (state.read_acked != Some((open, max_id))).then_some((open, max_id))
+}
+
+/// The read marker a Latest page asks for, or none.
+///
+/// A card that covers the conversation refuses the marker, so the conversation
+/// is owed it: [`State::read_owed`] keeps it for the pass after the reader backs
+/// out, which asks again through [`read_target`].
+fn latest_read(app: &App, state: &mut State) -> Option<(i64, i64)> {
+    let target = read_target(app, state);
+    let open = app.conversation.conversation.window.chat_id;
+    if target.is_none() && card_covers_conversation(app) && open != 0 {
+        state.read_owed = Some(open);
+    }
+    target
 }
 
 /// Whether a profile card is on show in the conversation's place.
@@ -2226,7 +2241,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             if let UpdateEvent::NewMessage(message) = &event
                 && message.chat_id == app.conversation.conversation.window.chat_id
             {
-                state.read_on_arrival = Some(message.chat_id);
+                state.read_owed = Some(message.chat_id);
             }
             // Whether it moved anything is not acted on: the loop redraws on
             // every pass, so the report has no decision to feed here.
@@ -3922,7 +3937,7 @@ mod tests {
             Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0))),
         );
 
-        assert_eq!(state.read_on_arrival, Some(CHAT));
+        assert_eq!(state.read_owed, Some(CHAT));
         assert_eq!(read_target(&app, &state), Some((CHAT, 4)));
     }
 
@@ -3943,7 +3958,7 @@ mod tests {
         );
         apply(&mut app, &mut state, arrival());
 
-        assert_eq!(state.read_on_arrival, Some(CHAT));
+        assert_eq!(state.read_owed, Some(CHAT));
         assert_eq!(read_target(&app, &state), None);
     }
 
@@ -3958,7 +3973,7 @@ mod tests {
             Event::Update(UpdateEvent::NewMessage(messages(CHAT + 1, 4..=4).remove(0))),
         );
 
-        assert_eq!(state.read_on_arrival, None);
+        assert_eq!(state.read_owed, None);
         assert_eq!(read_target(&app, &state), None);
     }
 
@@ -3987,7 +4002,7 @@ mod tests {
         );
 
         assert_eq!(
-            state.read_on_arrival,
+            state.read_owed,
             Some(CHAT),
             "the arrival is kept, not spent on a refused marker"
         );
@@ -4076,7 +4091,33 @@ mod tests {
         drive(&mut app, &mut state, &tx);
 
         assert!(rx.try_recv().is_err(), "nothing is sent with no client");
-        assert_eq!(state.read_on_arrival, None, "the flag is taken on the pass");
+        assert_eq!(state.read_owed, None, "the flag is taken on the pass");
+    }
+
+    #[test]
+    fn a_latest_under_a_card_owes_its_read_marker_to_the_pass_after_back() {
+        let mut app = listed(2, Some(20));
+        let mut state = State::default();
+        card_over_the_open_chat(&mut app);
+
+        assert_eq!(latest_read(&app, &mut state), None, "the card refuses it");
+        assert_eq!(state.read_owed, Some(CHAT), "the marker is owed");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // The pass after backing out: the arrival gating drive uses.
+        let arrived = !card_covers_conversation(&app) && state.read_owed.take().is_some();
+        assert!(arrived);
+        assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
+    }
+
+    #[test]
+    fn a_latest_with_no_card_asks_now_and_owes_nothing() {
+        let app = listed(2, Some(20));
+        let mut state = State::default();
+
+        assert_eq!(latest_read(&app, &mut state), Some((CHAT, 20)));
+        assert_eq!(state.read_owed, None);
     }
 
     // ---- what a failure costs -------------------------------------------
