@@ -326,6 +326,16 @@ Two things are deliberately absent rather than half-present:
 - **Cancelling a send that is already on its way.** That needs task-abort
   machinery this crate does not have.
 
+## Marking read
+
+`Client::mark_read(peer_id, max_id)` asks Telegram to mark a conversation read up
+to and including `max_id`, and returns once the server has accepted it. The peer
+is resolved through the session's peer cache like the calls above, and reports
+`FrameworkError::UnknownPeer` when it is not there. It does not clear anything on
+its own: the caller decides what an accepted marker means for the screen. The
+application sends it when a conversation is opened and clears the unread count
+only on success, so a refused marker is not a state the screen has to undo.
+
 ## Searching
 
 `Client::search_messages(peer_id, SearchArgs)` searches one conversation and
