@@ -74,7 +74,8 @@ below.
 
 - **Unit Tests:** `#[cfg(test)]` modules live beside the code they cover, in
   `domain`, `tui`, `telegram-framework` and `app`. Test the Vim motion logic
-  exhaustively (e.g., `gg` on an empty buffer, `G` at the last message). Widget
+  exhaustively (e.g., `gg` on an empty buffer, `G` at the last message, `o` on a
+  one-line, mid-row, empty and multi-line draft). Widget
   tests use `ratatui`'s `TestBackend`.
 - **History cache:** two layers, both on every job and neither needing a
   client. The **store** (`app/src/history_store.rs`) is pure functions over

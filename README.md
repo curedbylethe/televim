@@ -244,9 +244,9 @@ Working today:
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
   typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.
   The line is a real editor (`vim-line`, wrapped in `tui::line`): caret
-  movement, `w`/`b`/`e`, `x`, `dw`, `cc`, `p`, `gg`/`G`, a visual selection with
+  movement, `w`/`b`/`e`, `x`, `dw`, `cc`, `p`, `gg`/`G`, `o`, a visual selection with
   `d` and `y`, and multi-line messages with `Ctrl+J` (`Shift+Enter` where the
-  terminal volunteers the distinction). `gg` and `G` are the wrapper's, not the
+  terminal volunteers the distinction). `gg`, `G` and `o` are the wrapper's, not the
   library's — see [`docs/decisions.md`](./docs/decisions.md). The bar is always a draft: it grows to six
   rows, and each conversation keeps its own: leaving parks it, re-entering
   restores it, and another conversation starts with its own bar. Quitting keeps
