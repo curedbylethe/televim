@@ -401,6 +401,42 @@ impl MediaCache {
         self.dir.join(key.pointer_name())
     }
 
+    /// Drops a message's own key, after an edit to it: its pointer goes, and its
+    /// blob goes only with its last reference. A media id's pointer is content
+    /// identity and is left alone.
+    pub(crate) fn remove_message(&mut self, chat_id: i64, message_id: i64) {
+        self.remove_keys(&[Key::Message(chat_id, message_id)]);
+    }
+
+    /// Drops every message key whose id is one of `message_ids`, in any chat.
+    ///
+    /// A deletion from the feed names no chat, so this matches the history
+    /// file's rule. A message id is only unique within its chat, so a kept file
+    /// for another chat's message with the same id goes too: that costs a
+    /// download, never a wrong file.
+    pub(crate) fn remove_messages(&mut self, message_ids: &[i64]) {
+        let keys: Vec<Key> = self
+            .entries
+            .keys()
+            .copied()
+            .filter(|key| matches!(key, Key::Message(_, id) if message_ids.contains(id)))
+            .collect();
+        self.remove_keys(&keys);
+    }
+
+    /// Unindexes each key that is held, removes its pointer, and gives back its
+    /// reference to its blob.
+    fn remove_keys(&mut self, keys: &[Key]) {
+        for key in keys {
+            if let Some(entry) = self.entries.remove(key) {
+                if let Err(error) = fs::remove_file(self.pointer_path(*key)) {
+                    tracing::warn!(%error, "a removed media pointer could not be removed");
+                }
+                self.drop_ref(&entry.hash);
+            }
+        }
+    }
+
     /// Indexes a written store under each of `keys`, unless a clear ran since it
     /// was reserved. A late store's files are removed unless a newer reservation
     /// owns them.
@@ -1000,6 +1036,77 @@ mod tests {
         assert_eq!(cache.lookup(1, 1), None, "the older file goes");
         assert!(!first.exists(), "and is removed from disk");
         assert!(cache.lookup(1, 2).is_some());
+    }
+
+    #[test]
+    fn a_deleted_message_drops_its_cache_entry() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let gone = cache.store(1, 5, MediaKind::File, b"gone").expect("cached");
+        let elsewhere = cache
+            .store(2, 5, MediaKind::File, b"elsewhere")
+            .expect("cached");
+        let kept = cache.store(1, 6, MediaKind::File, b"kept").expect("cached");
+
+        // The feed names the id with no chat: both chats' copies of 5 go.
+        cache.remove_messages(&[5]);
+
+        assert_eq!(cache.lookup(1, 5), None);
+        assert_eq!(
+            cache.lookup(2, 5),
+            None,
+            "the same id in another chat goes too"
+        );
+        assert!(
+            !gone.exists() && !elsewhere.exists(),
+            "and their blobs with them"
+        );
+        assert_eq!(
+            cache.lookup(1, 6),
+            Some(kept.clone()),
+            "other messages stay"
+        );
+        assert!(kept.exists());
+        assert!(
+            !dir.path().join("1-5.ref").exists(),
+            "the pointer is removed"
+        );
+    }
+
+    #[test]
+    fn a_blob_shared_with_another_key_survives_a_message_delete() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let shared = cache.store(1, 5, MediaKind::File, b"same").expect("cached");
+        cache.store(1, 6, MediaKind::File, b"same").expect("cached");
+
+        cache.remove_message(1, 5);
+
+        assert_eq!(cache.lookup(1, 5), None);
+        assert!(shared.exists(), "message 6 still names the blob");
+        assert_eq!(cache.lookup(1, 6), Some(shared));
+    }
+
+    #[test]
+    fn a_media_id_is_kept_when_its_message_is_deleted() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache
+            .store_keys(
+                &[Key::Message(1, 5), Key::Media(77)],
+                MediaKind::Video,
+                b"clip",
+            )
+            .expect("cached");
+
+        cache.remove_messages(&[5]);
+
+        assert_eq!(
+            cache.lookup_media(77),
+            Some(path.clone()),
+            "the id is content identity"
+        );
+        assert!(path.exists());
     }
 
     #[test]
