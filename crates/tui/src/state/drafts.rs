@@ -42,7 +42,7 @@ pub struct DraftStore {
     /// which is no more than the chat list already holds.
     ///
     /// Persisted by `app` beside the parked drafts, as the newest
-    /// [`DraftStore::recent_read_marks`] peers. Restored only through
+    /// [`DraftStore::recent_read_marks`] peers, oldest first. Restored only through
     /// [`DraftStore::restore_read_marks`], which never moves a mark backwards, so
     /// a stored figure can only add a reading the reader was shown last session.
     /// A sign-out forgets them ([`DraftStore::clear_read_marks`]).
@@ -159,21 +159,23 @@ impl DraftStore {
     }
 
     /// The `limit` most recently moved marks, as `(peer id, max id)` pairs
-    /// sorted by peer id, so the persisted form is the same bytes for the same
-    /// marks.
+    /// ordered oldest to newest by when they moved.
+    ///
+    /// The order is the recency: feeding the result back through
+    /// [`DraftStore::restore_read_marks`] stamps the marks in this order, so a
+    /// restart keeps the same relative recency and the same window.
     #[must_use]
     pub fn recent_read_marks(&self, limit: usize) -> Vec<(i64, i64)> {
         let recorded = self.read_receipts.borrow();
         let mut newest: Vec<(i64, ReadMark)> = recorded.iter().map(|(id, m)| (*id, *m)).collect();
         newest.sort_by_key(|(_, mark)| std::cmp::Reverse(mark.stamp));
         newest.truncate(limit);
+        newest.sort_by_key(|(_, mark)| mark.stamp);
 
-        let mut out: Vec<(i64, i64)> = newest
+        newest
             .into_iter()
             .map(|(chat_id, mark)| (chat_id, mark.max_id))
-            .collect();
-        out.sort_by_key(|(chat_id, _)| *chat_id);
-        out
+            .collect()
     }
 
     /// Merges marks loaded from disk, keeping the higher figure for each peer.
@@ -434,17 +436,60 @@ mod tests {
         store.restore_read_marks(vec![(7, 12)]);
         assert_eq!(
             store.recent_read_marks(10),
-            vec![(7, 12), (8, 3)],
-            "a higher loaded figure does raise it"
+            vec![(8, 3), (7, 12)],
+            "a higher loaded figure does raise it, and the raise re-stamps the mark, \
+             so it is now the newest"
         );
     }
 
+    /// Marks come back in the order they were restored, which is the order they
+    /// are stamped in: the list is oldest first, so `(4, 10)` was restored first
+    /// and is the older. This used to sort by peer id; recency is the order now.
     #[test]
-    fn restored_marks_come_back_sorted_by_peer() {
+    fn restored_marks_come_back_in_the_order_restored() {
         let mut store = DraftStore::new();
         store.restore_read_marks(vec![(4, 10), (2, 7)]);
 
-        assert_eq!(store.recent_read_marks(10), vec![(2, 7), (4, 10)]);
+        assert_eq!(
+            store.recent_read_marks(10),
+            vec![(4, 10), (2, 7)],
+            "oldest to newest by stamp, not by peer id"
+        );
+    }
+
+    /// A restart keeps the recent peers, not the highest ids. Peer 2 moves first,
+    /// then 9, then 4. The persisted window of two is what `app` writes, and a
+    /// fresh store restored from it must keep 9 and 4 in move order, not the two
+    /// highest ids of the lot.
+    #[test]
+    fn a_restart_keeps_the_most_recent_peers_not_the_highest_ids() {
+        let store = DraftStore::new();
+        assert!(store.note_read(2, 3));
+        assert!(store.note_read(9, 5));
+        assert!(store.note_read(4, 7));
+
+        let persisted = store.recent_read_marks(2);
+        assert_eq!(
+            persisted,
+            vec![(9, 5), (4, 7)],
+            "the two most recently moved, oldest first: 9 moved before 4"
+        );
+
+        let mut relaunched = DraftStore::new();
+        relaunched.restore_read_marks(persisted);
+        assert_eq!(
+            relaunched.recent_read_marks(32),
+            vec![(9, 5), (4, 7)],
+            "the window after the restart holds the same two, in the same order"
+        );
+
+        let mut older = DraftStore::new();
+        older.restore_read_marks(store.recent_read_marks(32));
+        assert_eq!(
+            older.recent_read_marks(2),
+            vec![(9, 5), (4, 7)],
+            "a full-window restore then a narrower window keeps the newest two"
+        );
     }
 
     #[test]
@@ -460,8 +505,8 @@ mod tests {
 
         assert_eq!(
             store.recent_read_marks(2),
-            vec![(1, 6), (3, 5)],
-            "the two most recently moved, sorted by peer id"
+            vec![(3, 5), (1, 6)],
+            "the two most recently moved, oldest first: 3 last moved before 1 moved again"
         );
     }
 

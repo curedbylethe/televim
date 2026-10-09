@@ -19,7 +19,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 /// The drafts file beside the configuration.
 ///
@@ -43,7 +44,9 @@ pub(crate) struct DraftFile {
 pub(crate) struct LoadedDrafts {
     pub account: Option<String>,
     pub drafts: Vec<(i64, String)>,
-    /// `(peer id, highest id the peer has read)`, sorted by peer id.
+    /// `(peer id, highest id the peer has read)`, oldest first: the order
+    /// the file holds them, which is the recency order. A file in the older
+    /// object form has no order, so its marks come back in map order.
     pub reads: Vec<(i64, i64)>,
 }
 
@@ -60,23 +63,62 @@ impl LoadedDrafts {
 }
 
 /// The file payload:
-/// `{ "account": <phone|null>, "drafts": { "<peer_id>": "<text>" }, "read": { "<peer_id>": <max_id> } }`.
+/// `{ "account": <phone|null>, "drafts": { "<peer_id>": "<text>" }, "read": [[<peer_id>, <max_id>], ...] }`.
 ///
-/// `read` is omitted when empty, so a file with no read marks keeps the shape
-/// it had before they were stored, and an older file without the key loads
-/// with none.
+/// `read` lists the marks oldest first, so the recency order survives the
+/// round trip into `DraftStore::restore_read_marks`. It is
+/// omitted when empty, so a file with no read marks keeps the shape it had
+/// before they were stored, and an older file without the key loads with none.
 ///
-/// A `BTreeMap` rather than a `HashMap`, so the same drafts always serialise
-/// to the same bytes: iteration order is peer id order, and a sync that
-/// changed nothing writes nothing different.
+/// A file written before this array form stored `read` as an object
+/// (`{ "<peer_id>": <max_id> }`); that still loads, in map order. The `read`
+/// key is read leniently: anything that is not a pair of integers is dropped,
+/// so a damaged marks key never costs the drafts beside it.
+///
+/// `drafts` stays a `BTreeMap`, so the same drafts always serialise to the
+/// same bytes: iteration order is peer id order, and a sync that changed
+/// nothing writes nothing different.
 #[derive(Debug, Serialize, Deserialize)]
 struct Payload {
     #[serde(default)]
     account: Option<String>,
     #[serde(default)]
     drafts: BTreeMap<i64, String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    read: BTreeMap<i64, i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "lenient_reads"
+    )]
+    read: Vec<(i64, i64)>,
+}
+
+/// Reads the `read` key without letting it fail the whole payload.
+fn lenient_reads<'de, D>(deserializer: D) -> Result<Vec<(i64, i64)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(read_pairs(&value))
+}
+
+/// The marks in a `read` value: the array form in the order written, or the
+/// older object form in map order. Any other shape, and any entry that is
+/// not a pair of integers, contributes nothing.
+fn read_pairs(value: &Value) -> Vec<(i64, i64)> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item.as_array()?.as_slice() {
+                [peer, max] => Some((peer.as_i64()?, max.as_i64()?)),
+                _ => None,
+            })
+            .collect(),
+        Value::Object(map) => map
+            .iter()
+            .filter_map(|(peer, max)| Some((peer.parse().ok()?, max.as_i64()?)))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 impl DraftFile {
@@ -107,7 +149,7 @@ impl DraftFile {
             Ok(payload) => LoadedDrafts {
                 account: payload.account,
                 drafts: payload.drafts.into_iter().collect(),
-                reads: payload.read.into_iter().collect(),
+                reads: payload.read,
             },
             Err(error) => {
                 tracing::warn!(%error, "discarding an unreadable drafts file");
@@ -133,7 +175,7 @@ impl DraftFile {
                 .iter()
                 .map(|(peer_id, text)| (*peer_id, text.clone()))
                 .collect(),
-            read: reads.iter().copied().collect(),
+            read: reads.to_vec(),
         };
         let bytes = match serde_json::to_vec(&payload) {
             Ok(bytes) => bytes,
@@ -509,8 +551,87 @@ mod tests {
         assert_eq!(loaded.drafts, vec![(7, "seven".to_owned())]);
         assert_eq!(
             loaded.reads,
+            vec![(30, 4), (7, 9)],
+            "the marks come back in the order they were saved, oldest first, \
+             not sorted by peer id: the order is the recency"
+        );
+    }
+
+    #[test]
+    fn read_marks_are_written_as_an_ordered_array() {
+        let (_dir, file) = scratch("drafts.json");
+
+        file.save(&[], &[(9, 5), (4, 7), (2, 3)], None);
+
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&file.path).expect("the file"))
+            .expect("the payload is JSON");
+        assert_eq!(
+            raw["read"],
+            serde_json::from_str::<Value>("[[9, 5], [4, 7], [2, 3]]")
+                .expect("the expected payload is JSON"),
+            "the persisted form is an array of pairs, oldest first"
+        );
+
+        let loaded = file.load();
+        assert_eq!(
+            loaded.reads,
+            vec![(9, 5), (4, 7), (2, 3)],
+            "and the order survives the load, which an object's would not"
+        );
+    }
+
+    #[test]
+    fn an_object_form_file_still_loads_its_marks_and_drafts() {
+        let (_dir, file) = scratch("drafts.json");
+        fs::write(
+            &file.path,
+            r#"{"account": "+1555", "drafts": {"7": "seven"}, "read": {"30": 4, "7": 9}}"#,
+        )
+        .expect("the object-form file");
+
+        let loaded = file.load();
+        assert_eq!(loaded.account.as_deref(), Some("+1555"));
+        assert_eq!(loaded.drafts, vec![(7, "seven".to_owned())]);
+        let mut reads = loaded.reads.clone();
+        reads.sort_unstable();
+        assert_eq!(
+            reads,
             vec![(7, 9), (30, 4)],
-            "the marks come back sorted by peer id"
+            "the older object form loads both marks; its order is map order, not stored"
+        );
+    }
+
+    #[test]
+    fn a_damaged_read_key_never_costs_the_drafts() {
+        let (_dir, file) = scratch("drafts.json");
+        fs::write(
+            &file.path,
+            r#"{"drafts": {"7": "seven"}, "read": [[30, 4], "junk", [1], [2, "x"], [5, 6, 7]]}"#,
+        )
+        .expect("the damaged file");
+
+        let loaded = file.load();
+        assert_eq!(
+            loaded.drafts,
+            vec![(7, "seven".to_owned())],
+            "the drafts survive a read key that is not a list of pairs"
+        );
+        assert_eq!(
+            loaded.reads,
+            vec![(30, 4)],
+            "and only the well-formed pair is kept"
+        );
+
+        fs::write(
+            &file.path,
+            r#"{"drafts": {"7": "seven"}, "read": "not a map or list"}"#,
+        )
+        .expect("the wrong-shape file");
+        let loaded = file.load();
+        assert_eq!(loaded.drafts, vec![(7, "seven".to_owned())]);
+        assert!(
+            loaded.reads.is_empty(),
+            "a read key of the wrong shape is no marks"
         );
     }
 
