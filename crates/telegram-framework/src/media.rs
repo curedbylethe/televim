@@ -71,16 +71,22 @@ pub enum MediaKind {
 ///
 /// `None` means the message carries no media at all — the field is absent, or
 /// it is [`MessageMedia::Empty`](tl::enums::MessageMedia::Empty). Every other
-/// answer is `Some`, including for media this build does not model.
-pub(crate) fn classify_raw(media: Option<&tl::enums::MessageMedia>) -> Option<MediaKind> {
+/// answer is `Some`, including for media this build does not model. The second
+/// half is the media's stable id, `None` where the media has no record to read
+/// one from.
+pub(crate) fn classify_raw(
+    media: Option<&tl::enums::MessageMedia>,
+) -> Option<(MediaKind, Option<i64>)> {
     Some(match media? {
         tl::enums::MessageMedia::Empty => return None,
-        tl::enums::MessageMedia::Photo(_) => MediaKind::Photo,
-        tl::enums::MessageMedia::Document(document) => classify_document(document),
+        tl::enums::MessageMedia::Photo(photo) => (MediaKind::Photo, photo_id(photo)),
+        tl::enums::MessageMedia::Document(document) => {
+            (classify_document(document), document_id(document))
+        }
         // A contact, a poll, a location, a web page, a paid post — and anything
         // Telegram adds after this build. All of them are something the message
         // carries, and none of them is nothing.
-        _ => MediaKind::File,
+        _ => (MediaKind::File, None),
     })
 }
 
@@ -98,10 +104,10 @@ pub(crate) fn classify_raw(media: Option<&tl::enums::MessageMedia>) -> Option<Me
 /// `Media::from_raw` returns `None` for a handful of variants, so on this path
 /// such a message arrives here as `None`. The raw history path does not have
 /// that gap.
-pub(crate) fn classify_typed(media: Option<&Media>) -> Option<MediaKind> {
+pub(crate) fn classify_typed(media: Option<&Media>) -> Option<(MediaKind, Option<i64>)> {
     Some(match media? {
-        Media::Photo(_) => MediaKind::Photo,
-        Media::Document(document) => classify_document(&document.raw),
+        Media::Photo(photo) => (MediaKind::Photo, photo_id(&photo.raw)),
+        Media::Document(document) => (classify_document(&document.raw), document_id(&document.raw)),
         // `grammers` reads a document with a sticker attribute as a sticker, so
         // this is where a sticker arrives: a static one is its own kind, and an
         // animated one stays a file — animated stickers are out of scope, and
@@ -111,14 +117,37 @@ pub(crate) fn classify_typed(media: Option<&Media>) -> Option<MediaKind> {
         // kind added after this build — is one arm, deliberately: all of them
         // carry something, and none of them is nothing.
         Media::Sticker(sticker) => {
-            if sticker.is_animated() {
+            let kind = if sticker.is_animated() {
                 MediaKind::File
             } else {
                 MediaKind::Sticker
-            }
+            };
+            (kind, document_id(&sticker.document.raw))
         }
-        _ => MediaKind::File,
+        _ => (MediaKind::File, None),
     })
+}
+
+/// The stable id of a photo, read off its record.
+///
+/// This is what `grammers` reports as `Photo::id`, read off the raw record
+/// instead: that accessor unwraps the record, and a photo the response did not
+/// carry has none — the case [`fetchable_media`] refuses. Only the id is kept.
+/// The access hash and file reference are never stored, because they go stale.
+fn photo_id(photo: &tl::types::MessageMediaPhoto) -> Option<i64> {
+    match photo.photo.as_ref()? {
+        tl::enums::Photo::Photo(photo) => Some(photo.id),
+        tl::enums::Photo::Empty(_) => None,
+    }
+}
+
+/// The stable id of a document, read off its record. The same rule as
+/// [`photo_id`]: the id only, never the access hash or file reference.
+fn document_id(document: &tl::types::MessageMediaDocument) -> Option<i64> {
+    match document.document.as_ref()? {
+        tl::enums::Document::Document(document) => Some(document.id),
+        tl::enums::Document::Empty(_) => None,
+    }
 }
 
 /// Decides a document's kind from what the document itself says.
@@ -504,11 +533,78 @@ mod tests {
     /// Classifies a media value the raw path way. Borrowing keeps the fixture
     /// alive, which is what lets both paths be asserted on one value.
     fn raw(media: &tl::enums::MessageMedia) -> Option<MediaKind> {
-        classify_raw(Some(media))
+        classify_raw(Some(media)).map(|(kind, _)| kind)
     }
 
     fn typed(raw: tl::enums::MessageMedia) -> Option<MediaKind> {
-        classify_typed(media_typed(raw).as_ref())
+        classify_typed(media_typed(raw).as_ref()).map(|(kind, _)| kind)
+    }
+
+    /// A document named `notes.txt` whose record carries `id`.
+    fn document_with_id(id: i64) -> tl::enums::MessageMedia {
+        let mut media = media_document(vec![attribute_filename("notes.txt")], false);
+        let tl::enums::MessageMedia::Document(message) = &mut media else {
+            panic!("media_document builds a document");
+        };
+        let Some(tl::enums::Document::Document(document)) = &mut message.document else {
+            panic!("media_document carries a record");
+        };
+        document.id = id;
+        media
+    }
+
+    /// The id is read off the message on both paths, and only the id: the same
+    /// value comes out of the raw record and out of the `grammers` form of it.
+    #[test]
+    fn a_media_id_is_carried_from_the_message_on_both_paths() {
+        let document = document_with_id(77);
+
+        assert_eq!(
+            classify_raw(Some(&document)),
+            Some((MediaKind::File, Some(77)))
+        );
+        assert_eq!(
+            classify_typed(media_typed(document.clone()).as_ref()),
+            Some((MediaKind::File, Some(77)))
+        );
+
+        let photo = tl::enums::MessageMedia::Photo(tl::types::MessageMediaPhoto {
+            spoiler: false,
+            live_photo: false,
+            photo: Some(tl::enums::Photo::Photo(tl::types::Photo {
+                has_stickers: false,
+                id: 88,
+                access_hash: 1,
+                file_reference: Vec::new(),
+                date: 0,
+                sizes: Vec::new(),
+                video_sizes: None,
+                dc_id: 2,
+            })),
+            ttl_seconds: None,
+            video: None,
+        });
+
+        assert_eq!(
+            classify_raw(Some(&photo)),
+            Some((MediaKind::Photo, Some(88)))
+        );
+    }
+
+    /// No media, and media with no record to name it by, carry no id.
+    #[test]
+    fn media_without_a_record_carries_no_id() {
+        assert_eq!(classify_raw(None), None, "no media is no answer at all");
+        assert_eq!(
+            classify_raw(Some(&media_photo())),
+            Some((MediaKind::Photo, None)),
+            "a photo the response did not carry has no id to read"
+        );
+        assert_eq!(
+            classify_raw(Some(&media_unmodelled())),
+            Some((MediaKind::File, None)),
+            "a kind this build does not model is a file with no id"
+        );
     }
 
     /// Both paths are asserted on the same fixture, so a disagreement between

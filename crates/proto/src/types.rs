@@ -481,6 +481,7 @@ mod live_tests {
             is_outgoing: false,
             reply_to_msg_id: None,
             media: None,
+            media_id: None,
         }
     }
 
