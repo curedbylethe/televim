@@ -1422,19 +1422,14 @@ pub(crate) fn submit_edit(
 ///
 /// The list is cleared and marked in flight, and the lookup is queued: `tui`
 /// cannot reach the network, so the caller performs it and answers with
-/// [`App::apply_users`] or [`App::fail_users`]. An empty query asks nothing,
-/// and a key that did nothing silently reads as a hang, so it says so.
+/// [`App::apply_users`] or [`App::fail_users`]. An empty query is a lookup
+/// too: the server answers with the reader's most-contacted people.
 pub(crate) fn submit_new_chat(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     outbox: &mut Outbox,
     query: &str,
 ) {
-    if query.is_empty() {
-        ui.flash("type a name or @username to search for");
-        return;
-    }
-
     conversation.user_search.begin(query);
     queue_action(
         &mut *outbox,

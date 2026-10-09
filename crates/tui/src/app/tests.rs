@@ -5957,19 +5957,27 @@ fn submitting_a_new_chat_query_queues_exactly_one_lookup() {
     assert_eq!(app.user_search().query(), Some("ada"));
 }
 
-/// An empty query asks nothing and says so, rather than leaving the reader
-/// on a line that looks like it did something.
+/// An empty query is a lookup like any other: it asks the server for the
+/// reader's most-contacted people, and the search is on show while it runs.
 #[test]
-fn submitting_an_empty_new_chat_query_says_so() {
+fn submitting_an_empty_new_chat_query_looks_up_the_top_people() {
     let mut app = App::mock();
     app.handle_key(press(KeyCode::Char('h')));
     app.handle_key(press(KeyCode::Char('/')));
 
     app.handle_key(press(KeyCode::Enter));
 
-    assert!(app.take_action().is_none(), "nothing was asked");
-    assert!(!app.user_search().is_active());
-    assert!(app.status_text().contains("name"), "{}", app.status_text());
+    assert_eq!(
+        app.take_action(),
+        Some(Action::ResolveUser {
+            query: String::new()
+        }),
+        "the empty query is asked, not refused"
+    );
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert!(app.user_search().is_active(), "and the search is on show");
+    assert_eq!(app.user_search().query(), Some(""));
+    assert!(app.status_text().contains("searching"), "{}", app.status_text());
 }
 
 /// `:new` opens the same prompt with the query already in it, and the line
