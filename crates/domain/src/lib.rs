@@ -11,6 +11,7 @@
 
 pub mod account;
 pub mod chat;
+pub mod global_search;
 pub mod history;
 pub mod message;
 pub mod presence;
