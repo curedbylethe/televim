@@ -350,6 +350,20 @@ pub enum Event {
         result: Result<(), String>,
     },
 
+    /// Telegram accepted the reader's read marker for a conversation, so its
+    /// unread count is cleared on the chat list.
+    ///
+    /// Sent only on success: a refused marker leaves the count as the server had
+    /// it, and the next open asks again.
+    ReadMarked {
+        /// The conversation the marker was for.
+        chat_id: i64,
+
+        /// The newest message the marker reached, which is what the answer is
+        /// recorded against.
+        max_id: i64,
+    },
+
     /// An update arrived for a conversation televim displays.
     Update(UpdateEvent),
 
@@ -644,6 +658,10 @@ pub struct State {
     /// end while this is set is the reader-visible [`Event::Offline`] rather
     /// than another rebuild.
     auto_reconnect_used: bool,
+
+    /// The conversation and newest message Telegram last accepted a read marker
+    /// for. A conversation opened again at the same ceiling is not sent again.
+    read_acked: Option<(i64, i64)>,
 }
 
 impl State {
@@ -1408,6 +1426,9 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
 
         Wanted::Latest(peer_id) => {
             let cursor = begin_latest(app, state, peer_id);
+            if let Some((chat_id, max_id)) = read_target(app, state) {
+                request_read(&client, chat_id, max_id, tx);
+            }
             request(&client, FetchDirection::Latest, cursor, tx);
         }
 
@@ -1545,6 +1566,54 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
     }
 
     Wanted::Nothing
+}
+
+/// The conversation and newest message the read marker should go up to on this
+/// open, if one should be sent.
+///
+/// Only the conversation on show is considered, and only while its list entry
+/// still has unread messages. The ceiling is the newest message the list knows
+/// of (`last_message_id`), not the window's end. A missing or non-positive id is
+/// never sent, because it names no message the server holds. A ceiling already
+/// accepted is not sent again.
+fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
+    let open = app.conversation.conversation.window.chat_id;
+    if open == 0 {
+        return None;
+    }
+    let chat = app.chats().iter().find(|chat| chat.id == open)?;
+    if chat.unread_count == 0 {
+        return None;
+    }
+    let max_id = chat.last_message_id.filter(|id| *id > 0)?;
+    (state.read_acked != Some((open, max_id))).then_some((open, max_id))
+}
+
+/// Tells Telegram the reader has read a conversation up to `max_id`, and hands
+/// the answer back to the loop.
+///
+/// The same shape as [`request`], and for the same reason: the round trip is its
+/// own task. Only an accepted marker is reported, and a refused one is logged and
+/// dropped — there is no retry, and the count stays, so the next open asks again.
+fn request_read(
+    client: &Arc<ProtoClient>,
+    chat_id: i64,
+    max_id: i64,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+
+    tokio::spawn(async move {
+        match client.mark_read(chat_id, max_id).await {
+            Ok(()) => {
+                let _ = tx.send(AppEvent::Net(Event::ReadMarked { chat_id, max_id }));
+            }
+            Err(error) => {
+                tracing::debug!(%error, chat_id, max_id, "the read marker was not accepted; the unread count is kept");
+            }
+        }
+    });
 }
 
 /// Asks for one page, and hands the answer back to the loop.
@@ -2107,6 +2176,11 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         }
 
         Event::FeedEnded => apply_feed_ended(app, state),
+
+        Event::ReadMarked { chat_id, max_id } => {
+            state.read_acked = Some((chat_id, max_id));
+            app.mark_chat_read(chat_id);
+        }
 
         Event::LoggedOut { result } => apply_logged_out_and_reconnect(app, state, result),
 
