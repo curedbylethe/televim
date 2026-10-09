@@ -157,7 +157,9 @@ Working today:
   they have one, and a standing — `chat` when a conversation with them already
   exists, `new` when choosing them makes one — with the fragment the reader typed
   inked `match`. Picking someone already in the list focuses that chat rather than
-  creating a second; picking someone new lists and opens one. The status line says
+  creating a second; picking someone new lists and opens one. Submitting the
+  prompt empty lists the reader's most-contacted people instead, the server's
+  top correspondents (`contacts.GetTopPeers`), in the same overlay. The status line says
   where the search stands: `searching…` while an answer is in flight, the count
   when it lands, and why when it finds nobody or fails.
 - **Searching every private chat:** `?` opens a prompt on the bar, from the
