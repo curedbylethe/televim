@@ -89,6 +89,30 @@ boundary: ## Assert that only telegram-framework can reach grammers
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "✅ no grammers outside telegram-framework's live feature"
 
+# A user-visible change needs a CHANGELOG.md entry. "User-visible" is read from
+# the commit type: any feat, fix or perf on this branch since CHANGELOG_BASE
+# (its merge base) must come with a change to CHANGELOG.md in the same range.
+# Ceiling: a user-visible change committed as refactor, docs or build is not
+# caught; the type is the only signal available without a reviewer. Skips
+# loudly with no base ref, as design-check does, since a shallow clone cannot
+# compare.
+CHANGELOG_BASE ?= origin/main
+.PHONY: changelog-check
+changelog-check: ## Require a CHANGELOG.md entry for each feat, fix or perf commit
+	@if ! git rev-parse --verify --quiet $(CHANGELOG_BASE) >/dev/null; then \
+		echo "⚠️  changelog-check SKIPPED: no $(CHANGELOG_BASE) to compare against."; \
+		exit 0; \
+	fi; \
+	grep -q '^## \[Unreleased\]' CHANGELOG.md || { echo "error: CHANGELOG.md has no ## [Unreleased] section"; exit 1; }; \
+	range=$$(git merge-base $(CHANGELOG_BASE) HEAD)..HEAD; \
+	if git log --format=%s $$range | grep -Eq '^(feat|fix|perf)(\(.*\))?!?:' \
+		&& ! git diff --name-only $$range | grep -qx 'CHANGELOG.md'; then \
+		echo "error: user-visible commits in $$range but CHANGELOG.md is unchanged:"; \
+		git log --format='  %h %s' $$range | grep -E '^  [0-9a-f]+ (feat|fix|perf)'; \
+		exit 1; \
+	fi; \
+	echo "✅ changelog entries present for user-visible commits"
+
 .PHONY: check
 check: ## Type-check the entire workspace (faster than a full build)
 	$(CARGO) check --all-targets
@@ -132,7 +156,7 @@ design-specimen: ## Rebuild the specimen's frame bodies from the engine
 
 # --- CI / Pre-commit ---
 .PHONY: ci
-ci: fmt-check lint boundary test design-check build-release ## Run all checks required for CI
+ci: fmt-check lint boundary test design-check build-release changelog-check ## Run all checks required for CI
 	@echo "✅ CI checks passed!"
 
 .PHONY: clean

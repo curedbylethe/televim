@@ -73,7 +73,7 @@ match the compiler edition — both are `2024`.
 
 ## Commands
 
-`make ci` is the gate: `fmt-check lint boundary test design-check build-release`.
+`make ci` is the gate: `fmt-check lint boundary test design-check build-release changelog-check`.
 Individual targets, and what each one proves, are in
 [`docs/testing.md`](./docs/testing.md). The ones that catch the most:
 
