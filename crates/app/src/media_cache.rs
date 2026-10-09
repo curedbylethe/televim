@@ -466,6 +466,12 @@ impl MediaCache {
                     // Two blobs for one hash, under two suffixes: keep one.
                     let _ = fs::remove_file(&old.path);
                 }
+            } else if parse_legacy(name).is_some()
+                && let Err(error) = fs::remove_file(entry.path())
+            {
+                // Named by message, before content addressing. Nothing indexes
+                // these any more, and the cache is disposable, so they go.
+                tracing::warn!(%error, "a legacy media file could not be removed");
             }
         }
         // The pointers are read after the blobs, so each can be checked against
@@ -487,6 +493,17 @@ impl MediaCache {
                 }
             }
         }
+        // A blob no pointer names was left by an interrupted store, or by a
+        // pointer that is gone. Nothing would ever evict it, so it goes now.
+        self.blobs.retain(|_, blob| {
+            if blob.refs > 0 {
+                return true;
+            }
+            if let Err(error) = fs::remove_file(&blob.path) {
+                tracing::warn!(%error, "an orphaned media file could not be removed");
+            }
+            false
+        });
         self.evict(None);
     }
 
@@ -849,6 +866,43 @@ mod tests {
         assert!(cache.entries.is_empty());
         assert!(dir.path().join("notes.txt").exists());
         assert!(dir.path().join("1-2.exe").exists());
+    }
+
+    #[test]
+    fn legacy_message_named_files_are_removed_on_open() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        for name in ["-7-9.jpg", "1-2.mp4", "notes.txt"] {
+            fs::write(dir.path().join(name), b"old").expect("a file can be written");
+        }
+
+        let _cache = cache_in(dir.path(), None);
+
+        assert!(
+            !dir.path().join("-7-9.jpg").exists(),
+            "a negative chat id too"
+        );
+        assert!(!dir.path().join("1-2.mp4").exists());
+        assert!(dir.path().join("notes.txt").exists(), "a stranger is kept");
+    }
+
+    #[test]
+    fn a_blob_without_a_pointer_is_removed_on_open() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let kept = cache
+            .store(7, 9, MediaKind::Photo, b"kept")
+            .expect("cached");
+        drop(cache);
+        let orphan = dir
+            .path()
+            .join(blob_name(&content_hash(b"orphan"), MediaKind::File));
+        fs::write(&orphan, b"orphan").expect("a file can be written");
+
+        let mut reopened = cache_in(dir.path(), None);
+
+        assert!(!orphan.exists(), "nothing names it, so it goes");
+        assert!(kept.exists(), "a named blob stays");
+        assert_eq!(reopened.lookup(7, 9), Some(kept));
     }
 
     #[test]
