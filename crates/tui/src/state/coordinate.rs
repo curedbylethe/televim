@@ -3260,6 +3260,7 @@ pub(crate) fn handle_profile(
     list: &mut ChatListState,
     pending: &mut Pending,
     input: &mut InputState,
+    drafts: &mut DraftStore,
     rows: &[CardRow],
     lines: Vec<String>,
     is_contact: bool,
@@ -3340,6 +3341,26 @@ pub(crate) fn handle_profile(
         }
         KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
             profile.card_count(c);
+            false
+        }
+        // Enter confirms the card: the chat it is about is opened for real, and
+        // only then is its conversation on show. A card with no chat in the list
+        // has nothing to open, so Enter leaves it where it is.
+        KeyCode::Enter => {
+            if let Pane::Profile(ProfileId::User(chat_id)) = ui.pane
+                && select_chat_by_id(
+                    &mut *ui,
+                    &mut *list,
+                    &mut *outbox,
+                    &mut *pending,
+                    &mut *conversation,
+                    &mut *input,
+                    &mut *drafts,
+                    chat_id,
+                )
+            {
+                close_profile(&mut *ui, &mut *profile);
+            }
             false
         }
         _ => {
@@ -3619,6 +3640,7 @@ fn handle_conversation_key(
     list: &mut ChatListState,
     pending: &mut Pending,
     input: &mut InputState,
+    drafts: &mut DraftStore,
     rows: &[CardRow],
     lines: Vec<String>,
     is_contact: bool,
@@ -3635,6 +3657,7 @@ fn handle_conversation_key(
             &mut *list,
             &mut *pending,
             &mut *input,
+            &mut *drafts,
             rows,
             lines,
             is_contact,
@@ -3761,6 +3784,7 @@ pub(crate) fn handle_key(
             &mut *list,
             &mut *pending,
             &mut *input,
+            &mut *drafts,
             rows,
             lines,
             is_contact,

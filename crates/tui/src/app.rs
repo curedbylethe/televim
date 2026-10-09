@@ -1540,6 +1540,7 @@ impl App {
             &mut self.list,
             &mut self.pending,
             &mut self.input,
+            &mut self.drafts,
             &rows,
             lines,
             is_contact,
