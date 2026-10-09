@@ -3771,6 +3771,110 @@ mod tests {
         );
     }
 
+    // ---- marking a conversation read on open ----------------------------
+
+    /// An application with the conversation open, its list entry showing
+    /// `unread` messages up to `last`, and a few messages in the window.
+    fn listed(unread: u32, last: Option<i64>) -> App {
+        let mut app = App::new();
+        let mut conversation = chat(CHAT);
+        conversation.unread_count = unread;
+        conversation.last_message_id = last;
+        app.set_chats(vec![conversation]);
+        app.select_chat(0);
+        app.apply_latest(messages(CHAT, 1..=3));
+        app
+    }
+
+    #[test]
+    fn an_open_conversation_with_unread_messages_is_read_up_to_its_newest() {
+        assert_eq!(
+            read_target(&listed(2, Some(20)), &State::default()),
+            Some((CHAT, 20))
+        );
+    }
+
+    #[test]
+    fn an_already_read_conversation_sends_nothing() {
+        assert_eq!(read_target(&listed(0, Some(20)), &State::default()), None);
+    }
+
+    #[test]
+    fn nothing_is_sent_without_a_real_message_to_read_up_to() {
+        for last in [None, Some(0), Some(-1)] {
+            assert_eq!(
+                read_target(&listed(2, last), &State::default()),
+                None,
+                "last_message_id {last:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_is_sent_while_no_conversation_is_open() {
+        assert_eq!(read_target(&App::new(), &State::default()), None);
+    }
+
+    #[test]
+    fn a_ceiling_already_accepted_is_not_sent_again() {
+        let app = listed(2, Some(20));
+        let acked = State {
+            read_acked: Some((CHAT, 20)),
+            ..State::default()
+        };
+        assert_eq!(read_target(&app, &acked), None);
+
+        let older = State {
+            read_acked: Some((CHAT, 19)),
+            ..State::default()
+        };
+        assert_eq!(read_target(&app, &older), Some((CHAT, 20)));
+    }
+
+    #[test]
+    fn an_accepted_marker_clears_the_count_and_is_recorded() {
+        let mut app = listed(2, Some(20));
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ReadMarked {
+                chat_id: CHAT,
+                max_id: 20,
+            },
+        );
+
+        assert_eq!(app.chats()[0].unread_count, 0);
+        assert_eq!(state.read_acked, Some((CHAT, 20)));
+        assert_eq!(read_target(&app, &state), None);
+    }
+
+    #[test]
+    fn a_refused_marker_leaves_the_count_for_the_next_open() {
+        // A refusal sends no event, so nothing is applied: the count and the
+        // record are what they were, and the next open asks again.
+        let app = listed(2, Some(20));
+        let state = State::default();
+
+        assert_eq!(app.chats()[0].unread_count, 2);
+        assert_eq!(state.read_acked, None);
+        assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
+    }
+
+    #[test]
+    fn an_open_with_no_client_sends_nothing_and_leaves_the_cursor_for_the_client() {
+        let mut app = listed(2, Some(20));
+        let mut state = State::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "nothing is sent with no client");
+        assert_eq!(app.chats()[0].unread_count, 2);
+        assert!(state.history.cursor.is_none());
+    }
+
     // ---- what a failure costs -------------------------------------------
 
     #[test]
