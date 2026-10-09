@@ -662,6 +662,15 @@ pub struct State {
     /// The conversation and newest message Telegram last accepted a read marker
     /// for. A conversation opened again at the same ceiling is not sent again.
     read_acked: Option<(i64, i64)>,
+
+    /// The conversation on show, when a message arrived in it since the driver
+    /// last ran, so its read marker is asked for again.
+    ///
+    /// A request rather than a call from [`apply`], for the same reason as the
+    /// reconnect request: the client and the channel are the driver's. Taken on
+    /// every pass, client or not, so an arrival that lands with no client is not
+    /// carried into the next one.
+    read_on_arrival: Option<i64>,
 }
 
 impl State {
@@ -1376,6 +1385,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         }
     }
 
+    let arrived = state.read_on_arrival.take().is_some();
     let Some(client) = state.client.clone() else {
         // No client, so nothing is asked for — but a conversation opened
         // while there is none is still owed what the cache holds for it, or
@@ -1421,7 +1431,18 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         request_action(&client, state, action, media, tx);
     }
 
-    match wanted(app, state.history, Instant::now()) {
+    let next = wanted(app, state.history, Instant::now());
+    // An arrival in the open conversation asks for the marker again, through the
+    // same target as opening does. A Latest does its own just below, once its
+    // window has begun, so it is not asked twice on one pass.
+    if arrived
+        && !matches!(next, Wanted::Latest(_))
+        && let Some((chat_id, max_id)) = read_target(app, state)
+    {
+        request_read(&client, chat_id, max_id, tx);
+    }
+
+    match next {
         Wanted::Nothing => {}
 
         Wanted::Latest(peer_id) => {
@@ -2192,6 +2213,11 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // And the connection holds: a working feed is a connected one.
             app.set_connection(ConnectionState::Connected);
             state.remember_update(&event);
+            if let UpdateEvent::NewMessage(message) = &event
+                && message.chat_id == app.conversation.conversation.window.chat_id
+            {
+                state.read_on_arrival = Some(message.chat_id);
+            }
             // Whether it moved anything is not acted on: the loop redraws on
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
@@ -3873,6 +3899,74 @@ mod tests {
         assert!(rx.try_recv().is_err(), "nothing is sent with no client");
         assert_eq!(app.chats()[0].unread_count, 2);
         assert!(state.history.cursor.is_none());
+    }
+
+    #[test]
+    fn an_arrival_in_the_open_conversation_asks_for_its_newest_again() {
+        let mut app = listed(0, Some(3));
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0))),
+        );
+
+        assert_eq!(state.read_on_arrival, Some(CHAT));
+        assert_eq!(read_target(&app, &state), Some((CHAT, 4)));
+    }
+
+    #[test]
+    fn a_second_identical_arrival_is_deduped_once_the_first_is_accepted() {
+        let mut app = listed(0, Some(3));
+        let mut state = State::default();
+        let arrival = || Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0)));
+
+        apply(&mut app, &mut state, arrival());
+        apply(
+            &mut app,
+            &mut state,
+            Event::ReadMarked {
+                chat_id: CHAT,
+                max_id: 4,
+            },
+        );
+        apply(&mut app, &mut state, arrival());
+
+        assert_eq!(state.read_on_arrival, Some(CHAT));
+        assert_eq!(read_target(&app, &state), None);
+    }
+
+    #[test]
+    fn an_arrival_in_another_conversation_leaves_the_open_one_alone() {
+        let mut app = listed(0, Some(3));
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT + 1, 4..=4).remove(0))),
+        );
+
+        assert_eq!(state.read_on_arrival, None);
+        assert_eq!(read_target(&app, &state), None);
+    }
+
+    #[test]
+    fn an_arrival_with_no_client_sends_nothing_and_is_not_carried_forward() {
+        let mut app = listed(0, Some(3));
+        let mut state = State::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0))),
+        );
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "nothing is sent with no client");
+        assert_eq!(state.read_on_arrival, None, "the flag is taken on the pass");
     }
 
     // ---- what a failure costs -------------------------------------------
