@@ -473,7 +473,18 @@ are in [`../AGENTS.md`](../AGENTS.md).
   different work. Streaming and a cache directory are CUR-9 and CUR-10; `proto`
   narrows the two identifiers to the `i32` the wire uses on the way through, and
   says so with `ProtoError::MessageIdOutOfRange` rather than truncating.
-- **Why the media cache names files by message id:** a file is `<chat>-<message>.<suffix>`
+- **Why the media cache names blobs by content hash, with a pointer per key:** a blob
+  is `<sha256 of its bytes>.<suffix>`, and each key is a pointer file holding that hash:
+  `<chat>-<message>.ref` for a message and `m<id>.ref` for a Telegram media id. Two
+  messages with the same bytes share one blob, and a blob goes when its last pointer
+  does. The hash is taken after the download, so it cannot be the lookup key; the
+  pointers are the lookup, and the media id stays what finds a forwarded copy before
+  any download. A message's edit removes its pointer. A deletion from the feed names
+  no chat, so it removes the pointer for that id in every chat: a kept file for
+  another chat's message with the same id has its entry dropped too, which costs a
+  download, never a wrong file. The media id pointer is content identity and survives a message's
+  deletion. Supersedes the naming in the entry below, which is kept as history.
+- **Why the media cache names files by message id (superseded by the content-hash entry above):** a file is `<chat>-<message>.<suffix>`
   from the ids the server assigned, so its name is the same after a restart. The old
   temp-dir name carried the process id, the one thing a restart changes. The cache
   stores whole downloads, because the return type is still `Vec<u8>`; streaming

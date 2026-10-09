@@ -199,11 +199,17 @@ Working today:
   `open -W` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows (untested).
   The file comes from the media cache: a message opened before is served from
   disk with no request, and a first open downloads it and stores it there. The
-  cache is a directory of `0600`, plaintext files named `<chat>-<message>.<ext>`,
-  kept beside the config as `televim.media` unless `media_cache_dir` (or
-  `TELEVIM_MEDIA_CACHE_DIR`) names another. It keeps at most 1 GiB and 256 files;
-  past either, the oldest by modification time goes first. The directory is
-  emptied when the account changes and on sign-out. If that directory cannot be
+  cache is a directory of `0600`, plaintext files named by the sha256 of their
+  bytes (`<sha256>.<ext>`), so messages with the same bytes share one file. Two
+  kinds of pointer name a file: `<chat>-<message>.ref` for each message, and
+  `m<id>.ref` for each Telegram media id, which a forwarded copy shares. The
+  directory is kept beside the config as `televim.media` unless `media_cache_dir`
+  (or `TELEVIM_MEDIA_CACHE_DIR`) names another. It keeps at most
+  `media_cache_max_bytes` bytes (or `TELEVIM_MEDIA_CACHE_MAX_BYTES`; default 1 GiB)
+  and 256 pointers. A file over the byte cap is refused. Past either limit the least
+  recently used pointer goes first, and its file with it once no pointer names it.
+  An edit drops its message's pointer; a deletion drops the pointer for that id in
+  any chat. The directory is emptied when the account changes and on sign-out. If that directory cannot be
   written, this run uses `televim.media-<account>` under the system temp directory
   instead, with the same limits; the configured directory is left as it is and the
   next launch tries it again. Files saved by earlier

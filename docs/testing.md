@@ -100,14 +100,19 @@ below.
   conversation panel and the status bar.
 - **Media cache:** `app/src/media_cache.rs` is tested over a temp directory and no
   client: a file found again after a restart under a pid-free name, the byte cap and
-  the entry cap each evicting the oldest modification time first, a file that could
-  never fit refused without evicting anything, strangers' and temp files ignored, an
+  the entry cap each evicting the oldest modification time first, a small configured
+  cap evicting at that size, a deleted message dropped in every chat and a shared
+  blob kept for its other key, a media id kept when its message goes, a file that
+  could never fit refused without evicting anything, strangers' and temp files ignored, an
   account mismatch clearing the directory, `clear` on a missing directory, the
   owner-only mode before the rename, and a clear landing between a store's write and
   its commit, which refuses the late file without touching a newer store's file. An unwritable configured directory (a path
   under a regular file) opens the temp-directory fallback, where a store round-trips
   and the configured path is never created; the fallback keeps the byte cap, eviction
   and `0600` mode; and an unwritable fallback too degrades to `None` without panicking.
+  The byte cap's file and environment reads, `the_media_cache_max_bytes_is_read_from_the_file`
+  and `the_environment_supplies_the_media_cache_max_bytes`, are in `config.rs`'s tests
+  under the `ENV` lock.
   The loop's half (`net.rs`) checks that a
   download is stored once and the next open is served from disk, with the download
   never asked for again, and that signing out cancels every download in flight.
