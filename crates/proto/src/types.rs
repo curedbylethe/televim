@@ -101,6 +101,10 @@ pub(crate) struct ProtoMessage {
     /// kind this build does not model — that arrives as
     /// [`MediaKind::File`].
     pub media: Option<MediaKind>,
+
+    /// Telegram's stable id for the media, if it carries one. Only the id:
+    /// the framework never hands over an access hash or file reference.
+    pub media_id: Option<i64>,
 }
 
 impl From<ProtoChat> for Chat {
@@ -131,7 +135,7 @@ impl From<ProtoMessage> for Message {
             is_outgoing: message.is_outgoing,
             reply_to: message.reply_to,
             media: message.media,
-            media_id: None,
+            media_id: message.media_id,
         }
     }
 }
@@ -192,6 +196,7 @@ impl From<MessageInfo> for ProtoMessage {
             // `i64`, and widening here is what keeps the two spaces joined.
             reply_to: message.reply_to_msg_id.map(i64::from),
             media: message.media.map(media_kind),
+            media_id: message.media_id,
         }
     }
 }
@@ -308,7 +313,19 @@ mod tests {
             is_outgoing,
             reply_to: None,
             media: None,
+            media_id: None,
         }
+    }
+
+    #[test]
+    fn a_media_id_reaches_the_domain_message() {
+        let source = ProtoMessage {
+            media_id: Some(9001),
+            ..proto_message(false)
+        };
+
+        assert_eq!(Message::from(source).media_id, Some(9001));
+        assert_eq!(Message::from(proto_message(false)).media_id, None);
     }
 
     #[test]
@@ -484,6 +501,17 @@ mod live_tests {
             media: None,
             media_id: None,
         }
+    }
+
+    #[test]
+    fn a_framework_media_id_is_carried_into_the_dto() {
+        let source = MessageInfo {
+            media: Some(telegram_framework::media::MediaKind::Photo),
+            media_id: Some(9001),
+            ..message_info(42)
+        };
+
+        assert_eq!(ProtoMessage::from(source).media_id, Some(9001));
     }
 
     #[test]
