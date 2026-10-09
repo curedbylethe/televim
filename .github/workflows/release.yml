@@ -8,9 +8,10 @@ name: Release
 #    the commits since the last tag, so the PR carries the notes it publishes.
 # 3. When a release is created, the binaries are built and attached to it.
 #
-# No secrets are used. The binary reads TELEVIM_API_ID and TELEVIM_API_HASH at
-# run time, from the environment or televim.toml, so nothing is compiled in.
-# See the README's "Installing" section.
+# The build compiles in the application credentials from the TELEGRAM_API_ID
+# and TELEGRAM_API_HASH secrets. A user's own environment or televim.toml still
+# overrides them, so a user can sign in as their own application. See the
+# README's "Installing" section.
 
 on:
   push:
@@ -112,8 +113,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The credentials are compiled in (crates/app/src/config.rs), so a build
+      # without them would ship a binary that cannot sign in. Fail instead.
       - name: build
-        run: cargo build --release --locked
+        env:
+          TELEVIM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEVIM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          case "$TELEVIM_API_ID" in
+            ''|*[!0-9]*) echo "::error::TELEGRAM_API_ID secret is missing or not a number"; exit 1 ;;
+          esac
+          if [ -z "$TELEVIM_API_HASH" ]; then
+            echo "::error::TELEGRAM_API_HASH secret is missing"
+            exit 1
+          fi
+          cargo build --release --locked
 
       - name: package
         env:

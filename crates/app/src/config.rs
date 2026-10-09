@@ -20,6 +20,13 @@
 //! machine that has no such store, and the way to keep a run out of it
 //! entirely.
 //!
+//! # Built-in credentials
+//!
+//! A release build carries the application credentials it was built with, read
+//! from `TELEVIM_API_ID` and `TELEVIM_API_HASH` at compile time. They are the
+//! lowest layer: a file or environment setting overrides them, so a user can
+//! sign in as their own application. A build with neither has none, and says so.
+//!
 //! # The key to that file
 //!
 //! The file holds the authorisation key encrypted. The key to it is, in order:
@@ -198,6 +205,24 @@ impl Default for Config {
     }
 }
 
+/// Layers the credentials a build compiled in under every other source.
+///
+/// Both or neither: a half pair cannot identify an application, so a lone
+/// value is dropped here rather than layered, the same rule
+/// [`Config::credentials`] applies to the merged result.
+fn with_compiled_credentials(
+    builder: config::ConfigBuilder<config::builder::DefaultState>,
+    api_id: Option<&str>,
+    api_hash: Option<&str>,
+) -> Result<config::ConfigBuilder<config::builder::DefaultState>> {
+    match (api_id, api_hash) {
+        (Some(id), Some(hash)) => Ok(builder
+            .set_default("api_id", id)?
+            .set_default("api_hash", hash)?),
+        _ => Ok(builder),
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let mut builder = config::Config::builder()
@@ -206,6 +231,12 @@ impl Config {
             .set_default("bidi", BIDI_TERMINAL)?
             .set_default("stickers", STICKERS_INLINE)?
             .set_default("graphics", GRAPHICS_AUTO)?;
+
+        builder = with_compiled_credentials(
+            builder,
+            option_env!("TELEVIM_API_ID"),
+            option_env!("TELEVIM_API_HASH"),
+        )?;
 
         if path.exists() {
             builder = builder.add_source(config::File::from(path));
@@ -669,5 +700,44 @@ mod tests {
             // SAFETY: as above — clearing names this module's tests set.
             unsafe { std::env::remove_var(name) };
         }
+    }
+
+    /// Built-in credentials are the lowest layer, and a half pair is no pair.
+    /// Set through the builder directly so the test does not depend on what
+    /// this build was compiled with.
+    #[test]
+    fn built_in_credentials_are_overridden_and_need_a_full_pair() {
+        let load = |builder: config::ConfigBuilder<config::builder::DefaultState>, file: &str| {
+            builder
+                .add_source(config::File::from_str(file, config::FileFormat::Toml))
+                .build()
+                .expect("a literal source builds")
+                .try_deserialize::<Config>()
+                .expect("a literal source deserialises")
+        };
+        let base = || config::Config::builder();
+
+        let built_in = with_compiled_credentials(base(), Some("77"), Some("built-in"))
+            .expect("defaults layer");
+        assert_eq!(
+            load(built_in, "").credentials(),
+            Some((77, "built-in")),
+            "with nothing else set, the built-in pair is used"
+        );
+
+        let built_in = with_compiled_credentials(base(), Some("77"), Some("built-in"))
+            .expect("defaults layer");
+        assert_eq!(
+            load(built_in, "api_hash = \"from-the-file\"").credentials(),
+            Some((77, "from-the-file")),
+            "a file setting overrides the built-in value it names"
+        );
+
+        let half = with_compiled_credentials(base(), Some("77"), None).expect("defaults layer");
+        assert_eq!(
+            load(half, "").credentials(),
+            None,
+            "a lone built-in id is dropped, so there is no pair"
+        );
     }
 }
