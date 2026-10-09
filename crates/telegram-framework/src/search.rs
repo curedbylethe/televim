@@ -35,6 +35,7 @@
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::history::clamp_limit;
+use crate::media::{MediaKind, classify_raw};
 use crate::tl;
 
 /// One message a global search matched: where it is, and what it says.
@@ -51,8 +52,11 @@ pub struct GlobalHit {
     /// The message's identifier within that conversation.
     pub message_id: i32,
 
-    /// The message text, untruncated.
+    /// The message text, untruncated; empty for a bare attachment.
     pub text: String,
+
+    /// The attachment the message carries, if it carries one.
+    pub media: Option<MediaKind>,
 
     /// When the message was sent, as unix seconds.
     pub sent_at: i64,
@@ -354,19 +358,23 @@ fn global_hits_from(response: tl::enums::messages::Messages) -> GlobalSearchResu
     GlobalSearchResults { hits, total }
 }
 
-/// Describes a message as a hit, if it has text to show.
+/// Describes a message as a hit, if it is a message rather than an empty or
+/// service entry. A hit may carry text, media, or both.
 ///
-/// Empty and service messages are not hits: neither carries text. They still
-/// count in the total, because Telegram counted them.
+/// Empty and service messages are not hits. They still count in the total,
+/// because Telegram counted them.
 fn hit_of(message: tl::enums::Message) -> Option<GlobalHit> {
     let tl::enums::Message::Message(message) = message else {
         return None;
     };
 
+    let media = classify_raw(message.media.as_ref()).map(|(kind, _)| kind);
+
     Some(GlobalHit {
         chat_id: bare_id_of(&message.peer_id),
         message_id: message.id,
         text: message.message,
+        media,
         sent_at: i64::from(message.date),
         outgoing: message.out,
     })
@@ -623,6 +631,33 @@ mod tests {
             summary_from_language: None,
             rich_message: None,
         })
+    }
+
+    /// A message from user 42 that carries `media` and no caption.
+    fn media_message(id: i32, media: tl::enums::MessageMedia) -> tl::enums::Message {
+        let mut message = text_message(id, 1_700_000_000, false, "");
+        if let tl::enums::Message::Message(inner) = &mut message {
+            inner.media = Some(media);
+        }
+        message
+    }
+
+    #[test]
+    fn a_media_only_hit_carries_its_media_kind_and_no_text() {
+        let photo = tl::enums::MessageMedia::Photo(tl::types::MessageMediaPhoto {
+            spoiler: false,
+            live_photo: false,
+            photo: None,
+            ttl_seconds: None,
+            video: None,
+        });
+
+        let hit = hit_of(media_message(9, photo)).expect("a message is a hit");
+        assert_eq!(hit.media, Some(MediaKind::Photo));
+        assert!(hit.text.is_empty());
+
+        let plain = hit_of(text_message(10, 1_700_000_000, false, "words")).expect("has text");
+        assert_eq!(plain.media, None, "a text message carries no media");
     }
 
     #[test]

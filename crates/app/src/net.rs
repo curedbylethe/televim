@@ -3326,9 +3326,7 @@ fn private_hits(chats: &[Chat], hits: Vec<proto::search::GlobalHit>) -> (Vec<Glo
             chat_id: hit.chat_id,
             message_id: hit.message_id,
             text: hit.text,
-            // The DTO carries no attachment kind yet, so a media-only hit has no
-            // text to show. Known gap; not a drop.
-            media: None,
+            media: hit.media,
             sent_at: hit.sent_at,
             outgoing: hit.outgoing,
         })
@@ -7149,6 +7147,7 @@ mod tests {
                     chat_id,
                     message_id,
                     text: text.to_owned(),
+                    media: None,
                     sent_at: 0,
                     outgoing: false,
                 })
@@ -7181,6 +7180,26 @@ mod tests {
         assert_eq!(app.global_search().hits()[1].message_id, 4);
         assert_eq!(app.global_search().hits()[0].display_body(), "hello one");
         assert_eq!(app.global_search().total(), 9, "the server's total stands");
+    }
+
+    #[test]
+    fn a_media_only_hit_shows_the_token_for_its_kind() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        app.begin_global_search("pic");
+        let mut answer = global_answer(&[(CHAT, 1, "")], 1);
+        answer.hits[0].media = Some(MediaKind::Photo);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                query: "pic".to_owned(),
+                result: Ok(answer),
+            },
+        );
+
+        assert_eq!(app.global_search().hits()[0].display_body(), "[image]");
     }
 
     #[test]

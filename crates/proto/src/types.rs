@@ -217,7 +217,7 @@ impl From<MessageInfo> for ProtoMessage {
 // a file, and a build failure is the one answer that cannot degrade. The lint
 // this silences asks for exhaustiveness, which is exactly what is wrong.
 #[allow(clippy::match_wildcard_for_single_variants)]
-fn media_kind(kind: telegram_framework::media::MediaKind) -> MediaKind {
+pub(crate) fn media_kind(kind: telegram_framework::media::MediaKind) -> MediaKind {
     match kind {
         telegram_framework::media::MediaKind::Photo => MediaKind::Photo,
         telegram_framework::media::MediaKind::Video => MediaKind::Video,
