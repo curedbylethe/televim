@@ -439,7 +439,7 @@ crates/app/
 │   ├── history_store.rs # The history file beside the config: cached
 │   │                   #   messages per peer, the chat list, the merge
 │   ├── media_cache.rs  # The media directory beside the config: one file
-│   │                   #   per message, bounded by bytes and by count
+│   │                   #   per content hash, bounded by bytes and by count
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
@@ -488,11 +488,14 @@ calls. A `HistoryCursor`
 lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
 
 `media_cache.rs` owns the media directory (`televim.media` beside the config, or
-`media_cache_dir`). One file per message, named `<chat>-<message>.<suffix>` from the
-server's ids, so the name survives a restart. `MediaCache` keeps an in-memory index
-that a scan rebuilds at launch, holds both `MEDIA_CACHE_MAX_BYTES` and
-`MEDIA_CACHE_MAX_ENTRIES` by evicting the oldest modification time, and writes each
-file atomically at `0600`, as the history file does. `runtime.rs` opens it at launch
+`media_cache_dir`). Each distinct content is one blob named `<sha256>.<suffix>`; a
+pointer file per key names it, `<chat>-<message>.ref` for a message and `m<id>.ref`
+for a Telegram media id. `MediaCache` keeps an in-memory index that a scan rebuilds
+at launch from the pointers, holds the byte cap (`media_cache_max_bytes`, default
+`MEDIA_CACHE_MAX_BYTES`) and `MEDIA_CACHE_MAX_ENTRIES` by evicting the least recently
+used pointer (a lookup moves its mtime to now), and removes a blob with its last
+pointer. An edit removes its message's pointer; a deletion removes the pointer for
+each deleted id in any chat. Writes are atomic at `0600`, as the history file does. `runtime.rs` opens it at launch
 with the configured account, which clears the directory on a mismatch. If the configured
 directory cannot be created or written (a probe file), `open` uses
 `temp_dir()/televim.media-<account>` for that run, with a `tracing::warn!`; `net::State`

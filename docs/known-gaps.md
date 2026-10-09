@@ -21,7 +21,7 @@ Real, and named so they are not mistaken for oversights:
   it. Progress is reported per chunk and `Esc` stops the transfer, but the bytes
   still arrive whole, so the return type is the limit: streaming to disk is a later
   change (CUR-9), and the 16 MiB `MEDIA_LIMIT` refuses rather than truncates.
-- **The media cache has three known limits.**
+- **The media cache has four known limits.**
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on
     purpose: the cache is the account's, and sign-out ends the account.
@@ -31,6 +31,11 @@ Real, and named so they are not mistaken for oversights:
     is unwritable too, `o` says the media could not be cached.
   - *Legacy temp files are left.* Files named `televim-<pid>-…` from before the cache
     are not migrated or swept; the OS temp cleanup reclaims them.
+  - *The history file does not hold media ids.* A message restored from the history
+    file before any refetch carries no id, so it is looked up by its `(chat, message)`
+    key alone. A forwarded copy in another chat is served from disk only in the live
+    session, until that message is fetched again. The history file format is not
+    changed for this.
 - **The viewer hand-off has four known limits.**
   - *Stdin race.* The loop blocks on the viewer with the terminal released, but the
     reader thread keeps calling `crossterm::event::read`. A key it captures during

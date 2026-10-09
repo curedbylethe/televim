@@ -376,13 +376,15 @@ is a maintainer decision.
 
 ### The media cache
 
-The media cache (`app/src/media_cache.rs`) is bounded on disk, not in memory:
-`MEDIA_CACHE_MAX_BYTES` is 1 GiB and `MEDIA_CACHE_MAX_ENTRIES` is 256 files. Resident,
-it holds one index entry per cached file — a message key, a path, a size and a
-modification time, about 150 bytes — so about 40 KB at the entry cap. A download's
+The media cache (`app/src/media_cache.rs`) is bounded on disk, not in memory. The
+byte cap is `media_cache_max_bytes` (or `TELEVIM_MEDIA_CACHE_MAX_BYTES`), which
+defaults to `MEDIA_CACHE_MAX_BYTES`, 1 GiB; `MEDIA_CACHE_MAX_ENTRIES` is 256 pointers.
+Resident, it holds one index entry per pointer — a message or media-id key, a hash,
+and a modification time, about 150 bytes — so about 40 KB at the entry cap. A download's
 bytes are held in memory as they were before the cache, bounded by `MEDIA_LIMIT`
 (16 MiB), and written off the loop. The disk worst case is the byte cap plus one file
-of up to 16 MiB in flight during a write.
+of up to 16 MiB in flight during a write; this holds for any configured cap, and at
+the 1 GiB default it is 1 GiB plus 16 MiB.
 
 The temp-directory fallback used when the configured directory is unwritable keeps the
 same two caps and the same eviction; the figures above hold there too.
