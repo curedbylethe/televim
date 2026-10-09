@@ -6624,6 +6624,8 @@ fn global_hit(chat_id: i64, message_id: i64) -> domain::global_search::GlobalHit
         message_id,
         text: format!("hit {message_id}"),
         media: None,
+        sent_at: 0,
+        outgoing: false,
     }
 }
 

@@ -50,6 +50,12 @@ pub struct GlobalHit {
 
     /// The message text, as Telegram sent it.
     pub text: String,
+
+    /// When the message was sent, as unix seconds.
+    pub sent_at: i64,
+
+    /// Whether the signed-in account sent the message.
+    pub outgoing: bool,
 }
 
 /// The matches of a global search, oldest first, and how many there are.
@@ -96,6 +102,8 @@ fn to_global_results(
             chat_id: hit.chat_id,
             message_id: i64::from(hit.message_id),
             text: hit.text,
+            sent_at: hit.sent_at,
+            outgoing: hit.outgoing,
         })
         .collect();
 
@@ -268,6 +276,8 @@ mod live_tests {
             chat_id,
             message_id,
             text: text.to_owned(),
+            sent_at: 1_700_000_000,
+            outgoing: false,
         }
     }
 
@@ -297,7 +307,11 @@ mod live_tests {
         let results = to_global_results(telegram_framework::search::GlobalSearchResults {
             hits: vec![
                 framework_hit(i64::MAX, i32::MAX, "x"),
-                framework_hit(-5, 7, "y"),
+                telegram_framework::search::GlobalHit {
+                    sent_at: 1_700_000_001,
+                    outgoing: true,
+                    ..framework_hit(-5, 7, "y")
+                },
             ],
             total: 2,
         });
@@ -305,8 +319,18 @@ mod live_tests {
         // Reversed, so the expected list reads in the turned order.
         assert_eq!(results.hits[0].chat_id, -5);
         assert_eq!(results.hits[0].message_id, 7);
+        assert_eq!(results.hits[0].sent_at, 1_700_000_001);
+        assert!(
+            results.hits[0].outgoing,
+            "an outgoing message stays outgoing"
+        );
         assert_eq!(results.hits[1].chat_id, i64::MAX);
         assert_eq!(results.hits[1].message_id, i64::from(i32::MAX));
+        assert_eq!(results.hits[1].sent_at, 1_700_000_000);
+        assert!(
+            !results.hits[1].outgoing,
+            "an incoming message stays incoming"
+        );
     }
 
     #[test]
