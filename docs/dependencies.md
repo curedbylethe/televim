@@ -72,14 +72,15 @@ Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 | `getrandom` | One use: the OS entropy behind every salt, nonce and the keyring-held file key. Already in the lockfile transitively. |
 | `zeroize` | One use: wiping key material and the passphrase when they are dropped (`Zeroizing`), so a `FileKey` or a passphrase does not outlive its use in freed memory. Already in the lockfile transitively. It does **not** reach the expanded AES key schedule the cipher holds while it is alive — see [`decisions.md`](./decisions.md). |
 
+| `criterion` 0.8.2 | Dev-only runner for the micro-benches in `crates/domain/benches` (`history_window`, `search`, `vim`) and `crates/tui/benches` (`wrap_rows`), driven by `make bench` through `scripts/bench/compare.py`. Chosen over `divan` because criterion's saved baselines (`--save-baseline` / `--baseline`) express "this revision against that one" natively, which is the compare the suite exists for; `divan` is lighter to build but has no standing compare story in this repo. No crate's `[dependencies]` names it, so a release build never carries it. See [`decisions.md`](./decisions.md) and [`testing.md`](./testing.md). |
 | `tempfile` | Dev-only. |
 | `static_assertions` | Dev-only. Compile-time assertions, used to lock the "a login token cannot be cloned or reused" guarantee with the compiler rather than with a convention. |
 | `termlens` | Dev-only. Runs the `televim` binary in a pseudo-terminal for the PTY integration tests in `app/tests/tui_e2e.rs`. Default features, which pull `insta` for screen snapshots. |
 
 ### Declared but not depended on
 
-`criterion`, `bumpalo` and `ratatui-testlib` are **not** dependencies.
-Widget tests use `ratatui`'s own `TestBackend`, and there are no benchmarks. See
+`bumpalo` and `ratatui-testlib` are **not** dependencies. Widget tests use
+`ratatui`'s own `TestBackend`. Benchmarks do exist now, on `criterion` above; see
 [`testing.md`](./testing.md).
 
 `tikv-jemallocator` is in that state too, and was there until it was removed: it
