@@ -160,6 +160,10 @@ Real, and named so they are not mistaken for oversights:
   run: in the line's normal mode and as a visual selection's extent, where the
   only thing a motion can do is move a cursor the next key re-snaps. The
   wrapper's cursor is snapped to boundaries around every key either way.
+- **The input line's `w`, `b` and `e` ignore a ZWNJ (U+200C).** Word motions in
+  message text break at a ZWNJ, as a reader hears a Persian compound as two words;
+  the input line runs `vim-line`'s own word motions, which do not. A compound
+  typed in the bar is one word to these keys. See [`decisions.md`](./decisions.md).
 - **Three keys mean something else while a `:shortcode` completion is up.**
   `Tab`, `Enter` and `↑`/`↓` choose or accept a candidate instead of walking a
   pane, sending the message, or moving the caret. `Esc` closes the popup and

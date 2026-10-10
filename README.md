@@ -195,9 +195,10 @@ Working today:
   `Esc` answers, and it leaves the reader where they were. `gd` on a message
   that quotes nothing refuses with `Not a reply: gd jumps to the message a reply
   quotes.`, and a quote the client cannot fetch at all with `That message is no
-  longer available.` Messages soft-wrap to the panel's width — at whitespace
-  where there is whitespace to break at, and at the panel's edge where there is
-  not — so a message is as many rows as its text needs. Everything that measures
+  longer available.` Messages soft-wrap to the panel's width — at whitespace, or
+  after a zero-width non-joiner (ZWNJ, U+200C) where there is one to break at, and
+  at the panel's edge where there is not — so a message is as many rows as its text
+  needs. Everything that measures
   the conversation counts those rows rather than messages: the slice, the
   scrollbar beside it, a page, and the
   `FETCH_MARGIN` (20) that asks for a page. `[you]`/`[them]` and a reply's quoted
@@ -376,6 +377,9 @@ Not built, and named here so nobody reads the roadmap below as current:
   does `j`/`k` on its own — where the only thing they can do is move a cursor the
   next key re-snaps. `dw` and `cc` are the keys still refused, and they say so.
   `h`, `l`, `0`, `$`, `^`, `dd` and the arrows have always run.
+- **`w`, `b` and `e` in the input line ignore a ZWNJ (U+200C).** Word motions in
+  message text stop at one, so a Persian compound is two words there; the input
+  line's `vim-line` motions do not, so the same compound is one word in the bar.
 - **The yank clipboard is one-way and says nothing.** Whether a terminal honours
   OSC 52 at all is not something this program can find out, so a refused or capped
   write is not a failure of the yank and is not reported as one. `y` reaching the
