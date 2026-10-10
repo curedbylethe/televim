@@ -5,6 +5,35 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.4.0] - 2026-10-10
+
+### Added
+
+- **app:** Persist peer read positions across restarts
+- **app:** Recover missed peer read positions from the chat list
+- **tui:** Take an explicit UTC offset in date rendering
+- **app:** Show message times and day breaks in local time
+- **tui:** Let the cursor rest on the open-draft row
+
+### Fixed
+
+- **tui:** Keep the last character in place when o opens a line
+- **app:** Let a failed open's retry hold only its own conversation
+- **tui:** Keep a peer's read position with the time it last moved
+- **app:** Keep read-mark recency across restarts
+- **domain:** Add a prefix reset to VimState
+- **tui:** Clear pending input latches in one App method
+- **app:** Clear pending input and re-push key flags on focus change
+- **proto:** Keep global search hits in Telegram's newest-first order
+- **domain:** Keep the newest global search matches under the cap
+- **app:** Treat global search answers as newest first
+- **telegram-framework:** Treat a zero global search date as no time
+- **app:** Run the viewer wait off the loop thread
+- **app:** Gate the key reader across the viewer
+- **app:** Report the opener's exit when the opener returns early
+- **domain:** Treat a ZWNJ as a word boundary
+- **tui:** Break a row after a zero-width non-joiner
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
