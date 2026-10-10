@@ -388,16 +388,29 @@ fn focus_changed(
 
 /// The platform's file opener, and the arguments that come before the path.
 ///
-/// `open -W` on macOS waits for the application to quit; without `-W` it returns
-/// as soon as the file is handed over, and the terminal would come back under a
-/// running viewer. The Windows form is best-effort and untested: `start` returns
-/// without waiting, so there the terminal comes back at once.
+/// `open -W` on macOS waits for the application to quit, so its exit is the
+/// viewer's. `xdg-open` on Linux and `cmd /C start` on Windows return once the
+/// file is handed to a handler, so their exit is the opener's and the viewer may
+/// still be running; `OPENER_WAITS` says which, and the status line reports it.
+///
+/// Windows manual steps, since no CI leg runs this path: build and run the
+/// program on Windows, open a conversation with a media message, press `o` on it,
+/// close the viewer, and confirm the TUI returns to the same conversation with the
+/// cursor on the same message. The status line should read `Opener exited (code
+/// 0); the viewer may still be open`, and keys typed after the return should act
+/// on the TUI, not on the viewer.
 #[cfg(target_os = "macos")]
 const OPENER: (&str, &[&str]) = ("open", &["-W"]);
 #[cfg(all(unix, not(target_os = "macos")))]
 const OPENER: (&str, &[&str]) = ("xdg-open", &[]);
 #[cfg(windows)]
 const OPENER: (&str, &[&str]) = ("cmd", &["/C", "start", ""]);
+
+/// Whether the platform's opener exits only when the viewer does.
+#[cfg(target_os = "macos")]
+const OPENER_WAITS: bool = true;
+#[cfg(not(target_os = "macos"))]
+const OPENER_WAITS: bool = false;
 
 /// The command that opens `path` in the platform's viewer.
 ///
@@ -423,6 +436,8 @@ trait Viewer {
         done: mpsc::UnboundedSender<AppEvent>,
     ) -> std::io::Result<()>;
     fn resume(&mut self) -> std::io::Result<()>;
+    /// Whether a report of exit means the viewer exited (see `OPENER_WAITS`).
+    fn opener_waits(&self) -> bool;
 }
 
 /// The terminal as the viewer sees it: the real suspend, spawn and resume.
@@ -454,6 +469,10 @@ impl Viewer for TuiViewer<'_> {
 
     fn resume(&mut self) -> std::io::Result<()> {
         resume_tui(self.terminal, self.keys)
+    }
+
+    fn opener_waits(&self) -> bool {
+        OPENER_WAITS
     }
 }
 
@@ -510,7 +529,7 @@ impl Viewers {
                     .resume()
                     .context("taking the terminal back from the viewer")?;
                 self.gate.open();
-                app.flash(viewer_sentence(&Err(error), &path));
+                app.flash(viewer_sentence(&Err(error), &path, viewer.opener_waits()));
             }
         }
         Ok(())
@@ -528,21 +547,35 @@ impl Viewers {
             .resume()
             .context("taking the terminal back from the viewer")?;
         self.gate.open();
-        app.flash(viewer_sentence(&done.outcome, &done.path));
+        app.flash(viewer_sentence(
+            &done.outcome,
+            &done.path,
+            viewer.opener_waits(),
+        ));
         Ok(())
     }
 }
 
 /// The status sentence for a viewer's outcome.
 ///
+/// When the opener does not wait, its exit is only the opener's: the sentence
+/// says so and does not claim the viewer exited.
+///
 /// A missing opener and a spawn failure are refusals, and the path is named in
 /// both so the reader can open the file by hand: the file stays on disk.
-fn viewer_sentence(outcome: &std::io::Result<ExitStatus>, path: &Path) -> String {
+fn viewer_sentence(outcome: &std::io::Result<ExitStatus>, path: &Path, waits: bool) -> String {
     match outcome {
-        Ok(status) => match status.code() {
-            Some(code) => format!("Viewer exited (code {code})"),
-            None => "Viewer exited (no exit code)".to_owned(),
-        },
+        Ok(status) => {
+            let (who, tail) = if waits {
+                ("Viewer exited", "")
+            } else {
+                ("Opener exited", "; the viewer may still be open")
+            };
+            match status.code() {
+                Some(code) => format!("{who} (code {code}){tail}"),
+                None => format!("{who} (no exit code){tail}"),
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => format!(
             "Cannot open media: {} is not installed; the file is at {}",
             OPENER.0,
@@ -1570,16 +1603,19 @@ mod tests {
         let path = Path::new("/tmp/televim-1-2-3.jpg");
 
         let exited = std::process::ExitStatus::from_raw(3 << 8);
-        assert_eq!(viewer_sentence(&Ok(exited), path), "Viewer exited (code 3)");
+        assert_eq!(
+            viewer_sentence(&Ok(exited), path, true),
+            "Viewer exited (code 3)"
+        );
 
         let signalled = std::process::ExitStatus::from_raw(9);
         assert_eq!(
-            viewer_sentence(&Ok(signalled), path),
+            viewer_sentence(&Ok(signalled), path, true),
             "Viewer exited (no exit code)"
         );
 
         let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
-        let sentence = viewer_sentence(&Err(missing), path);
+        let sentence = viewer_sentence(&Err(missing), path, true);
         assert!(sentence.starts_with("Cannot open media: "), "{sentence}");
         assert!(
             sentence.ends_with("the file is at /tmp/televim-1-2-3.jpg"),
@@ -1587,7 +1623,7 @@ mod tests {
         );
 
         let refused = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        let sentence = viewer_sentence(&Err(refused), path);
+        let sentence = viewer_sentence(&Err(refused), path, true);
         assert!(sentence.starts_with("Cannot open media: "), "{sentence}");
         assert!(
             sentence.ends_with("the file is at /tmp/televim-1-2-3.jpg"),
@@ -1607,6 +1643,8 @@ mod tests {
         log: Vec<String>,
         fail_suspend: bool,
         fail_spawn: bool,
+        /// The opener returns before the viewer does (Linux and Windows).
+        early_return: bool,
     }
 
     impl Viewer for FakeViewer {
@@ -1637,6 +1675,10 @@ mod tests {
         fn resume(&mut self) -> std::io::Result<()> {
             self.log.push("resume".to_owned());
             Ok(())
+        }
+
+        fn opener_waits(&self) -> bool {
+            !self.early_return
         }
     }
 
@@ -1889,6 +1931,82 @@ mod tests {
             Some(AppEvent::Input(Event::FocusLost))
         ));
         assert!(held.is_empty(), "nothing is left behind or dropped");
+    }
+
+    /// An opener that returns before the viewer does: its exit ends the session,
+    /// the terminal comes back once, and the status names the opener, not the
+    /// viewer.
+    #[cfg(unix)]
+    #[test]
+    fn an_early_return_opener_resumes_once_and_names_the_opener() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers::default();
+        let mut viewer = FakeViewer {
+            early_return: true,
+            ..FakeViewer::default()
+        };
+        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        let done = next_done(&mut rx);
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
+
+        assert!(!viewers.busy());
+        assert_eq!(
+            viewer.log,
+            ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"],
+            "one resume, and the session is over"
+        );
+        assert_eq!(
+            app.ui.status,
+            "Opener exited (code 0); the viewer may still be open"
+        );
+    }
+
+    /// A waiting opener (macOS `open -W`) reports the viewer's own exit, as before.
+    #[cfg(unix)]
+    #[test]
+    fn a_waiting_opener_reports_the_viewer_exit() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers::default();
+        let mut viewer = FakeViewer::default();
+        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        let done = next_done(&mut rx);
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
+
+        assert_eq!(app.ui.status, "Viewer exited (code 0)");
+    }
+
+    /// The early-return sentence, checked directly so both platform branches are
+    /// covered on every host.
+    #[cfg(unix)]
+    #[test]
+    fn an_early_return_sentence_never_claims_the_viewer_exited() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let path = Path::new("/tmp/televim-1-2-3.jpg");
+        let exited = std::process::ExitStatus::from_raw(0);
+        assert_eq!(
+            viewer_sentence(&Ok(exited), path, false),
+            "Opener exited (code 0); the viewer may still be open"
+        );
+        let signalled = std::process::ExitStatus::from_raw(9);
+        assert_eq!(
+            viewer_sentence(&Ok(signalled), path, false),
+            "Opener exited (no exit code); the viewer may still be open"
+        );
     }
 
     /// A viewer that never starts still hands the reader back: the gate is open
