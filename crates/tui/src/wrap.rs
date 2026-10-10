@@ -8,6 +8,7 @@
 
 use std::ops::Range;
 
+use domain::vim::is_break_char;
 use unicode_width::UnicodeWidthStr;
 
 use crate::grapheme::clusters;
@@ -36,7 +37,10 @@ pub fn columns(text: &str) -> usize {
 ///
 /// Whitespace is where a row is broken, when there is whitespace to break it.
 /// A reader scanning a conversation wants its words whole, and a word is cut
-/// only where no space falls — that is, where the word is wider than the panel.
+/// only where no break falls — that is, where the word is wider than the panel.
+/// A zero-width non-joiner (U+200C) is a break too, the half-space Persian and
+/// Urdu write inside a word: the row ends *after* it and keeps it, since it is
+/// content rather than whitespace, in both [`wrap`] and [`wrap_keeping_whitespace`].
 /// Whitespace at the end of a row does not count toward its width, because a
 /// terminal does not draw it and a break decided with it counted would wrap
 /// early for nothing. A newline in the text starts a row, which is what makes
@@ -185,6 +189,12 @@ fn one_row(line: &str, from: usize, limit: usize, keep: bool) -> (usize, usize) 
                 Some((start, next)) if next == at => (start, end),
                 _ => (at, end),
             });
+        } else if cluster.ends_with(is_break_char) {
+            // A ZWNJ is content, so the break falls after it: the row keeps it
+            // in both modes, and the next row begins on the word after it. Its
+            // cluster ends with the ZWNJ, which is why this tests the end.
+            let end = at + cluster.len();
+            at_space = Some((end, end));
         }
     }
 
@@ -208,9 +218,15 @@ fn one_row(line: &str, from: usize, limit: usize, keep: bool) -> (usize, usize) 
 /// two rows disagreeing about where a word starts. [`wrap_keeping_whitespace`]
 /// keeps it on the row before the break instead, so the row after the break
 /// still begins on a word and nothing calls for this.
+///
+/// Whole clusters only: a space with a ZWNJ glued to it is one cluster, and it
+/// is content of the row before the break rather than blank space at the start
+/// of this one, so a cut inside it would land the row on a cluster's middle.
 fn past_spaces(line: &str, from: usize) -> usize {
-    let rest = &line[from..];
-    from + rest.len() - rest.trim_start_matches(char::is_whitespace).len()
+    clusters(&line[from..])
+        .take_while(|(_, cluster)| cluster.chars().all(char::is_whitespace))
+        .last()
+        .map_or(from, |(offset, cluster)| from + offset + cluster.len())
 }
 
 /// The columns one row has for text, given what is drawn on it.
@@ -462,6 +478,8 @@ mod tests {
             "👨‍👩‍👧 family and 👍🏽 and ❤️ in one row",
             "the quick brown fox",
             "a\n👨‍👩‍👧\nb",
+            "کتاب\u{200C}ها خوب\u{200C}ترین است",
+            "a\u{200C}\u{200C}b\u{200C} \u{200C}c",
         ];
         for text in texts {
             for width in [1, 2, 3, 4, 8] {
@@ -514,6 +532,46 @@ mod tests {
         assert_eq!(kept_rows_of(&text, 2), vec!["a", family]);
         assert!(columns("a") < 2, "the first row stops short of the limit");
         assert_eq!(columns(family), 2);
+    }
+
+    // ---- zero-width non-joiner -------------------------------------------
+
+    /// A word joined by a ZWNJ is two words to the reader, so a row that does
+    /// not fit it breaks after the joiner rather than cutting the word at the
+    /// edge, which would split the second half off in the middle of a letter run.
+    #[test]
+    fn a_row_breaks_after_a_zwnj_inside_a_word() {
+        assert_eq!(rows_of("کتاب\u{200C}ها", 5), vec!["کتاب\u{200C}", "ها"]);
+    }
+
+    /// The ZWNJ is zero-width content, not whitespace, so a break at it keeps it
+    /// on the first row with or without the whitespace kept.
+    #[test]
+    fn a_zwnj_break_keeps_the_zwnj_on_the_first_row_in_both_modes() {
+        let text = "کتاب\u{200C}ها";
+
+        assert_eq!(rows_of(text, 5), vec!["کتاب\u{200C}", "ها"]);
+        assert_eq!(kept_rows_of(text, 5), vec!["کتاب\u{200C}", "ها"]);
+    }
+
+    /// The half-space case at a width that only fits if the row breaks there: `سلام
+    /// کتاب‌` is 9 columns, so the row keeps the space and the word's first half.
+    /// Without the ZWNJ as a break the only break is the space, and `سلام` is left
+    /// alone on its row with the rest of the word on the next.
+    #[test]
+    fn farsi_joined_by_a_zwnj_breaks_at_the_half_space_when_the_width_needs_it() {
+        assert_eq!(
+            rows_of("سلام کتاب\u{200C}ها", 9),
+            vec!["سلام کتاب\u{200C}", "ها"]
+        );
+    }
+
+    /// A ZWNJ at the end of a line is content on that line, not a break that
+    /// leaves it to a row of its own or drops it.
+    #[test]
+    fn a_zwnj_at_the_end_of_a_line_stays_on_that_row() {
+        assert_eq!(rows_of("کتاب\u{200C}", 10), vec!["کتاب\u{200C}"]);
+        assert_eq!(kept_rows_of("کتاب\u{200C}", 10), vec!["کتاب\u{200C}"]);
     }
 
     // ---- decorations -----------------------------------------------------
