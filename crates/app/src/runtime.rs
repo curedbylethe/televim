@@ -6,10 +6,11 @@
 //! and every pass through the loop ends by asking the network what the screen is
 //! about to need.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Stdout;
 use std::io::{Write, stdout};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +50,15 @@ pub(crate) enum AppEvent {
 
     /// Something that happened away from the keyboard.
     Net(net::Event),
+
+    /// A viewer has exited, reported by the thread that waited for it.
+    Viewer(ViewerDone),
+}
+
+/// What a viewer's wait reports: the file it was given, and how the viewer ended.
+pub(crate) struct ViewerDone {
+    path: PathBuf,
+    outcome: std::io::Result<ExitStatus>,
 }
 
 /// Build a current-thread runtime (memory budget) and run the TUI.
@@ -402,9 +412,16 @@ fn viewer_command(path: &Path) -> Command {
 }
 
 /// The three steps a viewer takes, so the order can be tested without a tty.
+///
+/// `spawn` starts the viewer and returns without waiting for it: the wait runs on
+/// its own thread and reports to `done`, so the loop is never parked in it.
 trait Viewer {
     fn suspend(&mut self) -> std::io::Result<()>;
-    fn spawn(&mut self, path: &Path) -> std::io::Result<ExitStatus>;
+    fn spawn(
+        &mut self,
+        path: PathBuf,
+        done: mpsc::UnboundedSender<AppEvent>,
+    ) -> std::io::Result<()>;
     fn resume(&mut self) -> std::io::Result<()>;
 }
 
@@ -419,8 +436,20 @@ impl Viewer for TuiViewer<'_> {
         suspend_tui(self.terminal, self.keys)
     }
 
-    fn spawn(&mut self, path: &Path) -> std::io::Result<ExitStatus> {
-        viewer_command(path).status()
+    fn spawn(
+        &mut self,
+        path: PathBuf,
+        done: mpsc::UnboundedSender<AppEvent>,
+    ) -> std::io::Result<()> {
+        std::thread::Builder::new()
+            .name("viewer".to_owned())
+            .spawn(move || {
+                let outcome = viewer_command(&path).status();
+                // Nothing waits for this once the loop has ended, so a closed
+                // channel is not an error.
+                let _ = done.send(AppEvent::Viewer(ViewerDone { path, outcome }));
+            })
+            .map(|_handle| ())
     }
 
     fn resume(&mut self) -> std::io::Result<()> {
@@ -428,22 +457,74 @@ impl Viewer for TuiViewer<'_> {
     }
 }
 
-/// Runs the viewer on `path` with the terminal given away, and takes it back.
+/// The viewers the loop has been asked to open, one at a time.
 ///
-/// The terminal is taken back even when the spawn fails, and only once.
-/// The outer `Result` is a failure to restore the terminal, which ends the loop
-/// the way a failed draw does. The inner one is the viewer's own outcome, which
-/// the caller says on the status line: a failure to spawn or suspend is a refusal
-/// there, not an error here.
-fn run_viewer<V: Viewer>(viewer: &mut V, path: &Path) -> Result<std::io::Result<ExitStatus>> {
-    let launched = match viewer.suspend() {
-        Ok(()) => viewer.spawn(path),
-        Err(error) => Err(error),
-    };
-    viewer
-        .resume()
-        .context("taking the terminal back from the viewer")?;
-    Ok(launched)
+/// Queued paths wait here, and `open` is the one whose viewer holds the terminal.
+/// Nothing starts while one is open, so a second download settling mid-viewer
+/// waits its turn rather than stacking a second viewer over the first.
+#[derive(Default)]
+struct Viewers {
+    queued: VecDeque<PathBuf>,
+    open: Option<PathBuf>,
+}
+
+impl Viewers {
+    /// Whether a viewer holds the terminal. The loop draws nothing while it does.
+    fn busy(&self) -> bool {
+        self.open.is_some()
+    }
+
+    fn queue(&mut self, paths: Vec<PathBuf>) {
+        self.queued.extend(paths);
+    }
+
+    /// Opens the next queued path, unless a viewer already holds the terminal.
+    ///
+    /// A failed suspend or spawn is a refusal, not an error: the terminal is taken
+    /// back and the refusal says so on the status line. The outer `Result` is a
+    /// failed restore, which ends the loop the way a failed draw does.
+    fn start_next<V: Viewer>(
+        &mut self,
+        viewer: &mut V,
+        app: &mut App,
+        done: &mpsc::UnboundedSender<AppEvent>,
+    ) -> Result<()> {
+        if self.busy() {
+            return Ok(());
+        }
+        let Some(path) = self.queued.pop_front() else {
+            return Ok(());
+        };
+        app.set_status(format!("Opening {}…", path.display()));
+        let launched = viewer
+            .suspend()
+            .and_then(|()| viewer.spawn(path.clone(), done.clone()));
+        match launched {
+            Ok(()) => self.open = Some(path),
+            Err(error) => {
+                viewer
+                    .resume()
+                    .context("taking the terminal back from the viewer")?;
+                app.flash(viewer_sentence(&Err(error), &path));
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes the terminal back once the viewer's wait has reported, and says how it went.
+    fn finish<V: Viewer>(
+        &mut self,
+        viewer: &mut V,
+        app: &mut App,
+        done: &ViewerDone,
+    ) -> Result<()> {
+        self.open = None;
+        viewer
+            .resume()
+            .context("taking the terminal back from the viewer")?;
+        app.flash(viewer_sentence(&done.outcome, &done.path));
+        Ok(())
+    }
 }
 
 /// The status sentence for a viewer's outcome.
@@ -603,20 +684,15 @@ async fn event_loop(
     // event, like everything else.
     net::spawn_bring_up(cfg.clone(), tx.clone());
 
+    let mut viewers = Viewers::default();
+
     loop {
-        // Before the draw, and every pass: what a day is called — `Today`
-        // rather than a date — depends on when the frame is being read, and the
-        // screen owns no clock of its own.
-        record_clock(&app);
-
-        terminal
-            .draw(|frame| app.render(frame))
-            .context("drawing frame")?;
-        if app.graphics() == GraphicsMode::Kitty {
-            place_pictures(&app);
+        // Nothing is drawn while a viewer holds the terminal: the screen is the
+        // viewer's until it hands it back, and a frame written now lands on the
+        // shell's. The loop still runs the rest of the pass.
+        if !viewers.busy() {
+            draw_frame(terminal, &app)?;
         }
-
-        probe_first_frame();
 
         // The key was taken on the previous pass; what arrives here is the
         // frame that shows what it did.
@@ -625,11 +701,14 @@ async fn event_loop(
             keypress_to_probe = None;
         }
 
-        if app.ui.should_quit {
+        if app.ui.should_quit && !viewers.busy() {
             break;
         }
 
         match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
+            // Input the reader took while the viewer had the terminal is dropped,
+            // as it always was: it was not typed into the program.
+            Ok(Some(AppEvent::Input(_))) if viewers.busy() => {}
             Ok(Some(AppEvent::Input(Event::Key(key))))
                 if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
@@ -644,6 +723,10 @@ async fn event_loop(
             Ok(Some(AppEvent::Input(Event::FocusLost))) => focus_changed(&mut app, keys, false)?,
             Ok(Some(AppEvent::Input(_))) | Err(_) => {}
             Ok(Some(AppEvent::Net(event))) => net::apply(&mut app, &mut network, event),
+            Ok(Some(AppEvent::Viewer(done))) => {
+                viewers.finish(&mut TuiViewer { terminal, keys }, &mut app, &done)?;
+                drain_while_suspended(&mut rx, &mut app, &mut network);
+            }
             Ok(None) => break,
         }
 
@@ -663,17 +746,16 @@ async fn event_loop(
             };
             spawn_sticker_drain(batch, download, tx.clone());
         }
-        copy_if_asked(&mut app);
-        // After the picture and the clipboard of this pass, so neither is written
-        // into the window a viewer has the terminal for. One viewer per queued
-        // path, each with its own suspend and resume, and the input that arrived
-        // while it ran is dropped before the next draw (see `drain_while_suspended`).
-        for path in network.take_media() {
-            app.set_status(format!("Opening {}…", path.display()));
-            let outcome = run_viewer(&mut TuiViewer { terminal, keys }, &path)?;
-            app.flash(viewer_sentence(&outcome, &path));
-            drain_while_suspended(&mut rx, &mut app, &mut network);
+        // The clipboard is written to the terminal, so it waits for the viewer
+        // to hand the terminal back: the yank is kept until then.
+        if !viewers.busy() {
+            copy_if_asked(&mut app);
         }
+        // Queued paths open one viewer at a time, and the wait runs off this
+        // thread: the loop carries on while one is open, and the next starts when
+        // it reports (see `Viewers::start_next` and `Viewers::finish`).
+        viewers.queue(network.take_media());
+        viewers.start_next(&mut TuiViewer { terminal, keys }, &mut app, &tx)?;
         sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
         // Unlike the drafts, written off the loop's thread: the file is up to
         // a window per conversation, and it is a write behind the pages that
@@ -684,6 +766,24 @@ async fn event_loop(
     }
 
     network.finish_history(app.chats()).await;
+    Ok(())
+}
+
+/// Draws one frame, and places its pictures when the terminal takes them.
+fn draw_frame(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> Result<()> {
+    // Before the draw, and every pass: what a day is called — `Today` rather than
+    // a date — depends on when the frame is being read, and the screen owns no
+    // clock of its own.
+    record_clock(app);
+
+    terminal
+        .draw(|frame| app.render(frame))
+        .context("drawing frame")?;
+    if app.graphics() == GraphicsMode::Kitty {
+        place_pictures(app);
+    }
+
+    probe_first_frame();
     Ok(())
 }
 
@@ -1418,7 +1518,10 @@ mod tests {
         );
     }
 
-    /// Records the steps in order, and fails the ones asked to.
+    /// Records the steps in order, and fails the ones asked to. The wait does not
+    /// run here: a successful spawn reports its outcome on the channel, as the
+    /// real one does from its thread, and the test takes that event the way the
+    /// loop would.
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt as _;
 
@@ -1438,12 +1541,20 @@ mod tests {
             Ok(())
         }
 
-        fn spawn(&mut self, path: &Path) -> std::io::Result<ExitStatus> {
+        fn spawn(
+            &mut self,
+            path: PathBuf,
+            done: mpsc::UnboundedSender<AppEvent>,
+        ) -> std::io::Result<()> {
             self.log.push(format!("spawn {}", path.display()));
             if self.fail_spawn {
                 return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
             }
-            Ok(ExitStatus::from_raw(0))
+            let _ = done.send(AppEvent::Viewer(ViewerDone {
+                path,
+                outcome: Ok(ExitStatus::from_raw(0)),
+            }));
+            Ok(())
         }
 
         fn resume(&mut self) -> std::io::Result<()> {
@@ -1452,17 +1563,52 @@ mod tests {
         }
     }
 
+    fn chat(id: i64) -> domain::chat::Chat {
+        domain::chat::Chat {
+            read_outbox_max_id: None,
+            id,
+            title: format!("chat-{id}"),
+            kind: domain::chat::ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            presence: None,
+            deleted: false,
+        }
+    }
+
+    /// The event the wait reported, which the loop would receive next.
+    fn next_done(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> ViewerDone {
+        match rx.try_recv() {
+            Ok(AppEvent::Viewer(done)) => done,
+            _ => panic!("the wait reports its outcome before the loop asks"),
+        }
+    }
+
     /// The terminal is given away, the viewer runs on the file, and the terminal
     /// comes back once after it, in that order.
     #[cfg(unix)]
     #[test]
     fn the_viewer_runs_between_suspend_and_one_resume() {
-        let path = Path::new("/tmp/televim-1-2-3.jpg");
+        let path = PathBuf::from("/tmp/televim-1-2-3.jpg");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers::default();
         let mut viewer = FakeViewer::default();
+        viewers.queue(vec![path]);
 
-        let outcome = run_viewer(&mut viewer, path).expect("resume succeeds");
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        assert!(viewers.busy());
+        let done = next_done(&mut rx);
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
 
-        assert!(outcome.is_ok());
+        assert!(!viewers.busy());
         assert_eq!(
             viewer.log,
             ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"]
@@ -1470,26 +1616,31 @@ mod tests {
     }
 
     /// A spawn that fails still takes the terminal back, once, and the failure is
-    /// the viewer's outcome rather than an error that ends the loop.
+    /// a refusal on the status line rather than an error that ends the loop.
     #[cfg(unix)]
     #[test]
     fn the_terminal_comes_back_when_the_spawn_fails() {
-        let path = Path::new("/tmp/televim-1-2-3.jpg");
+        let path = PathBuf::from("/tmp/televim-1-2-3.jpg");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers::default();
         let mut viewer = FakeViewer {
             fail_spawn: true,
             ..FakeViewer::default()
         };
+        viewers.queue(vec![path]);
 
-        let outcome = run_viewer(&mut viewer, path).expect("resume succeeds");
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("resume succeeds");
 
-        assert_eq!(
-            outcome.err().map(|error| error.kind()),
-            Some(std::io::ErrorKind::NotFound)
-        );
+        assert!(!viewers.busy(), "a refused viewer holds nothing");
+        assert!(rx.try_recv().is_err(), "nothing is left to wait for");
         assert_eq!(
             viewer.log,
             ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"]
         );
+        assert!(app.status_text().contains("/tmp/televim-1-2-3.jpg"));
     }
 
     /// A suspend that fails never spawns the viewer, and the terminal is still
@@ -1497,15 +1648,112 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failed_suspend_spawns_nothing_and_still_resumes_once() {
-        let path = Path::new("/tmp/televim-1-2-3.jpg");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers::default();
         let mut viewer = FakeViewer {
             fail_suspend: true,
             ..FakeViewer::default()
         };
+        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
 
-        let outcome = run_viewer(&mut viewer, path).expect("resume succeeds");
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("resume succeeds");
 
-        assert!(outcome.is_err());
+        assert!(!viewers.busy());
         assert_eq!(viewer.log, ["suspend", "resume"]);
+    }
+
+    /// GAP 4 and GAP 5: while a viewer is open the loop is not parked. The wait
+    /// is reported later, and the same conversation and cursor are on the screen
+    /// when the terminal comes back: no restart, one resume.
+    #[cfg(unix)]
+    #[test]
+    fn a_completed_viewer_returns_to_the_same_conversation_and_cursor() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.set_chats(vec![chat(7)]);
+        app.select_chat(0);
+        app.conversation.vim.set_total(5);
+        app.conversation.vim.set_cursor(3);
+        let mut viewers = Viewers::default();
+        let mut viewer = FakeViewer::default();
+        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        // The loop keeps running while the viewer is open: another pass starts
+        // nothing, and the wait has not yet been taken.
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        assert!(viewers.busy());
+        assert_eq!(viewer.log, ["suspend", "spawn /tmp/televim-1-2-3.jpg"]);
+
+        let done = next_done(&mut rx);
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+
+        assert_eq!(app.current_chat_id(), 7);
+        assert_eq!(app.conversation.conversation.window.chat_id, 7);
+        assert_eq!(app.conversation.vim.cursor(), 3);
+        assert_eq!(
+            viewer.log,
+            ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"],
+            "one resume, and no second viewer for the same file"
+        );
+    }
+
+    /// GAP 7: queued paths open one viewer at a time. The second opens only once
+    /// the first has reported and the terminal is back.
+    #[cfg(unix)]
+    #[test]
+    fn queued_media_opens_one_viewer_at_a_time() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers::default();
+        let mut viewer = FakeViewer::default();
+        viewers.queue(vec![
+            PathBuf::from("/tmp/a.jpg"),
+            PathBuf::from("/tmp/b.jpg"),
+        ]);
+
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        assert_eq!(viewer.log, ["suspend", "spawn /tmp/a.jpg"]);
+
+        let done = next_done(&mut rx);
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        let done = next_done(&mut rx);
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
+
+        assert_eq!(
+            viewer.log,
+            [
+                "suspend",
+                "spawn /tmp/a.jpg",
+                "resume",
+                "suspend",
+                "spawn /tmp/b.jpg",
+                "resume",
+            ]
+        );
     }
 }
