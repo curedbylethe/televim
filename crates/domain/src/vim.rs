@@ -210,14 +210,23 @@ fn back_from(text: &str, at: usize) -> usize {
         .map_or(at, |character| at - character.len_utf8())
 }
 
+/// Whether `c` separates words: whitespace, or a zero-width non-joiner (U+200C).
+///
+/// The ZWNJ is what Persian and Urdu writing uses inside a word for a half-space,
+/// as in `کتاب‌ها`. It is not whitespace, but a reader hears two words there, and
+/// a motion that crossed it would select a word the reader does not see.
+pub fn is_break_char(c: char) -> bool {
+    c.is_whitespace() || c == '\u{200C}'
+}
+
 /// Whether the character at `offset` is the first of a word.
 ///
-/// A word is a run of non-whitespace, which is what a reader means by a word in a
-/// message: punctuation inside a word is part of it, and a run of punctuation is
-/// a word of its own.
+/// A word is a run of non-break characters (see [`is_break_char`]), which is what
+/// a reader means by a word in a message: punctuation inside a word is part of
+/// it, and a run of punctuation is a word of its own.
 fn starts_word(text: &str, offset: usize) -> bool {
-    !text[offset..].starts_with(char::is_whitespace)
-        && (offset == 0 || text[..offset].ends_with(char::is_whitespace))
+    !text[offset..].starts_with(is_break_char)
+        && (offset == 0 || text[..offset].ends_with(is_break_char))
 }
 
 /// The start of the next word after `at`, or `at` when there is none.
@@ -251,7 +260,7 @@ fn run_end(text: &str, from: usize) -> usize {
     let mut end = from;
     while end < text.len() {
         end = forward_from(text, end);
-        if end >= text.len() || text[end..].starts_with(char::is_whitespace) {
+        if end >= text.len() || text[end..].starts_with(is_break_char) {
             return back_from(text, end);
         }
     }
@@ -696,6 +705,41 @@ mod tests {
         );
     }
 
+    /// A Persian compound such as `کتاب‌ها` ("books") is written with a ZWNJ
+    /// between its parts, and a reader sees two words. `w` must stop at the start
+    /// of the second part rather than run across the half-space to the end.
+    #[test]
+    fn w_crosses_a_zwnj_into_the_next_part_of_a_persian_compound() {
+        let text = "کتاب\u{200C}ها";
+
+        assert_eq!(from_start(text, WORD(true)), 5, "`w` over the first part");
+        assert_eq!(at(text, 3, WORD(true)), 5, "from its last letter as well");
+        assert_eq!(at(text, 5, WORD(true)), 5, "and nothing follows the second");
+    }
+
+    /// `b` is the mirror of `w` across the same half-space: from the second part
+    /// it goes back over the ZWNJ to the start of the first, not to the ZWNJ.
+    /// The ZWNJ itself is never a word start, so it is never a landing.
+    #[test]
+    fn b_crosses_a_zwnj_back_to_the_start_of_the_first_part() {
+        let text = "کتاب\u{200C}ها";
+
+        assert_eq!(at(text, 5, WORD(false)), 0, "`b` back over the half-space");
+        assert_eq!(at(text, 4, WORD(false)), 0, "a ZWNJ is not a word start");
+    }
+
+    /// `e` treats the ZWNJ as the end of the first part, so it lands on the `ب`
+    /// before it, and from there on the last letter of the second part. Without
+    /// the break the first `e` would run through the whole compound.
+    #[test]
+    fn e_stops_at_a_zwnj_and_crosses_it_like_a_space() {
+        let text = "کتاب\u{200C}ها";
+
+        assert_eq!(from_start(text, CharMotion::WordEnd), 3);
+        assert_eq!(at(text, 3, CharMotion::WordEnd), 6);
+        assert_eq!(at(text, 6, CharMotion::WordEnd), 6, "the end of the text");
+    }
+
     #[test]
     fn b_goes_back_to_the_previous_word_start() {
         let text = "alpha beta gamma";
@@ -904,7 +948,7 @@ mod tests {
     /// function returns is a position the text can actually be indexed at.
     #[test]
     fn every_landing_is_a_position_the_text_has() {
-        let text = "  two words, then  a third… and 😀 more  ";
+        let text = "  two words, then  a third… and 😀 more کتاب\u{200C}ها  ";
 
         for at in 0..text.chars().count() {
             for motion in [
