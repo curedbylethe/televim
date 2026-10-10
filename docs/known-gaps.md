@@ -36,21 +36,27 @@ Real, and named so they are not mistaken for oversights:
     key alone. A forwarded copy in another chat is served from disk only in the live
     session, until that message is fetched again. The history file format is not
     changed for this.
-- **The viewer hand-off has four known limits.**
-  - *Stdin race.* The loop blocks on the viewer with the terminal released, but the
-    reader thread keeps calling `crossterm::event::read`. A key it captures during
-    the suspend window is queued and then dropped on resume, so it reaches neither the
-    viewer nor the program. Input already queued is dropped the same way; network
-    events are kept.
-  - *Network stalls while the viewer is open.* The runtime is current-thread and the
-    loop is parked in the wait, so no network task runs until the viewer exits. A long
-    viewing can let the connection go quiet.
+- **The viewer hand-off no longer blocks the loop, and has four known limits.** `o`
+  runs the platform opener on a thread of its own, so the loop keeps running while
+  the viewer is open: network events are applied, and queued media opens one viewer
+  at a time. When the wait ends the terminal comes back once, to the same
+  conversation and the same cursor, with no restart. Ctrl+c is the emergency exit
+  only: it is not needed to return, and no signal handler is installed, so pressing
+  it while a viewer holds the terminal still ends the program.
+  - *Reader gating.* The keyboard reader is gated for the whole viewing, so keys typed
+    into the viewer are the viewer's. A key the reader took just before the gate
+    closed is delivered to the program after the return, not to the viewer. The general fix is tracked separately.
+  - *Network during a viewing.* Network events are applied while the viewer is open,
+    but whether a long viewing still lets the connection go quiet is not checked here.
+    The general fix is tracked separately.
   - *The opener's exit, not the viewer's.* macOS waits only because of `-W`. `xdg-open`
     usually returns once a GUI handler is launched, so on Linux the terminal can come
-    back under a running viewer, and the sentence `Viewer exited (code …)` reports the
-    opener's exit code.
+    back under a running viewer, and the sentence `Opener exited (code …); the viewer
+    may still be open` reports the opener's exit. Waiting on the real viewer needs a
+    configured viewer command, which is tracked separately.
   - *Windows is untested.* `cmd /C start` returns without waiting, so the terminal is
-    back at once there. No Windows leg runs in CI.
+    back at once there. No Windows leg runs in CI; the manual steps are in the
+    `OPENER` doc comment in `crates/app/src/runtime.rs`. Tracked separately.
 - **Global search shows only the first page, capped at 100 hits.** `?` and
   `:search` ask the server once. The overlay keeps the newest 100 matches, and the
   status line says `100 of <total>` when there are more; there is no way to page
