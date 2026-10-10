@@ -12,8 +12,8 @@ use std::io::Stdout;
 use std::io::{Write, stdout};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -466,6 +466,7 @@ impl Viewer for TuiViewer<'_> {
 struct Viewers {
     queued: VecDeque<PathBuf>,
     open: Option<PathBuf>,
+    gate: ReaderGate,
 }
 
 impl Viewers {
@@ -496,6 +497,9 @@ impl Viewers {
             return Ok(());
         };
         app.set_status(format!("Opening {}…", path.display()));
+        // Closed before the terminal is given away, so the reader never takes a
+        // key the viewer was typed at. Opened again only once it is back.
+        self.gate.close();
         let launched = viewer
             .suspend()
             .and_then(|()| viewer.spawn(path.clone(), done.clone()));
@@ -505,6 +509,7 @@ impl Viewers {
                 viewer
                     .resume()
                     .context("taking the terminal back from the viewer")?;
+                self.gate.open();
                 app.flash(viewer_sentence(&Err(error), &path));
             }
         }
@@ -522,6 +527,7 @@ impl Viewers {
         viewer
             .resume()
             .context("taking the terminal back from the viewer")?;
+        self.gate.open();
         app.flash(viewer_sentence(&done.outcome, &done.path));
         Ok(())
     }
@@ -549,22 +555,28 @@ fn viewer_sentence(outcome: &std::io::Result<ExitStatus>, path: &Path) -> String
     }
 }
 
-/// Drops what the channel buffered while the viewer had the terminal.
+/// Takes what the channel buffered while the viewer had the terminal.
 ///
-/// Input is discarded: a key typed into a viewer that the reader thread picked up
-/// and queued is not one the reader meant for the program, and replaying it on
-/// resume would act on it twice. This is the Q1 decision; the byte the reader
-/// thread captured mid-suspend is the residual race, documented in
-/// `docs/known-gaps.md`. Network events are applied, not dropped, because a page
-/// that landed during the viewer is still a page.
+/// Input is held, not dropped: the reader is gated across the suspend window, so
+/// anything still queued here is a key it read before the gate closed, and that
+/// key is delivered once the terminal is back. Focus events are held with it, so
+/// a blur still clears the latches and a gain still re-pushes the flags. Network
+/// events are applied, because a page that landed during the viewer is still a
+/// page. This revisits Q1 for Input only; `docs/known-gaps.md` records the
+/// residual race (a byte the reader took just before the gate closed).
 fn drain_while_suspended(
     rx: &mut mpsc::UnboundedReceiver<AppEvent>,
     app: &mut App,
     network: &mut net::State,
+    held: &mut VecDeque<AppEvent>,
 ) {
     while let Ok(event) = rx.try_recv() {
-        if let AppEvent::Net(event) = event {
-            net::apply(app, network, event);
+        match event {
+            AppEvent::Net(event) => net::apply(app, network, event),
+            input @ AppEvent::Input(_) => held.push_back(input),
+            // At most one viewer is in flight, so nothing else waits behind the
+            // one that just reported.
+            AppEvent::Viewer(_) => {}
         }
     }
 }
@@ -655,7 +667,8 @@ async fn event_loop(
     app.session.credentials_configured = cfg.credentials().is_some();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
-    spawn_reader(tx.clone());
+    let mut viewers = Viewers::default();
+    spawn_reader(tx.clone(), viewers.gate.clone());
 
     // Holds the configuration and this channel, because a sign-out has to rebuild
     // the client and `apply` cannot be handed either.
@@ -684,7 +697,7 @@ async fn event_loop(
     // event, like everything else.
     net::spawn_bring_up(cfg.clone(), tx.clone());
 
-    let mut viewers = Viewers::default();
+    let mut held: VecDeque<AppEvent> = VecDeque::new();
 
     loop {
         // Nothing is drawn while a viewer holds the terminal: the screen is the
@@ -705,10 +718,10 @@ async fn event_loop(
             break;
         }
 
-        match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
-            // Input the reader took while the viewer had the terminal is dropped,
-            // as it always was: it was not typed into the program.
-            Ok(Some(AppEvent::Input(_))) if viewers.busy() => {}
+        match next_event(&viewers, &mut held, &mut rx).await {
+            // Input taken while the viewer has the terminal waits for it to be
+            // handed back: the program has not been typed at yet.
+            Ok(Some(input @ AppEvent::Input(_))) if viewers.busy() => held.push_back(input),
             Ok(Some(AppEvent::Input(Event::Key(key))))
                 if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
@@ -725,7 +738,7 @@ async fn event_loop(
             Ok(Some(AppEvent::Net(event))) => net::apply(&mut app, &mut network, event),
             Ok(Some(AppEvent::Viewer(done))) => {
                 viewers.finish(&mut TuiViewer { terminal, keys }, &mut app, &done)?;
-                drain_while_suspended(&mut rx, &mut app, &mut network);
+                drain_while_suspended(&mut rx, &mut app, &mut network, &mut held);
             }
             Ok(None) => break,
         }
@@ -767,6 +780,21 @@ async fn event_loop(
 
     network.finish_history(app.chats()).await;
     Ok(())
+}
+
+/// The loop's next event, or `Err` when a tick passes with nothing.
+///
+/// Held input goes first, and only once no viewer holds the terminal: it was taken
+/// before anything still in the channel.
+async fn next_event(
+    viewers: &Viewers,
+    held: &mut VecDeque<AppEvent>,
+    rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+) -> Result<Option<AppEvent>, tokio::time::error::Elapsed> {
+    if !viewers.busy() && !held.is_empty() {
+        return Ok(held.pop_front());
+    }
+    tokio::time::timeout(Duration::from_millis(250), rx.recv()).await
 }
 
 /// Draws one frame, and places its pictures when the terminal takes them.
@@ -1009,14 +1037,63 @@ fn clipboard_text(text: &str) -> String {
 /// A thread rather than a task, because `crossterm`'s `read` blocks and a task
 /// on a current-thread runtime may not. The thread ends when the channel closes,
 /// which is when the loop that owns the receiving end is gone.
-fn spawn_reader(tx: mpsc::UnboundedSender<AppEvent>) {
+fn spawn_reader(tx: mpsc::UnboundedSender<AppEvent>, gate: ReaderGate) {
     std::thread::spawn(move || {
-        while let Ok(event) = crossterm::event::read() {
+        loop {
+            // Closed while a viewer has the terminal: a read now would take a key
+            // the viewer was typed at.
+            if !gate.is_open() {
+                std::thread::sleep(READER_GATE_PAUSE);
+                continue;
+            }
+            // Polled rather than read, so the gate is looked at again before a
+            // key is taken from the terminal.
+            match crossterm::event::poll(READER_POLL) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(_) => break,
+            }
+            if !gate.is_open() {
+                continue;
+            }
+            let Ok(event) = crossterm::event::read() else {
+                break;
+            };
             if tx.send(AppEvent::Input(event)).is_err() {
                 break;
             }
         }
     });
+}
+
+/// How long the reader waits for a key before it looks at the gate again.
+const READER_POLL: Duration = Duration::from_millis(50);
+
+/// How long a gated reader sleeps before it looks at the gate again.
+const READER_GATE_PAUSE: Duration = Duration::from_millis(20);
+
+/// Whether the keyboard reader may take keys from the terminal.
+///
+/// Closed for the whole time a viewer holds the terminal, so the keys typed into
+/// the viewer are the viewer's, not the program's. Starts open. Shared with the
+/// reader thread, which checks it before every read.
+#[derive(Clone, Default)]
+struct ReaderGate {
+    closed: Arc<AtomicBool>,
+}
+
+impl ReaderGate {
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn open(&self) {
+        self.closed.store(false, Ordering::SeqCst);
+    }
+
+    fn is_open(&self) -> bool {
+        !self.closed.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg(test)]
@@ -1755,5 +1832,84 @@ mod tests {
                 "resume",
             ]
         );
+    }
+
+    /// GAP 3: the reader is gated for the whole viewer. Keys and Focus taken
+    /// during it are held and come out in order after the terminal is back, and
+    /// Net is applied during it rather than held.
+    #[cfg(unix)]
+    #[test]
+    fn keys_typed_during_a_viewer_are_held_and_net_still_applies() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut network = net::State::new(Config::default(), tx.clone());
+        let mut viewers = Viewers::default();
+        let gate = viewers.gate.clone();
+        let mut viewer = FakeViewer::default();
+        let mut held = VecDeque::new();
+        assert!(gate.is_open(), "the reader starts open");
+        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        assert!(!gate.is_open(), "the reader is gated while the viewer runs");
+
+        // What the reader and the network put on the channel while the viewer has
+        // the terminal, after the wait's own report.
+        let done = next_done(&mut rx);
+        let key = Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        tx.send(AppEvent::Input(key)).expect("the loop listens");
+        tx.send(AppEvent::Input(Event::FocusLost))
+            .expect("the loop listens");
+        tx.send(AppEvent::Net(net::Event::NoCredentials))
+            .expect("the loop listens");
+
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
+        drain_while_suspended(&mut rx, &mut app, &mut network, &mut held);
+
+        assert!(
+            gate.is_open(),
+            "the reader reads again once the terminal is back"
+        );
+        assert_eq!(
+            app.ui.status, "televim has no application credentials",
+            "Net is applied during the viewer"
+        );
+        assert!(matches!(
+            held.pop_front(),
+            Some(AppEvent::Input(Event::Key(k))) if k.code == KeyCode::Char('j')
+        ));
+        assert!(matches!(
+            held.pop_front(),
+            Some(AppEvent::Input(Event::FocusLost))
+        ));
+        assert!(held.is_empty(), "nothing is left behind or dropped");
+    }
+
+    /// A viewer that never starts still hands the reader back: the gate is open
+    /// again once the terminal is taken back after a failed spawn.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_viewer_reopens_the_reader() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers::default();
+        let gate = viewers.gate.clone();
+        let mut viewer = FakeViewer {
+            fail_spawn: true,
+            ..FakeViewer::default()
+        };
+        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+
+        assert!(gate.is_open());
     }
 }
