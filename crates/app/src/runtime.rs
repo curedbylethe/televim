@@ -401,22 +401,48 @@ fn viewer_command(path: &Path) -> Command {
     command
 }
 
+/// The three steps a viewer takes, so the order can be tested without a tty.
+trait Viewer {
+    fn suspend(&mut self) -> std::io::Result<()>;
+    fn spawn(&mut self, path: &Path) -> std::io::Result<ExitStatus>;
+    fn resume(&mut self) -> std::io::Result<()>;
+}
+
+/// The terminal as the viewer sees it: the real suspend, spawn and resume.
+struct TuiViewer<'a> {
+    terminal: &'a mut Terminal<CrosstermBackend<Stdout>>,
+    keys: &'a mut EnhancedKeys<Stdout>,
+}
+
+impl Viewer for TuiViewer<'_> {
+    fn suspend(&mut self) -> std::io::Result<()> {
+        suspend_tui(self.terminal, self.keys)
+    }
+
+    fn spawn(&mut self, path: &Path) -> std::io::Result<ExitStatus> {
+        viewer_command(path).status()
+    }
+
+    fn resume(&mut self) -> std::io::Result<()> {
+        resume_tui(self.terminal, self.keys)
+    }
+}
+
 /// Runs the viewer on `path` with the terminal given away, and takes it back.
 ///
+/// The terminal is taken back even when the spawn fails, and only once.
 /// The outer `Result` is a failure to restore the terminal, which ends the loop
 /// the way a failed draw does. The inner one is the viewer's own outcome, which
 /// the caller says on the status line: a failure to spawn or suspend is a refusal
 /// there, not an error here.
-fn run_viewer(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    keys: &mut EnhancedKeys<Stdout>,
-    path: &Path,
-) -> Result<std::io::Result<ExitStatus>> {
-    let launched = match suspend_tui(terminal, keys) {
-        Ok(()) => viewer_command(path).status(),
+fn run_viewer<V: Viewer>(viewer: &mut V, path: &Path) -> Result<std::io::Result<ExitStatus>> {
+    let launched = match viewer.suspend() {
+        Ok(()) => viewer.spawn(path),
         Err(error) => Err(error),
     };
-    resume_tui(terminal, keys).context("taking the terminal back from the viewer")?;
+    viewer
+        .resume()
+        .context("taking the terminal back from the viewer")?;
     Ok(launched)
 }
 
@@ -644,7 +670,7 @@ async fn event_loop(
         // while it ran is dropped before the next draw (see `drain_while_suspended`).
         for path in network.take_media() {
             app.set_status(format!("Opening {}…", path.display()));
-            let outcome = run_viewer(terminal, keys, &path)?;
+            let outcome = run_viewer(&mut TuiViewer { terminal, keys }, &path)?;
             app.flash(viewer_sentence(&outcome, &path));
             drain_while_suspended(&mut rx, &mut app, &mut network);
         }
@@ -1390,5 +1416,96 @@ mod tests {
             sentence.ends_with("the file is at /tmp/televim-1-2-3.jpg"),
             "{sentence}"
         );
+    }
+
+    /// Records the steps in order, and fails the ones asked to.
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt as _;
+
+    #[derive(Default)]
+    struct FakeViewer {
+        log: Vec<String>,
+        fail_suspend: bool,
+        fail_spawn: bool,
+    }
+
+    impl Viewer for FakeViewer {
+        fn suspend(&mut self) -> std::io::Result<()> {
+            self.log.push("suspend".to_owned());
+            if self.fail_suspend {
+                return Err(std::io::Error::other("no tty"));
+            }
+            Ok(())
+        }
+
+        fn spawn(&mut self, path: &Path) -> std::io::Result<ExitStatus> {
+            self.log.push(format!("spawn {}", path.display()));
+            if self.fail_spawn {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+            }
+            Ok(ExitStatus::from_raw(0))
+        }
+
+        fn resume(&mut self) -> std::io::Result<()> {
+            self.log.push("resume".to_owned());
+            Ok(())
+        }
+    }
+
+    /// The terminal is given away, the viewer runs on the file, and the terminal
+    /// comes back once after it, in that order.
+    #[cfg(unix)]
+    #[test]
+    fn the_viewer_runs_between_suspend_and_one_resume() {
+        let path = Path::new("/tmp/televim-1-2-3.jpg");
+        let mut viewer = FakeViewer::default();
+
+        let outcome = run_viewer(&mut viewer, path).expect("resume succeeds");
+
+        assert!(outcome.is_ok());
+        assert_eq!(
+            viewer.log,
+            ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"]
+        );
+    }
+
+    /// A spawn that fails still takes the terminal back, once, and the failure is
+    /// the viewer's outcome rather than an error that ends the loop.
+    #[cfg(unix)]
+    #[test]
+    fn the_terminal_comes_back_when_the_spawn_fails() {
+        let path = Path::new("/tmp/televim-1-2-3.jpg");
+        let mut viewer = FakeViewer {
+            fail_spawn: true,
+            ..FakeViewer::default()
+        };
+
+        let outcome = run_viewer(&mut viewer, path).expect("resume succeeds");
+
+        assert_eq!(
+            outcome.err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::NotFound)
+        );
+        assert_eq!(
+            viewer.log,
+            ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"]
+        );
+    }
+
+    /// A suspend that fails never spawns the viewer, and the terminal is still
+    /// taken back once.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_suspend_spawns_nothing_and_still_resumes_once() {
+        let path = Path::new("/tmp/televim-1-2-3.jpg");
+        let mut viewer = FakeViewer {
+            fail_suspend: true,
+            ..FakeViewer::default()
+        };
+
+        let outcome = run_viewer(&mut viewer, path).expect("resume succeeds");
+
+        assert!(outcome.is_err());
+        assert_eq!(viewer.log, ["suspend", "resume"]);
     }
 }
