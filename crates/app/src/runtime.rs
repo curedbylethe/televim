@@ -2030,4 +2030,46 @@ mod tests {
 
         assert!(gate.is_open());
     }
+
+    /// The whole open and close cycle as the loop drives it: the reader is gated
+    /// only while the viewer has the terminal, the conversation and cursor are
+    /// where they were, and the terminal comes back once with no second viewer
+    /// started. The fake has no kill step, so a kill path would show as an extra
+    /// entry in the log.
+    #[cfg(unix)]
+    #[test]
+    fn a_full_open_and_close_cycle_resumes_once_without_restart_or_kill() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.set_chats(vec![chat(7)]);
+        app.select_chat(0);
+        app.conversation.vim.set_total(5);
+        app.conversation.vim.set_cursor(3);
+        let mut viewers = Viewers::default();
+        let gate = viewers.gate.clone();
+        let mut viewer = FakeViewer::default();
+        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+        assert!(!gate.is_open(), "gated while the viewer has the terminal");
+        let done = next_done(&mut rx);
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("nothing is queued");
+
+        assert!(gate.is_open(), "the reader reads again after the return");
+        assert_eq!(app.current_chat_id(), 7);
+        assert_eq!(app.conversation.vim.cursor(), 3);
+        assert_eq!(
+            viewer.log,
+            ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"],
+            "one resume, no restart, no kill"
+        );
+        assert!(rx.try_recv().is_err(), "the wait reported exactly once");
+    }
 }
