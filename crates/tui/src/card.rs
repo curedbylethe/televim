@@ -44,6 +44,7 @@ use domain::selection::Selection;
 use ratatui::text::Line;
 
 use crate::app::{AccountState, App, SessionStore};
+use crate::bidi::{self, BidiMode};
 use crate::presence::wording;
 use crate::rows;
 use crate::text_row::{self, Ink, TextRow};
@@ -494,7 +495,7 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
                 spans.push(ratatui::text::Span::raw(" ".repeat(VALUE_X)));
             }
 
-            spans.extend(text_row::spans(&TextRow {
+            let value = TextRow {
                 text: &row.value,
                 range: range.clone(),
                 matched: false,
@@ -511,7 +512,19 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
                 // password.
                 concealed: false,
                 ink,
-            }));
+            };
+            // Same split as a message row: the terminal reverses a right-to-left
+            // run itself in `Terminal`, so the value goes out in stored order, one
+            // cluster per span; in `Visual` the value is permuted here, with the
+            // base direction of the whole value and not of this line.
+            spans.extend(match app.bidi() {
+                BidiMode::Terminal => text_row::per_cluster(text_row::spans(&value)),
+                BidiMode::Visual => {
+                    let base = bidi::base_direction(&row.value);
+                    let pieces = bidi::visual_row_in(&row.value, range.clone(), base);
+                    text_row::spans_permuted(&value, &pieces)
+                }
+            });
 
             out.push((index, Line::from(spans)));
         }
@@ -989,6 +1002,32 @@ mod drawing {
                 .any(|span| span.content.contains(CUE)),
             "and only the first carries the row's name"
         );
+    }
+
+    /// The account's bio drawn as a right-to-left value, in the given bidi mode.
+    fn rtl_bio_screen(bidi: crate::bidi::BidiMode) -> String {
+        let mut app = self_card().with_bidi(bidi);
+        if let crate::app::AccountState::Known(account) = &mut app.session.account {
+            account.bio = Some("سلام".to_owned());
+        }
+        rows_of(&screen(&app, 40)).join("\n")
+    }
+
+    /// Terminal mode emits the value in stored order and leaves the reversal to the
+    /// terminal, so the whole word is on the screen as written.
+    #[test]
+    fn a_right_to_left_value_is_drawn_whole_in_terminal_mode() {
+        let text = rtl_bio_screen(crate::bidi::BidiMode::Terminal);
+        assert!(text.contains("سلام"), "in stored order and whole: {text}");
+    }
+
+    /// Visual mode draws the value itself, so a right-to-left value is reversed in
+    /// full: the card had no permutation at all, and the word came out as stored.
+    #[test]
+    fn a_right_to_left_value_is_drawn_reversed_in_visual_mode() {
+        let text = rtl_bio_screen(crate::bidi::BidiMode::Visual);
+        assert!(text.contains("مالس"), "reversed and whole: {text}");
+        assert!(!text.contains("سلام"), "and not in stored order: {text}");
     }
 
     /// The cursor row is reverse video, and **the inline caret on it is not** —
