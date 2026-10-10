@@ -226,6 +226,26 @@ pub fn spans<'a>(row: &TextRow<'a>) -> Vec<Span<'a>> {
     paint(row, std::slice::from_ref(&row.range))
 }
 
+/// The same spans, each split into one span per grapheme cluster, in the same
+/// order and with the same styles.
+///
+/// ratatui sizes a span by its whole text, and `unicode-width` sizes a
+/// lam-alef pair as one column, so `"سلام"` in one span is three columns and
+/// four glyphs. Measured one cluster at a time it is four, which is what the
+/// terminal draws. A span boundary inside a word is invisible to the reader.
+#[must_use]
+pub fn per_cluster(spans: Vec<Span<'_>>) -> Vec<Span<'_>> {
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        let style = span.style;
+        out.extend(
+            crate::grapheme::clusters(&span.content)
+                .map(|(_, cluster)| Span::styled(cluster.to_owned(), style)),
+        );
+    }
+    out
+}
+
 /// The spans for one row drawn in the order [`Chunk`]s name, rather than the
 /// order the row is stored in.
 ///
