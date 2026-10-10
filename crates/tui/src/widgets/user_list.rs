@@ -70,6 +70,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
 use crate::app::{App, Focus};
+use crate::bidi::{self, BidiMode};
+use crate::text_row;
 use crate::wrap::columns;
 use domain::user::UserCandidate;
 
@@ -179,6 +181,9 @@ fn candidate_row<'a>(
     let mut used = 0;
 
     let mut spans = Vec::new();
+    // The name is the only text a reader writes in either direction, so it is the
+    // only part the bidi mode reorders; the handle is ASCII and the chrome is
+    // never permuted.
     used += push_marked(
         &mut spans,
         &candidate.display_name,
@@ -186,6 +191,7 @@ fn candidate_row<'a>(
         base,
         mark,
         budget.saturating_sub(used),
+        app.bidi(),
     );
 
     if let Some(username) = candidate.username.as_deref() {
@@ -200,6 +206,7 @@ fn candidate_row<'a>(
                 quiet,
                 mark,
                 budget.saturating_sub(used),
+                BidiMode::Terminal,
             );
         }
     }
@@ -226,15 +233,56 @@ fn push_marked<'a>(
     base: Style,
     mark: Style,
     budget: usize,
+    mode: BidiMode,
 ) -> usize {
     if budget == 0 || text.is_empty() {
         return 0;
     }
 
     let cut = fit_columns(text, budget);
-    let slice = &text[..cut];
-    spans.extend(marked(slice, fragment, base, mark));
-    columns(slice)
+    spans.extend(marked_in(text, 0..cut, fragment, base, mark, mode));
+    columns(&text[..cut])
+}
+
+/// [`marked`] over `text[range]`, in the order `mode` draws it. Under
+/// [`BidiMode::Terminal`] the spans are split per cluster, so a cluster the terminal
+/// draws whole is never cut across two cells.
+///
+/// Under [`BidiMode::Visual`] the range is laid out by runs in visual order, the
+/// way a conversation row is, with the whole text's direction. A run is inked
+/// `mark` when it overlaps a match of the fragment: the run is the unit that is
+/// drawn, so a match is shown on whichever runs it touches rather than split
+/// from them.
+fn marked_in<'a>(
+    text: &'a str,
+    range: Range<usize>,
+    fragment: Option<&str>,
+    base: Style,
+    mark: Style,
+    mode: BidiMode,
+) -> Vec<Span<'a>> {
+    match mode {
+        BidiMode::Terminal => text_row::per_cluster(marked(&text[range], fragment, base, mark)),
+        BidiMode::Visual => {
+            let hits: Vec<Range<usize>> = fragment
+                .filter(|f| !f.is_empty())
+                .map(|f| match_ranges(&text[range.clone()], f))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|hit| hit.start + range.start..hit.end + range.start)
+                .collect();
+
+            bidi::visual_row_in(text, range.clone(), bidi::base_direction(text))
+                .into_iter()
+                .map(|piece| {
+                    let inked = hits
+                        .iter()
+                        .any(|hit| hit.start < piece.logical.end && piece.logical.start < hit.end);
+                    Span::styled(&text[piece.logical], if inked { mark } else { base })
+                })
+                .collect()
+        }
+    }
 }
 
 /// The byte index of the longest prefix of `text` that fits `max` columns.
@@ -597,5 +645,37 @@ mod tests {
         );
         let shown = flat(&screen(&app, 80, 24));
         assert!(!shown.contains("Noor Haddad"), "{shown}");
+    }
+
+    const ARABIC: &str = "سلام";
+
+    /// The overlay with one candidate named [`ARABIC`], drawn under `mode`.
+    fn arabic_name(mode: BidiMode) -> App {
+        showing(vec![candidate(7, ARABIC, None)]).with_bidi(mode)
+    }
+
+    #[test]
+    fn a_terminal_name_is_drawn_in_logical_order_in_full() {
+        let app = arabic_name(BidiMode::Terminal);
+
+        let buffer = screen(&app, 80, 24);
+
+        assert!(
+            row_with(&buffer, ARABIC).is_some(),
+            "the name is drawn as stored"
+        );
+    }
+
+    #[test]
+    fn a_visual_name_is_drawn_reversed_in_full() {
+        let app = arabic_name(BidiMode::Visual);
+        let reversed: String = ARABIC.chars().rev().collect();
+
+        let buffer = screen(&app, 80, 24);
+
+        assert!(
+            row_with(&buffer, &reversed).is_some(),
+            "the name is in visual order"
+        );
     }
 }
