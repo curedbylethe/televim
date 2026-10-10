@@ -658,8 +658,8 @@ no bold, italic or underline (there is no second weight or slant in this surface
    body, so it starts the body column on the row that carries `[you]`/`[them]` (when
    the message opens its group) and a reply's quote prefix. It never moves to a row of
    its own below a caption or a status.
-2. **Soft-wrap rules are unchanged.** Rows break by cell width, at a space, in logical
-   order. A token has no space and is seven cells at most, and the body panel is never
+2. **Soft-wrap rules are unchanged.** Rows break by cell width, at a space or after a
+   ZWNJ (U+200C), in logical order. A token has no space and is seven cells at most, and the body panel is never
    narrower than `MIN_BODY_WIDTH` (8), so a token is **never split**: it is one atomic
    row. What can wrap is its neighbours: when the last row has no room for a trailing
    note, the note takes a row of its own below it (the `[failed: file exceeds the 2 GB
