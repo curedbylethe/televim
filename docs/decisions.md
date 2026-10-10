@@ -948,3 +948,16 @@ are in [`../AGENTS.md`](../AGENTS.md).
   machine does not know is not something the program can name. When the platform
   will not say what the zone is, the offset is UTC, which is what every label
   showed before the zone was read at all.
+- **Why the viewer's wait runs on a std thread while the loop keeps running:** the
+  viewer holds the terminal until someone closes it, and waiting for that on the
+  loop parked the one current-thread runtime, so network stopped, queued media
+  stacked behind it, and ctrl+c was the only way back. The wait is a plain thread
+  because `status()` blocks and the runtime must stay current-thread (AGENTS rule
+  6). It reports one `AppEvent::Viewer` when it ends, and the terminal is resumed
+  once for that report whichever way the wait ended. The keyboard reader is gated
+  (`ReaderGate`) from the moment the terminal is given away until it is back, so
+  keys typed into the viewer are not taken by the program; a key already read is
+  held and delivered after the return, not dropped. Queued paths open one viewer at
+  a time. What this does not settle is which process exits first on Linux and
+  Windows, where the opener may return before the viewer: that is reported as the
+  opener's exit, and the limits are in `docs/known-gaps.md`.
