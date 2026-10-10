@@ -254,9 +254,10 @@ Real, and named so they are not mistaken for oversights:
   unblocked for the screen-level half. It still cannot show how the user's own
   terminal shapes or draws the bytes: `termlens` reads the screen through its
   emulator, not through a shaping terminal. The input bar's right-to-left
-  tests inherit the same ceiling whole: they drive `BidiMode::Visual` only, and
-  the default path is pinned by the ASCII tests beside them, which cannot tell a
-  shaper's reorder from no reorder at all.
+  tests inherit the same ceiling whole: the glyph-order tests drive
+  `BidiMode::Visual` only, and the default path is pinned by the ASCII tests beside
+  them, which cannot tell a shaper's reorder from no reorder at all. The caret tests
+  after an Arabic draft run in both modes and check cell positions, not glyph shape.
 - **The new-chat prompt's prefix and the status sentence's punctuation differ
   between the model and the binary.** The revised design run agrees with the
   binary on the invocation (`/` on the chat list, `:new <query>`), the
@@ -288,9 +289,6 @@ Real, and named so they are not mistaken for oversights:
   to the existing `[you]` tag and `text-dim` vocabulary; no OpenDesign artifact
   was commissioned for it. `DESIGN.md` mirrors the OpenDesign project, so an entry
   there is a `make design-push`, which edits the project, and it waits for that call.
-- **The draft row's `BidiMode::Visual` path has no test.** `draft_items` permutes
-  the words the way `message_row` does, but no test in `widgets/conversation.rs`
-  sets that mode on a draft; the draft tests all run in the default mode.
 - **The session file's key has no prompt.** The key is `TELEVIM_SESSION_PASSPHRASE`
   or the OS keyring and nothing else, so a machine with neither ends at `offline:`
   and the reader sets the variable and types `:retry`. An interactive launch-time
