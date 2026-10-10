@@ -14,6 +14,8 @@
 //! The window is stateless: it scrolls just far enough to keep the cursor on
 //! screen, so nothing about where it sits is kept between frames.
 
+use std::ops::Range;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -21,6 +23,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::app::{App, Focus};
+use crate::bidi::{self, BidiMode, Chunk};
+use crate::text_row::{self, TextRow};
 use crate::wrap::columns;
 use domain::global_search::GlobalHit;
 
@@ -155,10 +159,17 @@ fn message_line(
     )];
     let mut used = columns(&format!("  {time:<5}  {tag:<6} "));
 
-    for (text, matched) in snippet(hit.display_body(), query, SNIPPET_CELLS) {
-        used += columns(&text);
-        let style = if matched { theme.match_hit } else { theme.text };
-        spans.push(Span::styled(text, paint(style)));
+    // The ellipses are chrome, drawn outside the reorder; only the body is permuted.
+    let snip = snippet(hit.display_body(), query, SNIPPET_CELLS);
+    let ellipsis = |shown: bool| shown.then(|| Span::styled("…", theme.text));
+    let body = snippet_spans(app, hit.display_body(), &snip.body);
+    for span in ellipsis(snip.lead)
+        .into_iter()
+        .chain(body)
+        .chain(ellipsis(snip.trail))
+    {
+        used += columns(&span.content);
+        spans.push(Span::styled(span.content.into_owned(), paint(span.style)));
     }
 
     spans.push(Span::styled(
@@ -168,13 +179,20 @@ fn message_line(
     Line::from(spans)
 }
 
-/// Cuts `text` to at most `cells` cells, centred on the first match of `query`,
-/// and returns it as runs: each run is text and whether it is a match.
+/// A snippet: the body runs, each text and whether it is a match, and whether the
+/// text was cut at either end. The cut ends are the caller's to draw.
+struct Snippet {
+    lead: bool,
+    body: Vec<(String, bool)>,
+    trail: bool,
+}
+
+/// Cuts `text` to at most `cells` cells, centred on the first match of `query`.
 ///
 /// Matching is case-insensitive and every match in the window is a run of its
-/// own. A cut end is marked with `…`. A row always shows its first match: the
+/// own. A cut end is reported, not drawn. A row always shows its first match: the
 /// window is chosen around it, and only a match wider than the snippet is cut.
-fn snippet(text: &str, query: &str, cells: usize) -> Vec<(String, bool)> {
+fn snippet(text: &str, query: &str, cells: usize) -> Snippet {
     let chars: Vec<char> = text
         .chars()
         .map(|c| if c == '\n' { ' ' } else { c })
@@ -202,17 +220,82 @@ fn snippet(text: &str, query: &str, cells: usize) -> Vec<(String, bool)> {
         _ => runs.push((ch.to_string(), matched)),
     };
 
-    if start > 0 {
-        push('…', false);
-    }
     for (index, &ch) in chars.iter().enumerate().take(end).skip(start) {
         let matched = found.iter().any(|&(s, e)| (s..e).contains(&index));
         push(ch, matched);
     }
-    if end < chars.len() {
-        push('…', false);
+    Snippet {
+        lead: start > 0,
+        body: runs,
+        trail: end < chars.len(),
     }
-    runs
+}
+
+/// The snippet's body, drawn in the order the message's direction asks for.
+///
+/// The direction is the whole message's, not the snippet's: a row of an
+/// all-neutral snippet carries no evidence of its own. Under
+/// [`BidiMode::Terminal`] the runs are emitted as they are stored, split per
+/// cluster; under [`BidiMode::Visual`] each piece of the reordered snippet keeps
+/// its match, so a match follows its own characters across the reorder.
+fn snippet_spans(app: &App, message: &str, runs: &[(String, bool)]) -> Vec<Span<'static>> {
+    // The runs laid end to end, so each one is a byte range the text_row functions
+    // can paint.
+    let flat: String = runs.iter().map(|(run, _)| run.as_str()).collect();
+    let mut ranges: Vec<(Range<usize>, bool)> = Vec::with_capacity(runs.len());
+    let mut at = 0;
+    for (run, matched) in runs {
+        ranges.push((at..at + run.len(), *matched));
+        at += run.len();
+    }
+
+    let text = flat.as_str();
+    let ink = text_row::Ink::readonly(&app.ui.theme);
+    let row = |range: Range<usize>, matched: bool| TextRow {
+        ink,
+        text,
+        range,
+        matched,
+        selected: None,
+        caret: None,
+        concealed: false,
+        reversed: false,
+    };
+
+    let drawn = match app.bidi() {
+        BidiMode::Terminal => ranges
+            .iter()
+            .flat_map(|(range, matched)| {
+                text_row::per_cluster(text_row::spans(&row(range.clone(), *matched)))
+            })
+            .collect::<Vec<_>>(),
+        BidiMode::Visual => {
+            let base = bidi::base_direction(message);
+            let mut drawn = Vec::new();
+            for chunk in bidi::visual_row(text, base) {
+                // A chunk is a forward slice of the snippet, so cutting it at the
+                // run boundaries keeps the pieces in the order they are drawn.
+                for (range, matched) in &ranges {
+                    let logical =
+                        chunk.logical.start.max(range.start)..chunk.logical.end.min(range.end);
+                    if logical.is_empty() {
+                        continue;
+                    }
+                    let piece = [Chunk {
+                        cells: columns(&text[logical.clone()]),
+                        logical: logical.clone(),
+                    }];
+                    drawn.extend(text_row::spans_permuted(&row(logical, *matched), &piece));
+                }
+            }
+            drawn
+        }
+    };
+
+    drawn
+        .into_iter()
+        .map(|span| Span::styled(span.content.into_owned(), span.style))
+        .collect()
 }
 
 /// Every non-overlapping match of `needle` in `chars`, as character ranges.
@@ -287,13 +370,113 @@ fn window(
 #[cfg(test)]
 mod tests {
     use super::{find_matches, snippet};
+    use crate::app::App;
+    use crate::bidi::BidiMode;
+    use domain::global_search::GlobalHit;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    /// Arabic, logical: one word, four glyphs.
+    const ARABIC: &str = "سلام";
+
+    /// A hit whose text is the Arabic word, from someone else, so the row is tagged
+    /// `[them]` and it is the only message row on the screen.
+    fn arabic_hit() -> GlobalHit {
+        GlobalHit {
+            chat_id: 1,
+            message_id: 1,
+            text: ARABIC.to_owned(),
+            media: None,
+            sent_at: None,
+            outgoing: false,
+        }
+    }
+
+    /// The screen's row that carries the sender tag, as its cells read left to right.
+    fn hit_screen(mode: BidiMode) -> (Buffer, u16) {
+        let mut app = App::mock().with_bidi(mode);
+        app.begin_global_search("لا");
+        assert!(app.adopt_global_search("لا", vec![arabic_hit()], 1, 0));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("the backend builds");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("the frame draws");
+        let buffer = terminal.backend().buffer().clone();
+
+        let y = (0..buffer.area.height)
+            .find(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("[them]")
+            })
+            .expect("the hit's row is on screen");
+        (buffer, y)
+    }
+
+    /// The screen's row that carries the sender tag, as its cells read left to right.
+    fn hit_row(mode: BidiMode) -> String {
+        let (buffer, y) = hit_screen(mode);
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_match_follows_its_letters_across_the_visual_reorder() {
+        let (buffer, y) = hit_screen(BidiMode::Visual);
+        let fg_of = |glyph: &str| {
+            (0..buffer.area.width)
+                .find(|&x| buffer[(x, y)].symbol() == glyph)
+                .map(|x| buffer[(x, y)].fg)
+                .expect("the glyph is on the row")
+        };
+
+        let match_fg = App::mock()
+            .ui
+            .theme
+            .match_hit
+            .fg
+            .expect("a match is a foreground");
+        assert_eq!(fg_of("ل"), match_fg, "the match's first letter");
+        assert_eq!(fg_of("ا"), match_fg, "the match's second letter");
+        assert_ne!(fg_of("س"), match_fg, "the plain letter is not a match");
+    }
+
+    #[test]
+    fn a_right_to_left_hit_is_drawn_in_logical_order_in_terminal_mode() {
+        let row = hit_row(BidiMode::Terminal);
+        assert!(
+            row.contains(ARABIC),
+            "the word is whole and in order: {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_right_to_left_hit_is_drawn_reversed_in_visual_mode() {
+        let row = hit_row(BidiMode::Visual);
+        let reversed: String = ARABIC.chars().rev().collect();
+        assert!(
+            row.contains(&reversed),
+            "the word is drawn reversed: {row:?}"
+        );
+        assert!(!row.contains(ARABIC), "and not in logical order: {row:?}");
+        assert!(row.contains("[them]"), "the tag is not permuted: {row:?}");
+    }
 
     /// The snippet's text, with its match runs wrapped in `[` `]`, for asserting.
     fn marked(text: &str, query: &str, cells: usize) -> String {
-        snippet(text, query, cells)
+        let snip = snippet(text, query, cells);
+        let body: String = snip
+            .body
             .into_iter()
             .map(|(run, matched)| if matched { format!("[{run}]") } else { run })
-            .collect()
+            .collect();
+        let lead = if snip.lead { "…" } else { "" };
+        let trail = if snip.trail { "…" } else { "" };
+        format!("{lead}{body}{trail}")
     }
 
     #[test]
@@ -328,8 +511,8 @@ mod tests {
     #[test]
     fn the_snippet_never_exceeds_its_cells() {
         let text = "é".repeat(200);
-        let runs = snippet(&text, "zzz", 62);
-        let cells: usize = runs.iter().map(|(run, _)| run.chars().count()).sum();
+        let snip = snippet(&text, "zzz", 62);
+        let cells: usize = snip.body.iter().map(|(run, _)| run.chars().count()).sum();
         assert!(cells <= 62, "{cells} cells");
     }
 }

@@ -1242,6 +1242,82 @@ mod tests {
         );
     }
 
+    /// An Arabic draft's caret sits on the cell after the last glyph drawn, under
+    /// the default mode. Its column is `wrap::columns` over the text in front of
+    /// it, which counts a cluster at a time, and the glyphs are drawn one cluster
+    /// to a cell, so the two must agree or the caret lands on the wrong letter.
+    #[test]
+    fn a_caret_after_an_arabic_draft_is_drawn_after_its_last_glyph() {
+        let mut terminal = App::mock();
+        press(&mut terminal, KeyCode::Char('i'));
+        type_text(&mut terminal, "سلام");
+
+        let buffer = screen(&terminal, 80, 24);
+        let top = bar_top(&rows_of(&buffer)) as u16;
+        let body = top + 1;
+        let caret = carets(&buffer, top);
+        assert_eq!(caret.len(), 1, "one caret on the draft: {caret:?}");
+        let (caret_x, caret_y, _) = caret[0];
+        assert_eq!(caret_y, body, "the caret is on the draft's row");
+
+        // Four glyphs, one cell each, starting at the bar's first column.
+        let glyphs: Vec<String> = (1..=4)
+            .map(|x| buffer[(x, body)].symbol().to_owned())
+            .collect();
+        assert_eq!(
+            glyphs,
+            ["س", "ل", "ا", "م"],
+            "the draft is drawn a glyph to a cell"
+        );
+        assert_eq!(
+            caret_x,
+            5,
+            "the caret is on the cell after the last drawn glyph: {:?}",
+            rows_of(&buffer)
+        );
+        assert_eq!(
+            u16::try_from(terminal.input.line.laid_out(78).column).expect("a column fits a u16"),
+            4,
+            "the caret column counts four clusters, as the glyphs are drawn"
+        );
+    }
+
+    /// The same draft under [`BidiMode::Visual`]: the glyphs are drawn in reverse,
+    /// and the caret at the logical end of the draft is the cell in front of the
+    /// first of them, which is the leftmost cell of the row.
+    #[test]
+    fn a_caret_after_an_arabic_draft_is_drawn_at_its_logical_end_in_visual_mode() {
+        let mut visual = App::mock().with_bidi(BidiMode::Visual);
+        press(&mut visual, KeyCode::Char('i'));
+        type_text(&mut visual, "سلام");
+
+        let buffer = screen(&visual, 80, 24);
+        let top = bar_top(&rows_of(&buffer)) as u16;
+        let body = top + 1;
+        let caret = carets(&buffer, top);
+        assert_eq!(caret.len(), 1, "one caret on the draft: {caret:?}");
+        let (caret_x, caret_y, _) = caret[0];
+        assert_eq!(caret_y, body, "the caret is on the draft's row");
+
+        // The layout's own column for the caret, offset by the bar's border.
+        let column = visual
+            .input
+            .line
+            .laid_out_in(78, BidiMode::Visual)
+            .visual_column
+            .expect("a visual column under Visual mode");
+        assert_eq!(
+            caret_x,
+            1 + u16::try_from(column).expect("a column fits a u16"),
+            "the painted caret is at the column the layout reports"
+        );
+        let glyphs: String = (1..=5)
+            .filter(|x| *x != caret_x)
+            .map(|x| buffer[(x, body)].symbol())
+            .collect();
+        assert_eq!(glyphs, "مالس", "the four glyphs, drawn right to left");
+    }
+
     /// A draft that reads left to right is the same row whichever mode draws it:
     /// the permutation is a no-op on left-to-right text, so the bar is not asked
     /// to do anything different and the default path is untouched.

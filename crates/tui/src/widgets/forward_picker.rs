@@ -18,6 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::app::App;
+use crate::widgets::chat_list;
 
 /// The header line for `count` messages, in the words the design gives.
 fn header(count: usize) -> String {
@@ -65,12 +66,11 @@ pub fn render(app: &App, conversation: Rect, frame: &mut Frame<'_>) {
                 .as_deref()
                 .unwrap_or_default()
                 .replace('\n', " ");
-            ListItem::new(Line::from(vec![
-                Span::styled(pin, app.ui.theme.text),
-                Span::styled(chat.title.clone(), app.ui.theme.text),
-                Span::styled("  ", app.ui.theme.text_dim),
-                Span::styled(preview, app.ui.theme.text_dim),
-            ]))
+            let mut spans = vec![Span::styled(pin, app.ui.theme.text)];
+            spans.extend(chat_list::drawn(app, &chat.title, app.ui.theme.text));
+            spans.push(Span::styled("  ", app.ui.theme.text_dim));
+            spans.extend(chat_list::drawn(app, &preview, app.ui.theme.text_dim));
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -90,6 +90,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use crate::app::Mode;
+    use crate::bidi::BidiMode;
     use crate::state::conversation::Forwarding;
     use domain::selection::Selection;
 
@@ -252,6 +253,49 @@ mod tests {
         assert!(
             row_of(&buffer, "Forward").is_none(),
             "no header without a picker"
+        );
+    }
+
+    const ARABIC: &str = "سلام";
+
+    /// The picker over the first message, with the first chat titled in Arabic
+    /// and drawn under `mode`.
+    fn picking_arabic(mode: BidiMode) -> App {
+        let mut app = App::mock().with_bidi(mode);
+        let mut chats = app.chats().to_vec();
+        chats[0].title = ARABIC.into();
+        app.set_chats(chats);
+        app.set_selection(Selection::at(1, None));
+        app.ui.set_mode(Mode::Visual);
+        app.conversation.open_forward(Forwarding {
+            ids: vec![1],
+            skipped: 0,
+        });
+        app
+    }
+
+    #[test]
+    fn a_terminal_title_is_drawn_in_logical_order_in_full() {
+        let app = picking_arabic(BidiMode::Terminal);
+
+        let buffer = screen(&app, 80, 24);
+
+        assert!(
+            row_of(&buffer, ARABIC).is_some(),
+            "the title is drawn as stored"
+        );
+    }
+
+    #[test]
+    fn a_visual_title_is_drawn_reversed_in_full() {
+        let app = picking_arabic(BidiMode::Visual);
+        let reversed: String = ARABIC.chars().rev().collect();
+
+        let buffer = screen(&app, 80, 24);
+
+        assert!(
+            row_of(&buffer, &reversed).is_some(),
+            "the title is in visual order"
         );
     }
 }

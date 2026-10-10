@@ -635,7 +635,7 @@ fn message_row<'m>(
         concealed: false,
     };
     match app.bidi() {
-        BidiMode::Terminal => spans.extend(text_row::spans(&row)),
+        BidiMode::Terminal => spans.extend(text_row::per_cluster(text_row::spans(&row))),
         BidiMode::Visual => {
             // One direction for the whole message, one permutation per row: the
             // base level is the message's, and a row of an all-neutral message
@@ -1619,6 +1619,70 @@ mod tests {
                 body_row(&screen, y)
             );
         }
+    }
+
+    /// The Terminal path draws a right-to-left row in logical order, and every
+    /// glyph of it lands in its own cell: a lam-alef pair must not cost the row
+    /// its last letter.
+    ///
+    /// `TestBackend` proves cell placement only. It has no shaper, so this says
+    /// nothing about how a real terminal joined or drew the glyphs.
+    #[test]
+    fn a_terminal_row_keeps_every_glyph_of_a_lam_alef_word_in_its_cell() {
+        let plain = screen(&showing(vec![at(2, 60, true, "abcd")]), 80, 24);
+        let app = showing(vec![at(2, 60, true, ARABIC)]);
+        let screen = screen(&app, 80, 24);
+
+        let first = text_column(&screen, FIRST, "you");
+        let columns: Vec<u16> = spelled(&screen, FIRST, first, ARABIC)
+            .iter()
+            .map(|(x, _)| *x)
+            .collect();
+
+        assert_eq!(
+            letters_at(&screen, FIRST, &columns),
+            ARABIC,
+            "all four glyphs of {ARABIC:?} are in cells, in logical order: {:?}",
+            body_row(&screen, FIRST)
+        );
+        // The note is right-aligned, so it must stand where it stands on a row
+        // of four one-column letters: the gap before it is measured from the
+        // same width the glyphs were drawn with.
+        // A column, not a byte: the Arabic is two bytes a glyph and one cell.
+        let note_column = |buffer: &Buffer| {
+            let line: Vec<char> = row(buffer, FIRST).chars().collect();
+            let clock: Vec<char> = clock_at(60).chars().collect();
+            line.windows(clock.len())
+                .position(|w| w == clock.as_slice())
+        };
+        assert_eq!(
+            note_column(&screen),
+            note_column(&plain),
+            "the note is in the column it has on a four-cell row: {:?} vs {:?}",
+            row(&screen, FIRST),
+            row(&plain, FIRST)
+        );
+    }
+
+    /// The regression guard for the same word under `BidiMode::Visual`: the fix
+    /// for the Terminal path must not change what the permuted path draws.
+    #[test]
+    fn a_visual_row_of_a_lam_alef_word_is_still_drawn_reversed_in_full() {
+        let app = showing(vec![at(2, 60, true, ARABIC)]).with_bidi(BidiMode::Visual);
+        let screen = screen(&app, 80, 24);
+
+        let first = text_column(&screen, FIRST, "you");
+        let columns: Vec<u16> = spelled(&screen, FIRST, first, ARABIC)
+            .iter()
+            .map(|(x, _)| *x)
+            .collect();
+
+        assert_eq!(
+            letters_at(&screen, FIRST, &columns),
+            in_drawing_order(ARABIC, true),
+            "the permuted row is unchanged, and every glyph is in a cell: {:?}",
+            body_row(&screen, FIRST)
+        );
     }
 
     /// A permuted row is the same row: same height, same geometry, same trailing
@@ -3192,6 +3256,25 @@ mod tests {
             !row(&screen, y + 1).contains('['),
             "and carries no tag: {}",
             row(&screen, y + 1)
+        );
+    }
+
+    /// The draft row's `BidiMode::Visual` path, which no test used to reach. A
+    /// regression guard, not a fix: the permutation already held, and `TestBackend`
+    /// proves only that the reversed word reached the cells, not how a terminal
+    /// shaped it.
+    #[test]
+    fn a_right_to_left_draft_is_drawn_reversed_in_full_under_visual() {
+        let app =
+            drafting(vec![at(1, 0, false, "the pier at six")], ARABIC).with_bidi(BidiMode::Visual);
+        let screen = screen(&app, 80, 24);
+        let y = draft_row(&app).expect("the draft is laid out");
+        let expected = format!("[you|draft] {}", in_drawing_order(ARABIC, true));
+
+        assert!(
+            row(&screen, y).contains(&expected),
+            "the draft is reversed in full: {}",
+            row(&screen, y)
         );
     }
 
