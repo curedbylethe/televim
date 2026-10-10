@@ -3259,6 +3259,25 @@ mod tests {
         );
     }
 
+    /// The draft row's `BidiMode::Visual` path, which no test used to reach. A
+    /// regression guard, not a fix: the permutation already held, and `TestBackend`
+    /// proves only that the reversed word reached the cells, not how a terminal
+    /// shaped it.
+    #[test]
+    fn a_right_to_left_draft_is_drawn_reversed_in_full_under_visual() {
+        let app =
+            drafting(vec![at(1, 0, false, "the pier at six")], ARABIC).with_bidi(BidiMode::Visual);
+        let screen = screen(&app, 80, 24);
+        let y = draft_row(&app).expect("the draft is laid out");
+        let expected = format!("[you|draft] {}", in_drawing_order(ARABIC, true));
+
+        assert!(
+            row(&screen, y).contains(&expected),
+            "the draft is reversed in full: {}",
+            row(&screen, y)
+        );
+    }
+
     #[test]
     fn in_follow_mode_a_draft_is_drawn_at_the_bottom_of_a_taller_conversation() {
         use ratatui::style::Modifier;
