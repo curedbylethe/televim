@@ -45,6 +45,13 @@ measure: ## Measure RSS at idle, startup, input latency, and binary size
 # baseline and fails past it. Separate from `measure` because it reads a report
 # rather than producing one, so CI can run them as two steps and keep the
 # artifact even when the comparison fails.
+# Drives the debug binary in kitty and saves right-to-left screenshots under
+# target/rtl-shots. Not part of `ci`: it needs a GUI, kitty and Screen Recording
+# permission for the terminal running it. Requires `make build` first.
+.PHONY: rtl-shots
+rtl-shots: ## Screenshot the RTL scenes in kitty (macOS, needs Screen Recording)
+	scripts/rtl/kitty_shots.py
+
 .PHONY: measure-check
 measure-check: ## Check the last measurement against the stored baseline
 	scripts/memory/check.py

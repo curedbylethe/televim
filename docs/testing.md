@@ -186,6 +186,14 @@ below.
   [`known-gaps.md`](./known-gaps.md). Their bodies are empty, so
   `--include-ignored` passes them without proving anything. Rendering of other
   keystroke flows is still covered by `tui`'s `TestBackend` tests.
+- **RTL Screenshots:** `make rtl-shots` (`scripts/rtl/kitty_shots.py`) launches the
+  debug binary in kitty, types into it through `kitty @`, and crops a screenshot of the
+  window to `target/rtl-shots/`. It writes the cell text beside each image. It shows
+  what a shaping terminal draws, which `TestBackend` and the pty tests cannot. It is
+  **not** in `ci`: it needs kitty, macOS, and Screen Recording permission for the
+  terminal that runs it. Offline it reaches the chat list and the input bar only;
+  conversation rows need a signed-in account. Nothing compares the images
+  automatically yet; they are read by a person.
 - **Memory Verification:** implemented as `make measure`, not as part of `ci`.
   The driver (`scripts/memory/measure.py`) builds the release binary and
   `crates/app/examples/memory_harness.rs`, runs the harness five times, launches
