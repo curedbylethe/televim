@@ -356,10 +356,10 @@ impl LineEditor {
     /// Two columns and one answer about a right-to-left row: [`LaidOut::column`]
     /// stays logical — it is the one every motion in this module is counted in,
     /// and the one that is right whatever order the row is drawn in — and
-    /// [`LaidOut::visual_column`] is `Some` only under [`BidiMode::Visual`],
-    /// where this program draws the row permuted and something outside the line
-    /// (the emoji popup) has to anchor itself where the caret is actually
-    /// painted.
+    /// [`LaidOut::visual_column`] is where the caret is actually painted, for
+    /// something outside the line (the emoji popup) to anchor itself on. Under
+    /// `Visual` and `Words` this program permutes the row; under `Terminal` the
+    /// terminal reverses each right-to-left run in place.
     ///
     /// It is the same rows and the same row the same `column` names either way.
     /// `BidiMode` is a fact about the terminal, not about the text, and nothing
@@ -392,7 +392,12 @@ impl LineEditor {
         // same `columns` the row was measured with, over the slice in front of
         // the caret.
         let column = columns(&self.text[range.start..at]);
-        let visual_column = mode.is_visual().then(|| {
+        // The cell the caret is painted on. Under `Visual` and `Words` this
+        // program permutes the row; under `Terminal` the terminal does, one
+        // cell per cluster and runs reversed in place, which is the row read
+        // with a left-to-right base. Either way it is a drawn width and not the
+        // string's, so a popup anchored on `column` drifts on lam-alef.
+        let visual_column = if mode.is_visual() {
             caret_visual_column(
                 &self.text,
                 range,
@@ -400,7 +405,15 @@ impl LineEditor {
                 mode,
                 bidi::base_direction(&self.text),
             )
-        });
+        } else {
+            caret_visual_column(
+                &self.text,
+                range,
+                at,
+                BidiMode::Visual,
+                bidi::Direction::Ltr,
+            )
+        };
 
         LaidOut {
             rows,
@@ -1015,18 +1028,19 @@ pub struct LaidOut {
     /// left-to-right draft.
     pub column: usize,
 
-    /// How many columns into that row the caret is **painted**, where the row is
-    /// drawn permuted.
+    /// How many cells into that row the caret is **painted**.
     ///
-    /// `None` unless [`LineEditor::laid_out_in`] was given
-    /// [`BidiMode::Visual`]: under the default the terminal does the reordering
-    /// and this program has no answer, so it says none rather than a number that
-    /// would be right on a different terminal than the one it is drawn on.
+    /// Counted in drawn cells, one per cluster, not in [`columns`] of the string:
+    /// `سلام` is three columns as a string and four cells as drawn. Under
+    /// [`BidiMode::Terminal`] it is the row read with a left-to-right base, each
+    /// right-to-left run reversed in place, which is what a terminal that
+    /// reverses runs one at a time (kitty) paints and what the input bar's caret
+    /// overlay is placed by.
     ///
     /// Cluster-level, by the same mapping the paint uses: the caret is a byte
     /// offset, the row is drawn a cluster at a time, and a caret inside a
     /// cluster is painted at the cluster that holds it.
-    pub visual_column: Option<usize>,
+    pub visual_column: usize,
 }
 
 /// The column the caret at `at` is **painted** in, on the row `row` of `text`

@@ -50,13 +50,10 @@ fn popup_area(app: &App, above: Rect, bar: Rect, frame: Rect) -> Option<Rect> {
 
     let width = bar.width.saturating_sub(2).max(1);
     let laid_out = app.input.line.laid_out_in(width, app.bidi());
-    // Where the caret is **painted**, which under [`crate::bidi::BidiMode::Visual`]
-    // is not where it sits in the string: the row reaches the terminal permuted,
-    // so a right-to-left draft puts the caret among the cells rather than after
-    // the bytes. `visual_column` is `None` in every other mode, and the logical
-    // column is then the only answer this program has — which is the right one,
-    // because the terminal is doing the reordering in that mode.
-    let caret = laid_out.visual_column.unwrap_or(laid_out.column);
+    // Where the caret is **painted**, which is not where it sits in the string:
+    // a right-to-left draft puts the caret among the cells rather than after the
+    // bytes, and the cells are one per cluster, not the string's width.
+    let caret = laid_out.visual_column;
 
     let rows = app
         .completion()
@@ -367,20 +364,12 @@ mod tests {
         let app = composing("שלום :cry").with_bidi(BidiMode::Visual);
 
         let laid_out = app.input.line.laid_out_in(78, BidiMode::Visual);
-        let visual = laid_out
-            .visual_column
-            .expect("a visual column under Visual mode");
+        let visual = laid_out.visual_column;
         assert_ne!(
             visual, laid_out.column,
             "the draft reads right-to-left, so the painted caret is not at the \
              logical column: {laid_out:?}"
         );
-        assert_eq!(
-            app.input.line.laid_out(78).visual_column,
-            None,
-            "and the default mode has no visual column to give"
-        );
-
         let rect = drawn_area(&app, 80, 24);
         let (_, bar) = panes(&app, 80, 24);
 
@@ -395,6 +384,34 @@ mod tests {
         assert!(
             laid_out.row == 0,
             "the draft is one row, so this is not the across-rows case wearing a hat"
+        );
+    }
+
+    /// Under the default mode the terminal reorders the row, but it still draws
+    /// one cell per cluster, so the caret's cell is the painted column and not
+    /// the whole-string width. `سلام` is three columns as a string and four
+    /// cells as drawn: a popup anchored on the string's width sits one column
+    /// short of the caret.
+    #[test]
+    fn the_popup_stands_under_the_drawn_caret_in_the_default_mode_too() {
+        let app = composing("سلام :cry");
+
+        let laid_out = app.input.line.laid_out(78);
+        let painted = laid_out.visual_column;
+        assert_ne!(
+            painted, laid_out.column,
+            "the string is narrower than its drawing: {laid_out:?}"
+        );
+
+        let rect = drawn_area(&app, 80, 24);
+        let (_, bar) = panes(&app, 80, 24);
+        assert_eq!(
+            rect.x,
+            bar.x
+                + 1
+                + u16::try_from(app.prompt_prefix().len()).expect("a prefix fits a u16")
+                + u16::try_from(painted).expect("a column fits a u16"),
+            "the popup is under the cell the caret is painted on: {rect:?}"
         );
     }
 

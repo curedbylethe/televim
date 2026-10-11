@@ -634,8 +634,8 @@ whole row goes through `spans`, which is the same paint over one piece. Nothing
 about a row's **geometry** reads the mode: the wrap, the bar's height and the
 panel's layout are pure functions of the text and the width, so the same draft is
 as tall in both modes. `LaidOut::visual_column` is the one place a column
-depends on it — where the caret is *painted*, for the emoji popup to anchor on —
-and it is `None` unless the caller passed `Visual`.
+depends on it — the cell the caret is *painted* on, for the emoji popup to anchor
+on. It counts drawn cells, one per cluster, in every mode.
 
 The log goes to a file beside the configuration (`televim.toml` → `televim.log`)
 and **never the terminal**: this program draws on the terminal, and `grammers`

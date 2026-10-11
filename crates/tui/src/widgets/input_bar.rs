@@ -1294,7 +1294,6 @@ mod tests {
                     .line
                     .laid_out_in(78, BidiMode::Visual)
                     .visual_column
-                    .expect("a visual column under Visual mode")
             )
             .expect("a column fits a u16"),
             "the painted caret is at the column the layout reports: {:?}",
@@ -1309,8 +1308,8 @@ mod tests {
         );
         assert_eq!(
             terminal.input.line.laid_out(78).visual_column,
-            None,
-            "which is a question this program does not answer in the default mode"
+            0,
+            "and the layout names that same cell"
         );
     }
 
@@ -1376,8 +1375,7 @@ mod tests {
             .input
             .line
             .laid_out_in(78, BidiMode::Visual)
-            .visual_column
-            .expect("a visual column under Visual mode");
+            .visual_column;
         assert_eq!(
             caret_x,
             1 + u16::try_from(column).expect("a column fits a u16"),
