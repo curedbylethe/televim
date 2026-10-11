@@ -158,6 +158,32 @@ SCENES = {
         ],
         "wait": "see you",
     },
+    # A Persian word with a zero-width non-joiner (the half-space) inside it.
+    "draft_zwnj": {
+        "chats": [(1, "Ada")],
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("i", lambda s: "INSERT" in s),
+            ("می\u200cخواهم", lambda s: "خواهم" in s),
+        ],
+        "wait": "خواهم",
+    },
+    # The same two words with Arabic drawn in Geeza Pro instead of the fallback
+    # (Courier New, which gives every letter a full cell). Compare the gap after
+    # the alef with `draft_two_words`.
+    "draft_two_words_geeza": {
+        "kitty_conf": "symbol_map U+0600-U+06FF Geeza Pro\n",
+        "env": {"TELEVIM_BIDI": "words"},
+        "chats": [(1, "Ada")],
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("i", lambda s: "INSERT" in s),
+            ("سلام خوبی", lambda s: "·" in s),
+        ],
+        "wait": "·",
+    },
     "draft_arabic": {
         "chats": [(1, "Ada")],
         "steps": [
@@ -208,12 +234,21 @@ def window_id(sock):
 
 def shot(sock, path):
     """Crop a full-screen capture to the window: `screencapture -l` is black here."""
-    bounds = subprocess.run(
-        ["swift", str(HERE / "window_bounds.swift"), str(window_id(sock))],
-        capture_output=True,
-        text=True,
-    )
+    for _ in range(10):
+        bounds = subprocess.run(
+            ["swift", str(HERE / "window_bounds.swift"), str(window_id(sock))],
+            capture_output=True,
+            text=True,
+        )
+        if bounds.returncode != 1:  # 1: not on screen yet
+            break
+        time.sleep(0.5)
     if bounds.returncode != 0:
+        if bounds.returncode == 2:
+            raise RuntimeError(
+                f"kitty's window is covered ({bounds.stderr.strip()}); close or move "
+                "those windows and run again. No picture was taken."
+            )
         raise RuntimeError(f"no on-screen window for kitty: {bounds.stderr.strip()}")
     result = subprocess.run(
         ["screencapture", "-x", "-R", bounds.stdout.strip().replace(" ", ","), str(path)],
@@ -245,7 +280,7 @@ def run_scene(name, scene):
     sandbox = pathlib.Path(tempfile.mkdtemp(prefix="televim-rtl-"))
     try:
         seed(sandbox, scene["chats"], scene.get("messages"))
-        (sandbox / "kitty.conf").write_text(FONT_CONF)
+        (sandbox / "kitty.conf").write_text(FONT_CONF + scene.get("kitty_conf", ""))
         # Unix socket paths are capped near 104 bytes, so the socket lives in
         # the system temp dir, not in the sandbox.
         sock = pathlib.Path(tempfile.gettempdir()) / f"tvk-{name}.sock"
@@ -276,9 +311,13 @@ def run_scene(name, scene):
             wait_until(sock, contains(scene["wait"]), repr(scene["wait"]))
             time.sleep(0.5)  # the frame for the last key may still be in flight
             OUT.mkdir(parents=True, exist_ok=True)
-            shot(sock, OUT / f"{name}.png")
             (OUT / f"{name}.txt").write_text(screen_text(sock))
-            print(f"wrote {name}.png and {name}.txt")
+            try:
+                shot(sock, OUT / f"{name}.png")
+                print(f"wrote {name}.png and {name}.txt")
+            except RuntimeError as err:
+                # The cells are the evidence that does not depend on the screen.
+                print(f"wrote {name}.txt only: {err}", file=sys.stderr)
         finally:
             proc.terminate()
             proc.wait(timeout=5)
