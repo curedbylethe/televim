@@ -394,26 +394,16 @@ impl LineEditor {
         let column = columns(&self.text[range.start..at]);
         // The cell the caret is painted on. Under `Visual` and `Words` this
         // program permutes the row; under `Terminal` the terminal does, one
-        // cell per cluster and runs reversed in place, which is the row read
-        // with a left-to-right base. Either way it is a drawn width and not the
-        // string's, so a popup anchored on `column` drifts on lam-alef.
-        let visual_column = if mode.is_visual() {
-            caret_visual_column(
-                &self.text,
-                range,
-                at,
-                mode,
-                bidi::base_direction(&self.text),
-            )
-        } else {
-            caret_visual_column(
-                &self.text,
-                range,
-                at,
-                BidiMode::Visual,
-                bidi::Direction::Ltr,
-            )
-        };
+        // cell per cluster and each word reversed in place. Either way it is a
+        // drawn width and not the string's, so a popup anchored on `column`
+        // drifts on lam-alef.
+        let visual_column = caret_visual_column(
+            &self.text,
+            range,
+            at,
+            mode,
+            bidi::base_direction(&self.text),
+        );
 
         LaidOut {
             rows,
@@ -1075,7 +1065,15 @@ pub(crate) fn caret_visual_column(
     base: bidi::Direction,
 ) -> usize {
     let cluster = grapheme::cluster_start(text, at);
-    let pieces = bidi::permuted_in(mode, text, row.clone(), base);
+    // Under the default the pieces are the row's words as stored, and each is
+    // laid out by the algorithm on its own: the terminal reverses a run, and a
+    // space ends one.
+    let stored = mode == BidiMode::Terminal;
+    let pieces = if stored {
+        bidi::stored_words_in(text, row.clone())
+    } else {
+        bidi::permuted_in(mode, text, row.clone(), base)
+    };
 
     let mut column = 0;
     for piece in &pieces {
@@ -1083,6 +1081,16 @@ pub(crate) fn caret_visual_column(
             && (cluster < piece.logical.end
                 || (cluster == piece.logical.end && piece.logical.end == row.end));
         if owns {
+            if stored {
+                return column
+                    + caret_visual_column(
+                        text,
+                        &piece.logical,
+                        at,
+                        BidiMode::Visual,
+                        bidi::Direction::Ltr,
+                    );
+            }
             // A right-to-left piece is drawn reversed, so the clusters after the
             // caret's own are drawn to its left: the caret's cell starts after
             // them. A piece of one cluster, or the caret at its end, has none.
