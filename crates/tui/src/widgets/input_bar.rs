@@ -460,18 +460,13 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 /// stored under [`BidiMode::Terminal`], and the words in reverse order under
 /// [`BidiMode::Words`]; under the terminal's own base direction, left-to-right.
 fn emitted_caret(text: &str, range: &Range<usize>, at: usize, mode: BidiMode) -> usize {
-    let (column, emitted) = match mode {
-        BidiMode::Words => (
-            line::caret_visual_column(text, range, at, mode, bidi::base_direction(text)),
-            bidi::permuted_in(mode, text, range.clone(), bidi::base_direction(text)),
-        ),
-        _ => (
-            line::caret_visual_column(text, range, at, BidiMode::Visual, bidi::Direction::Ltr),
-            vec![bidi::Chunk {
-                logical: range.clone(),
-                cells: columns(&text[range.clone()]),
-            }],
-        ),
+    let column = line::caret_visual_column(text, range, at, mode, bidi::base_direction(text));
+    let emitted = match mode {
+        BidiMode::Words => bidi::permuted_in(mode, text, range.clone(), bidi::base_direction(text)),
+        _ => vec![bidi::Chunk {
+            logical: range.clone(),
+            cells: columns(&text[range.clone()]),
+        }],
     };
 
     let mut cells = 0;
@@ -1413,6 +1408,39 @@ mod tests {
             carets(&buffer, top)[0].0,
             1,
             "the caret is on the leftmost cell"
+        );
+    }
+
+    /// A caret inside the first word of two, seven `Left`s from the end: before
+    /// the `ا` of `سلام`. A terminal that reverses each word in place (kitty)
+    /// draws that word's `ا` second from the left under `terminal`, and
+    /// second from the left of the *last* word under `words`, which has put it
+    /// there. The style goes on the emitted cell the glyph is moved onto, not on
+    /// the glyph's own cell; checked on kitty with `make rtl-shots`
+    /// (`draft_caret_mid`, `draft_caret_mid_words`).
+    #[test]
+    fn a_caret_inside_a_word_is_painted_on_the_cell_its_letter_is_drawn_in() {
+        let caret_x = |mode: BidiMode| {
+            let mut app = App::mock().with_bidi(mode);
+            press(&mut app, KeyCode::Char('i'));
+            type_text(&mut app, "سلام خوبی");
+            for _ in 0..7 {
+                press(&mut app, KeyCode::Left);
+            }
+            let buffer = screen(&app, 80, 24);
+            let top = bar_top(&rows_of(&buffer)) as u16;
+            carets(&buffer, top)[0].0
+        };
+
+        assert_eq!(
+            caret_x(BidiMode::Terminal),
+            2,
+            "second cell of the first word"
+        );
+        assert_eq!(
+            caret_x(BidiMode::Words),
+            7,
+            "second cell of the word moved last"
         );
     }
 

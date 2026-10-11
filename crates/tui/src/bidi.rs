@@ -238,13 +238,29 @@ pub fn word_row_in(text: &str, row: Range<usize>, base: Direction) -> Vec<Chunk>
     let Some(row_text) = text.get(row.clone()) else {
         return Vec::new();
     };
-    let at = row.start;
     if base != Direction::Rtl {
         return vec![Chunk {
-            logical: row,
             cells: columns(row_text),
+            logical: row,
         }];
     }
+
+    let mut chunks = stored_words_in(text, row);
+    chunks.reverse();
+    chunks
+}
+
+/// The words and whitespace runs of a row, in the order they are stored.
+///
+/// What a terminal that reverses each right-to-left run on its own (kitty) is
+/// handed, and so the pieces its caret column is counted over: a space ends a
+/// run there, so a word is reversed in place and the words do not move.
+#[must_use]
+pub fn stored_words_in(text: &str, row: Range<usize>) -> Vec<Chunk> {
+    let Some(row_text) = text.get(row.clone()) else {
+        return Vec::new();
+    };
+    let at = row.start;
 
     // Maximal runs of whitespace and of everything else, in logical order.
     let mut runs: Vec<(bool, Range<usize>)> = Vec::new();
@@ -257,10 +273,12 @@ pub fn word_row_in(text: &str, row: Range<usize>, base: Direction) -> Vec<Chunk>
         }
     }
 
+    // One cell per cluster, as drawn: `columns` of a whole word joins a lam-alef.
     runs.into_iter()
-        .rev()
         .map(|(_, run)| Chunk {
-            cells: columns(&row_text[run.clone()]),
+            cells: clusters(&row_text[run.clone()])
+                .map(|(_, c)| columns(c))
+                .sum(),
             logical: (run.start + at)..(run.end + at),
         })
         .collect()
@@ -303,14 +321,15 @@ mod tests {
     }
 
     /// The chunks tile the row whatever order they come in: no byte is dropped
-    /// or drawn twice, and their widths are the row's.
+    /// or drawn twice, and their widths are the cells the row is drawn in.
     #[test]
     fn word_chunks_tile_the_row() {
         let text = "سلام  خوبی، hi";
         let chunks = word_row_in(text, 0..text.len(), Direction::Rtl);
 
         let total: usize = chunks.iter().map(|chunk| chunk.cells).sum();
-        assert_eq!(total, columns(text));
+        let drawn: usize = clusters(text).map(|(_, c)| columns(c)).sum();
+        assert_eq!(total, drawn);
         let mut bytes: Vec<usize> = chunks.iter().flat_map(|c| c.logical.clone()).collect();
         bytes.sort_unstable();
         assert_eq!(bytes, (0..text.len()).collect::<Vec<_>>());

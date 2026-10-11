@@ -91,6 +91,33 @@ SCENES = {
         ],
         "wait": "😢",
     },
+    # Caret inside a word, not at an end: before the third letter of the first
+    # word of two (`سلام` is س ل ا م, so the block is on ا). Logically that is the
+    # caret index 2; visually it is the second cell from the word's right edge.
+    # One scene per mode, since each places the style overlay differently.
+    "draft_caret_mid": {
+        "chats": [(1, "Ada")],
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("i", lambda s: "INSERT" in s),
+            ("سلام خوبی", lambda s: "·" in s),
+            ("\x1b[D" * 7, lambda s: "INSERT" in s),
+        ],
+        "wait": "·",
+    },
+    "draft_caret_mid_words": {
+        "env": {"TELEVIM_BIDI": "words"},
+        "chats": [(1, "Ada")],
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("i", lambda s: "INSERT" in s),
+            ("سلام خوبی", lambda s: "·" in s),
+            ("\x1b[D" * 7, lambda s: "INSERT" in s),
+        ],
+        "wait": "·",
+    },
     "draft_arabic": {
         "chats": [(1, "Ada")],
         "steps": [
@@ -191,6 +218,7 @@ def run_scene(name, scene):
                 "-d", str(sandbox),
                 *(scene.get("argv") or [
                     "env",
+                    *(f"{k}={v}" for k, v in scene.get("env", {}).items()),
                     f"TELEVIM_SESSION_PATH={sandbox / 'session.bin'}",
                     str(BIN),
                     "--config", str(sandbox / "televim.toml"),
@@ -204,6 +232,7 @@ def run_scene(name, scene):
                 kitty(sock, "send-text", keys)
                 wait_until(sock, holds, repr(keys))
             wait_until(sock, contains(scene["wait"]), repr(scene["wait"]))
+            time.sleep(0.5)  # the frame for the last key may still be in flight
             OUT.mkdir(parents=True, exist_ok=True)
             shot(sock, OUT / f"{name}.png")
             (OUT / f"{name}.txt").write_text(screen_text(sock))
