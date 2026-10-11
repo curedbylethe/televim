@@ -31,9 +31,9 @@ pub(crate) fn drawn(app: &App, text: &str, style: Style) -> Vec<Span<'static>> {
     };
     let spans = match app.bidi() {
         BidiMode::Terminal => text_row::spans(&row),
-        BidiMode::Visual => {
+        mode @ (BidiMode::Visual | BidiMode::Words) => {
             let base = bidi::base_direction(text);
-            let pieces = bidi::visual_row_in(text, 0..text.len(), base);
+            let pieces = bidi::permuted_in(mode, text, 0..text.len(), base);
             text_row::spans_permuted(&row, &pieces)
         }
     };

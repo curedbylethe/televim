@@ -38,7 +38,9 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{AccountState, App, Focus, Mode, PromptKind, SignIn};
 use crate::bidi::{self, BidiMode};
+use crate::line;
 use crate::text_row;
+use crate::wrap::columns;
 
 /// How many content rows the bar may take before it starts scrolling.
 ///
@@ -447,6 +449,69 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     // a painted caret is a cell an assertion can look at and a real one is not.
 }
 
+/// Where the caret's style goes when the terminal draws the row reversed, as a
+/// byte offset.
+///
+/// The terminal keeps a cell's background at the cell it was emitted in, while
+/// it moves the glyphs of a right-to-left run within the run. So a style laid on
+/// the caret's own byte paints the wrong side of a reversed word. The style goes
+/// on the emitted cell whose index is the caret's visual column, and the
+/// background lands where the caret is drawn. The emitted order is the row as
+/// stored under [`BidiMode::Terminal`], and the words in reverse order under
+/// [`BidiMode::Words`]; under the terminal's own base direction, left-to-right.
+fn emitted_caret(text: &str, range: &Range<usize>, at: usize, mode: BidiMode) -> usize {
+    let (column, emitted) = match mode {
+        BidiMode::Words => (
+            line::caret_visual_column(text, range, at, mode, bidi::base_direction(text)),
+            bidi::permuted_in(mode, text, range.clone(), bidi::base_direction(text)),
+        ),
+        _ => (
+            line::caret_visual_column(text, range, at, BidiMode::Visual, bidi::Direction::Ltr),
+            vec![bidi::Chunk {
+                logical: range.clone(),
+                cells: columns(&text[range.clone()]),
+            }],
+        ),
+    };
+
+    let mut cells = 0;
+    for chunk in &emitted {
+        let Some(piece) = text.get(chunk.logical.clone()) else {
+            continue;
+        };
+        for (offset, cluster) in crate::grapheme::clusters(piece) {
+            let width = columns(cluster);
+            if column < cells + width {
+                return chunk.logical.start + offset;
+            }
+            cells += width;
+        }
+    }
+    range.end
+}
+
+/// Where the caret's style goes under [`BidiMode::Visual`], as a byte offset.
+///
+/// A caret at the end of the row has no character to carry its style, so
+/// `text_row` would emit it as a cell of its own after the piece that owns it,
+/// which pushes the rest of the word along. A right-to-left draft that ends in
+/// a run has its last letter drawn first, so that cell would split the word. The
+/// caret goes on the last letter instead: it is the leftmost cell of the run, the
+/// one the next letter would take.
+fn visual_caret(text: &str, range: &Range<usize>, at: usize) -> usize {
+    let Some(row) = text.get(range.clone()) else {
+        return at;
+    };
+    match crate::grapheme::clusters(row).last() {
+        Some((offset, cluster))
+            if at == range.end && bidi::base_direction(cluster) == bidi::Direction::Rtl =>
+        {
+            range.start + offset
+        }
+        _ => at,
+    }
+}
+
 /// One row of the draft.
 ///
 /// The text, the selection and the caret are [`text_row`]'s, because a card row
@@ -495,7 +560,12 @@ fn body_row<'a>(
         // hole in a row of reverse video. It needs the focus as well as the row:
         // a caret on a draft nobody is typing into is a promise the program does
         // not keep.
-        caret: (focused && caret_row).then(|| app.input.line.caret()),
+        caret: (focused && caret_row).then(|| match mode {
+            BidiMode::Terminal | BidiMode::Words => {
+                emitted_caret(text, range, app.input.line.caret(), mode)
+            }
+            BidiMode::Visual => visual_caret(text, range, app.input.line.caret()),
+        }),
         reversed: false,
         // A password is Telegram's secret rather than the reader's draft, and it
         // is the only prompt that conceals — see [`crate::line::LineEditor::concealed`].
@@ -509,14 +579,14 @@ fn body_row<'a>(
         // The pieces are slices of the **text** and the row's range is too, so a
         // row that does not begin at zero is permuted the same way a message row
         // is — which is why this asks `visual_row_in` and not `visual_row`.
-        BidiMode::Visual => {
+        BidiMode::Visual | BidiMode::Words => {
             // The direction is the draft's, asked per row for the same reason
             // the conversation panel asks it per row: `Direction` is neither
             // `Copy` nor `Clone`, so a frame's one answer cannot be handed to
             // every row of it. What *is* shared across the rows is the wrap —
             // `laid_out_in` cut them once, above, and a row is a slice of that.
             let base = bidi::base_direction(text);
-            text_row::spans_permuted(&row, &bidi::visual_row_in(text, range.clone(), base))
+            text_row::spans_permuted(&row, &bidi::permuted_in(mode, text, range.clone(), base))
         }
         BidiMode::Terminal => text_row::spans(&row),
     });
@@ -1196,9 +1266,10 @@ mod tests {
     /// the same number, which is what the emoji popup anchors itself on
     /// (STAGE-03).
     ///
-    /// The default is the other end of the row: under [`BidiMode::Terminal`] the
-    /// row goes to the terminal as it is stored and the shaper reverses the run
-    /// itself, so the same draft's caret is at the logical end.
+    /// The default paints the same cell from the other side: under
+    /// [`BidiMode::Terminal`] the row goes to the terminal as it is stored and the
+    /// shaper reverses the run itself, so the caret goes on the last letter's cell,
+    /// which is the leftmost of the run on screen.
     #[test]
     fn a_caret_in_a_right_to_left_draft_is_painted_at_the_cell_it_belongs_to() {
         let mut visual = App::mock().with_bidi(BidiMode::Visual);
@@ -1231,9 +1302,10 @@ mod tests {
         );
         assert_eq!(
             carets(&terminal_screen, terminal_top)[0].0,
-            1 + u16::try_from(terminal.input.line.laid_out(78).column)
-                .expect("a column fits a u16"),
-            "and under the default the same caret is at the logical end of the draft"
+            // The terminal draws the run reversed, so the leftmost cell on screen is
+            // the last letter's, and that is logical cell 0 for `שלום`.
+            1,
+            "and under the default the caret is on the last letter's cell"
         );
         assert_eq!(
             terminal.input.line.laid_out(78).visual_column,
@@ -1242,12 +1314,12 @@ mod tests {
         );
     }
 
-    /// An Arabic draft's caret sits on the cell after the last glyph drawn, under
+    /// An Arabic draft's caret sits on the cell of the last glyph drawn, under
     /// the default mode. Its column is `wrap::columns` over the text in front of
     /// it, and the glyphs are drawn one cluster to a cell, so the two must agree
     /// or the caret lands on the wrong letter.
     #[test]
-    fn a_caret_after_an_arabic_draft_is_drawn_after_its_last_glyph() {
+    fn a_caret_after_an_arabic_draft_is_drawn_on_its_last_glyph() {
         let mut terminal = App::mock();
         press(&mut terminal, KeyCode::Char('i'));
         type_text(&mut terminal, "سلام");
@@ -1271,8 +1343,8 @@ mod tests {
         );
         assert_eq!(
             caret_x,
-            5,
-            "the caret is on the cell after the last drawn glyph: {:?}",
+            1,
+            "the caret is on logical cell 0, which the terminal draws leftmost: {:?}",
             rows_of(&buffer)
         );
         assert_eq!(
@@ -1311,11 +1383,39 @@ mod tests {
             1 + u16::try_from(column).expect("a column fits a u16"),
             "the painted caret is at the column the layout reports"
         );
-        let glyphs: String = (1..=5)
-            .filter(|x| *x != caret_x)
-            .map(|x| buffer[(x, body)].symbol())
-            .collect();
+        let glyphs: String = (1..=4).map(|x| buffer[(x, body)].symbol()).collect();
         assert_eq!(glyphs, "مالس", "the four glyphs, drawn right to left");
+        assert_eq!(
+            buffer[(5, body)].symbol(),
+            " ",
+            "and the caret added no cell of its own after them"
+        );
+    }
+
+    /// Under `Words` a two-word draft reaches the terminal with its words in
+    /// reverse order and each word whole, so the terminal joins each one. The
+    /// caret at the end sits on the leftmost cell, where the next letter goes.
+    #[test]
+    fn a_words_draft_is_emitted_with_its_words_in_reverse_order() {
+        let mut app = App::mock().with_bidi(BidiMode::Words);
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "سلام خوبی");
+
+        let buffer = screen(&app, 80, 24);
+        let top = bar_top(&rows_of(&buffer)) as u16;
+        let body = top + 1;
+        let cells = |from: u16, to: u16| -> String {
+            (from..=to).map(|x| buffer[(x, body)].symbol()).collect()
+        };
+
+        assert_eq!(cells(1, 4), "خوبی", "the second word comes first");
+        assert_eq!(cells(5, 5), "·", "the space between them");
+        assert_eq!(cells(6, 9), "سلام", "and the first word last");
+        assert_eq!(
+            carets(&buffer, top)[0].0,
+            1,
+            "the caret is on the leftmost cell"
+        );
     }
 
     /// A draft that reads left to right is the same row whichever mode draws it:

@@ -392,9 +392,15 @@ impl LineEditor {
         // same `columns` the row was measured with, over the slice in front of
         // the caret.
         let column = columns(&self.text[range.start..at]);
-        let visual_column = mode
-            .is_visual()
-            .then(|| caret_visual_column(&self.text, range, at));
+        let visual_column = mode.is_visual().then(|| {
+            caret_visual_column(
+                &self.text,
+                range,
+                at,
+                mode,
+                bidi::base_direction(&self.text),
+            )
+        });
 
         LaidOut {
             rows,
@@ -1037,10 +1043,25 @@ pub struct LaidOut {
 ///
 /// `at` is widened to the cluster that holds it first, because a cluster is the
 /// smallest thing the row is drawn as and a caret inside one has no column of
+/// The cells `text` is drawn in, one cluster at a time. Not [`columns`] of the
+/// whole string: that joins a lam-alef pair into one column, and the terminal
+/// draws each cluster in its own cell.
+fn drawn_cells(text: &str) -> usize {
+    grapheme::clusters(text)
+        .map(|(_, cluster)| columns(cluster))
+        .sum()
+}
+
 /// its own. `h` and `l` still step one code point; nothing here moves them.
-fn caret_visual_column(text: &str, row: &Range<usize>, at: usize) -> usize {
+pub(crate) fn caret_visual_column(
+    text: &str,
+    row: &Range<usize>,
+    at: usize,
+    mode: BidiMode,
+    base: bidi::Direction,
+) -> usize {
     let cluster = grapheme::cluster_start(text, at);
-    let pieces = bidi::visual_row_in(text, row.clone(), bidi::base_direction(text));
+    let pieces = bidi::permuted_in(mode, text, row.clone(), base);
 
     let mut column = 0;
     for piece in &pieces {
@@ -1048,6 +1069,17 @@ fn caret_visual_column(text: &str, row: &Range<usize>, at: usize) -> usize {
             && (cluster < piece.logical.end
                 || (cluster == piece.logical.end && piece.logical.end == row.end));
         if owns {
+            // A right-to-left piece is drawn reversed, so the clusters after the
+            // caret's own are drawn to its left: the caret's cell starts after
+            // them. A piece of one cluster, or the caret at its end, has none.
+            let rtl = text
+                .get(piece.logical.clone())
+                .is_some_and(|piece| bidi::base_direction(piece) == bidi::Direction::Rtl);
+            if rtl {
+                let rest = &text[cluster..piece.logical.end];
+                let own = grapheme::clusters(rest).next().map_or("", |(_, own)| own);
+                return column + drawn_cells(rest) - drawn_cells(own);
+            }
             return column + text.get(piece.logical.start..cluster).map_or(0, columns);
         }
         column += piece.cells;

@@ -267,10 +267,10 @@ fn snippet_spans(app: &App, message: &str, runs: &[(String, bool)]) -> Vec<Span<
             .iter()
             .flat_map(|(range, matched)| text_row::spans(&row(range.clone(), *matched)))
             .collect::<Vec<_>>(),
-        BidiMode::Visual => {
+        mode @ (BidiMode::Visual | BidiMode::Words) => {
             let base = bidi::base_direction(message);
             let mut drawn = Vec::new();
-            for chunk in bidi::visual_row(text, base) {
+            for chunk in bidi::permuted_in(mode, text, 0..text.len(), base) {
                 // A chunk is a forward slice of the snippet, so cutting it at the
                 // run boundaries keeps the pieces in the order they are drawn.
                 for (range, matched) in &ranges {

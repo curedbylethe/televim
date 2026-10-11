@@ -79,6 +79,7 @@ impl fmt::Debug for Secret {
 /// spells them.
 const BIDI_TERMINAL: &str = "terminal";
 const BIDI_VISUAL: &str = "visual";
+const BIDI_WORDS: &str = "words";
 
 /// What a sticker message draws: its picture, or its token.
 ///
@@ -97,14 +98,17 @@ pub struct Config {
     pub log_level: String,
     pub theme: String,
 
-    /// Who emits a right-to-left row: `terminal` or `visual`.
+    /// Who emits a right-to-left row: `terminal`, `visual` or `words`.
     ///
     /// `terminal` — the default — emits the row in logical order and leaves the
     /// reordering to whatever is drawing it, which is what a terminal that
     /// shapes Arabic or Hebrew needs. `visual` applies the permutation here
     /// instead, for a terminal that does neither (xterm, alacritty); it is a
-    /// scramble on a shaping one. There is no detection, so this is a setting
-    /// and not a fact this program can go and read off the far end.
+    /// scramble on a shaping one. `words` emits a row's words in reverse order,
+    /// each one whole, for a terminal that reverses each word on its own (kitty):
+    /// the words read in order and the letters still join. There is no detection,
+    /// so this is a setting and not a fact this program can go and read off the
+    /// far end.
     ///
     /// **Per machine, not per terminal:** an ssh hop keeps the value it was
     /// launched with, and `tmux` multiplexes one value over every pane. Whether
@@ -288,7 +292,7 @@ impl Config {
 
     /// Who emits a right-to-left row, from [`Config::bidi`].
     ///
-    /// Only the exact word `visual` asks for the permutation to be applied here.
+    /// Only the exact words `visual` and `words` ask for the row to be permuted here.
     /// Everything else — including a spelling this program does not know — is
     /// [`BidiMode::Terminal`], because a value it cannot read that guessed
     /// `Visual` would scramble a run on precisely the terminals whose shaper is
@@ -297,10 +301,10 @@ impl Config {
     /// lowercases the *key* without touching the value.
     #[must_use]
     pub fn bidi_mode(&self) -> BidiMode {
-        if self.bidi == BIDI_VISUAL {
-            BidiMode::Visual
-        } else {
-            BidiMode::Terminal
+        match self.bidi.as_str() {
+            BIDI_VISUAL => BidiMode::Visual,
+            BIDI_WORDS => BidiMode::Words,
+            _ => BidiMode::Terminal,
         }
     }
 
@@ -604,6 +608,18 @@ mod tests {
             tui::app::App::new().with_bidi(cfg.bidi_mode()).bidi(),
             BidiMode::Visual
         );
+    }
+
+    /// `words` is its own mode: the words reversed, the letters left to the
+    /// terminal. Only the exact word selects it, like `visual`.
+    #[test]
+    fn the_words_value_selects_the_word_order_mode() {
+        let mut cfg = bare();
+        cfg.bidi = "words".to_owned();
+        assert_eq!(cfg.bidi_mode(), BidiMode::Words);
+
+        cfg.bidi = "Words".to_owned();
+        assert_eq!(cfg.bidi_mode(), BidiMode::Terminal);
     }
 
     /// A spelling the configuration does not know leaves the reordering to the

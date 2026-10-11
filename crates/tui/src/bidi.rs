@@ -65,13 +65,24 @@ pub enum BidiMode {
     /// setting on their terminal and not a fact about this program, so it is
     /// theirs to say rather than something to detect.
     Visual,
+
+    /// Emit a right-to-left row's words in reverse order, each word as stored.
+    ///
+    /// For a terminal that shapes and reverses each run of right-to-left text on
+    /// its own, and not the line as a whole (kitty does this): such a terminal
+    /// draws `سلام خوبی` with the words in logical order, each one reversed.
+    /// Reversing the words here puts them in reading order, and each word still
+    /// reaches the terminal as one run it can join. It is opt-in because a
+    /// terminal that applies the algorithm to the whole line would reverse the
+    /// words a second time.
+    Words,
 }
 
 impl BidiMode {
     /// Whether rows are permuted here rather than by the terminal.
     #[must_use]
     pub fn is_visual(self) -> bool {
-        matches!(self, Self::Visual)
+        matches!(self, Self::Visual | Self::Words)
     }
 }
 
@@ -202,6 +213,59 @@ pub fn visual_row_in(text: &str, row: Range<usize>, base: Direction) -> Vec<Chun
         .collect()
 }
 
+/// The pieces of one row under `mode`, in the order the terminal is handed them.
+///
+/// [`BidiMode::Visual`] permutes by the algorithm, and [`BidiMode::Words`] by
+/// word. Under the default there is no permutation to make, and the caller does
+/// not ask: it hands the row over as stored.
+#[must_use]
+pub fn permuted_in(mode: BidiMode, text: &str, row: Range<usize>, base: Direction) -> Vec<Chunk> {
+    match mode {
+        BidiMode::Words => word_row_in(text, row, base),
+        BidiMode::Visual | BidiMode::Terminal => visual_row_in(text, row, base),
+    }
+}
+
+/// [`visual_row_in`] for [`BidiMode::Words`]: a right-to-left row's words, in
+/// reverse order, each one a chunk drawn as written.
+///
+/// Words are the runs between whitespace. Whitespace stays where it is in the
+/// order, so the words keep their gaps. A row whose base is not right-to-left
+/// is one chunk, as it is stored: a left-to-right row already reads in order.
+#[allow(clippy::needless_pass_by_value)]
+#[must_use]
+pub fn word_row_in(text: &str, row: Range<usize>, base: Direction) -> Vec<Chunk> {
+    let Some(row_text) = text.get(row.clone()) else {
+        return Vec::new();
+    };
+    let at = row.start;
+    if base != Direction::Rtl {
+        return vec![Chunk {
+            logical: row,
+            cells: columns(row_text),
+        }];
+    }
+
+    // Maximal runs of whitespace and of everything else, in logical order.
+    let mut runs: Vec<(bool, Range<usize>)> = Vec::new();
+    for (offset, cluster) in clusters(row_text) {
+        let space = cluster.chars().all(char::is_whitespace);
+        let span = offset..offset + cluster.len();
+        match runs.last_mut() {
+            Some((kind, run)) if *kind == space => run.end = span.end,
+            _ => runs.push((space, span)),
+        }
+    }
+
+    runs.into_iter()
+        .rev()
+        .map(|(_, run)| Chunk {
+            cells: columns(&row_text[run.clone()]),
+            logical: (run.start + at)..(run.end + at),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +277,43 @@ mod tests {
             .into_iter()
             .map(|c| (c.logical.start, c.logical.end, c.cells))
             .collect()
+    }
+
+    /// The words of a right-to-left row come back in reverse order, each one
+    /// whole, with the space between them where it was.
+    #[test]
+    fn words_of_a_right_to_left_row_are_reversed_and_kept_whole() {
+        let text = "سلام خوبی";
+        let drawn: Vec<&str> = word_row_in(text, 0..text.len(), Direction::Rtl)
+            .iter()
+            .map(|chunk| &text[chunk.logical.clone()])
+            .collect();
+
+        assert_eq!(drawn, ["خوبی", " ", "سلام"]);
+    }
+
+    /// A left-to-right base is the row as stored: nothing moves.
+    #[test]
+    fn a_left_to_right_row_is_one_chunk_in_stored_order() {
+        let text = "hello world";
+        let chunks = word_row_in(text, 0..text.len(), Direction::Ltr);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].logical, 0..text.len());
+    }
+
+    /// The chunks tile the row whatever order they come in: no byte is dropped
+    /// or drawn twice, and their widths are the row's.
+    #[test]
+    fn word_chunks_tile_the_row() {
+        let text = "سلام  خوبی، hi";
+        let chunks = word_row_in(text, 0..text.len(), Direction::Rtl);
+
+        let total: usize = chunks.iter().map(|chunk| chunk.cells).sum();
+        assert_eq!(total, columns(text));
+        let mut bytes: Vec<usize> = chunks.iter().flat_map(|c| c.logical.clone()).collect();
+        bytes.sort_unstable();
+        assert_eq!(bytes, (0..text.len()).collect::<Vec<_>>());
     }
 
     fn shape_of(text: &str) -> Vec<(usize, usize, usize)> {

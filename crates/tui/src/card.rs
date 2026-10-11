@@ -517,11 +517,12 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
             // run itself in `Terminal`, so the value goes out in stored order; in
             // `Visual` the value is permuted here, with the base direction of the
             // whole value and not of this line.
-            spans.extend(match app.bidi() {
+            let mode = app.bidi();
+            spans.extend(match mode {
                 BidiMode::Terminal => text_row::spans(&value),
-                BidiMode::Visual => {
+                BidiMode::Visual | BidiMode::Words => {
                     let base = bidi::base_direction(&row.value);
-                    let pieces = bidi::visual_row_in(&row.value, range.clone(), base);
+                    let pieces = bidi::permuted_in(mode, &row.value, range.clone(), base);
                     text_row::spans_permuted(&value, &pieces)
                 }
             });
