@@ -261,7 +261,7 @@ fn marked_in<'a>(
 ) -> Vec<Span<'a>> {
     match mode {
         BidiMode::Terminal => marked(&text[range], fragment, base, mark),
-        BidiMode::Visual => {
+        BidiMode::Visual | BidiMode::Words => {
             let hits: Vec<Range<usize>> = fragment
                 .filter(|f| !f.is_empty())
                 .map(|f| match_ranges(&text[range.clone()], f))
@@ -270,7 +270,7 @@ fn marked_in<'a>(
                 .map(|hit| hit.start + range.start..hit.end + range.start)
                 .collect();
 
-            bidi::visual_row_in(text, range.clone(), bidi::base_direction(text))
+            bidi::permuted_in(mode, text, range.clone(), bidi::base_direction(text))
                 .into_iter()
                 .map(|piece| {
                     let inked = hits

@@ -636,7 +636,7 @@ fn message_row<'m>(
     };
     match app.bidi() {
         BidiMode::Terminal => spans.extend(text_row::spans(&row)),
-        BidiMode::Visual => {
+        BidiMode::Visual | BidiMode::Words => {
             // One direction for the whole message, one permutation per row: the
             // base level is the message's, and a row of an all-neutral message
             // carries no evidence of its own.
@@ -647,7 +647,7 @@ fn message_row<'m>(
             // bytes of every row that does not begin at zero — which is every row
             // of a wrapped message but the first, and the whole row would paint
             // nothing rather than paint itself wrong.
-            let pieces = bidi::visual_row_in(message.display_body(), range.clone(), base);
+            let pieces = bidi::permuted_in(app.bidi(), message.display_body(), range.clone(), base);
             spans.extend(text_row::spans_permuted(&row, &pieces));
         }
     }
@@ -892,9 +892,9 @@ fn draft_items<'a>(app: &'a App, words: &'a str, width: u16, on_draft: bool) -> 
             };
             match app.bidi() {
                 BidiMode::Terminal => spans.extend(text_row::spans(&row)),
-                BidiMode::Visual => {
+                BidiMode::Visual | BidiMode::Words => {
                     let base = bidi::base_direction(words);
-                    let pieces = bidi::visual_row_in(words, range, base);
+                    let pieces = bidi::permuted_in(app.bidi(), words, range, base);
                     spans.extend(text_row::spans_permuted(&row, &pieces));
                 }
             }

@@ -286,7 +286,10 @@ Working today:
   (`bidi = "visual"`) this program applies the permutation instead, for the whole
   draft and every row of a wrapped one, and the caret and the selection are marked
   on the cells their logical positions land on. The `: ` and `/` prefix is chrome
-  and is never permuted.
+  and is never permuted. `bidi = "words"` is for kitty, which reverses each
+  right-to-left word on its own: it emits a right-to-left row's words in reverse
+  order, each one whole, so the words read in order and the letters still join.
+  The stored text, and what is sent, are unchanged in every mode.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
   which side the messages are from, and says how many were left out because they
