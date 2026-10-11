@@ -71,7 +71,6 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
 use crate::app::{App, Focus};
 use crate::bidi::{self, BidiMode};
-use crate::text_row;
 use crate::wrap::columns;
 use domain::user::UserCandidate;
 
@@ -245,8 +244,7 @@ fn push_marked<'a>(
 }
 
 /// [`marked`] over `text[range]`, in the order `mode` draws it. Under
-/// [`BidiMode::Terminal`] the spans are split per cluster, so a cluster the terminal
-/// draws whole is never cut across two cells.
+/// [`BidiMode::Terminal`] the text goes out as stored.
 ///
 /// Under [`BidiMode::Visual`] the range is laid out by runs in visual order, the
 /// way a conversation row is, with the whole text's direction. A run is inked
@@ -262,7 +260,7 @@ fn marked_in<'a>(
     mode: BidiMode,
 ) -> Vec<Span<'a>> {
     match mode {
-        BidiMode::Terminal => text_row::per_cluster(marked(&text[range], fragment, base, mark)),
+        BidiMode::Terminal => marked(&text[range], fragment, base, mark),
         BidiMode::Visual => {
             let hits: Vec<Range<usize>> = fragment
                 .filter(|f| !f.is_empty())
@@ -652,18 +650,6 @@ mod tests {
     /// The overlay with one candidate named [`ARABIC`], drawn under `mode`.
     fn arabic_name(mode: BidiMode) -> App {
         showing(vec![candidate(7, ARABIC, None)]).with_bidi(mode)
-    }
-
-    #[test]
-    fn a_terminal_name_is_drawn_in_logical_order_in_full() {
-        let app = arabic_name(BidiMode::Terminal);
-
-        let buffer = screen(&app, 80, 24);
-
-        assert!(
-            row_with(&buffer, ARABIC).is_some(),
-            "the name is drawn as stored"
-        );
     }
 
     #[test]

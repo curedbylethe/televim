@@ -277,11 +277,10 @@ crates/tui/
 │   ├── text_row.rs     # A run of text the reader can put a cursor in: the
 │                      #   text, a match on it, a selection split out of it, and
 │                      #   a caret cut into it. Shared by the conversation, the
-│                      #   input bar and a card row. `per_cluster` splits its spans
-│                      #   one per grapheme cluster, for the Terminal path
+│                      #   input bar and a card row
 │   ├── wrap.rs         # Text + width -> the rows it occupies. `wrap` for a
 │                      #   message; `wrap_keeping_whitespace` for the input bar;
-│                      #   `columns` for how wide any of it is, summed per cluster
+│                      #   `columns` for how wide any of it is, as one string
 │   ├── widgets/
 │   │   ├── chat_list.rs
 │   │   ├── conversation.rs

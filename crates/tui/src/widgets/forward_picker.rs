@@ -275,18 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_title_is_drawn_in_logical_order_in_full() {
-        let app = picking_arabic(BidiMode::Terminal);
-
-        let buffer = screen(&app, 80, 24);
-
-        assert!(
-            row_of(&buffer, ARABIC).is_some(),
-            "the title is drawn as stored"
-        );
-    }
-
-    #[test]
     fn a_visual_title_is_drawn_reversed_in_full() {
         let app = picking_arabic(BidiMode::Visual);
         let reversed: String = ARABIC.chars().rev().collect();

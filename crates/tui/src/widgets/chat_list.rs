@@ -13,9 +13,8 @@ use crate::text_row::{self, Ink, TextRow};
 /// `text` in `style`, in the order the terminal reads it under `app.bidi()`.
 ///
 /// Under [`BidiMode::Visual`] the text's runs are laid out in visual order, the
-/// same as a conversation row; under [`BidiMode::Terminal`] it is split per
-/// cluster so no glyph is clipped. Shared with the forward picker, which draws
-/// the same titles.
+/// same as a conversation row; under [`BidiMode::Terminal`] it goes out as
+/// stored. Shared with the forward picker, which draws the same titles.
 pub(crate) fn drawn(app: &App, text: &str, style: Style) -> Vec<Span<'static>> {
     let row = TextRow {
         text,
@@ -31,7 +30,7 @@ pub(crate) fn drawn(app: &App, text: &str, style: Style) -> Vec<Span<'static>> {
         },
     };
     let spans = match app.bidi() {
-        BidiMode::Terminal => text_row::per_cluster(text_row::spans(&row)),
+        BidiMode::Terminal => text_row::spans(&row),
         BidiMode::Visual => {
             let base = bidi::base_direction(text);
             let pieces = bidi::visual_row_in(text, 0..text.len(), base);
