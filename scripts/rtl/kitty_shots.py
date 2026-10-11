@@ -10,8 +10,13 @@ keys through `kitty @`, then writes two files to `target/rtl-shots/`:
 - `<scene>.png`: the window as the compositor drew it (shaping included)
 - `<scene>.txt`: the cells kitty holds, as text (no shaping, no colours)
 
-Offline means no credentials, so only the chat list and the input bar are
-reachable. Conversation messages need a signed-in account and are not covered.
+Offline means no credentials, so the chat list and the input bar are reachable,
+and so are messages a scene seeds into the cache (`messages`).
+
+The picture is a capture of the **screen** cropped to kitty's window, so
+anything in front of that window is in it, including other applications'
+content. Close or move other windows before running, and read `<scene>.txt`
+first: it holds the cells kitty drew and is not affected by what is on top.
 """
 
 import json
@@ -118,6 +123,41 @@ SCENES = {
         ],
         "wait": "·",
     },
+    # Received and sent messages, from the cache: two Arabic words each way, and a
+    # mixed row. Opening the chat shows them in the conversation panel.
+    "messages_words": {
+        "env": {"TELEVIM_BIDI": "words"},
+        "chats": [(1, "Ada")],
+        "messages": {
+            1: [
+                {"id": 1, "text": "سلام خوبی", "timestamp": 1700000000, "is_outgoing": False},
+                {"id": 2, "text": "ممنون، تو چطوری؟", "timestamp": 1700000060, "is_outgoing": True},
+                {"id": 3, "text": "see you at 5 ساعت پنج", "timestamp": 1700000120, "is_outgoing": False},
+            ]
+        },
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("\r", lambda s: "سلام" in s or "خوبی" in s),
+        ],
+        "wait": "see you",
+    },
+    "messages_terminal": {
+        "chats": [(1, "Ada")],
+        "messages": {
+            1: [
+                {"id": 1, "text": "سلام خوبی", "timestamp": 1700000000, "is_outgoing": False},
+                {"id": 2, "text": "ممنون، تو چطوری؟", "timestamp": 1700000060, "is_outgoing": True},
+                {"id": 3, "text": "see you at 5 ساعت پنج", "timestamp": 1700000120, "is_outgoing": False},
+            ]
+        },
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("\r", lambda s: "سلام" in s or "خوبی" in s),
+        ],
+        "wait": "see you",
+    },
     "draft_arabic": {
         "chats": [(1, "Ada")],
         "steps": [
@@ -188,13 +228,15 @@ def shot(sock, path):
         )
 
 
-def seed(sandbox, chats):
+def seed(sandbox, chats, messages=None):
     """The warm-start cache `runtime.rs` reads: see `tests/common/mod.rs`."""
     file = {
         "account": None,
         "peers": {},
         "chats": [{"id": i, "title": t} for i, t in chats],
     }
+    if messages:
+        file["peers"] = {str(peer): rows for peer, rows in messages.items()}
     (sandbox / "televim.history.json").write_text(json.dumps(file, ensure_ascii=False))
     (sandbox / "televim.toml").write_text("")
 
@@ -202,7 +244,7 @@ def seed(sandbox, chats):
 def run_scene(name, scene):
     sandbox = pathlib.Path(tempfile.mkdtemp(prefix="televim-rtl-"))
     try:
-        seed(sandbox, scene["chats"])
+        seed(sandbox, scene["chats"], scene.get("messages"))
         (sandbox / "kitty.conf").write_text(FONT_CONF)
         # Unix socket paths are capped near 104 bytes, so the socket lives in
         # the system temp dir, not in the sandbox.

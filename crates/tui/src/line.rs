@@ -131,7 +131,7 @@ use vim_line::{Key, KeyCode as VKey, LineEditor as _, TextEdit, VimLineEditor};
 use crate::app::PromptKind;
 use crate::bidi::{self, BidiMode};
 use crate::grapheme;
-use crate::wrap::{columns, wrap_keeping_whitespace};
+use crate::wrap::{columns, drawn_cells, wrap_keeping_whitespace};
 
 /// The most characters a composed message may hold.
 ///
@@ -1047,15 +1047,6 @@ pub struct LaidOut {
 ///
 /// `at` is widened to the cluster that holds it first, because a cluster is the
 /// smallest thing the row is drawn as and a caret inside one has no column of
-/// The cells `text` is drawn in, one cluster at a time. Not [`columns`] of the
-/// whole string: that joins a lam-alef pair into one column, and the terminal
-/// draws each cluster in its own cell.
-fn drawn_cells(text: &str) -> usize {
-    grapheme::clusters(text)
-        .map(|(_, cluster)| columns(cluster))
-        .sum()
-}
-
 /// its own. `h` and `l` still step one code point; nothing here moves them.
 pub(crate) fn caret_visual_column(
     text: &str,
