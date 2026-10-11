@@ -79,6 +79,18 @@ SCENES = {
         ],
         "wait": "·",
     },
+    # The emoji popup under an Arabic word: it must open under the caret's cell,
+    # which is one cell per cluster (`سلام` is four), not the string's width.
+    "draft_popup": {
+        "chats": [(1, "Ada")],
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("i", lambda s: "INSERT" in s),
+            ("سلام :cry", lambda s: "😢" in s),
+        ],
+        "wait": "😢",
+    },
     "draft_arabic": {
         "chats": [(1, "Ada")],
         "steps": [
