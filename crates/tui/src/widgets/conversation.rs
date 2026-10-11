@@ -35,7 +35,7 @@ use crate::rows::{self, RowSpan};
 use crate::state::ui::{GraphicsMode, Placement};
 use crate::sticker::{DecodedSticker, STICKER_FIT_WIDTH};
 use crate::text_row;
-use crate::wrap::columns;
+use crate::wrap::{columns, drawn_cells};
 
 /// How many columns the messages keep for themselves before a scrollbar is
 /// worth showing beside them.
@@ -666,7 +666,7 @@ fn message_row<'m>(
         } else {
             0
         };
-        let drawn = prefix + columns(&message.display_body()[range.clone()]);
+        let drawn = prefix + drawn_cells(&message.display_body()[range.clone()]);
         let gap = usize::from(width).saturating_sub(drawn + columns(&note));
         if gap > 0 {
             spans.push(Span::raw(" ".repeat(gap)));
@@ -3214,6 +3214,36 @@ mod tests {
             "and carries no tag: {}",
             row(&screen, y + 1)
         );
+    }
+
+    /// A word with a lam-alef (`سلام`: `ل` then `ا`) is three columns as a string
+    /// and four cells as drawn. `ratatui` advances the next span by the string's
+    /// width, so the span after it started a cell early and painted over the
+    /// word's last letter: the received row lost the `م`, or the `ی` of the word
+    /// that follows. Found on kitty with `make rtl-shots` (`messages_terminal`).
+    #[test]
+    fn a_word_with_a_lam_alef_keeps_its_last_letter_in_every_mode() {
+        for mode in [BidiMode::Terminal, BidiMode::Words, BidiMode::Visual] {
+            let app = showing(vec![at(1, 0, false, "سلام خوبی")]).with_bidi(mode);
+            let screen = screen(&app, 80, 24);
+            let y = message_rows(&screen)
+                .into_iter()
+                .find(|&y| row(&screen, y).contains("[them]"))
+                .expect("the message is on the screen");
+            let drawn: String = row(&screen, y).chars().filter(|c| !c.is_ascii()).collect();
+            let letters = |text: &str| {
+                let mut all: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+                all.sort_unstable();
+                all
+            };
+
+            assert_eq!(
+                letters(&drawn.replace(['│', '─', '┌', '┐', '└', '┘'], "")),
+                letters("سلام خوبی"),
+                "{mode:?} dropped a letter: {}",
+                row(&screen, y)
+            );
+        }
     }
 
     /// The draft row's `BidiMode::Visual` path, which no test used to reach. A

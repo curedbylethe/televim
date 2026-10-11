@@ -28,6 +28,16 @@ pub fn columns(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+/// How many cells `text` is drawn in: one cluster at a time, summed.
+///
+/// Not [`columns`] of the whole string, which joins a lam-alef (`ل` then `ا`)
+/// into one column where the terminal, and `ratatui`'s buffer, keep a cell for
+/// each. `سلام` is three columns as a string and four cells as drawn.
+#[must_use]
+pub fn drawn_cells(text: &str) -> usize {
+    clusters(text).map(|(_, cluster)| columns(cluster)).sum()
+}
+
 /// Splits `text` into the rows it occupies at `width` columns.
 ///
 /// Byte offsets, always at a character boundary, so that a row is `&text[range]`

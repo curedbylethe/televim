@@ -47,6 +47,7 @@ use ratatui::text::Span;
 use crate::bidi::Chunk;
 use crate::rows;
 use crate::theme::Theme;
+use crate::wrap::{columns, drawn_cells};
 
 /// The inks one surface paints a text row with.
 ///
@@ -493,7 +494,7 @@ fn push<'a>(
     }
 
     let Some(mark) = dot else {
-        out.push(Span::styled(text, style));
+        push_text(out, text, style);
         return;
     };
 
@@ -501,15 +502,34 @@ fn push<'a>(
     for (at, character) in text.char_indices() {
         if character == ' ' {
             if start < at {
-                out.push(Span::styled(&text[start..at], style));
+                push_text(out, &text[start..at], style);
             }
             out.push(Span::styled("·", mark));
             start = at + 1;
         }
     }
     if start < text.len() {
-        out.push(Span::styled(&text[start..], style));
+        push_text(out, &text[start..], style);
     }
+}
+
+/// One span of text, or one per cluster when the text is wider drawn than measured.
+///
+/// `ratatui` advances the next span by the string's width, and a lam-alef
+/// (`ل` then `ا`) is one column there and two cells on screen, so the span after
+/// `سلام` would start a cell early and paint over its last letter. Spans of one
+/// cluster each advance by what they draw. The cells are the same either way, so
+/// the text a terminal shapes is unchanged; only text that would be misplaced is
+/// split.
+fn push_text<'a>(out: &mut Vec<Span<'a>>, text: &'a str, style: Style) {
+    if columns(text) == drawn_cells(text) {
+        out.push(Span::styled(text, style));
+        return;
+    }
+    out.extend(
+        crate::grapheme::clusters(text)
+            .map(|(at, cluster)| Span::styled(&text[at..at + cluster.len()], style)),
+    );
 }
 
 #[cfg(test)]

@@ -192,7 +192,7 @@ below.
   what a shaping terminal draws, which `TestBackend` and the pty tests cannot. It is
   **not** in `ci`: it needs kitty, macOS, and Screen Recording permission for the
   terminal that runs it. Offline it reaches the chat list and the input bar only;
-  conversation rows need a signed-in account. Nothing compares the images
+  a scene can seed cached messages into the conversation. The picture is a screen capture cropped to the window, so a window in front of kitty is in it: keep the screen clear and trust the `.txt` first. Nothing compares the images
   automatically yet; they are read by a person.
 - **Memory Verification:** implemented as `make measure`, not as part of `ci`.
   The driver (`scripts/memory/measure.py`) builds the release binary and
