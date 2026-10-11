@@ -1444,6 +1444,41 @@ mod tests {
         );
     }
 
+    /// A half-space (ZWNJ, U+200C) is zero width: the terminal draws it on the cell
+    /// of the letter in front, and it takes no cell of its own. So the Persian
+    /// `می‌خواهم` is seven cells, with the ZWNJ riding on the `ی`, and no mode may
+    /// give it a cell or move it onto another letter. What the gap looks like is
+    /// the font's: ZWNJ stops the joining and a monospace cell has no half width.
+    #[test]
+    fn a_zwnj_rides_on_the_letter_before_it_and_takes_no_cell() {
+        for mode in [BidiMode::Terminal, BidiMode::Words, BidiMode::Visual] {
+            let mut app = App::mock().with_bidi(mode);
+            press(&mut app, KeyCode::Char('i'));
+            type_text(&mut app, "می\u{200c}خواهم");
+
+            let buffer = screen(&app, 80, 24);
+            let top = bar_top(&rows_of(&buffer)) as u16;
+            let body = top + 1;
+            let cells: Vec<&str> = (1..=7).map(|x| buffer[(x, body)].symbol()).collect();
+            let all: String = cells.concat();
+
+            assert!(
+                all.contains("ی\u{200c}"),
+                "{mode:?}: the ZWNJ stays on the cell of the letter before it: {cells:?}"
+            );
+            assert_eq!(
+                cells.iter().filter(|c| c.contains('\u{200c}')).count(),
+                1,
+                "{mode:?}: and is on one cell only: {cells:?}"
+            );
+            assert_eq!(
+                buffer[(8, body)].symbol().trim(),
+                "",
+                "{mode:?}: seven cells, none for the ZWNJ: {cells:?}"
+            );
+        }
+    }
+
     /// A draft that reads left to right is the same row whichever mode draws it:
     /// the permutation is a no-op on left-to-right text, so the bar is not asked
     /// to do anything different and the default path is untouched.
