@@ -514,11 +514,11 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
                 ink,
             };
             // Same split as a message row: the terminal reverses a right-to-left
-            // run itself in `Terminal`, so the value goes out in stored order, one
-            // cluster per span; in `Visual` the value is permuted here, with the
-            // base direction of the whole value and not of this line.
+            // run itself in `Terminal`, so the value goes out in stored order; in
+            // `Visual` the value is permuted here, with the base direction of the
+            // whole value and not of this line.
             spans.extend(match app.bidi() {
-                BidiMode::Terminal => text_row::per_cluster(text_row::spans(&value)),
+                BidiMode::Terminal => text_row::spans(&value),
                 BidiMode::Visual => {
                     let base = bidi::base_direction(&row.value);
                     let pieces = bidi::visual_row_in(&row.value, range.clone(), base);

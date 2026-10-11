@@ -25,12 +25,7 @@ use crate::grapheme::clusters;
 /// over the slice in front of the caret.
 #[must_use]
 pub fn columns(text: &str) -> usize {
-    // Summed per cluster, because `UnicodeWidthStr::width` of a whole string
-    // joins some pairs into one column (lam-alef is one column as a pair, two as
-    // singles), and ratatui draws each cluster in its own cell.
-    clusters(text)
-        .map(|(_, cluster)| UnicodeWidthStr::width(cluster))
-        .sum()
+    UnicodeWidthStr::width(text)
 }
 
 /// Splits `text` into the rows it occupies at `width` columns.

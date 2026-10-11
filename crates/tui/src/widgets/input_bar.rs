@@ -1244,8 +1244,8 @@ mod tests {
 
     /// An Arabic draft's caret sits on the cell after the last glyph drawn, under
     /// the default mode. Its column is `wrap::columns` over the text in front of
-    /// it, which counts a cluster at a time, and the glyphs are drawn one cluster
-    /// to a cell, so the two must agree or the caret lands on the wrong letter.
+    /// it, and the glyphs are drawn one cluster to a cell, so the two must agree
+    /// or the caret lands on the wrong letter.
     #[test]
     fn a_caret_after_an_arabic_draft_is_drawn_after_its_last_glyph() {
         let mut terminal = App::mock();
@@ -1277,8 +1277,8 @@ mod tests {
         );
         assert_eq!(
             u16::try_from(terminal.input.line.laid_out(78).column).expect("a column fits a u16"),
-            4,
-            "the caret column counts four clusters, as the glyphs are drawn"
+            3,
+            "the caret column is the whole string's width: the lam-alef pair is one column"
         );
     }
 

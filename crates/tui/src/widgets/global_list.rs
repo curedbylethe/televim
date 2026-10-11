@@ -235,8 +235,8 @@ fn snippet(text: &str, query: &str, cells: usize) -> Snippet {
 ///
 /// The direction is the whole message's, not the snippet's: a row of an
 /// all-neutral snippet carries no evidence of its own. Under
-/// [`BidiMode::Terminal`] the runs are emitted as they are stored, split per
-/// cluster; under [`BidiMode::Visual`] each piece of the reordered snippet keeps
+/// [`BidiMode::Terminal`] the runs are emitted as they are stored; under
+/// [`BidiMode::Visual`] each piece of the reordered snippet keeps
 /// its match, so a match follows its own characters across the reorder.
 fn snippet_spans(app: &App, message: &str, runs: &[(String, bool)]) -> Vec<Span<'static>> {
     // The runs laid end to end, so each one is a byte range the text_row functions
@@ -265,9 +265,7 @@ fn snippet_spans(app: &App, message: &str, runs: &[(String, bool)]) -> Vec<Span<
     let drawn = match app.bidi() {
         BidiMode::Terminal => ranges
             .iter()
-            .flat_map(|(range, matched)| {
-                text_row::per_cluster(text_row::spans(&row(range.clone(), *matched)))
-            })
+            .flat_map(|(range, matched)| text_row::spans(&row(range.clone(), *matched)))
             .collect::<Vec<_>>(),
         BidiMode::Visual => {
             let base = bidi::base_direction(message);
