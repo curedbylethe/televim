@@ -25,10 +25,13 @@ Real, and named so they are not mistaken for oversights:
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on
     purpose: the cache is the account's, and sign-out ends the account.
-  - *An unwritable cache directory moves the cache to the temp directory for one run.*
-    The fallback is per launch and not persisted: the configured directory is never
-    rewritten or migrated, and the next launch probes it again. If the temp fallback
-    is unwritable too, `o` says the media could not be cached.
+  - *An unwritable cache directory moves the cache to the platform cache directory.*
+    The fallback is not the configured directory — that one is never rewritten or
+    migrated, and the next launch probes it again. The fallback lives under
+    `dirs::cache_dir()`, so it survives a restart; the system temp directory is used
+    only when no cache directory can be found, where the cache does not survive and
+    the warning says so. If the chosen fallback is unwritable too, `o` says the media
+    could not be cached.
   - *Legacy temp files are left.* Files named `televim-<pid>-…` from before the cache
     are not migrated or swept; the OS temp cleanup reclaims them.
 - **The viewer hand-off no longer blocks the loop, and has four known limits.** `o`

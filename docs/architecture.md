@@ -499,8 +499,11 @@ used pointer (a lookup moves its mtime to now), and removes a blob with its last
 pointer. An edit removes its message's pointer; a deletion removes the pointer for
 each deleted id in any chat. Writes are atomic at `0600`, as the history file does. `runtime.rs` opens it at launch
 with the configured account, which clears the directory on a mismatch. If the configured
-directory cannot be created or written (a probe file), `open` uses
-`temp_dir()/televim.media-<account>` for that run, with a `tracing::warn!`; `net::State`
+directory cannot be created or written (a probe file), `open` roots the fallback at
+`dirs::cache_dir()/televim/televim.media-<account>` so cached media survives a
+restart, with a `tracing::warn!`; the system temp directory is the root only when
+`dirs::cache_dir()` is `None`, and its warning says the cache will not survive;
+`net::State`
 holds it behind an `Arc<Mutex>`, cancels every download in flight and clears it at
 sign-out, and `save_media` looks up and stores through it — the store under
 `spawn_blocking`. A store takes the lock twice and writes between: it reserves a file
