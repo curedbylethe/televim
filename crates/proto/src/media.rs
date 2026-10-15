@@ -12,6 +12,13 @@
 //! fact about the two number spaces meeting in this crate, which is why it is
 //! [`ProtoError::MessageIdOutOfRange`] here and not something the framework
 //! reports — and it is answered before the request, not after.
+//!
+//! # The embedded thumbnail
+//!
+//! A message's media usually carries a small preview, and [`ProtoClient::embedded_thumbnail`]
+//! hands those bytes back without a download: they are part of the message the
+//! fetch already returned. The bytes are an opaque buffer here — `domain` never
+//! sees them, and `MediaKind` stays a payload-free description.
 
 #[cfg(feature = "live")]
 use crate::ProtoError;
@@ -111,6 +118,44 @@ impl crate::ProtoClient {
         );
 
         Ok(bytes)
+    }
+
+    /// Reads the thumbnail a message's media already carries, if it has one.
+    ///
+    /// The bytes ride on the message, so no download is asked for: the message
+    /// is re-read exactly as [`download_media_to`](Self::download_media_to)
+    /// re-reads it, and `Ok(None)` is an ordinary answer — a message whose media
+    /// carries no embedded preview. The bytes are an opaque buffer: `domain`
+    /// never sees them, and `MediaKind` stays payload-free.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProtoError::MessageIdOutOfRange`] — the identifier could not have
+    ///   been numbered by Telegram, so it names no message.
+    /// - [`ProtoError::Framework`] — the conversation is not in the peer cache,
+    ///   or a request failed.
+    pub async fn embedded_thumbnail(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+    ) -> Result<Option<Vec<u8>>, ProtoError> {
+        let target = narrow(chat_id, message_id)?;
+
+        let thumbnail = self
+            .inner()
+            .embedded_thumbnail(chat_id, i64::from(target))
+            .await?;
+
+        if let Some(bytes) = &thumbnail {
+            tracing::debug!(
+                chat_id,
+                message_id,
+                bytes = bytes.len(),
+                "read a message's embedded thumbnail"
+            );
+        }
+
+        Ok(thumbnail)
     }
 }
 
