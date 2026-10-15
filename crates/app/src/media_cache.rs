@@ -5,12 +5,13 @@
 //! blob and a CRC32 of the same bytes, so a lookup verifies the file on disk and
 //! evicts a corrupt or truncated one rather than serving it. A key is either the
 //! `(chat, message)` a file was downloaded for,
-//! `<chat>-<message>.ref`, or the Telegram media id it carries, `m<id>.ref`, which
-//! is the same for a file forwarded into any chat. The pointers are the index: a
-//! restart rebuilds it from their names and contents. The directory is bounded by
-//! the bytes of its distinct blobs and by its pointer count; past either, the
-//! least recently used pointer goes first, and its blob with it once no other
-//! pointer names it.
+//! `<chat>-<message>.ref`, the Telegram media id it carries, `m<id>.ref`, which
+//! is the same for a file forwarded into any chat, or the `(chat, message)`
+//! whose embedded thumbnail a blob is, `<chat>-<message>.thumb`. The pointers
+//! are the index: a restart rebuilds it from their names and contents. The
+//! directory is bounded by the bytes of its distinct blobs and by its pointer
+//! count; past either, the least recently used pointer goes first, and its blob
+//! with it once no other pointer names it.
 //!
 //! **Plaintext, like the history and drafts files.** Files are restricted to
 //! their owner and the directory is tagged with the account, but nothing is
@@ -84,6 +85,10 @@ fn parse_blob(name: &str) -> Option<String> {
     (SUFFIXES.contains(&extension) && hash_shaped).then(|| stem.to_owned())
 }
 
+/// The thumbnail pointer suffix, kept apart from a file's `.ref` so the two
+/// indexes cannot be confused.
+const THUMBNAIL_SUFFIX: &str = ".thumb";
+
 /// What a cached file is looked up by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Key {
@@ -91,21 +96,43 @@ pub(crate) enum Key {
     Message(i64, i64),
     /// Telegram's stable media id, which a forwarded copy shares: `m<id>.ref`.
     Media(i64),
+    /// The message whose embedded thumbnail a blob is:
+    /// `<chat>-<message>.thumb`.
+    Thumbnail(i64, i64),
 }
 
 impl Key {
     /// The pointer file's name. The `m` keeps a media id apart from a chat id,
-    /// which may be negative.
+    /// which may be negative, and the suffix keeps a thumbnail apart from the
+    /// file it previews.
     fn pointer_name(self) -> String {
         match self {
             Self::Message(chat_id, message_id) => format!("{chat_id}-{message_id}.ref"),
             Self::Media(media_id) => format!("m{media_id}.ref"),
+            Self::Thumbnail(chat_id, message_id) => {
+                format!("{chat_id}-{message_id}{THUMBNAIL_SUFFIX}")
+            }
+        }
+    }
+
+    /// The thumbnail key that belongs to this parent key, when it names a
+    /// message: the thumbnail is the parent's, so it is removed and evicted with
+    /// it. A media id has no thumbnail of its own — the blob is captured for the
+    /// message that opened it — so there is none to pair here.
+    fn thumbnail(self) -> Option<Self> {
+        match self {
+            Self::Message(chat_id, message_id) => Some(Self::Thumbnail(chat_id, message_id)),
+            Self::Media(_) | Self::Thumbnail(_, _) => None,
         }
     }
 }
 
 /// The key a pointer's name carries, or `None` for anything else.
 fn parse_pointer(name: &str) -> Option<Key> {
+    if let Some(stem) = name.strip_suffix(THUMBNAIL_SUFFIX) {
+        let (chat_id, message_id) = parse_ids(stem)?;
+        return Some(Key::Thumbnail(chat_id, message_id));
+    }
     let stem = name.strip_suffix(".ref")?;
     if let Some(media_id) = stem.strip_prefix('m') {
         return media_id.parse().ok().map(Key::Media);
@@ -365,6 +392,15 @@ impl MediaCache {
         self.hit(Key::Media(media_id))
     }
 
+    /// The file a message's embedded thumbnail is cached in, if it is.
+    ///
+    /// Consulted before the thumbnail is read again: a second open of the same
+    /// message is served from disk. Verified on the way in exactly as a file is
+    /// — a corrupt thumbnail is evicted and the lookup misses.
+    pub(crate) fn lookup_thumbnail(&mut self, chat_id: i64, message_id: i64) -> Option<PathBuf> {
+        self.hit(Key::Thumbnail(chat_id, message_id))
+    }
+
     /// A lookup is a use: the key's recency moves to now, and so does its
     /// pointer's mtime, which is what carries the order across a restart.
     ///
@@ -492,6 +528,46 @@ impl MediaCache {
             .lock()
             .expect("the media cache lock is not poisoned")
             .commit(reservation, keys)
+    }
+
+    /// Stores a message's embedded thumbnail as a blob of its own, keyed to the
+    /// message it belongs to, and returns the file it landed in.
+    ///
+    /// The bytes are already in memory — the accessor read them off the message
+    /// — so they are written to a temp in the cache directory and committed the
+    /// way a streamed download is: one store path, one checksum, the same
+    /// content-addressing and dedup. The blob is a `bin` because its format is
+    /// Telegram's and nothing here decodes it. An unwritable temp or a store
+    /// that will not fit is warned about and answered with `None`.
+    pub(crate) fn store_thumbnail(
+        cache: &Mutex<Self>,
+        chat_id: i64,
+        message_id: i64,
+        bytes: &[u8],
+    ) -> Option<PathBuf> {
+        let mut hasher = ContentHasher::new();
+        hasher.update(bytes);
+        let (hash, crc, size) = hasher.finish();
+
+        let temp = cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .download_temp_path();
+        if let Err(error) = write_owned(&temp, bytes) {
+            tracing::warn!(%error, "a message's thumbnail could not be written");
+            let _ = fs::remove_file(&temp);
+            return None;
+        }
+
+        Self::store_from_path(
+            cache,
+            &[Key::Thumbnail(chat_id, message_id)],
+            MediaKind::File,
+            &temp,
+            &hash,
+            crc,
+            size,
+        )
     }
 
     /// The single-owner store, for tests: the same three steps as
@@ -653,14 +729,29 @@ impl MediaCache {
 
     /// Unindexes each key that is held, removes its pointer, and gives back its
     /// reference to its blob.
+    ///
+    /// A message's thumbnail is its parent's, so it goes with it; a blob shared
+    /// with another key survives on that key's reference, the same rule the
+    /// whole cache turns on.
     fn remove_keys(&mut self, keys: &[Key]) {
         for key in keys {
-            if let Some(entry) = self.entries.remove(key) {
-                if let Err(error) = fs::remove_file(self.pointer_path(*key)) {
-                    tracing::warn!(%error, "a removed media pointer could not be removed");
-                }
-                self.drop_ref(&entry.hash);
+            self.forget_key(*key, "a removed media pointer could not be removed");
+            if let Some(thumbnail) = key.thumbnail() {
+                self.forget_key(thumbnail, "a removed media pointer could not be removed");
             }
+        }
+    }
+
+    /// Unindexes one key that is held, removes its pointer, and gives back its
+    /// reference to its blob. `what` names the pointer in the log when its
+    /// removal fails, so the two callers — a removal and an eviction — say which
+    /// of the two happened.
+    fn forget_key(&mut self, key: Key, what: &str) {
+        if let Some(entry) = self.entries.remove(&key) {
+            if let Err(error) = fs::remove_file(self.pointer_path(key)) {
+                tracing::warn!(%error, what);
+            }
+            self.drop_ref(&entry.hash);
         }
     }
 
@@ -870,11 +961,13 @@ impl MediaCache {
             let Some(key) = oldest else {
                 break;
             };
-            if let Some(entry) = self.entries.remove(&key) {
-                if let Err(error) = fs::remove_file(self.pointer_path(key)) {
-                    tracing::warn!(%error, "an evicted media pointer could not be removed");
-                }
-                self.drop_ref(&entry.hash);
+            self.forget_key(key, "an evicted media pointer could not be removed");
+            // The thumbnail is the parent's and goes with it — unless this same
+            // pass is storing it, which is the one `keep` protects against.
+            if let Some(thumbnail) = key.thumbnail()
+                && !keep.contains(&thumbnail)
+            {
+                self.forget_key(thumbnail, "an evicted media pointer could not be removed");
             }
         }
     }
@@ -993,6 +1086,31 @@ fn temp_sibling(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", std::process::id()));
     path.with_file_name(name)
+}
+
+/// Creates `path` owner-only and writes `bytes` into it.
+///
+/// The discipline every cached file is made under, for the one store whose bytes
+/// arrive whole rather than as a stream: a thumbnail is in memory before it is
+/// written, so [`MediaCache::store_thumbnail`] hands it to the same
+/// [`MediaCache::store_from_path`] a streamed download uses.
+#[cfg(unix)]
+fn write_owned(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_owned(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::write(path, bytes)
 }
 
 /// Sets a file's modification time to `when`.
@@ -1829,4 +1947,5 @@ mod tests {
         assert_eq!(cache.commit(stale, &[Key::Message(7, 9)]), None);
         assert!(!path.exists(), "and the late file is removed");
     }
+
 }
