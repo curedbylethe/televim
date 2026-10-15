@@ -61,8 +61,7 @@ use proto::{
 };
 use telegram_framework::{
     ClientBuilder, FileStore, FrameworkError, KeyProvider, KeyringKeyProvider, KeyringStore,
-    MEDIA_LIMIT, PASSWORD_ATTEMPTS, PassphraseProvider, Refusal, RequestError, SessionError,
-    SessionStore,
+    PASSWORD_ATTEMPTS, PassphraseProvider, Refusal, RequestError, SessionError, SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
@@ -2474,14 +2473,8 @@ fn open_media_id(view: &ConversationView, chat_id: i64, message_id: i64) -> Opti
 /// The status sentence for a download that wrote no file.
 ///
 /// Every failure the download can report gets a sentence, so none is silent.
-/// The limit is named for an oversize media, because it is the one thing a
-/// reader can act on.
 fn media_failure(error: &ProtoError) -> String {
     match error {
-        ProtoError::Framework(FrameworkError::MediaTooLarge { .. }) => format!(
-            "media is over the {} MiB limit; nothing was saved",
-            MEDIA_LIMIT / (1024 * 1024)
-        ),
         ProtoError::Framework(FrameworkError::MediaUnavailable { .. }) => {
             "this message carries no media televim can fetch; nothing was saved".to_owned()
         }
@@ -9051,25 +9044,15 @@ mod media_tests {
         }
     }
 
-    /// An oversize media names the limit, and every other failure is a sentence
-    /// that says nothing was saved.
+    /// Every failure is a sentence that says nothing was saved.
     #[test]
     fn every_download_failure_becomes_a_sentence_that_says_nothing_was_saved() {
-        let too_large = ProtoError::Framework(FrameworkError::MediaTooLarge {
-            peer_id: 1,
-            message_id: 2,
-            size: MEDIA_LIMIT + 1,
-            limit: MEDIA_LIMIT,
-        });
-        let text = media_failure(&too_large);
-        assert!(text.contains("16 MiB"), "{text}");
-        assert!(text.contains("nothing was saved"), "{text}");
-
         let unavailable = ProtoError::Framework(FrameworkError::MediaUnavailable {
             peer_id: 1,
             message_id: 2,
         });
         assert!(media_failure(&unavailable).contains("no media televim can fetch"));
+        assert!(media_failure(&unavailable).contains("nothing was saved"));
 
         let out_of_range = ProtoError::MessageIdOutOfRange {
             peer_id: 1,

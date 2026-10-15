@@ -122,7 +122,7 @@ pub use dialogs::{DialogInfo, DialogKind};
 #[cfg(feature = "live")]
 pub use history::{HISTORY_LIMIT, HistoryArgs};
 #[cfg(feature = "live")]
-pub use media::{MEDIA_LIMIT, MediaKind};
+pub use media::MediaKind;
 #[cfg(feature = "live")]
 pub use messages::{TEXT_LIMIT, validate_text};
 #[cfg(feature = "live")]
