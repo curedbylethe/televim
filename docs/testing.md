@@ -107,7 +107,10 @@ below.
   could never fit refused without evicting anything, strangers' and temp files ignored, an
   account mismatch clearing the directory, `clear` on a missing directory, the
   owner-only mode before the rename, and a clear landing between a store's write and
-  its commit, which refuses the late file without touching a newer store's file. An unwritable configured directory (a path
+  its commit, which refuses the late file without touching a newer store's file. A
+  stored file verifies its recorded CRC32 on lookup; a blob corrupted or truncated on
+  disk is evicted — file and pointer gone — and the lookup misses, while a shared blob's
+  other key is left alone. An unwritable configured directory (a path
   under a regular file) opens a fallback rooted under an injected cache directory,
   where a store round-trips and a second open finds the file after the restart
   analogue, and the configured path is never created; the fallback keeps the byte cap,

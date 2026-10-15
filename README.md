@@ -226,8 +226,10 @@ Working today:
   cache is a directory of `0600`, plaintext files named by the sha256 of their
   bytes (`<sha256>.<ext>`), so messages with the same bytes share one file. Two
   kinds of pointer name a file: `<chat>-<message>.ref` for each message, and
-  `m<id>.ref` for each Telegram media id, which a forwarded copy shares. The
-  directory is kept beside the config as `televim.media` unless `media_cache_dir`
+  `m<id>.ref` for each Telegram media id, which a forwarded copy shares. A pointer
+  also records a CRC32 of the blob's bytes: a lookup verifies the file on disk and
+  evicts a corrupt or truncated one rather than serving it, so its message is
+  fetched again. The directory is kept beside the config as `televim.media` unless `media_cache_dir`
   (or `TELEVIM_MEDIA_CACHE_DIR`) names another. It keeps at most
   `media_cache_max_bytes` bytes (or `TELEVIM_MEDIA_CACHE_MAX_BYTES`; default 1 GiB)
   and 256 pointers. A file over the byte cap is refused. Past either limit the least
