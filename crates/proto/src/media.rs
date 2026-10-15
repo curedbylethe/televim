@@ -112,33 +112,6 @@ impl crate::ProtoClient {
 
         Ok(bytes)
     }
-
-    /// [`download_media`](Self::download_media), reporting each chunk as it lands.
-    ///
-    /// The buffered shape, kept for its current caller until it moves to
-    /// [`download_media_to`](Self::download_media_to). `progress` runs after
-    /// every chunk with the bytes so far and the declared size; returning
-    /// `false` stops the transfer.
-    ///
-    /// # Errors
-    ///
-    /// Everything [`download_media_to`](Self::download_media_to) returns,
-    /// including `FrameworkError::DownloadAborted` when `progress` returns
-    /// `false`.
-    pub async fn download_media_with_progress(
-        &self,
-        chat_id: i64,
-        message_id: i64,
-        mut progress: impl FnMut(usize, Option<usize>) -> bool,
-    ) -> Result<Vec<u8>, ProtoError> {
-        let mut bytes = Vec::new();
-        self.download_media_to(chat_id, message_id, |chunk, downloaded, total| {
-            bytes.extend_from_slice(chunk);
-            progress(downloaded, total)
-        })
-        .await?;
-        Ok(bytes)
-    }
 }
 
 #[cfg(all(test, feature = "live"))]

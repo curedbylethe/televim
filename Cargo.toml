@@ -84,6 +84,10 @@ dirs = "7"
 # rather than served. CRC32 rather than the stored sha256: the sha256 names the
 # blob and is not rehashed on every lookup.
 crc32fast = "1.5.2"
+# One use: the free space on the media cache's filesystem, in `app::net`, so a
+# streamed download is refused before it fills the disk rather than failing
+# partway through. `std` exposes no such query.
+fs4 = "1.1.0"
 # `keyring` ships no default backend, so each supported platform store is
 # requested explicitly. They are target-gated, so enabling all of them is safe
 # on every platform; on Linux the Secret Service backend needs `libdbus`.
