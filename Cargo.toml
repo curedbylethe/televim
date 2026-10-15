@@ -75,6 +75,10 @@ base64 = "0.22"
 # `app::media_cache`. Pinned at the version already in the lockfile, so no
 # second copy enters the tree.
 sha2 = "0.10.9"
+# One use: the platform cache directory a media fallback lives under, in
+# `app::media_cache`, so cached media survives a restart rather than landing in
+# the system temp directory.
+dirs = "7"
 # `keyring` ships no default backend, so each supported platform store is
 # requested explicitly. They are target-gated, so enabling all of them is safe
 # on every platform; on Linux the Secret Service backend needs `libdbus`.
