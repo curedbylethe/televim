@@ -9881,4 +9881,29 @@ mod media_tests {
         assert!(state.media.take_pending().is_empty());
     }
 
+    /// A thumbnail already on disk is served from the cache: the gate
+    /// `cache_embedded_thumbnail` checks before it reads the message answers
+    /// `true`, so the read — and the request it makes for the message — is
+    /// skipped. A second open of the same message never asks for its preview
+    /// again.
+    #[test]
+    fn a_cached_thumbnail_is_served_before_it_is_read_again() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
+        assert!(
+            !thumbnail_is_cached(&cache, CHAT, 9),
+            "nothing is cached for the message yet"
+        );
+
+        MediaCache::store_thumbnail(&cache, CHAT, 9, b"preview").expect("a thumbnail is cached");
+
+        assert!(
+            thumbnail_is_cached(&cache, CHAT, 9),
+            "a cached thumbnail is served before it is read again"
+        );
+        assert!(
+            !thumbnail_is_cached(&cache, CHAT, 10),
+            "and only for the message it belongs to"
+        );
+    }
 }

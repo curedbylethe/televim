@@ -1948,4 +1948,199 @@ mod tests {
         assert!(!path.exists(), "and the late file is removed");
     }
 
+    /// The thumbnail a message already carries is stored as its own blob — a
+    /// content-addressed one, under the message's own `.thumb` pointer — and
+    /// found again after a restart, when `scan` rebuilds the index from it.
+    #[test]
+    fn a_thumbnail_is_found_again_after_a_restart() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = Mutex::new(cache_in(dir.path(), Some("+15550001")));
+        let path =
+            MediaCache::store_thumbnail(&cache, 7, 9, b"preview").expect("a thumbnail is cached");
+        let name = format!("{}.bin", content_hash(b"preview"));
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(name.as_str()),
+            "the preview is a content-addressed blob of its own"
+        );
+        drop(cache);
+
+        let mut reopened = cache_in(dir.path(), Some("+15550001"));
+        assert_eq!(reopened.lookup_thumbnail(7, 9), Some(path.clone()));
+        assert_eq!(fs::read(&path).expect("the file is there"), b"preview");
+        assert!(
+            dir.path().join("7-9.thumb").exists(),
+            "and its pointer is rebuilt"
+        );
+    }
+
+    /// A lookup is a use: a stored thumbnail is handed back before it is ever
+    /// read again.
+    #[test]
+    fn a_stored_thumbnail_is_handed_back_on_lookup() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = Mutex::new(cache_in(dir.path(), None));
+        let path = MediaCache::store_thumbnail(&cache, 1, 2, b"preview").expect("cached");
+
+        assert_eq!(
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .lookup_thumbnail(1, 2),
+            Some(path)
+        );
+    }
+
+    /// A thumbnail is its parent's: removing the message removes its pointer
+    /// and its thumbnail's, and both blobs with them.
+    #[test]
+    fn a_thumbnail_is_dropped_with_its_parent_message() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = Mutex::new(cache_in(dir.path(), None));
+        let file = cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .store(1, 5, MediaKind::File, b"clip")
+            .expect("cached");
+        let thumb = MediaCache::store_thumbnail(&cache, 1, 5, b"preview").expect("cached");
+
+        cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .remove_message(1, 5);
+
+        assert!(
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .lookup_thumbnail(1, 5)
+                .is_none()
+        );
+        assert!(!thumb.exists(), "the thumbnail blob goes with its parent");
+        assert!(!file.exists(), "and so does the parent's own blob");
+        assert!(
+            !dir.path().join("1-5.thumb").exists() && !dir.path().join("1-5.ref").exists(),
+            "both pointers are removed"
+        );
+    }
+
+    /// Two messages that carry the same preview share one thumbnail blob, and
+    /// it goes only with the last of them — the blob-refcount rule the whole
+    /// cache turns on, applied to a thumbnail.
+    #[test]
+    fn a_thumbnail_is_kept_while_a_shared_parent_remains() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = Mutex::new(cache_in(dir.path(), None));
+        let file = cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .store(1, 1, MediaKind::File, b"clip")
+            .expect("cached");
+        cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .store(1, 2, MediaKind::File, b"clip")
+            .expect("cached");
+        let thumb = MediaCache::store_thumbnail(&cache, 1, 1, b"preview").expect("cached");
+        let again = MediaCache::store_thumbnail(&cache, 1, 2, b"preview").expect("cached");
+        assert_eq!(thumb, again, "one blob holds both previews");
+
+        cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .remove_message(1, 1);
+
+        assert!(
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .lookup_thumbnail(1, 1)
+                .is_none()
+        );
+        assert_eq!(
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .lookup_thumbnail(1, 2),
+            Some(thumb.clone()),
+            "the other message still names the preview"
+        );
+        assert!(thumb.exists(), "so the shared thumbnail blob survives");
+        assert!(file.exists(), "and the file the two messages share");
+    }
+
+    /// A corrupt thumbnail is evicted on lookup exactly as a file is: the
+    /// pointer and the blob go, and the miss says to read it again.
+    #[test]
+    fn a_corrupt_thumbnail_is_evicted_and_the_lookup_misses() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = Mutex::new(cache_in(dir.path(), None));
+        let thumb = MediaCache::store_thumbnail(&cache, 1, 5, b"preview").expect("cached");
+        fs::write(&thumb, b"corrupted").expect("the blob can be corrupted");
+
+        assert!(
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .lookup_thumbnail(1, 5)
+                .is_none(),
+            "the corrupt preview is a miss"
+        );
+        assert!(!thumb.exists(), "the corrupt blob is removed");
+        assert!(
+            !dir.path().join("1-5.thumb").exists(),
+            "and its pointer with it"
+        );
+    }
+
+    /// Eviction takes a thumbnail with its parent: when the parent is the
+    /// oldest entry, its preview goes with it.
+    #[test]
+    fn an_evicted_parent_takes_its_thumbnail_with_it() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = Mutex::new(MediaCache::with_limits(
+            dir.path().to_path_buf(),
+            1024,
+            4,
+            None,
+        ));
+        let file = cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .store(1, 1, MediaKind::File, b"aaaa")
+            .expect("cached");
+        let thumb = MediaCache::store_thumbnail(&cache, 1, 1, b"preview").expect("cached");
+        cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .entries
+            .get_mut(&Key::Message(1, 1))
+            .expect("the parent is indexed")
+            .modified = SystemTime::UNIX_EPOCH;
+        for (message, bytes) in [(2, b"bbbb"), (3, b"cccc"), (4, b"dddd")] {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .store(1, message, MediaKind::File, bytes)
+                .expect("cached");
+        }
+
+        assert!(
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .lookup(1, 1)
+                .is_none(),
+            "the oldest parent is evicted"
+        );
+        assert!(
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .lookup_thumbnail(1, 1)
+                .is_none(),
+            "and its preview with it"
+        );
+        assert!(!file.exists() && !thumb.exists());
+    }
 }
