@@ -386,8 +386,11 @@ bytes are held in memory as they were before the cache, bounded by `MEDIA_LIMIT`
 of up to 16 MiB in flight during a write; this holds for any configured cap, and at
 the 1 GiB default it is 1 GiB plus 16 MiB.
 
-The temp-directory fallback used when the configured directory is unwritable keeps the
-same two caps and the same eviction; the figures above hold there too.
+The fallback used when the configured directory is unwritable keeps the same two caps
+and the same eviction; the figures above hold there too. It lives under the platform
+cache directory (`dirs::cache_dir()`), not the temp directory, so it survives a
+restart; the system temp directory is the last resort when no cache directory can be
+found, and only there does the cache not survive.
 
 These are **declared, not measured**, and the RSS budget is unaffected by the disk bound.
 

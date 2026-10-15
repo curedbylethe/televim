@@ -108,9 +108,12 @@ below.
   account mismatch clearing the directory, `clear` on a missing directory, the
   owner-only mode before the rename, and a clear landing between a store's write and
   its commit, which refuses the late file without touching a newer store's file. An unwritable configured directory (a path
-  under a regular file) opens the temp-directory fallback, where a store round-trips
-  and the configured path is never created; the fallback keeps the byte cap, eviction
-  and `0600` mode; and an unwritable fallback too degrades to `None` without panicking.
+  under a regular file) opens a fallback rooted under an injected cache directory,
+  where a store round-trips and a second open finds the file after the restart
+  analogue, and the configured path is never created; the fallback keeps the byte cap,
+  eviction and `0600` mode; the system temp directory is the last resort when no cache
+  directory can be found; and an unwritable fallback too degrades to `None` without
+  panicking.
   The byte cap's file and environment reads, `the_media_cache_max_bytes_is_read_from_the_file`
   and `the_environment_supplies_the_media_cache_max_bytes`, are in `config.rs`'s tests
   under the `ENV` lock.

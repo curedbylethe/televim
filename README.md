@@ -233,13 +233,15 @@ Working today:
   and 256 pointers. A file over the byte cap is refused. Past either limit the least
   recently used pointer goes first, and its file with it once no pointer names it.
   An edit drops its message's pointer; a deletion drops the pointer for that id in
-  any chat. The directory is emptied when the account changes and on sign-out. If that directory cannot be
-  written, this run uses `televim.media-<account>` under the system temp directory
-  instead, with the same limits; the configured directory is left as it is and the
-  next launch tries it again. Files saved by earlier
-  versions under the temp directory are not migrated or removed; the OS reclaims
-  them. The terminal leaves the alternate screen and raw mode for the viewer and
-  comes back where it was. A file over the 16 MiB limit is refused and nothing is
+  any chat. The directory is emptied when the account changes and on sign-out. If
+  that directory cannot be written, this run uses `televim.media-<account>` under the
+  platform cache directory (`dirs::cache_dir()`) instead, with the same limits, so
+  the cached media survives a restart; only when there is no platform cache directory
+  does it fall back to the system temp directory, warning that it will not survive.
+  The configured directory is left as it is and the next launch tries it again. Files
+  saved by earlier versions under the temp directory are not migrated or removed; the
+  OS reclaims them. The terminal leaves the alternate screen and raw mode for the
+  viewer and comes back where it was. A file over the 16 MiB limit is refused and nothing is
   saved, and the status line says what happened. While a download runs, its row shows `[image… 42%]` beside
   the placeholder (the megabytes so far when Telegram declared no size); `Esc` on that
   message stops it, and a failed download shows `[failed: …]`. There is no viewer setting. The known limits of the
