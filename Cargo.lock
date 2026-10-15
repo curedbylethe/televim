@@ -3499,6 +3499,7 @@ dependencies = [
  "base64",
  "clap",
  "config",
+ "crc32fast",
  "crossterm 0.28.1",
  "dirs",
  "domain",

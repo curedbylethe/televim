@@ -2,7 +2,9 @@
 //!
 //! Each distinct file is stored once, as a blob named `<sha256>.<suffix>` for
 //! the hash of its bytes. Each key has a pointer file holding the hash of its
-//! blob. A key is either the `(chat, message)` a file was downloaded for,
+//! blob and a CRC32 of the same bytes, so a lookup verifies the file on disk and
+//! evicts a corrupt or truncated one rather than serving it. A key is either the
+//! `(chat, message)` a file was downloaded for,
 //! `<chat>-<message>.ref`, or the Telegram media id it carries, `m<id>.ref`, which
 //! is the same for a file forwarded into any chat. The pointers are the index: a
 //! restart rebuilds it from their names and contents. The directory is bounded by
@@ -139,9 +141,48 @@ fn content_hash(bytes: &[u8]) -> String {
     hex
 }
 
+/// The hash and checksum a pointer file records, or `None` for one that names no
+/// blob. The first line is the blob's sha256; the second, when present, is its
+/// CRC32 as lowercase hex. A pointer written before integrity was added has only
+/// the first line, and its checksum reads as unknown.
+fn pointer_body(text: &str) -> Option<(String, Option<u32>)> {
+    let mut lines = text.lines();
+    let hash = lines.next()?.trim();
+    if hash.is_empty() {
+        return None;
+    }
+    let crc = lines
+        .next()
+        .map(str::trim)
+        .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+    Some((hash.to_owned(), crc))
+}
+
+/// The CRC32 of a file's bytes, read in chunks so a large blob is never held in
+/// memory. `None` if the file cannot be read, which a lookup treats as a
+/// mismatch and evicts.
+fn crc32_of(path: &Path) -> Option<u32> {
+    use std::io::Read as _;
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(_) => return None,
+        }
+    }
+    Some(hasher.finalize())
+}
+
 /// One key: the blob its pointer names, and when it was last used.
 struct Entry {
     hash: String,
+    /// The blob's CRC32, recorded at commit and checked on lookup. `None` for a
+    /// pointer written before integrity existed, whose checksum is unknown.
+    crc: Option<u32>,
     modified: SystemTime,
 }
 
@@ -158,6 +199,9 @@ struct Blob {
 struct Reservation {
     dir: PathBuf,
     hash: String,
+    /// The CRC32 of the bytes this store writes, so its pointer records what a
+    /// later lookup verifies.
+    crc: u32,
     path: PathBuf,
     size: u64,
     generation: u64,
@@ -250,12 +294,28 @@ impl MediaCache {
 
     /// A lookup is a use: the key's recency moves to now, and so does its
     /// pointer's mtime, which is what carries the order across a restart.
+    ///
+    /// The blob is verified here, lazily: its bytes are read and their CRC32
+    /// compared with the one its pointer recorded. A mismatch — a corrupt or
+    /// truncated file — evicts the file and this key's pointer and returns a
+    /// miss, so the caller re-downloads it. `scan` never re-hashes, so a restart
+    /// stays cheap.
     fn hit(&mut self, key: Key) -> Option<PathBuf> {
         let pointer = self.pointer_path(key);
-        let entry = self.entries.get_mut(&key)?;
         let now = SystemTime::now();
-        entry.modified = now;
-        let blob = self.blobs.get(&entry.hash)?;
+        let (hash, crc) = {
+            let entry = self.entries.get_mut(&key)?;
+            entry.modified = now;
+            (entry.hash.clone(), entry.crc)
+        };
+        let path = self.blobs.get(&hash)?.path.clone();
+        if let Some(crc) = crc
+            && crc32_of(&path) != Some(crc)
+        {
+            tracing::warn!(path = %path.display(), "a cached media file failed its checksum; evicting it");
+            self.evict_corrupt(key, &hash);
+            return None;
+        }
         // ponytail: the pointer's mtime is set under the cache lock, one syscall
         // per hit. Ceiling: a slow filesystem stalls the lock, so a concurrent
         // store waits, not the UI loop. Upgrade path: move this touch off-lock
@@ -263,7 +323,22 @@ impl MediaCache {
         if let Err(error) = set_mtime(&pointer, now) {
             tracing::warn!(%error, "a media pointer's recency could not be recorded");
         }
-        Some(blob.path.clone())
+        Some(path)
+    }
+
+    /// Evicts a blob whose bytes failed their checksum: this key's entry and
+    /// pointer go, and the file with them. Other keys that name the same blob are
+    /// left as they are — the file is already gone, so their own lookup misses.
+    fn evict_corrupt(&mut self, key: Key, hash: &str) {
+        self.entries.remove(&key);
+        if let Err(error) = fs::remove_file(self.pointer_path(key)) {
+            tracing::warn!(%error, "a corrupt media pointer could not be removed");
+        }
+        if let Some(blob) = self.blobs.remove(hash)
+            && let Err(error) = fs::remove_file(&blob.path)
+        {
+            tracing::warn!(%error, "a corrupt media file could not be removed");
+        }
     }
 
     /// Caches `bytes` under each of `keys` and returns the file they landed in.
@@ -281,7 +356,7 @@ impl MediaCache {
         let reservation = cache
             .lock()
             .expect("the media cache lock is not poisoned")
-            .reserve(&hash, kind, bytes.len(), keys.len())?;
+            .reserve(&hash, kind, bytes, keys.len())?;
         if write_reserved(&reservation, keys, bytes).is_none() {
             cache
                 .lock()
@@ -311,7 +386,7 @@ impl MediaCache {
     /// [`MediaCache::store`] under any set of keys.
     #[cfg(test)]
     fn store_keys(&mut self, keys: &[Key], kind: MediaKind, bytes: &[u8]) -> Option<PathBuf> {
-        let reservation = self.reserve(&content_hash(bytes), kind, bytes.len(), keys.len())?;
+        let reservation = self.reserve(&content_hash(bytes), kind, bytes, keys.len())?;
         if write_reserved(&reservation, keys, bytes).is_none() {
             self.abandon(&reservation);
             return None;
@@ -319,18 +394,18 @@ impl MediaCache {
         self.commit(reservation, keys)
     }
 
-    /// Claims the blob for `hash`, a store of `size` bytes that will name it
-    /// under `refs` pointers. Refuses what could never fit: bytes over
-    /// [`MEDIA_LIMIT`], or over the byte cap. A blob already here is held rather
-    /// than rewritten. No I/O.
+    /// Claims the blob for `hash`, a store of `bytes` that will name it under
+    /// `refs` pointers. Refuses what could never fit: bytes over [`MEDIA_LIMIT`],
+    /// or over the byte cap. A blob already here is held rather than rewritten.
+    /// No I/O.
     fn reserve(
         &mut self,
         hash: &str,
         kind: MediaKind,
-        size: usize,
+        bytes: &[u8],
         refs: usize,
     ) -> Option<Reservation> {
-        let size = u64::try_from(size).ok()?;
+        let size = u64::try_from(bytes.len()).ok()?;
         if size > MEDIA_LIMIT as u64 || size > self.max_bytes {
             return None;
         }
@@ -347,6 +422,7 @@ impl MediaCache {
         Some(Reservation {
             dir: self.dir.clone(),
             hash: hash.to_owned(),
+            crc: crc32fast::hash(bytes),
             path,
             size,
             generation: self.generation,
@@ -449,6 +525,7 @@ impl MediaCache {
     fn commit(&mut self, reservation: Reservation, keys: &[Key]) -> Option<PathBuf> {
         let Reservation {
             hash,
+            crc,
             path,
             size,
             generation,
@@ -488,6 +565,7 @@ impl MediaCache {
         for key in keys {
             let entry = Entry {
                 hash: hash.clone(),
+                crc: Some(crc),
                 modified: now,
             };
             if let Some(old) = self.entries.insert(*key, entry) {
@@ -580,16 +658,23 @@ impl MediaCache {
         // The pointers are read after the blobs, so each can be checked against
         // the blob it names. A pointer naming no blob is dangling and goes.
         for (key, path, modified) in pointers {
-            let hash = fs::read_to_string(&path)
+            let body = fs::read_to_string(&path)
                 .ok()
-                .map(|text| text.trim().to_owned())
-                .filter(|hash| self.blobs.contains_key(hash));
-            match hash {
-                Some(hash) => {
+                .and_then(|text| pointer_body(&text))
+                .filter(|(hash, _)| self.blobs.contains_key(hash));
+            match body {
+                Some((hash, crc)) => {
                     if let Some(blob) = self.blobs.get_mut(&hash) {
                         blob.refs += 1;
                     }
-                    self.entries.insert(key, Entry { hash, modified });
+                    self.entries.insert(
+                        key,
+                        Entry {
+                            hash,
+                            crc,
+                            modified,
+                        },
+                    );
                 }
                 None => {
                     let _ = fs::remove_file(&path);
@@ -700,7 +785,7 @@ fn write_reserved(reservation: &Reservation, keys: &[Key], bytes: &[u8]) -> Opti
             if reservation.write {
                 write_atomically(&reservation.path, bytes)?;
             }
-            let pointer = format!("{}\n", reservation.hash);
+            let pointer = format!("{}\n{:08x}\n", reservation.hash, reservation.crc);
             keys.iter().try_for_each(|key| {
                 write_atomically(
                     &reservation.dir.join(key.pointer_name()),
@@ -1239,7 +1324,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), Some("+15550001"));
         let reservation = cache
-            .reserve(&content_hash(b"late!!"), MediaKind::Photo, 6, 1)
+            .reserve(&content_hash(b"late!!"), MediaKind::Photo, b"late!!", 1)
             .expect("the file is reserved");
         let path = reservation.path.clone();
         write_reserved(&reservation, &[Key::Message(7, 9)], b"late!!")
@@ -1261,7 +1346,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), None);
         let stale = cache
-            .reserve(&content_hash(b"new"), MediaKind::Photo, 3, 1)
+            .reserve(&content_hash(b"new"), MediaKind::Photo, b"new", 1)
             .expect("reserved");
         write_reserved(&stale, &[Key::Message(7, 9)], b"new").expect("written");
         cache.clear();
@@ -1442,12 +1527,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), None);
         let stale = cache
-            .reserve(&content_hash(b"new"), MediaKind::Photo, 3, 1)
+            .reserve(&content_hash(b"new"), MediaKind::Photo, b"new", 1)
             .expect("reserved");
         write_reserved(&stale, &[Key::Message(7, 9)], b"new").expect("written");
         cache.clear();
         let fresh = cache
-            .reserve(&content_hash(b"new"), MediaKind::Photo, 3, 1)
+            .reserve(&content_hash(b"new"), MediaKind::Photo, b"new", 1)
             .expect("reserved");
         let path = fresh.path.clone();
         write_reserved(&fresh, &[Key::Message(7, 9)], b"new").expect("written over the late file");
@@ -1472,13 +1557,13 @@ mod tests {
         let mut cache = cache_in(dir.path(), None);
         let hash = content_hash(b"old");
         let stale = cache
-            .reserve(&hash, MediaKind::Photo, 3, 1)
+            .reserve(&hash, MediaKind::Photo, b"old", 1)
             .expect("reserved");
         let path = stale.path.clone();
         write_reserved(&stale, &[Key::Message(7, 9)], b"old").expect("written");
         cache.clear();
         let failed = cache
-            .reserve(&hash, MediaKind::Photo, 3, 1)
+            .reserve(&hash, MediaKind::Photo, b"old", 1)
             .expect("reserved");
         cache.abandon(&failed);
 

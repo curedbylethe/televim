@@ -79,6 +79,11 @@ sha2 = "0.10.9"
 # `app::media_cache`, so cached media survives a restart rather than landing in
 # the system temp directory.
 dirs = "7"
+# One use: the CRC32 a cached media blob records and verifies on lookup, in
+# `app::media_cache`, so a corrupt or truncated file is evicted and re-downloaded
+# rather than served. CRC32 rather than the stored sha256: the sha256 names the
+# blob and is not rehashed on every lookup.
+crc32fast = "1.5.2"
 # `keyring` ships no default backend, so each supported platform store is
 # requested explicitly. They are target-gated, so enabling all of them is safe
 # on every platform; on Linux the Secret Service backend needs `libdbus`.
