@@ -9221,6 +9221,60 @@ mod media_tests {
         assert_eq!((chat_id, message_id), (CHAT + 1, 9));
     }
 
+    /// The media id written to the history file is what a *restart* finds: the
+    /// id comes back through the file, and a copy in another chat is served from
+    /// the cache without a download — its own message key was never stored.
+    #[test]
+    fn a_restored_media_id_serves_a_forwarded_copy_after_a_restart() {
+        const MEDIA: i64 = 77;
+        let root = tempfile::tempdir().expect("a scratch directory");
+
+        // The download is filed under the media id as well as the message key,
+        // exactly as `keep_download` files it.
+        let cache = Mutex::new(MediaCache::open(root.path().join("media"), None, None));
+        let Event::MediaSaved { path, .. } =
+            keep_download(&cache, CHAT, 5, Some(MEDIA), MediaKind::Video, b"clip")
+        else {
+            panic!("a stored download answers with its file");
+        };
+        drop(cache);
+
+        // A history file remembers the id on a copy in another chat.
+        let mut forwarded = media_message(CHAT + 1, 9, Some(MediaKind::Video));
+        forwarded.media_id = Some(MEDIA);
+        let mut history = HistoryCache::default();
+        history.put(CHAT + 1, &[forwarded]);
+        let file = HistoryFile::new(root.path().join("televim.history.json"));
+        file.save(&history, Some("+1555"));
+
+        // A new launch: the cache is reopened, the file re-read, and the id
+        // arrives through the file rather than a hand-built message.
+        let cache = Mutex::new(MediaCache::open(root.path().join("media"), None, None));
+        let restored = file
+            .load()
+            .cache
+            .get(CHAT + 1)
+            .into_iter()
+            .next()
+            .expect("the saved message comes back");
+        assert_eq!(
+            restored.media_id,
+            Some(MEDIA),
+            "the restored message carries the id"
+        );
+
+        let Some(Event::MediaSaved {
+            path: served,
+            chat_id,
+            message_id,
+        }) = cached_media(&cache, CHAT + 1, restored.id, restored.media_id)
+        else {
+            panic!("the forwarded copy is served from the cache, not the wire");
+        };
+        assert_eq!(served, path, "the file the first chat downloaded");
+        assert_eq!((chat_id, message_id), (CHAT + 1, restored.id));
+    }
+
     /// Without an id a message is looked up by its own key alone, as it always
     /// was: another chat's copy is not its file, and an id that was never stored
     /// falls back to the message's key.
