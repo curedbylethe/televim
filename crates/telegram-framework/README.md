@@ -395,26 +395,32 @@ nothing. Two classifiers produce it — `classify_raw` for the hand-built
 are tested on every job because the decision can be, unlike the paths that reach
 it.
 
-The kind names a thing; it does not locate one. `Client::download_media(peer_id,
-message_id)` is the locator: it re-fetches the message by identifier through the
-same raw `GetHistory` request `fetch_history` builds, and streams the bytes out
-through `iter_download`. `grammers`' own `download_media` is behind an `fs`
-feature this crate never enables, and it takes a filesystem path, which is not a
-shape a terminal client wants.
+The kind names a thing; it does not locate one. `Client::download_media_to(peer_id,
+message_id, sink)` is the locator: it re-fetches the message by identifier through
+the same raw `GetHistory` request `fetch_history` builds, and streams the bytes out
+through `iter_download`, handing each chunk to `sink`. `grammers`' own
+`download_media` is behind an `fs` feature this crate never enables, and it takes a
+filesystem path, which is not a shape a terminal client wants.
 
 ```rust
-match client.download_media(peer_id, message_id).await {
-    Ok(bytes) => { /* the attachment, whole */ }
+match client
+    .download_media_to(peer_id, message_id, |chunk, downloaded, total| {
+        /* write the chunk; false stops the transfer */
+        true
+    })
+    .await
+{
+    Ok(()) => { /* the whole attachment was handed over, chunk by chunk */ }
     Err(FrameworkError::MediaUnavailable { .. }) => { /* no media, or not this message */ }
-    Err(FrameworkError::MediaTooLarge { size, limit, .. }) => { /* size over MEDIA_LIMIT */ }
+    Err(FrameworkError::DownloadAborted { .. }) => { /* the sink said stop */ }
 }
 ```
 
-`MEDIA_LIMIT` is 16 MiB, checked against the size Telegram declares and again
-against what actually arrives, so an oversized attachment is **reported**
-(`MediaTooLarge`) rather than truncated or streamed to the end first. The bytes
-come back owned: this is a `Vec<u8>` for now, and the streaming-and-cache shape
-that a viewer needs is CUR-9/CUR-10's.
+There is no size ceiling here: the chunks are the caller's as they arrive, so the
+framework holds no whole attachment and bounds nothing in memory. What bounds a
+download is the caller's disk, checked where the bytes are written.
+`Client::download_media` is the buffered convenience over the same work, for a
+caller with nowhere to stream to — a sticker decoded in memory once it is whole.
 
 ## Not here yet
 

@@ -15,12 +15,6 @@ Real, and named so they are not mistaken for oversights:
   which the crate's two-path split exists to avoid — the update feed arrives as a
   built `grammers` `Message`, and there is no raw variant to match on there
   without re-deriving one.
-- **A media download is a whole `Vec<u8>`, saved whole to the media cache.**
-  `Client::download_media` and `ProtoClient::download_media` return the bytes, and
-  `o` stores them as one file in the media cache before the platform viewer opens
-  it. Progress is reported per chunk and `Esc` stops the transfer, but the bytes
-  still arrive whole, so the return type is the limit: streaming to disk is a later
-  change (CUR-9), and the 16 MiB `MEDIA_LIMIT` refuses rather than truncates.
 - **The media cache has three known limits.**
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on
@@ -455,4 +449,4 @@ Real, and named so they are not mistaken for oversights:
 
 ## v2 Hooks
 
-The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists, and `o` stores the bytes in the media cache and opens the platform viewer. Streaming to disk is what is still ahead of it.
+The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists, `o` streams the bytes into the media cache, and the platform viewer opens it.

@@ -470,18 +470,19 @@ are in [`../AGENTS.md`](../AGENTS.md).
   fetch; a file written before the key existed reads back without one, and its
   message falls back to its own key until it is fetched again. The cache is still
   cleared when the account changes, so no file is shared between accounts.
-- **Why a download returns owned bytes for now:** `Client::download_media`
-  answers `Vec<u8>` rather than writing to a file or handing back a stream. The
-  caller today is a test and a caller that wants to know whether the fetch works,
-  and both want one value; a path, a cache directory, or a chunked reader would
-  each impose a storage decision on a program that has none yet. The transfer is
-  already streamed at the wire (`iter_download`) and already bounded
-  (`MEDIA_LIMIT`, 16 MiB, checked against the declared size and again against what
-  arrives, so an oversized attachment is reported rather than truncated), so what
-  a viewer needs later is a different return type over the same work, not
-  different work. Streaming and a cache directory are CUR-9 and CUR-10; `proto`
-  narrows the two identifiers to the `i32` the wire uses on the way through, and
-  says so with `ProtoError::MessageIdOutOfRange` rather than truncating.
+- **Why the download streams and what bounds it now:** `Client::download_media_to`
+  hands each chunk to a sink as it arrives and `save_media` writes it to a temp
+  file in the cache directory, so no whole attachment is ever held — the memory
+  ceiling the old 16 MiB media cap imposed is gone. What bounds a download now
+  is disk, not memory: the existing `media_cache_max_bytes` is the quota (no second
+  cap), and a free-space check (`fs4::available_space`, plus a margin) refuses a
+  declared size the cache's filesystem cannot hold before any chunk is stored. The
+  temp file's sha256 and CRC32 are computed in the one pass over the bytes as they
+  are written; on success it is renamed to `<sha256>.<suffix>`, on one filesystem
+  and so atomic, and committed through the same reserve/commit path the buffered
+  store used. A cancelled or failed download removes its temp file, and one a crash
+  leaves behind is swept on the next open. `Client::download_media` stays as a
+  buffered wrapper for the sticker path, which decodes in memory.
 - **Why the media cache names blobs by content hash, with a pointer per key:** a blob
   is `<sha256 of its bytes>.<suffix>`, and each key is a pointer file holding that hash:
   `<chat>-<message>.ref` for a message and `m<id>.ref` for a Telegram media id. Two
@@ -501,14 +502,14 @@ are in [`../AGENTS.md`](../AGENTS.md).
   cache is cleared with the account rather than kept per account: the history's
   stricter rule applies, since a stranger's media is worse to show than one more
   download.
-- **Why download progress is a callback that answers `bool`:** the framework's
-  `download_media_with_progress` calls `progress(downloaded, declared)` after each
-  accepted chunk, and a `false` answer aborts the transfer and drops the collected
-  bytes as `FrameworkError::DownloadAborted`. A callback rather than a channel keeps
-  the seam std-only, so `proto` and `tui` name no channel type and the abort needs no
-  error path of its own. The app side sends each chunk on its existing unbounded
-  channel, which never blocks the chunk loop; progress is one event per chunk, so the
-  count is bounded by the chunk size, not by the tick.
+- **Why download progress is the download's own sink:** `download_media_to` calls
+  its sink `(chunk, downloaded, declared)` after each accepted chunk, and a `false`
+  answer aborts the transfer as `FrameworkError::DownloadAborted`. The sink writes
+  the chunk and reports progress in one place, rather than a separate callback with
+  a separate buffer, so the seam stays std-only and `proto` and `tui` name no
+  channel type. The app side hands each chunk to a blocking writer over its own
+  channel, which never blocks the chunk loop; progress is one event per chunk, so
+  the count is bounded by the chunk size, not by the tick.
 - **Why the progress is decorated beside the placeholder rather than replacing it:**
   `Message::display_body` feeds selection, search, and bidi slicing as well as the
   drawn row, so substituting a token into it would move every byte range those keep.
@@ -674,9 +675,8 @@ are in [`../AGENTS.md`](../AGENTS.md).
   anything is allocated, because 16 MiB of WEBP is not 16 MiB of RGBA, and the
   cache cap (32 KiB, sixteen fit-box pictures and change) evicts oldest-first,
   because identifiers repeat across conversations and the whole cache is dropped
-  on switch. Both ceilings carry `const assert!`s against the 50 MB budget, the
-  way `MEDIA_LIMIT` does: a number that can grow without failing the build is a
-  suggestion.
+  on switch. Both ceilings carry `const assert!`s against the 50 MB budget: a
+  number that can grow without failing the build is a suggestion.
 - **Why the sticker painter is hand-rolled and not `ratatui-image`:** the job
   is 24 half-block cells by 8 rows — one `match` on two pixels — and the crate
   costs a stripped ~1.26 MB over an `image`-decode baseline (measured
