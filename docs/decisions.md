@@ -992,3 +992,15 @@ are in [`../AGENTS.md`](../AGENTS.md).
   the whole cache turns on. Folding the preview into the file's blob or pointer was
   rejected: the file may never be downloaded — a refused or cancelled open — while the
   preview is already in hand, and a pointer that names two blobs is not a name at all.
+- **Why the media cache stays plaintext for now, and is only recorded as a gap:** the
+  cache holds the attachments a reader has opened and the previews their messages carry,
+  restricted to their owner (`0600`) exactly as the history file is, and nothing there is
+  sealed. Sealing it means the same envelope the session file uses — `TVIM1 | salt(16) |
+  nonce(12) | ciphertext | tag(16)`, AES-256-GCM-SIV — and a key to open it with, and
+  that key is the reader's passphrase or the OS keyring, both of which are already
+  documented gaps for the session file itself (no prompt, no re-keying). The decision
+  here is only to **record** the gap and defer the sealing, beside the history file's own
+  plaintext entry in [`known-gaps.md`](./known-gaps.md), and to say the media directory
+  should be excluded from backups by default until then. A partial seal or a second
+  format was not invented: the cache is read on every open, and a second envelope nothing
+  else in the program reads buys little over the one the session file already has.

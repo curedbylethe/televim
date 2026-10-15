@@ -225,7 +225,10 @@ Working today:
   The file comes from the media cache: a message opened before is served from
   disk with no request, and a first open downloads it and stores it there. The
   cache is a directory of `0600`, plaintext files named by the sha256 of their
-  bytes (`<sha256>.<ext>`), so messages with the same bytes share one file. Three
+  bytes (`<sha256>.<ext>`), so messages with the same bytes share one file. It is
+  not encrypted — unlike the session file — so it is readable by anything running
+  as the reader and by any backup; the gap and its follow-up are in
+  [`docs/known-gaps.md`](docs/known-gaps.md). Three
   kinds of pointer name a file: `<chat>-<message>.ref` for each message,
   `m<id>.ref` for each Telegram media id, which a forwarded copy shares, and
   `<chat>-<message>.thumb` for the small preview a document or photo already
