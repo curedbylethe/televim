@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
@@ -44,6 +45,17 @@ pub const MEDIA_CACHE_MAX_ENTRIES: usize = 256;
 
 /// The file beside the media that records which account wrote it.
 const ACCOUNT_FILE: &str = "account";
+
+/// A streamed download's temp file, before its hash names it: a recognizable
+/// name, so a leftover from a crash is swept on the next open and never
+/// mistaken for a blob.
+const DOWNLOAD_TEMP_PREFIX: &str = ".download-";
+const DOWNLOAD_TEMP_SUFFIX: &str = ".tmp";
+
+/// Whether a name is a streamed download's temp file.
+fn is_download_temp(name: &str) -> bool {
+    name.starts_with(DOWNLOAD_TEMP_PREFIX) && name.ends_with(DOWNLOAD_TEMP_SUFFIX)
+}
 
 /// Every extension a cached file can carry, one per [`suffix`]. A name with any
 /// other extension is not ours and is left alone.
@@ -128,15 +140,53 @@ fn blob_name(hash: &str, kind: MediaKind) -> String {
     format!("{hash}.{}", suffix(kind))
 }
 
-/// The sha256 of `bytes`, as lowercase hex: the name a blob is stored under.
-fn content_hash(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
+/// A content hash computed over bytes as they arrive: the sha256 that names the
+/// blob, the CRC32 that verifies it, and the byte count.
+///
+/// A streamed download knows none of the three until the last chunk, so the
+/// caller feeds the chunks here as it writes them and gets the final values
+/// back from [`ContentHasher::finish`].
+pub(crate) struct ContentHasher {
+    sha: Sha256,
+    crc: crc32fast::Hasher,
+    bytes: u64,
+}
 
-    let mut hex = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+impl ContentHasher {
+    pub(crate) fn new() -> Self {
+        Self {
+            sha: Sha256::new(),
+            crc: crc32fast::Hasher::new(),
+            bytes: 0,
+        }
     }
-    hex
+
+    pub(crate) fn update(&mut self, chunk: &[u8]) {
+        self.sha.update(chunk);
+        self.crc.update(chunk);
+        self.bytes = self.bytes.saturating_add(chunk.len() as u64);
+    }
+
+    /// The sha256 hex, the CRC32, and the total bytes.
+    pub(crate) fn finish(self) -> (String, u32, u64) {
+        use std::fmt::Write as _;
+
+        let mut hash = String::with_capacity(64);
+        for byte in self.sha.finalize() {
+            write!(hash, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        (hash, self.crc.finalize(), self.bytes)
+    }
+}
+
+/// The sha256 of `bytes`, as lowercase hex: the name a blob is stored under.
+/// The whole-buffer twin of [`ContentHasher`], for the tests that store bytes
+/// directly rather than streaming them.
+#[cfg(test)]
+fn content_hash(bytes: &[u8]) -> String {
+    let mut hasher = ContentHasher::new();
+    hasher.update(bytes);
+    hasher.finish().0
 }
 
 /// The hash and checksum a pointer file records, or `None` for one that names no
@@ -279,6 +329,31 @@ impl MediaCache {
         cache
     }
 
+    /// The directory the cache writes in. A streamed download's temp file lives
+    /// here too, so the rename into place is on one filesystem.
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The byte cap: the most the cache's distinct blobs may take on disk.
+    pub(crate) fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// A unique temp path in [`MediaCache::dir`] for a streamed download.
+    ///
+    /// Named for the process and a counter so two stores in one run do not
+    /// collide. The file is renamed into its content-named place once the stream
+    /// has been hashed; a leftover from a crash is swept by [`MediaCache::scan`].
+    pub(crate) fn download_temp_path(&self) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        self.dir.join(format!(
+            "{DOWNLOAD_TEMP_PREFIX}{}-{n}{DOWNLOAD_TEMP_SUFFIX}",
+            std::process::id()
+        ))
+    }
+
     /// The file a message's media is cached in, if it is.
     pub(crate) fn lookup(&mut self, chat_id: i64, message_id: i64) -> Option<PathBuf> {
         self.hit(Key::Message(chat_id, message_id))
@@ -341,9 +416,10 @@ impl MediaCache {
 
     /// Caches `bytes` under each of `keys` and returns the file they landed in.
     ///
-    /// Takes the lock twice and writes between: the file I/O never runs under
-    /// the lock, so a clear waits out a lock-held swap, not a 16 MiB write. The
-    /// hash is taken before the first lock for the same reason.
+    /// The whole-buffer store, kept for tests: the production path streams a
+    /// download to a temp file and commits it with
+    /// [`MediaCache::store_from_path`], so a large attachment is never held whole.
+    #[cfg(test)]
     pub(crate) fn store_shared(
         cache: &Mutex<Self>,
         keys: &[Key],
@@ -362,6 +438,56 @@ impl MediaCache {
                 .abandon(&reservation);
             return None;
         }
+        cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .commit(reservation, keys)
+    }
+
+    /// Commits a blob already written to `temp`: renames it into its
+    /// content-named place, writes a pointer for each key, and indexes them.
+    ///
+    /// The streamed twin of [`MediaCache::store_shared`]. The rename is on one
+    /// filesystem — the temp file was created in [`MediaCache::dir`] — so it is
+    /// atomic, and it runs between the two lock acquisitions the same way the
+    /// buffered store's write did. When the blob is already cached the temp is
+    /// discarded and only the pointers are added.
+    pub(crate) fn store_from_path(
+        cache: &Mutex<Self>,
+        keys: &[Key],
+        kind: MediaKind,
+        temp: &Path,
+        hash: &str,
+        crc: u32,
+        size: u64,
+    ) -> Option<PathBuf> {
+        let reservation = cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .reserve_hashed(hash, kind, size, crc, keys.len())?;
+
+        if reservation.write {
+            if let Err(error) = fs::rename(temp, &reservation.path) {
+                tracing::warn!(%error, "a streamed media file could not be moved into the cache");
+                cache
+                    .lock()
+                    .expect("the media cache lock is not poisoned")
+                    .abandon(&reservation);
+                let _ = fs::remove_file(temp);
+                return None;
+            }
+        } else if let Err(error) = fs::remove_file(temp) {
+            tracing::warn!(%error, "a redundant streamed media file could not be removed");
+        }
+
+        if write_pointers(&reservation.dir, &reservation.hash, reservation.crc, keys).is_none() {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .abandon(&reservation);
+            return None;
+        }
+
         cache
             .lock()
             .expect("the media cache lock is not poisoned")
@@ -393,8 +519,9 @@ impl MediaCache {
     }
 
     /// Claims the blob for `hash`, a store of `bytes` that will name it under
-    /// `refs` pointers. Refuses what could never fit: bytes over the byte cap. A
-    /// blob already here is held rather than rewritten. No I/O.
+    /// `refs` pointers. The whole-buffer twin of [`MediaCache::reserve_hashed`],
+    /// for the tests that store bytes directly.
+    #[cfg(test)]
     fn reserve(
         &mut self,
         hash: &str,
@@ -402,7 +529,28 @@ impl MediaCache {
         bytes: &[u8],
         refs: usize,
     ) -> Option<Reservation> {
-        let size = u64::try_from(bytes.len()).ok()?;
+        let mut hasher = ContentHasher::new();
+        hasher.update(bytes);
+        let (_, crc, size) = hasher.finish();
+        self.reserve_hashed(hash, kind, size, crc, refs)
+    }
+
+    /// Claims the blob named by `hash` of `size` bytes with checksum `crc`, that
+    /// will name it under `refs` pointers. Refuses what could never fit: bytes
+    /// over the byte cap. A blob already here is held rather than rewritten. No
+    /// I/O.
+    ///
+    /// The streamed store knows its size and checksum before this runs — it has
+    /// written the bytes to a temp file and hashed them — so they arrive as
+    /// values rather than as a buffer.
+    fn reserve_hashed(
+        &mut self,
+        hash: &str,
+        kind: MediaKind,
+        size: u64,
+        crc: u32,
+        refs: usize,
+    ) -> Option<Reservation> {
         if size > self.max_bytes {
             return None;
         }
@@ -419,7 +567,7 @@ impl MediaCache {
         Some(Reservation {
             dir: self.dir.clone(),
             hash: hash.to_owned(),
-            crc: crc32fast::hash(bytes),
+            crc,
             path,
             size,
             generation: self.generation,
@@ -586,7 +734,10 @@ impl MediaCache {
         };
         for entry in read.flatten() {
             let name = entry.file_name();
-            let ours = name == ACCOUNT_FILE || name.to_str().is_some_and(is_cache_file);
+            let ours = name == ACCOUNT_FILE
+                || name
+                    .to_str()
+                    .is_some_and(|name| is_cache_file(name) || is_download_temp(name));
             if ours && let Err(error) = fs::remove_file(entry.path()) {
                 tracing::warn!(%error, "a cached media file could not be removed");
             }
@@ -650,6 +801,12 @@ impl MediaCache {
                 // Named by message, before content addressing. Nothing indexes
                 // these any more, and the cache is disposable, so they go.
                 tracing::warn!(%error, "a legacy media file could not be removed");
+            } else if is_download_temp(name) {
+                // A streamed download's temp file, left by a crash between the
+                // write and the commit. Nothing names it, so it goes.
+                if let Err(error) = fs::remove_file(entry.path()) {
+                    tracing::warn!(%error, "an interrupted media download's temp file could not be removed");
+                }
             }
         }
         // The pointers are read after the blobs, so each can be checked against
@@ -772,9 +929,11 @@ fn account_tag(account: Option<&str>) -> String {
     }
 }
 
-/// Writes what a reserved store owes the disk: the blob, when this store is the
-/// one writing it, then a pointer for each key. A failed write is warned about
-/// and returns `None`.
+/// Writes what a reserved buffered store owes the disk: the blob, when this
+/// store is the one writing it, then a pointer for each key. A failed write is
+/// warned about and returns `None`. The streamed store renames its blob into
+/// place instead and calls [`write_pointers`] directly.
+#[cfg(test)]
 fn write_reserved(reservation: &Reservation, keys: &[Key], bytes: &[u8]) -> Option<()> {
     let written = fs::create_dir_all(&reservation.dir)
         .context("creating the media cache directory")
@@ -782,14 +941,25 @@ fn write_reserved(reservation: &Reservation, keys: &[Key], bytes: &[u8]) -> Opti
             if reservation.write {
                 write_atomically(&reservation.path, bytes)?;
             }
-            let pointer = format!("{}\n{:08x}\n", reservation.hash, reservation.crc);
-            keys.iter().try_for_each(|key| {
-                write_atomically(
-                    &reservation.dir.join(key.pointer_name()),
-                    pointer.as_bytes(),
-                )
-            })
+            Ok(())
         });
+    if let Err(error) = written {
+        tracing::warn!(%error, "media could not be cached");
+        return None;
+    }
+    write_pointers(&reservation.dir, &reservation.hash, reservation.crc, keys)
+}
+
+/// Writes a pointer file for each key, naming `hash` and carrying `crc`.
+///
+/// The pointer body is the hash on the first line and the CRC32 as lowercase hex
+/// on the second, which is what a restart reads back. A failed write is warned
+/// about and returns `None`.
+fn write_pointers(dir: &Path, hash: &str, crc: u32, keys: &[Key]) -> Option<()> {
+    let pointer = format!("{hash}\n{crc:08x}\n");
+    let written = keys
+        .iter()
+        .try_for_each(|key| write_atomically(&dir.join(key.pointer_name()), pointer.as_bytes()));
     if let Err(error) = written {
         tracing::warn!(%error, "media could not be cached");
         return None;

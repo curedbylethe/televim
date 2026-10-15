@@ -42,8 +42,11 @@
 //! may see both halves sees them in one place.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::fs;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -69,7 +72,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
 use crate::config::Config;
 use crate::draft_store::DraftFile;
 use crate::history_store::{HistoryCache, HistoryFile, PageKind};
-use crate::media_cache::{Key, MediaCache};
+use crate::media_cache::{ContentHasher, Key, MediaCache};
 use crate::runtime::AppEvent;
 
 /// How many messages one page holds.
@@ -2485,39 +2488,229 @@ fn media_failure(error: &ProtoError) -> String {
     }
 }
 
-/// The progress callback of one download: reports each chunk on the loop's
-/// channel, and answers `false` once the reader has cancelled, which stops the
-/// transfer before the next chunk.
+/// The headroom a streamed download keeps beyond its declared size, so a
+/// download does not fill the disk to its very last byte.
+const MEDIA_FREE_SPACE_MARGIN: u64 = 16 * 1024 * 1024;
+
+/// Why a streamed download was refused before its bytes were stored.
+enum StreamRefusal {
+    /// The media is larger than the cache's byte cap.
+    OverCap { size: u64, cap: u64 },
+
+    /// The cache's filesystem does not have room for the media plus the margin.
+    NoSpace { needed: u64, available: u64 },
+}
+
+impl StreamRefusal {
+    /// The status sentence the refusal becomes. It says nothing was saved.
+    fn sentence(&self) -> String {
+        match self {
+            Self::OverCap { size, cap } => format!(
+                "media is {size} bytes, over the {cap} byte media cache cap; nothing was saved"
+            ),
+            Self::NoSpace { needed, available } => format!(
+                "not enough disk space for the media ({needed} bytes needed, {available} \
+                 available); nothing was saved"
+            ),
+        }
+    }
+}
+
+/// The refusal to report before a download starts, if any.
+///
+/// `total` is the size Telegram declared, when it declared one: media over the
+/// byte cap, or media the cache's filesystem has no room for once the margin is
+/// kept back, is refused before its bytes are stored. Free of the filesystem, so
+/// the decision is tested without one.
+fn stream_refusal(cap: u64, total: Option<u64>, available: Option<u64>) -> Option<StreamRefusal> {
+    let size = total?;
+    if size > cap {
+        return Some(StreamRefusal::OverCap { size, cap });
+    }
+    let available = available?;
+    let needed = size.saturating_add(MEDIA_FREE_SPACE_MARGIN);
+    (available < needed).then_some(StreamRefusal::NoSpace { needed, available })
+}
+
+/// A streamed download's bytes, as they were written to its temp file.
+struct StreamedMedia {
+    hash: String,
+    crc: u32,
+    size: u64,
+}
+
+/// Writes the chunks arriving on `chunks` to `temp`, hashing as it goes, and
+/// returns the content hash, checksum and size.
+///
+/// The temp file is owner-only from the first byte, like every cached file, and
+/// the sha256 that names the blob and the CRC32 that verifies it are computed in
+/// the one pass over the bytes.
+fn write_streamed(temp: &Path, chunks: Receiver<Vec<u8>>) -> std::io::Result<StreamedMedia> {
+    let mut file = write_temp(temp)?;
+    let mut hasher = ContentHasher::new();
+
+    for chunk in chunks {
+        file.write_all(&chunk)?;
+        hasher.update(&chunk);
+    }
+    file.flush()?;
+
+    let (hash, crc, size) = hasher.finish();
+    Ok(StreamedMedia { hash, crc, size })
+}
+
+/// Creates `temp` owner-only, mirroring the atomic-write helper's discipline:
+/// the file is restricted as it is made, before a byte is in it.
+#[cfg(unix)]
+fn write_temp(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn write_temp(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+/// Reports one chunk's progress on the loop's channel, and answers whether to
+/// keep going: `false` once the reader has cancelled, which stops the transfer
+/// before the next chunk.
 ///
 /// The send is unbounded, so the chunk loop never waits on the loop draining
 /// events; progress is one event per chunk, which bounds how many there are.
-fn media_progress(
+fn report_progress(
+    tx: &UnboundedSender<AppEvent>,
+    chat_id: i64,
+    message_id: i64,
+    cancel: &AtomicBool,
+    downloaded: usize,
+    total: Option<usize>,
+) -> bool {
+    if cancel.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    let _ = tx.send(AppEvent::Net(Event::MediaProgress {
+        chat_id,
+        message_id,
+        downloaded,
+        total,
+    }));
+
+    true
+}
+
+/// The event for a download the sink stopped before it was stored — a refusal, a
+/// cancel, or a write failure — and the temp file it leaves is removed.
+fn settle_interrupted(
+    refusal: &Mutex<Option<StreamRefusal>>,
+    cancel: &AtomicBool,
+    temp: &Path,
+    chat_id: i64,
+    message_id: i64,
+) -> Event {
+    let _ = fs::remove_file(temp);
+
+    if let Some(refusal) = refusal
+        .lock()
+        .expect("the refusal lock is not poisoned")
+        .take()
+    {
+        return Event::MediaFailed {
+            chat_id,
+            message_id,
+            reason: refusal.sentence(),
+        };
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Event::MediaCancelled {
+            chat_id,
+            message_id,
+        };
+    }
+
+    Event::MediaFailed {
+        chat_id,
+        message_id,
+        reason: "the media download was interrupted; nothing was saved".to_owned(),
+    }
+}
+
+/// The sink a media download feeds: checks the declared size and the free space
+/// once, before the first chunk is stored, hands each chunk to `chunks` for the
+/// writer, reports progress, and stops on a cancel or a refusal.
+///
+/// `chunks` is a channel to the blocking writer, so the transfer never waits on
+/// the disk. A refusal — over the byte cap, or no room for the declared size —
+/// is recorded in `refusal` and reported by the caller; a closed channel means
+/// the writer died and stops the transfer too.
+#[allow(clippy::too_many_arguments)]
+fn media_sink(
+    dir: &Path,
+    cap: u64,
+    chunks: Sender<Vec<u8>>,
+    refusal: Arc<Mutex<Option<StreamRefusal>>>,
+    cancel: Arc<AtomicBool>,
     tx: UnboundedSender<AppEvent>,
     chat_id: i64,
     message_id: i64,
-    cancel: Arc<AtomicBool>,
-) -> impl FnMut(usize, Option<usize>) -> bool {
-    move |downloaded, total| {
+) -> impl FnMut(&[u8], usize, Option<usize>) -> bool {
+    let dir = dir.to_path_buf();
+    let mut checked = false;
+    move |chunk: &[u8], downloaded: usize, total: Option<usize>| {
         if cancel.load(Ordering::Relaxed) {
             return false;
         }
 
-        let _ = tx.send(AppEvent::Net(Event::MediaProgress {
-            chat_id,
-            message_id,
-            downloaded,
-            total,
-        }));
+        // The declared size, when Telegram gave one, is checked once, before the
+        // first chunk is stored.
+        if !checked {
+            checked = true;
+            let available = fs4::available_space(&dir).ok();
+            let declared = total.and_then(|total| u64::try_from(total).ok());
+            if let Some(value) = stream_refusal(cap, declared, available) {
+                *refusal.lock().expect("the refusal lock is not poisoned") = Some(value);
+                return false;
+            }
+        }
 
-        true
+        // A size Telegram did not declare is only caught here, as it grows.
+        let downloaded_u64 = u64::try_from(downloaded).unwrap_or(u64::MAX);
+        if downloaded_u64 > cap {
+            *refusal.lock().expect("the refusal lock is not poisoned") =
+                Some(StreamRefusal::OverCap {
+                    size: downloaded_u64,
+                    cap,
+                });
+            return false;
+        }
+
+        if chunks.send(chunk.to_vec()).is_err() {
+            return false;
+        }
+
+        report_progress(&tx, chat_id, message_id, &cancel, downloaded, total)
     }
 }
 
 /// Downloads the media on a message into the cache, or serves it from there.
 ///
 /// A message already cached is answered from disk with no request on the wire.
-/// A miss downloads, then stores the bytes; the store is disk I/O, so it runs
-/// off the loop.
+/// A miss streams the download to a temp file in the cache directory — hashing
+/// as it lands and writing off the loop, on a blocking thread — then renames it
+/// into its content-named place and commits it. A cancelled or failed download
+/// leaves no temp file.
 async fn save_media(
     client: &ProtoClient,
     tx: &UnboundedSender<AppEvent>,
@@ -2539,39 +2732,82 @@ async fn save_media(
         return event;
     }
 
-    let progress = media_progress(tx.clone(), chat_id, message_id, job.cancel);
-    let bytes = match client
-        .download_media_with_progress(chat_id, message_id, progress)
-        .await
-    {
-        Ok(bytes) => bytes,
-        Err(ProtoError::Framework(FrameworkError::DownloadAborted { .. })) => {
-            return Event::MediaCancelled {
+    // The cache's directory and quota, read under the lock and released at once.
+    let (dir, cap, temp) = {
+        let cache = job
+            .cache
+            .lock()
+            .expect("the media cache lock is not poisoned");
+        (
+            cache.dir().to_path_buf(),
+            cache.max_bytes(),
+            cache.download_temp_path(),
+        )
+    };
+    // A copy for the cleanup paths: the original is moved into the writer.
+    let temp_cleanup = temp.clone();
+
+    // The chunks are written on a blocking thread so the download loop never
+    // waits on the disk: the sink only hands each chunk over and reports
+    // progress. Dropping the sender is what ends the writer.
+    let (chunk_tx, chunk_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let writer = tokio::task::spawn_blocking(move || write_streamed(&temp, chunk_rx));
+
+    let refusal = Arc::new(Mutex::new(None::<StreamRefusal>));
+    let sink = media_sink(
+        &dir,
+        cap,
+        chunk_tx,
+        Arc::clone(&refusal),
+        Arc::clone(&job.cancel),
+        tx.clone(),
+        chat_id,
+        message_id,
+    );
+
+    let download = client.download_media_to(chat_id, message_id, sink).await;
+    let written = writer.await;
+
+    match (download, written) {
+        (Ok(()), Ok(Ok(streamed))) => keep_streamed(
+            &job.cache,
+            chat_id,
+            message_id,
+            job.media_id,
+            job.kind,
+            &temp_cleanup,
+            &streamed,
+        ),
+        // A writer failure reaches the sink as a closed channel, so it is
+        // inspected here rather than trusted to the download's outcome.
+        (_, Ok(Err(error))) => {
+            let _ = fs::remove_file(&temp_cleanup);
+            Event::MediaFailed {
                 chat_id,
                 message_id,
-            };
+                reason: format!("could not write the media: {error}; nothing was saved"),
+            }
         }
-        Err(error) => {
-            return Event::MediaFailed {
+        (_, Err(_join)) => {
+            let _ = fs::remove_file(&temp_cleanup);
+            Event::MediaFailed {
+                chat_id,
+                message_id,
+                reason: "could not write the media; nothing was saved".to_owned(),
+            }
+        }
+        (Err(ProtoError::Framework(FrameworkError::DownloadAborted { .. })), Ok(Ok(_))) => {
+            settle_interrupted(&refusal, &job.cancel, &temp_cleanup, chat_id, message_id)
+        }
+        (Err(error), Ok(Ok(_))) => {
+            let _ = fs::remove_file(&temp_cleanup);
+            Event::MediaFailed {
                 chat_id,
                 message_id,
                 reason: media_failure(&error),
-            };
+            }
         }
-    };
-
-    let cache = Arc::clone(&job.cache);
-    let kind = job.kind;
-    let media_id = job.media_id;
-    tokio::task::spawn_blocking(move || {
-        keep_download(&cache, chat_id, message_id, media_id, kind, &bytes)
-    })
-    .await
-    .unwrap_or_else(|error| Event::MediaFailed {
-        chat_id,
-        message_id,
-        reason: format!("could not cache the media: {error}; nothing was saved"),
-    })
+    }
 }
 
 /// The answer for a message already in the cache, if it is.
@@ -2598,10 +2834,47 @@ fn cached_media(
     })
 }
 
-/// Stores a finished download in the cache, and answers with the file it is in.
+/// Stores a finished stream in the cache, and answers with the file it is in.
 ///
-/// A store that fails is said on the status line: the reader asked to open the
-/// media, and a file that was never written cannot be opened.
+/// The file is named for the message it was downloaded for, and for its media id
+/// when it has one, so a later copy in another chat finds it.
+fn keep_streamed(
+    cache: &Mutex<MediaCache>,
+    chat_id: i64,
+    message_id: i64,
+    media_id: Option<i64>,
+    kind: MediaKind,
+    temp: &Path,
+    streamed: &StreamedMedia,
+) -> Event {
+    let mut keys = vec![Key::Message(chat_id, message_id)];
+    keys.extend(media_id.map(Key::Media));
+    let stored = MediaCache::store_from_path(
+        cache,
+        &keys,
+        kind,
+        temp,
+        &streamed.hash,
+        streamed.crc,
+        streamed.size,
+    );
+    match stored {
+        Some(path) => Event::MediaSaved {
+            chat_id,
+            message_id,
+            path,
+        },
+        None => Event::MediaFailed {
+            chat_id,
+            message_id,
+            reason: "could not cache the media; nothing was saved".to_owned(),
+        },
+    }
+}
+
+/// Stores a finished whole-buffer download in the cache, for the tests: the
+/// production path streams and uses [`keep_streamed`].
+#[cfg(test)]
 fn keep_download(
     cache: &Mutex<MediaCache>,
     chat_id: i64,
@@ -2610,12 +2883,9 @@ fn keep_download(
     kind: MediaKind,
     bytes: &[u8],
 ) -> Event {
-    // The file is named for the message it was downloaded for, and for its media
-    // id when it has one, so a later copy in another chat finds it.
     let mut keys = vec![Key::Message(chat_id, message_id)];
     keys.extend(media_id.map(Key::Media));
-    let stored = MediaCache::store_shared(cache, &keys, kind, bytes);
-    match stored {
+    match MediaCache::store_shared(cache, &keys, kind, bytes) {
         Some(path) => Event::MediaSaved {
             chat_id,
             message_id,
@@ -9278,19 +9548,18 @@ mod media_tests {
         );
     }
 
-    /// The progress callback reports each chunk on the channel, in order; once the
+    /// The progress report puts each chunk on the channel, in order; once the
     /// cancel flag is set it answers `false`, and that chunk is not reported.
     #[test]
     fn progress_reports_each_chunk_and_a_cancel_stops_the_next() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let mut progress = media_progress(tx, CHAT, 9, Arc::clone(&cancel));
+        let cancel = AtomicBool::new(false);
 
-        assert!(progress(3, Some(10)));
-        assert!(progress(7, Some(10)));
+        assert!(report_progress(&tx, CHAT, 9, &cancel, 3, Some(10)));
+        assert!(report_progress(&tx, CHAT, 9, &cancel, 7, Some(10)));
         cancel.store(true, Ordering::Relaxed);
         assert!(
-            !progress(8, Some(10)),
+            !report_progress(&tx, CHAT, 9, &cancel, 8, Some(10)),
             "a cancel stops the transfer before its next chunk"
         );
 
@@ -9305,6 +9574,37 @@ mod media_tests {
             seen,
             vec![(3, Some(10)), (7, Some(10))],
             "the refused chunk is not reported"
+        );
+    }
+
+    /// The admission decision refuses media over the cap and media the disk has
+    /// no room for, and admits what fits — the free-space check AC2 asks for,
+    /// tested without a filesystem.
+    #[test]
+    fn a_stream_is_refused_over_the_cap_or_when_space_is_short() {
+        let cap = 1_000;
+
+        assert!(
+            stream_refusal(cap, Some(900), Some(u64::MAX)).is_none(),
+            "under the cap with room is admitted"
+        );
+        assert!(
+            matches!(
+                stream_refusal(cap, Some(cap + 1), Some(u64::MAX)),
+                Some(StreamRefusal::OverCap { size, cap: c }) if size == cap + 1 && c == cap
+            ),
+            "over the byte cap is refused"
+        );
+        assert!(
+            matches!(
+                stream_refusal(cap, Some(900), Some(0)),
+                Some(StreamRefusal::NoSpace { .. })
+            ),
+            "no room for the declared size plus the margin is refused"
+        );
+        assert!(
+            stream_refusal(cap, None, Some(0)).is_none(),
+            "an undeclared size is not refused up front"
         );
     }
 
