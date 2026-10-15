@@ -33,12 +33,10 @@ use std::time::SystemTime;
 use anyhow::{Context as _, Result};
 use domain::message::MediaKind;
 use sha2::{Digest, Sha256};
-use telegram_framework::MEDIA_LIMIT;
 
-/// The most bytes the cache keeps on disk. Per entry, [`MEDIA_LIMIT`] is the
-/// ceiling; this is the total, so a few hundred large files cannot grow
-/// without bound. It is a disk figure and does not count against the memory
-/// budget.
+/// The most bytes the cache keeps on disk. This is the total, so a few hundred
+/// large files cannot grow without bound. It is a disk figure and does not
+/// count against the memory budget.
 pub const MEDIA_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// The most files the cache keeps, whatever their size.
@@ -395,9 +393,8 @@ impl MediaCache {
     }
 
     /// Claims the blob for `hash`, a store of `bytes` that will name it under
-    /// `refs` pointers. Refuses what could never fit: bytes over [`MEDIA_LIMIT`],
-    /// or over the byte cap. A blob already here is held rather than rewritten.
-    /// No I/O.
+    /// `refs` pointers. Refuses what could never fit: bytes over the byte cap. A
+    /// blob already here is held rather than rewritten. No I/O.
     fn reserve(
         &mut self,
         hash: &str,
@@ -406,7 +403,7 @@ impl MediaCache {
         refs: usize,
     ) -> Option<Reservation> {
         let size = u64::try_from(bytes.len()).ok()?;
-        if size > MEDIA_LIMIT as u64 || size > self.max_bytes {
+        if size > self.max_bytes {
             return None;
         }
         // The holds are taken now, so an eviction cannot unlink the blob before
@@ -1311,7 +1308,6 @@ mod tests {
     fn the_production_caps_are_a_gibibyte_and_256_files() {
         assert_eq!(MEDIA_CACHE_MAX_BYTES, 1024 * 1024 * 1024);
         assert_eq!(MEDIA_CACHE_MAX_ENTRIES, 256);
-        assert!(MEDIA_LIMIT as u64 <= MEDIA_CACHE_MAX_BYTES);
     }
 
     #[test]

@@ -305,38 +305,12 @@ pub enum FrameworkError {
         message_id: i64,
     },
 
-    /// The media is larger than this crate will hold in one piece.
+    /// A download was stopped by its sink before it finished.
     ///
-    /// A refusal rather than a truncation, deliberately: a caller handed a short
-    /// file cannot tell it is short, and would write it out as though it were
-    /// whole. The limit is [`MEDIA_LIMIT`](crate::MEDIA_LIMIT), and it exists
-    /// because a download here is held whole while the program's memory budget
-    /// is not large enough to hold an arbitrary attachment.
-    ///
-    /// The reported size is what Telegram declared, which for a photo or a
-    /// sticker is the size of what has been collected so far — the smallest
-    /// figure known to be over the line, and the one that refuses the download.
-    #[error(
-        "the media on message {message_id} in conversation {peer_id} is {size} byte(s); the limit is {limit}"
-    )]
-    MediaTooLarge {
-        /// Bare identifier of the conversation the message belongs to.
-        peer_id: i64,
-
-        /// Identifier of the message.
-        message_id: i64,
-
-        /// How many bytes the media has, or the number known to be too many.
-        size: usize,
-
-        /// The most bytes a download may hold.
-        limit: usize,
-    },
-
-    /// A download was stopped by its progress callback before it finished.
-    ///
-    /// Partial bytes are dropped rather than returned: an aborted download is
-    /// not a file, and a caller must not be able to mistake one for a whole.
+    /// The sink returns `false` either because the reader cancelled or because
+    /// it could not write a chunk. Partial bytes are the sink's and are not
+    /// returned: an aborted download is not a file, and a caller must not be
+    /// able to mistake one for a whole.
     #[error("the download of message {message_id} in conversation {peer_id} was aborted")]
     DownloadAborted {
         /// Bare identifier of the conversation the message belongs to.
