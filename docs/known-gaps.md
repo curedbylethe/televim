@@ -21,7 +21,7 @@ Real, and named so they are not mistaken for oversights:
   it. Progress is reported per chunk and `Esc` stops the transfer, but the bytes
   still arrive whole, so the return type is the limit: streaming to disk is a later
   change (CUR-9), and the 16 MiB `MEDIA_LIMIT` refuses rather than truncates.
-- **The media cache has four known limits.**
+- **The media cache has three known limits.**
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on
     purpose: the cache is the account's, and sign-out ends the account.
@@ -31,11 +31,6 @@ Real, and named so they are not mistaken for oversights:
     is unwritable too, `o` says the media could not be cached.
   - *Legacy temp files are left.* Files named `televim-<pid>-…` from before the cache
     are not migrated or swept; the OS temp cleanup reclaims them.
-  - *The history file does not hold media ids.* A message restored from the history
-    file before any refetch carries no id, so it is looked up by its `(chat, message)`
-    key alone. A forwarded copy in another chat is served from disk only in the live
-    session, until that message is fetched again. The history file format is not
-    changed for this.
 - **The viewer hand-off no longer blocks the loop, and has four known limits.** `o`
   runs the platform opener on a thread of its own, so the loop keeps running while
   the viewer is open: network events are applied, and queued media opens one viewer
@@ -396,8 +391,9 @@ Real, and named so they are not mistaken for oversights:
 - **No history or chat-list cache for groups or channels.** Only private
   conversations are cached, because only private conversations are shown — the
   product's scope, not a limit of the store. Media bytes are not in the history
-  file: they are in the media cache, and the history keeps only the media *kind*, so
-  a cached `[image]` row draws its token and nothing more.
+  file: they are in the media cache, and the history keeps the media *kind* and its
+  Telegram media id, so a cached `[image]` row draws its token and nothing more, and
+  a row restored from the file still finds its file in the cache.
 
 - **Sixel is not implemented.** Sixel draws in pixels, so fitting the 24-by-8
   box needs the terminal's cell pixel size, and getting that is a probe the

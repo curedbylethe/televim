@@ -348,10 +348,10 @@ Working today:
   way. Every page the client fetches is merged into the cache, and an edit, a
   deletion or an arrival over the feed is folded in too. If the launch ends at
   `offline:`, the cached list and the cached conversations stay readable and
-  switchable, and the status line still says `offline:`. Text and the media
-  *kind* are kept; media bytes, presence and unsent placeholders never are. The
-  file is used only by a launch configured with the same phone it was written
-  under, and is removed on sign-out and when a launch finds no session. It is
+  switchable, and the status line still says `offline:`. Text, the media *kind* and
+  its Telegram media id are kept; media bytes, presence and unsent placeholders
+  never are. The file is used only by a launch configured with the same phone it was
+  written under, and is removed on sign-out and when a launch finds no session. It is
   **not encrypted** — see [`docs/known-gaps.md`](./docs/known-gaps.md).
 
 Not built, and named here so nobody reads the roadmap below as current:
