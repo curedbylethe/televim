@@ -456,34 +456,6 @@ impl Client {
         .await?;
         Ok(bytes)
     }
-
-    /// [`download_media`](Self::download_media), reporting each chunk as it lands.
-    ///
-    /// The buffered shape, kept for a caller that has not moved to
-    /// [`download_media_to`](Self::download_media_to) yet. `progress` runs after
-    /// every chunk with the bytes collected so far and the size Telegram
-    /// declared, when it declared one; returning `false` stops the transfer and
-    /// drops the bytes collected so far.
-    ///
-    /// # Errors
-    ///
-    /// Everything [`download_media_to`](Self::download_media_to) returns,
-    /// including [`FrameworkError::DownloadAborted`] when `progress` returns
-    /// `false`.
-    pub async fn download_media_with_progress(
-        &self,
-        peer_id: i64,
-        message_id: i64,
-        mut progress: impl FnMut(usize, Option<usize>) -> bool,
-    ) -> Result<Vec<u8>, FrameworkError> {
-        let mut bytes = Vec::new();
-        self.download_media_to(peer_id, message_id, |chunk, downloaded, total| {
-            bytes.extend_from_slice(chunk);
-            progress(downloaded, total)
-        })
-        .await?;
-        Ok(bytes)
-    }
 }
 
 #[cfg(test)]

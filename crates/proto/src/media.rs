@@ -1,4 +1,4 @@
-//! A message's attachment, as bytes.
+//! A message's attachment, fetched or streamed.
 //!
 //! The framework does the work: it re-reads the message, finds the file the
 //! media names, and transfers it. Nothing here builds a request or names a
@@ -41,17 +41,16 @@ fn narrow(chat_id: i64, message_id: i64) -> Result<i32, ProtoError> {
 
 #[cfg(feature = "live")]
 impl crate::ProtoClient {
-    /// Fetches the bytes of the media a message carries.
+    /// Streams the media a message carries to `sink`, one chunk at a time.
     ///
     /// `chat_id` is the bare identifier of the conversation, the same number the
     /// history fetch takes, and the message must be one that conversation's peer
     /// cache can address.
     ///
-    /// The bytes come back in one piece, under
-    /// [`MEDIA_LIMIT`](telegram_framework::MEDIA_LIMIT). A caller that needs
-    /// more than that is asking for streaming, which this method does not do: it
-    /// refuses a larger download rather than handing back a short one, so a file
-    /// written from the result is never quietly incomplete.
+    /// `sink` is called with each chunk, the total bytes so far, and the size
+    /// Telegram declared when it declared one; returning `false` stops the
+    /// transfer. The bytes are never collected here, so a caller can stream an
+    /// attachment far larger than the program's memory budget.
     ///
     /// # Errors
     ///
@@ -59,8 +58,39 @@ impl crate::ProtoClient {
     ///   been numbered by Telegram, so it names no message.
     /// - [`ProtoError::Framework`] — the conversation is not in the peer cache,
     ///   the message carries nothing that can be fetched
-    ///   (`FrameworkError::MediaUnavailable`), the media is over the limit
-    ///   (`FrameworkError::MediaTooLarge`), or a request failed.
+    ///   (`FrameworkError::MediaUnavailable`), the sink stopped the transfer
+    ///   (`FrameworkError::DownloadAborted`), or a request failed.
+    pub async fn download_media_to(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        sink: impl FnMut(&[u8], usize, Option<usize>) -> bool,
+    ) -> Result<(), ProtoError> {
+        let target = narrow(chat_id, message_id)?;
+
+        self.inner()
+            .download_media_to(chat_id, i64::from(target), sink)
+            .await?;
+
+        tracing::debug!(chat_id, message_id, "streamed a message's media");
+
+        Ok(())
+    }
+
+    /// Fetches the bytes of the media a message carries in one piece.
+    ///
+    /// For a caller with nowhere to stream to — a sticker decoded in memory once
+    /// it is whole. The file path uses
+    /// [`download_media_to`](Self::download_media_to), so a large attachment is
+    /// never held whole.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProtoError::MessageIdOutOfRange`] — the identifier could not have been
+    ///   numbered by Telegram, so it names no message.
+    /// - [`ProtoError::Framework`] — the conversation is not in the peer cache,
+    ///   the message carries nothing that can be fetched
+    ///   (`FrameworkError::MediaUnavailable`), or a request failed.
     pub async fn download_media(
         &self,
         chat_id: i64,
@@ -83,35 +113,30 @@ impl crate::ProtoClient {
         Ok(bytes)
     }
 
-    /// [`download_media`](Self::download_media), reporting each chunk as it
-    /// lands. `progress` is called with the bytes so far and the declared size,
-    /// and returning `false` aborts the transfer.
+    /// [`download_media`](Self::download_media), reporting each chunk as it lands.
+    ///
+    /// The buffered shape, kept for its current caller until it moves to
+    /// [`download_media_to`](Self::download_media_to). `progress` runs after
+    /// every chunk with the bytes so far and the declared size; returning
+    /// `false` stops the transfer.
     ///
     /// # Errors
     ///
-    /// Everything [`download_media`](Self::download_media) returns, and
-    /// [`ProtoError::Framework`] wrapping `FrameworkError::DownloadAborted` when
-    /// `progress` returns `false`.
+    /// Everything [`download_media_to`](Self::download_media_to) returns,
+    /// including `FrameworkError::DownloadAborted` when `progress` returns
+    /// `false`.
     pub async fn download_media_with_progress(
         &self,
         chat_id: i64,
         message_id: i64,
-        progress: impl FnMut(usize, Option<usize>) -> bool,
+        mut progress: impl FnMut(usize, Option<usize>) -> bool,
     ) -> Result<Vec<u8>, ProtoError> {
-        let target = narrow(chat_id, message_id)?;
-
-        let bytes = self
-            .inner()
-            .download_media_with_progress(chat_id, i64::from(target), progress)
-            .await?;
-
-        tracing::debug!(
-            chat_id,
-            message_id,
-            bytes = bytes.len(),
-            "downloaded a message's media"
-        );
-
+        let mut bytes = Vec::new();
+        self.download_media_to(chat_id, message_id, |chunk, downloaded, total| {
+            bytes.extend_from_slice(chunk);
+            progress(downloaded, total)
+        })
+        .await?;
         Ok(bytes)
     }
 }
