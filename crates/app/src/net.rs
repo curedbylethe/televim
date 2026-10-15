@@ -2711,6 +2711,9 @@ fn media_sink(
 /// as it lands and writing off the loop, on a blocking thread — then renames it
 /// into its content-named place and commits it. A cancelled or failed download
 /// leaves no temp file.
+///
+/// Its embedded thumbnail is persisted first, and looked up before it is read,
+/// so a second open serves both from disk.
 async fn save_media(
     client: &ProtoClient,
     tx: &UnboundedSender<AppEvent>,
@@ -2727,6 +2730,12 @@ async fn save_media(
             reason: MEDIA_NOT_LOADED.to_owned(),
         };
     };
+
+    // The embedded thumbnail is persisted first, and only when it is not cached
+    // already: a second open never asks for it again. It is the media's own
+    // preview, so it is captured independently of the file itself, which may
+    // already be cached.
+    cache_embedded_thumbnail(client, &job.cache, chat_id, message_id).await;
 
     if let Some(event) = cached_media(&job.cache, chat_id, message_id, job.media_id) {
         return event;
@@ -2808,6 +2817,53 @@ async fn save_media(
             }
         }
     }
+}
+
+/// Persists a message's embedded thumbnail, unless it is cached already.
+///
+/// The thumbnail rides on the message, so reading it is no download — but it is
+/// still re-read off the message, so a second open would ask for it again. The
+/// cache is consulted first and the read is skipped when it hits, which is the
+/// whole point of storing it. A failure to read it is logged and ignored: the
+/// file's own download is not made to fail over its preview.
+async fn cache_embedded_thumbnail(
+    client: &ProtoClient,
+    cache: &Mutex<MediaCache>,
+    chat_id: i64,
+    message_id: i64,
+) {
+    if thumbnail_is_cached(cache, chat_id, message_id) {
+        return;
+    }
+
+    match client.embedded_thumbnail(chat_id, message_id).await {
+        Ok(Some(bytes)) => {
+            MediaCache::store_thumbnail(cache, chat_id, message_id, &bytes);
+        }
+        Ok(None) => tracing::debug!(
+            chat_id,
+            message_id,
+            "the message carries no embedded thumbnail"
+        ),
+        Err(error) => tracing::debug!(
+            %error,
+            chat_id,
+            message_id,
+            "a message's embedded thumbnail could not be read"
+        ),
+    }
+}
+
+/// Whether a message's thumbnail is already cached, so it is not read again.
+///
+/// The gate [`cache_embedded_thumbnail`] checks before it asks the client at
+/// all: a hit means the thumbnail is served from disk and no read happens.
+fn thumbnail_is_cached(cache: &Mutex<MediaCache>, chat_id: i64, message_id: i64) -> bool {
+    cache
+        .lock()
+        .expect("the media cache lock is not poisoned")
+        .lookup_thumbnail(chat_id, message_id)
+        .is_some()
 }
 
 /// The answer for a message already in the cache, if it is.
@@ -9824,4 +9880,5 @@ mod media_tests {
         );
         assert!(state.media.take_pending().is_empty());
     }
+
 }
