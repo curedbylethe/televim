@@ -1039,6 +1039,99 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_file_passes_its_checksum_on_lookup() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache
+            .store(7, 9, MediaKind::Photo, b"picture")
+            .expect("cached");
+
+        assert_eq!(cache.lookup(7, 9), Some(path.clone()));
+        assert_eq!(
+            cache.entries[&Key::Message(7, 9)].crc,
+            Some(crc32fast::hash(b"picture")),
+            "the pointer records the blob's checksum"
+        );
+        assert_eq!(fs::read(&path).expect("the file is there"), b"picture");
+    }
+
+    #[test]
+    fn a_valid_hit_returns_the_file_unchanged() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache
+            .store(1, 2, MediaKind::File, b"bytes")
+            .expect("cached");
+
+        assert_eq!(cache.lookup(1, 2), Some(path.clone()));
+        assert_eq!(
+            cache.lookup(1, 2),
+            Some(path.clone()),
+            "a second hit is the same"
+        );
+        assert_eq!(fs::read(&path).expect("the file is there"), b"bytes");
+        assert!(cache.entries.contains_key(&Key::Message(1, 2)));
+    }
+
+    #[test]
+    fn a_corrupt_blob_is_evicted_and_the_lookup_misses() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache
+            .store(7, 9, MediaKind::Photo, b"picture")
+            .expect("cached");
+        fs::write(&path, b"corrupted").expect("the blob can be corrupted");
+
+        assert_eq!(cache.lookup(7, 9), None, "the corrupt file is a miss");
+        assert!(!path.exists(), "the corrupt file is removed");
+        assert!(
+            !dir.path().join("7-9.ref").exists(),
+            "and its pointer with it"
+        );
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn a_truncated_blob_is_evicted_and_the_lookup_misses() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache
+            .store(7, 9, MediaKind::Photo, b"picture")
+            .expect("cached");
+        fs::write(&path, b"pic").expect("the blob can be truncated");
+
+        assert_eq!(cache.lookup(7, 9), None, "the truncated file is a miss");
+        assert!(!path.exists(), "the truncated file is removed");
+    }
+
+    #[test]
+    fn evicting_a_corrupt_blob_leaves_a_shared_key_intact() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache
+            .store_keys(
+                &[Key::Message(1, 1), Key::Media(77)],
+                MediaKind::Video,
+                b"clip",
+            )
+            .expect("cached");
+        fs::write(&path, b"XXXX").expect("the shared blob can be corrupted");
+
+        assert_eq!(cache.lookup(1, 1), None, "the corrupt file is a miss");
+        assert!(!path.exists(), "the shared blob is removed");
+        assert!(
+            cache.entries.contains_key(&Key::Media(77)),
+            "the other key is left alone"
+        );
+        assert!(dir.path().join("m77.ref").exists(), "and so is its pointer");
+        assert_eq!(
+            cache.lookup_media(77),
+            None,
+            "its blob is gone, so it misses too"
+        );
+    }
+
+    #[test]
     fn a_hit_protects_a_file_from_eviction() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = MediaCache::with_limits(dir.path().to_path_buf(), 10, 256, None);
