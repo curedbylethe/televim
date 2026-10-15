@@ -343,6 +343,18 @@ Real, and named so they are not mistaken for oversights:
   reader's files can read the newest 200 messages of up to 32 conversations and
   the chat list's previews. Sealing both with the session file's key is the
   follow-up — see [`decisions.md`](./decisions.md).
+- **The media cache is not encrypted at rest.** The directory holds the bytes of
+  the attachments a reader has opened and the previews their messages carry, as
+  plaintext `0600` blobs named `<sha256>.<ext>`, beside pointer files that name
+  them — `<chat>-<message>.ref`, `m<id>.ref` and `<chat>-<message>.thumb` — and
+  the fallback directory `televim.media-<account>` under the platform cache
+  directory is the same. This is the media cache's half of **The history file is
+  not encrypted at rest** above, and the follow-up is the same one: reuse the
+  sealed envelope the session file already uses — `TVIM1 | salt(16) | nonce(12) |
+  ciphertext | tag(16)`, AES-256-GCM-SIV — so a downloaded file is ciphertext at
+  rest too (see [`decisions.md`](./decisions.md)). Building that is not this
+  change's work. Until it is, the media directory should be excluded from backups
+  by default.
 - **The history file's account tag is the configured phone, not the signed-in
   account.** The tag is `cfg.phone`, the same as the drafts', so two accounts
   signed in one after the other under a launch that configures no phone (or the
