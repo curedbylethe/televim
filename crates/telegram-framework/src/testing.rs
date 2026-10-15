@@ -121,6 +121,68 @@ pub(crate) fn media_document(
     })
 }
 
+/// Builds a document's media whose record carries `thumbs`.
+///
+/// The thumbnail tree is what the embedded-thumbnail accessor reads, so a
+/// fixture has to be able to say what a document ships with.
+pub(crate) fn media_document_with_thumbs(
+    attributes: Vec<tl::enums::DocumentAttribute>,
+    thumbs: Vec<tl::enums::PhotoSize>,
+) -> tl::enums::MessageMedia {
+    let mut media = media_document(attributes, false);
+    if let tl::enums::MessageMedia::Document(message) = &mut media
+        && let Some(tl::enums::Document::Document(record)) = &mut message.document
+    {
+        record.thumbs = Some(thumbs);
+    }
+    media
+}
+
+/// Builds a photo's media whose record carries `sizes`.
+///
+/// A photo's preview tree lives in the same place a document's does — the same
+/// `PhotoSize` values — so the accessor reads both the same way.
+pub(crate) fn media_photo_with_sizes(sizes: Vec<tl::enums::PhotoSize>) -> tl::enums::MessageMedia {
+    tl::enums::MessageMedia::Photo(tl::types::MessageMediaPhoto {
+        spoiler: false,
+        live_photo: false,
+        photo: Some(tl::enums::Photo::Photo(tl::types::Photo {
+            has_stickers: false,
+            id: 88,
+            access_hash: 1,
+            file_reference: Vec::new(),
+            date: 0,
+            sizes,
+            video_sizes: None,
+            dc_id: 2,
+        })),
+        ttl_seconds: None,
+        video: None,
+    })
+}
+
+/// Builds an embedded thumbnail: `photoCachedSize`, whose bytes ride on the
+/// message, so reading it is no request.
+pub(crate) fn thumbnail_cached(bytes: &[u8]) -> tl::enums::PhotoSize {
+    tl::enums::PhotoSize::PhotoCachedSize(tl::types::PhotoCachedSize {
+        r#type: "m".to_owned(),
+        w: 320,
+        h: 320,
+        bytes: bytes.to_vec(),
+    })
+}
+
+/// Builds a thumbnail that names a file instead: `photoSize`, whose bytes live
+/// behind a locator, so reading it *is* a request.
+pub(crate) fn thumbnail_fetchable() -> tl::enums::PhotoSize {
+    tl::enums::PhotoSize::Size(tl::types::PhotoSize {
+        r#type: "m".to_owned(),
+        w: 320,
+        h: 320,
+        size: 4096,
+    })
+}
+
 /// Builds an audio document's attribute.
 ///
 /// `voice` is what separates a voice note from a music file, and the two share

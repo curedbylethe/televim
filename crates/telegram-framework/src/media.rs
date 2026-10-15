@@ -26,6 +26,13 @@
 //! because a description is rebuilt on every history page and a stale access
 //! hash is worse than none.
 //!
+//! A message's **embedded** thumbnail — the small preview it already carries —
+//! is readable with no download at all: [`Client::embedded_thumbnail`] re-reads
+//! the message the way the download path does and hands back the bytes, not a
+//! locator. [`embedded_thumbnail`] is the extraction itself, a free function
+//! over a media value so that "which sizes are embedded" is tested on every CI
+//! job rather than only against a live account.
+//!
 //! Everything the transfer decides — whether the media can be fetched at all,
 //! and how a chunk ends the transfer — sits in [`fetchable_media`] and
 //! [`feed_chunk`], free functions over values rather than over a client, so
@@ -255,6 +262,38 @@ fn select_media(page: &[tl::enums::Message], message_id: i64) -> Option<Media> {
         .and_then(fetchable_media)
 }
 
+/// The bytes of the thumbnail a message's media already carries, if it has one.
+///
+/// Telegram embeds a small preview inside most photos and documents, and
+/// `grammers` reconstructs the bytes from it: a cached size carries them whole,
+/// a stripped size rebuilds a JPEG around them, and a vector size becomes an SVG
+/// path — none of which is a request. A size that names a file instead — a
+/// plain, fetchable size, or a progressive one — is not embedded, so it is
+/// skipped rather than fetched; when several embedded sizes are present the
+/// largest is read, which is the best this build can show without asking.
+///
+/// `None` for media with no thumbnail, for one whose only sizes must be
+/// fetched, and for every kind this build does not read: a contact, a poll, a
+/// location, a web page. Stickers are documents on the wire, so their preview —
+/// a still image, a vector outline for an animated one — is read here too.
+///
+/// This is the function the promise "an embedded thumbnail needs no request"
+/// rests on, so it is pure over the media value and touches nothing.
+fn embedded_thumbnail(media: &Media) -> Option<Vec<u8>> {
+    let sizes = match media {
+        Media::Photo(photo) => photo.thumbs(),
+        Media::Document(document) => document.thumbs(),
+        Media::Sticker(sticker) => sticker.document.thumbs(),
+        _ => return None,
+    };
+
+    sizes
+        .into_iter()
+        .filter_map(|size| size.to_data())
+        .filter(|bytes| !bytes.is_empty())
+        .max_by_key(Vec::len)
+}
+
 /// Feeds one chunk to `sink`, counting what has arrived and turning a `false`
 /// answer into an abort.
 ///
@@ -283,76 +322,46 @@ fn feed_chunk(
 }
 
 impl Client {
-    /// Streams the media a message carries to `sink`, one chunk at a time.
+    /// Re-reads the message by identifier and returns the media it carries,
+    /// when that media can be fetched.
     ///
-    /// `peer_id` is the bare identifier of the conversation, the same number
-    /// [`fetch_history`](crate::Client::fetch_history) takes, and the message
-    /// must be in that conversation's peer cache.
+    /// The one read both [`Client::download_media_to`] and
+    /// [`Client::embedded_thumbnail`] begin with. The locator is re-derived
+    /// from the message on the way rather than kept on the description, because
+    /// a description is rebuilt on every history page and a stale access hash is
+    /// worse than none.
     ///
-    /// `sink` is called with each chunk, the total bytes so far including this
-    /// chunk, and the size Telegram declared when it declared one. Returning
-    /// `false` stops the transfer: the call returns
-    /// [`FrameworkError::DownloadAborted`] and whatever the sink wrote is its
-    /// own to discard. Nothing is held here between chunks, so a caller can
-    /// stream an attachment far larger than the program's memory budget.
-    ///
-    /// # Why the message is fetched again
-    ///
-    /// Addressing a file takes the `access_hash` Telegram handed out with it,
-    /// and [`MessageInfo`](crate::MessageInfo) does not carry one: it is rebuilt
-    /// on every history page, so any locator kept on it would be stale the
-    /// moment the window moved. Re-reading the message costs one request and is
-    /// always right — and it keeps this a typed method, so `proto` never builds
-    /// a request.
-    ///
-    /// `iter_download` is used rather than `download_media`, which is behind
-    /// `grammers-client`'s `fs` feature: turning that on would be a
-    /// workspace-level dependency change for a method that writes to a path,
-    /// which nothing here wants.
-    ///
-    /// # Errors
-    ///
-    /// - [`FrameworkError::UnknownPeer`] — the conversation is not in the peer
-    ///   cache, so no request can address it.
-    /// - [`FrameworkError::MediaUnavailable`] — the message carries no media,
-    ///   carries media that cannot be fetched, or names no message at all.
-    /// - [`FrameworkError::DownloadAborted`] — `sink` returned `false` on a
-    ///   chunk, so the transfer stopped there.
-    /// - [`FrameworkError::Request`] — Telegram refused a request, the
-    ///   connection failed, or a chunk could not be decoded.
-    pub async fn download_media_to(
+    /// `Ok(None)` for a message Telegram could not have numbered and for one
+    /// that carries nothing fetchable; the caller decides which of those it
+    /// reports as a refusal.
+    async fn refetch_page_media(
         &self,
         peer_id: i64,
         message_id: i64,
-        mut sink: impl FnMut(&[u8], usize, Option<usize>) -> bool,
-    ) -> Result<(), FrameworkError> {
+    ) -> Result<Option<Media>, FrameworkError> {
         let Some(peer) = self.peer_ref(peer_id) else {
             tracing::warn!(
                 peer_id,
                 message_id,
-                "a download was asked for in a conversation that is not in the peer cache"
+                "a message was re-read in a conversation that is not in the peer cache"
             );
             return Err(FrameworkError::UnknownPeer(peer_id));
         };
 
         // Telegram numbers messages with an `i32`, so an identifier outside that
-        // range names no message — and there is then nothing to fetch, which is
-        // the same answer a message with no attachment gets.
+        // range names no message, and there is then nothing to read.
         let Ok(offset_id) = i32::try_from(message_id) else {
             tracing::warn!(
                 peer_id,
                 message_id,
-                "a download was asked for a message identifier telegram could not have numbered"
+                "a message was re-read with an identifier telegram could not have numbered"
             );
-            return Err(FrameworkError::MediaUnavailable {
-                peer_id,
-                message_id,
-            });
+            return Ok(None);
         };
 
         // The raw route `fetch_history` uses, rather than a `grammers` accessor:
         // the media's own record — the photo, the document and its access hash —
-        // is only on the raw message, and it is the thing being fetched.
+        // is only on the raw message, and it is the thing being read.
         let request = tl::functions::messages::GetHistory {
             peer: peer.into(),
             offset_id,
@@ -396,7 +405,53 @@ impl Client {
         // only reaches the store if it is written back.
         self.flush_session();
 
-        let Some(media) = select_media(&raw, message_id) else {
+        Ok(select_media(&raw, message_id))
+    }
+
+    /// Streams the media a message carries to `sink`, one chunk at a time.
+    ///
+    /// `peer_id` is the bare identifier of the conversation, the same number
+    /// [`fetch_history`](crate::Client::fetch_history) takes, and the message
+    /// must be in that conversation's peer cache.
+    ///
+    /// `sink` is called with each chunk, the total bytes so far including this
+    /// chunk, and the size Telegram declared when it declared one. Returning
+    /// `false` stops the transfer: the call returns
+    /// [`FrameworkError::DownloadAborted`] and whatever the sink wrote is its
+    /// own to discard. Nothing is held here between chunks, so a caller can
+    /// stream an attachment far larger than the program's memory budget.
+    ///
+    /// # Why the message is fetched again
+    ///
+    /// Addressing a file takes the `access_hash` Telegram handed out with it,
+    /// and [`MessageInfo`](crate::MessageInfo) does not carry one: it is rebuilt
+    /// on every history page, so any locator kept on it would be stale the
+    /// moment the window moved. Re-reading the message costs one request and is
+    /// always right — and it keeps this a typed method, so `proto` never builds
+    /// a request.
+    ///
+    /// `iter_download` is used rather than `download_media`, which is behind
+    /// `grammers-client`'s `fs` feature: turning that on would be a
+    /// workspace-level dependency change for a method that writes to a path,
+    /// which nothing here wants.
+    ///
+    /// # Errors
+    ///
+    /// - [`FrameworkError::UnknownPeer`] — the conversation is not in the peer
+    ///   cache, so no request can address it.
+    /// - [`FrameworkError::MediaUnavailable`] — the message carries no media,
+    ///   carries media that cannot be fetched, or names no message at all.
+    /// - [`FrameworkError::DownloadAborted`] — `sink` returned `false` on a
+    ///   chunk, so the transfer stopped there.
+    /// - [`FrameworkError::Request`] — Telegram refused a request, the
+    ///   connection failed, or a chunk could not be decoded.
+    pub async fn download_media_to(
+        &self,
+        peer_id: i64,
+        message_id: i64,
+        mut sink: impl FnMut(&[u8], usize, Option<usize>) -> bool,
+    ) -> Result<(), FrameworkError> {
+        let Some(media) = self.refetch_page_media(peer_id, message_id).await? else {
             tracing::debug!(peer_id, message_id, "the message has no media to fetch");
             return Err(FrameworkError::MediaUnavailable {
                 peer_id,
@@ -456,6 +511,52 @@ impl Client {
         .await?;
         Ok(bytes)
     }
+
+    /// The bytes of the thumbnail a message's media already carries, if it has
+    /// one — read off the message Telegram answers with, with no request of its
+    /// own.
+    ///
+    /// This is the preview a document or photo ships with, and reading it costs
+    /// no download: the message is re-read the way
+    /// [`download_media_to`](Self::download_media_to) re-reads it — one request
+    /// for the message, none for the thumbnail — so its locator is never stale.
+    ///
+    /// `Ok(None)` is an ordinary answer, not a failure: a photo whose preview
+    /// names a file to fetch, or media of a kind without an embedded one. A
+    /// message that cannot be read at all is a [`FrameworkError`], the same one
+    /// the download path reports for it.
+    ///
+    /// # Errors
+    ///
+    /// - [`FrameworkError::UnknownPeer`] — the conversation is not in the peer
+    ///   cache, so no request can address it.
+    /// - [`FrameworkError::Request`] — Telegram refused the read, the connection
+    ///   failed, or a message could not be decoded.
+    pub async fn embedded_thumbnail(
+        &self,
+        peer_id: i64,
+        message_id: i64,
+    ) -> Result<Option<Vec<u8>>, FrameworkError> {
+        let Some(media) = self.refetch_page_media(peer_id, message_id).await? else {
+            tracing::debug!(
+                peer_id,
+                message_id,
+                "the message has no media with an embedded thumbnail"
+            );
+            return Ok(None);
+        };
+
+        let thumbnail = embedded_thumbnail(&media);
+
+        tracing::debug!(
+            peer_id,
+            message_id,
+            bytes = thumbnail.as_ref().map_or(0, Vec::len),
+            "read a message's embedded thumbnail"
+        );
+
+        Ok(thumbnail)
+    }
 }
 
 #[cfg(test)]
@@ -463,8 +564,9 @@ mod tests {
     use super::*;
     use crate::testing::{
         attribute_audio, attribute_filename, attribute_sticker, attribute_video, media_document,
-        media_empty, media_photo, media_refused_by_grammers, media_typed, media_unmodelled,
-        raw_message,
+        media_document_with_thumbs, media_empty, media_photo, media_photo_with_sizes,
+        media_refused_by_grammers, media_typed, media_unmodelled, raw_message, thumbnail_cached,
+        thumbnail_fetchable,
     };
 
     use tl::enums::DocumentAttribute;
@@ -748,6 +850,87 @@ mod tests {
             media.to_raw_input_location().is_some(),
             "the locator is what the request is built from"
         );
+    }
+
+    /// The preview a document already carries is read off the media with no
+    /// request: the bytes are embedded in the message the read produced.
+    #[test]
+    fn an_embedded_document_thumbnail_is_read_without_a_request() {
+        let document = media_document_with_thumbs(
+            vec![attribute_filename("clip.mp4")],
+            vec![thumbnail_cached(b"embedded preview")],
+        );
+        let media = media_typed(document).expect("a document builds");
+
+        assert_eq!(
+            embedded_thumbnail(&media),
+            Some(b"embedded preview".to_vec())
+        );
+    }
+
+    /// A photo's preview tree lives in the same place, so it is read the same
+    /// way — the accessor is not a document-only path.
+    #[test]
+    fn an_embedded_photo_thumbnail_is_read_too() {
+        let photo = media_photo_with_sizes(vec![thumbnail_cached(b"photo preview")]);
+        let media = media_typed(photo).expect("a photo builds");
+
+        assert_eq!(embedded_thumbnail(&media), Some(b"photo preview".to_vec()));
+    }
+
+    /// A preview that names a file is *not* embedded: reading it would be a
+    /// request, which is the thing this accessor must never make. It is skipped
+    /// rather than fetched.
+    #[test]
+    fn a_thumbnail_that_names_a_file_is_not_read() {
+        let document = media_document_with_thumbs(
+            vec![attribute_filename("clip.mp4")],
+            vec![thumbnail_fetchable()],
+        );
+        let media = media_typed(document).expect("a document builds");
+
+        assert_eq!(
+            embedded_thumbnail(&media),
+            None,
+            "its bytes live behind a locator, so there is nothing embedded to read"
+        );
+    }
+
+    /// Several embedded sizes, and the largest is the one worth reading: it is
+    /// the best this build can show without asking for one.
+    #[test]
+    fn the_largest_embedded_thumbnail_is_the_one_read() {
+        let document = media_document_with_thumbs(
+            vec![attribute_filename("clip.mp4")],
+            vec![
+                thumbnail_cached(b"small"),
+                thumbnail_cached(b"the biggest embedded one"),
+            ],
+        );
+        let media = media_typed(document).expect("a document builds");
+
+        assert_eq!(
+            embedded_thumbnail(&media),
+            Some(b"the biggest embedded one".to_vec())
+        );
+    }
+
+    /// A sticker is a document on the wire, so its still preview is read too;
+    /// and a kind with no thumbnail at all is an ordinary `None`.
+    #[test]
+    fn a_sticker_reads_its_preview_and_other_kinds_have_none() {
+        let sticker = media_document_with_thumbs(
+            vec![attribute_sticker()],
+            vec![thumbnail_cached(b"sticker preview")],
+        );
+        let media = media_typed(sticker).expect("a sticker builds");
+        assert_eq!(
+            embedded_thumbnail(&media),
+            Some(b"sticker preview".to_vec())
+        );
+
+        let dice = media_typed(media_unmodelled()).expect("a dice builds");
+        assert_eq!(embedded_thumbnail(&dice), None);
     }
 
     /// The bytes reach the sink one chunk at a time, never as one buffer: the
