@@ -188,10 +188,16 @@ pub(crate) struct MediaCache {
 impl MediaCache {
     /// Opens the cache in `dir` for `account`, clearing it first if it was
     /// written for another account or for none. An unwritable `dir` opens a
-    /// per-launch fallback in the temp directory instead. `max_bytes` is the
-    /// byte cap, [`MEDIA_CACHE_MAX_BYTES`] when `None`.
+    /// fallback under the platform cache directory instead, so cached media
+    /// survives a restart; the system temp directory is the last resort, used
+    /// only when no cache directory can be found. `max_bytes` is the byte cap,
+    /// [`MEDIA_CACHE_MAX_BYTES`] when `None`.
     pub(crate) fn open(dir: PathBuf, account: Option<&str>, max_bytes: Option<u64>) -> Self {
-        Self::open_in(dir, &std::env::temp_dir(), account, max_bytes)
+        let fallback_root = match dirs::cache_dir() {
+            Some(cache) => cache.join("televim"),
+            None => std::env::temp_dir(),
+        };
+        Self::open_in(dir, &fallback_root, account, max_bytes)
     }
 
     /// [`MediaCache::open`] with the fallback root passed in, so tests can
@@ -635,7 +641,7 @@ impl MediaCache {
     }
 }
 
-/// `dir` if it can be written, else the temp-directory fallback for `account`.
+/// `dir` if it can be written, else a fallback under `fallback_root` for `account`.
 ///
 /// The probe is a create and a write-and-remove of a pid-named file, which
 /// catches what `claim`'s tag write would: a regular file where the directory
@@ -650,11 +656,25 @@ fn usable_dir(dir: PathBuf, fallback_root: &Path, account: Option<&str>) -> Path
         return dir;
     }
     let fallback = fallback_root.join(format!("televim.media-{}", account_tag(account)));
-    tracing::warn!(
-        configured = %dir.display(),
-        fallback = %fallback.display(),
-        "the media cache directory is not writable; using a temporary one for this run"
-    );
+    // The caller passes the system temp dir as the root only when no platform
+    // cache directory was found, so the two cases read differently: a cache-dir
+    // fallback survives a restart, the temp last resort does not.
+    if fallback_root == std::env::temp_dir().as_path() {
+        tracing::warn!(
+            configured = %dir.display(),
+            fallback = %fallback.display(),
+            "the media cache directory is not writable and no platform cache directory was \
+             found; using the system temp directory, where cached media will not survive a \
+             restart"
+        );
+    } else {
+        tracing::warn!(
+            configured = %dir.display(),
+            fallback = %fallback.display(),
+            "the media cache directory is not writable; using a fallback under the platform \
+             cache directory"
+        );
+    }
     fallback
 }
 
@@ -1277,14 +1297,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unwritable_configured_dir_opens_a_working_fallback_in_the_temp_root() {
+    fn an_unwritable_configured_dir_opens_a_working_fallback_under_the_cache_root() {
         let root = tempfile::tempdir().expect("a temp dir");
-        let fallback_root = root.path().join("tmp");
-        fs::create_dir(&fallback_root).expect("the fallback root is made");
+        let cache_root = root.path().join("cache");
+        fs::create_dir(&cache_root).expect("the cache root is made");
 
         let mut cache = MediaCache::open_in(
             unwritable_dir(root.path()),
-            &fallback_root,
+            &cache_root,
             Some("+15550001"),
             None,
         );
@@ -1292,7 +1312,7 @@ mod tests {
             .store(7, 9, MediaKind::Photo, b"picture")
             .expect("the fallback caches it");
 
-        assert!(path.starts_with(fallback_root.join("televim.media-15550001")));
+        assert!(path.starts_with(cache_root.join("televim.media-15550001")));
         assert_eq!(cache.lookup(7, 9), Some(path.clone()));
         assert_eq!(fs::read(&path).expect("the file is there"), b"picture");
         assert_eq!(cache.max_bytes, MEDIA_CACHE_MAX_BYTES);
