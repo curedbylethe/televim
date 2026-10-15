@@ -963,3 +963,17 @@ are in [`../AGENTS.md`](../AGENTS.md).
   a time. What this does not settle is which process exits first on Linux and
   Windows, where the opener may return before the viewer: that is reported as the
   opener's exit, and the limits are in `docs/known-gaps.md`.
+- **Why the media cache stores a fast checksum beside the content hash:** the blob's
+  sha256 is its content address and its filename, but nothing re-read the bytes to
+  check them, so a truncated or bit-rotted file was served as a hit. A lookup now
+  reads the blob in 16 KiB chunks and compares a CRC32 the pointer recorded at
+  commit; a mismatch evicts the file and the key's pointer and returns a miss, so the
+  caller re-downloads. CRC32 (`crc32fast`) rather than the stored sha256, because the
+  point is a cheap check on every lookup, not a second content address: re-hashing
+  sha256 over a large blob costs more than CRC32, and the sha256 already does the
+  addressing. The checksum lives in the pointer file rather than the blob name or a
+  sidecar — the pointer is the index a restart already reads, so `scan()` recovers the
+  checksum without a re-hash or an extra open, the blob name stays `<sha256>.<ext>` so
+  no existing file is migrated, and streaming's `<hash>.<ext>` rename target is
+  unchanged. Verification is lazy, only in `hit`, never in `scan`, to keep the startup
+  budget; an unwritable fallback and the eviction order are unchanged.

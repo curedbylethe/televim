@@ -380,8 +380,9 @@ The media cache (`app/src/media_cache.rs`) is bounded on disk, not in memory. Th
 byte cap is `media_cache_max_bytes` (or `TELEVIM_MEDIA_CACHE_MAX_BYTES`), which
 defaults to `MEDIA_CACHE_MAX_BYTES`, 1 GiB; `MEDIA_CACHE_MAX_ENTRIES` is 256 pointers.
 Resident, it holds one index entry per pointer — a message or media-id key, a hash,
-and a modification time, about 150 bytes — so about 40 KB at the entry cap. A download's
-bytes are held in memory as they were before the cache, bounded by `MEDIA_LIMIT`
+its CRC32, and a modification time, about 150 bytes — so about 40 KB at the entry cap. A lookup
+verifies a blob by reading it in 16 KiB chunks, so it never holds a whole file in
+memory. A download's bytes are held in memory as they were before the cache, bounded by `MEDIA_LIMIT`
 (16 MiB), and written off the loop. The disk worst case is the byte cap plus one file
 of up to 16 MiB in flight during a write; this holds for any configured cap, and at
 the 1 GiB default it is 1 GiB plus 16 MiB.
