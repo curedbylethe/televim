@@ -9548,6 +9548,102 @@ mod media_tests {
         );
     }
 
+    /// A download larger than the old 16 MiB ceiling streams to disk in chunks
+    /// and is stored whole: the writer hashes as it writes, and the cache keeps
+    /// the result — the memory ceiling is the disk quota now, not the payload.
+    #[test]
+    fn a_download_larger_than_the_old_ceiling_streams_and_is_stored() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
+        let temp = cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .download_temp_path();
+
+        let chunk = vec![7_u8; 512 * 1024];
+        let count = 40_usize; // 20 MiB, past the removed 16 MiB ceiling.
+        let expected = (chunk.len() as u64) * (count as u64);
+
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let writer = std::thread::spawn({
+            let temp = temp.clone();
+            move || write_streamed(&temp, rx)
+        });
+        for _ in 0..count {
+            tx.send(chunk.clone()).expect("the writer is reading");
+        }
+        drop(tx);
+        let streamed = writer
+            .join()
+            .expect("the writer does not panic")
+            .expect("the stream writes to disk");
+
+        assert_eq!(streamed.size, expected, "the whole payload was written");
+        assert!(
+            streamed.size > 16 * 1024 * 1024,
+            "larger than the ceiling that used to refuse it"
+        );
+
+        let Event::MediaSaved { path, .. } =
+            keep_streamed(&cache, CHAT, 5, None, MediaKind::Video, &temp, &streamed)
+        else {
+            panic!("a stored stream answers with its file");
+        };
+        assert_eq!(
+            std::fs::metadata(&path).expect("the file is there").len(),
+            expected,
+            "the stored blob is the whole stream"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("the file is there")[0],
+            7,
+            "and carries the streamed bytes"
+        );
+    }
+
+    /// A cancelled download leaves nothing behind: its temp file is removed and
+    /// nothing is stored.
+    #[test]
+    fn a_cancelled_download_removes_its_temp_and_leaves_no_blob() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
+        let temp = cache
+            .lock()
+            .expect("the media cache lock is not poisoned")
+            .download_temp_path();
+        std::fs::write(&temp, b"partial").expect("a temp file is written");
+
+        let cancel = AtomicBool::new(true);
+        let refusal = Mutex::new(None);
+        let event = settle_interrupted(&refusal, &cancel, &temp, CHAT, 5);
+
+        assert!(matches!(event, Event::MediaCancelled { .. }));
+        assert!(!temp.exists(), "the cancelled download's temp file is gone");
+        assert!(
+            cached_media(&cache, CHAT, 5, None).is_none(),
+            "and nothing was stored"
+        );
+    }
+
+    /// A refused download is the same: its temp file goes, and the refusal is a
+    /// sentence that says nothing was saved.
+    #[test]
+    fn a_refused_download_removes_its_temp_and_says_nothing_was_saved() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let temp = dir.path().join(".download-test.tmp");
+        std::fs::write(&temp, b"partial").expect("a temp file is written");
+
+        let cancel = AtomicBool::new(false);
+        let refusal = Mutex::new(Some(StreamRefusal::OverCap { size: 10, cap: 5 }));
+        let event = settle_interrupted(&refusal, &cancel, &temp, CHAT, 5);
+
+        let Event::MediaFailed { reason, .. } = event else {
+            panic!("a refusal is a failure event");
+        };
+        assert!(reason.contains("nothing was saved"), "{reason}");
+        assert!(!temp.exists(), "the refused download's temp file is gone");
+    }
+
     /// The progress report puts each chunk on the channel, in order; once the
     /// cancel flag is set it answers `false`, and that chunk is not reported.
     #[test]
