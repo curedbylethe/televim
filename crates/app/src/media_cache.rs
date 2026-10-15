@@ -1320,6 +1320,39 @@ mod tests {
     }
 
     #[test]
+    fn a_fallback_file_survives_a_restart() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let cache_root = root.path().join("cache");
+        fs::create_dir(&cache_root).expect("the cache root is made");
+
+        let mut cache = MediaCache::open_in(
+            unwritable_dir(root.path()),
+            &cache_root,
+            Some("+15550001"),
+            None,
+        );
+        let path = cache
+            .store(7, 9, MediaKind::Photo, b"picture")
+            .expect("the fallback caches it");
+        drop(cache);
+
+        // The restart analogue: a second open of the same configured dir finds
+        // the file the first run cached under the persistent cache root.
+        let mut reopened = MediaCache::open_in(
+            unwritable_dir(root.path()),
+            &cache_root,
+            Some("+15550001"),
+            None,
+        );
+
+        assert_eq!(reopened.lookup(7, 9), Some(path.clone()));
+        assert_eq!(
+            fs::read(&path).expect("the file survived the restart"),
+            b"picture"
+        );
+    }
+
+    #[test]
     fn nothing_is_created_under_the_unwritable_configured_path() {
         let root = tempfile::tempdir().expect("a temp dir");
         let fallback_root = root.path().join("tmp");
@@ -1391,6 +1424,17 @@ mod tests {
 
         assert_eq!(cache.store(1, 2, MediaKind::Gif, b"gif"), None);
         assert_eq!(cache.lookup(1, 2), None);
+    }
+
+    #[test]
+    fn the_temp_dir_is_the_last_resort_when_no_cache_dir_can_be_found() {
+        let root = tempfile::tempdir().expect("a temp dir");
+
+        // The system temp dir is the root the caller passes only when
+        // `dirs::cache_dir` is `None`: the last resort warns and lands here.
+        let fallback = usable_dir(unwritable_dir(root.path()), &std::env::temp_dir(), None);
+
+        assert_eq!(fallback, std::env::temp_dir().join("televim.media-none"));
     }
 
     #[test]
