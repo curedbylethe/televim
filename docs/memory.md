@@ -379,8 +379,11 @@ is a maintainer decision.
 The media cache (`app/src/media_cache.rs`) is bounded on disk, not in memory. The
 byte cap is `media_cache_max_bytes` (or `TELEVIM_MEDIA_CACHE_MAX_BYTES`), which
 defaults to `MEDIA_CACHE_MAX_BYTES`, 1 GiB; `MEDIA_CACHE_MAX_ENTRIES` is 256 pointers.
-Resident, it holds one index entry per pointer — a message or media-id key, a hash,
-its CRC32, and a modification time, about 150 bytes — so about 40 KB at the entry cap. A lookup
+Resident, it holds one index entry per pointer — a message, media-id or thumbnail
+key, a hash, its CRC32, and a modification time, about 150 bytes — so about 40 KB
+at the entry cap. A message's persisted thumbnail is an entry like any other: its
+blob counts against the byte cap and its `<chat>-<message>.thumb` pointer against
+the 256-pointer index, and no separate budget is set aside for it. A lookup
 verifies a blob by reading it in 16 KiB chunks, so it never holds a whole file in
 memory. A download streams chunk by chunk to a temp file in the cache directory and
 is hashed as it arrives, so a download's resident cost is one chunk-sized buffer

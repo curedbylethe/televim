@@ -977,3 +977,18 @@ are in [`../AGENTS.md`](../AGENTS.md).
   no existing file is migrated, and streaming's `<hash>.<ext>` rename target is
   unchanged. Verification is lazy, only in `hit`, never in `scan`, to keep the startup
   budget; an unwritable fallback and the eviction order are unchanged.
+- **Why a thumbnail is a cache entry of its own, keyed to its parent:** the preview a
+  document or photo ships with rides on the message, so it costs no download and is read
+  off the message the file's own fetch already returned; what it needs is somewhere to
+  live between opens, and the media cache is already that somewhere — content-addressed,
+  checksummed, and evicted by a bound. It is stored as its own blob under a
+  `<chat>-<message>.thumb` pointer beside the file's `<chat>-<message>.ref`, so a file
+  already downloaded and its preview are cached independently — either can be missing —
+  and two messages whose previews are identical share one blob exactly as two files do.
+  Keying it to the message rather than the media id is what "invalidated with its parent"
+  means: the preview belongs to the message that was opened, and a media id has none of
+  its own, so the entry is dropped whenever that message's key is — removed, edited,
+  evicted — and its blob goes with the last entry that names it, the same refcount rule
+  the whole cache turns on. Folding the preview into the file's blob or pointer was
+  rejected: the file may never be downloaded — a refused or cancelled open — while the
+  preview is already in hand, and a pointer that names two blobs is not a name at all.

@@ -108,6 +108,10 @@ below.
   account mismatch clearing the directory, `clear` on a missing directory, the
   owner-only mode before the rename, and a clear landing between a store's write and
   its commit, which refuses the late file without touching a newer store's file. A
+  message's embedded thumbnail is stored as a blob of its own and found again after a
+  restart, handed back on lookup before it is read, dropped with its parent message and
+  its parent's blob, kept while a parent another message shares remains, evicted on
+  lookup when corrupt, and taken by eviction with its parent. A
   stored file verifies its recorded CRC32 on lookup; a blob corrupted or truncated on
   disk is evicted — file and pointer gone — and the lookup misses, while a shared blob's
   other key is left alone. An unwritable configured directory (a path
@@ -124,7 +128,9 @@ below.
   download is stored once and the next open is served from disk, with the download
   never asked for again, that signing out cancels every download in flight, that a
   download larger than the removed 16 MiB ceiling streams and is stored whole, and
-  that a cancelled or refused download removes its temp file and stores nothing.
+  that a cancelled or refused download removes its temp file and stores nothing. The
+  thumbnail gate answers for a cached preview, so the read it would make never runs on
+  a second open.
 - **Integration Tests:** `crates/app/tests/proto_integration.rs` exercises the whole stack — the framework's login, the session store, the session cache, and the `proto` wrapper over both — against a real datacenter: it proves a stored session rebuilds an authorised client, that the client produces a private chat list in newest-first order, that the update feed and the chat list name conversations by the same identifier, and that history pages come back oldest first, without gaps or repeats, from an anchor that is exclusive. It lives in `app` because that is the only crate that may hold a framework `Client` and a `ProtoClient` at once. Three cases cannot be provoked with one account and are documented as deferred in the test's module docs: an update arriving for real, the offline gap `catch_up` closes, and a conversation with a known amount of history. A run prints how many updates it examined, how many the framework discarded, and how far it walked the history, so a run that proved little says so.
 - **Opt-in Tests:** Anything that needs a real account — `telegram-framework`'s
   `auth_integration` and `app`'s `proto_integration` — checks `TELEVIM_TEST_DC`

@@ -491,12 +491,18 @@ lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
 
 `media_cache.rs` owns the media directory (`televim.media` beside the config, or
 `media_cache_dir`). Each distinct content is one blob named `<sha256>.<suffix>`; a
-pointer file per key names it, `<chat>-<message>.ref` for a message and `m<id>.ref`
-for a Telegram media id. `MediaCache` keeps an in-memory index that a scan rebuilds
+pointer file per key names it, `<chat>-<message>.ref` for a message, `m<id>.ref`
+for a Telegram media id, and `<chat>-<message>.thumb` for the embedded preview a
+message's media already carries. `MediaCache` keeps an in-memory index that a scan rebuilds
 at launch from the pointers, holds the byte cap (`media_cache_max_bytes`, default
 `MEDIA_CACHE_MAX_BYTES`) and `MEDIA_CACHE_MAX_ENTRIES` by evicting the least recently
 used pointer (a lookup moves its mtime to now), and removes a blob with its last
-pointer. An edit removes its message's pointer; a deletion removes the pointer for
+pointer. A message's embedded thumbnail is a blob of its own under
+`<chat>-<message>.thumb`: `store_thumbnail` writes the bytes whole and commits them
+through the same content-addressed path a streamed download uses, `lookup_thumbnail`
+verifies and serves it, and it is removed with the message key it belongs to — or
+kept while a parent another message shares still names the blob it previews. An
+edit removes its message's pointer; a deletion removes the pointer for
 each deleted id in any chat. Writes are atomic at `0600`, as the history file does. `runtime.rs` opens it at launch
 with the configured account, which clears the directory on a mismatch. If the configured
 directory cannot be created or written (a probe file), `open` roots the fallback at
