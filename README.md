@@ -216,9 +216,10 @@ Working today:
   `TELEVIM_GRAPHICS`) places the picture with the kitty graphics protocol where
   the environment names kitty, ghostty or WezTerm; `kitty` forces it and `off`
   keeps the half-block cells everywhere. Sixel is not yet supported. Fetching the bytes is a client-level operation today
-  (`ProtoClient::download_media`, capped at 16 MiB, refused rather than
-  truncated when it is over): the attachment is re-read by identifier, because a
-  description is rebuilt on every page and a cached locator would be stale.
+  (`ProtoClient::download_media_to`): the download streams to a temp file in the
+  cache directory as each chunk lands and is renamed into place once hashed, so a
+  large attachment is never held whole. The attachment is re-read by identifier,
+  because a description is rebuilt on every page and a cached locator would be stale.
   `o` on a media message in Normal mode opens it in the platform viewer:
   `open -W` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows (untested).
   The file comes from the media cache: a message opened before is served from
@@ -243,8 +244,10 @@ Working today:
   The configured directory is left as it is and the next launch tries it again. Files
   saved by earlier versions under the temp directory are not migrated or removed; the
   OS reclaims them. The terminal leaves the alternate screen and raw mode for the
-  viewer and comes back where it was. A file over the 16 MiB limit is refused and nothing is
-  saved, and the status line says what happened. While a download runs, its row shows `[image… 42%]` beside
+  viewer and comes back where it was. A download is bounded by `media_cache_max_bytes` (the
+  quota) and a free-space check, and refused — the status line saying so — when its declared
+  size is over the cap or the cache's filesystem has no room for it; otherwise it streams to
+  disk. While a download runs, its row shows `[image… 42%]` beside
   the placeholder (the megabytes so far when Telegram declared no size); `Esc` on that
   message stops it, and a failed download shows `[failed: …]`. There is no viewer setting. The known limits of the
   hand-off are in [`docs/known-gaps.md`](docs/known-gaps.md).

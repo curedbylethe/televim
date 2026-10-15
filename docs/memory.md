@@ -382,10 +382,12 @@ defaults to `MEDIA_CACHE_MAX_BYTES`, 1 GiB; `MEDIA_CACHE_MAX_ENTRIES` is 256 poi
 Resident, it holds one index entry per pointer — a message or media-id key, a hash,
 its CRC32, and a modification time, about 150 bytes — so about 40 KB at the entry cap. A lookup
 verifies a blob by reading it in 16 KiB chunks, so it never holds a whole file in
-memory. A download's bytes are held in memory as they were before the cache, bounded by `MEDIA_LIMIT`
-(16 MiB), and written off the loop. The disk worst case is the byte cap plus one file
-of up to 16 MiB in flight during a write; this holds for any configured cap, and at
-the 1 GiB default it is 1 GiB plus 16 MiB.
+memory. A download streams chunk by chunk to a temp file in the cache directory and
+is hashed as it arrives, so a download's resident cost is one chunk-sized buffer
+(grammers yields 4 KiB–512 KiB) plus its index entry, never the whole attachment.
+The disk worst case is the byte cap plus one partial temp file in flight; the temp
+goes on cancel or failure and is swept on the next open if the process died, and at
+the 1 GiB default the cap is what bounds it.
 
 The fallback used when the configured directory is unwritable keeps the same two caps
 and the same eviction; the figures above hold there too. It lives under the platform

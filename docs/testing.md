@@ -122,7 +122,9 @@ below.
   under the `ENV` lock.
   The loop's half (`net.rs`) checks that a
   download is stored once and the next open is served from disk, with the download
-  never asked for again, and that signing out cancels every download in flight.
+  never asked for again, that signing out cancels every download in flight, that a
+  download larger than the removed 16 MiB ceiling streams and is stored whole, and
+  that a cancelled or refused download removes its temp file and stores nothing.
 - **Integration Tests:** `crates/app/tests/proto_integration.rs` exercises the whole stack — the framework's login, the session store, the session cache, and the `proto` wrapper over both — against a real datacenter: it proves a stored session rebuilds an authorised client, that the client produces a private chat list in newest-first order, that the update feed and the chat list name conversations by the same identifier, and that history pages come back oldest first, without gaps or repeats, from an anchor that is exclusive. It lives in `app` because that is the only crate that may hold a framework `Client` and a `ProtoClient` at once. Three cases cannot be provoked with one account and are documented as deferred in the test's module docs: an update arriving for real, the offline gap `catch_up` closes, and a conversation with a known amount of history. A run prints how many updates it examined, how many the framework discarded, and how far it walked the history, so a run that proved little says so.
 - **Opt-in Tests:** Anything that needs a real account — `telegram-framework`'s
   `auth_integration` and `app`'s `proto_integration` — checks `TELEVIM_TEST_DC`
@@ -152,8 +154,9 @@ below.
   known attachment — so it reads the newest messages of a conversation it is
   pointed at and skips, with its reason printed, when none of them carries
   anything. The parts of the media path that *can* be provoked without an account
-  are not left to it: `classify_raw`/`classify_typed`, the `MEDIA_LIMIT` check,
-  and the `proto` mapping are all ordinary unit tests that run on every job, and
+  are not left to it: `classify_raw`/`classify_typed`, the chunk-count and abort
+  rules of the streaming seam, the streamed store and its disk-space refusal, and
+  the `proto` mapping are all ordinary unit tests that run on every job, and
   the placeholder body is asserted in `tui`'s `TestBackend` tests. What only a
   datacenter can answer is whether Telegram hands over the bytes, which is why
   that one assertion is here and not in CI. The sticker path is covered the same

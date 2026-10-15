@@ -505,13 +505,16 @@ restart, with a `tracing::warn!`; the system temp directory is the root only whe
 `dirs::cache_dir()` is `None`, and its warning says the cache will not survive;
 `net::State`
 holds it behind an `Arc<Mutex>`, cancels every download in flight and clears it at
-sign-out, and `save_media` looks up and stores through it — the store under
-`spawn_blocking`. A store takes the lock twice and writes between: it reserves a file
-under the lock, writes with the lock released, and commits under the lock. `clear`
-bumps a generation, so a store that reserved before a clear removes its late file
-instead of indexing it, unless a newer reservation or entry holds its name; a
-reservation holds its name until it commits or its write fails. Sign-out never waits
-out a 16 MiB write.
+sign-out, and `save_media` looks up and streams a download into it: the chunks go
+to a temp file through a writer on `spawn_blocking`, hashed as they land, and the
+finished file is renamed to its content-named place and committed. A store takes
+the lock twice and writes between: it reserves a name under the lock, renames the
+temp file with the lock released, and commits under the lock. A declared size over
+the byte cap, or a filesystem with no room for it, is refused before any chunk is
+stored. `clear` bumps a generation, so a store that reserved before a clear removes
+its late file instead of indexing it, unless a newer reservation or entry holds its
+name; a reservation holds its name until it commits or its write fails. Sign-out
+never waits out a write.
 
 `history_store.rs` owns the history file (`televim.toml` → `televim.history.json`)
 and the cache it holds: the newest `HISTORY_CACHE_DEPTH` (200, asserted equal to
