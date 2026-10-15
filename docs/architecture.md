@@ -516,7 +516,10 @@ and the cache it holds: the newest `HISTORY_CACHE_DEPTH` (200, asserted equal to
 private peers, and the head of the chat list, at most `HISTORY_CACHE_CHATS` (500)
 rows with no presence. It lives in `app` for the drafts file's reason — `domain`
 and `tui` own no filesystem — and what crosses out of it is plain
-`domain::message::Message` and `domain::chat::Chat`, never its own rows. Every
+`domain::message::Message` and `domain::chat::Chat`, never its own rows. A cached
+row keeps the message's text, direction, timestamp, reply-to id, media kind and
+Telegram media id: the ids travel with the message, so a row restored from the
+file finds a forwarded copy in the media cache with no fetch. Every
 rule in it is a pure function over `HistoryCache`: `merge` folds a fetched page in
 (`PageKind::Latest`, `Older`, `Newer` or `Around`, the fetch's terms restated so
 the module names no `proto` type), `apply_update` folds a feed event in, `arrive`

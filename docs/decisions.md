@@ -465,10 +465,11 @@ are in [`../AGENTS.md`](../AGENTS.md).
   first and the message second, so a message without an id is served exactly as it
   was before.
 
-  What this does not do: the id is not yet written to the history file, so a
-  message restored from it before any fetch carries no id and falls back to its
-  message key until it is fetched again. The cache is still cleared when the account
-  changes, so no file is shared between accounts.
+  The id is written to the history file too, so a message restored from it carries
+  the id and a forwarded copy is served from disk across a restart, before any
+  fetch; a file written before the key existed reads back without one, and its
+  message falls back to its own key until it is fetched again. The cache is still
+  cleared when the account changes, so no file is shared between accounts.
 - **Why a download returns owned bytes for now:** `Client::download_media`
   answers `Vec<u8>` rather than writing to a file or handing back a stream. The
   caller today is a test and a caller that wants to know whether the fetch works,

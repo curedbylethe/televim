@@ -397,7 +397,8 @@ The cache (`app/src/history_store.rs`) is resident for the whole run and copied
 for every write, and it is the first structure in the program whose size is set
 by what the reader has read rather than by what is on screen. Its bounds are rows,
 not bytes: 200 messages × 32 peers is **6,400 rows at most**, plus 500 chat-list
-rows. Placeholders, presence and media bytes are never held; the media kind is.
+rows. Placeholders, presence and media bytes are never held; the media kind and its
+id are.
 
 | | Typical | Worst case |
 | :--- | ---: | ---: |
