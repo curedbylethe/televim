@@ -225,9 +225,14 @@ Working today:
   The file comes from the media cache: a message opened before is served from
   disk with no request, and a first open downloads it and stores it there. The
   cache is a directory of `0600`, plaintext files named by the sha256 of their
-  bytes (`<sha256>.<ext>`), so messages with the same bytes share one file. Two
-  kinds of pointer name a file: `<chat>-<message>.ref` for each message, and
-  `m<id>.ref` for each Telegram media id, which a forwarded copy shares. A pointer
+  bytes (`<sha256>.<ext>`), so messages with the same bytes share one file. Three
+  kinds of pointer name a file: `<chat>-<message>.ref` for each message,
+  `m<id>.ref` for each Telegram media id, which a forwarded copy shares, and
+  `<chat>-<message>.thumb` for the small preview a document or photo already
+  carries. The preview is no download — it rides on the message — and is stored
+  as a blob of its own so it is read once, served from disk after that, and
+  invalidated with its message: dropped when the message's entry is, or kept
+  while a parent another message shares remains. A pointer
   also records a CRC32 of the blob's bytes: a lookup verifies the file on disk and
   evicts a corrupt or truncated one rather than serving it, so its message is
   fetched again. The directory is kept beside the config as `televim.media` unless `media_cache_dir`
