@@ -701,6 +701,8 @@ struct CachedMessage {
     reply_to: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     media: Option<CachedMedia>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media_id: Option<i64>,
 }
 
 impl CachedMessage {
@@ -712,6 +714,7 @@ impl CachedMessage {
             is_outgoing: message.is_outgoing,
             reply_to: message.reply_to,
             media: message.media.map(CachedMedia::from),
+            media_id: message.media_id,
         }
     }
 
@@ -729,7 +732,7 @@ impl CachedMessage {
             is_outgoing: self.is_outgoing,
             reply_to: self.reply_to,
             media: self.media.map(MediaKind::from),
-            media_id: None,
+            media_id: self.media_id,
         }
     }
 }
@@ -995,6 +998,7 @@ mod tests {
         sent.status = MessageStatus::Sent;
         sent.reply_to = Some(1);
         sent.media = Some(MediaKind::Photo);
+        sent.media_id = Some(41);
         let written = vec![message(1, PEER, "first"), sent];
         let mut cache = HistoryCache::default();
         cache.put(PEER, &written);
@@ -1012,7 +1016,34 @@ mod tests {
             "every field the view draws comes back, oldest first"
         );
         assert_eq!(read[1].media, Some(MediaKind::Photo));
+        assert_eq!(
+            read[1].media_id,
+            Some(41),
+            "the media id comes back, so a forwarded copy is still found"
+        );
         assert_eq!(ids(&loaded.cache.get(30)), vec![9]);
+    }
+
+    /// A row writes the media id only when it has one: a file from before the
+    /// id was kept carries no key, and reads back with none.
+    #[test]
+    fn a_row_carries_the_media_id_only_when_it_has_one() {
+        let mut with_id = message(1, PEER, "");
+        with_id.media = Some(MediaKind::Photo);
+        with_id.media_id = Some(41);
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[with_id, message(2, PEER, "bare")]);
+
+        let bytes = HistoryFile::encode(&cache, None).expect("the cache serialises");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("the encoded payload is JSON");
+        let rows = &payload["peers"]["7"];
+
+        assert_eq!(rows[0]["media_id"].as_i64(), Some(41), "the id is written");
+        assert!(
+            rows[1].get("media_id").is_none(),
+            "and a row without one omits the key, as an older file did"
+        );
     }
 
     #[test]
@@ -1341,6 +1372,7 @@ mod tests {
         );
         assert_eq!(read[1].status, MessageStatus::Received);
         assert_eq!(read[1].media, Some(MediaKind::Voice));
+        assert_eq!(read[1].media_id, None, "an older file wrote no id");
         assert_eq!(read[1].display_body(), "[voice]");
     }
 
