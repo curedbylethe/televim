@@ -148,6 +148,22 @@ pub const QUIT_PROMPT: &str = "Quit televim? (y/n)";
 /// this program holds.
 pub const LOGOUT_PROMPT: &str = "Sign out and forget this session? (y/n)";
 
+/// The prompt for `:import-session`: it names the file, because the path is the
+/// one thing the reader typed and may have mistyped.
+fn import_prompt(path: &std::path::Path) -> String {
+    format!(
+        "Replace the stored session with the one in {}? (y/n)",
+        path.display()
+    )
+}
+
+/// What `:export-session` and `:import-session` say when no path was given.
+///
+/// Required rather than defaulted to the configured session file: that file is
+/// where the session already is, so copying it onto itself is never what was
+/// meant.
+pub const SESSION_PATH_USAGE: &str = "usage: :export-session <path> or :import-session <path>";
+
 /// What the profile panel says when `add account` is pressed.
 ///
 /// A deliberate refusal, and named as one. The bracketed `[failed: …]` form is
@@ -702,6 +718,16 @@ pub enum ConfirmKind {
     /// exactly when it starts doing that.
     Logout,
 
+    /// Replace the stored session with the one in the file at `path`.
+    ///
+    /// Asked first because it overwrites what the reader signs in with. Whether
+    /// the file is readable and whose account it holds is the other side's to
+    /// find out, so the prompt says only where it came from.
+    ImportSession {
+        /// The file the session is read from.
+        path: PathBuf,
+    },
+
     /// Delete these messages, for both sides.
     DeleteMessages {
         /// The messages to delete.
@@ -915,6 +941,25 @@ pub enum Action {
     /// sign-out with no argument is the one action whose whole content is that it
     /// happened, so it carries nothing.
     Logout,
+
+    /// Copy the stored session into a sealed file at `path`.
+    ///
+    /// Asked for rather than performed: the store is on the side holding the
+    /// configuration. The session is copied, never moved, and the auth key goes
+    /// with it inside the snapshot — this half never sees it.
+    ExportSession {
+        /// The file the session is written to.
+        path: PathBuf,
+    },
+
+    /// Replace the stored session with the one sealed in the file at `path`.
+    ///
+    /// Queued by the reader's `y` on [`ConfirmKind::ImportSession`]; the other
+    /// side refuses it, in a sentence, when the file belongs to another account.
+    ImportSession {
+        /// The file the session is read from.
+        path: PathBuf,
+    },
 
     /// Download the media on `message_id` in `chat_id` and open it in an
     /// external viewer.
@@ -2789,6 +2834,7 @@ impl App {
         match &self.conversation.confirm {
             Some(ConfirmKind::Quit) => return QUIT_PROMPT.to_owned(),
             Some(ConfirmKind::Logout) => return LOGOUT_PROMPT.to_owned(),
+            Some(ConfirmKind::ImportSession { path }) => return import_prompt(path),
             Some(ConfirmKind::DeleteMessages {
                 ids,
                 outgoing,

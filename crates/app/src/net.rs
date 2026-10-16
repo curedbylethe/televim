@@ -2162,6 +2162,8 @@ async fn report_sign_in(
 
 /// Everything a sign-in step is *not*: an operation on a conversation, or a
 /// question about somebody.
+// One arm per action: splitting the match would only move the arms apart.
+#[allow(clippy::too_many_lines)]
 fn request_plain(
     client: &Arc<ProtoClient>,
     action: Action,
@@ -2269,6 +2271,8 @@ fn request_plain(
             Action::Login { .. }
             | Action::LoginCancelled
             | Action::Logout
+            | Action::ExportSession { .. }
+            | Action::ImportSession { .. }
             | Action::CancelMediaDownload { .. } => {}
 
             // The download is the network's and the file it leaves is the

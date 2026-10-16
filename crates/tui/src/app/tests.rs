@@ -7536,3 +7536,60 @@ fn a_late_top_people_answer_is_refused_after_a_typed_query() {
     assert_eq!(app.user_search().query(), Some("ada"));
     assert!(app.user_search().candidates().is_empty());
 }
+
+// ---- session migration --------------------------------------------------
+
+#[test]
+fn export_session_queues_the_path_and_asks_for_no_confirmation() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "export-session /tmp/out.bin");
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::ExportSession {
+            path: "/tmp/out.bin".into()
+        })
+    );
+    assert_eq!(app.ui.mode, Mode::Normal);
+}
+
+#[test]
+fn import_session_confirms_before_anything_is_asked_for() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "import-session /tmp/in.bin");
+
+    assert_eq!(app.ui.mode, Mode::Confirm);
+    assert!(app.status_text().contains("/tmp/in.bin"));
+    assert_eq!(app.take_action(), None, "nothing is asked for yet");
+
+    app.handle_key(press(KeyCode::Char('y')));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::ImportSession {
+            path: "/tmp/in.bin".into()
+        })
+    );
+    assert_eq!(app.conversation.confirm, None);
+}
+
+#[test]
+fn declining_the_import_asks_for_nothing() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "import-session /tmp/in.bin");
+    app.handle_key(press(KeyCode::Char('n')));
+
+    assert_eq!(app.take_action(), None);
+    assert_eq!(app.ui.mode, Mode::Normal);
+}
+
+#[test]
+fn the_session_commands_refuse_a_missing_path() {
+    for command in ["export-session", "import-session", "import-session   "] {
+        let mut app = App::mock();
+        run_command_line(&mut app, command);
+
+        assert_eq!(app.ui.status, SESSION_PATH_USAGE, "{command}");
+        assert_eq!(app.take_action(), None, "{command}");
+        assert_eq!(app.conversation.confirm, None, "{command}");
+    }
+}

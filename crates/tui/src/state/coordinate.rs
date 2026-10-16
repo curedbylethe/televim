@@ -37,7 +37,8 @@ use domain::vim::{CharMotion, Motion, VimState};
 use crate::app::{
     ACTION_QUEUE, ADD_ACCOUNT_REFUSAL, AccountState, Action, ChatChoice, ConfirmKind,
     ContactProfile, Find, Focus, JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_REPLY,
-    NOT_YOURS_REFUSAL, Pane, ProfileId, PromptKind, Register, SignIn, SignInFlow, TYPING_FOR,
+    NOT_YOURS_REFUSAL, Pane, ProfileId, PromptKind, Register, SESSION_PATH_USAGE, SignIn,
+    SignInFlow, TYPING_FOR,
 };
 use crate::card::CardRow;
 use crate::jumplist::Jumplist;
@@ -1219,6 +1220,11 @@ pub(crate) fn handle_confirm(
             match &conversation.confirm {
                 Some(ConfirmKind::Quit) => ui.quit(),
                 Some(ConfirmKind::Logout) => queue_action(&mut *outbox, &mut *ui, Action::Logout),
+                Some(ConfirmKind::ImportSession { path }) => queue_action(
+                    &mut *outbox,
+                    &mut *ui,
+                    Action::ImportSession { path: path.clone() },
+                ),
                 Some(ConfirmKind::DeleteMessages { ids, .. }) => {
                     let chat_id = conversation.conversation.window.chat_id;
                     queue_action(
@@ -2740,6 +2746,30 @@ pub(crate) fn run_command(
         }
         _ if cmd.starts_with("search ") => {
             run_global_search(&mut *ui, &mut *conversation, &mut *outbox, cmd[7..].trim());
+            false
+        }
+        // Two spellings of one refusal: the path is required, because the
+        // configured file is where the session already is.
+        _ if cmd == "export-session" || cmd.starts_with("export-session ") => {
+            match cmd["export-session".len()..].trim() {
+                "" => ui.set_status(SESSION_PATH_USAGE.to_owned()),
+                path => queue_action(
+                    &mut *outbox,
+                    &mut *ui,
+                    Action::ExportSession { path: path.into() },
+                ),
+            }
+            false
+        }
+        _ if cmd == "import-session" || cmd.starts_with("import-session ") => {
+            match cmd["import-session".len()..].trim() {
+                "" => ui.set_status(SESSION_PATH_USAGE.to_owned()),
+                path => {
+                    ui.set_mode(Mode::Confirm);
+                    conversation
+                        .set_confirm(Some(ConfirmKind::ImportSession { path: path.into() }));
+                }
+            }
             false
         }
         _ if cmd.starts_with("chat ") => {
