@@ -597,6 +597,24 @@ code.
 | `this session was revoked — sign in again; and, for the log, the stored session is discarded` | `SESSION_REVOKED` ✱ | ditto |
 | `the stored session is no longer valid — sign in again` | `AUTH_KEY_UNREGISTERED` ✱ | ditto |
 | the raw error text | anything else, verbatim | ditto |
+| `Session file` | the launch box's title: the session file is encrypted and no key is available | `drawPass` |
+| `The session file is encrypted and no key is available, so televim needs the passphrase to read its chats.` | the one sentence the launch box asks with and why | ditto |
+| `Passphrase` `New passphrase` `Repeat passphrase` | the three concealed bar titles, one per line kind | `kindTitle` |
+| `· cached` | the chat list's title note while the session is locked and the list is the local cache | `drawList` |
+| `Deriving the key from the passphrase; ⏎ is refused while it runs.` | the launch box while the key is derived | `drawPass` |
+| `Checking… — the key is being derived` | the status row while the key is derived | `statusText` |
+| `that passphrase did not open the session file; the file was left as it was` | a wrong passphrase, kept on the box | `PASS_BAD_FILE` |
+| `Session unlocked.` | the status after the right passphrase | `passAnswer` |
+| `the session stays locked — :unlock asks again` | the status after `Esc` at the launch question | `passCancel` |
+| `Change the session passphrase? (y/n)` | the change's confirmation, on the status row | `beginChange` |
+| `the session is locked: :unlock first` | `:passphrase` on a locked session | `PASS_LOCKED` |
+| `the two entries differ, so nothing was changed and the file was left as it was` | a repeat that differs, on the new-passphrase box | `PASS_DIFFER` |
+| `Enter the same passphrase again.` | the box while the repeat is asked | `drawPass` |
+| `The session passphrase has been changed.` | the success box's first sentence, with the reminder beneath it | `drawPass` |
+| `Session passphrase changed.` | the success status | `PASS_CHANGED` |
+| `Session passphrase not changed: the file was left as it was.` | the failure status | `PASS_NOT_CHANGED` |
+| `the file could not be written (permission denied)` | the failure reason, set into the failure box | `PASS_WRITE_FAILED` |
+| `the passphrase was not changed; nothing was written` | `Esc` during a change | `PASS_CANCEL_CHANGE` |
 
 **`SESSION_PASSWORD_NEEDED` is not a refusal**: it is the answer that puts the password row up.
 The three sentences marked ✱ are Telegram's own doing or the account's own doing, so they never
@@ -930,8 +948,10 @@ regressing.
    `:shortcode` completion is up, and the status line names them for as long as
    it is. The settings hint and the card hints lose to a confirmation and to an
    active search, the same way the other hints do.
-5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, `New chat`, and the bar's
-   own title switching between `Message to …` and ` draft `.
+5. **Prompt** — `Command`, `Find`, `Reply`, `Edit`, `New chat`, `Passphrase`, `New passphrase`,
+   `Repeat passphrase`, and the bar's own title switching between `Message to …` and ` draft `.
+   The three passphrase titles are concealed: every character draws as `•`, and the text
+   never appears on the bar, in the box, or in the status row.
 6. **Status line** — the ranking, which is the whole of it: a **confirmation**
    outranks a **selection** outranks a **search**, and a `flash` is not a state
    at all. A refusal written while any of the three is up is a line the reader
@@ -1027,6 +1047,39 @@ regressing.
     dismissed by `Esc`, which returns to the selection it was raised from. What
     would catch it regressing: the header counts the selection, the box never
     leaves the conversation column, and the highlighted row is reverse video.
+
+11. **Session passphrase at launch** — the question asked when the session file is
+    encrypted and no key is available from `TELEVIM_SESSION_PASSPHRASE`, the config's
+    `session_passphrase`, or the OS keyring. A box over the right column, the same shape as
+    the sign-in box, and the bar below it titled `Passphrase`, concealed. The box's first
+    line is the one sentence that says what is asked and why: *the session file is
+    encrypted and no key is available, so televim needs the passphrase to read its chats.*
+    States: the question over the cached list (the list's title carries the note `· cached`),
+    the same question over an empty list (`Chats (0)`, no note), a first `⏎` refused while
+    `Checking…` stands, a refusal kept on the box (`that passphrase did not open the session
+    file; the file was left as it was`), and unlocked (the box goes, the list is live, the
+    status reads `Session unlocked.`). `Esc` leaves at once, the focus returns to the pane it
+    came from, and the session stays locked: the status says `the session stays locked —
+    :unlock asks again`. The two panes keep their widths, and the box is never a mode. The
+    passphrase line has no Normal mode, because a Normal-mode key could move a secret into view.
+    What would catch it regressing: the passphrase never appears in clear on any row, and the
+    cached list is still drawn beneath the box.
+
+12. **Change the session passphrase** — `:passphrase` on an open session, and only then.
+    The first step is the screen-wide y/n row the quit confirmation uses:
+    `Change the session passphrase? (y/n)`, on the status row at the confirmation's rank. `n`
+    and `Esc` leave the file untouched. After `y` the new passphrase is entered concealed, and
+    then again: a typo here would lock the file under a key nobody can recall, so the repeat is
+    the design's own requirement, not an option. A repeat that differs changes nothing and asks
+    the new passphrase again from the start, with `the two entries differ, so nothing was
+    changed and the file was left as it was`. Success: the status reads `Session passphrase
+    changed.` and the box says what to update, `TELEVIM_SESSION_PASSPHRASE` or
+    `session_passphrase`, if the old passphrase was set there, or the next launch will not
+    open the file. Failure: the status reads `Session passphrase not changed: the file was left
+    as it was.` and the box names the reason. A locked session refuses with `the session is
+    locked: :unlock first`. `:passphrase` and `:unlock` are proposed here and not yet in the
+    shipped command set. What would catch it regressing: the change is never reached without
+    the y/n row, and no failure path writes the file.
 
 ## Profile
 

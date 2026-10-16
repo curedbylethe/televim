@@ -206,5 +206,20 @@ const bidiAnchor = '<ol class="notes" data-od-id="bidi-notes">';
 if (!html.includes(bidiAnchor)) throw new Error('no section-10 notes anchor');
 html = html.replace(bidiAnchor, BIDI_FRAMES.map((f) => frameBlock(...f)).join('\n  ') + '\n  ' + bidiAnchor);
 
+/* ---------- sections 11 and 12 · the session passphrase: one full screen per state ----------
+   The prose and the captions are hand-written in components.html; these are the frame bodies only,
+   each the whole 24-row screen of a named scene variant. */
+const PASS_SCREENS = [
+  ['passphrase-ask-frame', 'passphrase', 0], ['passphrase-empty-frame', 'passphrase', 1],
+  ['passphrase-typing-frame', 'passphrase', 2], ['passphrase-checking-frame', 'passphrase', 3],
+  ['passphrase-refused-frame', 'passphrase', 4], ['passphrase-unlocked-frame', 'passphrase', 5],
+  ['passphrase-esc-frame', 'passphrase', 6], ['passphrase-esc-unlock-frame', 'passphrase', 7],
+  ['change-confirm-frame', 'passchange', 0], ['change-entry-frame', 'passchange', 1],
+  ['change-repeat-frame', 'passchange', 2], ['change-mismatch-frame', 'passchange', 3],
+  ['change-success-frame', 'passchange', 4], ['change-failure-frame', 'passchange', 5],
+  ['change-locked-frame', 'passchange', 6]
+];
+PASS_SCREENS.forEach(([id, scene, vi]) => { html = replaceFrame(html, id, TV.render(TV.scene(sceneIndex(scene), vi))); });
+
 fs.writeFileSync(FILE, html);
 console.log('regenerated every frame in components.html from the engine');

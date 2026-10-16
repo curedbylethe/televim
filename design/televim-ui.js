@@ -48,6 +48,12 @@
   /* a send resolves a moment later, and a sign-in request answers on its own: the reader's ⏎
      never hurries it. Nothing else in the interface repaints on a schedule. */
   function schedule() {
+    /* the key derivation answers on its own, as the sign-in request does */
+    if (app.s.pass && app.s.pass.checking && !app.s.pass.timer) {
+      const st = app.s;
+      st.pass.timer = setTimeout(() => { st.pass.timer = null; TV.answer(st); draw(); }, 1200);
+      return;
+    }
     if (app.s.view === 'signin' && app.s.signin && app.s.signin.checking) {
       const st = app.s;
       if (!st.signin.timer) st.signin.timer = setTimeout(() => {
