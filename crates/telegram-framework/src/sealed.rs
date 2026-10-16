@@ -76,16 +76,32 @@ const HEADER_LEN: usize = MAGIC.len() + SALT_LEN + NONCE_LEN;
 /// Bytes authenticated but not encrypted: magic and salt.
 const AAD_LEN: usize = MAGIC.len() + SALT_LEN;
 
-/// Argon2id memory cost, in KiB (19 MiB, the OWASP minimum).
+/// Argon2id cost parameters.
 ///
-/// Fixed here rather than taken from the crate's defaults: these numbers define
-/// what a passphrase derives to, so changing them orphans every file already
-/// written. A different cost would need a new magic.
-const KDF_MEMORY_KIB: u32 = 19 * 1024;
-/// Argon2id passes over memory.
-const KDF_PASSES: u32 = 2;
-/// Argon2id lanes.
-const KDF_LANES: u32 = 1;
+/// The default is fixed here rather than taken from the crate's defaults: these
+/// numbers define what a passphrase derives to. The envelope does not record
+/// them, so a file sealed under one set cannot be opened under another; it
+/// fails as [`SessionError::Load`], the same as a wrong passphrase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KdfParams {
+    /// Memory cost, in KiB.
+    pub memory_kib: u32,
+    /// Passes over memory.
+    pub passes: u32,
+    /// Lanes.
+    pub lanes: u32,
+}
+
+impl Default for KdfParams {
+    /// 19 MiB, 2 passes, 1 lane: the OWASP minimum.
+    fn default() -> Self {
+        Self {
+            memory_kib: 19 * 1024,
+            passes: 2,
+            lanes: 1,
+        }
+    }
+}
 
 /// The KDF salt of an envelope.
 pub type Salt = [u8; SALT_LEN];
@@ -141,6 +157,7 @@ pub trait KeyProvider: Send + Sync + fmt::Debug {
 /// once.
 pub struct PassphraseProvider {
     passphrase: Zeroizing<String>,
+    params: KdfParams,
     derived: Mutex<Option<(Salt, FileKey)>>,
 }
 
@@ -152,8 +169,18 @@ impl PassphraseProvider {
     /// [`SessionError::Unavailable`] at the point of use.
     #[must_use]
     pub fn new(passphrase: impl Into<String>) -> Self {
+        Self::with_params(passphrase, KdfParams::default())
+    }
+
+    /// A provider for `passphrase` deriving with `params`.
+    ///
+    /// The parameters are not stored in the envelope: the same ones must be
+    /// supplied to open a file as sealed it.
+    #[must_use]
+    pub fn with_params(passphrase: impl Into<String>, params: KdfParams) -> Self {
         Self {
             passphrase: Zeroizing::new(passphrase.into()),
+            params,
             derived: Mutex::new(None),
         }
     }
@@ -162,8 +189,13 @@ impl PassphraseProvider {
         if self.passphrase.is_empty() {
             return Err(SessionError::Unavailable("the passphrase is empty".into()));
         }
-        let params = Params::new(KDF_MEMORY_KIB, KDF_PASSES, KDF_LANES, Some(KEY_LEN))
-            .map_err(|error| SessionError::Unavailable(format!("bad KDF parameters: {error}")))?;
+        let params = Params::new(
+            self.params.memory_kib,
+            self.params.passes,
+            self.params.lanes,
+            Some(KEY_LEN),
+        )
+        .map_err(|error| SessionError::Unavailable(format!("bad KDF parameters: {error}")))?;
         let mut out = Zeroizing::new([0u8; KEY_LEN]);
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password_into(self.passphrase.as_bytes(), salt, &mut *out)
@@ -423,6 +455,50 @@ mod tests {
         fn opening_key(&self, _salt: &Salt) -> Result<FileKey, SessionError> {
             Ok(FileKey::from_bytes([self.0; KEY_LEN]))
         }
+    }
+
+    /// Cheap parameters, so the KDF tests stay fast.
+    const FAST: KdfParams = KdfParams {
+        memory_kib: 64,
+        passes: 1,
+        lanes: 1,
+    };
+
+    #[test]
+    fn default_params_are_the_shipped_constants() {
+        let d = KdfParams::default();
+        assert_eq!((d.memory_kib, d.passes, d.lanes), (19 * 1024, 2, 1));
+    }
+
+    #[test]
+    fn custom_params_round_trip() {
+        let provider = PassphraseProvider::with_params("hunter2", FAST);
+        let sealed = seal(PLAINTEXT, &provider).expect("seal");
+        let again = PassphraseProvider::with_params("hunter2", FAST);
+        let opened = open(&sealed, &again).expect("open");
+        assert_eq!(opened.as_deref().map(Vec::as_slice), Some(PLAINTEXT));
+    }
+
+    #[test]
+    fn different_params_derive_different_keys() {
+        let salt = [7u8; SALT_LEN];
+        let other = KdfParams { passes: 2, ..FAST };
+        let a = PassphraseProvider::with_params("hunter2", FAST)
+            .opening_key(&salt)
+            .expect("key");
+        let b = PassphraseProvider::with_params("hunter2", other)
+            .opening_key(&salt)
+            .expect("key");
+        assert_ne!(a.0.as_slice(), b.0.as_slice());
+    }
+
+    #[test]
+    fn opening_with_other_params_is_a_load_error() {
+        let sealed =
+            seal(PLAINTEXT, &PassphraseProvider::with_params("hunter2", FAST)).expect("seal");
+        let other = KdfParams { passes: 2, ..FAST };
+        let result = open(&sealed, &PassphraseProvider::with_params("hunter2", other));
+        assert!(matches!(result, Err(SessionError::Load(_))));
     }
 
     fn mock_entry() -> Entry {
