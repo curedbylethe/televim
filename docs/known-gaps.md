@@ -401,10 +401,13 @@ Real, and named so they are not mistaken for oversights:
   write.** A launch draws them as they were when the file was last written, and
   the `Ready` replaces them; between the two, a count can be wrong. Presence is not
   cached at all, so a cached list draws none until the feed reports it.
-- **`Ready` moves the focus to the conversation while the reader is typing under
+- **`Ready` no longer moves the focus while the reader is typing under
   `connecting…`.** A warm launch lets the reader type into the cached
   conversation's draft before the wire answers; the draft is kept across the
-  `Ready`, but the focus is settled by it, so the line can lose focus mid-word.
+  `Ready`, and with a conversation open and the input line focused, so is the
+  focus (`ready_leaves_input_focus_with_a_conversation_open`). With no
+  conversation open, with a sign-in form up, or with a `:` / `/` prompt on the
+  line, the `Ready` still settles focus as before.
 - **Focus regain is proven against state, not a live terminal.** On `FocusLost`
   and `FocusGained` the event loop clears the pending key latches, and a gain asks
   for the keyboard flags again. Whether a given terminal reports focus, and whether
