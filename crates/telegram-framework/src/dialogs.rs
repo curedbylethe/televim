@@ -154,6 +154,8 @@ impl Client {
             }
         }
 
+        // The pinned block arrives first, in Telegram's own pin order; `sort_by` is
+        // stable, so `pinned_then_newest` leaves that order alone.
         conversations.sort_by(pinned_then_newest);
         // Nothing else writes the peers and per-channel timestamps that dialog
         // iteration just learned, and the update stream reads them from the
@@ -410,15 +412,20 @@ fn newest_first(left: &DialogInfo, right: &DialogInfo) -> Ordering {
     right.last_timestamp.cmp(&left.last_timestamp)
 }
 
-/// Orders conversations with the pinned ones first, each section newest first.
+/// Orders conversations with the pinned ones first, in the order they arrived,
+/// and the rest newest first.
 ///
 /// `false < true`, so comparing the pins in reverse puts the pinned section
-/// ahead; ties fall through to `newest_first` within each section.
+/// ahead. Two pinned chats compare equal: the server sends them in its pin
+/// order and a stable sort keeps it. Use `sort_by`, never `sort_unstable_by`.
 fn pinned_then_newest(left: &DialogInfo, right: &DialogInfo) -> Ordering {
-    right
-        .pinned
-        .cmp(&left.pinned)
-        .then_with(|| newest_first(left, right))
+    right.pinned.cmp(&left.pinned).then_with(|| {
+        if left.pinned {
+            Ordering::Equal
+        } else {
+            newest_first(left, right)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -609,20 +616,21 @@ mod tests {
     }
 
     #[test]
-    fn pinned_dialogs_sort_above_newer_unpinned_ones_newest_first_within_each() {
+    fn the_pinned_block_keeps_the_servers_pin_order_above_newer_unpinned_ones_which_stay_newest_first()
+     {
         let mut pinned_old = dialog(1, Some(100));
         pinned_old.pinned = true;
         let mut pinned_new = dialog(2, Some(300));
         pinned_new.pinned = true;
         let mut dialogs = vec![
-            dialog(3, Some(900)),
             pinned_old,
-            dialog(4, Some(500)),
             pinned_new,
+            dialog(4, Some(500)),
+            dialog(3, Some(900)),
         ];
 
         dialogs.sort_by(pinned_then_newest);
 
-        assert_eq!(peer_ids(&dialogs), vec![2, 1, 3, 4]);
+        assert_eq!(peer_ids(&dialogs), vec![1, 2, 3, 4]);
     }
 }
