@@ -513,7 +513,9 @@ restart, with a `tracing::warn!`; the system temp directory is the root only whe
 holds it behind an `Arc<Mutex>`, cancels every download in flight and clears it at
 sign-out, and `save_media` looks up and streams a download into it: the chunks go
 to a temp file through a writer on `spawn_blocking`, hashed as they land, and the
-finished file is renamed to its content-named place and committed. A store takes
+finished file is renamed to its content-named place and committed, and that commit
+runs on `spawn_blocking` too, awaited before the path reaches `Event::MediaSaved`, so
+the loop never waits on the rename or the pointer-index rewrite. A store takes
 the lock twice and writes between: it reserves a name under the lock, renames the
 temp file with the lock released, and commits under the lock. A declared size over
 the byte cap, or a filesystem with no room for it, is refused before any chunk is
