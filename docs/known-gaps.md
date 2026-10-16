@@ -61,8 +61,9 @@ Real, and named so they are not mistaken for oversights:
   - *The opener's exit, not the viewer's.* macOS waits only because of `-W`. `xdg-open`
     usually returns once a GUI handler is launched, so on Linux the terminal can come
     back under a running viewer, and the sentence `Opener exited (code …); the viewer
-    may still be open` reports the opener's exit. Waiting on the real viewer needs a
-    configured viewer command, which is tracked separately.
+    may still be open` reports the opener's exit. A configured viewer command (`viewer`,
+    `viewer_image`, `viewer_video`, `viewer_audio`) is run directly and waited on, so
+    its sentence reports the viewer's own exit; only the platform default keeps this limit.
   - *Windows is untested.* `cmd /C start` returns without waiting, so the terminal is
     back at once there. No Windows leg runs in CI; the manual steps are in the
     `OPENER` doc comment in `crates/app/src/runtime.rs`. Tracked separately.
