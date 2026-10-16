@@ -138,7 +138,10 @@ below.
   analogue, and the configured path is never created; the fallback keeps the byte cap,
   eviction and `0600` mode; the system temp directory is the last resort when no cache
   directory can be found; and an unwritable fallback too degrades to `None` without
-  panicking.
+  panicking. A file held for a viewer survives its last pointer going and a `clear`, is
+  removed on release (once per hold), and is swept by the next open when never released
+  (`a_held_blob_*`, `a_held_then_cleared_blob_*`); `runtime.rs` drives `Viewers` with a fake
+  viewer to check that `ViewerDone` releases the hold (`a_viewer_holds_its_file_until_it_reports`).
   The byte cap's file and environment reads, `the_media_cache_max_bytes_is_read_from_the_file`
   and `the_environment_supplies_the_media_cache_max_bytes`, are in `config.rs`'s tests
   under the `ENV` lock.

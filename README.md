@@ -244,7 +244,9 @@ Working today:
   and 256 pointers. A file over the byte cap is refused. Past either limit the least
   recently used pointer goes first, and its file with it once no pointer names it.
   An edit drops its message's pointer; a deletion drops the pointer for that id in
-  any chat. The directory is emptied when the account changes and on sign-out. If
+  any chat. The directory is emptied when the account changes and on sign-out, except a file a
+  viewer is still open on, which stays until that viewer reports and is otherwise swept on the
+  next launch. If
   that directory cannot be written, this run uses `televim.media-<account>` under the
   platform cache directory (`dirs::cache_dir()`) instead, with the same limits, so
   the cached media survives a restart; only when there is no platform cache directory

@@ -302,6 +302,9 @@ pub(crate) struct MediaCache {
     /// reservations hold each. A stale store must not remove a file a current
     /// reservation owns.
     pending: BTreeMap<PathBuf, usize>,
+    /// Paths a viewer may still be reading, with how many viewers hold each.
+    /// Eviction and [`MediaCache::clear`] leave these files on disk.
+    viewing: BTreeMap<PathBuf, usize>,
 }
 
 impl MediaCache {
@@ -350,6 +353,7 @@ impl MediaCache {
             blobs: BTreeMap::new(),
             generation: 0,
             pending: BTreeMap::new(),
+            viewing: BTreeMap::new(),
         };
         cache.claim(account);
         cache.scan();
@@ -694,9 +698,42 @@ impl MediaCache {
         blob.refs = blob.refs.saturating_sub(1);
         if blob.refs == 0
             && let Some(blob) = self.blobs.remove(hash)
+            && !self.viewing.contains_key(&blob.path)
             && let Err(error) = fs::remove_file(&blob.path)
         {
             tracing::warn!(%error, "an unreferenced media file could not be removed");
+        }
+    }
+
+    /// Keeps `path` on disk until [`MediaCache::release_viewer`], because a
+    /// viewer may be reading it. A held blob that loses its last reference is
+    /// unindexed but not unlinked, and a clear leaves it too. Counted, so two
+    /// holds of one path need two releases.
+    pub(crate) fn hold_for_viewer(&mut self, path: &Path) {
+        *self.viewing.entry(path.to_owned()).or_insert(0) += 1;
+    }
+
+    /// Gives back one [`MediaCache::hold_for_viewer`]. At the last, a blob that
+    /// eviction or a clear left unindexed in the meantime is removed now; one
+    /// still indexed or being written is left to the cache.
+    pub(crate) fn release_viewer(&mut self, path: &Path) {
+        let Some(count) = self.viewing.get_mut(path) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        self.viewing.remove(path);
+        let hash = (path.parent() == Some(self.dir.as_path()))
+            .then(|| path.file_name()?.to_str().and_then(parse_blob))
+            .flatten();
+        if let Some(hash) = hash
+            && !self.owns(path, &hash)
+            && let Err(error) = fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "a released media file could not be removed");
         }
     }
 
@@ -829,7 +866,10 @@ impl MediaCache {
                 || name
                     .to_str()
                     .is_some_and(|name| is_cache_file(name) || is_download_temp(name));
-            if ours && let Err(error) = fs::remove_file(entry.path()) {
+            if ours
+                && !self.viewing.contains_key(&entry.path())
+                && let Err(error) = fs::remove_file(entry.path())
+            {
                 tracing::warn!(%error, "a cached media file could not be removed");
             }
         }
@@ -1661,6 +1701,69 @@ mod tests {
 
         assert_eq!(other.lookup(7, 9), None);
         assert!(!path.exists(), "the other account's media is removed");
+    }
+
+    #[test]
+    fn a_held_blob_survives_losing_its_last_reference_and_goes_on_release() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache.store(1, 2, MediaKind::Gif, b"gif").expect("cached");
+        cache.hold_for_viewer(&path);
+
+        cache.remove_message(1, 2);
+        assert_eq!(cache.lookup(1, 2), None);
+        assert!(path.exists(), "a viewer may be reading it");
+
+        cache.release_viewer(&path);
+        assert!(!path.exists(), "released, it is reaped");
+    }
+
+    #[test]
+    fn a_held_blob_survives_clear_and_goes_on_release() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), Some("+15550001"));
+        let path = cache.store(1, 2, MediaKind::Gif, b"gif").expect("cached");
+        cache.hold_for_viewer(&path);
+        cache.hold_for_viewer(&path);
+
+        cache.clear();
+        assert!(path.exists());
+        assert_eq!(cache.lookup(1, 2), None);
+        assert!(!dir.path().join(ACCOUNT_FILE).exists());
+
+        cache.release_viewer(&path);
+        assert!(path.exists(), "one of two holds remains");
+        cache.release_viewer(&path);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_held_then_cleared_blob_is_swept_by_the_next_open() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache.store(1, 2, MediaKind::Gif, b"gif").expect("cached");
+        cache.hold_for_viewer(&path);
+        cache.clear();
+        assert!(path.exists());
+        drop(cache);
+
+        let _reopened = cache_in(dir.path(), None);
+        assert!(
+            !path.exists(),
+            "no pointer names it, so the scan removes it"
+        );
+    }
+
+    #[test]
+    fn releasing_a_blob_that_is_still_cached_leaves_it() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        let path = cache.store(1, 2, MediaKind::Gif, b"gif").expect("cached");
+        cache.hold_for_viewer(&path);
+        cache.release_viewer(&path);
+
+        assert!(path.exists());
+        assert_eq!(cache.lookup(1, 2), Some(path));
     }
 
     #[test]

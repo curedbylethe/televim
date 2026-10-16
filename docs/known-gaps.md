@@ -15,7 +15,7 @@ Real, and named so they are not mistaken for oversights:
   which the crate's two-path split exists to avoid — the update feed arrives as a
   built `grammers` `Message`, and there is no raw variant to match on there
   without re-deriving one.
-- **The media cache has three known limits.**
+- **The media cache has five known limits.**
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on
     purpose: the cache is the account's, and sign-out ends the account.
@@ -28,6 +28,18 @@ Real, and named so they are not mistaken for oversights:
     could not be cached.
   - *Legacy temp files are left.* Files named `televim-<pid>-…` from before the cache
     are not migrated or swept; the OS temp cleanup reclaims them.
+  - *A viewer's file is the one exception to a clear.* A path handed to the viewer is
+    held until the viewer reports (`ViewerDone`) or fails to start. Eviction and `clear`
+    leave the file on disk; a sign-out or account change does not wait for the viewer.
+    The file is removed on release, or by the orphan scan on the next launch if the
+    program ended first. Where the opener returns before the viewer does (Linux,
+    Windows), the hold ends with the opener, not the viewer.
+  - *Two instances sharing one cache directory can lose each other's download.* The
+    crash sweep removes every `.download-*.tmp` by name and does not check the pid in
+    it, so one instance's open or `clear` can delete the other's in-flight temp, and that
+    download then fails at its rename. Two instances on one cache directory is not a
+    supported configuration; a liveness check would need platform code, so this is
+    documented and not built.
 - **The viewer hand-off no longer blocks the loop, and has four known limits.** `o`
   runs the platform opener on a thread of its own, so the loop keeps running while
   the viewer is open: network events are applied, and queued media opens one viewer
