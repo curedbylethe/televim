@@ -71,7 +71,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
 
 use crate::config::Config;
 use crate::draft_store::DraftFile;
-use crate::history_store::{HistoryCache, HistoryFile, PageKind};
+use crate::history_store::{HistoryCache, HistoryFile, HistoryTag, PageKind};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
 use crate::runtime::AppEvent;
 
@@ -812,6 +812,12 @@ impl State {
         self.cached.messages = cache;
     }
 
+    /// Records the tag the history file was loaded under, for the check at
+    /// `Ready` and for writes made before it.
+    pub(crate) fn restore_history_tag(&mut self, tag: HistoryTag) {
+        self.cached.tag = tag;
+    }
+
     /// The messages cached for `peer`, oldest first; empty when there are
     /// none.
     pub(crate) fn cached_history(&self, peer: i64) -> Vec<Message> {
@@ -916,8 +922,11 @@ impl State {
         }
 
         self.cached.dirty = false;
-        let account = self.cfg.as_ref().and_then(|cfg| cfg.phone.as_deref());
-        let Some(bytes) = HistoryFile::encode(&self.cached.messages, account) else {
+        let mut tag = self.cached.tag.clone();
+        if tag.account_id.is_none() && tag.phone.is_none() {
+            tag.phone = self.cfg.as_ref().and_then(|cfg| cfg.phone.clone());
+        }
+        let Some(bytes) = HistoryFile::encode(&self.cached.messages, &tag) else {
             return;
         };
         self.cached.write = Some(tokio::task::spawn_blocking(move || file.write(&bytes)));
@@ -946,6 +955,7 @@ impl State {
     /// land after it and put the file back.
     fn forget_history(&mut self) {
         self.cached.messages = HistoryCache::default();
+        self.cached.tag = HistoryTag::default();
         self.cached.dirty = false;
         let Some(file) = self.history_file.clone() else {
             return;
@@ -1023,6 +1033,13 @@ struct CachedHistory {
     /// When the last write was started, for [`HISTORY_CACHE_WRITE_INTERVAL`].
     /// `None` until the first, which therefore starts at once.
     last_write: Option<Instant>,
+
+    /// The account the file is tagged with: what the launch read, then the
+    /// signed-in id once `Ready` has named it.
+    ///
+    /// Never blanked while a cache is held: before `Ready` it is the loaded
+    /// tag, and a write with no id yet falls back to the configured phone.
+    tag: HistoryTag,
 }
 
 /// The least time between two starts of a history write. Changes inside it
@@ -3352,11 +3369,34 @@ fn apply_ready_to_screen(
     if no_session {
         state.forget_history();
     }
+    // **The signed-in account is the cache's tag.** The launch accepted a file
+    // on a tag it could not verify; `Ready` is where the account is known. A
+    // cache that is another account's goes here, before the list below draws
+    // over it, and the open conversation is not kept as the reader's place:
+    // it was the other account's.
+    let mut other_account = false;
+    if let Ok(account) = &account {
+        if !state
+            .cached
+            .tag
+            .holds_for(account.user_id, account.phone.as_deref())
+        {
+            state.forget_history();
+            other_account = true;
+        }
+        let live = HistoryTag {
+            account_id: Some(account.user_id),
+            phone: None,
+        };
+        // A legacy or untagged file is re-tagged by the next write, which
+        // this does not ask for: a quiet `Ready` owes the file nothing.
+        state.cached.tag = live;
+    }
     // The list is the feed's word on what this account's messages the peer has
     // read, which may be a read the feed never delivered. It is folded in
     // before the list lands, so the open view and the record agree on it.
     app.record_read_positions(&chats);
-    let conversation_open = app.conversation.conversation.window.chat_id != 0;
+    let conversation_open = app.conversation.conversation.window.chat_id != 0 && !other_account;
     let restored = if conversation_open && !no_session {
         state.history.cursor = None;
         state.history.jump = None;
@@ -7094,6 +7134,163 @@ mod tests {
         assert!(!path.exists(), "and the file is gone");
         state.persist_history(app.chats(), after_the_window());
         assert!(!state.cached.dirty, "nothing owed to the file");
+    }
+
+    /// A warm launch on `tag`, the cache on disk, and the screen drawn from it.
+    fn tagged_launch(path: &Path, tag: HistoryTag) -> (App, State) {
+        let mut app = launching();
+        let mut state = warm_state();
+        HistoryFile::new(path.to_path_buf()).save(&state.cached.messages, None);
+        state.set_history_file(HistoryFile::new(path.to_path_buf()));
+        state.restore_history_tag(tag);
+        open_from_cache(&mut app, &mut state);
+        assert_eq!(open_id(&app), CHAT, "the cache drew the conversation");
+        (app, state)
+    }
+
+    fn signed_in(user_id: i64, phone: Option<&str>) -> domain::account::Account {
+        domain::account::Account {
+            user_id,
+            phone: phone.map(str::to_owned),
+            ..domain::account::Account::default()
+        }
+    }
+
+    fn assert_cache_gone(app: &App, state: &State, path: &Path) {
+        assert_ne!(open_id(app), CHAT, "none of the other account's rows draw");
+        assert!(app.chats().iter().all(|chat| chat.id != CHAT));
+        assert!(state.cached_history(CHAT).is_empty());
+        assert!(state.cached.messages.chats().is_empty());
+        assert!(!path.exists(), "and the file is gone");
+    }
+
+    /// The cache is tagged with the account it was read for, and a `Ready` for
+    /// another account takes it down before the refreshed list draws.
+    #[test]
+    fn a_ready_for_another_account_discards_the_cache_before_it_draws() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let tag = HistoryTag {
+            account_id: Some(1),
+            phone: None,
+        };
+        let (mut app, mut state) = tagged_launch(&path, tag);
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1)],
+            Ok(signed_in(2, None)),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_cache_gone(&app, &state, &path);
+        assert_eq!(state.cached.tag.account_id, Some(2));
+    }
+
+    /// The same for a file that only carries the configured phone.
+    #[test]
+    fn a_ready_for_another_phone_discards_a_legacy_tagged_cache() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let tag = HistoryTag {
+            account_id: None,
+            phone: Some("+1555".to_owned()),
+        };
+        let (mut app, mut state) = tagged_launch(&path, tag);
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT + 1)],
+            Ok(signed_in(2, Some("+1666"))),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_cache_gone(&app, &state, &path);
+    }
+
+    /// Once an id is known the configured phone is no part of the rule: a
+    /// cache tagged with the signed-in account survives any phone, and a
+    /// legacy tag the account cannot disprove is kept and re-tagged.
+    #[test]
+    fn a_cache_tagged_with_the_signed_in_account_survives_a_different_configured_phone() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let cfg = Config {
+            phone: Some("+1999".to_owned()),
+            ..Config::default()
+        };
+        let tag = HistoryTag {
+            account_id: Some(1),
+            phone: None,
+        };
+        let (mut app, mut state) = tagged_launch(&path, tag);
+        state.cfg = Some(cfg);
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(signed_in(1, Some("+1888"))),
+            tui::SessionStore::Keyring,
+        );
+
+        assert!(!state.cached_history(CHAT).is_empty());
+        assert!(path.exists());
+        assert_eq!(open_id(&app), CHAT);
+
+        let legacy = HistoryTag {
+            account_id: None,
+            phone: Some("+1999".to_owned()),
+        };
+        let (mut app, mut state) = tagged_launch(&path, legacy);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT)],
+            Ok(signed_in(1, None)),
+            tui::SessionStore::Keyring,
+        );
+        assert!(
+            !state.cached_history(CHAT).is_empty(),
+            "unknown is no mismatch"
+        );
+        assert_eq!(state.cached.tag.account_id, Some(1), "re-tagged");
+    }
+
+    /// The first write after a `Ready` carries the signed-in id and drops the
+    /// legacy phone, and a write before any id keeps the loaded tag.
+    #[tokio::test]
+    async fn the_write_after_a_ready_is_tagged_with_the_signed_in_id() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let legacy = HistoryTag {
+            account_id: None,
+            phone: Some("+1555".to_owned()),
+        };
+        let (mut app, mut state) = tagged_launch(&path, legacy);
+        state.cached.dirty = true;
+        persist_list(&mut state, &app).await;
+        let loaded = HistoryFile::new(path.clone()).load();
+        assert_eq!(
+            loaded.account.as_deref(),
+            Some("+1555"),
+            "kept before Ready"
+        );
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT)],
+            Ok(signed_in(9, None)),
+            tui::SessionStore::Keyring,
+        );
+        state.cached.dirty = true;
+        persist_list(&mut state, &app).await;
+
+        let loaded = HistoryFile::new(path).load();
+        assert_eq!((loaded.account_id, loaded.account), (Some(9), None));
     }
 
     /// The landing resumes the open conversation's draft into the line, and

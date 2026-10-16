@@ -384,12 +384,6 @@ Real, and named so they are not mistaken for oversights:
   rest too (see [`decisions.md`](./decisions.md)). Building that is not this
   change's work. Until it is, the media directory should be excluded from backups
   by default.
-- **The history file's account tag is the configured phone, not the signed-in
-  account.** The tag is `cfg.phone`, the same as the drafts', so two accounts
-  signed in one after the other under a launch that configures no phone (or the
-  same phone) share the tag. A `Ready` with no session removes the file, and
-  sign-out removes it, which covers the usual way of changing account; a session
-  swapped underneath a launch by hand is not covered.
 - **A newest page requested on an old client can mark a run current that missed
   messages.** A latest page asked for before a reconnect and landing after the
   reconnect's `Ready` is counted as this session's newest page, so a message the

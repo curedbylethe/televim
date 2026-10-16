@@ -856,16 +856,28 @@ are in [`../AGENTS.md`](../AGENTS.md).
   fetched just before an arrival — which does not carry it — cannot mark the run
   current while missing it. The marks are memory only: they are claims about a
   feed, and the next launch has a different one.
-- **Why the history file's account rule is stricter than the drafts':** for
-  drafts a false clear loses the reader's words, so only a named mismatch
-  discards. For history a false clear costs one fetch the wire was going to make
-  anyway, while a false accept paints another account's conversation under a peer
-  id that may be reused. So the file seeds a launch only when it was saved under
-  exactly the configured phone, unnamed matching unnamed, and a file that may not
-  seed is removed rather than left for the first write to overwrite. A `Ready`
-  that says there is no session forgets the cache and removes the file too: the
-  sign-in form it opens accepts any number, so the cache cannot know the account
-  that signs in next is its own.
+- **Why the history cache is tagged with the signed-in account and checked after
+  `Ready`:** the configured phone is not who is signed in, so a tag made of it
+  either throws away a valid cache or cannot tell two accounts apart. The file
+  carries the signed-in user id (`account_id`), and `Ready` is the one point where
+  that id is known for certain, so it is the check: a cache whose id differs is
+  forgotten, in memory and on disk, and the open conversation is dropped rather
+  than kept as the reader's place, all before the refreshed list draws. The rule is
+  stricter than the drafts': for drafts a false clear loses the reader's words, so
+  only a named mismatch discards, while for history a false clear costs one fetch
+  the wire was going to make anyway and a false accept paints another account's
+  conversation under a peer id that may be reused. The launch cannot know the id
+  without reading the session store, which can block on the keyring and would delay
+  the first draw the cache exists to serve, so a file with an id is accepted at
+  launch and held for the `Ready` check. A file from before the id existed carries
+  only the phone: it seeds a launch only when it equals the configured phone,
+  unnamed matching unnamed, is compared with the account's phone at `Ready` when
+  that is known, and is kept and re-tagged with the id by the next write when it is
+  not — an absent phone is never a mismatch. A file that may not seed is removed
+  rather than left for the first write to overwrite, and a `Ready` that says there
+  is no session forgets the cache and removes the file too: the sign-in form it
+  opens accepts any number, so the cache cannot know the account that signs in next
+  is its own.
 - **Why the chat list is in the history file:** "startup renders from cache
   before network" cannot be met by messages alone, because a conversation is
   opened from the list and the list came from the wire. So the head of the list

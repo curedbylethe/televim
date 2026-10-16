@@ -81,7 +81,9 @@ below.
   client. The **store** (`app/src/history_store.rs`) is pure functions over
   `HistoryCache` and one file in a temp directory: the file's round trip, its
   `0600` mode, an atomic write that leaves no temp behind, a corrupt or missing
-  file as an empty cache, the exact-account rule, the depth, peer, text-byte
+  file as an empty cache, the account rules (`a_payload_round_trips_the_signed_in_account_id`,
+  `a_legacy_phone_tag_still_accepts_only_the_configured_phone`,
+  `a_mismatched_account_id_does_not_seed_the_cache`), the depth, peer, text-byte
   (`the_byte_budget_evicts_the_least_recently_touched`,
   `a_five_megabyte_message_does_not_leave_the_cache_over_budget`,
   `a_file_past_the_byte_budget_is_cut_on_load`) and chat-list
@@ -101,7 +103,10 @@ below.
   ended (`a_page_from_a_dead_feed_cannot_mark_a_run_current_after_a_reconnect`)
   changing nothing while a current-generation page still marks its run current,
   `--chat` from the cache, a `Ready` with no
-  session taking the cache down before the form, the draft surviving the `Ready`,
+  session taking the cache down before the form, a `Ready` for another account
+  discarding the cache before it draws
+  (`a_ready_for_another_account_discards_the_cache_before_it_draws`) and a cache
+  tagged with the signed-in account surviving a different configured phone, the draft surviving the `Ready`,
   a failed bring-up leaving the cache readable, and a cold cache launching as it
   always has. `tui`'s half — the seed accepted only for an empty open window, the
   revalidation sentence and its rank, paging held while the newest page is in
