@@ -346,7 +346,7 @@ while calibrating this one.
   `CONVERSATION_WINDOW` messages, so full history is never held.
 - A bounded history cache: at most `HISTORY_CACHE_DEPTH` (200) messages for each
   of at most `HISTORY_CACHE_PEERS` (32) peers, at most `HISTORY_CACHE_BYTES`
-  (8 MiB) of message text over all of them, and `HISTORY_CACHE_CHATS` (500)
+  (8 MiB) of JSON-encoded message text over all of them, and `HISTORY_CACHE_CHATS` (500)
   chat-list rows, in memory and in the file beside the configuration — see
   [The history cache](#the-history-cache).
 - Measurement-only `Instant` probes in the event loop, gated on
@@ -425,9 +425,12 @@ for every write, and it is the first structure in the program whose size is set
 by what the reader has read rather than by what is on screen. It has two bounds on
 the messages. The rows: 200 messages × 32 peers is **6,400 rows at most**, plus 500
 chat-list rows. And the bytes: `HISTORY_CACHE_BYTES`, **8 MiB** of message text
-summed over every cached peer, past which the least recently touched peers are
-evicted whole. The row bound alone left every row at maximum length free to reach
-about 80 MB; the byte bound is what takes the worst case under the budget.
+summed over every cached peer **as `serde_json` writes it** (`"` and `\` cost 2,
+control characters 6 or 2, everything else its UTF-8 length), past which the
+least recently touched peers are evicted whole. The row bound alone left every
+row at maximum length free to reach about 80 MB; the byte bound is what takes the
+worst case under the budget, and because it counts encoded bytes the text
+portion of the serialised file is at most 8 MiB whatever the text holds.
 Only `CachedMessage.text` is counted: ids, flags and media descriptors are small
 and fixed per row, and the chat list is bounded by its own 500-row cap instead.
 Placeholders, presence and media bytes are never held; the media kind and its
@@ -440,9 +443,9 @@ id are.
 | Chat list, in memory and on disk | about 100 KB | about 6 MB |
 | A write, briefly | about 3× the cache | about 3× the cache |
 
-These are **declared, not measured**. The typical figure is 6,400 rows of an
-ordinary message's size. The worst case is the byte bound filled: 8 MiB of text,
-which on disk is about 10 MB once JSON framing and ordinary escaping are counted.
+The typical figure is 6,400 rows of an ordinary message's size and is declared,
+not measured. The worst case is the byte bound filled: 8 MiB of encoded text,
+which on disk is about 10 MB once JSON framing is counted.
 The chat list's worst case is 500 previews at Telegram's 4,096-character limit in
 three-byte UTF-8 — about 12 KB each. Sealing adds about 44 bytes
 of envelope and leaves the encoded copy the same JSON length. A write holds the
@@ -511,20 +514,33 @@ conversation opened, and the whole of it is bounded by (conversations visited ×
 the budget, so no named constant beyond the depth and no eviction were added.
 Declared, not measured.
 
-**The worst case is declared to fall under the 50 MB budget, by this
-arithmetic** (declared, not measured; no run recorded it). Resident: 8 MiB of
-message text plus the chat list's worst case of about 6 MB, about 14 MB. A write
-holds the cache, the encoder's clone of it and the serialised bytes at once, so
-about 3× that, about 42 MB, briefly. The cold baseline in
-[`memory-baseline.json`](./memory-baseline.json) is about 4 MB. The sum, about
-46 MB, is under 50 MB with about 4 MB to spare, which is thin: the figure holds
-for text whose JSON encoding is about the size of the text. Text made largely of
-control characters, which JSON escapes to six bytes each, can make the
-serialised copy up to six times its text, and that case is outside this figure.
-The typical case adds about a megabyte resident and a few megabytes briefly per
-write, inside the margin the measured figures leave. The total is recomputed on
-each eviction rather than kept as a counter, which cannot drift; a maintained
-counter is the alternative if that ever shows up in a profile.
+**The worst case, measured, and what it does not show.** The bound counts
+*encoded* bytes, so control-character text, which JSON escapes to six bytes a
+character, can no longer inflate the serialised copy past the budget. Evidence is
+the in-crate test `cache_worst_case_full_budget_write_is_measured` (6,400 rows of
+`U+0001`, release, `cargo test -p televim --release --all-features --bin televim
+cache_worst_case -- --include-ignored --nocapture --test-threads=1`, Darwin
+`arm64`): encoded text 8,371,200 B, serialised file 8,735,744 B (1.04x; the same
+fill under the old raw-byte count was 8,384,000 B of text serialising to
+50,668,544 B, 6.04x). Process RSS around the write rose from a 9.8 MB baseline to
+a **60.4 MB peak** (the old accounting: 21.1 MB to 231.8 MB), and a re-open peaked
+at 62.7 MB. **That peak is above the 50 MB budget, and this section no longer
+declares otherwise.** The earlier arithmetic (about 46 MB: cache, the encoder's
+clone and the serialised bytes, about 3x, plus a 4 MB baseline) was too low: the
+write also seals and re-opens the envelope to verify it, which holds the
+serialised bytes, the ciphertext and the re-opened plaintext at once, and the test
+seals with a passphrase provider whose Argon2id derivation takes 19 MiB (a
+likely, unprofiled share of the peak; the keyring provider derives nothing). The
+bound removes the escaping blow-up, a 3.8x lower peak, and nothing more.
+Whether a shipped session reaches 60 MB was not measured; the formal record and a
+thresholded band are a separate piece of work. Removing copies (sealing and
+verifying in place, not cloning the cache for the encoder) is the follow-up, named
+in [`known-gaps.md`](./known-gaps.md). The chat list's worst case of about 6 MB
+is on top of this fill in a real session and is not in the test. The typical case
+adds about a megabyte resident and a few megabytes briefly per write, inside the
+margin the measured figures leave. The total is recomputed on each eviction
+rather than kept as a counter, which cannot drift; a maintained counter is the
+alternative if that ever shows up in a profile.
 
 What the change moves that the harness does measure is binary size. Measured on
 this host (Darwin 27.0.0, `arm64`, the pinned `rustc 1.98.1`), two `make measure`

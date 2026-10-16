@@ -401,7 +401,7 @@ Working today:
   while a bring-up or rebuild is under way, red once the budget is spent.
 - **History cache:** media bytes are not in this file; they are in the media cache
   (see **Media** above). The newest 200 messages of each of the 32 most recently
-  touched private conversations (at most 8 MiB of message text in all; the least
+  touched private conversations (at most 8 MiB of JSON-encoded message text in all; the least
   recently touched conversations go first), and the first 500 rows of the chat list,
   are kept in `televim.history.json` beside the config — sealed with the session
   file's envelope and key, `0600`, written atomically and off the loop's thread,

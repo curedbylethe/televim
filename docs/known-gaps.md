@@ -444,6 +444,17 @@ Real, and named so they are not mistaken for oversights:
   for the keyboard flags again. Whether a given terminal reports focus, and whether
   it resets the flags on blur, is not checked: nothing has run in one. Suspend
   (`SIGTSTP`/`SIGCONT`) is not handled; it is job control, not a window blur.
+- **A worst-case history-cache write peaks above the 50 MB budget.** The byte
+  bound counts JSON-encoded text, so the serialised text is at most 8 MiB; but the
+  in-crate worst-case test (6,400 rows of control characters, release) measured a
+  60.4 MB process peak around a write, from a 9.8 MB baseline, and 62.7 MB on
+  re-open ([`memory.md`](./memory.md#the-history-cache)). The write clones the
+  cache for the encoder, then holds the serialised bytes, the sealed envelope and
+  the re-opened verification copy at once, and the passphrase provider's Argon2id
+  adds 19 MiB while sealing (the Argon2 share is inferred, not profiled). Follow-up,
+  not done: seal and verify in place and drop the encoder's clone, to cut those
+  copies. Until then a full cache of pathological text can exceed the budget
+  briefly during a write; ordinary text is far smaller and was not measured here.
 - **The history cache's feed bookkeeping is not byte-bounded.** The feed's per-peer *seen* map is outside the peer
   bound and grows by one small entry per peer that received an arrival in the
   session.

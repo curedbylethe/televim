@@ -544,7 +544,7 @@ adds an arrival or a numbered send, `feed_interrupted` forgets which runs are
 current, and the least recently touched peer is evicted past the bound. The file
 is read and written by `HistoryFile` alone: one atomic, `0600` payload of
 `{ account, peers, chats }` JSON, bounded by `HISTORY_CACHE_BYTES` (8 MiB of
-message text) as well as the row bounds, sealed in the session file's `TVIM1`
+JSON-encoded message text) as well as the row bounds, sealed in the session file's `TVIM1`
 envelope through the same key provider (a legacy plaintext file is read once and
 rewritten sealed), best effort on every failure.
 
