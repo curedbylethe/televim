@@ -19,6 +19,13 @@ pub enum SessionError {
     #[error("could not read the stored session: {0}")]
     Load(String),
 
+    /// The session file exists but the operating system would not read it.
+    ///
+    /// A permissions or I/O problem with the file itself, apart from
+    /// [`Load`](Self::Load), where the bytes were read and the key was wrong.
+    #[error("could not read the session file: {0}")]
+    Read(String),
+
     /// The session could not be written.
     #[error("could not save the session: {0}")]
     Save(String),
