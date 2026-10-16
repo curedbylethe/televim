@@ -91,7 +91,9 @@ below.
   across all peers, an arrival only into a current run, and the marks an
   interruption, an overtaken page or an eviction take away. The **loop** (`net.rs`
   tests) drives `apply` and `drive` over a `State` with no client: a page landing
-  in the cache and on disk, one write in flight at a time, a failed write that
+  in the cache and on disk, one write in flight at a time, writes coalesced
+  within 500 ms (`ten_rapid_updates_are_coalesced_into_at_most_two_writes`,
+  `a_burst_leaves_the_file_equal_to_memory`), a failed write that
   does not fail the page, sign-out emptying the cache, feed events and numbered
   sends owing a write, a seed on open and none over a window the wire answered
   empty, a warm start drawing the cached list and conversation before any `Ready`,

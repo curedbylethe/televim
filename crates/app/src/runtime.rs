@@ -808,7 +808,7 @@ async fn event_loop(
         // already reached the screen, so nothing waits on it. The chat list
         // goes with it, read off the screen, where every change to it has
         // already landed.
-        network.persist_history(app.chats());
+        network.persist_history(app.chats(), Instant::now());
     }
 
     network.finish_history(app.chats()).await;
