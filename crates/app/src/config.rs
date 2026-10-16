@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use telegram_framework::KdfParams;
 use tui::bidi::BidiMode;
 use tui::state::ui::{GraphicsMode, StickerMode};
 
@@ -91,6 +92,12 @@ const STICKERS_OFF: &str = "off";
 /// spells it. `auto` decides from the environment once, at launch.
 const GRAPHICS_AUTO: &str = "auto";
 const GRAPHICS_KITTY: &str = "kitty";
+
+/// Bounds on the KDF keys: wide enough to tune, tight enough that a typo is
+/// neither trivial nor unbounded.
+const KDF_MEMORY_KIB_RANGE: std::ops::RangeInclusive<u32> = 8_192..=524_288;
+const KDF_PASSES_RANGE: std::ops::RangeInclusive<u32> = 1..=8;
+const KDF_LANES_RANGE: std::ops::RangeInclusive<u32> = 1..=4;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -181,6 +188,19 @@ pub struct Config {
     /// file, but a value put in one rests there in the clear.
     pub session_passphrase: Option<Secret>,
 
+    /// Argon2id memory cost of the passphrase-derived file key, in KiB.
+    ///
+    /// Unset, 19 MiB. Allowed 8192 to 524288. The envelope does not record it:
+    /// changing it makes a file sealed under the old value unopenable (the
+    /// same refusal as a wrong passphrase), so it is a seal-time choice.
+    pub session_kdf_memory_kib: Option<u32>,
+
+    /// Argon2id passes of the passphrase-derived file key. Unset, 2; allowed 1 to 8.
+    pub session_kdf_passes: Option<u32>,
+
+    /// Argon2id lanes of the passphrase-derived file key. Unset, 1; allowed 1 to 4.
+    pub session_kdf_lanes: Option<u32>,
+
     /// The directory downloaded media is kept in, so a re-open is instant.
     ///
     /// Unset, the cache sits beside the configuration file, as the history and
@@ -210,6 +230,9 @@ impl Default for Config {
             password: None,
             session_path: None,
             session_passphrase: None,
+            session_kdf_memory_kib: None,
+            session_kdf_passes: None,
+            session_kdf_lanes: None,
             media_cache_dir: None,
             media_cache_max_bytes: None,
         }
@@ -264,7 +287,47 @@ impl Config {
             .context("building config")?
             .try_deserialize()
             .context("deserialising config")?;
+        cfg.validate_kdf()?;
         Ok(cfg)
+    }
+
+    /// Refuses a KDF cost a typo could make trivial or unbounded, naming the key.
+    fn validate_kdf(&self) -> Result<()> {
+        for (key, value, range) in [
+            (
+                "session_kdf_memory_kib",
+                self.session_kdf_memory_kib,
+                KDF_MEMORY_KIB_RANGE,
+            ),
+            (
+                "session_kdf_passes",
+                self.session_kdf_passes,
+                KDF_PASSES_RANGE,
+            ),
+            ("session_kdf_lanes", self.session_kdf_lanes, KDF_LANES_RANGE),
+        ] {
+            if let Some(value) = value
+                && !range.contains(&value)
+            {
+                anyhow::bail!(
+                    "{key} = {value} is out of range: it must be {} to {}",
+                    range.start(),
+                    range.end()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The Argon2id cost for the session key: the keys set, the defaults for the rest.
+    #[must_use]
+    pub fn kdf_params(&self) -> KdfParams {
+        let default = KdfParams::default();
+        KdfParams {
+            memory_kib: self.session_kdf_memory_kib.unwrap_or(default.memory_kib),
+            passes: self.session_kdf_passes.unwrap_or(default.passes),
+            lanes: self.session_kdf_lanes.unwrap_or(default.lanes),
+        }
     }
 
     /// The application credentials, if both were given.
@@ -430,6 +493,56 @@ mod tests {
             cfg.graphics_mode(env(&[("KITTY_WINDOW_ID", "3")])),
             GraphicsMode::Halfblocks
         );
+    }
+
+    fn load_toml(name: &str, body: &str) -> Result<Config> {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+        let path =
+            std::env::temp_dir().join(format!("televim-cfg-{name}-{}.toml", std::process::id()));
+        std::fs::write(&path, body).expect("a temp file can be written");
+        let loaded = Config::load(&path);
+        std::fs::remove_file(&path).expect("the temp file can be removed");
+        loaded
+    }
+
+    #[test]
+    fn the_kdf_keys_are_read_and_default_to_the_shipped_cost() {
+        assert_eq!(bare().kdf_params(), KdfParams::default());
+
+        let cfg = load_toml(
+            "kdf-ok",
+            "session_kdf_memory_kib = 65536\nsession_kdf_passes = 3\nsession_kdf_lanes = 2\n",
+        )
+        .expect("in-range keys load");
+        let params = cfg.kdf_params();
+        assert_eq!(
+            (params.memory_kib, params.passes, params.lanes),
+            (65_536, 3, 2)
+        );
+
+        let cfg = load_toml("kdf-part", "session_kdf_passes = 4\n").expect("one key loads");
+        let params = cfg.kdf_params();
+        assert_eq!(
+            (params.memory_kib, params.passes, params.lanes),
+            (19 * 1024, 4, 1)
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_kdf_key_fails_the_launch_naming_the_key() {
+        for (key, value) in [
+            ("session_kdf_memory_kib", 0),
+            ("session_kdf_memory_kib", 1024),
+            ("session_kdf_memory_kib", 524_289),
+            ("session_kdf_passes", 0),
+            ("session_kdf_passes", 9),
+            ("session_kdf_lanes", 0),
+            ("session_kdf_lanes", 5),
+        ] {
+            let error = load_toml("kdf-bad", &format!("{key} = {value}\n"))
+                .expect_err("an out-of-range value is refused");
+            assert!(error.to_string().contains(key), "{error} names {key}");
+        }
     }
 
     /// A configuration with nothing set but the two required-by-nobody values.
