@@ -1316,6 +1316,9 @@ fn key_trouble(error: &SessionError) -> anyhow::Error {
              TELEVIM_SESSION_PASSPHRASE or make the OS keyring available ({why}); \
              the file was left as it was"
         ),
+        SessionError::Read(_) => anyhow::anyhow!(
+            "{error}; check the file and its permissions; the file was left as it was"
+        ),
         other => anyhow::anyhow!(
             "{other}; check TELEVIM_SESSION_PASSPHRASE or the OS keyring; \
              the file was left as it was"
@@ -9310,6 +9313,31 @@ mod session_store_tests {
             sealed,
             "byte for byte"
         );
+    }
+
+    /// A file the OS will not read is not a key problem: the sentence names the
+    /// file and its permissions, not the passphrase or the keyring, and the file
+    /// is not discarded.
+    #[test]
+    fn an_unreadable_file_names_the_file_and_its_permissions() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        std::fs::create_dir(&path).expect("a stand-in that cannot be read as a file");
+
+        let cfg = file_config(&path, Some("any"));
+        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+
+        assert_eq!(discard_corrupt_session(&*store), None, "not discarded");
+        let error = store.load().expect_err("the file cannot be read");
+        assert!(matches!(error, SessionError::Read(_)), "{error:?}");
+        let sentence = format!("{:#}", key_trouble(&error));
+        assert!(sentence.contains("permissions"), "{sentence}");
+        assert!(sentence.contains("left as it was"), "{sentence}");
+        assert!(
+            !sentence.contains("TELEVIM_SESSION_PASSPHRASE") && !sentence.contains("keyring"),
+            "{sentence}"
+        );
+        assert!(path.is_dir(), "still there");
     }
 
     /// A wrong passphrase is a typo, not a corrupt session: the file stays, and
