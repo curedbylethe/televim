@@ -737,10 +737,18 @@ are in [`../AGENTS.md`](../AGENTS.md).
   `p` on the chat list sends `messages.toggleDialogPin`, so the pin is the same
   on every client the account uses and survives a restart, with the flag re-read
   on every fetch. A local file would diverge from the other clients and would be
-  one more store to keep in step. A pinned chat sorts first, newest first within
-  its section, which is the one comparator the fetch already uses extended by a
-  key rather than replaced. The list does not move until Telegram has agreed, and
-  an unpin restores the chat's recency position. The list is not re-sorted on
+  one more store to keep in step. A pinned chat sorts first, and the pinned
+  block keeps the order the fetch delivered it in, which is Telegram's own pin
+  order: the order is positional in the response (`dialog` has no order field in
+  any recent layer), `getDialogs` carries pinned chats first, and `grammers`
+  excludes them only after the first page, so the order is trustworthy exactly
+  where it is read. This is de facto rather than a written contract; the
+  comparators compare two pinned chats equal and rely on `sort_by` being stable
+  (never `sort_unstable_by`), so no rank field is carried. The rest of the list
+  stays newest first. The list does not move until Telegram has agreed; a new
+  pin goes to the front of the pinned block, where Telegram puts it, and the next
+  fetch corrects it if the server placed it elsewhere. An unpin restores the
+  chat's recency position. The caveats are in `known-gaps.md`. The list is not re-sorted on
   updates: a background re-sort would move the highlight under the reader.
 - **Why presence carries a raw Unix time and `tui` does the formatting:** `domain`
   is clock-free, and "5 min ago" or "last seen today" is a function of the reader's

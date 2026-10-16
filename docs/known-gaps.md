@@ -477,6 +477,14 @@ Real, and named so they are not mistaken for oversights:
   A change of zone within a running process (a `TZ` change, or a system zone change while the
   program is open) is not exercised by any test; the per-frame read is expected to follow it,
   but that path is unverified.
+- **Pinned order is positional and only refreshed by a full fetch.** The order of the
+  pinned block is the order Telegram sends the first page of `messages.getDialogs` in.
+  The schema has no order field on a dialog and the official documentation is silent,
+  so this rests on how mtcute, TDLib and tdesktop behave, not on a written contract.
+  `updatePinnedDialogs` and `updateDialogPinned` are not handled, so a reorder or a
+  pin made on another device shows only on the next full chat-list fetch, and
+  `messages.getPinnedDialogs` is not called. A pin made here goes to the front of the
+  block until that fetch says otherwise.
 
 ## v2 Hooks
 

@@ -144,7 +144,7 @@ Working today:
   live feed missed is recovered when the chat list is next fetched, so `[read]`
   is shown for it. `p` pins the highlighted chat, or
   unpins it; the pin is kept by Telegram, so it survives a restart, and pinned
-  chats lead the list, newest first within each section. The focused pane's border is
+  chats lead the list in Telegram's own pin order, and the rest follow newest first. The focused pane's border is
   drawn in `Theme::border_focused`; `h`/`l` and `Tab` move between the two panes,
   and `Ctrl+w` steps back out of the line.
 - **Starting a conversation with someone new:** `/` on the chat list finds a
