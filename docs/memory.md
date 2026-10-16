@@ -441,6 +441,37 @@ drafts file writes the `HISTORY_CACHE_PEERS` (32) most recently moved marks
 (`app/src/runtime.rs` `sync_drafts`), so the file cannot grow past that, and a
 launch restores at most that many. Declared, not measured.
 
+The peer presence map (`UiState::peer_presence`, `tui/src/state/ui.rs`) is a third
+map of the kind, and **measured — no bound justified**. It is a `HashMap<i64,
+Presence>`: one 16-byte entry (an `i64` key and an 8-byte `Presence`) per distinct
+peer that has reported a status, plus hashbrown's control byte and spare buckets,
+sticky and never evicted until exit. The harness reports a mixed `Presence` (all
+six variants) for each of its 60 fixture chats before sampling. Both runs below
+are `make measure` on this host (Darwin 27.0.0, `arm64`, `rustc 1.98.1`), median
+harness RSS at idle:
+
+| | Without the map | With 60 entries | Delta |
+| :--- | ---: | ---: | ---: |
+| RSS at idle, harness at 60 chats | 3,981,312 B | 3,997,696 B | +16,384 B (one page) |
+
+Sixty entries are about 2 KB, so the delta is the page granularity of RSS and not
+a measurement of the map. The per-entry figure comes instead from a throwaway local
+run of the same release example with extra synthetic peers (not committed; the
+harness stays the fixture's 60), median of three: 100,000 peers read **+3.8 MB**
+(about 38 B each) and 1,000,000 peers **+70.9 MB** (about 71 B each, the table's
+power-of-two doubling and the freed older tables the allocator keeps resident
+included). Against the regression budget's +1.05 MB harness allowance, the
+allowance is crossed at roughly 15,000 to 28,000 distinct peers; a realistic
+session reports presence for the chat list and the contacts it opens, hundreds to
+low thousands, so 5,000 peers is about 0.2 to 0.35 MB, and nothing in the
+production flow can name a peer it has not been shown. The cost is far inside the
+50 MB target and the allowance, so no named constant and no eviction were added; a
+bound would be an `i64` map with an arbitrary cut-off that redraws a presence the
+reader already saw as absent. `make measure-check` still passes on a clean run
+(RSS 4,030,464 B against the 3,948,544 B baseline, +2.1%, allowance 1.05 MB); the
+baseline was not re-recorded. Revisit if the map ever becomes reachable from a
+peer count beyond the chat list.
+
 **The worst case is past the 50 MB budget, and that is a known gap, not a
 claim that it fits.** At about 80 MB resident and about three times that during
 a write, a reader whose 32 most recent conversations were all maximum-length

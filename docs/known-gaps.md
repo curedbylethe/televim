@@ -353,10 +353,14 @@ Real, and named so they are not mistaken for oversights:
   `a_presence_update_leaves_every_row_unchanged` in `widgets/chat_list.rs` pins
   it. Reversing it is a design-first item (`DESIGN.md`, the OpenDesign sheet, a
   specimen), then one `Span` in the row closure and its tests.
-- **The peer presence map is unbounded per session and unmeasured.** `UiState::peer_presence`
-  gains one entry for each distinct peer that reports presence and is never evicted
-  for the length of the session. It is not measured against the memory budget
-  ([`memory.md`](./memory.md)).
+- **The peer presence map is unbounded per session, measured, and left unbounded.**
+  `UiState::peer_presence` gains one entry for each distinct peer that reports
+  presence and is never evicted for the length of the session. At the harness's 60
+  peers it is invisible (+16 KB, one page, in `make measure`); a throwaway run puts
+  it at about 38 to 71 B a peer, so the +1.05 MB regression allowance is crossed
+  only at roughly 15,000 to 28,000 peers. No bound is justified at a realistic peer
+  count; revisit if a flow can name peers beyond the chat list
+  ([`memory.md`](./memory.md#the-history-cache)).
 - **The history file is not encrypted at rest.** `televim.history.json` is plain
   JSON restricted to its owner (`0600`), the drafts file's precedent; the session
   file is sealed, and the drafts and the history are not. Anyone who can read the
