@@ -292,7 +292,8 @@ Real, and named so they are not mistaken for oversights:
 - **A wrong passphrase is never recovered, only reported.** An envelope that does
   not open is `offline:` with the file untouched, by design (see
   [`decisions.md`](./decisions.md)); a reader who has lost the passphrase for good
-  removes the file by hand.
+  removes the file by hand. A file that cannot be read at all is a separate,
+  permissions-worded `offline:` sentence, not this one.
 - **Legacy plaintext is still read, and its wipe is best effort.** A file from an
   older build loads and is encrypted in place, and the old bytes are zero-filled —
   on Unix only, and not past SSD wear levelling, a journaling or copy-on-write

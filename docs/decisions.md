@@ -114,7 +114,11 @@ are in [`../AGENTS.md`](../AGENTS.md).
   is for a key that exists but is wrong: `could not read the stored session: could
   not decrypt the session: wrong passphrase or key, or the file was modified; check
   TELEVIM_SESSION_PASSPHRASE or the OS keyring; the file was left as it was`. A
-  blank passphrase is no
+  third is for a file the operating system will not read at all — a permissions or
+  I/O problem, no key involved: `could not read the session file: …; check the file
+  and its permissions; the file was left as it was`. It names neither the
+  passphrase nor the keyring, because neither is what the reader can fix. A blank
+  passphrase is no
   passphrase — an empty `TELEVIM_SESSION_PASSPHRASE=` is what an unset template
   variable looks like, and deriving a key from it would encrypt the session under
   nothing. The environment variable is preferred to the configuration key because a
@@ -127,8 +131,9 @@ are in [`../AGENTS.md`](../AGENTS.md).
 - **Why a file that will not open is `Load` and is never discarded:** an envelope
   that does not open — the wrong passphrase, an unreachable keyring, a modified or
   truncated file — is `SessionError::Load`, which is fatal to bring-up and ends at
-  `offline:`; a key source that cannot be reached is `Unavailable`, the same way.
-  Neither is `Corrupt`. `discard_corrupt_session` answers `Corrupt` by clearing the
+  `offline:`; a key source that cannot be reached is `Unavailable`, the same way,
+  and a file that exists but cannot be read (`fs::read` failing for any reason but
+  not-found) is `SessionError::Read`, again ending at `offline:`. None is `Corrupt`. `discard_corrupt_session` answers `Corrupt` by clearing the
   store, so mapping a typo in a passphrase to `Corrupt` would delete a good session
   over a keystroke. Only a legacy plaintext file that fails the JSON or version
   checks is still `Corrupt`, as it always was. The cost of the rule is that a
