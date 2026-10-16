@@ -286,7 +286,17 @@ Working today:
   size is over the cap or the cache's filesystem has no room for it; otherwise it streams to
   disk. While a download runs, its row shows `[image… 42%]` beside
   the placeholder (the megabytes so far when Telegram declared no size); `Esc` on that
-  message stops it, and a failed download shows `[failed: …] (o retries)`, `o` on it trying again. There is no viewer setting. The known limits of the
+  message stops it, and a failed download shows `[failed: …] (o retries)`, `o` on it trying again.
+  The viewer is set per kind of media: `viewer_image` (photos and stickers),
+  `viewer_video` (videos and GIFs) and `viewer_audio` (voice messages), each also read
+  from `TELEVIM_VIEWER_IMAGE`, `TELEVIM_VIEWER_VIDEO` and `TELEVIM_VIEWER_AUDIO`.
+  `viewer` (`TELEVIM_VIEWER`) covers every kind without its own key, files included. A
+  value is a command line split on whitespace: the first word is the program, the rest
+  are its arguments, and the file path is added last. There is no shell, so quotes, `~`
+  and `$VAR` are not expanded. A blank value is unset, and a kind with nothing set uses
+  the platform opener above. A configured program is run directly and waited on, so the
+  status line reports the viewer's own exit; one that is not installed is said on the
+  status line by name, with the path of the file. The known limits of the
   hand-off are in [`docs/known-gaps.md`](docs/known-gaps.md).
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
   typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.

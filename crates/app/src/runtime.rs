@@ -415,15 +415,65 @@ const OPENER_WAITS: bool = true;
 #[cfg(not(target_os = "macos"))]
 const OPENER_WAITS: bool = false;
 
-/// The command that opens `path` in the platform's viewer.
+/// A viewer command: the program, the arguments before the path, and whether
+/// its exit means the viewer exited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ViewerSpec {
+    program: String,
+    args: Vec<String>,
+    waits: bool,
+}
+
+impl ViewerSpec {
+    /// The platform's opener.
+    fn platform() -> Self {
+        let (program, args) = OPENER;
+        Self {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            waits: OPENER_WAITS,
+        }
+    }
+
+    /// A configured command line, split on whitespace: the first token is the
+    /// program, the rest its arguments. No shell sees it. A blank value is
+    /// `None`. The program is spawned directly, so its exit is the viewer's.
+    fn configured(line: &str) -> Option<Self> {
+        let mut tokens = line.split_whitespace().map(str::to_owned);
+        let program = tokens.next()?;
+        Some(Self {
+            program,
+            args: tokens.collect(),
+            waits: true,
+        })
+    }
+}
+
+/// The viewer for a media kind: its own key, else `viewer`, else the platform's.
+///
+/// Photos and stickers are images, videos and GIFs are video, voice messages are
+/// audio, and everything else takes the generic key.
+fn viewer_spec(cfg: &Config, kind: MediaKind) -> ViewerSpec {
+    let specific = match kind {
+        MediaKind::Photo | MediaKind::Sticker => &cfg.viewer_image,
+        MediaKind::Video | MediaKind::Gif => &cfg.viewer_video,
+        MediaKind::Voice => &cfg.viewer_audio,
+        MediaKind::File => &None,
+    };
+    [specific, &cfg.viewer]
+        .into_iter()
+        .find_map(|line| line.as_deref().and_then(ViewerSpec::configured))
+        .unwrap_or_else(ViewerSpec::platform)
+}
+
+/// The command that opens `path` with `spec`.
 ///
 /// Inherits the terminal's stdio, which is what a viewer needs and what keeps the
 /// program's own output off the screen: nothing is piped. `status()` is what
 /// waits, and the caller holds the loop until it returns.
-fn viewer_command(path: &Path) -> Command {
-    let (program, args) = OPENER;
-    let mut command = Command::new(program);
-    command.args(args).arg(path);
+fn viewer_command(path: &Path, spec: &ViewerSpec) -> Command {
+    let mut command = Command::new(&spec.program);
+    command.args(&spec.args).arg(path);
     command
 }
 
@@ -436,11 +486,10 @@ trait Viewer {
     fn spawn(
         &mut self,
         path: PathBuf,
+        spec: ViewerSpec,
         done: mpsc::UnboundedSender<AppEvent>,
     ) -> std::io::Result<()>;
     fn resume(&mut self) -> std::io::Result<()>;
-    /// Whether a report of exit means the viewer exited (see `OPENER_WAITS`).
-    fn opener_waits(&self) -> bool;
 }
 
 /// The terminal as the viewer sees it: the real suspend, spawn and resume.
@@ -457,12 +506,13 @@ impl Viewer for TuiViewer<'_> {
     fn spawn(
         &mut self,
         path: PathBuf,
+        spec: ViewerSpec,
         done: mpsc::UnboundedSender<AppEvent>,
     ) -> std::io::Result<()> {
         std::thread::Builder::new()
             .name("viewer".to_owned())
             .spawn(move || {
-                let outcome = viewer_command(&path).status();
+                let outcome = viewer_command(&path, &spec).status();
                 // Nothing waits for this once the loop has ended, so a closed
                 // channel is not an error.
                 let _ = done.send(AppEvent::Viewer(ViewerDone { path, outcome }));
@@ -472,10 +522,6 @@ impl Viewer for TuiViewer<'_> {
 
     fn resume(&mut self) -> std::io::Result<()> {
         resume_tui(self.terminal, self.keys)
-    }
-
-    fn opener_waits(&self) -> bool {
-        OPENER_WAITS
     }
 }
 
@@ -487,7 +533,9 @@ impl Viewer for TuiViewer<'_> {
 #[derive(Default)]
 struct Viewers {
     queued: VecDeque<(PathBuf, MediaKind)>,
-    open: Option<PathBuf>,
+    /// The viewer on the terminal, and the command that launched it, so the
+    /// report names that program and knows whether its exit is the viewer's.
+    open: Option<(PathBuf, ViewerSpec)>,
     gate: ReaderGate,
     /// The media cache, so a queued path is held against eviction and a clear
     /// until its viewer has finished. `None` holds nothing.
@@ -535,29 +583,36 @@ impl Viewers {
         viewer: &mut V,
         app: &mut App,
         done: &mpsc::UnboundedSender<AppEvent>,
+        cfg: &Config,
     ) -> Result<()> {
         if self.busy() {
             return Ok(());
         }
-        let Some((path, _kind)) = self.queued.pop_front() else {
+        let Some((path, kind)) = self.queued.pop_front() else {
             return Ok(());
         };
+        let spec = viewer_spec(cfg, kind);
         app.set_status(format!("Opening {}…", path.display()));
         // Closed before the terminal is given away, so the reader never takes a
         // key the viewer was typed at. Opened again only once it is back.
         self.gate.close();
         let launched = viewer
             .suspend()
-            .and_then(|()| viewer.spawn(path.clone(), done.clone()));
+            .and_then(|()| viewer.spawn(path.clone(), spec.clone(), done.clone()));
         match launched {
-            Ok(()) => self.open = Some(path),
+            Ok(()) => self.open = Some((path, spec)),
             Err(error) => {
                 viewer
                     .resume()
                     .context("taking the terminal back from the viewer")?;
                 self.gate.open();
                 self.release(&path);
-                app.flash(viewer_sentence(&Err(error), &path, viewer.opener_waits()));
+                app.flash(viewer_sentence(
+                    &Err(error),
+                    &path,
+                    &spec.program,
+                    spec.waits,
+                ));
             }
         }
         Ok(())
@@ -570,7 +625,10 @@ impl Viewers {
         app: &mut App,
         done: &ViewerDone,
     ) -> Result<()> {
-        self.open = None;
+        let spec = self
+            .open
+            .take()
+            .map_or_else(ViewerSpec::platform, |(_, spec)| spec);
         self.release(&done.path);
         viewer
             .resume()
@@ -579,7 +637,8 @@ impl Viewers {
         app.flash(viewer_sentence(
             &done.outcome,
             &done.path,
-            viewer.opener_waits(),
+            &spec.program,
+            spec.waits,
         ));
         Ok(())
     }
@@ -592,7 +651,12 @@ impl Viewers {
 ///
 /// A missing opener and a spawn failure are refusals, and the path is named in
 /// both so the reader can open the file by hand: the file stays on disk.
-fn viewer_sentence(outcome: &std::io::Result<ExitStatus>, path: &Path, waits: bool) -> String {
+fn viewer_sentence(
+    outcome: &std::io::Result<ExitStatus>,
+    path: &Path,
+    program: &str,
+    waits: bool,
+) -> String {
     match outcome {
         Ok(status) => {
             let (who, tail) = if waits {
@@ -606,8 +670,7 @@ fn viewer_sentence(outcome: &std::io::Result<ExitStatus>, path: &Path, waits: bo
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => format!(
-            "Cannot open media: {} is not installed; the file is at {}",
-            OPENER.0,
+            "Cannot open media: {program} is not installed; the file is at {}",
             path.display()
         ),
         Err(error) => format!(
@@ -847,7 +910,7 @@ async fn event_loop(
         // thread: the loop carries on while one is open, and the next starts when
         // it reports (see `Viewers::start_next` and `Viewers::finish`).
         viewers.queue(network.take_media());
-        viewers.start_next(&mut TuiViewer { terminal, keys }, &mut app, &tx)?;
+        viewers.start_next(&mut TuiViewer { terminal, keys }, &mut app, &tx, cfg)?;
         sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
         // Unlike the drafts, written off the loop's thread: the file is up to
         // a window per conversation, and it is a write behind the pages that
@@ -1630,12 +1693,136 @@ mod tests {
     #[test]
     fn the_viewer_is_the_platform_opener_on_the_file() {
         let path = Path::new("/tmp/televim-1-2-3.jpg");
-        let command = viewer_command(path);
+        let spec = viewer_spec(&Config::default(), MediaKind::File);
+        let command = viewer_command(path, &spec);
 
+        assert_eq!(spec, ViewerSpec::platform());
+        assert_eq!(spec.waits, OPENER_WAITS);
         assert_eq!(command.get_program(), OPENER.0);
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args.last().copied(), Some(path.as_os_str()));
         assert_eq!(args.len(), OPENER.1.len() + 1);
+    }
+
+    fn spec(program: &str, args: &[&str]) -> ViewerSpec {
+        ViewerSpec {
+            program: program.to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            waits: true,
+        }
+    }
+
+    /// A specific key beats `viewer`, which beats the platform opener; each
+    /// kind reads its own class's key.
+    #[test]
+    fn a_kind_takes_its_key_then_the_generic_one_then_the_platform() {
+        let cfg = Config {
+            viewer: Some("any".to_owned()),
+            viewer_image: Some("img".to_owned()),
+            viewer_video: Some("vid".to_owned()),
+            viewer_audio: Some("aud".to_owned()),
+            ..Config::default()
+        };
+
+        for (kind, program) in [
+            (MediaKind::Photo, "img"),
+            (MediaKind::Sticker, "img"),
+            (MediaKind::Video, "vid"),
+            (MediaKind::Gif, "vid"),
+            (MediaKind::Voice, "aud"),
+            (MediaKind::File, "any"),
+        ] {
+            assert_eq!(viewer_spec(&cfg, kind), spec(program, &[]), "{kind:?}");
+        }
+
+        let only_generic = Config {
+            viewer: Some("any".to_owned()),
+            ..Config::default()
+        };
+        assert_eq!(
+            viewer_spec(&only_generic, MediaKind::Voice),
+            spec("any", &[])
+        );
+
+        let only_image = Config {
+            viewer_image: Some("img".to_owned()),
+            ..Config::default()
+        };
+        assert_eq!(
+            viewer_spec(&only_image, MediaKind::File),
+            ViewerSpec::platform(),
+            "a specific key does not leak to other kinds"
+        );
+    }
+
+    /// The value is split on whitespace with no shell, the path goes last, and a
+    /// blank value is unset.
+    #[test]
+    fn a_configured_command_is_split_and_gets_the_path_last() {
+        let cfg = Config {
+            viewer_video: Some("  mpv   --fs  --loop=no ".to_owned()),
+            viewer: Some("   ".to_owned()),
+            ..Config::default()
+        };
+        let path = Path::new("/tmp/a b.mp4");
+        let video = viewer_spec(&cfg, MediaKind::Video);
+        let command = viewer_command(path, &video);
+
+        assert_eq!(command.get_program(), "mpv");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--fs", "--loop=no", "/tmp/a b.mp4"]);
+        assert!(video.waits, "a configured command is waited on");
+
+        assert_eq!(
+            viewer_spec(&cfg, MediaKind::File),
+            ViewerSpec::platform(),
+            "a blank value is unset"
+        );
+    }
+
+    /// The real spawn of a program that is not there fails with `NotFound`, the
+    /// kind the sentence turns into "is not installed".
+    #[test]
+    fn a_missing_program_fails_to_spawn_as_not_found() {
+        let path = Path::new("/tmp/a.jpg");
+        let error = viewer_command(path, &spec("televim-no-such-viewer-xyz", &[]))
+            .status()
+            .expect_err("no such program");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// A program that does not exist is a refusal on the status line that names
+    /// it, with the gate open again and no panic.
+    #[test]
+    fn a_bogus_viewer_is_refused_by_name() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers::default();
+        let gate = viewers.gate.clone();
+        let mut viewer = FakeViewer {
+            fail_spawn: true,
+            ..FakeViewer::default()
+        };
+        let cfg = Config {
+            viewer_image: Some("no-such-viewer-xyz --flag".to_owned()),
+            ..Config::default()
+        };
+        viewers.queue(vec![(PathBuf::from("/tmp/a.jpg"), MediaKind::Photo)]);
+
+        viewers
+            .start_next(&mut viewer, &mut app, &tx, &cfg)
+            .expect("a refusal is not an error");
+
+        assert!(
+            app.ui
+                .status
+                .starts_with("Cannot open media: no-such-viewer-xyz is not installed"),
+            "{}",
+            app.ui.status
+        );
+        assert!(gate.is_open());
+        assert!(!viewers.busy());
     }
 
     /// The sentences the reader sees for each outcome: an exit code, an exit
@@ -1650,26 +1837,29 @@ mod tests {
 
         let exited = std::process::ExitStatus::from_raw(3 << 8);
         assert_eq!(
-            viewer_sentence(&Ok(exited), path, true),
+            viewer_sentence(&Ok(exited), path, "mpv", true),
             "Viewer exited (code 3)"
         );
 
         let signalled = std::process::ExitStatus::from_raw(9);
         assert_eq!(
-            viewer_sentence(&Ok(signalled), path, true),
+            viewer_sentence(&Ok(signalled), path, "mpv", true),
             "Viewer exited (no exit code)"
         );
 
         let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
-        let sentence = viewer_sentence(&Err(missing), path, true);
-        assert!(sentence.starts_with("Cannot open media: "), "{sentence}");
+        let sentence = viewer_sentence(&Err(missing), path, "mpv", true);
+        assert!(
+            sentence.starts_with("Cannot open media: mpv is not installed"),
+            "{sentence}"
+        );
         assert!(
             sentence.ends_with("the file is at /tmp/televim-1-2-3.jpg"),
             "{sentence}"
         );
 
         let refused = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        let sentence = viewer_sentence(&Err(refused), path, true);
+        let sentence = viewer_sentence(&Err(refused), path, "mpv", true);
         assert!(sentence.starts_with("Cannot open media: "), "{sentence}");
         assert!(
             sentence.ends_with("the file is at /tmp/televim-1-2-3.jpg"),
@@ -1689,8 +1879,8 @@ mod tests {
         log: Vec<String>,
         fail_suspend: bool,
         fail_spawn: bool,
-        /// The opener returns before the viewer does (Linux and Windows).
-        early_return: bool,
+        /// The spec each spawn was handed, in order.
+        specs: Vec<ViewerSpec>,
     }
 
     impl Viewer for FakeViewer {
@@ -1705,9 +1895,11 @@ mod tests {
         fn spawn(
             &mut self,
             path: PathBuf,
+            spec: ViewerSpec,
             done: mpsc::UnboundedSender<AppEvent>,
         ) -> std::io::Result<()> {
             self.log.push(format!("spawn {}", path.display()));
+            self.specs.push(spec);
             if self.fail_spawn {
                 return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
             }
@@ -1721,10 +1913,6 @@ mod tests {
         fn resume(&mut self) -> std::io::Result<()> {
             self.log.push("resume".to_owned());
             Ok(())
-        }
-
-        fn opener_waits(&self) -> bool {
-            !self.early_return
         }
     }
 
@@ -1765,7 +1953,7 @@ mod tests {
         viewers.queue(vec![(path, MediaKind::Photo)]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         assert!(viewers.busy());
         let done = next_done(&mut rx);
@@ -1807,7 +1995,7 @@ mod tests {
         let mut viewer = FakeViewer::default();
         viewers.queue(vec![(path.clone(), MediaKind::Photo)]);
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
 
         cache
@@ -1839,7 +2027,7 @@ mod tests {
         viewers.queue(vec![(path, MediaKind::Photo)]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("resume succeeds");
 
         assert!(!viewers.busy(), "a refused viewer holds nothing");
@@ -1869,7 +2057,7 @@ mod tests {
         )]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("resume succeeds");
 
         assert!(!viewers.busy());
@@ -1896,12 +2084,12 @@ mod tests {
         )]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         // The loop keeps running while the viewer is open: another pass starts
         // nothing, and the wait has not yet been taken.
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         assert!(viewers.busy());
         assert_eq!(viewer.log, ["suspend", "spawn /tmp/televim-1-2-3.jpg"]);
@@ -1911,7 +2099,7 @@ mod tests {
             .finish(&mut viewer, &mut app, &done)
             .expect("resume succeeds");
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
 
         assert_eq!(app.current_chat_id(), 7);
@@ -1939,10 +2127,10 @@ mod tests {
         ]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         assert_eq!(viewer.log, ["suspend", "spawn /tmp/a.jpg"]);
 
@@ -1951,7 +2139,7 @@ mod tests {
             .finish(&mut viewer, &mut app, &done)
             .expect("resume succeeds");
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         let done = next_done(&mut rx);
         viewers
@@ -1993,7 +2181,7 @@ mod tests {
         )]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         assert!(!gate.is_open(), "the reader is gated while the viewer runs");
 
@@ -2049,26 +2237,23 @@ mod tests {
         assert!(held.is_empty(), "nothing is left behind or dropped");
     }
 
-    /// An opener that returns before the viewer does: its exit ends the session,
-    /// the terminal comes back once, and the status names the opener, not the
-    /// viewer.
+    /// The platform opener's exit ends the session, the terminal comes back once,
+    /// and the status says what that exit means on this platform: the viewer's on
+    /// macOS (`open -W`), only the opener's elsewhere.
     #[cfg(unix)]
     #[test]
-    fn an_early_return_opener_resumes_once_and_names_the_opener() {
+    fn the_platform_opener_resumes_once_and_says_what_its_exit_means() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         let mut viewers = Viewers::default();
-        let mut viewer = FakeViewer {
-            early_return: true,
-            ..FakeViewer::default()
-        };
+        let mut viewer = FakeViewer::default();
         viewers.queue(vec![(
             PathBuf::from("/tmp/televim-1-2-3.jpg"),
             MediaKind::Photo,
         )]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         let done = next_done(&mut rx);
         viewers
@@ -2081,33 +2266,51 @@ mod tests {
             ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"],
             "one resume, and the session is over"
         );
+        assert_eq!(viewer.specs, [ViewerSpec::platform()]);
         assert_eq!(
             app.ui.status,
-            "Opener exited (code 0); the viewer may still be open"
+            if OPENER_WAITS {
+                "Viewer exited (code 0)"
+            } else {
+                "Opener exited (code 0); the viewer may still be open"
+            }
         );
     }
 
-    /// A waiting opener (macOS `open -W`) reports the viewer's own exit, as before.
+    /// A configured command is waited on directly, so its exit is the viewer's
+    /// on every platform.
     #[cfg(unix)]
     #[test]
-    fn a_waiting_opener_reports_the_viewer_exit() {
+    fn a_configured_viewer_reports_the_viewer_exit() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
         let mut viewers = Viewers::default();
         let mut viewer = FakeViewer::default();
+        let cfg = Config {
+            viewer: Some("mpv --fs".to_owned()),
+            ..Config::default()
+        };
         viewers.queue(vec![(
             PathBuf::from("/tmp/televim-1-2-3.jpg"),
             MediaKind::Photo,
         )]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &cfg)
             .expect("the start goes through");
         let done = next_done(&mut rx);
         viewers
             .finish(&mut viewer, &mut app, &done)
             .expect("resume succeeds");
 
+        assert_eq!(
+            viewer.specs,
+            [ViewerSpec {
+                program: "mpv".to_owned(),
+                args: vec!["--fs".to_owned()],
+                waits: true
+            }]
+        );
         assert_eq!(app.ui.status, "Viewer exited (code 0)");
     }
 
@@ -2121,12 +2324,12 @@ mod tests {
         let path = Path::new("/tmp/televim-1-2-3.jpg");
         let exited = std::process::ExitStatus::from_raw(0);
         assert_eq!(
-            viewer_sentence(&Ok(exited), path, false),
+            viewer_sentence(&Ok(exited), path, "xdg-open", false),
             "Opener exited (code 0); the viewer may still be open"
         );
         let signalled = std::process::ExitStatus::from_raw(9);
         assert_eq!(
-            viewer_sentence(&Ok(signalled), path, false),
+            viewer_sentence(&Ok(signalled), path, "xdg-open", false),
             "Opener exited (no exit code); the viewer may still be open"
         );
     }
@@ -2150,7 +2353,7 @@ mod tests {
         )]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
 
         assert!(gate.is_open());
@@ -2179,7 +2382,7 @@ mod tests {
         )]);
 
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("the start goes through");
         assert!(!gate.is_open(), "gated while the viewer has the terminal");
         let done = next_done(&mut rx);
@@ -2187,7 +2390,7 @@ mod tests {
             .finish(&mut viewer, &mut app, &done)
             .expect("resume succeeds");
         viewers
-            .start_next(&mut viewer, &mut app, &tx)
+            .start_next(&mut viewer, &mut app, &tx, &Config::default())
             .expect("nothing is queued");
 
         assert!(gate.is_open(), "the reader reads again after the return");
