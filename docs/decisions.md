@@ -94,8 +94,21 @@ are in [`../AGENTS.md`](../AGENTS.md).
   they now protect ciphertext, as defence in depth. `save` also opens what it just
   sealed before writing it, because a provider that sealed under a key it could
   not hand back would turn a good session into a file nothing can read. The
-  Argon2id cost (`m` = 19 MiB, `t` = 2, `p` = 1) is frozen in `sealed.rs`; a new
-  cost needs a new magic.
+  Argon2id cost defaults to `m` = 19 MiB, `t` = 2, `p` = 1 (`KdfParams::default`);
+  it is configurable, but the envelope does not record it, so a file opens only
+  under the cost it was sealed with.
+- **Why encryption at rest is not a toggle:** `FileStore` seals every write, and
+  there is no `encrypt_session` switch and no `EncryptedFileStore` wrapper over it.
+  A switch would be a second, plaintext write path, which is the exposure the
+  envelope exists to close and which the next bullet rules out; a wrapper would be
+  a second layer over behaviour the store already has. Plaintext is only ever
+  *read*, once, from a file an older build wrote, and the reader is told so: the
+  status row says `Event::SessionResealed` after `Ready`. What a reader can tune is
+  the Argon2id cost (`session_kdf_memory_kib`, `session_kdf_passes`,
+  `session_kdf_lanes`), bounded at load so a typo is neither trivial nor unbounded.
+  The envelope does not carry the cost (`VERSION` and the magic stay as they are),
+  so it applies to sealing only: a file sealed under one cost fails to open under
+  another as a `Load` error, the same refusal as a wrong passphrase.
 - **Why the file key comes from the environment first, the keyring second, and
   nowhere else:** the order is `TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase`
   in the configuration, which the environment wins over), then a random 256-bit key

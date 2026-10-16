@@ -305,7 +305,10 @@ Real, and named so they are not mistaken for oversights:
   and the reader sets the variable and types `:retry`. An interactive launch-time
   prompt is the deferred alternative: it needs a new prompt kind, a widget and a
   design pass. There is also no re-keying — changing the passphrase makes the old
-  file unopenable, and the way out is to remove it and sign in again.
+  file unopenable, and the way out is to remove it and sign in again. The same
+  holds for the Argon2id cost keys (`session_kdf_*`): the envelope does not record
+  the cost, so a file opens only under the cost it was sealed with, and a changed
+  value reads as a wrong passphrase.
 - **A wrong passphrase is never recovered, only reported.** An envelope that does
   not open is `offline:` with the file untouched, by design (see
   [`decisions.md`](./decisions.md)); a reader who has lost the passphrase for good
