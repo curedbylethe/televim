@@ -1363,7 +1363,10 @@ fn key_provider(
     keyring: impl FnOnce() -> Arc<dyn KeyProvider>,
 ) -> Arc<dyn KeyProvider> {
     match cfg.passphrase() {
-        Some(passphrase) => Arc::new(PassphraseProvider::new(passphrase)),
+        Some(passphrase) => Arc::new(PassphraseProvider::with_params(
+            passphrase,
+            cfg.kdf_params(),
+        )),
         None => keyring(),
     }
 }
@@ -9847,6 +9850,31 @@ mod session_store_tests {
             "{sentence}"
         );
         assert!(path.is_dir(), "still there");
+    }
+
+    /// The configured KDF cost reaches the key: a file sealed under it opens under
+    /// it, and not under the defaults.
+    #[test]
+    fn the_configured_kdf_cost_seals_the_file_and_the_defaults_cannot_open_it() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let mut cfg = file_config(&path, Some("right"));
+        cfg.session_kdf_memory_kib = Some(8_192);
+        cfg.session_kdf_passes = Some(1);
+
+        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        store
+            .save(&SessionData::default())
+            .expect("a session is written");
+        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        assert!(store.load().expect("opens with the same cost").is_some());
+
+        let defaults = file_config(&path, Some("right"));
+        let Session { store, .. } = session_store_with(&defaults, || Arc::new(NoKeyring));
+        let error = store
+            .load()
+            .expect_err("the default cost derives another key");
+        assert!(matches!(error, SessionError::Load(_)), "{error:?}");
     }
 
     /// A wrong passphrase is a typo, not a corrupt session: the file stays, and
