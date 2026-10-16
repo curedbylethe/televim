@@ -34,6 +34,8 @@ Real, and named so they are not mistaken for oversights:
     The file is removed on release, or by the orphan scan on the next launch if the
     program ended first. Where the opener returns before the viewer does (Linux,
     Windows), the hold ends with the opener, not the viewer.
+    A store that reserved before a `clear` and commits or fails after it leaves a held
+    file alone too; the release removes it.
   - *Two instances sharing one cache directory can lose each other's download.* The
     crash sweep removes every `.download-*.tmp` by name and does not check the pid in
     it, so one instance's open or `clear` can delete the other's in-flight temp, and that
