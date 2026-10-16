@@ -257,7 +257,7 @@ Working today:
   size is over the cap or the cache's filesystem has no room for it; otherwise it streams to
   disk. While a download runs, its row shows `[image… 42%]` beside
   the placeholder (the megabytes so far when Telegram declared no size); `Esc` on that
-  message stops it, and a failed download shows `[failed: …]`. There is no viewer setting. The known limits of the
+  message stops it, and a failed download shows `[failed: …] (o retries)`, `o` on it trying again. There is no viewer setting. The known limits of the
   hand-off are in [`docs/known-gaps.md`](docs/known-gaps.md).
 - **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
   typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.

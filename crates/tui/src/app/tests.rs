@@ -6780,12 +6780,41 @@ fn a_failed_download_draws_its_reason_and_a_forgotten_one_draws_nothing() {
     let message = app.conversation.conversation.message(2).expect("on show");
     assert_eq!(
         crate::rows::status_suffix(&app, message).as_deref(),
-        Some("[failed: no route]")
+        Some("[failed: no route] (o retries)")
     );
 
     app.conversation.downloads.forget(MOCK_CHAT, 2);
     let message = app.conversation.conversation.message(2).expect("on show");
     assert_eq!(crate::rows::status_suffix(&app, message), None);
+}
+
+/// On a row too narrow for the whole token, the reason survives and the hint is
+/// what the right edge cuts.
+#[test]
+fn a_narrow_row_keeps_the_failure_reason_and_cuts_the_retry_hint() {
+    let mut app = App::mock();
+    app.apply_latest(vec![with_media(2, "", domain::message::MediaKind::Photo)]);
+    app.conversation
+        .downloads
+        .fail(MOCK_CHAT, 2, "connection reset by peer".to_owned());
+
+    let width = 90;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24))
+        .expect("the test backend builds");
+    terminal
+        .draw(|frame| app.render(frame))
+        .expect("the frame draws");
+    let buffer = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..24)
+        .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+
+    let row = rows
+        .iter()
+        .find(|row| row.contains("[failed:"))
+        .unwrap_or_else(|| panic!("no failed token drawn: {rows:#?}"));
+    assert!(row.contains("[failed: connection reset by peer]"), "{row}");
+    assert!(!row.contains("(o retries)"), "{row}");
 }
 
 /// `Esc` on a message whose download is in flight queues that download's cancel,
