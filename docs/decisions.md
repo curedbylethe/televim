@@ -109,6 +109,21 @@ are in [`../AGENTS.md`](../AGENTS.md).
   The envelope does not carry the cost (`VERSION` and the magic stay as they are),
   so it applies to sealing only: a file sealed under one cost fails to open under
   another as a `Load` error, the same refusal as a wrong passphrase.
+- **Why migration copies the snapshot and never touches the live session:**
+  `:export-session <path>` and `:import-session <path>` move the stored
+  `SessionData` between the configured store (`FileStore` or `KeyringStore`) and a
+  sealed file, composed in `app` from the public `SessionStore` trait. The auth
+  key lives inside that snapshot (`DcOption.auth_key`), so a copy preserves it and
+  nothing extracts, rewrites or stores it separately. No framework API snapshots
+  the *live* `StoreSession` (`session_handle` stays `pub(crate)`) and none is
+  added: the stored copy is what the next launch reads, and a client that holds
+  the live session is neither paused nor read. Import checks the account before it
+  writes: a snapshot of another account, or one that does not say whose it is while
+  an account is known, is refused with the destination untouched; signed out, any
+  snapshot is taken. It asks `y/n` first because it overwrites the store, and
+  then re-runs bring-up as `:retry` does. Neither command deletes anything — the
+  keyring is delete-only — and the path is required, since the configured file is
+  where the session already is.
 - **Why the file key comes from the environment first, the keyring second, and
   nowhere else:** the order is `TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase`
   in the configuration, which the environment wins over), then a random 256-bit key
