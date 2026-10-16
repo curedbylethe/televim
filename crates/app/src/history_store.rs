@@ -847,6 +847,12 @@ impl HistoryFile {
         Self { path, keys }
     }
 
+    /// The same file, sealed under `keys` from here on.
+    #[must_use]
+    pub(crate) fn rekeyed(self, keys: Arc<dyn KeyProvider>) -> Self {
+        Self::new(self.path, keys)
+    }
+
     /// A handle sealed under a fixed passphrase, so tests need no keyring.
     #[cfg(test)]
     pub(crate) fn for_test(path: PathBuf) -> Self {

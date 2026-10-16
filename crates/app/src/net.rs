@@ -189,6 +189,13 @@ pub enum Event {
     /// to be brought up again on it.
     SessionImported(String),
 
+    /// The session file needs a passphrase: none was available, or the one
+    /// tried did not open it. The screen asks for one.
+    SessionKeyRequired {
+        /// A key was tried and the file refused it, rather than none being found.
+        rejected: bool,
+    },
+
     /// A legacy plaintext session file was read and sealed in place.
     ///
     /// Once: the file is sealed afterwards, so no later bring-up finds it plain.
@@ -671,6 +678,13 @@ pub struct State {
     /// tests is therefore the ordinary case, not a special one.
     cfg: Option<Config>,
 
+    /// A passphrase the reader typed at the prompt, held for this process only.
+    ///
+    /// Never written to the configuration, a profile or a file, and wiped when
+    /// replaced or dropped. [`State::cfg_now`] puts it ahead of whatever the
+    /// configuration resolved; it only exists after that failed.
+    passphrase: Option<zeroize::Zeroizing<String>>,
+
     /// The channel bring-up answers on. Read only beside [`State::cfg`].
     tx: Option<UnboundedSender<AppEvent>>,
 
@@ -742,6 +756,16 @@ impl State {
             bringing_up: true,
             ..Self::default()
         }
+    }
+
+    /// The configuration as it is now: [`State::cfg`] with the typed passphrase,
+    /// if there is one, ahead of the configured one.
+    fn cfg_now(&self) -> Option<Config> {
+        let mut cfg = self.cfg.clone()?;
+        if let Some(typed) = &self.passphrase {
+            cfg.session_passphrase = Some(crate::config::Secret::from(typed.to_string()));
+        }
+        Some(cfg)
     }
 
     /// The reconnect the feed's end asked for, once.
@@ -1140,7 +1164,13 @@ pub fn spawn_bring_up(cfg: Config, tx: UnboundedSender<AppEvent>) {
         }
 
         if let Err(reason) = bring_up(&cfg, &tx).await {
+            let key = reason.downcast_ref::<KeyRequired>().map(|key| key.rejected);
+            // The `offline:` sentence first and the question after it, so the
+            // sentence is what stands when the reader leaves the question.
             let _ = tx.send(AppEvent::Net(Event::Offline(reason)));
+            if let Some(rejected) = key {
+                let _ = tx.send(AppEvent::Net(Event::SessionKeyRequired { rejected }));
+            }
         }
     });
 }
@@ -1460,12 +1490,15 @@ fn spawn_import_session(
 }
 
 /// Starts every queued session export and import.
-fn run_session_actions(app: &mut App, state: &State) {
+fn run_session_actions(app: &mut App, state: &mut State) {
     while let Some(action) = app.take_session_action() {
-        let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) else {
+        let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) else {
             continue;
         };
         match action {
+            Action::SubmitSessionPassphrase { value } => {
+                submit_passphrase(state, value.expose(), &tx);
+            }
             Action::ExportSession { path } => spawn_export_session(cfg, path, tx),
             Action::ImportSession { path } => {
                 let known = match &app.session.account {
@@ -1476,6 +1509,28 @@ fn run_session_actions(app: &mut App, state: &State) {
             }
             _ => {}
         }
+    }
+}
+
+/// Holds a typed passphrase for this process and brings the client up again on it.
+///
+/// The file is opened by the bring-up and by nothing else here, so a wrong
+/// passphrase is the read-only failure it always was: it comes back as
+/// [`Event::SessionKeyRequired`] with the file untouched. The history cache's
+/// key follows the typed one, so it opens and is written under the same key as
+/// the session. One bring-up at a time: a submit that lands on one in flight
+/// waits for the reader's next try.
+fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEvent>) {
+    state.passphrase = Some(zeroize::Zeroizing::new(typed.to_owned()));
+    let Some(cfg) = state.cfg_now() else {
+        return;
+    };
+    if let Some(file) = state.history_file.take() {
+        state.history_file = Some(file.rekeyed(file_key_provider(&cfg)));
+    }
+    if !state.bringing_up {
+        state.bringing_up = true;
+        spawn_bring_up(cfg, tx.clone());
     }
 }
 
@@ -1586,22 +1641,56 @@ pub(crate) fn file_key_provider(cfg: &Config) -> Arc<dyn KeyProvider> {
 ///
 /// Names what the reader can set, and says the file was left alone, because the
 /// alternative they will fear is that it was thrown away.
+///
+/// A missing key and a rejected one are [`KeyRequired`] underneath, which is what
+/// opens the passphrase question; the sentence is the same either way.
 fn key_trouble(error: &SessionError) -> anyhow::Error {
     match error {
-        SessionError::Unavailable(why) => anyhow::anyhow!(
-            "the session file is encrypted and no key is available: set \
-             TELEVIM_SESSION_PASSPHRASE or make the OS keyring available ({why}); \
-             the file was left as it was"
-        ),
+        SessionError::Unavailable(why) => anyhow::Error::new(KeyRequired {
+            rejected: false,
+            sentence: format!(
+                "the session file is encrypted and no key is available: set \
+                 TELEVIM_SESSION_PASSPHRASE or make the OS keyring available ({why}); \
+                 the file was left as it was"
+            ),
+        }),
         SessionError::Read(_) => anyhow::anyhow!(
             "{error}; check the file and its permissions; the file was left as it was"
         ),
-        other => anyhow::anyhow!(
-            "{other}; check TELEVIM_SESSION_PASSPHRASE or the OS keyring; \
-             the file was left as it was"
-        ),
+        other => {
+            let sentence = format!(
+                "{other}; check TELEVIM_SESSION_PASSPHRASE or the OS keyring; \
+                 the file was left as it was"
+            );
+            if matches!(other, SessionError::Load(_)) {
+                anyhow::Error::new(KeyRequired {
+                    rejected: true,
+                    sentence,
+                })
+            } else {
+                anyhow::anyhow!(sentence)
+            }
+        }
     }
 }
+
+/// A session file that cannot be opened for want of a key, or with the one it
+/// was given. Carried inside the `offline:` error so bring-up can tell the
+/// screen to ask for a passphrase; it prints as the sentence alone.
+#[derive(Debug)]
+struct KeyRequired {
+    /// A key was tried and the file refused it.
+    rejected: bool,
+    sentence: String,
+}
+
+impl std::fmt::Display for KeyRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.sentence)
+    }
+}
+
+impl std::error::Error for KeyRequired {}
 
 /// Forwards the feed to the loop for as long as it lasts.
 ///
@@ -1696,7 +1785,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     if app.take_retry_request() {
         if state.bringing_up {
             app.flash("already trying to connect");
-        } else if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+        } else if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
             state.bringing_up = true;
             spawn_bring_up(cfg, tx);
         }
@@ -1711,7 +1800,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     if state.take_reconnect_request() {
         if auto_reconnect(state) {
             state.auto_reconnect_used = true;
-            if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+            if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
                 state.bringing_up = true;
                 spawn_bring_up(cfg, tx);
             }
@@ -2553,7 +2642,11 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             chats,
             account,
             session_store,
-        } => apply_ready(app, state, client, chats, account, session_store),
+        } => {
+            apply_ready(app, state, client, chats, account, session_store);
+            // Opened, so whatever lock the launch found is over.
+            app.session_unlocked();
+        }
 
         // Nothing failed, so nothing is an `Offline`: the screen's answer is a
         // sentence about the configuration, which is what the flow draws.
@@ -2568,6 +2661,8 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // a screen they did not expect and has to be told why. It says nothing
         // about the client: there is one either way, and the `Ready` beside it is
         // what puts the screen up.
+        Event::SessionKeyRequired { rejected } => app.session_key_required(rejected),
+
         Event::SessionDiscarded(sentence)
         | Event::SessionResealed(sentence)
         | Event::SessionMoved(sentence) => {
@@ -2578,7 +2673,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // one the client opens. One already in flight read the old session and
         // is not stacked on: the reader is told to ask again.
         Event::SessionImported(sentence) => {
-            app.ui.status = match (state.bringing_up, state.cfg.clone(), state.tx.clone()) {
+            app.ui.status = match (state.bringing_up, state.cfg_now(), state.tx.clone()) {
                 (false, Some(cfg), Some(tx)) => {
                     state.bringing_up = true;
                     spawn_bring_up(cfg, tx);
@@ -3388,7 +3483,7 @@ fn apply_logged_out_and_reconnect(app: &mut App, state: &mut State, result: Resu
     // reused — see [`State::cfg`]. Its `Ready` carries
     // `Err(String::new())`, and `apply_ready_to_screen` is what opens
     // the phone field off the back of it.
-    if let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) {
+    if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
         // Counted as in flight from here rather than from the `Ready` it
         // will send, so a `:retry` typed while it is on its way is refused
         // rather than answered with a second client.
@@ -10344,6 +10439,128 @@ mod session_store_tests {
         assert_eq!(
             std::fs::read(&path).expect("the file is still there"),
             sealed
+        );
+    }
+
+    /// A missing key and a rejected one are the two reasons to ask for a
+    /// passphrase; a file the OS would not read is neither.
+    #[test]
+    fn only_a_missing_or_rejected_key_asks_for_a_passphrase() {
+        let wanted = |error: &SessionError| {
+            key_trouble(error)
+                .downcast_ref::<KeyRequired>()
+                .map(|key| key.rejected)
+        };
+        assert_eq!(
+            wanted(&SessionError::Unavailable("none".into())),
+            Some(false)
+        );
+        assert_eq!(wanted(&SessionError::Load("wrong key".into())), Some(true));
+        assert_eq!(wanted(&SessionError::Read("denied".into())), None);
+        assert_eq!(wanted(&SessionError::Corrupt("junk".into())), None);
+        // The sentence is unchanged by the type it travels in.
+        let sentence = format!("{:#}", key_trouble(&SessionError::Unavailable("x".into())));
+        assert!(
+            sentence.contains("TELEVIM_SESSION_PASSPHRASE"),
+            "{sentence}"
+        );
+    }
+
+    #[test]
+    fn the_key_required_event_opens_the_question() {
+        let mut app = App::new();
+        let mut state = State::default();
+        apply(
+            &mut app,
+            &mut state,
+            Event::SessionKeyRequired { rejected: true },
+        );
+
+        assert!(app.session.locked);
+        assert!(
+            app.session
+                .pass
+                .as_ref()
+                .is_some_and(|pass| pass.bad.is_some())
+        );
+    }
+
+    /// The typed passphrase beats a configured one that failed, in the
+    /// configuration every bring-up reads — and lives nowhere else.
+    #[test]
+    fn a_typed_passphrase_is_tried_ahead_of_the_configured_one_and_is_not_kept() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("right")))
+            .save(&snapshot(1, 1))
+            .expect("a session is written");
+        let sealed = std::fs::read(&path).expect("the file exists");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(file_config(&path, Some("wrong")), tx.clone());
+        // A bring-up is in flight already, so none is spawned here.
+        submit_passphrase(&mut state, "right", &tx);
+
+        let cfg = state.cfg_now().expect("a configuration");
+        assert_eq!(cfg.passphrase(), Some("right"));
+        assert_eq!(
+            state.cfg.as_ref().and_then(Config::passphrase),
+            Some("wrong"),
+            "the configured value is untouched, so nothing typed is persisted"
+        );
+        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        assert!(store.load().expect("it opens").is_some());
+        assert_eq!(std::fs::read(&path).expect("still there"), sealed);
+    }
+
+    /// A passphrase that does not open the file is a read-only failure: the
+    /// question comes back, and the bytes are exactly what they were.
+    #[test]
+    fn a_wrong_typed_passphrase_writes_nothing_and_asks_again() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("right")))
+            .save(&snapshot(1, 1))
+            .expect("a session is written");
+        let sealed = std::fs::read(&path).expect("the file exists");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(file_config(&path, None), tx.clone());
+        submit_passphrase(&mut state, "nope", &tx);
+
+        let cfg = state.cfg_now().expect("a configuration");
+        let Session { store, keys } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let error = store.load().expect_err("the wrong key does not open it");
+        let required = key_trouble(&error);
+        assert_eq!(
+            required
+                .downcast_ref::<KeyRequired>()
+                .map(|key| key.rejected),
+            Some(true)
+        );
+        drop(keys);
+        assert_eq!(std::fs::read(&path).expect("still there"), sealed);
+
+        let mut app = App::new();
+        apply(
+            &mut app,
+            &mut state,
+            Event::SessionKeyRequired { rejected: true },
+        );
+        assert!(app.session.locked);
+    }
+
+    /// Replacing the typed passphrase drops the old one; nothing else holds it.
+    #[test]
+    fn the_typed_passphrase_is_held_only_in_the_state() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(Config::default(), tx.clone());
+        submit_passphrase(&mut state, "first", &tx);
+        submit_passphrase(&mut state, "second", &tx);
+
+        assert_eq!(
+            state.passphrase.as_deref().map(String::as_str),
+            Some("second")
         );
     }
 }

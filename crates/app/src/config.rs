@@ -62,6 +62,12 @@ impl Secret {
     }
 }
 
+impl Drop for Secret {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
 impl From<String> for Secret {
     fn from(text: String) -> Self {
         Self(text)
