@@ -235,6 +235,14 @@ pub enum Event {
         /// the page was short, and that is what settles a direction.
         cursor: HistoryCursor,
 
+        /// The feed generation the page was requested under, read when the
+        /// fetch was spawned rather than when it lands.
+        ///
+        /// A page from an older generation was fetched by a client that has
+        /// since gone, and is dropped whole: it knows nothing of what the
+        /// reconnect missed, so it must not mark a cached run current.
+        generation: u64,
+
         /// The page, oldest first, or why there is not one.
         result: Result<Vec<Message>, ProtoError>,
     },
@@ -577,6 +585,12 @@ pub struct State {
     /// The cursor for the conversation on show, and how long it has to be left
     /// alone.
     history: History,
+
+    /// Which feed instance this is, counted up each time one ends or a `Ready`
+    /// brings a new client. Stamped on every history request so a page that
+    /// returns under an older count can be told from one asked of the current
+    /// client. Unrelated to the media cache's `generation`.
+    feed_generation: u64,
 
     /// The global search jump that a cached message landed on when the
     /// conversation was seeded from the cache, held until the newest page
@@ -1513,12 +1527,18 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             if let Some((chat_id, max_id)) = latest_read(app, state) {
                 request_read(&client, chat_id, max_id, tx);
             }
-            request(&client, FetchDirection::Latest, cursor, tx);
+            request(
+                &client,
+                FetchDirection::Latest,
+                cursor,
+                state.feed_generation,
+                tx,
+            );
         }
 
         Wanted::Page(direction, cursor) => {
             app.begin_fetch(direction);
-            request(&client, direction, cursor, tx);
+            request(&client, direction, cursor, state.feed_generation, tx);
         }
 
         Wanted::Jump(jump) => {
@@ -1740,6 +1760,7 @@ fn request(
     client: &Arc<ProtoClient>,
     direction: FetchDirection,
     cursor: HistoryCursor,
+    generation: u64,
     tx: &UnboundedSender<AppEvent>,
 ) {
     let client = Arc::clone(client);
@@ -1764,6 +1785,7 @@ fn request(
             direction,
             anchor,
             cursor,
+            generation,
             result,
         }));
     });
@@ -2397,8 +2419,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             direction,
             anchor,
             cursor,
+            generation,
             result,
-        } => apply_history(app, state, direction, anchor, cursor, result),
+        } => apply_history(app, state, direction, anchor, cursor, generation, result),
 
         Event::Jumped {
             jump,
@@ -3128,11 +3151,19 @@ fn apply_history(
     direction: FetchDirection,
     anchor: Option<i64>,
     mut cursor: HistoryCursor,
+    generation: u64,
     result: Result<Vec<Message>, ProtoError>,
 ) {
     // However it ended, the direction is open again: a fetch that failed
     // must not close a conversation for good.
     app.end_fetch(direction);
+
+    // A page asked of a client whose feed has since ended knows nothing of what
+    // the reconnect missed. The peer guard below cannot tell it apart when the
+    // reader reopened the same conversation, so it goes first, whole.
+    if generation != state.feed_generation {
+        return;
+    }
 
     if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
         return;
@@ -3213,6 +3244,8 @@ fn apply_offline(app: &mut App, state: &mut State, reason: &anyhow::Error) {
 /// so the two cannot disagree about what "reconnecting" looks like.
 fn apply_feed_ended(app: &mut App, state: &mut State) {
     state.reconnect_requested = true;
+    // Pages still in flight were asked of the client that just ended.
+    state.feed_generation += 1;
     // Whatever arrives before the new feed is up is never seen, so no cached
     // run is known current until its next newest page.
     state.cached.messages.feed_interrupted();
@@ -3267,6 +3300,8 @@ fn apply_ready_to_screen(
 ) {
     // The client is up: connected, whatever the screen says underneath it.
     app.set_connection(ConnectionState::Connected);
+    // A new client brings a new feed: pages asked of the old one are stale.
+    state.feed_generation += 1;
     let no_session = matches!(&account, Err(reason) if reason.is_empty());
     // A conversation already on screen is the reader's place, and a `Ready` that
     // lands on top of one is the client being brought back up — or a launch the
@@ -4442,6 +4477,7 @@ mod tests {
                 direction: FetchDirection::Latest,
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
             },
         );
@@ -4489,6 +4525,7 @@ mod tests {
                 direction: FetchDirection::Latest,
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
             },
         );
@@ -5353,6 +5390,7 @@ mod tests {
                 direction: FetchDirection::Older,
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(messages(CHAT, -1..=0)),
             },
         );
@@ -5556,6 +5594,7 @@ mod tests {
                 direction: FetchDirection::Latest,
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(messages(CHAT, 1..=2)),
             },
         );
@@ -5587,6 +5626,7 @@ mod tests {
                 direction: FetchDirection::Latest,
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
             },
         );
@@ -5697,7 +5737,8 @@ mod tests {
         state
     }
 
-    /// A page of [`CHAT`] arriving the way the fetch sends it.
+    /// A page of [`CHAT`] arriving the way the fetch sends it, asked of the
+    /// feed that is up now.
     fn page_arrives(
         app: &mut App,
         state: &mut State,
@@ -5705,6 +5746,7 @@ mod tests {
         anchor: Option<i64>,
         page: Vec<Message>,
     ) {
+        let generation = state.feed_generation;
         apply(
             app,
             state,
@@ -5712,6 +5754,7 @@ mod tests {
                 direction,
                 anchor,
                 cursor: HistoryCursor::new(CHAT),
+                generation,
                 result: Ok(page),
             },
         );
@@ -6352,6 +6395,95 @@ mod tests {
         assert_eq!(window_ids(&app), vec![1, 2]);
     }
 
+    /// The reconnect race: a newest page asked of the dead client lands after
+    /// the feed ended and a new `Ready` came, with the same conversation
+    /// reopened. It names the same peer, so only its generation tells it apart.
+    /// Nothing of it may reach the cache, the window or the cursor.
+    #[test]
+    fn a_page_from_a_dead_feed_cannot_mark_a_run_current_after_a_reconnect() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT, 1..=3);
+        open_pass(&mut app, &mut state);
+        let asked_under = state.feed_generation;
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+        assert_ne!(state.feed_generation, asked_under, "the feed moved on");
+        // The reader opens the same conversation again: a fresh cursor, same peer.
+        state.history = opened(CHAT);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                generation: asked_under,
+                result: Ok(messages(CHAT, 4..=6)),
+            },
+        );
+
+        assert_eq!(state.cached_history(CHAT).len(), 3, "no merge");
+        assert_eq!(state.cached_history(CHAT)[0].id, 1);
+        assert!(
+            !state.cached.messages.arrive(&messages(CHAT, 7..=7)[0]),
+            "the run was not made current"
+        );
+        assert_eq!(window_ids(&app), vec![1, 2, 3], "the window is untouched");
+        assert!(
+            state
+                .history
+                .cursor
+                .is_some_and(|c| c.newest_loaded_id().is_none()),
+            "the cursor did not move onto the page"
+        );
+    }
+
+    /// The other half: a page asked under the generation now current lands as
+    /// it always did, and marks the run current.
+    #[test]
+    fn a_current_generation_page_still_marks_a_run_current() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT, 1..=3);
+        open_pass(&mut app, &mut state);
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+        state.history = opened(CHAT);
+        let generation = state.feed_generation;
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                generation,
+                result: Ok(messages(CHAT, 4..=6)),
+            },
+        );
+
+        assert_eq!(window_ids(&app), vec![4, 5, 6]);
+        assert!(
+            state.cached.messages.arrive(&messages(CHAT, 7..=7)[0]),
+            "the run is current"
+        );
+    }
+
     /// What is cached for another conversation is never shown in this one.
     #[test]
     fn another_conversations_cache_does_not_seed_the_one_opened() {
@@ -6380,6 +6512,7 @@ mod tests {
                 direction: FetchDirection::Latest,
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
             },
         );

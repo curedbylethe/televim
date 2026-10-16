@@ -554,7 +554,11 @@ than clearing it as it does a finished sign-in flow. Every pass it calls
 `State::persist_history` with the list on screen, and `finish_history` on the way
 out. **`net.rs`** keeps the cache in `State::cached` (`CachedHistory`: the cache,
 a dirty flag and the one write in flight). `apply_history` and `apply_jumped`
-merge each page that lands (`remember_page`), the feed's events and a send's
+merge each page that lands (`remember_page`) — unless it was requested under an
+older `State::feed_generation`, which `FeedEnded` and every `Ready` bump and
+`Event::History` carries from the request, in which case the whole page is
+dropped before the peer guard, so a page from a dead client cannot mark a run
+current after a reconnect — the feed's events and a send's
 numbered answer go through `remember_update` and `remember_sent`, and
 `FeedEnded`, `FeedRetrying` and every `Ready` call `feed_interrupted`. A snapshot
 is encoded on the loop thread and written by `spawn_blocking`, one write at a
