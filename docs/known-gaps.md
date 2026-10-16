@@ -184,14 +184,15 @@ Real, and named so they are not mistaken for oversights:
   to fetch around, so it is pinned by a test
   (`a_return_to_a_placeholder_says_so_and_leaves_the_reader_put`) rather than
   worked around.
-- **`Ctrl-i` is `Tab` on the wire, so forward navigation needs a terminal that
-  reports the two apart.** `Ctrl-i` and `Tab` are the same byte unless the
-  terminal speaks the kitty keyboard protocol or `modifyOtherKeys`; crossterm then
-  delivers `KeyCode::Tab`, which is the pane switch and is answered before the
-  conversation sees a key. Only a CONTROL-modified `i` moves forward, so on such a
-  terminal `Ctrl-i` does not navigate and `Ctrl-o` alone returns — see
-  [`decisions.md`](./decisions.md). `Tab` is not rebound: a key that is a motion
-  in one place and a pane in the next is a key a reader has to learn twice.
+- **`Ctrl-i` is `Tab` on the wire, so forward navigation carries a second key.**
+  `Ctrl-i` and `Tab` are the same byte unless the terminal speaks the kitty
+  keyboard protocol or `modifyOtherKeys`; crossterm then delivers `KeyCode::Tab`,
+  which is the pane switch and is answered before the conversation sees a key.
+  Forward is therefore bound twice — `Ctrl-i` where the terminal reports it apart,
+  and `Ctrl-n` always — so on a terminal that cannot tell the two apart, `Ctrl-n`
+  moves forward and `Ctrl-o` returns — see [`decisions.md`](./decisions.md). `Tab`
+  is not rebound: a key that is a motion in one place and a pane in the next is a
+  key a reader has to learn twice, so it keeps its precedence as the pane switch.
 - **A feed dropped without `finish` persists a stale update position.** See
   [`decisions.md`](./decisions.md).
 - **No figure measures the program under load.** The 50 MB ceiling is

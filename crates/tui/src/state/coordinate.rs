@@ -405,9 +405,10 @@ pub(crate) fn jump_back(pending: &mut Pending, conversation: &mut ConversationSt
 
 /// Takes the reader forward to the place a `Ctrl-o` walked them away from.
 ///
-/// `Ctrl-i`, and nothing else: a terminal that cannot report it apart from
-/// `Tab` sends `Tab` instead, and `Tab` is the pane switch here — so on such
-/// a terminal only `Ctrl-o` works, which is what the design accepted.
+/// `Ctrl-i`, and `Ctrl-n` with it: a terminal that cannot report `Ctrl-i`
+/// apart from `Tab` sends `Tab` instead, and `Tab` is the pane switch here —
+/// so `Ctrl-n` is the second, unambiguous name for the same step, and on a
+/// terminal that does report the two apart either key walks the jumplist.
 pub(crate) fn jump_forward(pending: &mut Pending, conversation: &mut ConversationState) {
     if pending.pending_jump.is_some() || !conversation.has_conversation() {
         return;
@@ -3495,14 +3496,16 @@ fn handle_normal_ctrl(
     match key.code {
         KeyCode::Char('d') => page(&*ui, &mut *conversation, layout, true),
         KeyCode::Char('u') => page(&*ui, &mut *conversation, layout, false),
-        // `Ctrl-o` and `Ctrl-i`: back and forward through the places the
-        // reader has jumped from. Not while a jump is on its way — one
-        // fetch is in flight and the reader may have escaped it, and a
-        // second jump would replace the one they are still waiting for.
+        // `Ctrl-o`, `Ctrl-i` and `Ctrl-n`: back and forward through the
+        // places the reader has jumped from. `Ctrl-n` is the same step as
+        // `Ctrl-i`, for terminals that deliver `Ctrl-i` as `Tab`. Not while a
+        // jump is on its way — one fetch is in flight and the reader may have
+        // escaped it, and a second jump would replace the one they are still
+        // waiting for.
         KeyCode::Char('o') if pending.pending_jump.is_none() => {
             jump_back(&mut *pending, &mut *conversation);
         }
-        KeyCode::Char('i') if pending.pending_jump.is_none() => {
+        KeyCode::Char('i' | 'n') if pending.pending_jump.is_none() => {
             jump_forward(&mut *pending, &mut *conversation);
         }
         _ => {}

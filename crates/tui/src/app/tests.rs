@@ -5627,6 +5627,59 @@ fn ctrl_i_takes_the_reader_forward_again() {
     assert_eq!(app.pending_jump(), None);
 }
 
+/// `Ctrl-n` is the same forward step as `Ctrl-i`, for terminals that send
+/// `Ctrl-i` as `Tab`: it walks the jumplist forward the same way.
+#[test]
+fn ctrl_n_takes_the_reader_forward_again() {
+    let mut app = with_a_loaded_quote();
+    go_to_reply(&mut app);
+    app.handle_key(press_ctrl('o'));
+
+    app.handle_key(press_ctrl('n'));
+
+    assert_eq!(reading(&app), Some(1), "back to the quoted message");
+    assert_eq!(app.pending_jump(), None);
+}
+
+/// And `Ctrl-n` fetches the same way when the mark is off screen: a return
+/// across a replaced window is a jump of its own, and the second key asks for
+/// it exactly as `Ctrl-i` would.
+#[test]
+fn ctrl_n_is_the_forward_step_across_a_replaced_window() {
+    let mut app = with_a_reply_to_19();
+    go_to_reply(&mut app);
+    assert!(app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
+    app.handle_key(press_ctrl('o'));
+    assert!(app.apply_jump(&page(&[1, 2, 3, 4, 5]), 2));
+
+    app.handle_key(press_ctrl('n'));
+
+    assert_eq!(
+        app.pending_jump(),
+        Some(Jump {
+            peer_id: MOCK_CHAT,
+            target_id: 19,
+            kind: JumpKind::Forward,
+        }),
+        "message 19 is not in the window the return replaced"
+    );
+    assert_eq!(app.status_text(), JUMP_FORWARD_LABEL);
+}
+
+/// One fetch at a time, on either forward key: a `Ctrl-n` asked for while a
+/// page is already on its way is swallowed rather than replacing the jump the
+/// reader is still waiting for.
+#[test]
+fn a_forward_asked_for_while_a_jump_is_on_its_way_is_ignored() {
+    let mut app = with_a_reply_to_19();
+    go_to_reply(&mut app);
+    let waiting = app.pending_jump();
+
+    app.handle_key(press_ctrl('n'));
+
+    assert_eq!(app.pending_jump(), waiting, "the key is swallowed");
+}
+
 /// The jump that took the reader away replaced the window, so the mark they
 /// left behind is not on screen any more: a return is then a jump of its own,
 /// on the same terms as the one they asked for, and it says so.
