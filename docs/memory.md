@@ -380,6 +380,17 @@ band before this change (+248,176 B), so `make measure-check` reports a binary-s
 breach that this change did not cause. The baseline was not re-recorded here; that
 is a maintainer decision.
 
+Enabling `zeroize` on `aes-gcm-siv` and `aes` (so the expanded AES key schedule
+is wiped on drop) was measured separately with `make measure` on the same host,
+before and after: stripped release binary 6,455,248 B both times, **+0 B**. The
+figure is page-aligned on macOS arm64, so a small addition can be absorbed by
+section padding; the claim is "no byte-level change here", not "no code". That
+tree had already drifted from the stored baseline (6,372,096 B) by +83,152 B
+before the feature, so `make measure-check` still reports a binary-size breach
+that this change did not cause, and the baseline was not re-recorded. Latency
+figures in the same run swung with host noise between two identical-binary runs
+(launch to first frame: 55 ms, then 2.8 ms).
+
 ### The media cache
 
 The media cache (`app/src/media_cache.rs`) is bounded on disk, not in memory. The

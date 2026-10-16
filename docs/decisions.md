@@ -187,14 +187,19 @@ are in [`../AGENTS.md`](../AGENTS.md).
   tries again. A session that was ever stored in plaintext should be treated as
   exposed to whoever could read that disk, and the reader should sign the device out
   of Telegram if that matters.
-- **Known limit: the expanded AES key schedule is not zeroized.** `FileKey` and the
-  passphrase are wiped when dropped (`Zeroizing`), the ciphertext's plaintext
-  buffers are `Zeroizing`, and `Debug` for each is redacted. But the cipher expands
-  its key into round keys inside `Aes256GcmSiv`, and that state is not reachable
-  from here to wipe, so a copy of the key's material outlives the `FileKey` until
-  the allocation is reused. This protects against a log or a core dump read by
-  accident, not against an attacker who can read this process's memory — who could
-  read the passphrase from the environment in any case.
+- **The expanded AES key schedule is zeroized.** `FileKey` and the passphrase are
+  wiped when dropped (`Zeroizing`), the ciphertext's plaintext buffers are
+  `Zeroizing`, and `Debug` for each is redacted. The cipher's own state is wiped
+  too: `aes-gcm-siv`'s `zeroize` feature clears the intermediate keys it derives,
+  and the `aes` crate's `zeroize` feature clears the expanded round keys when the
+  cipher drops. `aes-gcm-siv` does not forward the second, so the workspace names
+  `aes` to enable it. Measured cost on the stripped release binary: none at the
+  byte level (6,455,248 B before and after on macOS arm64, where segments are
+  page-aligned, so a few hundred bytes can vanish into padding). A residual
+  remains: a key copied by value or spilled to a register or the stack before a
+  `Drop` runs is out of reach. This protects against a log or a core dump read by
+  accident, not against an attacker who can read this process's live memory, who
+  could read the passphrase from the environment in any case.
 - **Known limit: the keyring is delete-only from here.** `KeyringStore::clear`
   deletes the entry, and the store holds no key material of its own to wipe. The
   OS credential store owns the bytes it keeps, so what it does with them after a
