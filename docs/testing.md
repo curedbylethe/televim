@@ -236,6 +236,15 @@ below.
     was dropped and that no credential reached the run. The sandbox holds no
     history file either, so every figure is a cold-cache launch — see
     [`memory.md`](./memory.md).
+  - **A second, populated launch set measures the binary with its data.**
+    `crates/app/examples/seed_history.rs` writes a sealed 60-chat cache
+    (32 peers, 200 rows each, below every eviction bound) beside the sandbox
+    config, and the binary is launched credential-free with only
+    `TELEVIM_SESSION_PASSPHRASE` added, which opens that cache and nothing else.
+    The no-credentials path draws the cache offline and never touches it, so the
+    list is full. The result is `rss_idle_populated_binary_bytes`, with a
+    `seeded_history` block of what was loaded; the empty-list
+    `rss_idle_binary_bytes` is kept unchanged for comparability.
   - **The compared harness never runs under a profiler.** RSS is read in-process
     (`/proc/self/status` on Linux, `proc_pidinfo` on macOS) because the
     development host has neither `valgrind` nor `heaptrack`, and because under
