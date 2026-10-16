@@ -1951,6 +1951,83 @@ mod tests {
         );
     }
 
+    /// A session that has *used* its counters and peer cache must forget them
+    /// too: the next sign-in on this client starts from zero, with no peer
+    /// carried over from the account that left.
+    #[cfg(feature = "live")]
+    #[tokio::test]
+    async fn clearing_a_used_session_resets_counters_peers_and_the_stored_copy() {
+        use std::sync::Arc;
+
+        use grammers_client::session::Session as _;
+        use grammers_client::session::types::{PeerInfo, UpdateState as TlUpdateState};
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        store
+            .save(&SessionData {
+                user_id: Some(7),
+                phone: Some("+100".to_owned()),
+                ..SessionData::default()
+            })
+            .expect("the seed saves");
+        let session =
+            super::bridge::StoreSession::new(Arc::clone(&store)).expect("the stored session loads");
+        assert!(session.snapshot().account().is_some(), "the account loaded");
+
+        session
+            .cache_peer(&PeerInfo::User {
+                id: 42,
+                auth: None,
+                bot: None,
+                is_self: None,
+            })
+            .await
+            .expect("the mirror cannot fail");
+        for update in [
+            TlUpdateState::Primary {
+                pts: 7,
+                date: 8,
+                seq: 9,
+            },
+            TlUpdateState::Secondary { qts: 5 },
+            TlUpdateState::Channel { id: 3, pts: 11 },
+        ] {
+            session
+                .set_update_state(update)
+                .await
+                .expect("the mirror cannot fail");
+        }
+        session.persist().expect("the used session is written");
+        assert!(session.cached_peer(42).is_some(), "the peer was cached");
+
+        session.clear().expect("clearing succeeds");
+
+        let left = session.snapshot();
+        assert_eq!(
+            left.update_state,
+            UpdateState::default(),
+            "update counters start from zero"
+        );
+        assert!(
+            left.peers.is_empty(),
+            "no peer may survive: {:?}",
+            left.peers
+        );
+        assert_eq!(left.account(), None, "nor may the account");
+        assert_eq!(session.cached_peer(42), None);
+        assert!(
+            !session.persist_if_dirty().expect("nothing to write"),
+            "the reset itself leaves nothing to flush"
+        );
+        assert!(
+            store.load().expect("the store is readable").is_none(),
+            "a fresh reader of the same backend sees no session"
+        );
+        let reopened = super::bridge::StoreSession::new(store).expect("an empty store loads");
+        assert_eq!(reopened.snapshot().update_state, UpdateState::default());
+        assert!(reopened.snapshot().peers.is_empty());
+    }
+
     /// The update feed never reads this cache: a conversation comes from the
     /// peer encoded in the message, and your own user only ever turns up as a
     /// *sender*, which is synthesised from the outgoing flag. So the account's
