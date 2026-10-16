@@ -642,12 +642,15 @@ are in [`../AGENTS.md`](../AGENTS.md).
   The precedence is the harder half. `Ctrl-i` and `Tab` are the same byte unless
   the terminal speaks the kitty keyboard protocol or `modifyOtherKeys`, and
   crossterm then delivers `KeyCode::Tab` — which is the pane switch here, answered
-  globally and ahead of the conversation. So `Tab` is **not** rebound: forward
-  navigation is bound to a CONTROL-modified `i` only. The consequence is recorded
-  rather than worked around. On a terminal that cannot report the two apart,
-  forward is unreachable and `Ctrl-o` carries the criterion alone, which the
-  criterion's "or" allows; a second forward key would be a new decision with a new
-  design entry, not a workaround invented here.
+  globally and ahead of the conversation. `Tab` is therefore **not** rebound: a key
+  that is a motion in one place and a pane in the next is a key a reader has to
+  learn twice. Instead, forward navigation is bound to a second, unambiguous key
+  beside the CONTROL-modified `i`: **`Ctrl-n`**, whose design entry and the reasoning
+  behind the choice are in [`DESIGN.md`](../DESIGN.md). Both keys walk the jumplist
+  forward, so on a terminal that cannot report `Ctrl-i` apart from `Tab`, `Ctrl-n`
+  carries forward and `Ctrl-o` returns. This takes the decision the earlier text
+  left open — that a second forward key would be a new decision with a new design
+  entry — rather than working around the shared byte.
 - **Why a date jump fetches with `offset_date` rather than paging older:** a day or
   date jump lands on the first message of a target day, which the loaded window may
   not hold, so the page has to be fetched. Paging older — `fetch_older` — until the

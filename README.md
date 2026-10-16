@@ -211,7 +211,8 @@ Working today:
   day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`); a `:date`
   that is not `YYYY-MM-DD` is refused with `not a date: <argument>` and the
   reader stays put.
-  `Ctrl-o` goes back to the message the jump left and `Ctrl-i` forward again —
+  `Ctrl-o` goes back to the message the jump left and `Ctrl-i` (or `Ctrl-n`, for
+  terminals that send `Ctrl-i` as `Tab`) forward again —
   a return to a message the window no longer holds is fetched the same way, and
   says `Jumping back…` or `Jumping forward…`. The marks are kept per
   conversation, so leaving a chat and returning walks back to where the reader
