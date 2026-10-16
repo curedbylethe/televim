@@ -195,18 +195,18 @@ Real, and named so they are not mistaken for oversights:
   key a reader has to learn twice, so it keeps its precedence as the pane switch.
 - **A feed dropped without `finish` persists a stale update position.** See
   [`decisions.md`](./decisions.md).
-- **No figure measures the program under load.** The 50 MB ceiling is
-  measured ([`memory.md`](./memory.md)) on two processes, and neither is the
-  loaded one: the harness holds 60 chats and a drawn screen but none of the
-  network half, and the binary is the whole program with an empty chat list.
-  The figure for 50 chats in the real binary sits between 3.41 MB and 8.25 MB
-  and has not been taken: the chat list now retries and `:retry` re-runs the
-  bring-up, so a launch with a session can populate it, but `make measure` drops
-  every `TELEVIM_*` and `TELEGRAM_*` name on purpose — the binary is launched
-  with no credentials, so it builds no client — and nothing has yet weighed it
-  with one. The allocator question itself is closed rather than open: the
-  global allocator is the system allocator, chosen on the measured margins, and
-  no arena pays — see [`decisions.md`](./decisions.md).
+- **No figure measures a connected session under load.** The 50 MB ceiling is
+  measured ([`memory.md`](./memory.md)) on three processes: the harness (60 chats
+  and a drawn screen, none of the network half), the binary with an empty chat
+  list, and, since the seeded scenario, the binary with a sealed 60-chat cache
+  loaded (`rss_idle_populated_binary_bytes`, 7.55 MB median of five runs, 125
+  samples between 4.23 and 9.34 MB). That last one is the real program drawing a
+  real list, launched credential-free so it builds no client. What is still not
+  taken is a session connected to Telegram with fetched history, because
+  `make measure` drops every `TELEVIM_*` and `TELEGRAM_*` credential name on
+  purpose. The allocator question itself is closed rather than open: the global
+  allocator is the system allocator, chosen on the measured margins, and no arena
+  pays, see [`decisions.md`](./decisions.md).
 - **One candidate is benchmarked; it is not in production.** The gap that "nothing
   compares two implementations" is retired for the harness: `make bench` (criterion
   micro-benches, A/B compare report; see [`testing.md`](./testing.md)) compares a
@@ -448,7 +448,8 @@ Real, and named so they are not mistaken for oversights:
   bound counts JSON-encoded text, so the serialised text is at most 8 MiB; but the
   in-crate worst-case test (6,400 rows of control characters, release) measured a
   60.4 MB process peak around a write, from a 9.8 MB baseline, and 62.7 MB on
-  re-open ([`memory.md`](./memory.md#the-history-cache)). The write clones the
+  re-open (re-run at the baseline re-record: the same 60.4 MB and 62.7 MB; it is
+  not part of `make measure` and has no band) ([`memory.md`](./memory.md#the-history-cache)). The write clones the
   cache for the encoder, then holds the serialised bytes, the sealed envelope and
   the re-opened verification copy at once, and the passphrase provider's Argon2id
   adds 19 MiB while sealing (the Argon2 share is inferred, not profiled). Follow-up,

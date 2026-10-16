@@ -268,7 +268,9 @@ below.
     machine it was never measured on — so CI's first run on a new host is a
     recording run. Record it with
     `scripts/memory/check.py --record-baseline docs/memory-baseline.<host>.json`,
-    which takes the median across several reports.
+    which takes the median across several reports (the re-record of the 0.5.0
+    tree used five, saved aside as the driver overwrites `target/memory-report.json`;
+    the record is in [`memory.md`](./memory.md)).
   - **Recording a baseline is deliberate.** The driver never writes one: someone
     reads the report and decides what the tree costs.
 - **Micro-benchmarks (A/B compare):** criterion 0.8.2, a dev-only dependency, runs
