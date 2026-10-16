@@ -102,7 +102,10 @@ time = { version = "0.3.55", features = ["local-offset"] }
 # nonce-misuse-resistant (RFC 8452) and shares the `aes` build already in the
 # lockfile; Argon2id stretches a passphrase into the file key. Both are pure
 # Rust, so no C toolchain is needed on any platform.
-aes-gcm-siv = { version = "0.12", default-features = false, features = ["aes", "alloc"] }
+aes-gcm-siv = { version = "0.12", default-features = false, features = ["aes", "alloc", "zeroize"] }
+# Named only to switch on its `zeroize` feature: the expanded AES key schedule
+# lives in `aes`, and `aes-gcm-siv` does not forward the feature to it.
+aes = { version = "0.9", features = ["zeroize"] }
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 # One use: random nonces, salts and the keyring-held file key.
 getrandom = "0.4"
