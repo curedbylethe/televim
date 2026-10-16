@@ -520,9 +520,25 @@ pub enum PromptKind {
     Phone,
     Code,
     Password,
+    /// The session file's passphrase, asked at launch or by `:unlock`.
+    Passphrase,
+    /// The first entry of a changed session passphrase.
+    NewPassphrase,
+    /// The second entry, which must match the first.
+    RepeatPassphrase,
 }
 
 impl PromptKind {
+    /// Whether the bar paints this prompt as bullets: a password and the three
+    /// passphrase prompts.
+    #[must_use]
+    pub const fn is_secret(self) -> bool {
+        matches!(
+            self,
+            Self::Password | Self::Passphrase | Self::NewPassphrase | Self::RepeatPassphrase
+        )
+    }
+
     /// Whether this prompt is a buffer the reader edits, or a one-line answer
     /// to a question.
     ///
@@ -558,6 +574,102 @@ impl PromptKind {
         }
     }
 }
+
+/// A typed passphrase on its way out of the prompt.
+///
+/// Wiped when dropped, and its `Debug` says nothing: an [`Action`] derives
+/// `Debug`, and a passphrase must not reach a log through it.
+#[derive(Clone)]
+pub struct Secret(zeroize::Zeroizing<String>);
+
+impl Secret {
+    /// Takes ownership of `text`, which is wiped with the value.
+    #[must_use]
+    pub fn new(text: String) -> Self {
+        Self(zeroize::Zeroizing::new(text))
+    }
+
+    /// The text. Only for handing to the thing that derives a key from it.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
+impl PartialEq for Secret {
+    fn eq(&self, other: &Self) -> bool {
+        self.expose() == other.expose()
+    }
+}
+
+impl Eq for Secret {}
+
+/// What the session passphrase box is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassMode {
+    /// The session file is locked and the reader is asked for its passphrase.
+    Unlock,
+
+    /// The reader is replacing the passphrase of an open session file.
+    Change,
+}
+
+/// The session passphrase box, drawn over the right column while it is up.
+///
+/// An overlay on the session like [`SignIn`], and for the same reason: it is
+/// not a pane. [`SessionState::locked`](crate::state::session::SessionState)
+/// is the file's own state and outlives the box.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassPrompt {
+    /// Whether this unlocks the file or changes its passphrase.
+    pub mode: PassMode,
+
+    /// The pane the reader came from, so `Esc` puts the focus back there.
+    pub from: Focus,
+
+    /// The first entry of a change, held until the repeat is typed.
+    pub first: Option<Secret>,
+
+    /// The refusal kept on the box until the next `⏎`.
+    pub bad: Option<String>,
+
+    /// Whether the key is being derived: `⏎` is refused meanwhile.
+    pub checking: bool,
+
+    /// How a change ended, once it has: the box then shows the result.
+    pub done: Option<Result<(), String>>,
+}
+
+/// The sentence the launch box asks with, and why.
+pub const PASS_ASK: &str = "The session file is encrypted and no key is available, so televim needs the passphrase to read its chats.";
+/// A wrong passphrase, kept on the box.
+pub const PASS_BAD_FILE: &str =
+    "that passphrase did not open the session file; the file was left as it was";
+/// An empty entry.
+pub const PASS_EMPTY: &str = "The passphrase cannot be empty.";
+/// A repeat that differs from the first entry.
+pub const PASS_DIFFER: &str =
+    "the two entries differ, so nothing was changed and the file was left as it was";
+/// `:passphrase` while the session is locked.
+pub const PASS_LOCKED: &str = "the session is locked: :unlock first";
+/// `Esc` at the launch question.
+pub const PASS_STILL_LOCKED: &str = "the session stays locked — :unlock asks again";
+/// `Esc` during a change.
+pub const PASS_CANCEL_CHANGE: &str = "the passphrase was not changed; nothing was written";
+/// `:unlock` on a session that is open.
+pub const PASS_OPEN_ALREADY: &str = "the session is open already";
+/// The status while the key is derived.
+pub const PASS_CHECKING: &str = "Checking… — the key is being derived";
+/// A `⏎` while the key is derived.
+pub const PASS_STILL_CHECKING: &str = "still checking — the answer is on its way";
+/// The status after the right passphrase.
+pub const PASS_UNLOCKED: &str = "Session unlocked.";
 
 /// Which field of the sign-in form the reader is filling in.
 ///
@@ -959,6 +1071,22 @@ pub enum Action {
     ImportSession {
         /// The file the session is read from.
         path: PathBuf,
+    },
+
+    /// Try this passphrase on the locked session file.
+    ///
+    /// Held in memory by the other side and never written; a wrong one changes
+    /// nothing on disk.
+    SubmitSessionPassphrase {
+        /// What the reader typed.
+        value: Secret,
+    },
+
+    /// Seal the session file, and the history cache beside it, under a new
+    /// passphrase.
+    ChangeSessionPassphrase {
+        /// The new passphrase, typed twice.
+        new: Secret,
     },
 
     /// Download the media on `message_id` in `chat_id` and open it in an
@@ -2477,6 +2605,34 @@ impl App {
         );
     }
 
+    /// The session file needs its passphrase: ask for it.
+    ///
+    /// `rejected` when a key was tried and the file refused it, which the box
+    /// then says. Delegates to [`coordinate::begin_unlock`].
+    pub fn session_key_required(&mut self, rejected: bool) {
+        coordinate::begin_unlock(
+            &mut self.ui,
+            &mut self.session,
+            &mut self.conversation,
+            &mut self.input,
+            rejected,
+        );
+    }
+
+    /// The session opened: the box goes and the session is no longer locked.
+    ///
+    /// Delegates to [`coordinate::session_unlocked`].
+    pub fn session_unlocked(&mut self) {
+        coordinate::session_unlocked(&mut self.ui, &mut self.session, &mut self.input);
+    }
+
+    /// How a passphrase change ended, as a sentence for the box.
+    ///
+    /// Delegates to [`coordinate::passphrase_changed`].
+    pub fn passphrase_changed(&mut self, result: Result<(), String>) {
+        coordinate::passphrase_changed(&mut self.ui, &mut self.session, &mut self.input, result);
+    }
+
     // ---- rendering -----------------------------------------------------
 
     pub fn render(&self, frame: &mut Frame<'_>) {
@@ -2528,6 +2684,9 @@ impl App {
         // other column and it is always there.
         match self.session.signin.as_ref() {
             Some(signin) => widgets::signin::render(self, signin, horizontal[1], frame),
+            None if self.session.pass.is_some() => {
+                widgets::passphrase::render(self, horizontal[1], frame);
+            }
             None => match self.ui.pane {
                 Pane::Conversation => {
                     widgets::conversation::render(self, horizontal[1], frame, layout);
@@ -2786,7 +2945,10 @@ impl App {
             | PromptKind::Edit
             | PromptKind::Phone
             | PromptKind::Code
-            | PromptKind::Password => "",
+            | PromptKind::Password
+            | PromptKind::Passphrase
+            | PromptKind::NewPassphrase
+            | PromptKind::RepeatPassphrase => "",
             PromptKind::Command => ":",
             // A message search and a person search are both queries, so they
             // share the prefix. They are told apart by what answers them — the
@@ -2834,6 +2996,9 @@ impl App {
             .and_then(|flow| flow.login.refusal.as_ref())
         {
             return refusal.clone();
+        }
+        if self.session.pass.as_ref().is_some_and(|pass| pass.checking) {
+            return PASS_CHECKING.to_owned();
         }
         if self.ui.focus == Focus::Input {
             return widgets::input_bar::hint(self).to_owned();

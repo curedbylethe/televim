@@ -280,7 +280,8 @@ impl LineEditor {
     /// The editor is reset rather than left where it was, which is what keeps
     /// the next `i` from starting somewhere unexpected.
     pub fn clear(&mut self) {
-        self.text.clear();
+        // Zeroed, not just emptied: this is the buffer a passphrase is typed in.
+        zeroize::Zeroize::zeroize(&mut self.text);
         self.purpose = PromptKind::Message;
         self.editor.reset();
     }
@@ -468,7 +469,7 @@ impl LineEditor {
     /// text changes — see [`crate::text_row::TextRow::concealed`].
     #[must_use]
     pub fn concealed(&self) -> bool {
-        matches!(self.purpose, PromptKind::Password)
+        self.purpose.is_secret()
     }
 
     /// Keeps the text and forgets what it was for.

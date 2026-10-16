@@ -197,6 +197,24 @@ const SIGNIN_PAUSED_HINT: &str = " sign-in paused; Tab brings it back";
 /// what says so before the reader presses it.
 const SIGNIN_WAITING_HINT: &str = " Checking… — the request is in flight";
 
+/// The hint on the launch passphrase line.
+const PASS_HINT: &str = " ⏎: unlock  Esc: leave it locked";
+
+/// The hint on the two lines of a passphrase change.
+const PASS_NEW_HINT: &str = " ⏎: next  Esc: cancel the change";
+
+/// The hint under the result of a change.
+const PASS_DONE_HINT: &str = " Esc: close";
+
+/// The hint while the passphrase box is up.
+fn pass_hint(app: &App) -> &'static str {
+    match app.input.line.purpose() {
+        PromptKind::Passphrase => PASS_HINT,
+        PromptKind::NewPassphrase | PromptKind::RepeatPassphrase => PASS_NEW_HINT,
+        _ => PASS_DONE_HINT,
+    }
+}
+
 /// The columns the status line spends on the mode label and the gap after it.
 ///
 /// The widest label the line itself can produce is `NORMAL`, and a `Confirm`
@@ -217,7 +235,7 @@ const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
 ///
-/// Fifteen entries: the design's fourteen minus the two this build cannot reach —
+/// Eighteen entries, the last three being the passphrase box's; fifteen of them: the design's fourteen minus the two this build cannot reach —
 /// the editable profile's row, because there is no editable profile, and the
 /// deletion confirmation's, because a confirmation outranks every hint and so is
 /// never asked for one — plus the three sign-in rows, which the design does not
@@ -225,7 +243,7 @@ const ASSUMED_WIDTH: usize = 80;
 /// test and displayed by nothing is the defect this list exists to prevent, and
 /// it is why the count is written out rather than derived.
 #[cfg(test)]
-const ALL_HINTS: [&str; 15] = [
+const ALL_HINTS: [&str; 18] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
     VISUAL_HINT,
@@ -241,6 +259,9 @@ const ALL_HINTS: [&str; 15] = [
     SIGNIN_FIELD_HINT,
     SIGNIN_PAUSED_HINT,
     SIGNIN_WAITING_HINT,
+    PASS_HINT,
+    PASS_NEW_HINT,
+    PASS_DONE_HINT,
 ];
 
 /// The hint for the state the screen is in.
@@ -253,6 +274,8 @@ const ALL_HINTS: [&str; 15] = [
 #[must_use]
 pub fn hint(app: &App) -> &'static str {
     match (app.ui.focus, app.ui.mode) {
+        // The passphrase box outranks every pane: while it is up the keys are its.
+        _ if app.session.pass.is_some() => pass_hint(app),
         // The sign-in surface, above every other row: it is not a pane and it is
         // not a card, so nothing about the pair describes it. The keys are the
         // field's while one is open and the flow's while it is not.
@@ -371,6 +394,9 @@ pub fn title(app: &App) -> String {
         PromptKind::Phone => " Phone ".to_owned(),
         PromptKind::Code => " Login code ".to_owned(),
         PromptKind::Password => " Password ".to_owned(),
+        PromptKind::Passphrase => " Passphrase ".to_owned(),
+        PromptKind::NewPassphrase => " New passphrase ".to_owned(),
+        PromptKind::RepeatPassphrase => " Repeat passphrase ".to_owned(),
         _ => match (
             app.ui.focus,
             app.input.line.purpose(),

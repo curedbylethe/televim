@@ -2,9 +2,12 @@
 
 use domain::account::Account;
 
-use crate::app::{AccountState, LoginField, SessionStore, SignIn};
+use crate::app::{AccountState, LoginField, PassPrompt, SessionStore, SignIn};
 
 /// The account's session and the sign-in surface.
+// Four flags, each a fact reported by a different caller (credentials, client,
+// retry, lock); none derives from another.
+#[allow(clippy::struct_excessive_bools)]
 pub struct SessionState {
     /// What the profile panel shows, and why it might show nothing.
     pub account: AccountState,
@@ -17,6 +20,15 @@ pub struct SessionState {
     /// `None` for every reader who is already signed in, which is most of the
     /// life of the program. `Some` is an overlay and not a pane: see [`SignIn`].
     pub signin: Option<SignIn>,
+
+    /// Whether the session file is locked: it is encrypted and no key opened it.
+    ///
+    /// The file's own state, which outlives [`Self::pass`]: `Esc` closes the box
+    /// and leaves the session locked, and `:unlock` asks again.
+    pub locked: bool,
+
+    /// The session passphrase box, when it is up.
+    pub pass: Option<PassPrompt>,
 
     /// The phone number configuration carried, if there is one.
     ///
@@ -80,6 +92,8 @@ impl SessionState {
             account: AccountState::Unfetched,
             session_store: SessionStore::default(),
             signin: None,
+            locked: false,
+            pass: None,
             phone: String::new(),
             code_prefill: String::new(),
             password_prefill: String::new(),

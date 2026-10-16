@@ -2450,6 +2450,8 @@ fn request_plain(
             | Action::Logout
             | Action::ExportSession { .. }
             | Action::ImportSession { .. }
+            | Action::SubmitSessionPassphrase { .. }
+            | Action::ChangeSessionPassphrase { .. }
             | Action::CancelMediaDownload { .. } => {}
 
             // The download is the network's and the file it leaves is the
