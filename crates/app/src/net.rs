@@ -185,6 +185,10 @@ pub enum Event {
     /// An export of the session finished, or was refused; the sentence says which.
     SessionMoved(String),
 
+    /// An import wrote the session into the configured store, and the client is
+    /// to be brought up again on it.
+    SessionImported(String),
+
     /// A legacy plaintext session file was read and sealed in place.
     ///
     /// Once: the file is sealed afterwards, so no later bring-up finds it plain.
@@ -1372,6 +1376,109 @@ fn export_session(
     export_snapshot(&*store, cfg.session_path.is_some(), &dest, path)
 }
 
+/// Replaces the session in `dest` with the one in `source`, the file at `path`.
+///
+/// `known` is the account the reader is signed in as, when there is one. A
+/// snapshot of another account is refused, and so is one that does not say whose
+/// it is while an account is known: the check cannot pass on a guess. Signed out
+/// there is nothing to compare, and any snapshot is taken. `dest` is written
+/// only after every check has passed. The snapshot is saved whole, so the auth
+/// key it carries is neither read nor rewritten.
+fn import_snapshot(
+    source: &dyn SessionStore,
+    dest: &dyn SessionStore,
+    dest_is_file: bool,
+    known: Option<i64>,
+    path: &Path,
+) -> Result<String, String> {
+    let data = match source.load() {
+        Ok(Some(data)) => data,
+        Ok(None) => return Err(format!("there is no session in {}", path.display())),
+        Err(error) => return Err(unreadable_session(&error, true)),
+    };
+    if let Some(known) = known {
+        match data.account() {
+            Some(found) if found.user_id == known => {}
+            Some(found) => {
+                return Err(format!(
+                    "{} holds account {}, but you are signed in as account {known}; \
+                     nothing was imported",
+                    path.display(),
+                    found.user_id
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "{} does not say which account it is, and you are signed in as \
+                     account {known}; nothing was imported",
+                    path.display()
+                ));
+            }
+        }
+    }
+    dest.save(&data).map_err(|error| {
+        let kept = if dest_is_file {
+            "the session file"
+        } else {
+            "the keyring"
+        };
+        format!("could not write the session to {kept}: {error}; it was left as it was")
+    })?;
+    Ok(format!("session imported from {}", path.display()))
+}
+
+/// [`import_snapshot`] from the file at `path`, opened under the current key,
+/// into the configured store.
+fn import_session(
+    cfg: &Config,
+    path: &Path,
+    known: Option<i64>,
+    keyring: impl Fn() -> Arc<dyn KeyProvider>,
+) -> Result<String, String> {
+    is_the_configured_file(cfg, path)?;
+    let source = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
+    let Session { store, .. } = session_store_with(cfg, &keyring);
+    import_snapshot(&source, &*store, cfg.session_path.is_some(), known, path)
+}
+
+/// Runs an import off the loop, for the reason an export is.
+fn spawn_import_session(
+    cfg: Config,
+    path: PathBuf,
+    known: Option<i64>,
+    tx: UnboundedSender<AppEvent>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let event = match import_session(&cfg, &path, known, || {
+            Arc::new(KeyringKeyProvider::default())
+        }) {
+            Ok(sentence) => Event::SessionImported(sentence),
+            Err(sentence) => Event::SessionMoved(sentence),
+        };
+        let _ = tx.send(AppEvent::Net(event));
+    });
+}
+
+/// Starts every queued session export and import.
+fn run_session_actions(app: &mut App, state: &State) {
+    while let Some(action) = app.take_session_action() {
+        let (Some(cfg), Some(tx)) = (state.cfg.clone(), state.tx.clone()) else {
+            continue;
+        };
+        match action {
+            Action::ExportSession { path } => spawn_export_session(cfg, path, tx),
+            Action::ImportSession { path } => {
+                let known = match &app.session.account {
+                    tui::app::AccountState::Known(account) => Some(account.user_id),
+                    _ => None,
+                };
+                spawn_import_session(cfg, path, known, tx);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Runs an export off the loop: the key derivation and the keyring both block.
 fn spawn_export_session(cfg: Config, path: PathBuf, tx: UnboundedSender<AppEvent>) {
     tokio::task::spawn_blocking(move || {
@@ -1619,13 +1726,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     let arrived = !card_covers_conversation(app) && state.read_owed.take().is_some();
     // Before the client is looked up, like the retry: these touch the stored
     // session and nothing else, and no client is the state a reader needs them in.
-    while let Some(action) = app.take_session_action() {
-        if let (Action::ExportSession { path }, Some(cfg), Some(tx)) =
-            (action, state.cfg.clone(), state.tx.clone())
-        {
-            spawn_export_session(cfg, path, tx);
-        }
-    }
+    run_session_actions(app, state);
     let Some(client) = state.client.clone() else {
         // No client, so nothing is asked for — but a conversation opened
         // while there is none is still owed what the cache holds for it, or
@@ -2469,6 +2570,20 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         | Event::SessionResealed(sentence)
         | Event::SessionMoved(sentence) => {
             app.ui.status = sentence;
+        }
+
+        // The same bring-up `:retry` runs, so the session just written is the
+        // one the client opens. One already in flight read the old session and
+        // is not stacked on: the reader is told to ask again.
+        Event::SessionImported(sentence) => {
+            app.ui.status = match (state.bringing_up, state.cfg.clone(), state.tx.clone()) {
+                (false, Some(cfg), Some(tx)) => {
+                    state.bringing_up = true;
+                    spawn_bring_up(cfg, tx);
+                    format!("{sentence}; reconnecting")
+                }
+                _ => format!("{sentence}; :retry reconnects with it"),
+            };
         }
 
         Event::CodeRequested { phone, result } => match result {
@@ -9869,6 +9984,103 @@ mod session_store_tests {
 
         let same = export_session(&cfg, &from, || Arc::new(NoKeyring)).expect_err("same file");
         assert!(same.contains("configured session file"), "{same}");
+    }
+
+    /// A file at `path` sealed under `Fixed`, holding `data`.
+    fn sealed_file(path: &std::path::Path, data: &SessionData) -> FileStore {
+        let store = FileStore::with_key_provider(path, Arc::new(Fixed));
+        store.save(data).expect("a session is written");
+        store
+    }
+
+    #[test]
+    fn an_import_into_the_keyring_side_keeps_the_account_and_the_auth_key() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("in.bin");
+        let source = sealed_file(&path, &snapshot(7, 0xCD));
+        let keyring = MemoryStore::default();
+
+        for known in [None, Some(7)] {
+            import_snapshot(&source, &keyring, false, known, &path).expect("it imports");
+            let copy = keyring.load().expect("loads").expect("some");
+            assert_eq!(copy.account().map(|a| a.user_id), Some(7));
+            assert_eq!(auth_key_bytes(&copy), [0xCD; 256], "{known:?}");
+        }
+    }
+
+    #[test]
+    fn an_import_of_another_account_is_refused_and_the_destination_is_untouched() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("in.bin");
+        let source = sealed_file(&path, &snapshot(8, 2));
+        let dest = MemoryStore::default();
+        dest.save(&snapshot(7, 1)).expect("stored");
+        let before = dest.load().expect("loads");
+
+        let refusal = import_snapshot(&source, &dest, false, Some(7), &path).expect_err("refused");
+        assert!(refusal.contains('7') && refusal.contains('8'), "{refusal}");
+        assert_eq!(dest.load().expect("loads"), before, "untouched");
+    }
+
+    #[test]
+    fn an_import_that_does_not_say_whose_it_is_is_refused_while_signed_in() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("in.bin");
+        let source = sealed_file(&path, &SessionData::default());
+        let dest = MemoryStore::default();
+
+        import_snapshot(&source, &dest, false, Some(7), &path).expect_err("cannot compare");
+        assert_eq!(dest.load().expect("loads"), None, "untouched");
+        import_snapshot(&source, &dest, false, None, &path).expect("signed out takes it");
+    }
+
+    #[test]
+    fn an_import_names_a_missing_file_and_a_key_that_does_not_open_it() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("in.bin");
+        let cfg = file_config(&dir.path().join("session.bin"), Some("right"));
+
+        let missing = import_session(&cfg, &path, None, || Arc::new(NoKeyring)).expect_err("none");
+        assert!(missing.contains("in.bin"), "{missing}");
+
+        sealed_file(&path, &snapshot(7, 1));
+        let wrong = import_session(&cfg, &path, None, || Arc::new(NoKeyring)).expect_err("key");
+        assert!(wrong.contains("TELEVIM_SESSION_PASSPHRASE"), "{wrong}");
+        assert!(wrong.contains("left as it was"), "{wrong}");
+        assert!(!dir.path().join("session.bin").exists(), "nothing written");
+    }
+
+    #[test]
+    fn an_import_into_the_configured_file_round_trips_the_key_and_is_sealed() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (path, session) = (dir.path().join("in.bin"), dir.path().join("session.bin"));
+        let cfg = file_config(&session, Some("right"));
+        let keys = || -> Arc<dyn KeyProvider> { Arc::new(NoKeyring) };
+        FileStore::with_key_provider(&path, key_provider(&cfg, keys))
+            .save(&snapshot(7, 0xEE))
+            .expect("a session is written");
+
+        import_session(&cfg, &path, Some(7), keys).expect("it imports");
+        let bytes = std::fs::read(&session).expect("the file exists");
+        assert!(telegram_framework::sealed::is_sealed(&bytes));
+        let Session { store, .. } = session_store_with(&cfg, keys);
+        let copy = store.load().expect("loads").expect("some");
+        assert_eq!(auth_key_bytes(&copy), [0xEE; 256]);
+
+        let same = import_session(&cfg, &session, None, keys).expect_err("the file itself");
+        assert!(same.contains("configured session file"), "{same}");
+    }
+
+    #[test]
+    fn an_imported_session_reconnects_or_says_how() {
+        let mut app = App::new();
+        let mut state = State::default();
+        apply(
+            &mut app,
+            &mut state,
+            Event::SessionImported("done".to_owned()),
+        );
+        assert!(app.ui.status.starts_with("done") && app.ui.status.contains(":retry"));
     }
 
     fn file_config(path: &std::path::Path, passphrase: Option<&str>) -> Config {
