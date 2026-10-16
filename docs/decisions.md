@@ -1160,6 +1160,15 @@ are in [`../AGENTS.md`](../AGENTS.md).
   a time. What this does not settle is which process exits first on Linux and
   Windows, where the opener may return before the viewer: that is reported as the
   opener's exit, and the limits are in `docs/known-gaps.md`.
+- **Why the launch sweep trusts "our pid or old" and not a process-liveness check:** a
+  download temp is named `.download-<pid>-<n>.tmp`, and the sweep removes it when the pid
+  is this process's (a leftover of a crashed earlier run that reused the pid is ours to
+  clear) or when its last write is over 24 hours old (a live download refreshes the mtime
+  with every chunk, so only a dead writer leaves one that old). A name that does not parse
+  is kept. Asking the OS whether the pid is alive would need platform code or a
+  dependency, and pids are reused, so it would answer wrongly in both directions; the
+  name and the mtime need only `metadata`. `clear` is unchanged: it is a wipe, not
+  housekeeping.
 - **Why the media cache stores a fast checksum beside the content hash:** the blob's
   sha256 is its content address and its filename, but nothing re-read the bytes to
   check them, so a truncated or bit-rotted file was served as a hit. A lookup now
