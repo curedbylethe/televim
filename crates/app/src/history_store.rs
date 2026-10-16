@@ -66,8 +66,8 @@ const _: () = assert!(HISTORY_CACHE_DEPTH == CONVERSATION_WINDOW);
 /// [`HistoryCache::touch`] for what that means and why.
 pub(crate) const HISTORY_CACHE_PEERS: usize = 32;
 
-/// How many bytes of message text the file keeps, summed over every cached
-/// conversation.
+/// How many JSON-encoded bytes of message text the file keeps, summed over
+/// every cached conversation.
 ///
 /// Rows bound a conversation and conversations bound the file, but neither
 /// bounds *size*: a row can carry 4,096 characters, so 6 400 rows could hold
@@ -76,8 +76,9 @@ pub(crate) const HISTORY_CACHE_PEERS: usize = 32;
 /// only — ids, flags and media descriptors are small and fixed per row, and the
 /// chat list is capped by [`HISTORY_CACHE_CHATS`] — and past it the least
 /// recently touched conversations go whole, as past [`HISTORY_CACHE_PEERS`].
-/// Eight MiB of text lands near ten megabytes on disk once JSON framing is
-/// counted.
+/// The count is of *encoded* bytes ([`encoded_len`]), so the text portion of
+/// the serialised file is at most eight MiB whatever the text holds, and lands
+/// near ten megabytes on disk once JSON framing is counted.
 pub(crate) const HISTORY_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 /// How many conversations of the chat list the file keeps.
@@ -228,6 +229,21 @@ struct FeedMarks {
     seen: BTreeMap<i64, i64>,
 }
 
+/// Bytes `text` takes inside a JSON string, quotes excluded: what `serde_json`
+/// writes. `"` and `\` cost 2, as do the short escapes `\n \r \t` and the
+/// backspace and form feed; every other control character below U+0020 costs 6
+/// (`\u00XX`); anything else costs its UTF-8 length. Escaping only ever
+/// inflates, so counting this and not `str::len` bounds the serialised copy.
+fn encoded_len(text: &str) -> usize {
+    text.chars()
+        .map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            c if c < '\u{20}' => 6,
+            c => c.len_utf8(),
+        })
+        .sum()
+}
+
 impl HistoryCache {
     /// The messages cached for `peer`, oldest first, as the domain's own type.
     ///
@@ -321,14 +337,16 @@ impl HistoryCache {
         self.touched.insert(peer, self.clock);
     }
 
-    /// The bytes of message text held, over every cached peer: what
-    /// [`HISTORY_CACHE_BYTES`] bounds. Summed on demand — at most 6 400 rows,
-    /// each `len` O(1) — so there is no counter to drift from the rows.
-    fn text_bytes(&self) -> usize {
+    /// The JSON-encoded bytes of message text held, over every cached peer:
+    /// what [`HISTORY_CACHE_BYTES`] bounds, so the text portion of the
+    /// serialised file never exceeds it. See [`encoded_len`] for the rule.
+    /// Summed on demand — at most 6 400 rows — so there is no counter to drift
+    /// from the rows.
+    fn encoded_text_bytes(&self) -> usize {
         self.peers
             .values()
             .flatten()
-            .map(|row| row.text.len())
+            .map(|row| encoded_len(&row.text))
             .sum()
     }
 
@@ -347,7 +365,9 @@ impl HistoryCache {
     /// cached — so a page fetched before it still cannot mark a returning
     /// peer current.
     fn evict(&mut self) {
-        while self.peers.len() > HISTORY_CACHE_PEERS || self.text_bytes() > HISTORY_CACHE_BYTES {
+        while self.peers.len() > HISTORY_CACHE_PEERS
+            || self.encoded_text_bytes() > HISTORY_CACHE_BYTES
+        {
             let touched = &self.touched;
             let Some(oldest) = self
                 .peers
@@ -2492,7 +2512,7 @@ mod tests {
         for peer in 1..=3 {
             assert!(cache.merge(peer, &[big(1, peer, third)], LATEST));
         }
-        assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
         assert!(cache.get(1).is_empty(), "the least recently touched went");
         assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
         assert!(!cache.touched.contains_key(&1));
@@ -2507,12 +2527,12 @@ mod tests {
         assert!(cache.merge(1, &[big(1, 1, five)], LATEST));
         assert!(!cache.get(1).is_empty(), "5 MiB alone fits 8 MiB");
         assert!(cache.merge(2, &[big(1, 2, five)], LATEST));
-        assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
         assert!(cache.get(1).is_empty(), "the older giant is gone");
         assert!(!cache.get(2).is_empty());
 
         assert!(cache.merge(3, &[big(1, 3, HISTORY_CACHE_BYTES + 1)], LATEST));
-        assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
         assert!(
             cache.get(3).is_empty(),
             "over budget on its own, it goes too"
@@ -2542,16 +2562,50 @@ mod tests {
         );
 
         let cache = file.load().cache;
-        assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
         assert!(cache.get(1).is_empty(), "the oldest conversation went");
         assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
     }
 
     // ---- Worst case: control-character text at the byte budget -------------
 
+    #[test]
+    fn encoded_len_mirrors_serde_json() {
+        assert_eq!(encoded_len("hello"), 5);
+        assert_eq!(encoded_len("\"\\"), 4);
+        assert_eq!(encoded_len("\u{1}"), 6);
+        assert_eq!(encoded_len("\n\r\t\u{8}\u{c}"), 10);
+        assert_eq!(encoded_len("é€😀"), 2 + 3 + 4);
+        assert_eq!(encoded_len("a\"b\u{1f}\n"), 1 + 2 + 1 + 6 + 2);
+        for text in [
+            "plain",
+            "q\"\\",
+            "\u{0}\u{1f}\u{7f}",
+            "\n\r\t\u{8}\u{c}",
+            "é€😀",
+        ] {
+            let json = serde_json::to_string(text).expect("a string serialises");
+            assert_eq!(encoded_len(text), json.len() - 2, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_budget_counts_encoded_bytes_not_raw_length() {
+        // Two rows of about half the budget encoded, a twelfth raw: together
+        // they fit by `len` many times over, so only the encoded count evicts.
+        let mut cache = HistoryCache::default();
+        let n = HISTORY_CACHE_BYTES / 6 / 2 + 1;
+        for peer in 1..=2 {
+            assert!(cache.merge(peer, &[message(1, peer, &"\u{1}".repeat(n))], LATEST));
+        }
+        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(cache.get(1).is_empty(), "the least recently touched went");
+        assert!(!cache.get(2).is_empty());
+    }
+
     /// A cache at the document's shape: [`HISTORY_CACHE_PEERS`] conversations of
-    /// [`HISTORY_CACHE_DEPTH`] rows, each row's text `per_row` bytes of
-    /// `'\u{1}'`, one UTF-8 byte that JSON-escapes to six (`\u0001`).
+    /// [`HISTORY_CACHE_DEPTH`] rows, each row's text `per_row` characters
+    /// of `'\u{1}'`, one UTF-8 byte that JSON-escapes to six (`\u0001`).
     fn control_char_cache(per_row: usize) -> HistoryCache {
         let text = "\u{1}".repeat(per_row);
         let mut cache = HistoryCache::default();
@@ -2676,6 +2730,8 @@ mod tests {
     struct WorstCase {
         text_bytes: usize,
         serialised: usize,
+        /// Bytes of the serialised payload that are escaped message text.
+        escaped_text: usize,
         baseline: Option<u64>,
         write_peak: Option<u64>,
         load_peak: Option<u64>,
@@ -2685,7 +2741,7 @@ mod tests {
     /// control-character cache must keep.
     fn write_and_reopen_worst_case(cache: &HistoryCache) -> WorstCase {
         let (_dir, file) = scratch("history.json");
-        let text_bytes = cache.text_bytes();
+        let text_bytes = cache.encoded_text_bytes();
         assert_eq!(
             cache.peers.values().map(Vec::len).sum::<usize>(),
             HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH,
@@ -2696,11 +2752,14 @@ mod tests {
             account_id: Some(1),
             phone: None,
         };
-        let (baseline, write_peak, serialised) = peak_rss_during(|| {
+        let (baseline, write_peak, (serialised, escaped_text)) = peak_rss_during(|| {
             let bytes = HistoryFile::encode(cache, &tag).expect("the cache serialises");
             let len = bytes.len();
             file.write(&bytes);
-            len
+            // `control_char_cache` text is `\u0001` runs and nothing else in
+            // the payload escapes, so this is the text portion exactly.
+            let escaped = bytes.windows(6).filter(|w| *w == b"\\u0001").count() * 6;
+            (len, escaped)
         });
         assert!(
             serialised > text_bytes,
@@ -2710,12 +2769,13 @@ mod tests {
 
         let (_, load_peak, loaded) = peak_rss_during(|| file.load());
         assert_eq!(loaded.account_id, Some(1));
-        assert_eq!(loaded.cache.text_bytes(), text_bytes);
+        assert_eq!(loaded.cache.encoded_text_bytes(), text_bytes);
         assert_eq!(loaded.cache.get(1).len(), HISTORY_CACHE_DEPTH);
         assert_eq!(fields(&loaded.cache.get(1)[0]), fields(&cache.get(1)[0]));
         WorstCase {
             text_bytes,
             serialised,
+            escaped_text,
             baseline,
             write_peak,
             load_peak,
@@ -2729,8 +2789,9 @@ mod tests {
         let run = write_and_reopen_worst_case(&cache);
         assert_eq!(
             run.text_bytes,
-            HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH * 40
+            HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH * 40 * 6
         );
+        assert_eq!(run.escaped_text, run.text_bytes, "the count is the wire");
     }
 
     #[test]
@@ -2739,13 +2800,21 @@ mod tests {
                 cache_worst_case -- --include-ignored --nocapture`"]
     #[allow(clippy::cast_precision_loss, reason = "display only")]
     fn cache_worst_case_full_budget_write_is_measured() {
-        // Largest whole per-row size that keeps the total under the bound.
-        let per_row = (HISTORY_CACHE_BYTES - 1) / (HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH);
+        // Largest whole per-row size whose *encoded* total fits the bound:
+        // each `\u{1}` is one character and six encoded bytes.
+        let per_row = HISTORY_CACHE_BYTES / (HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH * 6);
         let cache = control_char_cache(per_row);
-        assert!(cache.text_bytes() > HISTORY_CACHE_BYTES - HISTORY_CACHE_BYTES / 100);
+        assert!(cache.encoded_text_bytes() > HISTORY_CACHE_BYTES - HISTORY_CACHE_BYTES / 100);
 
         let run = write_and_reopen_worst_case(&cache);
-        assert!(run.text_bytes <= HISTORY_CACHE_BYTES);
+        // The structural bound: the escaped text in the serialised payload is
+        // within the budget, and is exactly what the accounting counted.
+        assert!(
+            run.escaped_text <= HISTORY_CACHE_BYTES,
+            "serialised text portion {} B exceeds the {HISTORY_CACHE_BYTES} B budget",
+            run.escaped_text
+        );
+        assert_eq!(run.escaped_text, run.text_bytes);
 
         let mb = |bytes: Option<u64>| {
             bytes.map_or("n/a".to_owned(), |b| format!("{:.1} MB", b as f64 / 1e6))
@@ -2754,7 +2823,7 @@ mod tests {
             "cache_worst_case: rows             = {}",
             HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH
         );
-        println!("cache_worst_case: text bytes       = {}", run.text_bytes);
+        println!("cache_worst_case: encoded text     = {}", run.text_bytes);
         println!("cache_worst_case: serialised len   = {}", run.serialised);
         println!(
             "cache_worst_case: ratio            = {:.2}x",

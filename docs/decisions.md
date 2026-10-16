@@ -940,7 +940,7 @@ are in [`../AGENTS.md`](../AGENTS.md).
   message is oldest going first. `HISTORY_CACHE_CHATS` is 500 because a cap at
   all is what gives the file a worst case; the fetched list itself has none, and
   500 is more than a screen scrolls through before the fetched list replaces it.
-  `HISTORY_CACHE_BYTES` is 8 MiB of summed message text: rows alone left every
+  `HISTORY_CACHE_BYTES` is 8 MiB of summed, JSON-encoded message text: rows alone left every
   row at maximum length free to reach about 80 MB, past the 50 MB budget. It
   counts text only, and past it the least recently touched peers go whole, by the
   same order as the peer bound, so a load, a page and an arrival all meet it
@@ -948,6 +948,22 @@ are in [`../AGENTS.md`](../AGENTS.md).
   cannot drift; 8 MiB is chosen over 10 because JSON framing lands it near the
   ten megabytes on disk. The worst case these give is declared in
   [`memory.md`](./memory.md).
+- **Why `HISTORY_CACHE_BYTES` counts JSON-encoded bytes and stays 8 MiB:** the
+  budget summed `text.len()`, but the file holds what `serde_json` writes, and
+  escaping only inflates: a control character is six bytes on disk for one in
+  memory. A full cache of such text measured 8,384,000 B serialising to
+  50,668,544 B (6.04x) with a 231.8 MB write peak, which the declared worst case
+  had excluded rather than bounded. So the count now mirrors the encoder (`"` and
+  `\` 2, the short escapes 2, other control characters below U+0020 6, anything
+  else its UTF-8 length), and the text portion of the file is at most 8 MiB by
+  construction. The same fill now serialises to 8,735,744 B (1.04x). Rejected:
+  *shrinking the budget*, which taxes ordinary text, where escaping costs
+  nothing, to cover a pathological case (usable history cut sixfold); *sealing in
+  place to remove the encoder's clone*, a real second cut at the peak but a
+  separate change, left as a follow-up in [`known-gaps.md`](./known-gaps.md)
+  because the post-change write peak (60.4 MB) is still above 50 MB. Nothing
+  re-sends cached text, so evicting by the encoded count changes what is
+  displayed only for a reader whose history is made of such text.
 - **Why a fetched page is merged as the stretch it speaks for:** a cache that
   stored the last page fetched would hold one page; one that appended every page
   would keep messages the server has since deleted. So the cache holds one
