@@ -414,7 +414,9 @@ impl SessionStore for MemoryStore {
 /// a modified or truncated file — is [`SessionError::Load`], and the file is
 /// left exactly as found. It is never [`SessionError::Corrupt`], which a caller
 /// may answer by deleting the file: a typo must not cost a session. A key source
-/// that cannot be reached is [`SessionError::Unavailable`].
+/// that cannot be reached is [`SessionError::Unavailable`]. A file the operating
+/// system will not read at all is [`SessionError::Read`]; a missing one is
+/// `Ok(None)`.
 ///
 /// # Migration
 ///
@@ -516,7 +518,7 @@ impl SessionStore for FileStore {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => Zeroizing::new(bytes),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(SessionError::Load(error.to_string())),
+            Err(error) => return Err(SessionError::Read(error.to_string())),
         };
 
         if let Some(plain) = sealed::open(&bytes, self.keys.as_ref())? {
@@ -1541,6 +1543,22 @@ mod tests {
         let error = store.load().expect_err("a modified file is refused");
         assert!(matches!(error, SessionError::Load(_)), "got {error:?}");
         assert_eq!(fs::read(&path).expect("still there"), bytes);
+    }
+
+    /// A file that cannot be read is not a key problem: `Read`, not `Load`, and
+    /// not `Corrupt`. A directory in the file's place fails `fs::read` on every
+    /// platform and for every user, which a permissions trick would not.
+    #[test]
+    fn an_unreadable_file_is_a_read_error_and_is_left_untouched() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session.json");
+        fs::create_dir(&path).expect("the stand-in is created");
+
+        let error = file_store(&path)
+            .load()
+            .expect_err("an unreadable file is refused");
+        assert!(matches!(error, SessionError::Read(_)), "got {error:?}");
+        assert!(path.is_dir(), "left as it was");
     }
 
     #[test]
