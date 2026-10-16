@@ -182,6 +182,11 @@ pub enum Event {
     /// there would turn the sign-in form into an error card.
     SessionDiscarded(String),
 
+    /// A legacy plaintext session file was read and sealed in place.
+    ///
+    /// Once: the file is sealed afterwards, so no later bring-up finds it plain.
+    SessionResealed(String),
+
     /// The client could not be brought up.
     ///
     /// Carries the reason, and the chain behind it: the screen has one line to
@@ -1152,7 +1157,9 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
     // resolved a second time could be a second store — so a reader could be told
     // where their session is while a different file is the one being cleared.
     let Session { store, keys } = session_store(cfg);
+    let was_plaintext = holds_plaintext_session(cfg);
     let discarded = discard_corrupt_session(&*store);
+    let resealed = (was_plaintext && !holds_plaintext_session(cfg)).then(|| RESEALED.to_owned());
 
     // After the probe above, not before: the probe is what opens an existing file
     // and so what derives its key, and a key already derived is not derived
@@ -1193,6 +1200,7 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
             session_store,
         }));
         report_discarded(discarded, tx);
+        report_resealed(resealed, tx);
         return Ok(());
     }
 
@@ -1240,6 +1248,7 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         session_store,
     }));
     report_discarded(discarded, tx);
+    report_resealed(resealed, tx);
     tokio::spawn(pump(updates, tx.clone()));
 
     Ok(())
@@ -1280,6 +1289,28 @@ fn discard_corrupt_session(store: &dyn SessionStore) -> Option<String> {
 fn report_discarded(discarded: Option<String>, tx: &UnboundedSender<AppEvent>) {
     if let Some(sentence) = discarded {
         let _ = tx.send(AppEvent::Net(Event::SessionDiscarded(sentence)));
+    }
+}
+
+/// What the reader is told when a plaintext session file was read and sealed in place.
+const RESEALED: &str =
+    "the session file was not encrypted and now is; it is sealed under your key from here on";
+
+/// Whether the session file exists and is plaintext: a legacy file not yet sealed.
+///
+/// Empty and unreadable files count as no: there is nothing to say about them.
+fn holds_plaintext_session(cfg: &Config) -> bool {
+    cfg.session_path
+        .as_ref()
+        .and_then(|path| std::fs::read(path).ok())
+        .is_some_and(|bytes| !bytes.is_empty() && !telegram_framework::sealed::is_sealed(&bytes))
+}
+
+/// Says a legacy plaintext session was sealed, behind the [`Event::Ready`] like
+/// [`report_discarded`], and for the same reason.
+fn report_resealed(resealed: Option<String>, tx: &UnboundedSender<AppEvent>) {
+    if let Some(sentence) = resealed {
+        let _ = tx.send(AppEvent::Net(Event::SessionResealed(sentence)));
     }
 }
 
@@ -2354,7 +2385,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // a screen they did not expect and has to be told why. It says nothing
         // about the client: there is one either way, and the `Ready` beside it is
         // what puts the screen up.
-        Event::SessionDiscarded(sentence) => {
+        Event::SessionDiscarded(sentence) | Event::SessionResealed(sentence) => {
             app.ui.status = sentence;
         }
 
@@ -9875,6 +9906,47 @@ mod session_store_tests {
             .load()
             .expect_err("the default cost derives another key");
         assert!(matches!(error, SessionError::Load(_)), "{error:?}");
+    }
+
+    /// A legacy plaintext file is sealed by the first load, and the reader is told
+    /// once: the probe sees it plain before and sealed after, and never again.
+    #[test]
+    fn a_legacy_plaintext_session_is_sealed_and_reported_once() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let plain = serde_json::to_vec(&SessionData::default()).expect("a session serialises");
+        std::fs::write(&path, plain).expect("a legacy file");
+        let cfg = file_config(&path, Some("right"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        for round in 0..2 {
+            let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+            let was_plaintext = holds_plaintext_session(&cfg);
+            assert_eq!(was_plaintext, round == 0);
+            store.load().expect("the file loads");
+            let resealed =
+                (was_plaintext && !holds_plaintext_session(&cfg)).then(|| RESEALED.to_owned());
+            report_resealed(resealed, &tx);
+        }
+        drop(tx);
+
+        let Some(AppEvent::Net(Event::SessionResealed(sentence))) = rx.try_recv().ok() else {
+            panic!("the first bring-up reports the re-seal");
+        };
+        assert!(sentence.contains("not encrypted and now is"), "{sentence}");
+        assert!(
+            rx.try_recv().is_err(),
+            "the second finds it sealed: said once"
+        );
+
+        let mut app = App::new();
+        let mut state = State::default();
+        apply(
+            &mut app,
+            &mut state,
+            Event::SessionResealed(sentence.clone()),
+        );
+        assert_eq!(app.ui.status, sentence);
     }
 
     /// A wrong passphrase is a typo, not a corrupt session: the file stays, and
