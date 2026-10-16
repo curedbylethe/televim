@@ -348,14 +348,40 @@
     <div class="row"><span class="fN"> NORMAL  </span><span class="ft"> /tickets <i class="w">—</i> match 3 of 5                                               </span></div>
     <div class="row"><span class="ft">                                                                                </span></div>
     <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+  </div>
+  <div class="frame" data-od-id="status-line-rest-frame" data-terminal="dark" role="img" aria-label="status-line-rest-frame, 80 by 24 cells">
+    <div class="row"><span class="fN"> NORMAL  </span><span class="ft"> Jumping to the quoted message<i class="w">…</i>                                        </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
     <div class="row"><span class="fN"> NORMAL  </span><span class="ft"> [failed: no route]                                                    </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="fN"> NORMAL  </span><span class="ft"> Not a reply: gd jumps to the message a reply quotes.                  </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="fN"> NORMAL  </span><span class="ft"> Cached messages <i class="w">—</i> loading the latest<i class="w">…</i>                                 </span></div>
     <div class="row"><span class="ft">                                                                                </span></div>
     <div class="row"><span class="ft">                                                                                </span></div>
     <div class="row"><span class="fN"> NORMAL  </span><span class="fd"> i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct</span><span class="ft">    </span></div>
     <div class="row"><span class="ft">                                                                                </span></div>
     <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
+    <div class="row"><span class="ft">                                                                                </span></div>
   </div>
-  <ol class="notes"><li><b>Eight real status rows, each the last row of an engine render.</b> The order is the priority the program gives them: a confirmation outranks a selection, a selection outranks a search, and the resting hint is last.</li><li><b>Rows 1, 4–5:</b> a line's own hint (INSERT typing, then the two VISUAL hints). <b>Rows 2–3:</b> confirmations, which show no hint. <b>Row 6:</b> a search, with its position. <b>Row 7:</b> why the message under the cursor failed. <b>Row 8:</b> the resting hint.</li><li><b>The rows are spaced two apart</b> so each can be read on its own; in the program they are the same single row.</li></ol>
+  <ol class="notes"><li><b>Eleven real status rows over two frames, each the last row of an engine render.</b> Eleven rows at this spacing do not fit in 24, so the first frame holds ranks 1–5 and the second ranks 6–10. The order is the priority the program gives them, <code>DESIGN.md</code>'s, highest first: a confirmation outranks a selection, a selection outranks a search, a jump outranks a failed send, and the resting hint is last.</li><li><b>First frame.</b> Row 1, rank 1: a line's own hint (INSERT typing). Rows 2–3, rank 2: confirmations, which show no hint. Rows 4–5, rank 3: a selection, with its unit, then the line's VISUAL hint. Row 6, rank 5: a search, with its position.</li><li><b>Second frame.</b> Row 1, rank 6: a jump in flight (<code>Jumping to the quoted message…</code>; <code>Jumping to first unread…</code> is the same rank). Row 2, rank 7: why the message under the cursor failed. Row 3, rank 8: a flash, a refusal worth reading. Row 4, rank 9: a cached conversation waiting for its newest page. Row 5, rank 10: the resting hint. Ranks 0 and 4 (a sign-in refusal, the new-chat list) are drawn in their own screens.</li><li><b>The rows are spaced two apart</b> so each can be read on its own; in the program they are the same single row.</li></ol>
 </section>
 
   

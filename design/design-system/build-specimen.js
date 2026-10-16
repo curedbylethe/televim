@@ -76,12 +76,17 @@ function sec05() {
   return g;
 }
 /* ---------- 06 · Status line: the ranks, each the real row of a real state ---------- */
-const STATUS_STATES = ['iHello', '<Tab>q', 'kkkkdd', '/tickets<CR>vj', 'iHello<Esc>vhh', '/tickets<CR>', 'jjjj', ''];
-function sec06() {
+const STATUS_STATES = ['iHello', '<Tab>q', 'kkkkdd', '/tickets<CR>vj', 'iHello<Esc>vhh', '/tickets<CR>'];
+/* the rest of the ranks, second frame: a jump in flight, a failed send, a flash, a cached window, the hint.
+   Eleven rows at the two-row spacing do not fit in 24, so the ranks are split across two frames. */
+const STATUS_STATES_REST = ['jjgd', 'jjjj', 'gd', '<cached>', ''];
+function statusFrame(states) {
   const g = blank();
-  STATUS_STATES.forEach((k, i) => rowCopy(g, i * 3, G(k), H - 1));
+  states.forEach((k, i) => rowCopy(g, i * 3, G(k), H - 1));
   return g;
 }
+const sec06 = () => statusFrame(STATUS_STATES);
+const sec06b = () => statusFrame(STATUS_STATES_REST);
 
 /* ---------- output ---------- */
 const frameRows = (grid) => grid.map((r) => '    <div class="row">' + TV.toHTML([r]) + '</div>').join('\n');
@@ -106,6 +111,7 @@ html = replaceFrame(html, 'hint-row-frame', hintRowFrame());
 html = replaceFrame(html, 'hint-measure-frame', hintMeasureFrame());
 html = replaceFrame(html, 'prompt-frame', sec05());
 html = replaceFrame(html, 'status-line-frame', sec06());
+html = replaceFrame(html, 'status-line-rest-frame', sec06b());
 html = replaceFrame(html, 'panel-light-frame', sec01());
 
 /* ---------- section 08 · every profile frame, in reading order ----------

@@ -835,6 +835,7 @@
      is fetched as a page around it, which replaces the window, and the cursor lands on it. Every
      jump that moves the reader leaves a mark, and Ctrl-o / Ctrl-i walk the marks as Vim's jumplist
      does. A mark is a message id, never a row: the window it was set in may be gone. */
+  const REVALIDATING = 'Cached messages — loading the latest…';
   const JUMP_QUOTE = 'Jumping to the quoted message…', JUMP_BACK = 'Jumping back…', JUMP_FORWARD = 'Jumping forward…';
   const PAGE_RADIUS = 3;
   const hereId = (c) => (c.msgs[c.cur] ? c.msgs[c.cur].id : null);
@@ -1334,6 +1335,7 @@
     /* the same tick ages the peer's typing note: it is not repeated, so it runs out */
     const open = s.chats && s.chats[s.chat];
     if (open && open.typing) open.typing--;
+    if (open && open.revalidating) { open.revalidating = false; return s; }
     if (s.newchat && s.newchat.pending) { s.newchat.pending = false; return s; }
     if (s.jump) return landJump(s);
     const A = s.signin, p = A && A.pending;
@@ -1365,6 +1367,12 @@
   function peerTyping(s) {
     const c = s.view === 'chat' && chat(s);
     if (c) c.typing = TYPING_TICKS;
+    return s;
+  }
+  /* a cached window is on show and the server's newest page for it is on its way; <wait> is the page */
+  function revalidate(s) {
+    const c = s.view === 'chat' && chat(s);
+    if (c) c.revalidating = true;
     return s;
   }
   function peerSays(s, text) {
@@ -1589,6 +1597,8 @@
     if (s.focus === 'list') return { t: HINT.list, a: 'd' };
     const c = chat(s), m = c.msgs[c.cur];
     if (m && m.status && m.status.startsWith('failed')) return { t: ' [' + m.status + ']', a: 't' };
+    /* below everything written to the status, above the resting hint */
+    if (c.revalidating) return { t: ' ' + REVALIDATING, a: 't' };
     if (s.draft && s.draft.ctx === ctx(s)) return { t: HINT.draft, a: 'd' };
     return { t: HINT.normal, a: 'd' };
   }
@@ -2196,6 +2206,7 @@
         if (name === 'wait') answer(s);
         else if (name === 'typing') peerTyping(s);
         else if (name === 'peer') peerSays(s, PEER_SAYS);
+        else if (name === 'cached') revalidate(s);
         else key(s, TOK[name]);
         i = e;
       } else key(s, script[i]);
@@ -2232,6 +2243,10 @@
       { name: 'Ctrl-o: back needs a fetch too', keys: 'jjgd<wait><C-o>' },
       { name: 'Ctrl-o: back on the reply that was left', keys: 'jjgd<wait><C-o><wait>' },
       { name: 'gd on a message that is not a reply', keys: 'gd' }] },
+    /* a window painted from the cache, with the newest page still on its way (rank 9 of the status line) */
+    { id: 'cached', name: 'Cached conversation', variants: [
+      { name: 'The newest page is on its way', keys: '<cached>' },
+      { name: 'The page arrived: the hint is back', keys: '<cached><wait>' }] },
     { id: 'visual', name: 'Visual', variants: [
       { name: 'Two messages, search live', keys: '/tickets<CR>vj' }] },
     /* Media-only messages. The chat is Ken Thompson's, put first by the `media` start; the cursor
