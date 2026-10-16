@@ -67,7 +67,7 @@ use telegram_framework::{
     PASSWORD_ATTEMPTS, PassphraseProvider, Refusal, RequestError, SessionError, SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, LoginField};
+use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, JumpKind, LoginField};
 
 use crate::config::Config;
 use crate::draft_store::DraftFile;
@@ -2209,11 +2209,14 @@ fn request(
     });
 }
 
-/// Asks for a page around the message the reader jumped to, and hands the answer
-/// back to the loop.
+/// Asks for a page around the message or the day the reader jumped to, and hands
+/// the answer back to the loop.
 ///
 /// The same shape as [`request`], and for the same reason: the round trip is its
 /// own task so that a jump does not stop the reader's keystrokes from being read.
+/// A day or date jump's anchor is the target day's first unix second rather than
+/// a message id, so it is fetched by that date; every other jump names a message
+/// to centre the page on.
 fn request_jump(
     client: &Arc<ProtoClient>,
     jump: Jump,
@@ -2224,9 +2227,18 @@ fn request_jump(
     let tx = tx.clone();
 
     tokio::spawn(async move {
-        let result = client
-            .fetch_around(jump.peer_id, jump.target_id, PAGE)
-            .await;
+        let result = match jump.kind {
+            JumpKind::Date => {
+                client
+                    .fetch_around_date(jump.peer_id, jump.target_id, PAGE)
+                    .await
+            }
+            _ => {
+                client
+                    .fetch_around(jump.peer_id, jump.target_id, PAGE)
+                    .await
+            }
+        };
 
         let _ = tx.send(AppEvent::Net(Event::Jumped {
             jump,
@@ -4517,6 +4529,7 @@ mod tests {
     use tui::app::CHAT_SWITCH_DELAY;
     use tui::app::ConnectionState;
     use tui::app::Focus;
+    use tui::app::JUMP_DAY_LABEL;
     use tui::app::JUMP_SEARCH_LABEL;
     use tui::app::JumpKind;
     use tui::app::REVALIDATING_LABEL;
@@ -4855,6 +4868,140 @@ mod tests {
             "and the reader is back on the message they left"
         );
         assert_eq!(app.pending_jump(), None);
+    }
+
+    /// A day or date jump is a place the window does not hold, so it travels like
+    /// any other jump — the difference is the anchor: the target day's first unix
+    /// second in place of a message id, and a kind that says which reading applies,
+    /// which is what the request is dispatched on.
+    #[test]
+    fn a_date_jump_is_asked_for_with_its_day() {
+        const DAY: i64 = 1_700_000_000;
+
+        let mut app = app_with_unread_out_of_reach(2);
+        let jump = Jump {
+            peer_id: CHAT,
+            target_id: DAY,
+            kind: JumpKind::Date,
+        };
+        app.set_jump(Some(jump));
+
+        assert_eq!(
+            app.pending_jump(),
+            Some(jump),
+            "the reader asked for a day, not a message"
+        );
+        assert_eq!(app.jump_label(), JUMP_DAY_LABEL);
+        assert_eq!(
+            wanted(&app, opened(CHAT), Instant::now()),
+            Wanted::Jump(jump),
+            "and the request carries the day, outranking paging like every other jump"
+        );
+    }
+
+    /// A page around a day replaces the window rather than extending it, and the
+    /// jump is over: the day-anchored fetch is the same landing path a message id
+    /// takes, told to the same cursor.
+    #[test]
+    fn a_date_jump_page_replaces_the_window_and_ends_the_jump() {
+        const DAY: i64 = 1_700_000_000;
+
+        let mut app = app_with_unread_out_of_reach(2);
+        let jump = Jump {
+            peer_id: CHAT,
+            target_id: DAY,
+            kind: JumpKind::Date,
+        };
+        app.set_jump(Some(jump));
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(messages(CHAT, 16..=20)),
+            },
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.len(),
+            5,
+            "the window was replaced by the page the day's fetch returned"
+        );
+        let landed = app
+            .conversation
+            .conversation
+            .window
+            .get(app.conversation.vim.cursor())
+            .map(|message| message.id);
+        assert!(
+            matches!(landed, Some(16..=20)),
+            "the cursor was placed on a message of the page, got {landed:?}"
+        );
+        assert_eq!(app.pending_jump(), None, "and the jump is over");
+        assert!(
+            state.history.jump.is_none(),
+            "the in-flight mark is cleared too, or the driver would ask again"
+        );
+        assert_eq!(
+            state
+                .history
+                .cursor
+                .and_then(|cursor| cursor.oldest_loaded_id()),
+            Some(16),
+            "the cursor counts from the window that replaced the old one"
+        );
+    }
+
+    /// However a date jump ended, it is over: a failure must not leave the key
+    /// wedged, exactly as for a message jump.
+    #[test]
+    fn a_failed_date_jump_leaves_the_key_free() {
+        const DAY: i64 = 1_700_000_000;
+
+        let mut app = app_with_unread_out_of_reach(2);
+        let jump = Jump {
+            peer_id: CHAT,
+            target_id: DAY,
+            kind: JumpKind::Date,
+        };
+        app.set_jump(Some(jump));
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert!(
+            app.ui.status.contains("history:"),
+            "got {:?}",
+            app.ui.status
+        );
+        assert_eq!(
+            app.pending_jump(),
+            None,
+            "asking again is one keystroke away, and a wedged key is not"
+        );
+        assert!(state.history.jump.is_none());
+        assert_eq!(
+            app.conversation.conversation.window.len(),
+            8,
+            "and the reader stayed where they were"
+        );
     }
 
     /// A jump's answer is reported to the cursor the conversation is described

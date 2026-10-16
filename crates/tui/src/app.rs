@@ -242,6 +242,17 @@ pub const JUMP_FORWARD_LABEL: &str = "Jumping forward…";
 /// What is said while a jump to a message a global search found is on its way.
 pub const JUMP_SEARCH_LABEL: &str = "Jumping…";
 
+/// What is said while a day or date jump is on its way.
+///
+/// **Interim**, and unreachable until a producer exists (STAGE-04): a day jump
+/// carries the day in its target and the final sentence names it —
+/// `Jumping to Sep 26, 2026…`, `Jumping to Yesterday…` — in the day-separator
+/// vocabulary `DESIGN.md` records (§ *Day-boundary and date jumps*, the label
+/// table). That sentence cannot be said here, because a `&'static str` cannot
+/// hold the day; STAGE-04 weaves the name in at the status path. This is the
+/// closest honest stand-in until then, so `label()` stays exhaustive.
+pub const JUMP_DAY_LABEL: &str = "Jumping to a day…";
+
 /// `gd` on a message that quotes nothing.
 pub const NOT_A_REPLY: &str = "Not a reply: gd jumps to the message a reply quotes.";
 
@@ -252,7 +263,9 @@ pub const JUMP_UNAVAILABLE: &str = "That message is no longer available.";
 ///
 /// `Unread` is `gg` and a match `n` walked to; the other two are the jumplist's,
 /// and are named here so that this match is complete rather than because anything
-/// produces them yet.
+/// produces them yet. `Date` is a day or date jump: it carries its anchor in
+/// [`Jump::target_id`] rather than naming a message, and no producer builds one
+/// until STAGE-04.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JumpKind {
     Unread,
@@ -261,6 +274,8 @@ pub enum JumpKind {
     Forward,
     /// A message a global search found, which the window does not hold.
     Search,
+    /// A day or date jump, whose target is the day's first unix second.
+    Date,
 }
 
 impl JumpKind {
@@ -277,6 +292,7 @@ impl JumpKind {
             Self::Back => JUMP_BACK_LABEL,
             Self::Forward => JUMP_FORWARD_LABEL,
             Self::Search => JUMP_SEARCH_LABEL,
+            Self::Date => JUMP_DAY_LABEL,
         }
     }
 }
@@ -285,14 +301,20 @@ impl JumpKind {
 ///
 /// `gg` means the first unread message, and that message is only sometimes
 /// loaded. When it is not, the request cannot be answered from the window and
-/// has to travel: this is what it travels as — the conversation, and the message
-/// the page should be centred on.
+/// has to travel: this is what it travels as — the conversation, and the anchor
+/// the page should be centred on. The anchor is usually a message id; a day or
+/// date jump has no message id to name, so its anchor is the target day's first
+/// instant and its `kind` says which reading applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Jump {
     /// The conversation to fetch from.
     pub peer_id: i64,
 
-    /// The message to centre the page on.
+    /// The anchor the page is centred on: a message id, or, when `kind` is
+    /// [`JumpKind::Date`], the target day's first instant in unix seconds (the
+    /// reader's zone). One field, because the two are the same thing to every
+    /// step of the jump path — the clear and the in-flight compare always match a
+    /// jump against itself, so the value needs no range of its own.
     pub target_id: i64,
 
     /// Which jump this is, so the screen can say where it is going.
@@ -2055,6 +2077,20 @@ impl App {
     /// Delegates to [`Pending::clear_jump`].
     pub fn clear_jump(&mut self, target_id: i64) -> bool {
         self.pending.clear_jump(target_id)
+    }
+
+    /// Records the jump the reader asked for, or clears it — the setter
+    /// [`Self::clear_jump`] is the counterpart of.
+    ///
+    /// The producers inside this crate ([`coordinate::jump_to_unread`] and its
+    /// siblings) record through [`Pending`] directly. This is the seam for a
+    /// caller that resolved a jump of its own to install it for the driver,
+    /// which is what a date jump's loop tests need while no producer builds one
+    /// yet.
+    ///
+    /// Delegates to [`Pending::set_jump`].
+    pub fn set_jump(&mut self, jump: Option<Jump>) {
+        self.pending.set_jump(jump);
     }
 
     /// Replaces the window with a page fetched around a message the reader asked

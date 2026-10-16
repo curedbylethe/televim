@@ -359,6 +359,53 @@ impl crate::ProtoClient {
 
         Ok(to_messages(peer_id, page))
     }
+
+    /// Fetches a page of `limit` messages centred on the day `unix_date` starts.
+    ///
+    /// This is what a day or date jump asks for when the target day is not in the
+    /// loaded window: the same page `fetch_around` fetches, anchored by a date
+    /// rather than a message id. Like it, the result replaces the window, so the
+    /// caller's cursor has to be told — [`HistoryCursor::reset_to`].
+    ///
+    /// `unix_date` is the day's first instant in unix seconds, read in the
+    /// reader's zone; computing it is the caller's, because only the reader's
+    /// clock and offset say where a day begins.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) on the
+    /// same failures as `fetch_latest`.
+    pub async fn fetch_around_date(
+        &self,
+        peer_id: i64,
+        unix_date: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>, crate::ProtoError> {
+        // A unix second the wire's `int` cannot name is a day Telegram holds no
+        // messages for, so there is no page to ask for — the same answer `narrow`
+        // gives an identifier outside a message's range, and what the jump reads
+        // as "no such day".
+        let Ok(unix_date) = i32::try_from(unix_date) else {
+            tracing::warn!(
+                peer_id,
+                unix_date,
+                "a date outside telegram's timestamp range cannot be paged from"
+            );
+            return Ok(Vec::new());
+        };
+
+        let args = HistoryArgs::around_date(unix_date, limit);
+        let page = self.inner().fetch_history(peer_id, args).await?;
+
+        tracing::debug!(
+            peer_id,
+            unix_date,
+            returned = page.len(),
+            "fetched a page of a conversation around a date"
+        );
+
+        Ok(to_messages(peer_id, page))
+    }
 }
 
 #[cfg(test)]

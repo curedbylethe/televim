@@ -639,6 +639,21 @@ are in [`../AGENTS.md`](../AGENTS.md).
   forward is unreachable and `Ctrl-o` carries the criterion alone, which the
   criterion's "or" allows; a second forward key would be a new decision with a new
   design entry, not a workaround invented here.
+- **Why a date jump fetches with `offset_date` rather than paging older:** a day or
+  date jump lands on the first message of a target day, which the loaded window may
+  not hold, so the page has to be fetched. Paging older — `fetch_older` — until the
+  day appeared was the alternative, and it is worse: one round trip per page
+  crossed, whole stretches of the conversation walked to reach one day, and the
+  same reading of the page at the end of it. `messages.getHistory` already carries
+  an `offset_date` — a unix second meaning "only messages sent before this" — which
+  `HistoryArgs` had pinned at zero since it was written, so the day costs one round
+  trip and the page comes back centred on it. The seam is a fourth constructor,
+  `HistoryArgs::around_date`, beside `latest`/`older`/`newer`/`around` and set over
+  primitives so it is testable on CI without a datacenter; `ProtoClient::fetch_around_date`
+  reaches it, and `JumpKind::Date` is what tells the driver's request path to use
+  it. The day itself — its first instant in the reader's zone — is the caller's to
+  compute, because only the caller has the clock, and the four message-anchored
+  fetches leave `offset_date` zero, so none of them changes.
 - **Why a jump keeps the search:** the design engine's `landJump` sets
   `s.search = null` — its hits were rows of the old window — and `DESIGN.md`
   records that. The Rust does the opposite on purpose. `apply_jump` does not touch
