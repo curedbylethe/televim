@@ -2863,15 +2863,18 @@ async fn save_media(
     let written = writer.await;
 
     match (download, written) {
-        (Ok(()), Ok(Ok(streamed))) => keep_streamed(
-            &job.cache,
-            chat_id,
-            message_id,
-            job.media_id,
-            job.kind,
-            &temp_cleanup,
-            &streamed,
-        ),
+        (Ok(()), Ok(Ok(streamed))) => {
+            keep_streamed(
+                Arc::clone(&job.cache),
+                chat_id,
+                message_id,
+                job.media_id,
+                job.kind,
+                temp_cleanup,
+                streamed,
+            )
+            .await
+        }
         // A writer failure reaches the sink as a closed channel, so it is
         // inspected here rather than trusted to the download's outcome.
         (_, Ok(Err(error))) => {
@@ -2979,26 +2982,36 @@ fn cached_media(
 ///
 /// The file is named for the message it was downloaded for, and for its media id
 /// when it has one, so a later copy in another chat finds it.
-fn keep_streamed(
-    cache: &Mutex<MediaCache>,
+///
+/// The commit — the rename into the blob, the stale-temp removal and the pointer
+/// index rewrite — runs on a blocking thread, so the current-thread runtime that
+/// carries the key handling never waits on the disk. The cache is shared by
+/// `Arc`, and `store_from_path` still locks it per phase.
+async fn keep_streamed(
+    cache: Arc<Mutex<MediaCache>>,
     chat_id: i64,
     message_id: i64,
     media_id: Option<i64>,
     kind: MediaKind,
-    temp: &Path,
-    streamed: &StreamedMedia,
+    temp: PathBuf,
+    streamed: StreamedMedia,
 ) -> Event {
     let mut keys = vec![Key::Message(chat_id, message_id)];
     keys.extend(media_id.map(Key::Media));
-    let stored = MediaCache::store_from_path(
-        cache,
-        &keys,
-        kind,
-        temp,
-        &streamed.hash,
-        streamed.crc,
-        streamed.size,
-    );
+    let committed = tokio::task::spawn_blocking(move || {
+        MediaCache::store_from_path(
+            &cache,
+            &keys,
+            kind,
+            &temp,
+            &streamed.hash,
+            streamed.crc,
+            streamed.size,
+        )
+    })
+    .await;
+    // A commit that panicked is a commit that stored nothing.
+    let stored = committed.unwrap_or(None);
     match stored {
         Some(path) => Event::MediaSaved {
             chat_id,
@@ -10142,10 +10155,14 @@ mod media_tests {
     /// A download larger than the old 16 MiB ceiling streams to disk in chunks
     /// and is stored whole: the writer hashes as it writes, and the cache keeps
     /// the result — the memory ceiling is the disk quota now, not the payload.
-    #[test]
-    fn a_download_larger_than_the_old_ceiling_streams_and_is_stored() {
+    #[tokio::test]
+    async fn a_download_larger_than_the_old_ceiling_streams_and_is_stored() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
+        let cache = Arc::new(Mutex::new(MediaCache::open(
+            dir.path().to_path_buf(),
+            None,
+            None,
+        )));
         let temp = cache
             .lock()
             .expect("the media cache lock is not poisoned")
@@ -10176,7 +10193,7 @@ mod media_tests {
         );
 
         let Event::MediaSaved { path, .. } =
-            keep_streamed(&cache, CHAT, 5, None, MediaKind::Video, &temp, &streamed)
+            keep_streamed(cache, CHAT, 5, None, MediaKind::Video, temp, streamed).await
         else {
             panic!("a stored stream answers with its file");
         };

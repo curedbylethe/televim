@@ -1064,3 +1064,25 @@ are in [`../AGENTS.md`](../AGENTS.md).
   persistent while a download runs and is cleared on finish, failure and cancel, and the
   rank table gains no row: the sentence sits at rank 8 beside the cached-window sentence,
   and `DESIGN.md` records it there if the sheet enumerates examples.
+- **Why the download commit is off the loop, and what stays:** the runtime is
+  current-thread (`app/src/runtime.rs`), so a blocking `std::fs` call in a task stalls
+  every key and every event. The streamed write was already on `spawn_blocking`; what was
+  left on the loop was the commit after it, `MediaCache::store_from_path` — the rename
+  into the blob, the stale-temp removal and the pointer-index rewrite. It now runs inside
+  `spawn_blocking` on a cloned `Arc<Mutex<MediaCache>>` and is awaited before the path is
+  handed to `Event::MediaSaved`, so the event still carries a stored file. The signature
+  and the per-phase locking of `store_from_path` did not change, and neither did any cache
+  format, blob name, pointer layout or capacity rule. A commit that panics counts as a
+  commit that stored nothing and reports the usual "nothing was saved" failure. `tokio::fs`
+  was not adopted: `spawn_blocking` is the shape this program already uses for the writer
+  and for history writes. Three synchronous operations stay on the loop on purpose.
+  (1) The `fs4::available_space` call in `media_sink` is one `statfs` per download. It is
+  the free-space gate, and it must refuse before the stream starts; inside the writer the
+  refusal would land after storage began. (2) The draft writes (`draft_store.rs`, reached
+  from `runtime.rs`) are small JSON payloads written on edit, not the media path.
+  (3) The session writes (`telegram-framework/src/session.rs`) are a small sealed file
+  written rarely. Each is bounded by a payload that does not grow with the media, so a
+  stall is bounded by that payload (not measured here) and does not scale with the size of a video. Moving them would add a
+  thread hop and an ordering question (a draft or session write racing the next one) for
+  no visible gain; they are accepted, not overlooked, and a measurement showing a stall
+  is the reason to revisit them.
