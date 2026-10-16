@@ -562,7 +562,11 @@ current after a reconnect — the feed's events and a send's
 numbered answer go through `remember_update` and `remember_sent`, and
 `FeedEnded`, `FeedRetrying` and every `Ready` call `feed_interrupted`. A snapshot
 is encoded on the loop thread and written by `spawn_blocking`, one write at a
-time, so an older snapshot can never land over a newer one; sign-out and a
+time, so an older snapshot can never land over a newer one, and coalesced within
+500 ms: the first write after idle starts at once, passes inside the window
+leave the cache marked, and the loop's tick brings the pass that writes the lot
+(`persist_history` takes `now`, so no timer is involved), while `finish_history`
+flushes on exit regardless of the window; sign-out and a
 `Ready` with no session call `forget_history`, which empties the cache and
 removes the file behind any write still going. `seed_opened` runs on every open
 — from `begin_latest`, and from `drive` alone while there is no client, so a

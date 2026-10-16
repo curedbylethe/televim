@@ -878,7 +878,20 @@ impl State {
     /// is the one place all of those have already been folded together. Read
     /// once a pass, compared in place, and only a change marks the cache, so a
     /// quiet pass costs a scan of the list and no write.
-    pub(crate) fn persist_history(&mut self, chats: &[Chat]) {
+    ///
+    /// **Writes are spaced.** A write starts at once after idle, and a pass
+    /// within [`HISTORY_CACHE_WRITE_INTERVAL`] of the last start leaves the
+    /// cache marked and returns, so a burst of changes is one write, taken
+    /// at the first pass past the window. `now` is passed in rather than read
+    /// so a test can step across the window; the loop's tick is what brings
+    /// that pass, so no timer is needed.
+    pub(crate) fn persist_history(&mut self, chats: &[Chat], now: Instant) {
+        self.write_history(chats, Some(now));
+    }
+
+    /// [`State::persist_history`], with `now` of `None` for a write that
+    /// ignores the spacing.
+    fn write_history(&mut self, chats: &[Chat], now: Option<Instant>) {
         if self.cached.messages.set_chats(chats) {
             self.cached.dirty = true;
         }
@@ -896,6 +909,11 @@ impl State {
         {
             return;
         }
+        if let (Some(now), Some(last)) = (now, self.cached.last_write)
+            && now.saturating_duration_since(last) < HISTORY_CACHE_WRITE_INTERVAL
+        {
+            return;
+        }
 
         self.cached.dirty = false;
         let account = self.cfg.as_ref().and_then(|cfg| cfg.phone.as_deref());
@@ -903,6 +921,7 @@ impl State {
             return;
         };
         self.cached.write = Some(tokio::task::spawn_blocking(move || file.write(&bytes)));
+        self.cached.last_write = now.or(self.cached.last_write);
     }
 
     /// Waits out the write in flight and writes what it held back, for the
@@ -914,7 +933,7 @@ impl State {
         if let Some(write) = self.cached.write.take() {
             let _ = write.await;
         }
-        self.persist_history(chats);
+        self.write_history(chats, None);
         if let Some(write) = self.cached.write.take() {
             let _ = write.await;
         }
@@ -1000,7 +1019,15 @@ struct CachedHistory {
     /// sign-out's removal waits behind it too — or the write would put back
     /// the file the sign-out had just removed.
     write: Option<tokio::task::JoinHandle<()>>,
+
+    /// When the last write was started, for [`HISTORY_CACHE_WRITE_INTERVAL`].
+    /// `None` until the first, which therefore starts at once.
+    last_write: Option<Instant>,
 }
+
+/// The least time between two starts of a history write. Changes inside it
+/// wait, marked, for the first pass past it.
+const HISTORY_CACHE_WRITE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The two answers Telegram has given this sign-in, and nothing else.
 ///
@@ -5760,10 +5787,19 @@ mod tests {
         );
     }
 
+    /// An instant a full window past every one this has handed out, so a pass
+    /// that is not about the spacing is never held back by it.
+    fn after_the_window() -> Instant {
+        static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        static STEPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let step = STEPS.fetch_add(1, Ordering::Relaxed) + 1;
+        *BASE.get_or_init(Instant::now) + HISTORY_CACHE_WRITE_INTERVAL * 2 * step
+    }
+
     /// What the loop does after the pass, waited out: the write is taken off
     /// the loop's thread, so a test has to wait for it to land.
     async fn persist(state: &mut State) {
-        state.persist_history(&[]);
+        state.persist_history(&[], after_the_window());
         if let Some(write) = state.cached.write.take() {
             write.await.expect("the history write ran");
         }
@@ -5932,6 +5968,75 @@ mod tests {
         );
     }
 
+    /// Whether a write is running, or ran, since the last look; takes it.
+    async fn write_started(state: &mut State) -> bool {
+        match state.cached.write.take() {
+            Some(write) => {
+                write.await.expect("the history write ran");
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Passes inside the window leave the cache marked and start nothing;
+    /// the first one past it writes the lot. Ten changes, two writes.
+    #[tokio::test]
+    async fn ten_rapid_updates_are_coalesced_into_at_most_two_writes() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+        let t0 = Instant::now();
+        let mut writes = 0;
+        for id in 1..=10_u32 {
+            page_arrives(
+                &mut app,
+                &mut state,
+                FetchDirection::Latest,
+                None,
+                messages(CHAT, 1..=i64::from(id)),
+            );
+            state.persist_history(&[], t0 + Duration::from_millis(10) * id);
+            writes += usize::from(write_started(&mut state).await);
+        }
+        assert_eq!(writes, 1, "the first is at once, the other nine wait");
+        assert!(state.cached.dirty, "and the rest is still owed");
+
+        state.persist_history(
+            &[],
+            t0 + HISTORY_CACHE_WRITE_INTERVAL + Duration::from_millis(10),
+        );
+        writes += usize::from(write_started(&mut state).await);
+        assert_eq!(writes, 2);
+        assert!(!state.cached.dirty);
+        assert_eq!(file_ids(&path), (1..=10).collect::<Vec<_>>());
+    }
+
+    /// A burst ends with the file equal to the cache, the exit flush
+    /// ignoring the window.
+    #[tokio::test]
+    async fn a_burst_leaves_the_file_equal_to_memory() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+        let t0 = Instant::now();
+        for id in 1..=10_u32 {
+            page_arrives(
+                &mut app,
+                &mut state,
+                FetchDirection::Latest,
+                None,
+                messages(CHAT, 1..=i64::from(id)),
+            );
+            state.persist_history(&[], t0 + Duration::from_millis(10) * id);
+        }
+        state.finish_history(&[]).await;
+        assert_eq!(file_ids(&path), cached_ids(&state));
+        assert_eq!(file_ids(&path), (1..=10).collect::<Vec<_>>());
+    }
+
     /// While a write is in flight no second one starts beside it, so an older
     /// snapshot can never land over a newer one; the newer is written once
     /// the first has finished.
@@ -5953,7 +6058,7 @@ mod tests {
             None,
             messages(CHAT, 1..=3),
         );
-        state.persist_history(&[]);
+        state.persist_history(&[], after_the_window());
         assert!(!path.exists(), "nothing started beside the write in flight");
         assert!(state.cached.dirty, "the snapshot is still owed");
 
@@ -5972,7 +6077,7 @@ mod tests {
 
     /// What the loop does after the pass with the list on screen, waited out.
     async fn persist_list(state: &mut State, app: &App) {
-        state.persist_history(app.chats());
+        state.persist_history(app.chats(), after_the_window());
         if let Some(write) = state.cached.write.take() {
             write.await.expect("the history write ran");
         }
@@ -6008,7 +6113,7 @@ mod tests {
         persist_list(&mut state, &app).await;
         assert_eq!(file_chats(&path), vec![(CHAT, None), (CHAT + 1, None)]);
 
-        state.persist_history(app.chats());
+        state.persist_history(app.chats(), after_the_window());
         assert!(
             !state.cached.dirty && state.cached.write.is_none(),
             "the same list on the next pass is no write"
@@ -6987,7 +7092,7 @@ mod tests {
         assert!(state.cached_history(CHAT).is_empty());
         assert!(state.cached.messages.chats().is_empty());
         assert!(!path.exists(), "and the file is gone");
-        state.persist_history(app.chats());
+        state.persist_history(app.chats(), after_the_window());
         assert!(!state.cached.dirty, "nothing owed to the file");
     }
 
