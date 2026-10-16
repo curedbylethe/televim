@@ -1048,3 +1048,19 @@ are in [`../AGENTS.md`](../AGENTS.md).
   should be excluded from backups by default until then. A partial seal or a second
   format was not invented: the cache is read on every open, and a second envelope nothing
   else in the program reads buys little over the one the session file already has.
+- **Why the status line carries no download percentage:** while a download runs the status
+  line reads `downloading media…` for the whole transfer, and the percentage — with its
+  byte-count fallback when the total is unknown — lives only on the message row, in the
+  tokens `rows.rs` draws beside the placeholder. The row token is the progress authority:
+  progress is the download's own decoration beside the placeholder, never the body, and the
+  row is where the reader's eye already is when the file they opened is the one moving. Rank
+  8 is a state sentence — it says that a transfer is under way, not how far along it is —
+  and a live counter in it would be a second rendering of a number the row already shows,
+  free to drift from it by a frame or a progress event. It yields to rank 7, a cursor
+  message's failure reason, as any written status does, so a failure the reader is looking
+  at is never hidden behind a transfer sentence. Mirroring the percentage into the status
+  line was rejected for exactly that duplication, and a second status field for it was
+  rejected as a new rank nothing asked for. The consequence is that the sentence is
+  persistent while a download runs and is cleared on finish, failure and cancel, and the
+  rank table gains no row: the sentence sits at rank 8 beside the cached-window sentence,
+  and `DESIGN.md` records it there if the sheet enumerates examples.
