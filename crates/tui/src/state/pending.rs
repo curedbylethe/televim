@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use domain::message::MediaKind;
+
 use crate::app::{CHAT_SWITCH_DELAY, ChatChoice, Find, Jump};
 
 /// Half-typed keys and the requests a keystroke defers.
@@ -187,18 +189,18 @@ impl Pending {
 /// [`Pending`], because only the network pushes to it.
 #[derive(Debug, Default)]
 pub struct MediaQueue {
-    paths: Vec<PathBuf>,
+    paths: Vec<(PathBuf, MediaKind)>,
 }
 
 impl MediaQueue {
     /// Queues a saved file for the viewer.
-    pub fn push(&mut self, path: PathBuf) {
-        self.paths.push(path);
+    pub fn push(&mut self, path: PathBuf, kind: MediaKind) {
+        self.paths.push((path, kind));
     }
 
     /// Takes every queued path, oldest first, leaving the queue empty.
     #[must_use]
-    pub fn take_pending(&mut self) -> Vec<PathBuf> {
+    pub fn take_pending(&mut self) -> Vec<(PathBuf, MediaKind)> {
         std::mem::take(&mut self.paths)
     }
 }
@@ -207,6 +209,8 @@ impl MediaQueue {
 mod tests {
     use std::path::PathBuf;
 
+    use domain::message::MediaKind;
+
     use super::MediaQueue;
 
     /// Paths come back in the order they were saved, once: a drain takes them
@@ -214,12 +218,15 @@ mod tests {
     #[test]
     fn a_drain_takes_every_queued_path_in_order_and_then_nothing() {
         let mut queue = MediaQueue::default();
-        queue.push(PathBuf::from("a.jpg"));
-        queue.push(PathBuf::from("b.mp4"));
+        queue.push(PathBuf::from("a.jpg"), MediaKind::Photo);
+        queue.push(PathBuf::from("b.mp4"), MediaKind::Video);
 
         assert_eq!(
             queue.take_pending(),
-            vec![PathBuf::from("a.jpg"), PathBuf::from("b.mp4")]
+            vec![
+                (PathBuf::from("a.jpg"), MediaKind::Photo),
+                (PathBuf::from("b.mp4"), MediaKind::Video)
+            ]
         );
         assert!(queue.take_pending().is_empty());
     }
