@@ -32,7 +32,9 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::draft_store::{DraftFile, drafts_acceptable};
-use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, history_acceptable};
+use crate::history_store::{
+    HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, history_acceptable,
+};
 use crate::media_cache::MediaCache;
 use crate::net;
 use tui::app::App;
@@ -614,6 +616,25 @@ fn drain_while_suspended(
     }
 }
 
+/// Reads the history file at launch: the cache it may seed and the tag it was
+/// saved under, both empty when the file may not seed this launch.
+fn load_history(file: &HistoryFile, configured: Option<&str>) -> (HistoryCache, HistoryTag) {
+    let loaded = file.load();
+    let tag = HistoryTag {
+        account_id: loaded.account_id,
+        phone: loaded.account.clone(),
+    };
+    if history_acceptable(loaded.account.as_deref(), loaded.account_id, configured) {
+        // An accepted tag waits for the check at `Ready`.
+        return (loaded.cache, tag);
+    }
+    if loaded.cache != HistoryCache::default() {
+        tracing::warn!("history stored for another account was discarded");
+    }
+    file.clear();
+    (HistoryCache::default(), HistoryTag::default())
+}
+
 /// Draw, wait for something to happen, apply it, then ask for what comes next.
 ///
 /// `initial_chat` is the `--chat` id, recorded below and selected from the
@@ -672,22 +693,14 @@ async fn event_loop(
     let mut last_synced: Option<SyncedDrafts> = None;
 
     // The history file beside it, loaded once at launch too, under the
-    // stricter rule: only a file saved under exactly this account seeds the
-    // cache, because a false accept paints a stranger's conversation and a
-    // false clear costs one fetch. A file that may not seed is removed rather
+    // stricter rule: a file tagged with a user id seeds the cache and is
+    // checked against the signed-in account at `Ready`; a phone-only file
+    // must equal the configured phone. A false accept paints a stranger's
+    // conversation and a false clear costs one fetch. A file that may not seed is removed rather
     // than left for the first write to overwrite, so another account's
     // messages do not wait on disk for a page that may never come.
     let history_file = HistoryFile::new(history_path.to_path_buf());
-    let loaded_history = history_file.load();
-    let history = if history_acceptable(loaded_history.account.as_deref(), cfg.phone.as_deref()) {
-        loaded_history.cache
-    } else {
-        if loaded_history.cache != HistoryCache::default() {
-            tracing::warn!("history stored for another account was discarded");
-        }
-        history_file.clear();
-        HistoryCache::default()
-    };
+    let (history, history_tag) = load_history(&history_file, cfg.phone.as_deref());
 
     // What the configuration carries goes into the sign-in flow as pre-fills,
     // and nothing more: the flow is where a phone number, a code and a password
@@ -720,6 +733,7 @@ async fn event_loop(
     // that is leaving.
     network.set_history_file(history_file);
     network.restore_history(history);
+    network.restore_history_tag(history_tag);
     // Before the first frame: a warm cache draws the reader's list and their
     // conversation now, under `connecting…`, rather than after the round trip
     // the bring-up below is about to start.

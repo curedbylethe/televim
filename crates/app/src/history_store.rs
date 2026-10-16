@@ -99,11 +99,39 @@ pub(crate) struct HistoryFile {
     path: PathBuf,
 }
 
-/// What [`HistoryFile::load`] found: the stored account tag and the cache.
+/// What [`HistoryFile::load`] found: the stored account tags and the cache.
+///
+/// `account_id` is the signed-in user id the file was written under, and
+/// `account` the configured phone of files written before that tag existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedHistory {
     pub account: Option<String>,
+    pub account_id: Option<i64>,
     pub cache: HistoryCache,
+}
+
+/// The account a history file is tagged with, as the loop holds it.
+///
+/// An id is the tag; the phone is the legacy tag of files written before the
+/// id was known, read but written only while no id is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HistoryTag {
+    pub account_id: Option<i64>,
+    pub phone: Option<String>,
+}
+
+impl HistoryTag {
+    /// Whether the cache this tag names may stay once `Ready` names the
+    /// signed-in account: an id must equal the live id; a legacy phone must
+    /// equal the live phone, and passes when the live one is unknown, as does
+    /// an untagged file. Absence is never a mismatch.
+    pub(crate) fn holds_for(&self, user_id: i64, phone: Option<&str>) -> bool {
+        match (self.account_id, self.phone.as_deref(), phone) {
+            (Some(id), _, _) => id == user_id,
+            (None, Some(stored), Some(live)) => stored == live,
+            _ => true,
+        }
+    }
 }
 
 impl LoadedHistory {
@@ -112,6 +140,7 @@ impl LoadedHistory {
     fn empty() -> Self {
         Self {
             account: None,
+            account_id: None,
             cache: HistoryCache::default(),
         }
     }
@@ -625,7 +654,7 @@ pub(crate) enum PageKind {
 }
 
 /// The file payload:
-/// `{ "account": <phone|null>, "peers": { "<peer_id>": [<row>, …] },
+/// `{ "account": <phone|null>, "account_id": <user id|null>, "peers": { "<peer_id>": [<row>, …] },
 /// "chats": [<chat>, …] }`.
 ///
 /// `chats` is left out while empty, and a file without it — one written
@@ -634,6 +663,8 @@ pub(crate) enum PageKind {
 struct Payload {
     #[serde(default)]
     account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_id: Option<i64>,
     #[serde(default)]
     peers: BTreeMap<i64, Vec<CachedMessage>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -842,6 +873,7 @@ impl HistoryFile {
                 cache.chats.truncate(HISTORY_CACHE_CHATS);
                 LoadedHistory {
                     account: payload.account,
+                    account_id: payload.account_id,
                     cache,
                 }
             }
@@ -852,7 +884,7 @@ impl HistoryFile {
         }
     }
 
-    /// Stores `cache` under `account`, atomically: [`HistoryFile::encode`]
+    /// Stores `cache` under the phone `account`, atomically: [`HistoryFile::encode`]
     /// then [`HistoryFile::write`], on one thread.
     ///
     /// The loop does not call this — it encodes where the cache lives and
@@ -860,20 +892,27 @@ impl HistoryFile {
     /// shape do.
     #[cfg(test)]
     pub(crate) fn save(&self, cache: &HistoryCache, account: Option<&str>) {
-        if let Some(bytes) = Self::encode(cache, account) {
+        if let Some(bytes) = Self::encode(
+            cache,
+            &HistoryTag {
+                account_id: None,
+                phone: account.map(str::to_owned),
+            },
+        ) {
             self.write(&bytes);
         }
     }
 
-    /// The bytes that store `cache` under `account`, or `None` when it could
+    /// The bytes that store `cache` under `tag`, or `None` when it could
     /// not be serialised, which is warned about.
     ///
     /// Apart from [`HistoryFile::write`] so the two can run on different
     /// threads: the snapshot is taken where the cache is, and only the disk
     /// work is handed off.
-    pub(crate) fn encode(cache: &HistoryCache, account: Option<&str>) -> Option<Vec<u8>> {
+    pub(crate) fn encode(cache: &HistoryCache, tag: &HistoryTag) -> Option<Vec<u8>> {
         let payload = Payload {
-            account: account.map(str::to_owned),
+            account: tag.phone.clone(),
+            account_id: tag.account_id,
             peers: cache.peers.clone(),
             chats: cache.chats.clone(),
         };
@@ -915,11 +954,18 @@ impl HistoryFile {
 /// The drafts rule turned around. For drafts a false clear loses the reader's
 /// words, so only a named mismatch discards. Here a false clear costs one
 /// fetch the wire was going to make anyway, while a false accept paints
-/// another account's conversation under a peer id that happens to be reused —
-/// so the file is accepted only when it was saved under exactly the account
-/// configured now, unnamed matching unnamed.
-pub(crate) fn history_acceptable(stored: Option<&str>, configured: Option<&str>) -> bool {
-    stored == configured
+/// another account's conversation under a peer id that happens to be reused.
+///
+/// A file tagged with a user id is accepted: who is signed in is not reliably
+/// knowable before `Ready`, which checks it ([`HistoryTag::holds_for`]). A
+/// file with only the legacy phone tag is accepted only when it equals the
+/// configured phone, unnamed matching unnamed.
+pub(crate) fn history_acceptable(
+    stored_phone: Option<&str>,
+    stored_id: Option<i64>,
+    configured: Option<&str>,
+) -> bool {
+    stored_id.is_some() || stored_phone == configured
 }
 
 /// Writes `bytes` so that the target only ever appears as a whole file.
@@ -1059,7 +1105,8 @@ mod tests {
         let mut cache = HistoryCache::default();
         cache.put(PEER, &[with_id, message(2, PEER, "bare")]);
 
-        let bytes = HistoryFile::encode(&cache, None).expect("the cache serialises");
+        let bytes =
+            HistoryFile::encode(&cache, &HistoryTag::default()).expect("the cache serialises");
         let payload: serde_json::Value =
             serde_json::from_slice(&bytes).expect("the encoded payload is JSON");
         let rows = &payload["peers"]["7"];
@@ -1153,21 +1200,89 @@ mod tests {
     }
 
     #[test]
-    fn the_account_rule_accepts_only_the_same_account() {
-        assert!(history_acceptable(Some("+1555"), Some("+1555")), "same");
-        assert!(history_acceptable(None, None), "unnamed matches unnamed");
+    fn a_legacy_phone_tag_still_accepts_only_the_configured_phone() {
         assert!(
-            !history_acceptable(Some("+15550000001"), Some("+15550000002")),
+            history_acceptable(Some("+1555"), None, Some("+1555")),
+            "same"
+        );
+        assert!(
+            history_acceptable(None, None, None),
+            "unnamed matches unnamed"
+        );
+        assert!(
+            !history_acceptable(Some("+15550000001"), None, Some("+15550000002")),
             "a named mismatch is someone else's conversations"
         );
         assert!(
-            !history_acceptable(None, Some("+1555")),
+            !history_acceptable(None, None, Some("+1555")),
             "an untagged file may be anyone's: a false clear costs a fetch"
         );
         assert!(
-            !history_acceptable(Some("+1555"), None),
+            !history_acceptable(Some("+1555"), None, None),
             "a tagged file under an unnamed launch may be someone else's"
         );
+    }
+
+    #[test]
+    fn an_account_id_is_accepted_at_launch_whatever_the_configured_phone() {
+        assert!(history_acceptable(None, Some(7), Some("+1555")));
+        assert!(history_acceptable(None, Some(7), None));
+    }
+
+    #[test]
+    fn the_post_ready_rule_compares_the_id_then_the_legacy_phone() {
+        let id = |id| HistoryTag {
+            account_id: Some(id),
+            phone: None,
+        };
+        let phone = |phone: &str| HistoryTag {
+            account_id: None,
+            phone: Some(phone.to_owned()),
+        };
+        assert!(id(7).holds_for(7, Some("+1")), "the phone plays no part");
+        assert!(!id(7).holds_for(8, None));
+        assert!(phone("+1").holds_for(7, Some("+1")));
+        assert!(!phone("+1").holds_for(7, Some("+2")));
+        assert!(phone("+1").holds_for(7, None), "unknown is not a mismatch");
+        assert!(HistoryTag::default().holds_for(7, Some("+2")));
+    }
+
+    #[test]
+    fn a_payload_round_trips_the_signed_in_account_id() {
+        let (_dir, file) = scratch("history.json");
+        let bytes = HistoryFile::encode(
+            &HistoryCache::default(),
+            &HistoryTag {
+                account_id: Some(42),
+                phone: None,
+            },
+        )
+        .expect("the cache serialises");
+        file.write(&bytes);
+
+        let loaded = file.load();
+        assert_eq!(loaded.account_id, Some(42));
+        assert_eq!(loaded.account, None);
+    }
+
+    #[test]
+    fn a_mismatched_account_id_does_not_seed_the_cache() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "someone else's")]);
+        let tag = HistoryTag {
+            account_id: Some(1),
+            phone: None,
+        };
+        file.write(&HistoryFile::encode(&cache, &tag).expect("the cache serialises"));
+
+        let loaded = file.load();
+        let live = HistoryTag {
+            account_id: loaded.account_id,
+            phone: loaded.account,
+        };
+        assert!(live.holds_for(1, None));
+        assert!(!live.holds_for(2, None), "another account's cache goes");
     }
 
     #[test]
@@ -1179,7 +1294,11 @@ mod tests {
         file.save(&cache, Some("+10000000001"));
 
         let loaded = file.load();
-        let seeded = if history_acceptable(loaded.account.as_deref(), Some("+19999999999")) {
+        let seeded = if history_acceptable(
+            loaded.account.as_deref(),
+            loaded.account_id,
+            Some("+19999999999"),
+        ) {
             loaded.cache
         } else {
             HistoryCache::default()
@@ -1387,7 +1506,11 @@ mod tests {
         .expect("the hand-written file");
 
         let loaded = file.load();
-        assert!(history_acceptable(loaded.account.as_deref(), Some("+1555")));
+        assert!(history_acceptable(
+            loaded.account.as_deref(),
+            loaded.account_id,
+            Some("+1555")
+        ));
 
         let read = loaded.cache.get(PEER);
         assert_eq!(ids(&read), vec![4, 5]);
@@ -2024,6 +2147,7 @@ mod tests {
             .collect();
         let payload = Payload {
             account: None,
+            account_id: None,
             peers,
             chats: Vec::new(),
         };
@@ -2049,6 +2173,7 @@ mod tests {
             .collect();
         let payload = Payload {
             account: None,
+            account_id: None,
             peers: BTreeMap::from([(PEER, rows)]),
             chats: Vec::new(),
         };
@@ -2115,6 +2240,7 @@ mod tests {
             .collect();
         let payload = Payload {
             account: None,
+            account_id: None,
             peers,
             chats: Vec::new(),
         };
