@@ -37,6 +37,7 @@ use crate::history_store::{
 };
 use crate::media_cache::MediaCache;
 use crate::net;
+use domain::message::MediaKind;
 use tui::app::App;
 use tui::state::ui::{GraphicsMode, StickerMode};
 
@@ -485,7 +486,7 @@ impl Viewer for TuiViewer<'_> {
 /// waits its turn rather than stacking a second viewer over the first.
 #[derive(Default)]
 struct Viewers {
-    queued: VecDeque<PathBuf>,
+    queued: VecDeque<(PathBuf, MediaKind)>,
     open: Option<PathBuf>,
     gate: ReaderGate,
     /// The media cache, so a queued path is held against eviction and a clear
@@ -517,11 +518,11 @@ impl Viewers {
         self.open.is_some()
     }
 
-    fn queue(&mut self, paths: Vec<PathBuf>) {
-        for path in &paths {
+    fn queue(&mut self, media: Vec<(PathBuf, MediaKind)>) {
+        for (path, _) in &media {
             self.hold(path);
         }
-        self.queued.extend(paths);
+        self.queued.extend(media);
     }
 
     /// Opens the next queued path, unless a viewer already holds the terminal.
@@ -538,7 +539,7 @@ impl Viewers {
         if self.busy() {
             return Ok(());
         }
-        let Some(path) = self.queued.pop_front() else {
+        let Some((path, _kind)) = self.queued.pop_front() else {
             return Ok(());
         };
         app.set_status(format!("Opening {}…", path.display()));
@@ -1761,7 +1762,7 @@ mod tests {
         let mut app = App::new();
         let mut viewers = Viewers::default();
         let mut viewer = FakeViewer::default();
-        viewers.queue(vec![path]);
+        viewers.queue(vec![(path, MediaKind::Photo)]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)
@@ -1804,7 +1805,7 @@ mod tests {
             ..Viewers::default()
         };
         let mut viewer = FakeViewer::default();
-        viewers.queue(vec![path.clone()]);
+        viewers.queue(vec![(path.clone(), MediaKind::Photo)]);
         viewers
             .start_next(&mut viewer, &mut app, &tx)
             .expect("the start goes through");
@@ -1835,7 +1836,7 @@ mod tests {
             fail_spawn: true,
             ..FakeViewer::default()
         };
-        viewers.queue(vec![path]);
+        viewers.queue(vec![(path, MediaKind::Photo)]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)
@@ -1862,7 +1863,10 @@ mod tests {
             fail_suspend: true,
             ..FakeViewer::default()
         };
-        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+        viewers.queue(vec![(
+            PathBuf::from("/tmp/televim-1-2-3.jpg"),
+            MediaKind::Photo,
+        )]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)
@@ -1886,7 +1890,10 @@ mod tests {
         app.conversation.vim.set_cursor(3);
         let mut viewers = Viewers::default();
         let mut viewer = FakeViewer::default();
-        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+        viewers.queue(vec![(
+            PathBuf::from("/tmp/televim-1-2-3.jpg"),
+            MediaKind::Photo,
+        )]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)
@@ -1927,8 +1934,8 @@ mod tests {
         let mut viewers = Viewers::default();
         let mut viewer = FakeViewer::default();
         viewers.queue(vec![
-            PathBuf::from("/tmp/a.jpg"),
-            PathBuf::from("/tmp/b.jpg"),
+            (PathBuf::from("/tmp/a.jpg"), MediaKind::Photo),
+            (PathBuf::from("/tmp/b.jpg"), MediaKind::Photo),
         ]);
 
         viewers
@@ -1980,7 +1987,10 @@ mod tests {
         let mut viewer = FakeViewer::default();
         let mut held = VecDeque::new();
         assert!(gate.is_open(), "the reader starts open");
-        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+        viewers.queue(vec![(
+            PathBuf::from("/tmp/televim-1-2-3.jpg"),
+            MediaKind::Photo,
+        )]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)
@@ -2052,7 +2062,10 @@ mod tests {
             early_return: true,
             ..FakeViewer::default()
         };
-        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+        viewers.queue(vec![(
+            PathBuf::from("/tmp/televim-1-2-3.jpg"),
+            MediaKind::Photo,
+        )]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)
@@ -2082,7 +2095,10 @@ mod tests {
         let mut app = App::new();
         let mut viewers = Viewers::default();
         let mut viewer = FakeViewer::default();
-        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+        viewers.queue(vec![(
+            PathBuf::from("/tmp/televim-1-2-3.jpg"),
+            MediaKind::Photo,
+        )]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)
@@ -2128,7 +2144,10 @@ mod tests {
             fail_spawn: true,
             ..FakeViewer::default()
         };
-        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+        viewers.queue(vec![(
+            PathBuf::from("/tmp/televim-1-2-3.jpg"),
+            MediaKind::Photo,
+        )]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)
@@ -2154,7 +2173,10 @@ mod tests {
         let mut viewers = Viewers::default();
         let gate = viewers.gate.clone();
         let mut viewer = FakeViewer::default();
-        viewers.queue(vec![PathBuf::from("/tmp/televim-1-2-3.jpg")]);
+        viewers.queue(vec![(
+            PathBuf::from("/tmp/televim-1-2-3.jpg"),
+            MediaKind::Photo,
+        )]);
 
         viewers
             .start_next(&mut viewer, &mut app, &tx)

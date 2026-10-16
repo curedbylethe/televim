@@ -510,6 +510,9 @@ pub enum Event {
 
         /// The temp file the media was written to, whole.
         path: PathBuf,
+
+        /// What the media is, so the loop can pick its viewer.
+        kind: MediaKind,
     },
 
     /// A media download that ran off the loop has not written a file, worded
@@ -1020,7 +1023,7 @@ impl State {
 
     /// Takes every saved media path, oldest first, for the loop to hand to the
     /// viewer. Leaves the queue empty.
-    pub fn take_media(&mut self) -> Vec<PathBuf> {
+    pub fn take_media(&mut self) -> Vec<(PathBuf, MediaKind)> {
         self.media.take_pending()
     }
 
@@ -3245,7 +3248,7 @@ async fn save_media(
     // already be cached.
     cache_embedded_thumbnail(client, &job.cache, chat_id, message_id).await;
 
-    if let Some(event) = cached_media(&job.cache, chat_id, message_id, job.media_id) {
+    if let Some(event) = cached_media(&job.cache, chat_id, message_id, job.media_id, job.kind) {
         return event;
     }
 
@@ -3387,6 +3390,7 @@ fn cached_media(
     chat_id: i64,
     message_id: i64,
     media_id: Option<i64>,
+    kind: MediaKind,
 ) -> Option<Event> {
     let path = {
         let mut cache = cache.lock().expect("the media cache lock is not poisoned");
@@ -3398,6 +3402,7 @@ fn cached_media(
         chat_id,
         message_id,
         path,
+        kind,
     })
 }
 
@@ -3440,6 +3445,7 @@ async fn keep_streamed(
             chat_id,
             message_id,
             path,
+            kind,
         },
         None => Event::MediaFailed {
             chat_id,
@@ -3467,6 +3473,7 @@ fn keep_download(
             chat_id,
             message_id,
             path,
+            kind,
         },
         None => Event::MediaFailed {
             chat_id,
@@ -3526,11 +3533,12 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
             chat_id,
             message_id,
             path,
+            kind,
         } => {
             app.conversation.downloads.forget(chat_id, message_id);
             tracing::debug!(chat_id, message_id, path = %path.display(), "media saved");
             app.flash(format!("media saved to {}", path.display()));
-            state.media.push(path);
+            state.media.push(path, kind);
         }
         Event::MediaFailed {
             chat_id,
@@ -11056,7 +11064,7 @@ mod media_tests {
         let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
 
         assert!(
-            cached_media(&cache, CHAT, 5, None).is_none(),
+            cached_media(&cache, CHAT, 5, None, MediaKind::Video).is_none(),
             "nothing cached yet"
         );
 
@@ -11071,7 +11079,7 @@ mod media_tests {
             path: again,
             message_id,
             ..
-        }) = cached_media(&cache, CHAT, 5, None)
+        }) = cached_media(&cache, CHAT, 5, None, MediaKind::Video)
         else {
             panic!("the cached message is served from disk");
         };
@@ -11118,10 +11126,13 @@ mod media_tests {
             }),
         );
         assert!(
-            cached_media(&cache, CHAT, 6, None).is_none(),
+            cached_media(&cache, CHAT, 6, None, MediaKind::Video).is_none(),
             "the edited file goes"
         );
-        assert!(cached_media(&cache, CHAT, 5, None).is_some(), "others stay");
+        assert!(
+            cached_media(&cache, CHAT, 5, None, MediaKind::Video).is_some(),
+            "others stay"
+        );
     }
 
     /// A deletion drops the cached file whichever way it arrives, the feed's or
@@ -11145,9 +11156,9 @@ mod media_tests {
                 message_ids: vec![5],
             }),
         );
-        assert!(cached_media(&cache, CHAT, 5, None).is_none());
+        assert!(cached_media(&cache, CHAT, 5, None, MediaKind::Video).is_none());
         assert!(
-            cached_media(&cache, CHAT + 1, 5, None).is_none(),
+            cached_media(&cache, CHAT + 1, 5, None, MediaKind::Video).is_none(),
             "the same id in another chat goes too"
         );
 
@@ -11161,7 +11172,7 @@ mod media_tests {
             },
         );
         assert!(
-            cached_media(&cache, CHAT, 7, None).is_none(),
+            cached_media(&cache, CHAT, 7, None, MediaKind::Video).is_none(),
             "the reader's own delete too"
         );
     }
@@ -11183,7 +11194,8 @@ mod media_tests {
             path: forwarded,
             chat_id,
             message_id,
-        }) = cached_media(&cache, CHAT + 1, 9, Some(77))
+            ..
+        }) = cached_media(&cache, CHAT + 1, 9, Some(77), MediaKind::Video)
         else {
             panic!("the forwarded copy is served from disk");
         };
@@ -11237,7 +11249,14 @@ mod media_tests {
             path: served,
             chat_id,
             message_id,
-        }) = cached_media(&cache, CHAT + 1, restored.id, restored.media_id)
+            ..
+        }) = cached_media(
+            &cache,
+            CHAT + 1,
+            restored.id,
+            restored.media_id,
+            MediaKind::Video,
+        )
         else {
             panic!("the forwarded copy is served from the cache, not the wire");
         };
@@ -11255,12 +11274,12 @@ mod media_tests {
         keep_download(&cache, CHAT, 5, None, MediaKind::Video, b"clip");
 
         assert!(
-            cached_media(&cache, CHAT + 1, 9, None).is_none(),
+            cached_media(&cache, CHAT + 1, 9, None, MediaKind::Video).is_none(),
             "no id and another chat is a miss"
         );
-        assert!(cached_media(&cache, CHAT, 5, None).is_some());
+        assert!(cached_media(&cache, CHAT, 5, None, MediaKind::Video).is_some());
         assert!(
-            cached_media(&cache, CHAT, 5, Some(77)).is_some(),
+            cached_media(&cache, CHAT, 5, Some(77), MediaKind::Video).is_some(),
             "an id that is not stored falls back to the message's own key"
         );
     }
@@ -11341,7 +11360,7 @@ mod media_tests {
         assert!(matches!(event, Event::MediaCancelled { .. }));
         assert!(!temp.exists(), "the cancelled download's temp file is gone");
         assert!(
-            cached_media(&cache, CHAT, 5, None).is_none(),
+            cached_media(&cache, CHAT, 5, None, MediaKind::Video).is_none(),
             "and nothing was stored"
         );
     }
@@ -11518,6 +11537,7 @@ mod media_tests {
                 chat_id: CHAT,
                 message_id: 9,
                 path: PathBuf::from("televim-1-7-9.mp4"),
+                kind: MediaKind::Video,
             },
         );
         assert!(
@@ -11527,7 +11547,7 @@ mod media_tests {
         );
         assert_eq!(
             state.media.take_pending(),
-            vec![PathBuf::from("televim-1-7-9.mp4")]
+            vec![(PathBuf::from("televim-1-7-9.mp4"), MediaKind::Video)]
         );
 
         apply(
