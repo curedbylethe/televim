@@ -343,10 +343,15 @@ Real, and named so they are not mistaken for oversights:
   `PeerStatus` for them. There is no expiry, and Telegram's `expires` deadline on
   `Online` is ignored, so a peer who goes offline without an update still reads
   `online` until one arrives. Revisit on a reader complaint, not before.
-- **The chat list shows no presence.** This is deliberate: presence reaches the
-  screen through the open conversation's title and one contact-card row only. Chat-list
-  rows are not decorated, and `widgets/chat_list.rs` has no test module to put a row
-  assertion in.
+- **The chat list shows no presence, by decision.** Presence reaches the screen
+  through the open conversation's title and one contact-card row only. Rows stay
+  undecorated for three reasons: `UiState::peer_presence` holds only peers who
+  signalled this session, so a fresh launch would mark a few rows and leave the
+  rest blank; `DESIGN.md` specifies no presence on the list, so showing it is a
+  design change first; and the row already carries title, unread count and pin.
+  `a_presence_update_leaves_every_row_unchanged` in `widgets/chat_list.rs` pins
+  it. Reversing it is a design-first item (`DESIGN.md`, the OpenDesign sheet, a
+  specimen), then one `Span` in the row closure and its tests.
 - **The peer presence map is unbounded per session and unmeasured.** `UiState::peer_presence`
   gains one entry for each distinct peer that reports presence and is never evicted
   for the length of the session. It is not measured against the memory budget
