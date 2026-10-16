@@ -5342,9 +5342,9 @@ fn n_crosses_a_jump_boundary() {
         Some(Jump {
             peer_id: MOCK_CHAT,
             target_id: 19,
-            kind: JumpKind::Unread,
+            kind: JumpKind::Match,
         }),
-        "an unloaded match is a jump, the same path `gg` takes"
+        "an unloaded match is a jump of its own kind, on the same fetch path `gg` takes"
     );
 
     assert!(app.apply_jump(&page(&[19, 20, 21, 22, 23, 24, 25]), 19));
@@ -5374,6 +5374,98 @@ fn a_jump_in_flight_is_what_the_status_line_says() {
         "3 conversation(s)",
         "the line goes back to what it was saying once the jump is over"
     );
+}
+
+// ---- `n`/`N`, a match the window does not hold ----------------------
+
+/// An `n`/`N` match the loaded window does not hold carries its own sentence in
+/// flight rather than borrowing the first unread one: the row the panel draws
+/// says `Jumping to the match…`, which is what the key was asked to do.
+///
+/// A search is up during the walk and a search outranks a jump on the status
+/// line (`DESIGN.md`, the ranking), so the in-flight sentence is read through
+/// [`App::jump_label`] — the one the panel draws — rather than `status_text`.
+#[test]
+fn an_unloaded_match_jump_says_it_is_a_match_jump() {
+    let mut app = with_unread_out_of_reach(2);
+    run_search_line(&mut app, "text");
+    assert!(app.apply_searched(MOCK_CHAT, "text", vec![3, 7, 19, 25], 4));
+
+    // Forward: 3 -> 7 are loaded; 19 is not, so `n` asks for it.
+    app.handle_key(press(KeyCode::Char('n')));
+    app.handle_key(press(KeyCode::Char('n')));
+
+    assert_eq!(
+        app.pending_jump().map(|jump| jump.kind),
+        Some(JumpKind::Match),
+        "an unloaded match is its own kind, not the first unread's"
+    );
+    assert_eq!(
+        app.jump_label(),
+        JUMP_MATCH_LABEL,
+        "and the panel says where it is going"
+    );
+
+    // Backward is the same kind: `N` from the oldest match wraps to the newest,
+    // 25, which is also outside the window.
+    let mut app = with_unread_out_of_reach(2);
+    run_search_line(&mut app, "text");
+    assert!(app.apply_searched(MOCK_CHAT, "text", vec![3, 7, 19, 25], 4));
+    app.handle_key(press(KeyCode::Char('N')));
+
+    assert_eq!(
+        app.pending_jump().map(|jump| jump.kind),
+        Some(JumpKind::Match),
+        "`N` takes the same kind the other way"
+    );
+    assert_eq!(app.jump_label(), JUMP_MATCH_LABEL);
+}
+
+/// A match the window holds is a cursor move: no fetch, and nothing in flight,
+/// so the walk stays the search's own and no jump sentence is said.
+#[test]
+fn a_loaded_match_moves_without_a_fetch_or_a_jump_label() {
+    let mut app = App::mock();
+    // `the` starts a word in six of the sample messages, all of them loaded.
+    run_search_line(&mut app, "the");
+    let first = reading(&app);
+
+    app.handle_key(press(KeyCode::Char('n')));
+
+    assert_ne!(reading(&app), first, "the walk moved the cursor");
+    assert_eq!(app.pending_jump(), None, "a loaded match costs no fetch");
+    assert!(
+        !app.status_text().contains("Jumping"),
+        "and no jump sentence is said: {:?}",
+        app.status_text()
+    );
+}
+
+/// The unavailable case follows the reply/search rule, not `gg`'s silence: a
+/// match jump whose fetch came back empty writes the refusal. The active search
+/// outranks it on the line (rank 5 over the flash's 8), so the flash is what is
+/// pinned — the reader keeps reading the search until it clears.
+#[test]
+fn a_match_jump_that_came_back_empty_writes_the_refusal() {
+    let mut app = with_unread_out_of_reach(2);
+    run_search_line(&mut app, "text");
+    assert!(app.apply_searched(MOCK_CHAT, "text", vec![3, 7, 19, 25], 4));
+    app.handle_key(press(KeyCode::Char('n')));
+    app.handle_key(press(KeyCode::Char('n')));
+    assert_eq!(
+        app.pending_jump().map(|jump| jump.kind),
+        Some(JumpKind::Match)
+    );
+
+    let before = app.conversation.conversation.window.len();
+    assert!(!app.apply_jump(&[], 19));
+
+    assert_eq!(
+        app.ui.status, JUMP_UNAVAILABLE,
+        "the match jump flashes rather than keeping `gg`'s silence"
+    );
+    assert_eq!(app.pending_jump(), None, "and the key is free again");
+    assert_eq!(app.conversation.conversation.window.len(), before);
 }
 
 // ---- `gd`, the message a reply quotes ------------------------------

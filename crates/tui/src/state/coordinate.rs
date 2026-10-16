@@ -458,9 +458,9 @@ pub(crate) fn go_to(
 
 /// Walks the search's matches in the direction given.
 ///
-/// A match that is loaded is a cursor move; one that is not is a [`Jump`],
-/// which is the same path `gg` takes. Wrapping announces itself, because a
-/// walk that looped silently reads as a stuck key.
+/// A match that is loaded is a cursor move; one that is not is a [`Jump`] of its
+/// own kind, on the same fetch path `gg` takes. Wrapping announces itself,
+/// because a walk that looped silently reads as a stuck key.
 pub(crate) fn walk_search(
     pending: &mut Pending,
     conversation: &mut ConversationState,
@@ -500,7 +500,7 @@ pub(crate) fn walk_search(
         pending.set_jump(Some(Jump {
             peer_id: conversation.conversation.window.chat_id,
             target_id: id,
-            kind: JumpKind::Unread,
+            kind: JumpKind::Match,
         }));
     }
 
