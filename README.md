@@ -343,7 +343,13 @@ Working today:
   internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
   registers are deliberately not shared, because their formats differ.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
-  `:settings`, `:signin` and `:retry`.
+  `:settings`, `:signin`, `:retry`, `:export-session <path>` and `:import-session <path>`.
+  The last two copy the stored session between backends: `:export-session` writes
+  it, sealed under the current key, to a file; `:import-session` reads such a file
+  into the configured store (the file at `session_path`, or the OS keyring when none
+  is set) after a `y/n`, refuses a session that belongs to another account than the
+  one signed in, and reconnects with it. The auth key travels inside the snapshot;
+  the live session and the source are left as they were. The path is required.
   `:retry` re-runs the bring-up — the client, the chat list, the feed — and is how
   a launch that exhausted its three chat-list attempts is cleared without a
   restart; while a bring-up is already in flight it says so and does nothing.
