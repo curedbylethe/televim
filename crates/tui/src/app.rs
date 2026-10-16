@@ -27,6 +27,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 
 use crate::bidi::BidiMode;
+use crate::date;
 use crate::emoji;
 use crate::event::{AppAction, key_to_action};
 use crate::rows::{self, Reserved, RowKind, RowSpan, Slice};
@@ -242,16 +243,23 @@ pub const JUMP_FORWARD_LABEL: &str = "Jumping forward…";
 /// What is said while a jump to a message a global search found is on its way.
 pub const JUMP_SEARCH_LABEL: &str = "Jumping…";
 
-/// What is said while a day or date jump is on its way.
+/// What is said while a day or date jump is on its way, when the day cannot be
+/// named.
 ///
-/// **Interim**, and unreachable until a producer exists (STAGE-04): a day jump
-/// carries the day in its target and the final sentence names it —
-/// `Jumping to Sep 26, 2026…`, `Jumping to Yesterday…` — in the day-separator
-/// vocabulary `DESIGN.md` records (§ *Day-boundary and date jumps*, the label
-/// table). That sentence cannot be said here, because a `&'static str` cannot
-/// hold the day; STAGE-04 weaves the name in at the status path. This is the
-/// closest honest stand-in until then, so `label()` stays exhaustive.
+/// The final sentence names the day — `Jumping to Sep 26, 2026…`, `Jumping to
+/// Yesterday…` — in the day-separator vocabulary `DESIGN.md` records
+/// (§ *Day-boundary and date jumps*, the label table), and [`App::jump_label`]
+/// builds it. This is what is left when the day cannot be named: no clock has
+/// been recorded (`App::now` is zero), so [`crate::date::day_label`] has no
+/// "today" to be relative to and returns nothing. The jump is still on its way,
+/// so the label says so without the day rather than inventing one.
 pub const JUMP_DAY_LABEL: &str = "Jumping to a day…";
+
+/// `:date` with a missing or malformed argument.
+///
+/// The argument follows it after a colon and a space, as a reader who mistyped
+/// a date needs to see what was not a date.
+pub const NOT_A_DATE: &str = "not a date";
 
 /// `gd` on a message that quotes nothing.
 pub const NOT_A_REPLY: &str = "Not a reply: gd jumps to the message a reply quotes.";
@@ -2388,6 +2396,7 @@ impl App {
         self.pending.set_g(false);
         self.pending.set_find(None);
         self.pending.set_jump(None);
+        self.pending.set_count(None);
         self.conversation.vim.clear_prefix();
         self.profile.profile_vim.clear_prefix();
         self.profile.profile_pending_w = false;
@@ -2930,14 +2939,27 @@ impl App {
 
     /// What a jump in flight is called, on the panel and on the status line.
     ///
-    /// `JUMP_LABEL` names a destination — the first unread message — and a jump
-    /// to a reply is not going there, so each kind has its own sentence and both
-    /// places that say one read this.
+    /// [`JUMP_LABEL`] names a destination — the first unread message — and a
+    /// jump to a reply is not going there, so each kind has its own sentence and
+    /// both places that say one read this. A day or date jump's sentence names
+    /// the day, which a `&'static str` cannot hold, so it is built here: the
+    /// day is the target instant read through [`crate::date::day_label`], which
+    /// is the day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`).
+    /// With no clock recorded there is no "today" to be relative to, so the
+    /// day cannot be named and the label falls back on [`JUMP_DAY_LABEL`].
     #[must_use]
-    pub fn jump_label(&self) -> &'static str {
-        self.pending
-            .pending_jump
-            .map_or(JUMP_LABEL, |jump| jump.kind.label())
+    pub fn jump_label(&self) -> String {
+        let Some(jump) = self.pending.pending_jump else {
+            return JUMP_LABEL.to_owned();
+        };
+
+        if jump.kind == JumpKind::Date
+            && let Some(day) = date::day_label(jump.target_id, self.now(), self.offset())
+        {
+            return format!("Jumping to {day}…");
+        }
+
+        jump.kind.label().to_owned()
     }
 
     /// The rows the conversation panel shows, given a `budget` of room for
@@ -3084,7 +3106,7 @@ impl App {
             return self.conversation.search.label();
         }
         if self.pending.pending_jump.is_some() {
-            return self.jump_label().to_owned();
+            return self.jump_label();
         }
         if let Some(message) = self.cursor_message()
             && let Some(reason) = self.conversation.conversation.failure(message.id)

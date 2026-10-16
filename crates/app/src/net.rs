@@ -4958,6 +4958,73 @@ mod tests {
         );
     }
 
+    /// A date jump's landing is the first message **at or after** the day, not
+    /// the page's first row: the page straddles the day, and only a day-precise
+    /// landing puts the cursor on the message the jump asked for rather than on
+    /// an older one the fetch happened to include.
+    #[test]
+    fn a_date_jump_lands_on_the_first_message_of_the_day() {
+        fn on(id: i64, (year, month, day): (i64, u32, u32)) -> Message {
+            Message {
+                id,
+                chat_id: CHAT,
+                text: Cow::Borrowed("text"),
+                timestamp: tui::date::days_from_civil(tui::date::CivilDate { year, month, day })
+                    * 86_400,
+                status: MessageStatus::Received,
+                is_outgoing: false,
+                reply_to: None,
+                media: None,
+                media_id: None,
+            }
+        }
+
+        let mut app = app_with_a_conversation(CHAT, 8);
+        let day = tui::date::days_from_civil(tui::date::CivilDate {
+            year: 2024,
+            month: 10,
+            day: 26,
+        });
+        let jump = Jump {
+            peer_id: CHAT,
+            target_id: tui::date::day_start(day, 0),
+            kind: JumpKind::Date,
+        };
+        app.set_jump(Some(jump));
+
+        // A page that straddles the day: two messages the day before it and two
+        // on the day after it.
+        let page = vec![
+            on(1, (2024, 10, 25)),
+            on(2, (2024, 10, 25)),
+            on(3, (2024, 10, 27)),
+            on(4, (2024, 10, 27)),
+        ];
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(page),
+            },
+        );
+
+        assert_eq!(
+            app.conversation
+                .conversation
+                .window
+                .get(app.conversation.vim.cursor())
+                .map(|message| message.id),
+            Some(3),
+            "the first message on or after the target day, not the page's first row"
+        );
+    }
+
     /// However a date jump ended, it is over: a failure must not leave the key
     /// wedged, exactly as for a message jump.
     #[test]

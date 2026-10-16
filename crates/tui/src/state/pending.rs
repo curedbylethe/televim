@@ -42,6 +42,16 @@ pub struct Pending {
     /// itself is not recorded, because it has not been typed yet.
     pub(crate) pending_find: Option<Find>,
 
+    /// A numeric prefix typed before `gg` or `G`.
+    ///
+    /// Vim's `[N]`: the digits accumulate until a key reads them, and only
+    /// `gg` and `G` do — `[N]gg` walks up N day boundaries and `[N]G` the
+    /// mirror, while a bare `gg`/`G` keeps its old meaning. A leading `0` is
+    /// not a count (Vim's `0` is a motion), and a key that is neither digit
+    /// nor a motion clears the count, so a number typed by mistake cannot
+    /// silently change the next jump.
+    pub(crate) pending_count: Option<u32>,
+
     /// The `--chat` id to open once the first chat list arrives.
     ///
     /// Set at launch from the CLI and taken when the list lands, so it applies
@@ -59,6 +69,7 @@ impl Pending {
             pending_chat: None,
             pending_g: false,
             pending_find: None,
+            pending_count: None,
             pending_initial_chat: None,
         }
     }
@@ -138,6 +149,34 @@ impl Pending {
     /// Records the `f`/`t`/`F`/`T` waiting for its character, or clears it.
     pub(crate) fn set_find(&mut self, find: Option<Find>) {
         self.pending_find = find;
+    }
+
+    /// The count a numeric prefix has accumulated, if any.
+    pub(crate) fn count(&self) -> Option<u32> {
+        self.pending_count
+    }
+
+    /// Appends a digit to the count, saturating rather than wrapping.
+    ///
+    /// A count that overflows is far past any conversation's days, so clamping
+    /// to the largest one is the same answer as counting it exactly.
+    pub(crate) fn push_count(&mut self, digit: u32) {
+        let next = self
+            .pending_count
+            .unwrap_or(0)
+            .saturating_mul(10)
+            .saturating_add(digit);
+        self.pending_count = Some(next);
+    }
+
+    /// Takes the count a motion just read, leaving none behind.
+    pub(crate) fn take_count(&mut self) -> Option<u32> {
+        self.pending_count.take()
+    }
+
+    /// Clears a half-typed count, so the next jump is a bare one.
+    pub(crate) fn set_count(&mut self, count: Option<u32>) {
+        self.pending_count = count;
     }
 }
 

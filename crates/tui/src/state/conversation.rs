@@ -794,6 +794,25 @@ impl ConversationState {
             .unwrap_or_else(|| window.len().saturating_sub(1))
     }
 
+    /// Where a day jump to `unix_date` lands on the page the date fetch returned.
+    ///
+    /// The first message at or after the day the anchor names, which is the
+    /// message a `:date` or `[N]gg` jump asked for; the page is centred on it,
+    /// so it is the message the fetch was for. A page that came back entirely
+    /// older than the day — a shifted answer — falls back on its newest message,
+    /// which is still the nearest the fetch came to the day, rather than on the
+    /// identifier comparison [`Self::landing_index`] would make between a
+    /// message id and a unix second.
+    pub(crate) fn landing_day(&self, unix_date: i64, offset: i64) -> usize {
+        let window = &self.conversation.window;
+        let target = crate::date::day_key(unix_date, offset);
+
+        window
+            .iter()
+            .position(|message| crate::date::day_key(message.timestamp, offset) >= target)
+            .unwrap_or_else(|| window.len().saturating_sub(1))
+    }
+
     /// The window positions the selection covers, oldest first.
     ///
     /// **Positions**, and not the span between the two identifiers, because the

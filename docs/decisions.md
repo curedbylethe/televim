@@ -654,6 +654,31 @@ are in [`../AGENTS.md`](../AGENTS.md).
   it. The day itself — its first instant in the reader's zone — is the caller's to
   compute, because only the caller has the clock, and the four message-anchored
   fetches leave `offset_date` zero, so none of them changes.
+- **Why a day jump counts boundaries, and where its landing and its parser live:** a
+  numeric prefix turns `gg`/`G` into day walks; bare `gg`/`G` keep their old meanings,
+  because a reader who wants the top of the window should not have to know about days.
+  `[N]gg` steps N *boundaries* up, where a boundary is a change of day in the window (the
+  day separator nearest above the cursor is the first), and `[N]G` is the mirror; a day
+  with no messages is not a boundary and is crossed rather than landed on, so the count
+  is taken over the distinct days the window holds — what the reader sees — and not over
+  the calendar. Only past the oldest or newest loaded day does the walk fall back on one
+  calendar day at a time, because there is no separator left to count, and the day it
+  reaches then has to be fetched. Every day or date jump lands on the *first message of
+  the target day* — never on a separator row — so the landing is worked out from day
+  keys rather than from message identifiers: `apply_jump`'s day case reads the page with
+  `date::day_key` and lands on the first message at or after the day, because a date
+  anchor is a unix second and comparing a message id to it names nothing.
+  `:date <ISO>` is an exact day in the reader's current zone, and its parser lives in
+  `tui::date` (`parse_iso_date`) as a pure function so `tui` names no time crate: it
+  accepts `YYYY-MM-DD` only and refuses a month or day out of range, a leap day that is
+  not one, and anything else, which the command line reports as `not a date: <argument>`
+  and does not jump from. The day's first unix second — what the fetch and the jump
+  anchor carry — is `date::day_start`, the inverse of `date::day_key` under the reader's
+  offset, and the rank-6 label names that day in the day-separator vocabulary
+  (`Jumping to Sep 26, 2026…`), falling back on `Jumping to a day…` only when no clock
+  has been recorded and there is no "today" to be relative to. Day and date jumps record
+  their origin as window-replacing jumps do (Q-04), except a non-positive placeholder
+  origin, which has nothing for `Ctrl-o` to land on (G-10).
 - **Why a jump keeps the search:** the design engine's `landJump` sets
   `s.search = null` — its hits were rows of the old window — and `DESIGN.md`
   records that. The Rust does the opposite on purpose. `apply_jump` does not touch

@@ -4081,6 +4081,209 @@ fn the_ends_of_the_window_are_messages_and_not_separators() {
     );
 }
 
+// ---- day-boundary and date jumps (criterion 1) ----------------------
+
+/// `[N]gg` and `[N]G` walk N day boundaries and land on the first message of
+/// the day they reach, never on a separator row.
+#[test]
+fn a_count_prefix_walks_gg_and_g_across_day_boundaries() {
+    let mut app = across_three_days();
+
+    // `2gg` from the newest day: two boundaries up, to the oldest day.
+    app.handle_key(press(KeyCode::Char('2')));
+    go_to_top(&mut app);
+    assert_eq!(
+        reading(&app),
+        Some(101),
+        "the first message of the oldest day, not the top of the window"
+    );
+    assert_eq!(app.pending_jump(), None, "a loaded day costs no fetch");
+
+    // `1G` from there: one boundary back down, to the middle day.
+    app.handle_key(press(KeyCode::Char('1')));
+    app.handle_key(press(KeyCode::Char('G')));
+    assert_eq!(
+        reading(&app),
+        Some(104),
+        "the first message of the day below"
+    );
+    assert_eq!(app.pending_jump(), None);
+}
+
+/// A day the window does not hold is a [`JumpKind::Date`] whose anchor is the
+/// day's first unix second in the reader's zone, so the server can be asked for
+/// exactly that day.
+#[test]
+fn a_day_jump_past_the_window_asks_the_server_for_the_day() {
+    let mut app = across_three_days();
+    app.conversation.vim.set_cursor(0); // the oldest day, 2024-10-27
+
+    app.handle_key(press(KeyCode::Char('1')));
+    go_to_top(&mut app);
+
+    let day = crate::date::days_from_civil(crate::date::CivilDate {
+        year: 2024,
+        month: 10,
+        day: 26,
+    });
+    assert_eq!(
+        app.pending_jump(),
+        Some(Jump {
+            peer_id: MOCK_CHAT,
+            target_id: crate::date::day_start(day, 0),
+            kind: JumpKind::Date,
+        }),
+        "a day older than the window is fetched by its first instant"
+    );
+}
+
+/// A day with no messages is not a boundary, so the walk crosses it without
+/// stopping — the reader jumped a boundary, not a calendar day, and no fetch is
+/// spent on a lull.
+#[test]
+fn a_day_walk_crosses_an_empty_day_without_stopping() {
+    let mut app = App::mock();
+    app.conversation.conversation.window.replace(vec![
+        message_on(1, (2024, 10, 27)),
+        message_on(2, (2024, 10, 27)),
+        message_on(3, (2024, 10, 29)),
+        message_on(4, (2024, 10, 29)),
+    ]);
+    app.conversation.vim.set_total(4);
+    app.conversation.vim.set_cursor(3);
+
+    app.handle_key(press(KeyCode::Char('1')));
+    go_to_top(&mut app);
+
+    assert_eq!(
+        reading(&app),
+        Some(1),
+        "the 28th has no messages, so the day above is the 27th"
+    );
+    assert_eq!(app.pending_jump(), None, "and the window answered it");
+}
+
+/// `:date <ISO>` goes to the first message of the day, which the window holds
+/// here: a cursor move and nothing else.
+#[test]
+fn a_date_in_the_window_is_a_cursor_move() {
+    let mut app = across_three_days();
+
+    run_command_line(&mut app, "date 2024-10-28");
+
+    assert_eq!(reading(&app), Some(104), "the first message of that day");
+    assert_eq!(app.pending_jump(), None, "the day was loaded, so no page");
+}
+
+/// A date the window does not hold is a date jump, exactly as `[N]gg` is.
+#[test]
+fn a_date_before_the_window_is_fetched() {
+    let mut app = across_three_days();
+
+    run_command_line(&mut app, "date 2024-10-26");
+
+    let day = crate::date::days_from_civil(crate::date::CivilDate {
+        year: 2024,
+        month: 10,
+        day: 26,
+    });
+    assert_eq!(
+        app.pending_jump(),
+        Some(Jump {
+            peer_id: MOCK_CHAT,
+            target_id: crate::date::day_start(day, 0),
+            kind: JumpKind::Date,
+        })
+    );
+}
+
+/// A `:date` argument that is not a date is refused by name, and the reader is
+/// left where they were.
+#[test]
+fn a_bad_date_is_refused_by_name() {
+    let mut app = across_three_days();
+
+    for (argument, refusal) in [
+        ("date", "not a date: "),
+        ("date 2024-13-01", "not a date: 2024-13-01"),
+        ("date 2024-10-32", "not a date: 2024-10-32"),
+        ("date not-a-date", "not a date: not-a-date"),
+        ("date 26-10-2024", "not a date: 26-10-2024"),
+    ] {
+        run_command_line(&mut app, argument);
+        assert_eq!(app.status_text(), refusal, "for :{argument}");
+        assert_eq!(app.pending_jump(), None, "and nothing was fetched");
+        assert_eq!(reading(&app), Some(109), "and the reader stayed put");
+    }
+}
+
+/// The sentence names the day, in the day-separator vocabulary: a full date
+/// for a day past the week, `Today` for the reader's own day.
+#[test]
+fn a_date_jump_label_names_the_day() {
+    let mut app = across_three_days();
+    // A clock three weeks on, so 2024-10-26 is past the week and reads as a
+    // date rather than a weekday name.
+    let now = crate::date::days_from_civil(crate::date::CivilDate {
+        year: 2024,
+        month: 11,
+        day: 16,
+    }) * 86_400;
+    app.record_now(now, 0);
+
+    run_command_line(&mut app, "date 2024-10-26");
+    assert_eq!(app.status_text(), "Jumping to Oct 26, 2024…");
+
+    // Drop the jump in flight, or the next key is swallowed while it waits, and
+    // ask for the reader's own day, which the vocabulary calls `Today`.
+    app.handle_key(press(KeyCode::Esc));
+    run_command_line(&mut app, "date 2024-11-16");
+    assert_eq!(app.status_text(), "Jumping to Today…");
+}
+
+/// A day or date jump records where the reader was, so `Ctrl-o` after it
+/// returns — the rule a jumplist mark is for (Q-04).
+#[test]
+fn ctrl_o_returns_from_a_date_jump() {
+    let mut app = across_three_days();
+
+    run_command_line(&mut app, "date 2024-10-27");
+    assert_eq!(reading(&app), Some(101), "the first message of that day");
+
+    app.handle_key(press_ctrl('o'));
+
+    assert_eq!(reading(&app), Some(109), "back where they were");
+    assert_eq!(app.pending_jump(), None, "which needed no page");
+}
+
+/// A placeholder origin is not recorded, because there is nothing for `Ctrl-o`
+/// to land on (G-10): it must not make the key look like it has somewhere to go.
+#[test]
+fn a_day_jump_from_a_placeholder_records_nothing() {
+    let mut app = App::mock();
+    app.conversation.conversation.window.replace(vec![
+        Message {
+            id: -7,
+            timestamp: 1_730_000_000,
+            ..message(0, "text")
+        },
+        message_on(2, (2024, 10, 28)),
+        message_on(3, (2024, 10, 29)),
+    ]);
+    app.conversation.vim.set_total(3);
+    app.conversation.vim.set_cursor(0);
+
+    app.handle_key(press(KeyCode::Char('1')));
+    app.handle_key(press(KeyCode::Char('G')));
+
+    assert_eq!(reading(&app), Some(2), "landed on the next day");
+    assert_eq!(
+        app.conversation.jumplist.depth(MOCK_CHAT),
+        0,
+        "a non-positive origin is never a mark"
+    );
+}
+
 /// Grouping, separators and read state in one window, at the layer that
 /// draws them: three groups of three, a separator before each, and the newest
 /// group read.
@@ -4181,6 +4384,20 @@ fn message_of_day(id: i64) -> Message {
         reply_to: None,
         media: None,
         media_id: None,
+    }
+}
+
+/// A message of the sample conversation timestamped on a civil day at UTC.
+///
+/// The day is spelled `(year, month, day)` so a test can name a `:date`
+/// argument as the string a reader would type and still know which window row
+/// it is.
+fn message_on(id: i64, (year, month, day): (i64, u32, u32)) -> Message {
+    let midnight =
+        crate::date::days_from_civil(crate::date::CivilDate { year, month, day }) * 86_400;
+    Message {
+        timestamp: midnight + 3_600,
+        ..message(id, "text")
     }
 }
 

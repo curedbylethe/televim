@@ -36,12 +36,14 @@ use domain::vim::{CharMotion, Motion, VimState};
 
 use crate::app::{
     ACTION_QUEUE, ADD_ACCOUNT_REFUSAL, AccountState, Action, ChatChoice, ConfirmKind,
-    ContactProfile, Find, Focus, JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_REPLY,
-    NOT_YOURS_REFUSAL, PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED, PASS_OPEN_ALREADY,
-    PASS_STILL_CHECKING, PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode, PassPrompt, ProfileId,
-    PromptKind, Register, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow, TYPING_FOR,
+    ContactProfile, Find, Focus, JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_DATE,
+    NOT_A_REPLY, NOT_YOURS_REFUSAL, PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED,
+    PASS_OPEN_ALREADY, PASS_STILL_CHECKING, PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode,
+    PassPrompt, ProfileId, PromptKind, Register, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow,
+    TYPING_FOR,
 };
 use crate::card::CardRow;
+use crate::date;
 use crate::jumplist::Jumplist;
 use crate::line::LineVerdict;
 use crate::rows::{self, RowSpan};
@@ -569,7 +571,11 @@ pub(crate) fn apply_jump(
         .vim
         .set_total(conversation.conversation.window.len());
 
-    let landing = conversation.landing_index(target_id);
+    let landing = if kind == Some(JumpKind::Date) {
+        conversation.landing_day(target_id, ui.metrics.offset.get())
+    } else {
+        conversation.landing_index(target_id)
+    };
     conversation.vim.set_cursor(landing);
     conversation.settle_follow();
 
@@ -2154,6 +2160,153 @@ pub(crate) fn jump_to_reply(
     })
 }
 
+/// Takes the reader N day boundaries up (negative) or down (positive).
+///
+/// `[N]gg` and `[N]G`: the count is N boundaries, and a boundary is a change of
+/// day in the window — Vim's buffer has lines, this one has days. The day
+/// separator nearest above the cursor is the first, so `[N]gg` lands on the
+/// first message of the day N distinct days above where the cursor stands, and
+/// `[N]G` is the mirror. A day with no messages is not a boundary and is
+/// crossed without stopping, which is why the count is taken over the days the
+/// window actually holds rather than over the calendar: the separator model is
+/// what the reader is looking at.
+///
+/// Past the oldest or newest loaded day the walk continues one calendar day at
+/// a time, because there is no separator left to count; [`land_on_day`] then
+/// fetches the day the window no longer holds.
+pub(crate) fn jump_days(
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    ui: &mut UiState,
+    from: usize,
+    steps: i64,
+) {
+    let offset = ui.metrics.offset.get();
+    let Some(origin) = conversation
+        .conversation
+        .window
+        .get(from)
+        .and_then(|message| date::day_key(message.timestamp, offset))
+    else {
+        return;
+    };
+
+    let days = distinct_days(&conversation.conversation.window, offset);
+    let Some(here) = days.iter().position(|&day| day == origin) else {
+        return;
+    };
+    let last = days.len() - 1;
+
+    let target = i64::try_from(here)
+        .unwrap_or(i64::MAX)
+        .saturating_add(steps);
+    let target_day = usize::try_from(target)
+        .ok()
+        .and_then(|index| days.get(index).copied())
+        .unwrap_or_else(|| {
+            if target < 0 {
+                // Past the oldest loaded day, one calendar day at a time.
+                days[0].saturating_add(target)
+            } else {
+                // Past the newest, likewise.
+                let last = i64::try_from(last).unwrap_or(i64::MAX);
+                days[days.len() - 1].saturating_add(target.saturating_sub(last))
+            }
+        });
+
+    land_on_day(pending, conversation, ui, target_day);
+}
+
+/// Takes the reader to the first message of `target_day`, loaded or fetched.
+///
+/// A day the window holds is a cursor move; one it does not is a date jump the
+/// driver fetches, and the target rides [`Jump::target_id`] as the day's first
+/// unix second in the reader's zone. A day the window spans that has no message
+/// on it — a lull — is answered from the window, landing on the first message at
+/// or after it, so a jump never leaves a day behind for a round trip the window
+/// could already answer.
+///
+/// The origin is recorded before the cursor moves, as any window-replacing
+/// jump's is (Q-04); a non-positive placeholder origin is not, because there is
+/// nothing for `Ctrl-o` to land on (G-10).
+pub(crate) fn land_on_day(
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    ui: &mut UiState,
+    target_day: i64,
+) {
+    if !conversation.has_conversation() {
+        return;
+    }
+    let offset = ui.metrics.offset.get();
+
+    if let Some(origin) = conversation.cursor_message_id()
+        && origin > 0
+    {
+        conversation
+            .jumplist
+            .record(conversation.conversation.window.chat_id, origin);
+    }
+
+    let window = &conversation.conversation.window;
+    let first = window
+        .iter()
+        .find_map(|message| date::day_key(message.timestamp, offset));
+    let last = window
+        .iter()
+        .filter_map(|message| date::day_key(message.timestamp, offset))
+        .last();
+
+    // A day the window holds outright: land on its first message.
+    let mut landing = window
+        .iter()
+        .position(|message| date::day_key(message.timestamp, offset) == Some(target_day));
+
+    // Otherwise a day the window spans but has no message on: the first message
+    // at or after it is inside the window, so no fetch is needed either.
+    if landing.is_none()
+        && let (Some(first), Some(last)) = (first, last)
+        && (first..=last).contains(&target_day)
+    {
+        landing = window.iter().position(|message| {
+            date::day_key(message.timestamp, offset).is_some_and(|day| day >= target_day)
+        });
+    }
+
+    let chat_id = window.chat_id;
+    let target_unix = date::day_start(target_day, offset);
+
+    if let Some(index) = landing {
+        conversation.vim.set_cursor(index);
+        conversation.settle_follow();
+        return;
+    }
+
+    pending.set_jump(Some(Jump {
+        peer_id: chat_id,
+        target_id: target_unix,
+        kind: JumpKind::Date,
+    }));
+    conversation.settle_follow();
+}
+
+/// The distinct local days the window holds, in the order it holds them.
+///
+/// The window is in message order, so the days come out ascending and a
+/// repeated day is the one already at the end of the list.
+fn distinct_days(window: &ConversationWindow, offset: i64) -> Vec<i64> {
+    let mut days = Vec::new();
+    for message in window.iter() {
+        if let Some(day) = date::day_key(message.timestamp, offset)
+            && days.last() != Some(&day)
+        {
+            days.push(day);
+        }
+    }
+
+    days
+}
+
 /// Where the open conversation's unread messages start, as far as its
 /// numbering can say.
 ///
@@ -2819,11 +2972,45 @@ pub(crate) fn run_command(
             }
             false
         }
+        // `:date <ISO>`: the first message of an exact day, in the reader's
+        // zone. Strictly `YYYY-MM-DD`, so a missing or malformed argument is
+        // refused on the status line rather than guessed at.
+        _ if cmd == "date" || cmd.starts_with("date ") => {
+            run_date(
+                &mut *ui,
+                &mut *pending,
+                &mut *conversation,
+                cmd["date".len()..].trim(),
+            );
+            false
+        }
         _ => {
             ui.set_status(format!("unknown command: :{cmd}"));
             false
         }
     }
+}
+
+/// `:date <ISO>`: takes the reader to the first message of an exact day.
+///
+/// The argument is `YYYY-MM-DD`, read in the reader's current zone — the
+/// single-offset policy `known-gaps.md` records — and the day is landed on
+/// exactly as `[N]gg` lands on one: loaded is a cursor move, unloaded is a date
+/// jump. A missing or malformed argument is refused with a flash rather than
+/// jumped from: a date nobody typed correctly is not a date, and guessing at
+/// which piece was meant would be a jump the reader did not ask for.
+fn run_date(
+    ui: &mut UiState,
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    arg: &str,
+) {
+    let Some(day) = date::parse_iso_date(arg) else {
+        ui.flash(format!("{NOT_A_DATE}: {arg}"));
+        return;
+    };
+
+    land_on_day(pending, conversation, ui, date::days_from_civil(day));
 }
 
 /// Handles a key while the line has the focus.
@@ -3324,8 +3511,8 @@ fn handle_normal_ctrl(
 
 /// Normal-mode keys over the conversation.
 ///
-/// Structure: `Ctrl` chords for paging and jumps, then the vim motion table,
-/// then the plain-character match. Dispatch order and bindings are unchanged.
+/// Structure: `Ctrl` chords for paging and jumps, a numeric prefix, then the
+/// vim motion table, then the plain-character match.
 ///
 /// Returns true when a card was opened and its highlight still needs sizing.
 // The keys are one table, and the `Esc` that stops a download is one more arm of
@@ -3347,11 +3534,12 @@ pub(crate) fn handle_normal(
         return false;
     }
 
-    // Every plain character goes to the motion table before anything else:
-    // `gd` is a two-key sequence built on the same `g` as `gg`, and the
-    // table owns that prefix. A character that never reached it left the `g`
-    // armed for whatever key came next, so `g` then `d` then `G` deleted a
-    // message instead of going to the end.
+    // `Esc` drops a half-typed count, as it drops the other pending keys a
+    // terminal blur can strand; the media cancel below is its other job here.
+    if key.code == KeyCode::Esc {
+        pending.set_count(None);
+    }
+
     // `Esc` stops the download of the message under the cursor when one is in
     // flight. With none in flight it does nothing here, as it always has.
     if key.code == KeyCode::Esc
@@ -3368,6 +3556,17 @@ pub(crate) fn handle_normal(
         return false;
     }
 
+    // A numeric prefix: the digits accumulate until `gg` or `G` reads them,
+    // which are the only motions `[N]` applies to. A leading `0` is Vim's
+    // motion rather than a count, so it falls through when nothing is pending;
+    // once a count is open, `0` continues it (`10gg`).
+    if let KeyCode::Char(c @ '0'..='9') = key.code
+        && (c != '0' || pending.count().is_some())
+    {
+        pending.push_count(c.to_digit(10).expect("a digit key is a digit"));
+        return false;
+    }
+
     let KeyCode::Char(c) = key.code else {
         return false;
     };
@@ -3380,44 +3579,93 @@ pub(crate) fn handle_normal(
             .last()
             .is_some_and(|span| span.kind == rows::RowKind::Draft),
     );
+
+    // Every plain character goes to the motion table before the plain match
+    // below: `gd` is a two-key sequence built on the same `g` as `gg`, and the
+    // table owns that prefix. A character that never reached it left the `g`
+    // armed for whatever key came next, so `g` then `d` then `G` deleted a
+    // message instead of going to the end.
+    let at = conversation.vim.cursor();
     if let Some(motion) = conversation.vim.handle_char(c) {
         match motion {
-            // `gg` is where the unread messages start when there are
-            // any, and the top of what is loaded when there are not. A
-            // jump the window can answer is taken here; one it cannot is
-            // left for the caller to fetch. Either way the reader has
-            // asked for something, so whatever they asked for before is
-            // replaced by it.
+            // `gg` is where the unread messages start when there are any, and
+            // the top of what is loaded when there are not. A jump the window
+            // can answer is taken here; one it cannot is left for the caller to
+            // fetch. With a count it is a day jump instead: `[N]gg` walks N day
+            // boundaries up. The table has already moved the cursor to the top,
+            // so it is put back first: a jump that needs a page must leave the
+            // reader where they were until it lands.
             Motion::First => {
-                let jump = jump_to_unread(&mut *list, &mut *conversation, &mut *ui);
-                pending.set_jump(jump);
+                if let Some(steps) = pending.take_count() {
+                    conversation.vim.set_cursor(at);
+                    jump_days(
+                        &mut *pending,
+                        &mut *conversation,
+                        &mut *ui,
+                        at,
+                        -i64::from(steps),
+                    );
+                } else {
+                    let jump = jump_to_unread(&mut *list, &mut *conversation, &mut *ui);
+                    pending.set_jump(jump);
+                }
             }
 
-            // `G` is the reader overriding a jump with "take me to the
-            // end". The page on its way is for a place they no longer
-            // want to be, and it is dropped when it lands.
-            Motion::Last => pending.set_jump(None),
+            // `G` is the reader overriding a jump with "take me to the end".
+            // The page on its way is for a place they no longer want to be, and
+            // it is dropped when it lands. With a count it is the mirror day
+            // jump: `[N]G` walks N day boundaries down, and the cursor is put
+            // back the same way `[N]gg` puts it.
+            Motion::Last => {
+                if let Some(steps) = pending.take_count() {
+                    conversation.vim.set_cursor(at);
+                    jump_days(
+                        &mut *pending,
+                        &mut *conversation,
+                        &mut *ui,
+                        at,
+                        i64::from(steps),
+                    );
+                } else {
+                    pending.set_jump(None);
+                }
+            }
 
-            // `n` and `N` walk the search's matches. `VimState` reports
-            // the motion but cannot answer it, because a match is a
-            // place in a conversation and the list of them lives here.
-            Motion::NextMatch => walk_search(&mut *pending, &mut *conversation, &mut *ui, true),
-            Motion::PrevMatch => walk_search(&mut *pending, &mut *conversation, &mut *ui, false),
+            // `n` and `N` walk the search's matches. `VimState` reports the
+            // motion but cannot answer it, because a match is a place in a
+            // conversation and the list of them lives here. A count is not
+            // theirs, so it is dropped rather than carried into the walk.
+            Motion::NextMatch => {
+                pending.set_count(None);
+                walk_search(&mut *pending, &mut *conversation, &mut *ui, true);
+            }
+            Motion::PrevMatch => {
+                pending.set_count(None);
+                walk_search(&mut *pending, &mut *conversation, &mut *ui, false);
+            }
 
             // `gd`, likewise: which message this one quotes is a fact
             // about the conversation, and the window is what holds it.
             Motion::GotoReply => {
+                pending.set_count(None);
                 let jump = jump_to_reply(&mut *list, &mut *conversation, &mut *ui);
                 pending.set_jump(jump);
             }
 
             // `j` and `k` are the motions themselves, and the table has
-            // already applied them.
-            Motion::Down | Motion::Up => {}
+            // already applied them. A count is not theirs either.
+            Motion::Down | Motion::Up => pending.set_count(None),
         }
 
         conversation.settle_follow();
         return false;
+    }
+
+    // No motion means either the `g` that opens `gg`/`gd`, which keeps the
+    // count for the key after it, or a character that means nothing here, which
+    // drops it.
+    if c != 'g' {
+        pending.set_count(None);
     }
 
     match c {
