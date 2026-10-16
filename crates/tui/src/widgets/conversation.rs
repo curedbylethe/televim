@@ -2127,6 +2127,38 @@ mod tests {
     }
 
     #[test]
+    fn a_download_in_flight_and_a_failed_one_say_so_on_their_drawn_row() {
+        let mut app = showing(vec![attachment(1, 0, false, MediaKind::Photo)]);
+        let chat = mock_chat_id();
+
+        app.conversation.downloads.start(chat, 1);
+        app.conversation.downloads.progress(chat, 1, 42, Some(100));
+        let drawn = row(&screen(&app, 80, 24), FIRST);
+        assert!(
+            drawn.contains("[image… 42%]"),
+            "progress on the row: {drawn}"
+        );
+
+        app.conversation
+            .downloads
+            .progress(chat, 1, 2 * 1_048_576, None);
+        let drawn = row(&screen(&app, 80, 24), FIRST);
+        assert!(
+            drawn.contains("[image… 2.0 MB]"),
+            "bytes without a size: {drawn}"
+        );
+
+        app.conversation
+            .downloads
+            .fail(chat, 1, "no route".to_owned());
+        let drawn = row(&screen(&app, 80, 24), FIRST);
+        assert!(
+            drawn.contains("[failed: no route] (o retries)"),
+            "failure and retry hint on the row: {drawn}"
+        );
+    }
+
+    #[test]
     fn every_kind_draws_its_own_placeholder() {
         for (media, label) in [
             (MediaKind::Photo, "[image]"),
