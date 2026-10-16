@@ -43,16 +43,22 @@ pub const HISTORY_LIMIT: i32 = 100;
 
 /// Which messages a history request asks for.
 ///
-/// The three fields are `GetHistory`'s own: `offset_id` anchors the page,
-/// `add_offset` moves that anchor, and `limit` is how many to return. Their
-/// meaning only exists together, so they are held in one value rather than
-/// passed as three loose integers — see the module documentation.
+/// The fields are `GetHistory`'s own: `offset_id` anchors the page by message
+/// and `offset_date` anchors it by date, `add_offset` moves that anchor, and
+/// `limit` is how many to return. Their meaning only exists together, so they
+/// are held in one value rather than passed as loose integers — see the module
+/// documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryArgs {
     /// The message the page is counted from. Zero means "the most recent".
     pub offset_id: i32,
 
-    /// How far to move from `offset_id`. Negative counts *towards newer*.
+    /// The date the page is counted from: only messages sent before this unix
+    /// second are returned. Zero means "no date anchor". Set by
+    /// [`HistoryArgs::around_date`]; a page anchored by a message leaves it zero.
+    pub offset_date: i32,
+
+    /// How far to move from the anchor. Negative counts *towards newer*.
     pub add_offset: i32,
 
     /// How many messages to return.
@@ -64,6 +70,7 @@ impl HistoryArgs {
     pub fn latest(limit: usize) -> Self {
         Self {
             offset_id: 0,
+            offset_date: 0,
             add_offset: 0,
             limit: clamp_limit(limit),
         }
@@ -76,6 +83,7 @@ impl HistoryArgs {
     pub fn older(oldest_id: i32, limit: usize) -> Self {
         Self {
             offset_id: oldest_id,
+            offset_date: 0,
             add_offset: 0,
             limit: clamp_limit(limit),
         }
@@ -90,6 +98,7 @@ impl HistoryArgs {
 
         Self {
             offset_id: newest_id,
+            offset_date: 0,
             // Negated after clamping, so the shift and the page size are the
             // same number: the page ends where the anchor is not.
             add_offset: -limit,
@@ -106,6 +115,27 @@ impl HistoryArgs {
 
         Self {
             offset_id: target_id,
+            offset_date: 0,
+            add_offset: -(limit / 2),
+            limit,
+        }
+    }
+
+    /// A page of `limit` messages centred on the day that starts at `unix_date`.
+    ///
+    /// The date anchor Telegram takes is a unix second meaning "sent before
+    /// this", so this is [`HistoryArgs::around`] with a date in place of a
+    /// message id: the page counts back from the first message before the day
+    /// and shifts half a page towards newer, which is where the first message at
+    /// or after the day sits. A day or date jump the window cannot answer is
+    /// fetched with this; the day's own first instant — in the reader's zone —
+    /// is the caller's to compute, because only the caller has the clock.
+    pub fn around_date(unix_date: i32, limit: usize) -> Self {
+        let limit = clamp_limit(limit);
+
+        Self {
+            offset_id: 0,
+            offset_date: unix_date,
             add_offset: -(limit / 2),
             limit,
         }
@@ -186,7 +216,7 @@ impl Client {
         let request = tl::functions::messages::GetHistory {
             peer: peer.into(),
             offset_id: args.offset_id,
-            offset_date: 0,
+            offset_date: args.offset_date,
             add_offset: args.add_offset,
             limit: args.limit,
             max_id: 0,
@@ -236,6 +266,7 @@ impl Client {
         tracing::debug!(
             peer_id,
             offset_id = args.offset_id,
+            offset_date = args.offset_date,
             add_offset = args.add_offset,
             limit = args.limit,
             returned = messages.len(),
@@ -364,6 +395,41 @@ mod tests {
         let odd = HistoryArgs::around(4_096, 51);
         assert_eq!(odd.add_offset, -25);
         assert_eq!(odd.limit, 51);
+    }
+
+    /// A date anchor is a unix second rather than a message id, and it is the
+    /// only thing that fills `offset_date` — the four message-anchored pages
+    /// leave it zero, which is what keeps their behaviour unchanged.
+    #[test]
+    fn a_page_around_a_day_is_anchored_by_its_date() {
+        let args = HistoryArgs::around_date(1_700_000_000, 50);
+
+        assert_eq!(args.offset_id, 0, "a date anchor names no message");
+        assert_eq!(args.offset_date, 1_700_000_000, "the day is the anchor");
+        assert_eq!(args.add_offset, -25, "half the page sits on each side");
+        assert_eq!(args.limit, 50);
+
+        for around_message in [
+            HistoryArgs::latest(50),
+            HistoryArgs::older(4_096, 50),
+            HistoryArgs::newer(4_096, 50),
+            HistoryArgs::around(4_096, 50),
+        ] {
+            assert_eq!(
+                around_message.offset_date, 0,
+                "only a day or date jump is anchored by date"
+            );
+        }
+    }
+
+    /// The date is clamped into a page size the way the others are, so a caller
+    /// counting in whatever is convenient still gets a request Telegram accepts.
+    #[test]
+    fn a_day_page_shifts_by_its_clamped_size() {
+        let args = HistoryArgs::around_date(1_700_000_000, usize::MAX);
+
+        assert_eq!(args.limit, HISTORY_LIMIT);
+        assert_eq!(args.add_offset, -(HISTORY_LIMIT / 2));
     }
 
     #[test]

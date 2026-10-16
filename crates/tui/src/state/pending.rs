@@ -78,6 +78,12 @@ impl Pending {
     /// that landed does. The reader stays where they were either way; what this
     /// is for is that the key is free again — a jump nothing releases is a key
     /// that never works again.
+    ///
+    /// The argument is the jump's own anchor, so a day or date jump — whose
+    /// anchor is the target day's first unix second rather than a message id —
+    /// clears through the same compare. There is no second shape to match on:
+    /// what is compared is always the in-flight jump against its own
+    /// `target_id`, whichever reading of that field its kind gives it.
     pub(crate) fn clear_jump(&mut self, target_id: i64) -> bool {
         if self.pending_jump.map(|jump| jump.target_id) != Some(target_id) {
             return false;
