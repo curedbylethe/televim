@@ -36,12 +36,13 @@ Real, and named so they are not mistaken for oversights:
     Windows), the hold ends with the opener, not the viewer.
     A store that reserved before a `clear` and commits or fails after it leaves a held
     file alone too; the release removes it.
-  - *Two instances sharing one cache directory can lose each other's download.* The
-    crash sweep removes every `.download-*.tmp` by name and does not check the pid in
-    it, so one instance's open or `clear` can delete the other's in-flight temp, and that
-    download then fails at its rename. Two instances on one cache directory is not a
-    supported configuration; a liveness check would need platform code, so this is
-    documented and not built.
+  - *Two instances sharing one cache directory are still not supported.* The launch
+    sweep removes a `.download-<pid>-<n>.tmp` only when the pid in its name is this
+    process or its last write is over 24 hours old, so a second instance's in-flight
+    download survives the first one's open. A name that does not parse is kept. `clear`
+    still removes every download temp by name, as a deliberate wipe, so a sign-out in
+    one instance can still fail the other's download at its rename, and two live
+    instances on one cache directory remain an unsupported mode.
 - **The viewer hand-off no longer blocks the loop, and has four known limits.** `o`
   runs the platform opener on a thread of its own, so the loop keeps running while
   the viewer is open: network events are applied, and queued media opens one viewer

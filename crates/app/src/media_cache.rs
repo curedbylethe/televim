@@ -30,7 +30,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
 use domain::message::MediaKind;
@@ -56,6 +56,23 @@ const DOWNLOAD_TEMP_SUFFIX: &str = ".tmp";
 /// Whether a name is a streamed download's temp file.
 fn is_download_temp(name: &str) -> bool {
     name.starts_with(DOWNLOAD_TEMP_PREFIX) && name.ends_with(DOWNLOAD_TEMP_SUFFIX)
+}
+
+/// How old a download temp must be, by its last write, for `scan` to sweep it
+/// when another process owns it. A live download writes a chunk at a time and
+/// so keeps refreshing the mtime; only a dead or crashed writer leaves a temp
+/// untouched for a day.
+const DOWNLOAD_TEMP_MAX_AGE: Duration = Duration::from_hours(24);
+
+/// The pid in a `.download-<pid>-<n>.tmp` name, or `None` when the name does
+/// not have that shape.
+fn download_temp_pid(name: &str) -> Option<u32> {
+    let body = name
+        .strip_prefix(DOWNLOAD_TEMP_PREFIX)?
+        .strip_suffix(DOWNLOAD_TEMP_SUFFIX)?;
+    let (pid, counter) = body.split_once('-')?;
+    counter.parse::<u64>().ok()?;
+    pid.parse().ok()
 }
 
 /// Every extension a cached file can carry, one per [`suffix`]. A name with any
@@ -939,9 +956,23 @@ impl MediaCache {
                 // these any more, and the cache is disposable, so they go.
                 tracing::warn!(%error, "a legacy media file could not be removed");
             } else if is_download_temp(name) {
-                // A streamed download's temp file, left by a crash between the
-                // write and the commit. Nothing names it, so it goes.
-                if let Err(error) = fs::remove_file(entry.path()) {
+                // A streamed download's temp file. It is a crash's leftover only
+                // when this process wrote it or its last write is long past; a
+                // fresh temp of another pid belongs to a live instance.
+                let stale = meta
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .map(|age| age > DOWNLOAD_TEMP_MAX_AGE);
+                let sweep = match (download_temp_pid(name), stale) {
+                    (Some(pid), _) if pid == std::process::id() => true,
+                    (Some(_), Some(stale)) => stale,
+                    _ => {
+                        tracing::warn!("a media download temp of unknown ownership was left alone");
+                        false
+                    }
+                };
+                if sweep && let Err(error) = fs::remove_file(entry.path()) {
                     tracing::warn!(%error, "an interrupted media download's temp file could not be removed");
                 }
             }
@@ -1188,6 +1219,52 @@ mod tests {
     fn set_pointer_time(dir: &Path, chat_id: i64, message_id: i64, when: SystemTime) {
         let pointer = Key::Message(chat_id, message_id).pointer_name();
         set_mtime(&dir.join(pointer), when).expect("the mtime is set");
+    }
+
+    #[test]
+    fn a_fresh_temp_from_another_pid_survives_the_next_open() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let temp = dir
+            .path()
+            .join(format!(".download-{}-0.tmp", std::process::id() + 1));
+        fs::write(&temp, b"partial").expect("the temp is written");
+        drop(cache_in(dir.path(), None));
+        assert!(temp.exists());
+    }
+
+    #[test]
+    fn a_stale_temp_from_another_pid_is_swept() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let temp = dir
+            .path()
+            .join(format!(".download-{}-0.tmp", std::process::id() + 1));
+        fs::write(&temp, b"partial").expect("the temp is written");
+        let old = SystemTime::now() - DOWNLOAD_TEMP_MAX_AGE - Duration::from_hours(1);
+        set_mtime(&temp, old).expect("the mtime is set");
+        drop(cache_in(dir.path(), None));
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn our_own_temp_is_swept_even_when_fresh() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let temp = dir
+            .path()
+            .join(format!(".download-{}-0.tmp", std::process::id()));
+        fs::write(&temp, b"partial").expect("the temp is written");
+        drop(cache_in(dir.path(), None));
+        assert!(!temp.exists());
+    }
+
+    #[test]
+    fn an_unparsable_download_temp_is_left_alone() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let temp = dir.path().join(".download-x-0.tmp");
+        fs::write(&temp, b"partial").expect("the temp is written");
+        let old = SystemTime::now() - DOWNLOAD_TEMP_MAX_AGE - Duration::from_hours(1);
+        set_mtime(&temp, old).expect("the mtime is set");
+        drop(cache_in(dir.path(), None));
+        assert!(temp.exists());
     }
 
     #[test]
