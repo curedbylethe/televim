@@ -136,9 +136,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
   A silent fallback would reintroduce the exposure this order exists to close, so a
   reader with no key gets the `offline:` sentence instead: `the session file is
   encrypted and no key is available: set TELEVIM_SESSION_PASSPHRASE or make the OS
-  keyring available (…); the file was left as it was`. **There is no interactive
-  prompt**, deliberately deferred: it needs a new prompt kind, a widget and a
-  design pass, and none of that is in this change. The second `offline:` sentence
+  keyring available (…); the file was left as it was`. **A launch-time prompt
+  now follows that sentence**: see *Why the passphrase may now be typed at launch*
+  below, which supersedes the earlier decision not to have one. The second
+  `offline:` sentence
   is for a key that exists but is wrong: `could not read the stored session: could
   not decrypt the session: wrong passphrase or key, or the file was modified; check
   TELEVIM_SESSION_PASSPHRASE or the OS keyring; the file was left as it was`. A
@@ -156,6 +157,36 @@ are in [`../AGENTS.md`](../AGENTS.md).
   changed in the environment is read on the next `:retry`. The profile card names
   the result as `encrypted file <path>`, so a path is never read as a plaintext
   one.
+- **Why the passphrase may now be typed at launch** (supersedes the earlier "there
+  is no interactive prompt"): that was deferred for want of a prompt kind, a widget
+  and a design pass, and all three now exist. When bring-up finds the session file
+  without a key, or with one it refuses, it still ends at the `offline:` sentence
+  and then opens a question over the right column (the chat list stays on the left,
+  titled `· cached`); the bar below it is a concealed `Passphrase` line with no
+  Normal mode. `Esc` leaves the session locked and the sentence stands; `:unlock`
+  asks again. Four rules keep it from reopening what the file rules closed. **The
+  typed passphrase is memory only:** it is held in a `Zeroizing` string in the
+  network state, put ahead of the configured one for every later bring-up in that
+  process, replaced on the next try and dropped with the process; it is written to
+  no configuration, profile or file, and the `Action` that carries it prints as
+  `Secret(<redacted>)`. **A wrong one writes nothing:** the file is opened by the
+  same read-only bring-up as ever, so the refusal is the file's bytes unchanged and
+  the question again. **Environment and configuration still win when they work:**
+  the prompt is a fallback and a retry, never the default; a configured key that
+  fails also asks (the refusal then reads `that passphrase did not open the session
+  file; the file was left as it was`, the design's sentence). **The history cache
+  follows the typed key**, since it is sealed under the session's own.
+  `:passphrase` changes the passphrase of an open session file: a `y/n`, the new
+  passphrase twice (a typo would lock the file; a mismatch changes nothing and
+  restarts the entry), then the current file is opened with the current key, so a
+  key that does not open it writes nothing at all. The session is written first,
+  atomically, and the history cache is re-sealed in place after it: the cache can
+  be rebuilt from the wire and the session cannot. The OS keyring entry is left
+  alone, since the OS owns those bytes and other files may depend on it; a reader
+  whose old passphrase was set in `TELEVIM_SESSION_PASSPHRASE` or
+  `session_passphrase` is told to update it, and one on the keyring is asked at the
+  next launch. The command is refused while the session is locked and where no
+  session file is configured.
 - **Why a file that will not open is `Load` and is never discarded:** an envelope
   that does not open — the wrong passphrase, an unreachable keyring, a modified or
   truncated file — is `SessionError::Load`, which is fatal to bring-up and ends at
