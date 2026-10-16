@@ -44,6 +44,22 @@
 //! stretches a passphrase; [`KeyringKeyProvider`] keeps a random key in the OS
 //! credential store. Key material is wiped when dropped, its `Debug` is
 //! redacted, and nothing here logs it.
+//!
+//! # What is wiped, and what is not
+//!
+//! * [`FileKey`], the passphrase and the Argon2 output are `Zeroizing`, as are
+//!   the plaintext buffers [`open`] and [`seal`] hand around.
+//! * The cipher's intermediate keys (the per-nonce message-authentication and
+//!   message-encryption keys that AES-GCM-SIV derives) are wiped by
+//!   `aes-gcm-siv`'s `zeroize` feature.
+//! * The expanded AES round keys are wiped when the cipher drops, by the `aes`
+//!   crate's `zeroize` feature. `aes-gcm-siv` does not forward that feature, so
+//!   the workspace names `aes` to switch it on.
+//!
+//! Residual limit: wiping covers memory the values live in when they drop, not
+//! copies the compiler or CPU made on the way. A key moved by value, held in a
+//! register or spilled to the stack can leave a copy that no `Drop` reaches, and
+//! a process dump taken while a session is open still holds the live key.
 
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -676,6 +692,40 @@ mod tests {
         assert_eq!(format!("{key:?}"), "FileKey(<redacted>)");
         let provider = PassphraseProvider::new("hunter2");
         assert!(!format!("{provider:?}").contains("hunter2"));
+    }
+
+    /// Every formatting surface a log line could reach (`Debug`, pretty `Debug`,
+    /// and the `Display` of the error a failed open returns) is free of the key
+    /// bytes and the passphrase, in decimal, hex and as text.
+    #[test]
+    fn no_log_format_carries_key_material() {
+        let key = FileKey::from_bytes([0xAB; KEY_LEN]);
+        let provider = PassphraseProvider::new("hunter2-correct-horse");
+        let keyring = KeyringKeyProvider::new("televim-test", "never-created");
+        let sealed = seal(PLAINTEXT, &FixedProvider(0xCD)).expect("seal");
+        let err = open(&sealed, &FixedProvider(0xEF)).expect_err("wrong key");
+
+        let surfaces = [
+            format!("{key:?}"),
+            format!("{key:#?}"),
+            format!("{provider:?}"),
+            format!("{provider:#?}"),
+            format!("{keyring:?}"),
+            format!("{keyring:#?}"),
+            format!("{err}"),
+            format!("{err:?}"),
+        ];
+        for text in &surfaces {
+            let lower = text.to_lowercase();
+            for byte in [0xAB_u8, 0xCD, 0xEF] {
+                assert!(
+                    !lower.contains(&format!("{byte:02x}{byte:02x}{byte:02x}")),
+                    "{text}"
+                );
+                assert!(!text.contains(&format!("[{byte}, {byte}")), "{text}");
+            }
+            assert!(!text.contains("hunter2"), "{text}");
+        }
     }
 
     #[test]
