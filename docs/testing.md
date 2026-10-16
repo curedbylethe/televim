@@ -92,7 +92,10 @@ below.
   does not fail the page, sign-out emptying the cache, feed events and numbered
   sends owing a write, a seed on open and none over a window the wire answered
   empty, a warm start drawing the cached list and conversation before any `Ready`,
-  the `Ready` refreshing around it, `--chat` from the cache, a `Ready` with no
+  the `Ready` refreshing around it, a page requested under a feed that has since
+  ended (`a_page_from_a_dead_feed_cannot_mark_a_run_current_after_a_reconnect`)
+  changing nothing while a current-generation page still marks its run current,
+  `--chat` from the cache, a `Ready` with no
   session taking the cache down before the form, the draft surviving the `Ready`,
   a failed bring-up leaving the cache readable, and a cold cache launching as it
   always has. `tui`'s half — the seed accepted only for an empty open window, the
