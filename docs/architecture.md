@@ -537,12 +537,17 @@ rule in it is a pure function over `HistoryCache`: `merge` folds a fetched page 
 the module names no `proto` type), `apply_update` folds a feed event in, `arrive`
 adds an arrival or a numbered send, `feed_interrupted` forgets which runs are
 current, and the least recently touched peer is evicted past the bound. The file
-is read and written by `HistoryFile` alone: one atomic, `0600` JSON payload of
-`{ account, peers, chats }`, best effort on every failure.
+is read and written by `HistoryFile` alone: one atomic, `0600` payload of
+`{ account, peers, chats }` JSON, bounded by `HISTORY_CACHE_BYTES` (8 MiB of
+message text) as well as the row bounds, sealed in the session file's `TVIM1`
+envelope through the same key provider (a legacy plaintext file is read once and
+rewritten sealed), best effort on every failure.
 
 The data flows one way through three places. **`runtime.rs`** loads the file once
-at launch and keeps it only when `history_acceptable` says it was saved under
-exactly the configured phone — otherwise it is removed — then hands file and
+at launch and keeps it only when `history_acceptable` allows it — a file tagged
+with an account id is kept until `Ready` names the account and compares, a legacy
+phone-tagged one only if it equals the configured phone; otherwise it is removed —
+then hands file and
 cache to `net::State` and calls `net::open_from_cache` **before the first frame**:
 a warm cache installs the cached list, opens its head (or the `--chat` id when the
 cached list holds it) and seeds that conversation, so the screen is the reader's

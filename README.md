@@ -355,10 +355,12 @@ Working today:
   while a bring-up or rebuild is under way, red once the budget is spent.
 - **History cache:** media bytes are not in this file; they are in the media cache
   (see **Media** above). The newest 200 messages of each of the 32 most recently
-  touched private conversations, and the first 500 rows of the chat list, are kept
-  in `televim.history.json` beside the config — sealed JSON (the session file's envelope), `0600`, written
-  atomically and off the loop's thread, behind every page, feed event and list
-  change. A launch with a warm cache draws the cached chat list and the first
+  touched private conversations (at most 8 MiB of message text in all; the least
+  recently touched conversations go first), and the first 500 rows of the chat list,
+  are kept in `televim.history.json` beside the config — sealed with the session
+  file's envelope and key, `0600`, written atomically and off the loop's thread,
+  behind every page, feed event and list change, with writes coalesced within 500 ms
+  and flushed on exit. A launch with a warm cache draws the cached chat list and the first
   conversation (or the `--chat` one, when the cache holds it) **before any network
   round trip**, under `connecting…`; the `Ready` that follows refreshes the list
   around the reader, and the newest page replaces the cached rows, with
@@ -368,10 +370,11 @@ Working today:
   `offline:`, the cached list and the cached conversations stay readable and
   switchable, and the status line still says `offline:`. Text, the media *kind* and
   its Telegram media id are kept; media bytes, presence and unsent placeholders
-  never are. The file is used only by a launch configured with the same phone it was
-  written under, and is removed on sign-out and when a launch finds no session. It is
-  sealed with the session file's envelope and key; a plaintext file from an older
-  build is read once and rewritten sealed.
+  never are. The file is tagged with the signed-in account's id and checked once `Ready`
+  names the account; another account's file is discarded. A page fetched under a
+  feed that has since ended is dropped. The file is removed on sign-out and when a
+  launch finds no session. A plaintext file from an older build is read once and
+  rewritten sealed.
 
 Not built, and named here so nobody reads the roadmap below as current:
 

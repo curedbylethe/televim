@@ -1043,8 +1043,8 @@ are in [`../AGENTS.md`](../AGENTS.md).
   nonce(12) | ciphertext | tag(16)`, AES-256-GCM-SIV — and a key to open it with, and
   that key is the reader's passphrase or the OS keyring, both of which are already
   documented gaps for the session file itself (no prompt, no re-keying). The decision
-  here is only to **record** the gap and defer the sealing, beside the history file's own
-  plaintext entry in [`known-gaps.md`](./known-gaps.md), and to say the media directory
+  here is only to **record** the gap and defer the sealing, in [`known-gaps.md`](./known-gaps.md) (the history
+  file is already sealed), and to say the media directory
   should be excluded from backups by default until then. A partial seal or a second
   format was not invented: the cache is read on every open, and a second envelope nothing
   else in the program reads buys little over the one the session file already has.

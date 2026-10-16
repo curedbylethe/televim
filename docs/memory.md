@@ -427,7 +427,8 @@ These are **declared, not measured**. The typical figure is 6,400 rows of an
 ordinary message's size. The worst case is the byte bound filled: 8 MiB of text,
 which on disk is about 10 MB once JSON framing and ordinary escaping are counted.
 The chat list's worst case is 500 previews at Telegram's 4,096-character limit in
-three-byte UTF-8 — about 12 KB each. A write holds the
+three-byte UTF-8 — about 12 KB each. Sealing adds about 44 bytes
+of envelope and leaves the encoded copy the same JSON length. A write holds the
 cache, the clone the encoder takes of it and the serialised bytes at once, the
 clone dropped once the bytes exist; a launch holds the file's bytes and the
 parsed payload together while it reads. The feed's *seen* map
