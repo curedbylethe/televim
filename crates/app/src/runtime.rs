@@ -1968,8 +1968,8 @@ mod tests {
     /// during it are held and come out in order after the terminal is back, and
     /// Net is applied during it rather than held.
     #[cfg(unix)]
-    #[test]
-    fn keys_typed_during_a_viewer_are_held_and_net_still_applies() {
+    #[tokio::test]
+    async fn keys_typed_during_a_viewer_are_held_and_net_still_applies() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1997,6 +1997,26 @@ mod tests {
         tx.send(AppEvent::Net(net::Event::NoCredentials))
             .expect("the loop listens");
 
+        // The loop's own arms while the viewer is open: Net is applied on the
+        // spot, Input is parked in `held`, and `next_event` hands none of it back.
+        for _ in 0..3 {
+            match next_event(&viewers, &mut held, &mut rx)
+                .await
+                .expect("the events are already queued")
+            {
+                Some(input @ AppEvent::Input(_)) => held.push_back(input),
+                Some(AppEvent::Net(event)) => net::apply(&mut app, &mut network, event),
+                _ => panic!("only the key, the focus event and Net were sent"),
+            }
+        }
+        assert_eq!(
+            app.ui.status, "televim has no application credentials",
+            "Net is applied while the viewer is still open"
+        );
+        assert!(viewers.busy(), "the viewer is still open");
+        assert!(!gate.is_open(), "the reader stays gated until the return");
+        assert_eq!(held.len(), 2, "the key and the focus event are held");
+
         viewers
             .finish(&mut viewer, &mut app, &done)
             .expect("resume succeeds");
@@ -2006,17 +2026,15 @@ mod tests {
             gate.is_open(),
             "the reader reads again once the terminal is back"
         );
-        assert_eq!(
-            app.ui.status, "televim has no application credentials",
-            "Net is applied during the viewer"
-        );
+        assert_eq!(held.len(), 2, "nothing is left behind or dropped");
+        // Handed to the program in arrival order once the loop resumes.
         assert!(matches!(
-            held.pop_front(),
-            Some(AppEvent::Input(Event::Key(k))) if k.code == KeyCode::Char('j')
+            next_event(&viewers, &mut held, &mut rx).await,
+            Ok(Some(AppEvent::Input(Event::Key(k)))) if k.code == KeyCode::Char('j')
         ));
         assert!(matches!(
-            held.pop_front(),
-            Some(AppEvent::Input(Event::FocusLost))
+            next_event(&viewers, &mut held, &mut rx).await,
+            Ok(Some(AppEvent::Input(Event::FocusLost)))
         ));
         assert!(held.is_empty(), "nothing is left behind or dropped");
     }
