@@ -366,6 +366,11 @@ again. The harness and the shipped-binary measurement run with no credentials, s
 it; it is a declared allocation, not a measured one. A launch that uses the keyring
 key instead derives nothing.
 
+The 19 MiB is a *default*. `session_kdf_memory_kib` lets a reader raise it, to at
+most 524288 KiB (512 MiB), so the worst case of that one transient allocation is
+512 MiB, bounded at config load and held only while the key is derived. That
+ceiling is declared, not measured, and still outside every RSS figure above.
+
 What the change does move is binary size, which the regression budget measures.
 A stripped release build of the tree just before this change was 6,007,456 B and
 of the tree with it 6,057,248 B: **+49,792 B (+0.83%)** for `aes-gcm-siv`, `argon2`

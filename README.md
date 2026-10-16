@@ -118,7 +118,13 @@ Working today:
   kept in the OS keyring. With neither, the launch ends at `offline:` naming the
   missing key and the file is left as it was — it is never written in plaintext —
   and a wrong passphrase ends the same way and never discards the session. A file
-  written by an older build is encrypted on its first launch. A stored session that
+  written by an older build is encrypted on its first launch, and the status line
+  says once that it was not encrypted and now is. A passphrase is stretched with
+  Argon2id at 19 MiB, 2 passes, 1 lane unless `session_kdf_memory_kib` (8192 to
+  524288), `session_kdf_passes` (1 to 8) or `session_kdf_lanes` (1 to 4) say
+  otherwise; an out-of-range value fails the launch naming the key. The cost is not
+  recorded in the file, so changing it makes a file sealed under the old cost
+  unopenable until it is set back. A stored session that
   cannot be parsed is discarded at launch: the status line says
   so and the sign-in field opens, rather than the launch ending at an `offline:`
   the reader can do nothing with. A launch that does end at `offline:` has asked
