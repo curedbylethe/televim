@@ -488,15 +488,39 @@ struct Viewers {
     queued: VecDeque<PathBuf>,
     open: Option<PathBuf>,
     gate: ReaderGate,
+    /// The media cache, so a queued path is held against eviction and a clear
+    /// until its viewer has finished. `None` holds nothing.
+    cache: Option<Arc<Mutex<MediaCache>>>,
 }
 
 impl Viewers {
+    fn hold(&self, path: &Path) {
+        if let Some(cache) = &self.cache {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .hold_for_viewer(path);
+        }
+    }
+
+    fn release(&self, path: &Path) {
+        if let Some(cache) = &self.cache {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .release_viewer(path);
+        }
+    }
+
     /// Whether a viewer holds the terminal. The loop draws nothing while it does.
     fn busy(&self) -> bool {
         self.open.is_some()
     }
 
     fn queue(&mut self, paths: Vec<PathBuf>) {
+        for path in &paths {
+            self.hold(path);
+        }
         self.queued.extend(paths);
     }
 
@@ -531,6 +555,7 @@ impl Viewers {
                     .resume()
                     .context("taking the terminal back from the viewer")?;
                 self.gate.open();
+                self.release(&path);
                 app.flash(viewer_sentence(&Err(error), &path, viewer.opener_waits()));
             }
         }
@@ -545,6 +570,7 @@ impl Viewers {
         done: &ViewerDone,
     ) -> Result<()> {
         self.open = None;
+        self.release(&done.path);
         viewer
             .resume()
             .context("taking the terminal back from the viewer")?;
@@ -728,6 +754,7 @@ async fn event_loop(
         cfg.phone.as_deref(),
         cfg.media_cache_max_bytes,
     ));
+    viewers.cache = network.media_cache();
     // And the history file and what it held: every fetched page is merged
     // into the cache and written behind, and the messages go with the account
     // that is leaving.
@@ -1746,6 +1773,49 @@ mod tests {
             viewer.log,
             ["suspend", "spawn /tmp/televim-1-2-3.jpg", "resume"]
         );
+    }
+
+    /// A queued file is held from the queue to the viewer's report: eviction
+    /// cannot take it meanwhile, and the report releases it.
+    #[cfg(unix)]
+    #[test]
+    fn a_viewer_holds_its_file_until_it_reports() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = Arc::new(Mutex::new(MediaCache::open(
+            dir.path().to_path_buf(),
+            None,
+            None,
+        )));
+        let path = MediaCache::store_shared(
+            &cache,
+            &[crate::media_cache::Key::Message(1, 2)],
+            domain::message::MediaKind::Gif,
+            b"gif",
+        )
+        .expect("cached");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        let mut viewers = Viewers {
+            cache: Some(cache.clone()),
+            ..Viewers::default()
+        };
+        let mut viewer = FakeViewer::default();
+        viewers.queue(vec![path.clone()]);
+        viewers
+            .start_next(&mut viewer, &mut app, &tx)
+            .expect("the start goes through");
+
+        cache
+            .lock()
+            .expect("the lock is not poisoned")
+            .remove_message(1, 2);
+        assert!(path.exists(), "held while the viewer may read it");
+
+        let done = next_done(&mut rx);
+        viewers
+            .finish(&mut viewer, &mut app, &done)
+            .expect("resume succeeds");
+        assert!(!path.exists(), "released with the viewer's report");
     }
 
     /// A spawn that fails still takes the terminal back, once, and the failure is

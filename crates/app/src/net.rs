@@ -762,6 +762,11 @@ impl State {
         self.media_cache = Some(Arc::new(Mutex::new(cache)));
     }
 
+    /// The launch's media cache, shared, for the viewer hand-off to hold a path.
+    pub(crate) fn media_cache(&self) -> Option<Arc<Mutex<MediaCache>>> {
+        self.media_cache.clone()
+    }
+
     /// Empties the media cache: its files are the account's, and sign-out ends
     /// the account.
     ///

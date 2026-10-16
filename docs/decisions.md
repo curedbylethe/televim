@@ -1086,3 +1086,19 @@ are in [`../AGENTS.md`](../AGENTS.md).
   thread hop and an ordering question (a draft or session write racing the next one) for
   no visible gain; they are accepted, not overlooked, and a measurement showing a stall
   is the reason to revisit them.
+- **Why a viewer's file is held against eviction:** the viewer is a separate process
+  that opens the path some time after it is queued, and the loop keeps running while it
+  does (the opener's wait runs on its own thread, and on Linux and Windows the opener
+  returns before the viewer does). Eviction and `clear` both remove files, so either
+  could take a blob under it: on POSIX the unlink succeeds and the viewer may find
+  nothing to open; on Windows the remove can fail or the open can. `MediaCache` therefore
+  keeps a held-path map, `hold_for_viewer` / `release_viewer`. The runtime holds each
+  path as `Viewers::queue` accepts it and releases it in `Viewers::finish` or when the
+  spawn is refused. While held, `drop_ref` still unindexes a blob at zero references
+  (the byte and entry caps stay true to what the cache tracks) but does not unlink it,
+  and `clear` skips it; release removes a file that is no longer indexed or being written,
+  and the orphan scan on the next open removes it if the program ended first. The hold is
+  a count per path, not a flag, because the same blob can be queued twice. It is not a
+  blob reference count: a reference is a pointer, and a viewer has none, so counting it
+  there would pin the pointer and entry caps too. Sign-out and account change do not wait
+  for the viewer. No blob name, pointer format or capacity rule changed.
