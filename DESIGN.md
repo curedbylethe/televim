@@ -523,6 +523,9 @@ code.
 | a caption beside a placeholder | never: `display_body()` returns the caption when there is one, so the label is drawn only for a message that says nothing; the caption is body ink | `Message::display_body` |
 | `[sending…]` | on the message's **last** row, which is the one with room | asserted |
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |
+| `[image… 42%]` | a download in flight: the kind's own placeholder with the percentage inside, drawn beside the placeholder and never replacing the body | `rows::download_token` |
+| `[image… 2.0 MB]` | ditto when Telegram declared no size: the megabytes so far stand in for the percentage | ditto |
+| `[failed: reason] (o retries)` | a download that failed: the reason, then the hint that `o` tries again; the reason wins truncation, so a narrow row clips the hint first | ditto |
 | `[delivered]` | an outgoing group the peer's client has acknowledged and not read; the group's **last** row, beside any time | `rows::receipt_word` |
 | `[read]` | an outgoing group the peer has read; same row, same place | ditto |
 | `21:04` | a group's time, `HH:MM`, once, on the group's **last** row, right-aligned after any state | `rows::trailing_note` |
@@ -691,6 +694,22 @@ no bold, italic or underline (there is no second weight or slant in this surface
 5. **The wording is not localised** and does not change with the kind of file (no
    filename, size or duration inside the brackets). That is a decision for another day,
    not this one.
+
+**A download draws a token beside the placeholder, never in place of the body.** While
+a file is moving, the message's row carries the kind's own placeholder with its
+progress inside, in `text-dim` like every other thing the program says about a message:
+
+| State | Token |
+| :---- | :---- |
+| in flight, size declared | `[image… 42%]` |
+| in flight, no size declared | `[image… 2.0 MB]` |
+| failed | `[failed: reason] (o retries)` |
+
+The kind word follows the placeholder (`[video… 7%]`, `[file… 1.3 MB]`). The percentage
+is capped at 100. The failure token's reason is truncated to the room and wins over the
+hint: a row too narrow for both is clipped at its right edge, which takes `(o retries)`
+and leaves the reason. The status line carries no percentage; see rank 8 under the
+status ranking.
 
 **A static sticker draws as a bounded block, not a token.** The decoded image is
 scaled to fit a box 24 columns wide and 8 rows high, keeping its shape and never
@@ -978,7 +997,7 @@ regressing.
    | 5 | an active search | `/bench — match 1 of 2` |
    | 6 | a jump in flight | `Jumping to first unread…`, `Jumping to the quoted message…` |
    | 7 | why the message under the cursor failed | the send's own reason |
-   | 8 | a `flash` — a refusal, a status worth reading | anything just written |
+   | 8 | a `flash` — a refusal, a status worth reading; also the persistent sentence while a download runs, with no percentage | anything just written, or `downloading media…` |
    | 9 | a cached conversation waiting for its newest page | `Cached messages — loading the latest…` |
    | 10 | the hint, or `televim` | the resting state. The editable profile and both cards use their own hint here, not `televim` |
 
