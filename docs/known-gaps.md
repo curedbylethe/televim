@@ -64,9 +64,11 @@ Real, and named so they are not mistaken for oversights:
     may still be open` reports the opener's exit. A configured viewer command (`viewer`,
     `viewer_image`, `viewer_video`, `viewer_audio`) is run directly and waited on, so
     its sentence reports the viewer's own exit; only the platform default keeps this limit.
-  - *Windows is untested.* `cmd /C start` returns without waiting, so the terminal is
-    back at once there. No Windows leg runs in CI; the manual steps are in the
-    `OPENER` doc comment in `crates/app/src/runtime.rs`. Tracked separately.
+  - *Windows is untested.* The default is `cmd /C start "" /WAIT`, which waits for the
+    started process, so its sentence reports the viewer's exit. That wait has not been
+    run on Windows: no CI leg runs there, and the release check is the manual steps in
+    the `OPENER` doc comment in `crates/app/src/runtime.rs`. A target that detaches
+    itself can still return early; a configured viewer command is the escape hatch.
 - **Global search shows only the first page, capped at 100 hits.** `?` and
   `:search` ask the server once. The overlay keeps the newest 100 matches, and the
   status line says `100 of <total>` when there are more; there is no way to page

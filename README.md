@@ -248,7 +248,7 @@ Working today:
   large attachment is never held whole. The attachment is re-read by identifier,
   because a description is rebuilt on every page and a cached locator would be stale.
   `o` on a media message in Normal mode opens it in the platform viewer:
-  `open -W` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows (untested).
+  `open -W` on macOS, `xdg-open` on Linux, `cmd /C start "" /WAIT` on Windows (waits, but untested: no Windows CI leg).
   The file comes from the media cache: a message opened before is served from
   disk with no request, and a first open downloads it and stores it there. The
   cache is a directory of `0600`, plaintext files named by the sha256 of their

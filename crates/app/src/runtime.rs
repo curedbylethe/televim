@@ -391,28 +391,30 @@ fn focus_changed(
 
 /// The platform's file opener, and the arguments that come before the path.
 ///
-/// `open -W` on macOS waits for the application to quit, so its exit is the
-/// viewer's. `xdg-open` on Linux and `cmd /C start` on Windows return once the
-/// file is handed to a handler, so their exit is the opener's and the viewer may
+/// `open -W` on macOS and `cmd /C start "" /WAIT` on Windows wait for the started
+/// process, so their exit is the viewer's. `xdg-open` on Linux returns once the
+/// file is handed to a handler, so its exit is the opener's and the viewer may
 /// still be running; `OPENER_WAITS` says which, and the status line reports it.
+/// `start /WAIT` can still return early for a target that detaches itself; a
+/// configured viewer command is the escape hatch.
 ///
-/// Windows manual steps, since no CI leg runs this path: build and run the
-/// program on Windows, open a conversation with a media message, press `o` on it,
-/// close the viewer, and confirm the TUI returns to the same conversation with the
-/// cursor on the same message. The status line should read `Opener exited (code
-/// 0); the viewer may still be open`, and keys typed after the return should act
-/// on the TUI, not on the viewer.
+/// Windows manual steps, since no CI leg runs this path and the wait has not been
+/// run on Windows: build and run the program on Windows, open a conversation with a
+/// media message, press `o` on it, and confirm the TUI does not return while the
+/// viewer is open. Close the viewer: the TUI returns to the same conversation with
+/// the cursor on the same message, the status line reads `Viewer exited (code n)`,
+/// and keys typed after the return act on the TUI, not on the viewer.
 #[cfg(target_os = "macos")]
 const OPENER: (&str, &[&str]) = ("open", &["-W"]);
 #[cfg(all(unix, not(target_os = "macos")))]
 const OPENER: (&str, &[&str]) = ("xdg-open", &[]);
 #[cfg(windows)]
-const OPENER: (&str, &[&str]) = ("cmd", &["/C", "start", ""]);
+const OPENER: (&str, &[&str]) = ("cmd", &["/C", "start", "", "/WAIT"]);
 
 /// Whether the platform's opener exits only when the viewer does.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 const OPENER_WAITS: bool = true;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 const OPENER_WAITS: bool = false;
 
 /// A viewer command: the program, the arguments before the path, and whether
@@ -1702,6 +1704,28 @@ mod tests {
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args.last().copied(), Some(path.as_os_str()));
         assert_eq!(args.len(), OPENER.1.len() + 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_default_waits_for_the_viewer() {
+        let path = Path::new("C:\\televim-1-2-3.jpg");
+        let spec = viewer_spec(&Config::default(), MediaKind::File);
+        let command = viewer_command(path, &spec);
+        let args: Vec<_> = command.get_args().collect();
+
+        assert!(spec.waits);
+        assert_eq!(command.get_program(), "cmd");
+        assert_eq!(
+            args,
+            [
+                "/C",
+                "start",
+                "",
+                "/WAIT",
+                path.to_str().expect("utf-8 path")
+            ]
+        );
     }
 
     fn spec(program: &str, args: &[&str]) -> ViewerSpec {
