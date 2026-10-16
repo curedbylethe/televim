@@ -1537,8 +1537,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                 let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
                 let media_id = open_media_id(&app.conversation.conversation, *chat_id, *message_id);
                 kind.zip(state.media_cache.clone()).map(|(kind, cache)| {
-                    "downloading media…".clone_into(&mut app.ui.status);
-                    app.conversation.downloads.start(*chat_id, *message_id);
+                    begin_media_download(app, *chat_id, *message_id);
                     let cancel = Arc::new(AtomicBool::new(false));
                     state.media_cancel.push(MediaCancel {
                         chat_id: *chat_id,
@@ -2539,6 +2538,16 @@ fn open_media_kind(view: &ConversationView, chat_id: i64, message_id: i64) -> Op
     view.message(message_id)
         .filter(|message| message.chat_id == chat_id)
         .and_then(|message| message.media)
+}
+
+/// Marks a media download as begun and says so on the status line.
+///
+/// The sentence goes through [`App::set_status`], which carries no deadline: a
+/// flash still on its own deadline when the reader pressed `o` would otherwise
+/// expire and clear it while the transfer is still running.
+fn begin_media_download(app: &mut App, chat_id: i64, message_id: i64) {
+    app.set_status("downloading media…");
+    app.conversation.downloads.start(chat_id, message_id);
 }
 
 /// The Telegram media id of the media on `message_id` in `chat_id`, when the
@@ -9942,6 +9951,22 @@ mod media_tests {
         };
         assert_eq!(again, path);
         assert_eq!(message_id, 5);
+    }
+
+    /// A flash still on its deadline when a download begins must not clear the
+    /// progress sentence: the sentence carries no deadline of its own.
+    #[test]
+    fn the_download_sentence_outlasts_an_older_flash() {
+        let mut app = App::new();
+        app.flash("an older flash");
+
+        begin_media_download(&mut app, CHAT, 5);
+
+        assert_eq!(app.ui.status, "downloading media…");
+        // Far past any flash deadline the tui can set.
+        let later = Instant::now() + Duration::from_secs(3600);
+        assert!(!app.expire_status(later), "the sentence has no deadline");
+        assert_eq!(app.ui.status, "downloading media…");
     }
 
     /// An edit drops its message's cached file, and only that one.
