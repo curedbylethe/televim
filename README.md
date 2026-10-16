@@ -402,7 +402,8 @@ Working today:
   names the account; another account's file is discarded. A page fetched under a
   feed that has since ended is dropped. The file is removed on sign-out and when a
   launch finds no session. A plaintext file from an older build is read once and
-  rewritten sealed.
+  rewritten sealed; that reader goes after 2026-12-31, and a plaintext file is then
+  treated as corrupt.
 
 Not built, and named here so nobody reads the roadmap below as current:
 

@@ -320,8 +320,21 @@ Real, and named so they are not mistaken for oversights:
 - **Legacy plaintext is still read, and its wipe is best effort.** A file from an
   older build loads and is encrypted in place, and the old bytes are zero-filled —
   on Unix only, and not past SSD wear levelling, a journaling or copy-on-write
-  filesystem, a snapshot or a backup. Dropping the plaintext reader is a dated
-  follow-up, not part of this change.
+  filesystem, a snapshot or a backup. The plaintext reader is removed after
+  2026-12-31: from then on `FileStore::load` treats a file that is not an
+  envelope as corrupt instead of reading and re-sealing it, and a reader still on
+  such a file signs in again. Until then it is read as described; nothing is
+  removed yet.
+- **Signing out deletes the keyring entry and no more.** `KeyringStore::clear`
+  deletes the `session` credential and counts a missing one as success. The OS
+  credential store owns the bytes it keeps, so it may leave a backup, a version
+  or a free-list copy that this repo cannot reach, and the in-memory mirror is
+  grammers-owned, so its bytes cannot be wiped either; only the wrapper's own
+  `AuthKey` values are zeroed on drop. What is proven is the logical state: after
+  a sign-out the store, the update counters, the peer cache and the account are
+  empty (`clearing_a_used_session_resets_counters_peers_and_the_stored_copy`), and
+  the client is dropped, which aborts its runner, so no grammers session or socket
+  outlives it. There is no integration test that watches a socket close.
 - **Key wiping cannot reach copies made before a `Drop`.** The `FileKey`, the
   passphrase, the cipher's intermediate keys and its expanded round keys are all
   wiped when they drop (the `zeroize` features on `aes-gcm-siv` and `aes`). A copy
