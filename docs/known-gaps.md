@@ -319,9 +319,11 @@ Real, and named so they are not mistaken for oversights:
   on Unix only, and not past SSD wear levelling, a journaling or copy-on-write
   filesystem, a snapshot or a backup. Dropping the plaintext reader is a dated
   follow-up, not part of this change.
-- **The expanded AES key schedule is not zeroized.** The `FileKey` and the
-  passphrase are wiped on drop; the round keys inside the cipher are not reachable
-  to wipe.
+- **Key wiping cannot reach copies made before a `Drop`.** The `FileKey`, the
+  passphrase, the cipher's intermediate keys and its expanded round keys are all
+  wiped when they drop (the `zeroize` features on `aes-gcm-siv` and `aes`). A copy
+  the compiler or CPU made on the way, in a register or a stack slot, and the live
+  key in a process dump taken while a session is open, are not reachable.
 - **The 19 MiB Argon2id allocation is declared, not measured.** `make measure` runs
   with no credentials, so no RSS figure includes it; see [`memory.md`](./memory.md).
 - **Live wire behaviour for restricted presence is unconfirmed: observer landed,
