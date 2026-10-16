@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 domain.workspace = true
 tui.workspace = true
+zeroize.workspace = true
 
 # Both halves of the client, on: this is a Telegram client, and neither crate is
 # any use to it without its own `live` feature. That feature stays off inside
