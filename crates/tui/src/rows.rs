@@ -811,7 +811,8 @@ pub(crate) fn status_suffix(app: &App, message: &Message) -> Option<String> {
 /// The kind's own label without its closing bracket, so a photo in flight reads
 /// `[image… 42%]`: the placeholder the reader already knows, with how far along
 /// it is inside. With no declared size there is no percentage to give, so the
-/// bytes so far are said in megabytes instead.
+/// bytes so far are said in megabytes instead. A failed one says why, then that
+/// `o` tries again.
 fn download_token(message: &Message, outcome: &Outcome) -> String {
     match outcome {
         Outcome::InFlight { downloaded, total } => {
@@ -827,7 +828,12 @@ fn download_token(message: &Message, outcome: &Outcome) -> String {
             };
             format!("{kind}… {progress}]")
         }
-        Outcome::Failed(reason) => format!("[failed: {}]", truncate(reason, FAILED_REASON_WIDTH)),
+        // The hint follows the reason, so a row too narrow for both is clipped
+        // at its right edge, which takes the hint and leaves the reason.
+        Outcome::Failed(reason) => format!(
+            "[failed: {}] (o retries)",
+            truncate(reason, FAILED_REASON_WIDTH)
+        ),
     }
 }
 
