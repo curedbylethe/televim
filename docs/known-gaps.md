@@ -303,14 +303,28 @@ Real, and named so they are not mistaken for oversights:
   to wipe.
 - **The 19 MiB Argon2id allocation is declared, not measured.** `make measure` runs
   with no credentials, so no RSS figure includes it; see [`memory.md`](./memory.md).
-- **Live wire behaviour for restricted presence is unconfirmed.** The mapping of
-  `UserStatus::Recently`, `LastWeek`, `LastMonth` and `Empty` (to `UserPresence`
-  `Recently`, `LastWeek`, `LastMonth` and `Hidden`) is unit-tested against the schema,
-  but what Telegram actually sends a peer who hides last-seen is not. The gate cannot
-  check it without a datacenter. `proto_integration` does not assert presence today,
-  so a hand run (`TELEVIM_TEST_DC=1 … cargo test --all --all-features --test
-  proto_integration`) proves the suite passes, not the presence shape. Confirm by
-  hand against a restricted account, and extend the suite if the answer differs.
+- **Live wire behaviour for restricted presence is unconfirmed: observer landed,
+  awaiting run.** The mapping of `UserStatus::Recently`, `LastWeek`, `LastMonth` and
+  `Empty` (to `UserPresence` `Recently`, `LastWeek`, `LastMonth` and `Hidden`) is
+  unit-tested against the schema, but what Telegram actually sends a peer who hides
+  last-seen has not been observed. The gate cannot check it without a datacenter.
+  `presence_on_the_wire_for_a_restricted_peer_is_observed` in `proto_integration`
+  prints the resolved bucket and the wording the UI would show for the account's own
+  profile and for a peer's (`own status` / `peer status` lines); it asserts no
+  particular bucket. Run only that test, with a second account that hides its
+  last-seen sharing a private conversation with the first, since each test requests
+  its own login code and Telegram throttles hard:
+
+  ```console
+  $ TELEVIM_TEST_DC=1 TELEVIM_API_ID=… TELEVIM_API_HASH=… \
+    TELEVIM_TEST_PHONE=+… TELEVIM_TEST_CODE=… \
+    TELEVIM_TEST_PEER_PHONE=+… TELEVIM_TEST_PEER_CODE=… \
+    cargo test --all --all-features --test proto_integration \
+    presence_on_the_wire_for_a_restricted_peer_is_observed -- --nocapture
+  ```
+
+  Not yet run. Paste the two lines here when it is. The mapping and wording change
+  only if the observation contradicts them.
 - **A missed peer read is recovered only when the chat list is fetched.** The
   live `updateReadHistoryOutbox` receipt is best-effort: Telegram delivers each
   update to one randomly chosen active session, so a session can miss it. The
