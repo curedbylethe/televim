@@ -31,7 +31,11 @@
     cardReading: ' q:quit',
     /* the status line while the forward picker is up: the picker's own hint, which the Rust
        names FORWARD_PICKER_HINT and which carries the mode's name, unlike the rest. */
-    forward: 'VISUAL  j/k: choose  ⏎: forward  Esc: cancel'
+    forward: 'VISUAL  j/k: choose  ⏎: forward  Esc: cancel',
+    /* the session passphrase: the line that unlocks, the two lines of a change, and the result box */
+    pass: ' ⏎: unlock  Esc: leave it locked',
+    passNew: ' ⏎: next  Esc: cancel the change',
+    passDone: ' Esc: close'
   };
   const ALL_HINTS = Object.values(HINT);
   /* reader's own text. The popup lists these; the chrome never paints the glyph. */
@@ -445,6 +449,22 @@
   /* SESSION_PASSWORD_NEEDED is not a refusal: it is the answer that puts the password row up. */
   const SIGNOUT_ROW = '[ ⏎: sign in again ]';
   const CHECKING = 'Checking…';
+  /* ---------- session passphrase: the words this surface adds ----------
+     The session file is encrypted. Its key comes from TELEVIM_SESSION_PASSPHRASE, the config's
+     session_passphrase, or the OS keyring; when none of them has one, the reader is asked. The demo
+     passphrase is 'lantern'. A new passphrase beginning with '!' stands in for a failed write, the
+     way '!' stands in for a failed search, so the failure sentence has a frame to be seen in. */
+  const PASSPHRASE_DEMO = 'lantern';
+  const PASS_KIND = { passphrase: 1, newpass: 1, repeat: 1 };
+  const PASS_BAD_FILE = 'that passphrase did not open the session file; the file was left as it was';
+  const PASS_EMPTY = 'The passphrase cannot be empty.';
+  const PASS_DIFFER = 'the two entries differ, so nothing was changed and the file was left as it was';
+  const PASS_LOCKED = 'the session is locked: :unlock first';
+  const PASS_STILL_LOCKED = 'the session stays locked — :unlock asks again';
+  const PASS_CANCEL_CHANGE = 'the passphrase was not changed; nothing was written';
+  const PASS_CHANGED = 'Session passphrase changed.';
+  const PASS_NOT_CHANGED = 'Session passphrase not changed: the file was left as it was.';
+  const PASS_WRITE_FAILED = 'the file could not be written (permission denied)';
   /* the peer is typing in the open conversation: a note on the title, in the dim ink, and state
      rather than motion. It is set by the peer's typing event and ends on the peer's next message,
      on the conversation closing, or when the network tick has come round TYPING_TICKS times
@@ -655,6 +675,9 @@
       profile: { name: 'Noor Haddad', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
     };
     if (view === 'signin') beginSignin(s);
+    /* launch with no key: the cached list stays on show, and the passphrase is asked over the right column */
+    else if (view === 'passphrase') beginUnlock(s);
+    else if (view === 'passphraseEmpty') { s.chats = []; beginUnlock(s); }
     else if (view === 'stale') beginStale(s);
     else if (view === 'nocreds') beginNoCreds(s);
     else if (view === 'loggedout') beginLoggedOut(s);
@@ -745,6 +768,7 @@
     if (s.confirm) { s.flash = ''; confirmKey(s, k); return s; }
     /* a fetch is in flight: Esc drops it and every other key waits for the answer */
     if (s.jump) { if (k === 'Escape') s.jump = null; return s; }
+    if (s.pass) return passKey(s, k);
     if (s.view === 'signin') {
       const A = s.signin;
       /* a request is in flight: the first ⏎ is refused, and every later key does nothing. */
@@ -1242,6 +1266,8 @@
         if (c === 'settings') openSettings(s);
         else if (c === 'new' || c.startsWith('new ')) openNewChat(s, c.replace(/^new\s*/, ''));
         else if (c === 'signin') beginSignin(s);
+        else if (c === 'passphrase') beginChange(s);
+        else if (c === 'unlock') { if (s.locked) beginUnlock(s); else refuse(s, 'the session is open already'); }
         else if (c === 'q' || c === 'quit') common(s, 'q');
         else if (c) refuse(s, 'Not a command: ' + c);
         return;
@@ -1253,6 +1279,7 @@
         s.profile.username = u; s.draft = null; closeLine(s); s.flash = 'Username saved.'; return;
       }
       case 'bio': if (buf.length > 70) return refuse(s, 'Bio is limited to 70 characters.'); s.profile.bio = buf.trim(); s.draft = null; closeLine(s); s.flash = 'Bio saved.'; return;
+      case 'passphrase': case 'newpass': case 'repeat': passSubmit(s, L, buf); return;
       /* the three sign-in steps do not answer here: they enter the in-flight state, and the
          answer (the code, SESSION_PASSWORD_NEEDED, a refusal) lands in answer(). */
       case 'phone': case 'code': case 'pw': {
@@ -1338,6 +1365,7 @@
     if (open && open.revalidating) { open.revalidating = false; return s; }
     if (s.newchat && s.newchat.pending) { s.newchat.pending = false; return s; }
     if (s.jump) return landJump(s);
+    if (s.pass && s.pass.checking) return passAnswer(s);
     const A = s.signin, p = A && A.pending;
     if (!A || !A.checking || !p) return s;
     A.checking = false; A.checkN = 0; A.pending = null; s.flash = '';
@@ -1359,6 +1387,69 @@
       s.flash = authSentence('PASSWORD_HASH_INVALID', A.attempts);
       openSigninLine(s, 'pw');
     }
+    return s;
+  }
+
+  /* ---------- the session passphrase ----------
+     Three line kinds: passphrase (unlock), newpass and repeat (a change). None has a Normal mode:
+     a passphrase is typed, never edited, and Esc leaves the line at once. The box over the right
+     column is s.pass; s.locked is the session file's own state, which outlives the box. */
+  function openPassLine(s, kind) {
+    s.line = { kind, buf: '', pos: 0, mode: 'insert', from: 'pass', origin: '', pend: '' };
+    s.focus = 'input';
+  }
+  function beginUnlock(s) {
+    const from = s.focus;
+    s.locked = true; s.view = 'chat'; s.right = 'conv'; s.confirm = null; s.vis = null; s.search = null; s.draft = null;
+    s.pass = { mode: 'unlock', from, bad: '', reason: '', checking: false, checkN: 0, pending: null, pendKind: '' };
+    openPassLine(s, 'passphrase');
+  }
+  function beginChange(s) {
+    if (s.locked) return refuse(s, PASS_LOCKED);
+    ask(s, 'Change the session passphrase? (y/n)', (x) => {
+      x.pass = { mode: 'change', from: x.focus, first: '', bad: '', reason: '', checking: false, checkN: 0, pending: null, pendKind: '' };
+      openPassLine(x, 'newpass');
+    });
+  }
+  function passKey(s, k) {
+    const P = s.pass;
+    /* the key is being derived: the first ⏎ is refused, and every later key does nothing */
+    if (P.checking) { if (k === 'Enter' && !P.checkN) { P.checkN = 1; s.flash = 'still checking — the answer is on its way'; } return s; }
+    if (P.mode === 'done') { if (k === 'Escape') s.pass = null; else if (k === ':') { s.pass = null; common(s, k); } return s; }
+    if (k === 'Escape') { passCancel(s); return s; }
+    if (k === 'Enter') { submit(s); return s; }
+    /* no Normal mode, so no pending prefix either: Tab and ^w have nothing to do in a secret */
+    if (k === 'Tab' || k === 'C-w') return s;
+    s.flash = '';
+    lineKey(s, k);
+    return s;
+  }
+  function passCancel(s) {
+    const P = s.pass;
+    s.pass = null; s.line = null; s.focus = P.from;
+    s.flash = P.mode === 'unlock' ? PASS_STILL_LOCKED : PASS_CANCEL_CHANGE;
+  }
+  /* ⏎ in a passphrase line. An empty one is refused; a change asks for the new passphrase twice,
+     because a typo would lock the file under a key nobody can recall. */
+  function passSubmit(s, L, buf) {
+    const P = s.pass;
+    if (!buf) return refuse(s, PASS_EMPTY);
+    if (L.kind === 'newpass') { P.first = buf; s.line = null; openPassLine(s, 'repeat'); return; }
+    if (L.kind === 'repeat' && buf !== P.first) { P.first = ''; P.bad = PASS_DIFFER; s.line = null; openPassLine(s, 'newpass'); return; }
+    P.bad = ''; P.pendKind = L.kind; P.pending = buf; P.checking = true; P.checkN = 0;
+    s.line = null; s.focus = 'list';
+  }
+  function passAnswer(s) {
+    const P = s.pass, p = P.pending;
+    P.checking = false; P.checkN = 0; P.pending = null; s.flash = '';
+    if (P.mode === 'unlock') {
+      if (p !== PASSPHRASE_DEMO) { P.bad = PASS_BAD_FILE; openPassLine(s, 'passphrase'); return s; }
+      s.locked = false; s.pass = null; s.focus = 'list'; s.flash = 'Session unlocked.';
+      return s;
+    }
+    /* a change has no second answer to wait for, so its result is the box the reader reads */
+    if (p.startsWith('!')) { s.pass = { mode: 'done', ok: false, reason: PASS_WRITE_FAILED }; s.flash = PASS_NOT_CHANGED; return s; }
+    s.pass = { mode: 'done', ok: true, reason: '' }; s.flash = PASS_CHANGED;
     return s;
   }
 
@@ -1485,7 +1576,7 @@
   /* ---------- the bar ---------- */
   function kindTitle(s, L) {
     if (L.kind === 'message') { const c = chat(s); return 'Message to ' + (c ? c.name : ''); }
-    return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', newchat: 'New chat', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password' }[L.kind];
+    return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', newchat: 'New chat', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password', passphrase: 'Passphrase', newpass: 'New passphrase', repeat: 'Repeat passphrase' }[L.kind];
   }
   function barRows(L) {
     const prefix = L.kind === 'command' || L.kind === 'find';
@@ -1504,8 +1595,15 @@
       const start = rows.length > n ? clamp(cr[0] - n + 1, 0, rows.length - n) : 0;
       return { title: kindTitle(s, { kind: p.kind }), shown, rows, cr, n, start, lit: false, prefix: '', conceal, base: 'ltr' };
     }
+    /* the key is being derived: the bar shows the passphrase as bullets, with no caret, as sign-in does */
+    if (s.pass && s.pass.checking) {
+      const shown = '•'.repeat(s.pass.pending.length), rows = wrap(shown, 76, 76, true), cr = caretRC(rows, shown.length);
+      const n = Math.min(BAR_MAX, Math.max(1, rows.length));
+      const start = rows.length > n ? clamp(cr[0] - n + 1, 0, rows.length - n) : 0;
+      return { title: kindTitle(s, { kind: s.pass.pendKind }), shown, rows, cr, n, start, lit: false, prefix: '', conceal: true, base: 'ltr' };
+    }
     let title = 'Input', buf = '', pos = 0, lit = false, prefix = '', conceal = false;
-    if (L) { lit = true; title = kindTitle(s, L); buf = L.buf; pos = L.pos; prefix = L.kind === 'command' ? ': ' : L.kind === 'find' ? '/ ' : ''; conceal = L.kind === 'pw'; }
+    if (L) { lit = true; title = kindTitle(s, L); buf = L.buf; pos = L.pos; prefix = L.kind === 'command' ? ': ' : L.kind === 'find' ? '/ ' : ''; conceal = L.kind === 'pw' || !!PASS_KIND[L.kind]; }
     else if (d && d.ctx === ctx(s) && s.view === 'chat') { title = 'draft'; buf = d.buf; pos = d.pos; }
     const shown = conceal ? '•'.repeat(buf.length) : buf;
     const rows = wrap(shown, prefix ? 74 : 76, 76, true);
@@ -1568,7 +1666,10 @@
     if (s.flash) return { t: ' ' + s.flash, a: 't' };
     if (s.view === 'signin' && s.signin && s.signin.checking)
       return { t: ' ' + CHECKING + ' — the request is in flight', a: 't' };
+    if (s.pass && s.pass.checking) return { t: ' ' + CHECKING + ' — the key is being derived', a: 't' };
     const L = s.line;
+    if (L && PASS_KIND[L.kind]) return { t: L.kind === 'passphrase' ? HINT.pass : HINT.passNew, a: 'd' };
+    if (s.pass) return { t: HINT.passDone, a: 'd' };
     if (L && s.view === 'signin' && s.signin.out && s.signin.step === 0 && L.from === 'signin')
       return { t: ' ' + SIGNED_OUT, a: 'd' };
     if (L) {
@@ -1611,7 +1712,9 @@
 
   /* ---------- chat list ---------- */
   function drawList(g, s, h) {
-    box(g, 0, 0, LW, h, 'Chats (' + s.chats.length + ')', s.line ? false : s.focus === 'list');
+    /* locked: the list is the local cache, and the title says so with a title note, as a cached conversation is named */
+    const cached = s.locked && s.chats.length ? ' · cached' : '';
+    box(g, 0, 0, LW, h, 'Chats (' + s.chats.length + ')', s.line ? false : s.focus === 'list', cached);
     s.chats.slice(0, h - 2).forEach((c, i) => {
       const cur = i === s.chat, a = cur ? 'tr' : 't', y = 1 + i;
       fill(g, 1, y, LW - 2, a);
@@ -2044,6 +2147,38 @@
       line(y + 1, 'Password hint: street I grew up on', 't');
     }
   }
+  /* The passphrase box: a box over the right column, the same shape as the sign-in box. One
+     sentence says what is asked and why; the state and any refusal follow it, and a refusal stays
+     on screen until the next ⏎ rather than flashing. */
+  function drawPass(g, s, x0, h) {
+    const P = s.pass;
+    box(g, x0, 0, RW, h, P.mode === 'unlock' ? 'Session file' : 'Session passphrase', false);
+    let y = 1;
+    const para = (str, a) => {
+      wrap(str, 52, 52, false).forEach((r) => { put(g, x0 + 2, y, str.slice(r.s, r.e), a); y++; });
+      y++;
+    };
+    const state = (str) => { put(g, x0 + 2, y, str, 't'); y++; };
+    if (P.mode === 'done') {
+      if (P.ok) {
+        para('The session passphrase has been changed. The session file is encrypted with the new one.', 't');
+        para('Update TELEVIM_SESSION_PASSPHRASE or session_passphrase in the config file to the new one, if that is where the old passphrase was set. Otherwise the next launch will not open the file.', 'd');
+      } else {
+        para('The passphrase was not changed: ' + P.reason + '. The session file was left as it was, so the old passphrase still opens the file.', 't');
+      }
+      return;
+    }
+    if (P.mode === 'unlock') {
+      para('The session file is encrypted and no key is available, so televim needs the passphrase to read its chats.', 'd');
+      if (P.checking) { para('Deriving the key from the passphrase; ⏎ is refused while it runs.', 'd'); state(CHECKING); }
+      else if (P.bad) para(P.bad, 't');
+      return;
+    }
+    para('The session file is encrypted with the current passphrase. Enter the new one twice. A typo would lock the file, because nothing else holds the key.', 'd');
+    if (P.first && !P.checking) para('Enter the same passphrase again.', 'd');
+    if (P.checking) { para('Encrypting the session file with the new passphrase; ⏎ is refused while it runs.', 'd'); state(CHECKING); }
+    else if (P.bad) para(P.bad, 't');
+  }
   function drawNoCreds(g, s, x0, h) {
     /* not a form: one sentence, and no field, because a field the reader cannot use is worse
        than no field. */
@@ -2130,6 +2265,7 @@
     if (s.view === 'signin' && s.signin.out && s.signin.away) drawCard(g, s, LW, top);
     else if (s.view === 'signin') drawSignin(g, s, LW, top);
     else if (s.view === 'nocreds') drawNoCreds(g, s, LW, top);
+    else if (s.pass) drawPass(g, s, LW, top);
     else if (s.right === 'settings') drawSettings(g, s, LW, top);
     else if (s.right === 'profile') drawCard(g, s, LW, top);
     else drawConv(g, s, LW, top);
@@ -2373,7 +2509,28 @@
       { name: 'No candidates', keys: '<Tab>/zz<CR><wait>' },
       { name: 'Search failed', keys: '<Tab>/!net<CR><wait>' },
       { name: 'Exact username: the new conversation opens', keys: '<Tab>/@torvalds<CR>' },
-      { name: 'The person already has a chat: it is focused, not duplicated', keys: '<Tab>/@adalovelace<CR>' }] }
+      { name: 'The person already has a chat: it is focused, not duplicated', keys: '<Tab>/@adalovelace<CR>' }] },
+    /* Launch with no key. The demo passphrase is 'lantern'; anything else is the wrong one. The
+       cached list stays on the left, and the question sits over the right column. */
+    { id: 'passphrase', name: 'Session passphrase at launch', start: 'passphrase', variants: [
+      { name: 'Asked over the cached list: no key is available', keys: '' },
+      { name: 'Empty list: nothing cached, the same question', start: 'passphraseEmpty', keys: '' },
+      { name: 'Typing: the passphrase is concealed', keys: 'lan' },
+      { name: 'Checking: the key is being derived', keys: 'lantern<CR>' },
+      { name: 'Wrong passphrase: the refusal stays, the file left as it was', keys: 'nope<CR><wait>' },
+      { name: 'Unlocked: the question goes and the list is live', keys: 'lantern<CR><wait>' },
+      { name: 'Esc: the reader is where they were, still locked', keys: '<Esc>' },
+      { name: 'Esc, then :unlock asks again', keys: '<Esc>:unlock<CR>' }] },
+    /* Changing the passphrase of an open session file: the y/n row first, then the new passphrase
+       twice. A new passphrase beginning with '!' fails to write, and the failure says so. */
+    { id: 'passchange', name: 'Change the session passphrase', variants: [
+      { name: ':passphrase: the y/n confirmation first', keys: ':passphrase<CR>' },
+      { name: 'Yes: the new passphrase, concealed', keys: ':passphrase<CR>y' },
+      { name: 'Typed once: the repeat is asked', keys: ':passphrase<CR>yfresh<CR>' },
+      { name: 'The repeat differs: nothing is changed', keys: ':passphrase<CR>yfresh<CR>stale<CR>' },
+      { name: 'Success: the sentence and the reminder', keys: ':passphrase<CR>yfresh<CR>fresh<CR><wait>' },
+      { name: 'Failure: the file is left as it was', keys: ':passphrase<CR>y!fresh<CR>!fresh<CR><wait>' },
+      { name: 'Locked: :passphrase is refused', start: 'passphrase', keys: '<Esc>:passphrase<CR>' }] }
   ];
   function scene(si, vi) {
     const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start, v.bidi);
