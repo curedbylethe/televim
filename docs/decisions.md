@@ -29,7 +29,8 @@ are in [`../AGENTS.md`](../AGENTS.md).
   because the relay aborts with the client — and asks bring-up for a fresh one,
   whose `Ready` carries `Err(String::new())` and installs the signed-out screen and
   the sign-in field together. `State` holds the `Config` and the channel, so the
-  respawn needed no change to `apply`'s signature.
+  respawn needed no change to `apply`'s signature. The same event drops a
+  passphrase typed at the prompt: it unlocked the account that left.
 - **Why the sign-in surface is an overlay and not a `Pane` variant:** `Pane` is
   `Copy`, and its lifecycle belongs to the layout — `set_focus` closes the
   profile, `Tab` and `Ctrl-w` walk out of the right-hand column — while a flow in
@@ -235,7 +236,9 @@ are in [`../AGENTS.md`](../AGENTS.md).
   deletes the entry, and the store holds no key material of its own to wipe. The
   OS credential store owns the bytes it keeps, so what it does with them after a
   delete is outside this repo. The wrapper's own `AuthKey` values are zeroed on
-  drop; the session mirror is grammers-owned and cannot be reached to wipe.
+  drop; the session mirror is grammers-owned and cannot be reached to wipe. What a
+  sign-out does clear is checked by
+  `clearing_a_used_session_resets_counters_peers_and_the_stored_copy`.
 - **Why the chat-list fetch is retried three times, why the wait is the one
   history paging already uses, and why `:retry` is a command:** the launch fetch
   ran once, and one `?` turned a single transient refusal into a terminal

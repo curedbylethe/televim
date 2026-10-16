@@ -228,6 +228,7 @@ impl Drop for Client {
     /// the runner would keep a connection open, and the relay would keep
     /// draining a feed no one can read — so both are stopped here rather than
     /// left to the process exiting. The relay stops itself; see its own `Drop`.
+    /// After a [`Client::logout`] this is what ends the last live connection.
     fn drop(&mut self) {
         self.runner.abort();
     }
@@ -418,6 +419,21 @@ impl Client {
     /// The client remains usable afterwards: [`Client::is_authorized`] reports
     /// `false` and the login flow can be run again on it. What a fresh sign-in
     /// produces is a different account's session and overwrites this one.
+    ///
+    /// **What is and is not cleared.** The store and the mirror are cleared: the
+    /// update counters, the peer cache and the account go with the key. Fields of
+    /// this object such as `dialogs_fetched` are left as they are, because the
+    /// app never reuses a signed-out client; it drops it and builds a new one
+    /// (see `docs/decisions.md`, "Why logging out rebuilds the client").
+    ///
+    /// **The keyring is delete-only.** For a [`crate::session::KeyringStore`] the
+    /// clear deletes the credential, and the OS credential store owns what it
+    /// does with the bytes after that: it may keep backups or versions. The
+    /// mirror's bytes belong to `grammers` and cannot be wiped from here.
+    ///
+    /// **Nothing outlives the client.** Dropping it aborts the runner that holds
+    /// the sockets (see the `Drop` impl), so no `grammers` session or connection
+    /// survives it. This is by construction; no test watches a socket close.
     ///
     /// This is the framework half only — what a caller shows the reader before
     /// calling it, and what it does with the result, is not decided here.
