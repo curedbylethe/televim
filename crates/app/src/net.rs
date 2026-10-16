@@ -2683,6 +2683,10 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             // them back.
             state.forget_history();
             state.forget_media();
+            // The typed passphrase unlocked *this* account's files, which are
+            // gone. Holding it on would seal the next sign-in under a secret
+            // the reader gave for someone else; dropping it wipes it.
+            state.passphrase = None;
             // The empty reason is the signed-out *state*, not a missing one: the
             // reader chose this, so a line saying why it could not read a
             // profile would be an excuse nobody asked for.
@@ -9675,7 +9679,10 @@ mod tests {
     #[test]
     fn signing_out_empties_the_screen_and_the_client() {
         let mut app = App::new();
-        let mut state = State::default();
+        let mut state = State {
+            passphrase: Some(zeroize::Zeroizing::new("typed".to_owned())),
+            ..State::default()
+        };
 
         apply_logged_out(&mut app, &mut state, Ok(()));
 
@@ -9691,6 +9698,10 @@ mod tests {
         assert!(state.client.is_none(), "and so did the client behind it");
         assert!(app.signin().is_none(), "the field is the next event's job");
         assert_eq!(app.ui.status, "signed out");
+        assert!(
+            state.passphrase.is_none(),
+            "the passphrase typed for the signed-out account is not carried to the next"
+        );
     }
 
     /// The whole sequence in two events: the sign-out empties the screen, and
@@ -9735,6 +9746,7 @@ mod tests {
             tui::SessionStore::Keyring,
         );
 
+        state.passphrase = Some(zeroize::Zeroizing::new("typed".to_owned()));
         apply_logged_out(
             &mut app,
             &mut state,
@@ -9742,6 +9754,10 @@ mod tests {
         );
 
         assert!(matches!(app.session.account, AccountState::Known(_)));
+        assert!(
+            state.passphrase.is_some(),
+            "still signed in, so the passphrase is still needed"
+        );
         assert_eq!(
             app.ui.status,
             "could not sign out: the session could not be cleared"
