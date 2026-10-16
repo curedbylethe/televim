@@ -539,6 +539,8 @@ code.
 | `Jumping to first unread…` | a jump the window could not answer | `JUMP_LABEL` |
 | `Jumping to the quoted message…` | `gd` on a reply whose target is not loaded: the page around it is in flight | specified here; not yet in the binary |
 | `Jumping back…` `Jumping forward…` | `Ctrl-o` / `Ctrl-i` to a position whose message is no longer loaded | ditto |
+| `Jumping to <day>…` | a day or date jump (`[N]gg` / `[N]G` / `:date <ISO>`) whose target day is not loaded — `<day>` in the day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`) | specified here; not yet in the binary |
+| `Jumping to the match…` | an `n`/`N` search jump whose match is outside the loaded window (criterion 3): own label, not the first-unread one | specified here; not yet in the binary |
 | `Not a reply: gd jumps to the message a reply quotes.` | `gd` on a message with no quote: a refusal, a `flash` | ditto |
 | `That message is no longer available.` | `gd` on a reply whose target the client does not hold at all | ditto |
 | `televim` | the resting status line, when there is nothing to say | `IDLE_STATUS` |
@@ -792,20 +794,35 @@ quote.
 5. **A message that is not a reply**, or a reply whose target the client does not
    hold at all, is a refusal written to the status line (`flash`, rank 7).
 
-**Jumplist (Ctrl-o, Ctrl-i)** follows Vim: every `gd` leaves a mark on the message
-the reader left, `Ctrl-o` goes back one mark, `Ctrl-i` goes forward, and a new jump
-discards the marks ahead of the position. The first `Ctrl-o` from the end of the
-list marks where the reader is, so `Ctrl-i` can return. A mark is a message id, so
-it survives the window being replaced; going back to a message the window no longer
-holds fetches it, and says `Jumping back…` (or `Jumping forward…`). Marks are per
-conversation. `Ctrl-o` with no marks, and `Ctrl-i` at the end, do nothing.
+**Jumplist (Ctrl-o, Ctrl-i, Ctrl-n)** follows Vim: every `gd` leaves a mark on the
+message the reader left, `Ctrl-o` goes back one mark, `Ctrl-i` goes forward, and a
+new jump discards the marks ahead of the position. The first `Ctrl-o` from the end
+of the list marks where the reader is, so `Ctrl-i` can return. A mark is a message
+id, so it survives the window being replaced; going back to a message the window no
+longer holds fetches it, and says `Jumping back…` (or `Jumping forward…`). Marks
+are per conversation **and survive leaving it**: the list stays in memory across a
+conversation switch, so `Ctrl-o` in the new chat walks back into the old one's marks
+through the same fetch path. The list's depth is handed in by `app` and defaults to
+100. Window-replacing jumps other than `gd` (day and date jumps) record the
+cursor's message as the origin too, under the rule in *Day-boundary and date
+jumps*; in-window moves never record one. `Ctrl-o` with no marks, and `Ctrl-i`
+(`Ctrl-n`) at the end, do nothing. `Tab` stays the pane switch; no hint row
+changes.
 
-> **Open decision: `Ctrl-i` is `Tab` on the wire.** A terminal sends the same byte
-> for both unless it speaks the kitty keyboard protocol or `modifyOtherKeys`. The
-> engine binds `C-i` and leaves `Tab` as the pane switch, which is what the binary
-> must keep doing, so on a terminal that does not report them apart **forward is
-> unreachable** and only `Ctrl-o` works. This needs a decision, not a workaround
-> invented here: either accept it, or give forward a second key.
+**Forward key decision (settled, Q-02).** `Ctrl-i` and `Tab` share a byte on many
+terminals, so forward gets a second, unambiguous key: **`Ctrl-n`**. It walks the
+jumplist forward exactly as `Ctrl-i` does, in every mode where `Ctrl-i` is bound;
+`Ctrl-i` keeps working wherever the terminal reports it apart, so nothing changes
+for readers whose terminal distinguishes the two. `Tab` is not rebound — it is the
+pane switch in every context, and a key that is a motion in one place and a pane
+switch in the next is a key a reader has to learn twice. `Ctrl-n` was chosen over
+`Ctrl-f` (already a plain motion — opening the forward prompt is a different
+surface, and Vim reserves `Ctrl-f` for paging) and over `Ctrl-]` (kept free for
+future use): an audit of the normal-mode chord space shows `Ctrl-n` unbound, while
+`Ctrl-d`/`Ctrl-u` page, `Ctrl-w` is a prefix, `Ctrl-c` preempts, and
+`Ctrl-o`/`Ctrl-i` already own the jumplist. Where the terminal speaks the kitty
+keyboard protocol or `modifyOtherKeys`, `Ctrl-i` suffices and `Ctrl-n` is simply a
+second name for the same step.
 
 **The label.** `JUMP_LABEL` (`Jumping to first unread…`) is not reused: it names a
 destination, and this one is another. A reader who pressed `gd` and read "first
@@ -826,6 +843,46 @@ Scenes: `jump` in the engine, eight frames at 80×24 on Ada Lovelace's chat: the
 loaded target, the fetch in flight, the page arrived with the cursor on the
 target, `Ctrl-o` back (loaded), `Ctrl-i` forward, `Ctrl-o` needing a fetch, that
 fetch landed, and `gd` on a message with no quote.
+
+### Day-boundary and date jumps
+
+A motion, not a new component: `[N]gg`, `[N]G` and `:date <ISO>` move the cursor to
+the **first message of a target day**; separators are decoration and the cursor never
+rests on one. Counting is relative to the day the cursor stands in: the day
+separator nearest above the cursor is the first boundary, so `[N]gg` steps up across
+N day boundaries and `[N]G` is the mirror across N upward/downward days. Bare `gg`
+and `G` keep their old meanings (first unread, falling back to the top of the
+window; newest message / bottom); only a numeric prefix makes them day jumps.
+Absolute "Nth day of the conversation" indexing was considered and rejected as
+harder to aim and un-Vim-like.
+
+- *Landing rule.* Every day and date jump lands on the **first message of the target
+  day**; the separator above it is kept in view by the usual rule, and nothing else
+  changes (window, rows, colours, status ink).
+- *Beyond the loaded window.* A day or date jump that needs history fetches through
+  the date anchor (first message at or after the target day) and then lands per the
+  rule; the page replaces the loaded window, and the cursor rests on the target in
+  the middle of the page, with `Loading older…` / `Loading newer…` saying which ends
+  are still the server's. Edges behave as in *Jump to the quoted message*:
+  `Esc` drops the fetch in flight.
+- *No such day.* When the server holds no message at or after the target day, the
+  jump flashes the unavailable sentence rather than landing.
+- *`:date <ISO>`.* Accepts `YYYY-MM-DD` only, read in the reader's current zone
+  (the single-offset policy); it is a window-replacing jump and lands per the rule
+  above. Bad input is a flash under the `run_command` precedent (STAGE-04).
+- *Record rule (Q-04).* Day and date jumps are window-replacing jumps, so each
+  records the cursor's message as the origin before it moves, exactly as `gd` does;
+  in-window moves (plain `j`/`k`, paging) never record one, and a non-positive
+  (placeholder) origin is never recorded (G-10). The result is that `Ctrl-o` after
+  `:date` returns where the reader was.
+- *Labels.* Follow the documented pattern `Jumping to <where>…`, in the same ink as
+  every other status-line sentence (`text`), at rank 6. `<where>` uses the
+  day-separator vocabulary, so the sentences are things like
+  `Jumping to Sep 26, 2026…`, `Jumping to Yesterday…`, `Jumping to Today…`.
+- *Scenes.* `jump` covers the fetch-in-flight shape; the day/date variants add
+  nothing new to draw (same page, same cursor position on the first message of a
+  day), so no new frames are required — the label sentence is the new thing, and it
+  shares the rank and ink.
 
 ## Starting a conversation with someone new
 
@@ -1008,10 +1065,12 @@ regressing.
    the four holds. A selection or a confirmation hiding the retry sentence
    hides nothing the dot was saying.
 
-   Rank 6 is one rank with three sentences, because a jump in flight is one kind of
-   state and the sentence names where it is going; see *Jump to the quoted message*.
-   A search above it hides the label, which is the ranking working: the reader who
-   pressed `gd` with a search up still sees the search until the page lands.
+   Rank 6 is one rank with six sentences now: first unread, the quoted message,
+   back, forward, a day or date jump, and an unloaded search match. A jump in
+   flight is one kind of state and the sentence names where it is going; see
+   *Jump to the quoted message* and *Day-boundary and date jumps*. A search above
+   it hides the label, which is the ranking working: the reader who pressed `gd`
+   with a search up still sees the search until the page lands.
 
    Rank 9 sits below everything written to the status so that a cache can never
    talk over a failure: a revalidation that fails says `history:` like any other
