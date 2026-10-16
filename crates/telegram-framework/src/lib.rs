@@ -103,7 +103,7 @@ pub mod users;
 mod testing;
 
 pub use error::{AuthError, FrameworkError, RequestError, SessionError};
-pub use sealed::{FileKey, KeyProvider, KeyringKeyProvider, PassphraseProvider};
+pub use sealed::{FileKey, KdfParams, KeyProvider, KeyringKeyProvider, PassphraseProvider};
 pub use session::{
     AccountIdentity, AuthKey, ChannelKind, ChannelState, DcOption, FileStore, KeyringStore,
     MemoryStore, Peer, SessionData, SessionStore, UpdateState,
