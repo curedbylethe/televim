@@ -2546,4 +2546,225 @@ mod tests {
         assert!(cache.get(1).is_empty(), "the oldest conversation went");
         assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
     }
+
+    // ---- Worst case: control-character text at the byte budget -------------
+
+    /// A cache at the document's shape: [`HISTORY_CACHE_PEERS`] conversations of
+    /// [`HISTORY_CACHE_DEPTH`] rows, each row's text `per_row` bytes of
+    /// `'\u{1}'`, one UTF-8 byte that JSON-escapes to six (`\u0001`).
+    fn control_char_cache(per_row: usize) -> HistoryCache {
+        let text = "\u{1}".repeat(per_row);
+        let mut cache = HistoryCache::default();
+        for peer in 1..=i64::try_from(HISTORY_CACHE_PEERS).expect("a small bound") {
+            let rows: Vec<Message> = (1..=i64::try_from(HISTORY_CACHE_DEPTH)
+                .expect("a small bound"))
+                .map(|id| message(id, peer, &text))
+                .collect();
+            cache.put(peer, &rows);
+        }
+        cache
+    }
+
+    /// This process's resident set size, by the same per-OS route as
+    /// `examples/memory_harness.rs`: `/proc/self/status` on Linux,
+    /// `proc_pidinfo` on macOS, nothing elsewhere.
+    #[cfg(target_os = "linux")]
+    fn resident_bytes() -> Option<u64> {
+        let status = fs::read_to_string("/proc/self/status").ok()?;
+        status.lines().find_map(|line| {
+            let rest = line.strip_prefix("VmRSS:")?;
+            rest.split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+                .map(|kb| kb * 1024)
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn resident_bytes() -> Option<u64> {
+        use std::ffi::c_void;
+        use std::mem::size_of;
+
+        /// The kernel's `struct proc_taskinfo`; `resident_size` is the field read.
+        #[repr(C)]
+        #[derive(Default)]
+        struct ProcTaskInfo {
+            virtual_size: u64,
+            resident_size: u64,
+            total_user: u64,
+            total_system: u64,
+            threads_user: u64,
+            threads_system: u64,
+            policy: i32,
+            faults: i32,
+            pageins: i32,
+            cow_faults: i32,
+            messages_sent: i32,
+            messages_received: i32,
+            syscalls_mach: i32,
+            syscalls_unix: i32,
+            context_switches: i32,
+            threads: i32,
+            numrunning: i32,
+            priority: i32,
+        }
+        const _: () = assert!(size_of::<ProcTaskInfo>() == 96);
+
+        unsafe extern "C" {
+            fn proc_pidinfo(
+                pid: i32,
+                flavor: i32,
+                arg: u64,
+                buffer: *mut c_void,
+                buffersize: i32,
+            ) -> i32;
+        }
+
+        let mut info = ProcTaskInfo::default();
+        let size = i32::try_from(size_of::<ProcTaskInfo>()).ok()?;
+        // SAFETY: the buffer is this struct's own size, which is what is passed
+        // as `buffersize`; a short write is rejected by the length check below.
+        let written = unsafe {
+            proc_pidinfo(
+                i32::try_from(std::process::id()).ok()?,
+                4, // PROC_PIDTASKINFO
+                0,
+                std::ptr::from_mut(&mut info).cast(),
+                size,
+            )
+        };
+        (written == size && info.resident_size > 0).then_some(info.resident_size)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn resident_bytes() -> Option<u64> {
+        None
+    }
+
+    /// Runs `work` while a sampler thread polls the resident set, and returns
+    /// `(baseline, peak, result)`: RSS before the run, the highest sample
+    /// during it (never below the baseline), and what `work` returned.
+    fn peak_rss_during<T>(work: impl FnOnce() -> T) -> (Option<u64>, Option<u64>, T) {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let baseline = resident_bytes();
+        let peak = Arc::new(AtomicU64::new(baseline.unwrap_or(0)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let sampler = {
+            let (peak, stop) = (Arc::clone(&peak), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Some(now) = resident_bytes() {
+                        peak.fetch_max(now, Ordering::Relaxed);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+        };
+        let result = work();
+        if let Some(now) = resident_bytes() {
+            peak.fetch_max(now, Ordering::Relaxed);
+        }
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().expect("the sampler thread ends cleanly");
+        let peak = peak.load(Ordering::Relaxed);
+        (baseline, (peak > 0).then_some(peak), result)
+    }
+
+    /// What one worst-case write and re-open measured.
+    struct WorstCase {
+        text_bytes: usize,
+        serialised: usize,
+        baseline: Option<u64>,
+        write_peak: Option<u64>,
+        load_peak: Option<u64>,
+    }
+
+    /// Encodes, writes and re-opens `cache`, asserting the structural facts a
+    /// control-character cache must keep.
+    fn write_and_reopen_worst_case(cache: &HistoryCache) -> WorstCase {
+        let (_dir, file) = scratch("history.json");
+        let text_bytes = cache.text_bytes();
+        assert_eq!(
+            cache.peers.values().map(Vec::len).sum::<usize>(),
+            HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH,
+            "the fill is complete: nothing was evicted before the write"
+        );
+
+        let tag = HistoryTag {
+            account_id: Some(1),
+            phone: None,
+        };
+        let (baseline, write_peak, serialised) = peak_rss_during(|| {
+            let bytes = HistoryFile::encode(cache, &tag).expect("the cache serialises");
+            let len = bytes.len();
+            file.write(&bytes);
+            len
+        });
+        assert!(
+            serialised > text_bytes,
+            "control characters inflate on the wire: {serialised} vs {text_bytes}"
+        );
+        assert!(file.path.exists(), "the write left a file");
+
+        let (_, load_peak, loaded) = peak_rss_during(|| file.load());
+        assert_eq!(loaded.account_id, Some(1));
+        assert_eq!(loaded.cache.text_bytes(), text_bytes);
+        assert_eq!(loaded.cache.get(1).len(), HISTORY_CACHE_DEPTH);
+        assert_eq!(fields(&loaded.cache.get(1)[0]), fields(&cache.get(1)[0]));
+        WorstCase {
+            text_bytes,
+            serialised,
+            baseline,
+            write_peak,
+            load_peak,
+        }
+    }
+
+    #[test]
+    fn cache_worst_case_small_fill_keeps_the_structural_invariants() {
+        // A few hundred KiB: 32 x 200 rows of 40 control characters.
+        let cache = control_char_cache(40);
+        let run = write_and_reopen_worst_case(&cache);
+        assert_eq!(
+            run.text_bytes,
+            HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH * 40
+        );
+    }
+
+    #[test]
+    #[ignore = "release-only: serialises ~48 MB through serde_json, too slow for a debug build; \
+                run `cargo test -p televim --release --all-features --bin televim \
+                cache_worst_case -- --include-ignored --nocapture`"]
+    #[allow(clippy::cast_precision_loss, reason = "display only")]
+    fn cache_worst_case_full_budget_write_is_measured() {
+        // Largest whole per-row size that keeps the total under the bound.
+        let per_row = (HISTORY_CACHE_BYTES - 1) / (HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH);
+        let cache = control_char_cache(per_row);
+        assert!(cache.text_bytes() > HISTORY_CACHE_BYTES - HISTORY_CACHE_BYTES / 100);
+
+        let run = write_and_reopen_worst_case(&cache);
+        assert!(run.text_bytes <= HISTORY_CACHE_BYTES);
+
+        let mb = |bytes: Option<u64>| {
+            bytes.map_or("n/a".to_owned(), |b| format!("{:.1} MB", b as f64 / 1e6))
+        };
+        println!(
+            "cache_worst_case: rows             = {}",
+            HISTORY_CACHE_PEERS * HISTORY_CACHE_DEPTH
+        );
+        println!("cache_worst_case: text bytes       = {}", run.text_bytes);
+        println!("cache_worst_case: serialised len   = {}", run.serialised);
+        println!(
+            "cache_worst_case: ratio            = {:.2}x",
+            run.serialised as f64 / run.text_bytes as f64
+        );
+        println!("cache_worst_case: baseline RSS     = {}", mb(run.baseline));
+        println!(
+            "cache_worst_case: peak RSS (write) = {}",
+            mb(run.write_peak)
+        );
+        println!("cache_worst_case: peak RSS (load)  = {}", mb(run.load_peak));
+    }
 }
