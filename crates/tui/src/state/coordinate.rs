@@ -37,7 +37,7 @@ use domain::vim::{CharMotion, Motion, VimState};
 use crate::app::{
     ACTION_QUEUE, ADD_ACCOUNT_REFUSAL, AccountState, Action, ChatChoice, ConfirmKind,
     ContactProfile, Find, Focus, JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_REPLY,
-    NOT_YOURS_REFUSAL, PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_OPEN_ALREADY,
+    NOT_YOURS_REFUSAL, PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED, PASS_OPEN_ALREADY,
     PASS_STILL_CHECKING, PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode, PassPrompt, ProfileId,
     PromptKind, Register, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow, TYPING_FOR,
 };
@@ -1210,14 +1210,18 @@ pub(crate) fn handle_forward_pick(
 /// However it ends, the selection goes with it: it was made for this
 /// question, and a second `d` afterwards must ask about whatever is under the
 /// cursor then rather than reusing a range the reader has already answered.
+///
+/// Returns true when the answer was `y` to [`ConfirmKind::ChangePassphrase`]:
+/// the two entries are opened by the caller, which holds the session.
 pub(crate) fn handle_confirm(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     outbox: &mut Outbox,
     key: KeyEvent,
-) {
+) -> bool {
     match key.code {
         KeyCode::Char('y') => {
+            let change = conversation.confirm == Some(ConfirmKind::ChangePassphrase);
             match &conversation.confirm {
                 Some(ConfirmKind::Quit) => ui.quit(),
                 Some(ConfirmKind::Logout) => queue_action(&mut *outbox, &mut *ui, Action::Logout),
@@ -1237,11 +1241,12 @@ pub(crate) fn handle_confirm(
                         },
                     );
                 }
-                None => {}
+                Some(ConfirmKind::ChangePassphrase) | None => {}
             }
             conversation.set_confirm(None);
             conversation.clear_selection();
             ui.set_mode(Mode::Normal);
+            return change;
         }
         KeyCode::Char('n') | KeyCode::Esc => {
             conversation.set_confirm(None);
@@ -1250,6 +1255,7 @@ pub(crate) fn handle_confirm(
         }
         _ => {}
     }
+    false
 }
 
 /// Handles a key while a selection is being made.
@@ -2760,6 +2766,10 @@ pub(crate) fn run_command(
         }
         // Two spellings of one refusal: the path is required, because the
         // configured file is where the session already is.
+        "passphrase" => {
+            run_passphrase(&mut *ui, &*session, &mut *conversation);
+            false
+        }
         "unlock" => {
             run_unlock(&mut *ui, &mut *session, &mut *conversation, &mut *input);
             false
@@ -3158,6 +3168,33 @@ pub(crate) fn handle_pass(
         }
     }
     false
+}
+
+/// The two entries of a passphrase change, opened by `y` on the confirmation.
+fn begin_change(ui: &mut UiState, session: &mut SessionState, input: &mut InputState) {
+    session.pass = Some(PassPrompt {
+        mode: PassMode::Change,
+        from: ui.focus,
+        first: None,
+        bad: None,
+        checking: false,
+        done: None,
+    });
+    open_pass_line(ui, input, PromptKind::NewPassphrase);
+}
+
+/// `:passphrase`: change the session file's passphrase, after a y/n.
+///
+/// Refused while the session is locked: there is no open file to re-seal, and
+/// the reader's first question is the launch one. Whether there is a session
+/// file at all is the other side's to say, after the entries.
+fn run_passphrase(ui: &mut UiState, session: &SessionState, conversation: &mut ConversationState) {
+    if session.locked {
+        ui.set_status(PASS_LOCKED.to_owned());
+        return;
+    }
+    ui.set_mode(Mode::Confirm);
+    conversation.set_confirm(Some(ConfirmKind::ChangePassphrase));
 }
 
 /// `:unlock`: ask for the passphrase again after `Esc` left the session locked.
@@ -4245,7 +4282,9 @@ fn preempt_key(
     // a pane, so it outranks the focus: it has to be answered before another
     // key is addressed anywhere.
     if ui.mode == Mode::Confirm {
-        handle_confirm(&mut *ui, &mut *conversation, &mut *outbox, key);
+        if handle_confirm(&mut *ui, &mut *conversation, &mut *outbox, key) {
+            begin_change(&mut *ui, &mut *session, &mut *input);
+        }
         return Some(false);
     }
 
@@ -4348,7 +4387,9 @@ fn handle_conversation_key(
             false
         }
         (Mode::Confirm, _) => {
-            handle_confirm(&mut *ui, &mut *conversation, &mut *outbox, key);
+            // Unreachable: `preempt_key` answers a confirmation first, and it is
+            // the one that holds the session a change opens its entries on.
+            let _ = handle_confirm(&mut *ui, &mut *conversation, &mut *outbox, key);
             false
         }
     }

@@ -197,4 +197,37 @@ mod tests {
 
         assert!(!flat(&app).contains("· cached"));
     }
+
+    #[test]
+    fn a_change_shows_the_repeat_step_the_result_and_the_reminder() {
+        let mut app = App::mock();
+        for text in [":passphrase\n", "y", "fresh\n"] {
+            for c in text.chars() {
+                key(
+                    &mut app,
+                    if c == '\n' {
+                        KeyCode::Enter
+                    } else {
+                        KeyCode::Char(c)
+                    },
+                );
+            }
+        }
+        let screen = flat(&app);
+        assert!(screen.contains("Session passphrase"), "{screen}");
+        assert!(
+            screen.contains("Enter the same passphrase again."),
+            "{screen}"
+        );
+        assert!(screen.contains("Repeat passphrase"), "{screen}");
+
+        for c in "fresh".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        key(&mut app, KeyCode::Enter);
+        app.passphrase_changed(Ok(()));
+        let screen = flat(&app);
+        assert!(screen.contains("has been changed"), "{screen}");
+        assert!(screen.contains("TELEVIM_SESSION_PASSPHRASE"), "{screen}");
+    }
 }
