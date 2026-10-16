@@ -422,11 +422,7 @@ Real, and named so they are not mistaken for oversights:
   for the keyboard flags again. Whether a given terminal reports focus, and whether
   it resets the flags on blur, is not checked: nothing has run in one. Suspend
   (`SIGTSTP`/`SIGCONT`) is not handled; it is job control, not a window blur.
-- **The history cache's worst case is past the memory budget.** Typically about a
-  megabyte; with every cached message at Telegram's maximum length it is about
-  80 MB in memory and a write briefly needs about three times that. The figures
-  and the upgrade path (a byte budget beside the row bounds) are in
-  [`memory.md`](./memory.md). The feed's per-peer *seen* map is outside the peer
+- **The history cache's feed bookkeeping is not byte-bounded.** The feed's per-peer *seen* map is outside the peer
   bound and grows by one small entry per peer that received an arrival in the
   session.
 - **No history or chat-list cache for groups or channels.** Only private

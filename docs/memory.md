@@ -344,7 +344,8 @@ while calibrating this one.
 - A bounded conversation window: `domain::history::ConversationWindow` caps at
   `CONVERSATION_WINDOW` messages, so full history is never held.
 - A bounded history cache: at most `HISTORY_CACHE_DEPTH` (200) messages for each
-  of at most `HISTORY_CACHE_PEERS` (32) peers, and `HISTORY_CACHE_CHATS` (500)
+  of at most `HISTORY_CACHE_PEERS` (32) peers, at most `HISTORY_CACHE_BYTES`
+  (8 MiB) of message text over all of them, and `HISTORY_CACHE_CHATS` (500)
   chat-list rows, in memory and in the file beside the configuration — see
   [The history cache](#the-history-cache).
 - Measurement-only `Instant` probes in the event loop, gated on
@@ -404,23 +405,29 @@ These are **declared, not measured**, and the RSS budget is unaffected by the di
 
 The cache (`app/src/history_store.rs`) is resident for the whole run and copied
 for every write, and it is the first structure in the program whose size is set
-by what the reader has read rather than by what is on screen. Its bounds are rows,
-not bytes: 200 messages × 32 peers is **6,400 rows at most**, plus 500 chat-list
-rows. Placeholders, presence and media bytes are never held; the media kind and its
+by what the reader has read rather than by what is on screen. It has two bounds on
+the messages. The rows: 200 messages × 32 peers is **6,400 rows at most**, plus 500
+chat-list rows. And the bytes: `HISTORY_CACHE_BYTES`, **8 MiB** of message text
+summed over every cached peer, past which the least recently touched peers are
+evicted whole. The row bound alone left every row at maximum length free to reach
+about 80 MB; the byte bound is what takes the worst case under the budget.
+Only `CachedMessage.text` is counted: ids, flags and media descriptors are small
+and fixed per row, and the chat list is bounded by its own 500-row cap instead.
+Placeholders, presence and media bytes are never held; the media kind and its
 id are.
 
 | | Typical | Worst case |
 | :--- | ---: | ---: |
-| Messages, in memory | about 1 MB | about 80 MB |
-| Messages, on disk | about 1 MB | about 160 MB |
+| Messages, in memory | about 1 MB | about 8 MiB of text, plus per-row overhead |
+| Messages, on disk | about 1 MB | about 10 MB |
 | Chat list, in memory and on disk | about 100 KB | about 6 MB |
-| A write, briefly | about 3× the cache | about 3× the cache, more for heavily escaped text |
+| A write, briefly | about 3× the cache | about 3× the cache |
 
 These are **declared, not measured**. The typical figure is 6,400 rows of an
-ordinary message's size. The worst case is every cached message at Telegram's
-4,096-character limit in three-byte UTF-8 — about 12 KB a message — and on disk,
-text made entirely of control characters, which JSON escapes to six bytes each.
-The chat list's worst case is 500 previews of that same length. A write holds the
+ordinary message's size. The worst case is the byte bound filled: 8 MiB of text,
+which on disk is about 10 MB once JSON framing and ordinary escaping are counted.
+The chat list's worst case is 500 previews at Telegram's 4,096-character limit in
+three-byte UTF-8 — about 12 KB each. A write holds the
 cache, the clone the encoder takes of it and the serialised bytes at once, the
 clone dropped once the bytes exist; a launch holds the file's bytes and the
 parsed payload together while it reads. The feed's *seen* map
@@ -472,14 +479,20 @@ reader already saw as absent. `make measure-check` still passes on a clean run
 baseline was not re-recorded. Revisit if the map ever becomes reachable from a
 peer count beyond the chat list.
 
-**The worst case is past the 50 MB budget, and that is a known gap, not a
-claim that it fits.** At about 80 MB resident and about three times that during
-a write, a reader whose 32 most recent conversations were all maximum-length
-messages would take the process well over the ceiling. The typical case adds
-about a megabyte resident and a few megabytes briefly per write, inside the
-margin the measured figures leave. The upgrade path is a byte budget beside the
-row bounds — evicting by size as well as by count — and it is named in
-[`known-gaps.md`](./known-gaps.md) rather than built.
+**The worst case is declared to fall under the 50 MB budget, by this
+arithmetic** (declared, not measured; no run recorded it). Resident: 8 MiB of
+message text plus the chat list's worst case of about 6 MB, about 14 MB. A write
+holds the cache, the encoder's clone of it and the serialised bytes at once, so
+about 3× that, about 42 MB, briefly. The cold baseline in
+[`memory-baseline.json`](./memory-baseline.json) is about 4 MB. The sum, about
+46 MB, is under 50 MB with about 4 MB to spare, which is thin: the figure holds
+for text whose JSON encoding is about the size of the text. Text made largely of
+control characters, which JSON escapes to six bytes each, can make the
+serialised copy up to six times its text, and that case is outside this figure.
+The typical case adds about a megabyte resident and a few megabytes briefly per
+write, inside the margin the measured figures leave. The total is recomputed on
+each eviction rather than kept as a counter, which cannot drift; a maintained
+counter is the alternative if that ever shows up in a profile.
 
 What the change moves that the harness does measure is binary size. Measured on
 this host (Darwin 27.0.0, `arm64`, the pinned `rustc 1.98.1`), two `make measure`

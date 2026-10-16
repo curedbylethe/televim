@@ -64,6 +64,20 @@ const _: () = assert!(HISTORY_CACHE_DEPTH == CONVERSATION_WINDOW);
 /// [`HistoryCache::touch`] for what that means and why.
 pub(crate) const HISTORY_CACHE_PEERS: usize = 32;
 
+/// How many bytes of message text the file keeps, summed over every cached
+/// conversation.
+///
+/// Rows bound a conversation and conversations bound the file, but neither
+/// bounds *size*: a row can carry 4,096 characters, so 6 400 rows could hold
+/// tens of megabytes. This is the bound that does, and the one the worst case
+/// in `docs/memory.md` is declared from. It counts [`CachedMessage::text`]
+/// only — ids, flags and media descriptors are small and fixed per row, and the
+/// chat list is capped by [`HISTORY_CACHE_CHATS`] — and past it the least
+/// recently touched conversations go whole, as past [`HISTORY_CACHE_PEERS`].
+/// Eight MiB of text lands near ten megabytes on disk once JSON framing is
+/// counted.
+pub(crate) const HISTORY_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
 /// How many conversations of the chat list the file keeps.
 ///
 /// The list as the wire last showed it is what a launch draws before the wire
@@ -272,8 +286,19 @@ impl HistoryCache {
         self.touched.insert(peer, self.clock);
     }
 
-    /// Drops peers until at most [`HISTORY_CACHE_PEERS`] are left, the least
-    /// recently touched first.
+    /// The bytes of message text held, over every cached peer: what
+    /// [`HISTORY_CACHE_BYTES`] bounds. Summed on demand — at most 6 400 rows,
+    /// each `len` O(1) — so there is no counter to drift from the rows.
+    fn text_bytes(&self) -> usize {
+        self.peers
+            .values()
+            .flatten()
+            .map(|row| row.text.len())
+            .sum()
+    }
+
+    /// Drops peers until at most [`HISTORY_CACHE_PEERS`] are left and their
+    /// text fits [`HISTORY_CACHE_BYTES`], the least recently touched first.
     ///
     /// Untouched peers — what a file held — go before any touched one, the
     /// one whose newest message is oldest first; the peer id breaks a tie, so
@@ -287,7 +312,7 @@ impl HistoryCache {
     /// cached — so a page fetched before it still cannot mark a returning
     /// peer current.
     fn evict(&mut self) {
-        while self.peers.len() > HISTORY_CACHE_PEERS {
+        while self.peers.len() > HISTORY_CACHE_PEERS || self.text_bytes() > HISTORY_CACHE_BYTES {
             let touched = &self.touched;
             let Some(oldest) = self
                 .peers
@@ -2036,5 +2061,72 @@ mod tests {
         let kept = ids(&file.load().cache.get(PEER));
         assert_eq!(kept.len(), HISTORY_CACHE_DEPTH);
         assert_eq!(kept.first(), Some(&2));
+    }
+
+    /// A message of `len` bytes of text for `peer`.
+    fn big(id: i64, peer: i64, len: usize) -> Message {
+        message(id, peer, &"x".repeat(len))
+    }
+
+    #[test]
+    fn the_byte_budget_evicts_the_least_recently_touched() {
+        let third = HISTORY_CACHE_BYTES / 3 + 1;
+        let mut cache = HistoryCache::default();
+        for peer in 1..=3 {
+            assert!(cache.merge(peer, &[big(1, peer, third)], LATEST));
+        }
+        assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(cache.get(1).is_empty(), "the least recently touched went");
+        assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
+        assert!(!cache.touched.contains_key(&1));
+        assert!(!cache.feed.current.contains(&1));
+    }
+
+    /// One message larger than the whole budget cannot be kept at all.
+    #[test]
+    fn a_five_megabyte_message_does_not_leave_the_cache_over_budget() {
+        let five = 5 * 1024 * 1024;
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(1, &[big(1, 1, five)], LATEST));
+        assert!(!cache.get(1).is_empty(), "5 MiB alone fits 8 MiB");
+        assert!(cache.merge(2, &[big(1, 2, five)], LATEST));
+        assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(cache.get(1).is_empty(), "the older giant is gone");
+        assert!(!cache.get(2).is_empty());
+
+        assert!(cache.merge(3, &[big(1, 3, HISTORY_CACHE_BYTES + 1)], LATEST));
+        assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(
+            cache.get(3).is_empty(),
+            "over budget on its own, it goes too"
+        );
+    }
+
+    #[test]
+    fn a_file_past_the_byte_budget_is_cut_on_load() {
+        let (_dir, file) = scratch("history.json");
+        let third = HISTORY_CACHE_BYTES / 3 + 1;
+        let peers: BTreeMap<i64, Vec<CachedMessage>> = (1..=3)
+            .map(|peer| {
+                let mut row = CachedMessage::from_message(&big(1, peer, third));
+                row.timestamp = peer;
+                (peer, vec![row])
+            })
+            .collect();
+        let payload = Payload {
+            account: None,
+            peers,
+            chats: Vec::new(),
+        };
+        fs::write(
+            &file.path,
+            serde_json::to_vec(&payload).expect("the payload serialises"),
+        )
+        .expect("the heavy file");
+
+        let cache = file.load().cache;
+        assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);
+        assert!(cache.get(1).is_empty(), "the oldest conversation went");
+        assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
     }
 }

@@ -81,7 +81,10 @@ below.
   client. The **store** (`app/src/history_store.rs`) is pure functions over
   `HistoryCache` and one file in a temp directory: the file's round trip, its
   `0600` mode, an atomic write that leaves no temp behind, a corrupt or missing
-  file as an empty cache, the exact-account rule, the depth, peer and chat-list
+  file as an empty cache, the exact-account rule, the depth, peer, text-byte
+  (`the_byte_budget_evicts_the_least_recently_touched`,
+  `a_five_megabyte_message_does_not_leave_the_cache_over_budget`,
+  `a_file_past_the_byte_budget_is_cut_on_load`) and chat-list
   bounds (on load as well as on write), every merge rule per `PageKind` — overlap,
   replace past a gap, ignore when disjoint, deletion inside a page's stretch, an
   empty page changing nothing — and every feed rule: an edit in place, a deletion

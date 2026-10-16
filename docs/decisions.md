@@ -787,8 +787,8 @@ are in [`../AGENTS.md`](../AGENTS.md).
   and the cache is a store of what was read rather than a second history model.
 - **Why the history cache is a JSON file and not sqlite or redb:** the criterion
   names "(sqlite/redb)" as the means, and the means was weighed rather than
-  taken. The working set is small and bounded — at most 6,400 rows and a 500-row
-  list, about a megabyte typically — and it is read whole at launch and written
+  taken. The working set is small and bounded — at most 6,400 rows, 8 MiB of
+  text and a 500-row list, about a megabyte typically — and it is read whole at launch and written
   whole behind the screen, so a database's strengths (indexed lookups, partial
   writes, transactions across tables) buy nothing a single atomic file does not
   already give. Both candidates are new dependencies: `rusqlite` brings a C
@@ -800,7 +800,7 @@ are in [`../AGENTS.md`](../AGENTS.md).
   that discipline and adds no dependency. The ceiling is the whole-file rewrite:
   a cache that grew past a working set, or one that needed to be queried rather
   than loaded, is what would reopen this.
-- **Why the bounds are 200 per peer, 32 peers and 500 chats:**
+- **Why the bounds are 200 per peer, 32 peers, 8 MiB of text and 500 chats:**
   `HISTORY_CACHE_DEPTH` is exactly one `CONVERSATION_WINDOW`, and a `const`
   assertion keeps the two equal: a cache hit fills the window a conversation
   opens into, and more would be rows the window drops on arrival. They are named
@@ -815,7 +815,14 @@ are in [`../AGENTS.md`](../AGENTS.md).
   message is oldest going first. `HISTORY_CACHE_CHATS` is 500 because a cap at
   all is what gives the file a worst case; the fetched list itself has none, and
   500 is more than a screen scrolls through before the fetched list replaces it.
-  The worst case these give is declared in [`memory.md`](./memory.md).
+  `HISTORY_CACHE_BYTES` is 8 MiB of summed message text: rows alone left every
+  row at maximum length free to reach about 80 MB, past the 50 MB budget. It
+  counts text only, and past it the least recently touched peers go whole, by the
+  same order as the peer bound, so a load, a page and an arrival all meet it
+  through `evict`. The sum is taken on each eviction, not kept as a counter, so it
+  cannot drift; 8 MiB is chosen over 10 because JSON framing lands it near the
+  ten megabytes on disk. The worst case these give is declared in
+  [`memory.md`](./memory.md).
 - **Why a fetched page is merged as the stretch it speaks for:** a cache that
   stored the last page fetched would hold one page; one that appended every page
   would keep messages the server has since deleted. So the cache holds one
