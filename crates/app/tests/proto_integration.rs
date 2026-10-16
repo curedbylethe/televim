@@ -80,6 +80,30 @@
 //! the history's are asserted directly, which is deterministic, and the counts —
 //! of updates checked, of updates the framework discarded, of pages walked — are
 //! printed, so a run that proved little says so instead of looking like a pass.
+//!
+//! # Restricted presence
+//!
+//! What Telegram sends for a peer who hides last-seen is assumed, not observed:
+//! the mapping treats `Recently`, `LastWeek`, `LastMonth` and `Empty` as their own
+//! buckets and shows `Empty` as nothing.
+//! `presence_on_the_wire_for_a_restricted_peer_is_observed` prints what the wire
+//! says. Run it by hand, with `TELEVIM_TEST_PEER_PHONE` and `TELEVIM_TEST_PEER_CODE`
+//! naming an account that hides its last-seen, and the first account sharing a
+//! private conversation with it:
+//!
+//! ```console
+//! $ TELEVIM_TEST_DC=1 TELEVIM_API_ID=… TELEVIM_API_HASH=… \
+//!   TELEVIM_TEST_PHONE=+… TELEVIM_TEST_CODE=… \
+//!   TELEVIM_TEST_PEER_PHONE=+… TELEVIM_TEST_PEER_CODE=… \
+//!   cargo test --all --all-features --test proto_integration \
+//!   presence_on_the_wire_for_a_restricted_peer_is_observed -- --nocapture
+//! ```
+//!
+//! Run only this test: each one requests its own login codes, and Telegram
+//! throttles hard. Look at the `peer status` line. A bucket other than the one the
+//! peer's privacy setting should produce, or `none`, contradicts the mapping and
+//! is what `docs/known-gaps.md` asks to be reported; only then do the mapping and
+//! the wording move.
 
 use std::collections::HashSet;
 use std::env;
@@ -90,6 +114,7 @@ use std::time::Duration;
 use domain::chat::Chat;
 use domain::history::{ConversationWindow, unread_target};
 use domain::message::Message;
+use domain::presence::Presence;
 use domain::updates::{ChatList, UpdateEvent};
 use proto::{HistoryCursor, ProtoClient, ProtoError, UpdateStream};
 use telegram_framework::session::FileStore;
@@ -1789,4 +1814,66 @@ async fn the_accounts_own_profile_names_the_user_the_session_is_signed_in_as() {
         "the account's own Saved Messages has no bare peer to file it under, so \
          the fetch skips it — and reading the account's own user does not change that"
     );
+}
+
+// ---- what the wire says about a peer who hides last-seen -------------------
+
+/// One observation line: the bucket the wire resolved to, and the words the
+/// interface would show for it.
+///
+/// Matches every [`Presence`] on purpose, so a bucket added to the domain stops
+/// the build here instead of printing as nothing. `None` is a profile that
+/// carried no status at all, which is reported, not asserted against.
+fn presence_observation(presence: Option<Presence>) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs().cast_signed());
+    let bucket = match presence {
+        None => "none (the profile carried no status)".to_owned(),
+        Some(Presence::Online) => "Online".to_owned(),
+        Some(Presence::Offline { was_online }) => format!("Offline {{ was_online: {was_online} }}"),
+        Some(Presence::Recently) => "Recently".to_owned(),
+        Some(Presence::LastWeek) => "LastWeek".to_owned(),
+        Some(Presence::LastMonth) => "LastMonth".to_owned(),
+        Some(Presence::Hidden) => "Hidden".to_owned(),
+    };
+    let words = presence
+        .and_then(|presence| tui::presence::wording(presence, now, 0))
+        .unwrap_or_else(|| "(nothing shown)".to_owned());
+    format!("{bucket} -> {words}")
+}
+
+/// Prints what Telegram sends for the account's own status and for a peer's.
+///
+/// An observer, not a check: what a peer who hides last-seen produces on the wire
+/// is the open question, so nothing is asserted about which bucket comes back; the
+/// exhaustive match in [`presence_observation`] is what makes every answer a bucket
+/// the mapping knows. The lines it prints are the result; see "Restricted
+/// presence" in the module docs for how to read them.
+#[tokio::test]
+async fn presence_on_the_wire_for_a_restricted_peer_is_observed() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+
+    let Some(pair) = read_pair(&dc).await else {
+        return;
+    };
+
+    let own = pair
+        .sender
+        .fetch_account()
+        .await
+        .expect("the account's own profile is read");
+    println!("own status  : {}", presence_observation(own.presence));
+
+    // `read_pair` has fetched the chat list, which is what seeds the access hash
+    // `fetch_user` needs for this peer.
+    let peer = pair
+        .sender
+        .fetch_user(pair.chat_id)
+        .await
+        .expect("the peer's profile is read");
+    println!("peer status : {}", presence_observation(peer.presence));
 }
