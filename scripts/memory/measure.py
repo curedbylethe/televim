@@ -22,6 +22,7 @@ Environment:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -32,7 +33,9 @@ import shutil
 import statistics
 import subprocess
 import sys
+import struct
 import tempfile
+import termios
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -47,6 +50,9 @@ KEPT_LOG = TARGET / "measure" / "binary.log"
 # Where the measured binary's log is copied afterwards, so the report can point
 # at something durable rather than at a temporary directory that is about to go.
 KEPT_LOG = TARGET / "measure" / "binary.log"
+
+# The seeded scenario's log, kept apart so it does not overwrite the empty-list one.
+KEPT_POPULATED_LOG = TARGET / "measure" / "binary-populated.log"
 
 # The last N invocations' medians, so the report can state the spread *across*
 # invocations rather than only within one. See `cross_invocation`.
@@ -67,6 +73,11 @@ ENV_WHITELIST = ("PATH", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER")
 # Prefixes stripped from the inherited environment even if whitelisted, because
 # any of these would hand the run an account.
 ENV_DENY_PREFIXES = ("TELEGRAM_", "TELEVIM_")
+
+# Seals and opens the seeded history cache in the populated scenario, and nothing
+# else: it is an application secret scoped to a sandbox, not an account credential.
+SEED_PASSPHRASE = "televim-measure-seed"
+SEEDER = TARGET / "release" / "examples" / "seed_history"
 
 # Written to the log by the probes in `app/src/runtime.rs`. These are the
 # patterns; changing them here without changing them there loses the number.
@@ -96,8 +107,8 @@ NOT_MEASURED = [
     "the reader thread's blocking crossterm read and the terminal's own paint: "
     "input latency is measured from the loop taking the key to the draw completing, "
     "so it is not end-to-end keystroke-to-photons",
-    "the real binary's startup with a populated chat list: reaching one needs a "
-    "Telegram round trip, so first-frame is the empty/sign-in frame",
+    "the real binary's first-frame time with a populated chat list: the seeded "
+    "scenario reports RSS only; first-frame and latency come from the empty-list launches",
     "a Windows RSS figure (no portable way to ask a process; reported as null)",
 ]
 
@@ -110,9 +121,9 @@ def run(cmd, **kwargs):
 
 
 def build(skip: bool) -> None:
-    """Builds the release binary and the harness example.
+    """Builds the release binary and the harness and seeder examples.
 
-    The example is built separately and explicitly: `cargo build --release`
+    The examples are built separately and explicitly: `cargo build --release`
     does not build examples, which is the whole reason the harness is one.
     """
     if skip:
@@ -121,6 +132,7 @@ def build(skip: bool) -> None:
     print("· building the release binary and the harness (this is slow: lto=fat)")
     run(["cargo", "build", "--release", "--locked"])
     run(["cargo", "build", "--release", "--locked", "--example", "memory_harness"])
+    run(["cargo", "build", "--release", "--locked", "--example", "seed_history"])
 
 
 def harness_runs(count: int) -> list[dict]:
@@ -244,7 +256,7 @@ def make_sandbox() -> pathlib.Path:
     return sandbox
 
 
-def sandbox_env(sandbox: pathlib.Path) -> dict:
+def sandbox_env(sandbox: pathlib.Path, seeded: bool = False) -> dict:
     """A deliberately bare environment for the measured binary.
 
     The binary reaches Telegram if it is handed credentials, and it reads a
@@ -261,6 +273,10 @@ def sandbox_env(sandbox: pathlib.Path) -> dict:
     there are no application credentials at all — which is the point: with none,
     the program deterministically takes the unauthorized path on any machine.
 
+    With `seeded`, exactly one more name is added, `TELEVIM_SESSION_PASSPHRASE`,
+    so the binary can open the sealed history cache the seeder wrote. It opens
+    nothing else: no account credential is supplied.
+
     Returns the audit record of what was removed, which goes into the report.
     """
     removed = sorted(name for name in os.environ if name.startswith(ENV_DENY_PREFIXES))
@@ -276,6 +292,8 @@ def sandbox_env(sandbox: pathlib.Path) -> dict:
         # at least be a file inside the sandbox rather than a developer's own.
         TELEVIM_SESSION_PATH=str(sandbox / "session.json"),
     )
+    if seeded:
+        env["TELEVIM_SESSION_PASSPHRASE"] = SEED_PASSPHRASE
     return {
         "env": env,
         "isolation": {
@@ -293,14 +311,27 @@ def sandbox_env(sandbox: pathlib.Path) -> dict:
             "so the sandbox is outside the repository: an in-repo sandbox would "
             "still load the root .env",
             "credentials_supplied": False,
-            "note": "no TELEGRAM_*/TELEVIM_* credential reaches the run, so the "
-            "binary takes the unauthorized path, builds no client, and its chat "
-            "list is empty",
+            "note": (
+                "no account credential reaches the run; the sandbox passphrase seals "
+                "and opens only the seeded cache, and the list drawn is that seeded "
+                "cache. The binary takes the no-credentials path and builds no client"
+                if seeded
+                else "no TELEGRAM_*/TELEVIM_* credential reaches the run, so the "
+                "binary takes the unauthorized path, builds no client, and its chat "
+                "list is empty"
+            ),
+            "seeded_history": seeded,
         },
     }
 
 
-def launch_once(config: pathlib.Path, log: pathlib.Path, env: dict, sandbox: pathlib.Path) -> dict:
+def launch_once(
+    config: pathlib.Path,
+    log: pathlib.Path,
+    env: dict,
+    sandbox: pathlib.Path,
+    sized: bool = False,
+) -> dict:
     """One launch of the release binary on a pty, and what it said about itself.
 
     The binary enters raw mode and the alternate screen, so a pipe is not
@@ -309,6 +340,10 @@ def launch_once(config: pathlib.Path, log: pathlib.Path, env: dict, sandbox: pat
     rather than a method.
     """
     master, slave = pty.openpty()
+    if sized:
+        # A pty opens 0x0 and the binary draws nothing into it; a populated
+        # list only counts as loaded once there is a screen to draw it on.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
     log.unlink(missing_ok=True)
 
     started = time.monotonic()
@@ -359,7 +394,22 @@ def launch_once(config: pathlib.Path, log: pathlib.Path, env: dict, sandbox: pat
     }
 
 
-def real_binary(launches: int = BINARY_LAUNCHES) -> dict:
+def seed_sandbox(sandbox: pathlib.Path) -> dict:
+    """Runs the seeder into `sandbox` and returns what it says it wrote."""
+    if not SEEDER.exists():
+        sys.exit(f"error: {SEEDER} is missing; run without --skip-build")
+    out = subprocess.run(
+        [str(SEEDER), str(sandbox), SEED_PASSPHRASE],
+        cwd=sandbox,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", "")},
+    )
+    return json.loads(out.stdout)
+
+
+def real_binary(launches: int = BINARY_LAUNCHES, seeded: bool = False) -> dict:
     """Launches the release binary `launches` times and reports the warm median.
 
     Repeated launches, because a single one measures the page cache rather than
@@ -372,10 +422,13 @@ def real_binary(launches: int = BINARY_LAUNCHES) -> dict:
     worth having — it is what the very first launch of a session costs. The
     median of the launches after it is what the program costs.
 
-    RSS is sampled in the state the binary reaches with no account: the chat
-    list is empty, because there is no offline way to put fifty chats in front
-    of it. The loaded figure comes from the harness instead, and the two are
-    recorded as two things rather than averaged into one.
+    RSS is sampled in the state the binary reaches with no account. With
+    `seeded` False the chat list is empty: the whole program and none of its
+    data. With `seeded` True a sealed 60-chat cache is placed beside the config
+    first; a credential-free launch draws it offline and keeps it (the
+    no-credentials path never touches the cache), so that figure is the program
+    with its data. The two are recorded as two things rather than averaged into
+    one, and the empty-list figure stays for comparability.
     """
     if not BINARY.exists():
         return {"measured": False, "reason": f"{BINARY} is missing"}
@@ -388,22 +441,28 @@ def real_binary(launches: int = BINARY_LAUNCHES) -> dict:
 
     # A config file with nothing in it, so the run takes the defaults.
     config.write_text("")
-    sandbox = sandbox_env(sandbox_dir)
+    sandbox = sandbox_env(sandbox_dir, seeded)
 
-    runs = [
-        launch_once(config, log, sandbox["env"], sandbox_dir) for _ in range(max(1, launches))
-    ]
+    runs = []
+    seed = None
+    for _ in range(max(1, launches)):
+        # Re-seeded before every launch, so a cache a launch rewrote cannot
+        # influence the next one.
+        if seeded:
+            seed = seed_sandbox(sandbox_dir)
+        runs.append(launch_once(config, log, sandbox["env"], sandbox_dir, sized=seeded))
     first = [f for r in runs for f in r["first_frame_ms"]]
     latency = [v for r in runs for v in r["input_latency_ms"]]
     rss = [v for r in runs for v in r["rss_idle_bytes"]]
 
     # Keep the log somewhere durable; the sandbox is about to be discarded.
-    KEPT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    kept = KEPT_POPULATED_LOG if seeded else KEPT_LOG
+    kept.parent.mkdir(parents=True, exist_ok=True)
     if log.exists():
-        KEPT_LOG.write_text(log.read_text())
+        kept.write_text(log.read_text())
     shutil.rmtree(sandbox_dir, ignore_errors=True)
 
-    return {
+    result = {
         "measured": bool(first),
         "launches": len(runs),
         "first_frame_ms": first[1:] if len(first) > 1 else first,
@@ -411,12 +470,21 @@ def real_binary(launches: int = BINARY_LAUNCHES) -> dict:
         "first_frame_ms_all": first,
         "input_latency_ms": latency,
         "rss_idle_bytes": rss,
-        "rss_note": "the shipped binary, unauthorised: no credential reaches it, so it "
-        "builds no client and its chat list is empty. This is the whole program and "
-        "none of its data; see rss_idle_harness_bytes for the loaded figure.",
+        "rss_note": (
+            "the shipped binary, credential-free, with a sealed seeded history cache "
+            "loaded and its chat list drawn. This is the whole program with its data."
+            if seeded
+            else "the shipped binary, unauthorised: no credential reaches it, so it "
+            "builds no client and its chat list is empty. This is the whole program and "
+            "none of its data; see rss_idle_populated_binary_bytes and "
+            "rss_idle_harness_bytes for the loaded figures."
+        ),
         "isolation": sandbox["isolation"],
-        "log": str(KEPT_LOG.relative_to(ROOT)),
+        "log": str(kept.relative_to(ROOT)),
     }
+    if seeded:
+        result["seeded_history"] = seed
+    return result
 
 
 def environment(real: dict) -> dict:
@@ -555,6 +623,12 @@ def main() -> int:
     )
 
     real = real_binary()
+    populated = real_binary(seeded=True)
+    populated_rss_stats = (
+        summarize([b / (1024 * 1024) for b in populated["rss_idle_bytes"]], "MB")
+        if populated["rss_idle_bytes"]
+        else {"unit": "MB", "measured": False, "reason": populated.get("reason", "no sample")}
+    )
     binary_rss_stats = (
         summarize([b / (1024 * 1024) for b in real["rss_idle_bytes"]], "MB")
         if real["rss_idle_bytes"]
@@ -579,6 +653,7 @@ def main() -> int:
     metrics = {
         "rss_idle_harness_bytes": rss_harness,
         "rss_idle_binary_bytes": binary_rss_stats,
+        "rss_idle_populated_binary_bytes": populated_rss_stats,
         "startup_populated_load_ms": load,
         "startup_first_frame_ms": first_frame,
         "input_latency_ms": summarize(real["input_latency_ms"], "ms") if real["input_latency_ms"] else {"unit": "ms", "measured": False, "reason": "no keypress reached the loop"},
@@ -590,6 +665,9 @@ def main() -> int:
         metrics["input_latency_ms"]["samples"] = len(real["input_latency_ms"])
     if real["rss_idle_bytes"]:
         metrics["rss_idle_binary_bytes"]["samples"] = len(real["rss_idle_bytes"])
+
+    if populated["rss_idle_bytes"]:
+        metrics["rss_idle_populated_binary_bytes"]["samples"] = len(populated["rss_idle_bytes"])
 
     report = {
         "schema": "televim.memory-report/1",
@@ -621,6 +699,8 @@ def main() -> int:
         "cross_invocation": cross_invocation(metrics),
         "runs": runs,
         "real_binary_run": real,
+        "populated_binary_run": populated,
+        "seeded_history": populated.get("seeded_history"),
     }
 
     REPORT.parent.mkdir(parents=True, exist_ok=True)
@@ -634,8 +714,8 @@ def verdict(ceiling_mb: float, band: tuple[float, float] | None, **figures) -> d
     """A ceiling's status, computed from every figure and honest about none being complete.
 
     No figure is the program under load: the binary is the shipped program with
-    an empty chat list (there is no offline way to load fifty chats into it), and
-    the harness is 60 chats without the network half. The status is judged on the
+    an empty chat list, and the harness is 60 chats without the network half.
+    The status is judged on the
     largest of them, and names which that was.
 
     `band` is a target *range* rather than a ceiling. A figure under the range
