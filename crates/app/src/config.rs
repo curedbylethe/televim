@@ -232,6 +232,26 @@ pub struct Config {
     /// the life of the run: it is handed to `tui` once, before the first frame,
     /// so it can only be changed by a relaunch.
     pub jumplist_depth: Option<usize>,
+
+    /// The command that opens any downloaded media, when a kind-specific key
+    /// below does not name one.
+    ///
+    /// A command line split on whitespace: the first token is the program, the
+    /// rest are its arguments, and the file path is appended last. There is no
+    /// shell, so quoting and expansion do not apply. Blank is unset. Unset, the
+    /// platform opener (`open -W`, `xdg-open`, `cmd /C start`) is used. A
+    /// configured command is run directly and waited on, so the status line
+    /// reports the viewer's own exit.
+    pub viewer: Option<String>,
+
+    /// The command for photos and stickers; falls back to `viewer`.
+    pub viewer_image: Option<String>,
+
+    /// The command for videos and GIFs; falls back to `viewer`.
+    pub viewer_video: Option<String>,
+
+    /// The command for voice messages; falls back to `viewer`.
+    pub viewer_audio: Option<String>,
 }
 
 impl Default for Config {
@@ -255,6 +275,10 @@ impl Default for Config {
             media_cache_dir: None,
             media_cache_max_bytes: None,
             jumplist_depth: None,
+            viewer: None,
+            viewer_image: None,
+            viewer_video: None,
+            viewer_audio: None,
         }
     }
 }
@@ -671,6 +695,72 @@ mod tests {
         assert_eq!(
             cfg.jumplist_depth, None,
             "the jumplist's own depth is the default"
+        );
+    }
+
+    /// Each viewer key is read from the file under its own name.
+    #[test]
+    fn the_viewer_keys_are_read_from_the_file() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
+        let path =
+            std::env::temp_dir().join(format!("televim-cfg-viewer-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "viewer = \"a\"\nviewer_image = \"b -x\"\nviewer_video = \"c\"\nviewer_audio = \"d\"\n",
+        )
+        .expect("a temp file can be written");
+
+        let cfg = Config::load(&path).expect("a file with the keys loads");
+        std::fs::remove_file(&path).expect("the temp file can be removed");
+
+        assert_eq!(cfg.viewer.as_deref(), Some("a"));
+        assert_eq!(cfg.viewer_image.as_deref(), Some("b -x"));
+        assert_eq!(cfg.viewer_video.as_deref(), Some("c"));
+        assert_eq!(cfg.viewer_audio.as_deref(), Some("d"));
+    }
+
+    /// Each viewer key has its `TELEVIM_` variable.
+    #[test]
+    fn the_environment_supplies_the_viewer_keys() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+        let names = [
+            "TELEVIM_VIEWER",
+            "TELEVIM_VIEWER_IMAGE",
+            "TELEVIM_VIEWER_VIDEO",
+            "TELEVIM_VIEWER_AUDIO",
+        ];
+
+        // SAFETY: process-wide environment, written only by the tests in this
+        // module and only while holding `ENV`.
+        unsafe {
+            for name in names {
+                std::env::set_var(name, format!("{name}-cmd"));
+            }
+        }
+
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+
+        // SAFETY: as above — clearing names this test set.
+        unsafe {
+            for name in names {
+                std::env::remove_var(name);
+            }
+        }
+
+        assert_eq!(cfg.viewer.as_deref(), Some("TELEVIM_VIEWER-cmd"));
+        assert_eq!(
+            cfg.viewer_image.as_deref(),
+            Some("TELEVIM_VIEWER_IMAGE-cmd")
+        );
+        assert_eq!(
+            cfg.viewer_video.as_deref(),
+            Some("TELEVIM_VIEWER_VIDEO-cmd")
+        );
+        assert_eq!(
+            cfg.viewer_audio.as_deref(),
+            Some("TELEVIM_VIEWER_AUDIO-cmd")
         );
     }
 
