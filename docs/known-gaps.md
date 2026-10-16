@@ -49,10 +49,15 @@ Real, and named so they are not mistaken for oversights:
   it while a viewer holds the terminal still ends the program.
   - *Reader gating.* The keyboard reader is gated for the whole viewing, so keys typed
     into the viewer are the viewer's. A key the reader took just before the gate
-    closed is delivered to the program after the return, not to the viewer. The general fix is tracked separately.
-  - *Network during a viewing.* Network events are applied while the viewer is open,
-    but whether a long viewing still lets the connection go quiet is not checked here.
-    The general fix is tracked separately.
+    closed is held, in arrival order with any focus event read alongside it, and
+    delivered to the program once the terminal is back, not to the viewer. The one
+    byte that can still reach the wrong side is one the reader had already taken
+    from the terminal in the instant the gate closed; that race is accepted. A test
+    pins the gate open, closed for the viewing and open after, and the held order.
+  - *Network during a viewing.* The wait runs on a thread of its own, so the loop
+    never parks in it and network events are applied while the viewer is open; a test
+    sends one mid-viewing and checks it lands. The runtime stays current-thread, so a
+    long viewing is serviced between loop passes, not in parallel with them.
   - *The opener's exit, not the viewer's.* macOS waits only because of `-W`. `xdg-open`
     usually returns once a GUI handler is launched, so on Linux the terminal can come
     back under a running viewer, and the sentence `Opener exited (code …); the viewer
