@@ -86,6 +86,18 @@ pub fn day_key(timestamp: i64, offset: i64) -> Option<i64> {
     }
 }
 
+/// The first unix second of the local day `day` names, at `offset` seconds
+/// from UTC.
+///
+/// The inverse of [`day_key`] when the timestamp is a day's first second:
+/// `day_key(day_start(d, offset), offset) == Some(d)` for every `d`. A day or
+/// date jump fetches by this instant, because Telegram's date anchor is a unix
+/// second and the day it names is the reader's.
+#[must_use]
+pub fn day_start(day: i64, offset: i64) -> i64 {
+    day.saturating_mul(SECONDS_PER_DAY).saturating_sub(offset)
+}
+
 /// The civil date a day key names. The inverse of [`days_from_civil`].
 #[must_use]
 pub fn civil_from_days(days: i64) -> CivilDate {
@@ -137,6 +149,66 @@ pub fn days_from_civil(date: CivilDate) -> i64 {
 #[must_use]
 pub fn civil_from_timestamp(timestamp: i64, offset: i64) -> CivilDate {
     civil_from_days(timestamp.saturating_add(offset).div_euclid(SECONDS_PER_DAY))
+}
+
+/// Parses a civil date in the one shape `:date` accepts: `YYYY-MM-DD`.
+///
+/// Strict on purpose. The year is exactly four ASCII digits and the month and
+/// day are exactly two, so `2026-9-26`, `26-09-2026` and `2026-09-26T00:00` are
+/// all refused rather than guessed at; the month is `01`-`12` and the day is
+/// within the month's own length, leap years included, so `2026-02-30` is
+/// refused too. `None` for anything else, and the caller says so on the status
+/// line. A date the arithmetic could roll over (month `13`) is refused here
+/// rather than by the caller: [`days_from_civil`] tolerates it because the
+/// caller already knows what it holds, and this parser's caller does not.
+#[must_use]
+pub fn parse_iso_date(text: &str) -> Option<CivilDate> {
+    let mut parts = text.split('-');
+    let year = parts.next()?;
+    let month = parts.next()?;
+    let day = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if year.len() != 4 || !year.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let month = two_digits(month)?;
+    let day = two_digits(day)?;
+    let year = year.parse::<i64>().ok()?;
+
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    Some(CivilDate { year, month, day })
+}
+
+/// A run of exactly two ASCII digits, as a number.
+fn two_digits(text: &str) -> Option<u32> {
+    if text.len() != 2 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+/// How many days the month has, in a proleptic Gregorian calendar.
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap(year) => 29,
+        2 => 28,
+        // Unreachable: the caller has already held the month to 1-12. A month
+        // the arithmetic never sees has no length, rather than a default that
+        // would accept a date that does not exist.
+        _ => 0,
+    }
+}
+
+/// Whether a year is a leap year in the proleptic Gregorian calendar.
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 /// The weekday a timestamp falls on at `offset` seconds from UTC, `Mon`-style
@@ -500,5 +572,101 @@ mod tests {
             assert_eq!(clock(0, offset), None, "offset {offset}");
             assert_eq!(day_label(0, NOW, offset), None, "offset {offset}");
         }
+    }
+
+    // ---- `:date`'s ISO parser (AC-1) --------------------------------------
+
+    #[test]
+    fn the_iso_parser_accepts_the_criterion_example() {
+        assert_eq!(
+            parse_iso_date("2026-09-26"),
+            Some(CivilDate {
+                year: 2026,
+                month: 9,
+                day: 26
+            })
+        );
+        assert_eq!(
+            parse_iso_date("1970-01-01"),
+            Some(CivilDate {
+                year: 1970,
+                month: 1,
+                day: 1
+            })
+        );
+    }
+
+    #[test]
+    fn the_iso_parser_rejects_a_malformed_string() {
+        for text in [
+            "",            // missing
+            "2026",        // no month or day
+            "2026-09",     // no day
+            "2026-9-26",   // one-digit month
+            "2026-09-6",   // one-digit day
+            "26-09-2026",  // day-first
+            "2026/09/26",  // wrong separators
+            "2026-09-26T", // a time
+            "2026-09-26 ", // trailing space the caller forgot to trim
+            " 2026-09-26", // leading space
+            "2026-09-2x",  // not digits
+            "abcd-09-26",  // not digits
+            "2026-13-01",  // month out of range
+            "2026-00-01",  // month zero
+            "2026-09-31",  // September has thirty days
+            "2026-09-00",  // day zero
+            "2026-02-29",  // 2026 is not a leap year
+            "1900-02-29",  // 1900 is a century, not a leap year
+        ] {
+            assert_eq!(parse_iso_date(text), None, "{text:?} is not a date");
+        }
+    }
+
+    #[test]
+    fn the_iso_parser_accepts_a_real_leap_day() {
+        assert_eq!(
+            parse_iso_date("2000-02-29"),
+            Some(CivilDate {
+                year: 2000,
+                month: 2,
+                day: 29
+            }),
+            "2000 is divisible by 400"
+        );
+        assert_eq!(
+            parse_iso_date("2024-02-29"),
+            Some(CivilDate {
+                year: 2024,
+                month: 2,
+                day: 29
+            })
+        );
+    }
+
+    #[test]
+    fn a_days_start_and_key_round_trip_under_any_offset() {
+        let date = parse_iso_date("2026-09-26").expect("a valid date");
+        let day = days_from_civil(date);
+        for offset in [0, IST, PST, SECONDS_PER_DAY, -SECONDS_PER_DAY] {
+            assert_eq!(
+                day_key(day_start(day, offset), offset),
+                Some(day),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn day_start_is_the_first_second_of_the_local_day() {
+        // 2026-09-26 00:00 at +05:30 is 2026-09-25 18:30 UTC.
+        let date = parse_iso_date("2026-09-26").expect("a valid date");
+        let day = days_from_civil(date);
+        let start = day_start(day, IST);
+        assert_eq!(clock(start, IST).as_deref(), Some("00:00"));
+        assert_eq!(
+            day_key(start - 1, IST),
+            Some(day - 1),
+            "one second earlier is the day before"
+        );
     }
 }

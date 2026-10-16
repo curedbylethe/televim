@@ -911,10 +911,14 @@ fn draft_items<'a>(app: &'a App, words: &'a str, width: u16, on_draft: bool) -> 
 
 /// A row saying what is being fetched.
 ///
-/// The label is a `&'static str` rather than a borrow of anything: the row
-/// outlives the frame's own borrows, and every label here is a constant.
-fn loading(app: &App, label: &'static str) -> ListItem<'static> {
-    ListItem::new(Line::from(Span::styled(label, app.ui.theme.text_dim)))
+/// The label is owned rather than a borrow of anything: the row outlives the
+/// frame's own borrows, and a jump's label is built per frame — a day or date
+/// jump names the day it is going to rather than a constant.
+fn loading(app: &App, label: impl Into<String>) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(
+        label.into(),
+        app.ui.theme.text_dim,
+    )))
 }
 
 /// A day separator: a rule across the panel with the day set into it.

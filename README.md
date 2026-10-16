@@ -197,10 +197,20 @@ Working today:
   `100 of <total>`, and only the first 100 are shown. Only private chats are
   searched; groups and channels are dropped. `/` keeps its meaning on each pane.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
-  screenful, `gg` to the first unread, `n` to cycle search matches. `gd` on a
+  screenful, `gg` to the first unread, `n` to cycle search matches. A numeric
+  prefix makes `gg`/`G` walk day boundaries instead: `[N]gg` steps N day
+  boundaries up and `[N]G` N down, landing on the first message of the day each
+  reaches — a day with no messages is a boundary crossed, never landed on — and
+  fetching the day with a date page when the window does not hold it. `:date
+  <ISO>` goes to an exact `YYYY-MM-DD` day the same way, read in the reader's
+  own zone. `gd` on a
   message that quotes another goes to the quoted message: a cursor move when it
   is loaded, and otherwise a page fetched around it that replaces the window,
   with `Jumping to the quoted message…` said while that page is in flight.
+  A day that is not loaded says `Jumping to <day>…`, `<day>` in the
+  day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`); a `:date`
+  that is not `YYYY-MM-DD` is refused with `not a date: <argument>` and the
+  reader stays put.
   `Ctrl-o` goes back to the message the jump left and `Ctrl-i` forward again —
   a return to a message the window no longer holds is fetched the same way, and
   says `Jumping back…` or `Jumping forward…`. The marks are kept per
@@ -353,8 +363,11 @@ Working today:
   internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
   registers are deliberately not shared, because their formats differ.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
-  `:settings`, `:signin`, `:retry`, `:unlock`, `:passphrase`, `:export-session <path>`
-  and `:import-session <path>`.
+  `:date <ISO>`, `:settings`, `:signin`, `:retry`, `:unlock`, `:passphrase`,
+  `:export-session <path>` and `:import-session <path>`.
+  `:date <ISO>` takes `YYYY-MM-DD` in the reader's own zone and jumps to the
+  first message of that day, loading a page when the window does not hold it;
+  anything else is refused with `not a date: <argument>`.
   `:unlock` asks for the session passphrase again after `Esc` left the session
   locked. `:passphrase` asks `y/n`, then the new passphrase twice, and re-seals the
   session file and the history cache under it; the old one stops opening either,
