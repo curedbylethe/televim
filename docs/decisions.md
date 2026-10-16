@@ -609,6 +609,15 @@ are in [`../AGENTS.md`](../AGENTS.md).
   "first unread" would have been told the program did something else. Hence
   `Jumping to the quoted message…`, `Jumping back…` and `Jumping forward…` at the
   same rank and the same ink.
+- **Why the unloaded match jump got its own kind:** `n`/`N` onto a match the
+  window does not hold rode `gg`'s fetch path and borrowed `JumpKind::Unread`, so
+  the row thrown over the messages read `Jumping to first unread…` for a key that
+  goes to a search hit. `JumpKind::Match` names it — the sentence is `Jumping to
+  the match…` — and the loaded case is untouched: a match the window holds stays a
+  cursor move, no fetch and no sentence. The unavailable flash follows the reply
+  and search kinds, not `gg`: `apply_jump` keeps `Unread`'s silence because `gg`
+  means "the unread" and not "message 19", while `n`/`N` names a message, so an
+  empty page writes `That message is no longer available.`
 - **Why the return is a bounded per-conversation jumplist, and why `Tab` still
   cycles panes:** the criterion asks for `Ctrl-o` or `Ctrl-i` to return to where
   the reader was; CUR-34 built the pair and CUR-35 made it the general thing.

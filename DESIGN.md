@@ -539,8 +539,8 @@ code.
 | `Jumping to first unread…` | a jump the window could not answer | `JUMP_LABEL` |
 | `Jumping to the quoted message…` | `gd` on a reply whose target is not loaded: the page around it is in flight | specified here; not yet in the binary |
 | `Jumping back…` `Jumping forward…` | `Ctrl-o` / `Ctrl-i` to a position whose message is no longer loaded | ditto |
-| `Jumping to <day>…` | a day or date jump (`[N]gg` / `[N]G` / `:date <ISO>`) whose target day is not loaded — `<day>` in the day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`) | specified here; not yet in the binary |
-| `Jumping to the match…` | an `n`/`N` search jump whose match is outside the loaded window (criterion 3): own label, not the first-unread one | specified here; not yet in the binary |
+| `Jumping to <day>…` | a day or date jump (`[N]gg` / `[N]G` / `:date <ISO>`) whose target day is not loaded — `<day>` in the day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`) | `App::jump_label` (falls back to `JUMP_DAY_LABEL` when no clock stands) |
+| `Jumping to the match…` | an `n`/`N` search jump whose match is outside the loaded window (criterion 3): own label, not the first-unread one | `JUMP_MATCH_LABEL` |
 | `Not a reply: gd jumps to the message a reply quotes.` | `gd` on a message with no quote: a refusal, a `flash` | ditto |
 | `That message is no longer available.` | `gd` on a reply whose target the client does not hold at all | ditto |
 | `televim` | the resting status line, when there is nothing to say | `IDLE_STATUS` |

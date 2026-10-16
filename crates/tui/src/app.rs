@@ -243,6 +243,14 @@ pub const JUMP_FORWARD_LABEL: &str = "Jumping forward…";
 /// What is said while a jump to a message a global search found is on its way.
 pub const JUMP_SEARCH_LABEL: &str = "Jumping…";
 
+/// What is said while an `n`/`N` search match the loaded window does not hold is
+/// on its way.
+///
+/// The match is a place in the open conversation, so it is neither the global
+/// search overlay's landing ([`JUMP_SEARCH_LABEL`]) nor the first unread message
+/// ([`JUMP_LABEL`]): its own sentence says which of the three is in flight.
+pub const JUMP_MATCH_LABEL: &str = "Jumping to the match…";
+
 /// What is said while a day or date jump is on its way, when the day cannot be
 /// named.
 ///
@@ -269,11 +277,11 @@ pub const JUMP_UNAVAILABLE: &str = "That message is no longer available.";
 
 /// Which jump the reader asked for, which is what the label says.
 ///
-/// `Unread` is `gg` and a match `n` walked to; the other two are the jumplist's,
-/// and are named here so that this match is complete rather than because anything
-/// produces them yet. `Date` is a day or date jump: it carries its anchor in
-/// [`Jump::target_id`] rather than naming a message, and no producer builds one
-/// until STAGE-04.
+/// `Unread` is `gg`; `Match` is an `n`/`N` match the loaded window does not hold,
+/// which is its own kind so it is not mislabelled as the first unread message.
+/// `Reply`, `Back` and `Forward` are `gd` and the jumplist's; `Search` is a
+/// landing from the global-search overlay. `Date` is a day or date jump: it
+/// carries its anchor in [`Jump::target_id`] rather than naming a message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JumpKind {
     Unread,
@@ -282,6 +290,8 @@ pub enum JumpKind {
     Forward,
     /// A message a global search found, which the window does not hold.
     Search,
+    /// An `n`/`N` search match the loaded window does not hold.
+    Match,
     /// A day or date jump, whose target is the day's first unix second.
     Date,
 }
@@ -300,6 +310,7 @@ impl JumpKind {
             Self::Back => JUMP_BACK_LABEL,
             Self::Forward => JUMP_FORWARD_LABEL,
             Self::Search => JUMP_SEARCH_LABEL,
+            Self::Match => JUMP_MATCH_LABEL,
             Self::Date => JUMP_DAY_LABEL,
         }
     }
