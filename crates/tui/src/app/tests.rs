@@ -5958,6 +5958,14 @@ fn an_accepted_pin_moves_the_chat_and_the_highlight_stays_on_it() {
 
     assert_eq!(app.list.list.chats[0].id, chat);
     assert_eq!(app.list.selected_chat, 0, "the highlight followed the chat");
+
+    let second = app.list.list.chats[2].id;
+    app.set_pinned(second, true);
+    assert_eq!(
+        app.list.list.chats[0].id, second,
+        "a new pin leads the block"
+    );
+    assert_eq!(app.list.list.chats[1].id, chat);
 }
 
 #[test]

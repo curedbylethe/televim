@@ -362,20 +362,25 @@ impl ChatList {
     /// The conversation with this identifier, if the client holds it.
     /// Records a pin Telegram accepted and moves the chat to where that puts it.
     ///
-    /// The same order the framework fetches by, applied to one chat: pinned
-    /// first, each section newest first. Unpinning therefore restores the
-    /// chat's recency position. `false` when the list does not hold the chat.
+    /// The same order the framework fetches by, applied to one chat: the pinned
+    /// block keeps the server's pin order and the rest is newest first. A new
+    /// pin goes to the front of the pinned block, where Telegram puts it; the
+    /// next fetch is authoritative. Unpinning restores the chat's recency
+    /// position. `false` when the list does not hold the chat.
     pub fn set_pinned(&mut self, chat_id: i64, pinned: bool) -> bool {
         let Some(from) = self.chats.iter().position(|chat| chat.id == chat_id) else {
             return false;
         };
         let mut chat = self.chats.remove(from);
         chat.pinned = pinned;
-        let to = self
-            .chats
-            .iter()
-            .position(|other| sorts_before(&chat, other))
-            .unwrap_or(self.chats.len());
+        let to = if pinned {
+            0
+        } else {
+            self.chats
+                .iter()
+                .position(|other| sorts_before(&chat, other))
+                .unwrap_or(self.chats.len())
+        };
         self.chats.insert(to, chat);
         true
     }
@@ -412,14 +417,18 @@ impl ChatList {
     }
 }
 
-/// Whether `chat` belongs above `other` in a list that is pinned first and
-/// newest first within each section.
+/// Whether `chat` belongs above `other` in a list that is pinned first, with
+/// the pinned block in the server's order and the rest newest first.
 ///
-/// Mirrors the framework's fetch order. A chat with no messages sorts last in
-/// its section, as it does there.
+/// Mirrors the framework's fetch order. Two pinned chats compare equal, so a
+/// stable placement keeps their existing order. A chat with no messages sorts
+/// last among the unpinned, as it does there.
 fn sorts_before(chat: &Chat, other: &Chat) -> bool {
     if chat.pinned != other.pinned {
         return chat.pinned;
+    }
+    if chat.pinned {
+        return false;
     }
     match (chat.last_timestamp, other.last_timestamp) {
         (Some(mine), Some(theirs)) => mine > theirs,
@@ -463,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_puts_the_chat_first_and_keeps_the_pinned_section_newest_first() {
+    fn a_pin_lands_at_the_front_of_the_pinned_block_whatever_its_age() {
         let mut list =
             ChatList::with_chats(vec![chat_at(2, 500), chat_at(1, 100), chat_at(3, 200)]);
 
@@ -471,12 +480,31 @@ mod tests {
         assert_eq!(ids(&list), vec![1, 2, 3]);
 
         assert!(list.set_pinned(3, true));
-        assert_eq!(
-            ids(&list),
-            vec![3, 1, 2],
-            "3 is newer than 1, so it leads the pinned section"
-        );
+        assert_eq!(ids(&list), vec![3, 1, 2], "a fresh pin leads the block");
+        assert!(list.set_pinned(2, true));
+        assert_eq!(ids(&list), vec![2, 3, 1], "newest again, not by age");
         assert!(!list.set_pinned(9, true), "a chat the list does not hold");
+    }
+
+    #[test]
+    fn a_newer_message_on_a_lower_pinned_chat_does_not_reorder_the_block() {
+        let mut list = ChatList::with_chats(vec![
+            Chat {
+                pinned: true,
+                ..chat_at(1, 100)
+            },
+            Chat {
+                pinned: true,
+                ..chat_at(2, 200)
+            },
+            chat_at(3, 50),
+        ]);
+
+        list.chats[1].last_timestamp = Some(9_000);
+
+        assert_eq!(ids(&list), vec![1, 2, 3]);
+        assert!(list.set_pinned(3, false));
+        assert_eq!(ids(&list), vec![1, 2, 3], "unpinned, still below the block");
     }
 
     #[test]
@@ -495,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn a_conversation_with_no_messages_is_placed_last_in_its_section() {
+    fn a_conversation_with_no_messages_is_placed_last_among_the_unpinned() {
         let mut list = ChatList::with_chats(vec![
             Chat {
                 last_timestamp: None,
@@ -507,7 +535,9 @@ mod tests {
         assert!(list.set_pinned(2, true));
         assert_eq!(ids(&list), vec![2, 1]);
         assert!(list.set_pinned(1, true));
-        assert_eq!(ids(&list), vec![2, 1], "pinned, but still dateless last");
+        assert_eq!(ids(&list), vec![1, 2], "a fresh pin leads, dated or not");
+        assert!(list.set_pinned(1, false));
+        assert_eq!(ids(&list), vec![2, 1], "unpinned, dateless goes last again");
     }
 
     /// A conversation with nothing in it yet.
