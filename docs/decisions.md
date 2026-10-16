@@ -1080,6 +1080,18 @@ are in [`../AGENTS.md`](../AGENTS.md).
   says `history:`, and `offline:` keeps its line — and it is said only while the
   window came from the cache *and* its newest page is in flight, so an offline
   reader is not promised something that is not coming.
+- **Why the viewer is set per media kind, with the platform opener as the default:**
+  one global command cannot serve a photo and a voice note, and `xdg-open` cannot be
+  waited on at all, since it returns once a handler is launched. `viewer_image`,
+  `viewer_video` and `viewer_audio` each fall back to `viewer`, which falls back to the
+  platform opener, so nothing needs configuring and the common case stays one line. The
+  kind rides with the path from the download to the spawn (`MediaSaved`, the queue,
+  `Viewers`), and `start_next` resolves the command when it pops an item, because only
+  then is the next kind known. A value is split on whitespace and spawned directly: no
+  `sh -c` and no `cmd /C` string, so a path or a setting is never re-parsed as shell
+  and the spawn failure names one program. The cost is that quoting is unavailable, so
+  a program path with a space needs a wrapper script. A configured program is
+  waited on, so its exit sentence is the viewer's; the platform default keeps its own.
 - **Why the version is bumped by merging a release PR, not by a feature:** the
   version is one line, `[workspace.package] version` in the root `Cargo.toml`,
   inherited by every crate, so a bump is a statement about what shipped. It
