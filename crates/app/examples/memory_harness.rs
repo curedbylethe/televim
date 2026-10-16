@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::{Chat, ChatKind};
 use domain::message::{Message, MessageStatus};
+use domain::presence::Presence;
+use domain::updates::UpdateEvent;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tui::app::App;
@@ -79,6 +81,7 @@ fn main() {
     "measuring".clone_into(&mut app.ui.status);
     app.set_chats(fixture_chats());
     app.select_chat(0);
+    report_presence_for_every_chat(&mut app);
 
     let applied = app.apply_latest(fixture_messages());
     assert!(
@@ -171,6 +174,32 @@ fn input_latency_us(terminal: &mut Terminal<TestBackend>, app: &mut App) -> Vec<
         samples.push(micros(at.elapsed()));
     }
     samples
+}
+
+/// Reports a presence for every chat in the fixture, so the peer presence map
+/// (`UiState::peer_presence`, unbounded and sticky) is populated to the full
+/// peer count the session holds before RSS is sampled.
+///
+/// The variants are mixed so each representation is exercised: `Offline` is the
+/// one that carries a payload.
+fn report_presence_for_every_chat(app: &mut App) {
+    let ids: Vec<i64> = app.chats().iter().map(|chat| chat.id).collect();
+    for (n, chat_id) in ids.into_iter().enumerate() {
+        let presence = match n % 6 {
+            0 => Presence::Online,
+            1 => Presence::Offline {
+                was_online: i32::try_from(FIXED_NOW - 3_600).unwrap_or(i32::MAX),
+            },
+            2 => Presence::Recently,
+            3 => Presence::LastWeek,
+            4 => Presence::LastMonth,
+            _ => Presence::Hidden,
+        };
+        assert!(
+            app.apply_update(&UpdateEvent::PeerStatus { chat_id, presence }),
+            "a first report for peer {chat_id} changes what is held"
+        );
+    }
 }
 
 /// The chat list the load is made of.
