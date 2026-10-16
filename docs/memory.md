@@ -148,7 +148,8 @@ reach the shipped artifact.
 `docs/memory-baseline.json` is the stored baseline, and it is recorded by
 hand, never by the driver: `check.py --record-baseline` takes the median across
 several reports, so one slow run cannot anchor a rule above what the tree
-normally costs. It also carries a `cross_invocation` block, and every metric
+normally costs, and stamps the `Cargo.lock` hash it was taken against so the
+checker can warn when the lock moves. It also carries a `cross_invocation` block, and every metric
 carries its sample count — so the figures behind the baseline can be recomputed
 from the tree rather than taken on trust.
 

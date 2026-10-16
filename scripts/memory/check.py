@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -260,6 +261,13 @@ def record_baseline(reports: list[dict], path: pathlib.Path) -> None:
         }
 
     head = reports[0]
+    # The checker's Cargo.lock warning depends on this hash; a report that lacks
+    # it (hand-made or foreign) must not yield a baseline that lacks it too.
+    environment = dict(head.get("environment", {}))
+    if not environment.get("cargo_lock_sha256"):
+        environment["cargo_lock_sha256"] = hashlib.sha256(
+            (ROOT / "Cargo.lock").read_bytes()
+        ).hexdigest()
     baseline = {
         "schema": "televim.memory-baseline/1",
         "platform": host_key(),
@@ -271,7 +279,7 @@ def record_baseline(reports: list[dict], path: pathlib.Path) -> None:
                 "scripts/memory/thresholds.json reads these keys.",
         "taken_unix": head.get("generated_unix"),
         "recorded_from": len(reports),
-        "environment": head.get("environment", {}),
+        "environment": environment,
         "load": head.get("load", {}),
         "idle_definition": head.get("idle_definition"),
         "metrics": metrics,
@@ -374,17 +382,20 @@ def main() -> int:
         return 0
 
     rows = compare(report, baseline, budget)
-    lock_match = (
-        baseline.get("environment", {}).get("cargo_lock_sha256")
-        == env.get("cargo_lock_sha256")
-    )
-    lock_note = (
-        f"Cargo.lock matches the baseline."
-        if lock_match
-        else f"**Cargo.lock differs from the baseline** — the tree has changed since "
-        f"it was taken, which moves every figure here. Re-record the baseline if "
-        f"that change was intended."
-    )
+    recorded_lock = baseline.get("environment", {}).get("cargo_lock_sha256")
+    if not recorded_lock:
+        lock_note = (
+            "Cargo.lock hash was not recorded in the baseline; re-record it so the "
+            "check can warn."
+        )
+    elif recorded_lock == env.get("cargo_lock_sha256"):
+        lock_note = "Cargo.lock matches the baseline."
+    else:
+        lock_note = (
+            "**Cargo.lock differs from the baseline** — the tree has changed since "
+            "it was taken, which moves every figure here. Re-record the baseline if "
+            "that change was intended."
+        )
 
     breaches = [r for r in rows if r["verdict"] == "BREACH"]
     verdict = (
