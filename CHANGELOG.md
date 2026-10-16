@@ -5,6 +5,60 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.4.0] - 2026-10-16
+
+### Added
+
+- **app:** Persist peer read positions across restarts
+- **app:** Recover missed peer read positions from the chat list
+- **tui:** Take an explicit UTC offset in date rendering
+- **app:** Show message times and day breaks in local time
+- **tui:** Let the cursor rest on the open-draft row
+- **app:** Fall back to the platform cache dir for media
+- **app:** Persist the media id in the history file
+- **app:** Prove cross-chat media hit survives restart
+- **app:** Verify a media cache entry's checksum on lookup
+- **telegram-framework:** Stream a download instead of buffering it
+- **proto:** Forward the streaming download
+- **app:** Write a media download to a temp file as it streams
+- **telegram-framework:** Read a document's embedded thumbnail without a request
+- **proto:** Carry the embedded thumbnail to the app
+- **app:** Cache a message's thumbnail and invalidate it with its parent
+- **dialogs:** Keep the server's pin order for pinned chats
+
+### Fixed
+
+- **tui:** Keep the last character in place when o opens a line
+- **app:** Let a failed open's retry hold only its own conversation
+- **tui:** Keep a peer's read position with the time it last moved
+- **app:** Keep read-mark recency across restarts
+- **domain:** Add a prefix reset to VimState
+- **tui:** Clear pending input latches in one App method
+- **app:** Clear pending input and re-push key flags on focus change
+- **proto:** Keep global search hits in Telegram's newest-first order
+- **domain:** Keep the newest global search matches under the cap
+- **app:** Treat global search answers as newest first
+- **telegram-framework:** Treat a zero global search date as no time
+- **app:** Run the viewer wait off the loop thread
+- **app:** Gate the key reader across the viewer
+- **app:** Report the opener's exit when the opener returns early
+- **domain:** Treat a ZWNJ as a word boundary
+- **tui:** Break a row after a zero-width non-joiner
+- **telegram-framework:** Classify an unreadable session file apart from a wrong key
+- **app:** Word an unreadable session file for its permissions, not its key
+- **app:** Leave input focus alone when ready lands on an open conversation
+- **tui:** Draw Terminal-mode lam-alef words in full
+- **tui:** Draw a right-to-left profile card value in visual order
+- **tui:** Draw global search snippets in conversation RTL order
+- **tui:** Draw chat list titles right-to-left under bidi visual
+- **tui:** Draw forward picker titles and previews right-to-left
+- **tui:** Draw user list names right-to-left under bidi visual
+- **tui:** Draw Terminal rows as stored, not split per cluster
+- **tui:** RTL caret placement and words bidi mode
+- **tui:** Anchor the emoji popup on the drawn caret cell in every bidi mode
+- **tui:** Place the Terminal caret word by word, as kitty reverses runs
+- **tui:** Keep the last letter of a word with a lam-alef in a message row
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
