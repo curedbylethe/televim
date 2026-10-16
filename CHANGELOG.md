@@ -5,6 +5,12 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.5.1] - 2026-10-16
+
+### Changed
+
+- **app:** Bound the history cache by JSON-encoded text bytes
+
 ## [0.4.0] - 2026-10-16
 
 ### Added
