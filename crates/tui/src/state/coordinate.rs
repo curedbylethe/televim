@@ -37,8 +37,9 @@ use domain::vim::{CharMotion, Motion, VimState};
 use crate::app::{
     ACTION_QUEUE, ADD_ACCOUNT_REFUSAL, AccountState, Action, ChatChoice, ConfirmKind,
     ContactProfile, Find, Focus, JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_REPLY,
-    NOT_YOURS_REFUSAL, Pane, ProfileId, PromptKind, Register, SESSION_PATH_USAGE, SignIn,
-    SignInFlow, TYPING_FOR,
+    NOT_YOURS_REFUSAL, PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_OPEN_ALREADY,
+    PASS_STILL_CHECKING, PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode, PassPrompt, ProfileId,
+    PromptKind, Register, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow, TYPING_FOR,
 };
 use crate::card::CardRow;
 use crate::jumplist::Jumplist;
@@ -2666,7 +2667,12 @@ pub(crate) fn submit(
         // Unreachable: a sign-in field answers `Enter` itself, so that its
         // `⏎` can be refused while a request is on its way — which a submit
         // with no way to refuse is.
-        PromptKind::Phone | PromptKind::Code | PromptKind::Password => false,
+        PromptKind::Phone
+        | PromptKind::Code
+        | PromptKind::Password
+        | PromptKind::Passphrase
+        | PromptKind::NewPassphrase
+        | PromptKind::RepeatPassphrase => false,
     };
 
     // A sign-in field is what the line is now: `:signin` opened it
@@ -2676,7 +2682,11 @@ pub(crate) fn submit(
     // their keys to an arm with nothing to say about a flow in progress.
     // `:new` keeps its query line for the same reason: the reader is about
     // to type into it, and the reset below would empty it.
-    if session.signin_field().is_some() || input.line.purpose() == PromptKind::NewChat {
+    // `:unlock` and `:passphrase` leave a passphrase line open, for the same reason.
+    if session.signin_field().is_some()
+        || session.pass.is_some()
+        || input.line.purpose() == PromptKind::NewChat
+    {
         conversation.set_reply_to(None);
         conversation.set_editing(None);
         return opened;
@@ -2750,6 +2760,10 @@ pub(crate) fn run_command(
         }
         // Two spellings of one refusal: the path is required, because the
         // configured file is where the session already is.
+        "unlock" => {
+            run_unlock(&mut *ui, &mut *session, &mut *conversation, &mut *input);
+            false
+        }
         _ if cmd == "export-session" || cmd.starts_with("export-session ") => {
             match cmd["export-session".len()..].trim() {
                 "" => ui.set_status(SESSION_PATH_USAGE.to_owned()),
@@ -2954,6 +2968,209 @@ pub(crate) fn handle_signin_field(
             &mut *profile,
             key,
         ),
+    }
+}
+
+/// Opens the passphrase line for `kind` and gives it the focus.
+fn open_pass_line(ui: &mut UiState, input: &mut InputState, kind: PromptKind) {
+    input.line.open_with(kind, String::new());
+    ui.set_focus(Focus::Input);
+}
+
+/// Puts the unlock question up: the session file is locked.
+///
+/// `rejected` when a key was tried and refused, so the box keeps saying so.
+/// Asking again while the box is up keeps the pane `Esc` returns to.
+pub(crate) fn begin_unlock(
+    ui: &mut UiState,
+    session: &mut SessionState,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    rejected: bool,
+) {
+    let from = session.pass.as_ref().map_or(ui.focus, |pass| pass.from);
+    session.locked = true;
+    session.pass = Some(PassPrompt {
+        mode: PassMode::Unlock,
+        from,
+        first: None,
+        bad: rejected.then(|| PASS_BAD_FILE.to_owned()),
+        checking: false,
+        done: None,
+    });
+    conversation.set_confirm(None);
+    ui.set_mode(Mode::Normal);
+    open_pass_line(ui, input, PromptKind::Passphrase);
+}
+
+/// The session opened: the question goes, and so does the lock.
+pub(crate) fn session_unlocked(
+    ui: &mut UiState,
+    session: &mut SessionState,
+    input: &mut InputState,
+) {
+    if !session.locked {
+        return;
+    }
+    session.locked = false;
+    if let Some(pass) = session.pass.take() {
+        input.line.clear();
+        ui.set_focus(pass.from);
+    }
+    ui.flash(PASS_UNLOCKED);
+}
+
+/// A passphrase change ended: the box shows how, and the status says so.
+pub(crate) fn passphrase_changed(
+    ui: &mut UiState,
+    session: &mut SessionState,
+    input: &mut InputState,
+    result: Result<(), String>,
+) {
+    let Some(pass) = session
+        .pass
+        .as_mut()
+        .filter(|pass| pass.mode == PassMode::Change)
+    else {
+        return;
+    };
+    ui.flash(if result.is_ok() {
+        "Session passphrase changed."
+    } else {
+        "Session passphrase not changed: the file was left as it was."
+    });
+    pass.checking = false;
+    pass.first = None;
+    pass.bad = None;
+    pass.done = Some(result);
+    input.line.clear();
+    ui.set_focus(pass.from);
+}
+
+/// `Esc` in the passphrase box: leave the line, keep the session as it was.
+fn pass_cancel(ui: &mut UiState, session: &mut SessionState, input: &mut InputState) {
+    let Some(pass) = session.pass.take() else {
+        return;
+    };
+    input.line.clear();
+    ui.set_focus(pass.from);
+    ui.flash(match pass.mode {
+        PassMode::Unlock => PASS_STILL_LOCKED,
+        PassMode::Change => crate::app::PASS_CANCEL_CHANGE,
+    });
+}
+
+/// `⏎` in the passphrase box.
+///
+/// A change asks for the new passphrase twice, because a typo would lock the
+/// file under a key nobody can recall: a repeat that differs changes nothing
+/// and asks again from the start.
+fn pass_submit(
+    ui: &mut UiState,
+    session: &mut SessionState,
+    input: &mut InputState,
+    outbox: &mut Outbox,
+) {
+    let kind = input.line.purpose();
+    let typed = Secret::new(input.line.take());
+    let Some(pass) = session.pass.as_mut() else {
+        return;
+    };
+    if typed.expose().trim().is_empty() {
+        ui.flash(PASS_EMPTY);
+        open_pass_line(ui, input, kind);
+        return;
+    }
+    pass.bad = None;
+    match kind {
+        PromptKind::NewPassphrase => {
+            pass.first = Some(typed);
+            open_pass_line(ui, input, PromptKind::RepeatPassphrase);
+        }
+        PromptKind::RepeatPassphrase if pass.first.as_ref() != Some(&typed) => {
+            pass.first = None;
+            pass.bad = Some(PASS_DIFFER.to_owned());
+            open_pass_line(ui, input, PromptKind::NewPassphrase);
+        }
+        PromptKind::RepeatPassphrase => {
+            pass.first = None;
+            pass.checking = true;
+            queue_action(outbox, ui, Action::ChangeSessionPassphrase { new: typed });
+        }
+        _ => {
+            pass.checking = true;
+            queue_action(outbox, ui, Action::SubmitSessionPassphrase { value: typed });
+        }
+    }
+}
+
+/// A key while the passphrase box is up.
+///
+/// The line has no Normal mode: a passphrase is typed, never edited, and a
+/// Normal-mode key could move a secret into view. `Esc` leaves at once.
+///
+/// Returns true when a card was opened and its highlight still needs sizing.
+pub(crate) fn handle_pass(
+    session: &mut SessionState,
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    outbox: &mut Outbox,
+    profile: &mut ProfileCard,
+    pending: &mut Pending,
+    list: &mut ChatListState,
+    drafts: &mut DraftStore,
+    key: KeyEvent,
+) -> bool {
+    let Some(pass) = session.pass.as_ref() else {
+        return false;
+    };
+    if pass.done.is_some() {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            session.pass = None;
+        }
+        return false;
+    }
+    if pass.checking {
+        if key.code == KeyCode::Enter {
+            ui.flash(PASS_STILL_CHECKING);
+        }
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => pass_cancel(ui, session, input),
+        KeyCode::Enter => pass_submit(ui, session, input, outbox),
+        KeyCode::Tab | KeyCode::BackTab => {}
+        _ if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') => {}
+        _ => {
+            return handle_line(
+                &mut *ui,
+                &mut *conversation,
+                &mut *input,
+                &mut *outbox,
+                &mut *pending,
+                &mut *session,
+                &mut *list,
+                &mut *drafts,
+                &mut *profile,
+                key,
+            );
+        }
+    }
+    false
+}
+
+/// `:unlock`: ask for the passphrase again after `Esc` left the session locked.
+fn run_unlock(
+    ui: &mut UiState,
+    session: &mut SessionState,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+) {
+    if session.locked {
+        begin_unlock(ui, session, conversation, input, false);
+    } else {
+        ui.set_status(PASS_OPEN_ALREADY.to_owned());
     }
 }
 
@@ -4036,6 +4253,21 @@ fn preempt_key(
     // **before** the pane walk below: while it is up `Tab` pauses the flow
     // rather than walking the panes, and `q` is unbound, so a reader typing a
     // phone number cannot quit the program out from under themselves.
+    if session.pass.is_some() {
+        return Some(handle_pass(
+            &mut *session,
+            &mut *ui,
+            &mut *conversation,
+            &mut *input,
+            &mut *outbox,
+            &mut *profile,
+            &mut *pending,
+            &mut *list,
+            &mut *drafts,
+            key,
+        ));
+    }
+
     if session.signin.is_some() {
         return Some(handle_signin(
             &mut *session,

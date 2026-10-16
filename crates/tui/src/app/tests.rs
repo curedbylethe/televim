@@ -7593,3 +7593,119 @@ fn the_session_commands_refuse_a_missing_path() {
         assert_eq!(app.conversation.confirm, None, "{command}");
     }
 }
+
+// ---- the session passphrase ----------------------------------------------
+
+fn locked() -> App {
+    let mut app = App::mock();
+    app.session_key_required(false);
+    app
+}
+
+#[test]
+fn a_locked_session_opens_the_question_on_a_concealed_passphrase_line() {
+    let app = locked();
+
+    assert!(app.session.locked);
+    assert_eq!(app.input.line.purpose(), PromptKind::Passphrase);
+    assert!(app.input.line.concealed());
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert_eq!(app.session.pass.as_ref().and_then(|p| p.bad.clone()), None);
+}
+
+#[test]
+fn a_rejected_key_opens_the_question_with_the_refusal_kept() {
+    let mut app = App::mock();
+    app.session_key_required(true);
+
+    let bad = app.session.pass.as_ref().and_then(|pass| pass.bad.clone());
+    assert_eq!(bad.as_deref(), Some(PASS_BAD_FILE));
+}
+
+#[test]
+fn submitting_a_passphrase_queues_it_and_waits_for_the_answer() {
+    let mut app = locked();
+    type_text(&mut app, "lantern");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::SubmitSessionPassphrase {
+            value: Secret::new("lantern".to_owned())
+        })
+    );
+    assert!(app.session.pass.as_ref().is_some_and(|pass| pass.checking));
+    assert_eq!(app.status_text(), PASS_CHECKING);
+
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(app.take_action(), None, "a second ⏎ is refused");
+}
+
+#[test]
+fn a_blank_passphrase_is_refused_and_asks_for_nothing() {
+    let mut app = locked();
+    type_text(&mut app, "  ");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.take_action(), None);
+    assert_eq!(app.ui.status, PASS_EMPTY);
+    assert_eq!(app.input.line.purpose(), PromptKind::Passphrase);
+}
+
+#[test]
+fn a_refusal_from_the_other_side_keeps_the_box_and_clears_the_line() {
+    let mut app = locked();
+    type_text(&mut app, "nope");
+    app.handle_key(press(KeyCode::Enter));
+    app.session_key_required(true);
+
+    let pass = app.session.pass.as_ref().expect("the box stays");
+    assert!(!pass.checking);
+    assert_eq!(pass.bad.as_deref(), Some(PASS_BAD_FILE));
+    assert!(app.input.line.is_empty());
+    assert_eq!(app.input.line.purpose(), PromptKind::Passphrase);
+}
+
+#[test]
+fn escape_leaves_the_session_locked_and_unlock_asks_again() {
+    let mut app = locked();
+    type_text(&mut app, "half");
+    app.handle_key(press(KeyCode::Esc));
+
+    assert!(app.session.pass.is_none());
+    assert!(app.session.locked, "Esc does not unlock");
+    assert_eq!(app.ui.status, PASS_STILL_LOCKED);
+    assert!(app.input.line.is_empty(), "nothing typed is kept");
+    assert_eq!(app.take_action(), None);
+
+    run_command_line(&mut app, "unlock");
+    assert!(app.session.pass.is_some());
+    assert_eq!(app.input.line.purpose(), PromptKind::Passphrase);
+}
+
+#[test]
+fn unlock_on_an_open_session_says_so() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "unlock");
+
+    assert_eq!(app.ui.status, PASS_OPEN_ALREADY);
+    assert!(app.session.pass.is_none());
+}
+
+#[test]
+fn unlocking_takes_the_box_down_and_says_so() {
+    let mut app = locked();
+    app.session_unlocked();
+
+    assert!(!app.session.locked);
+    assert!(app.session.pass.is_none());
+    assert_eq!(app.ui.status, PASS_UNLOCKED);
+}
+
+#[test]
+fn a_typed_passphrase_never_shows_in_debug_output() {
+    let action = Action::SubmitSessionPassphrase {
+        value: Secret::new("lantern".to_owned()),
+    };
+    assert!(!format!("{action:?}").contains("lantern"));
+}

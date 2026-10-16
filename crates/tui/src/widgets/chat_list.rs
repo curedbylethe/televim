@@ -65,7 +65,13 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         })
         .collect();
 
-    let title = format!(" Chats ({}) ", app.chats().len());
+    // A locked session shows the local cache, and the title says so.
+    let cached = if app.session.locked && !app.chats().is_empty() {
+        " · cached"
+    } else {
+        ""
+    };
+    let title = format!(" Chats ({}){cached} ", app.chats().len());
     // The focused pane's border is the only thing that says where the keys go,
     // so the two panes cannot both be drawn as though they had it.
     let border = if app.ui.focus == Focus::ChatList {
