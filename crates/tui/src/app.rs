@@ -2097,6 +2097,13 @@ impl App {
         self.outbox.take_action()
     }
 
+    /// Takes a queued session export or import, if there is one.
+    ///
+    /// Delegates to [`Outbox::take_session_action`].
+    pub fn take_session_action(&mut self) -> Option<Action> {
+        self.outbox.take_session_action()
+    }
+
     /// Records that a send for `temp_id` is in flight.
     ///
     /// Delegates to [`ConversationState::begin_send`].

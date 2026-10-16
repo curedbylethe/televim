@@ -68,6 +68,21 @@ impl Outbox {
         self.actions.pop_front()
     }
 
+    /// Takes the oldest session export or import, leaving the rest queued.
+    ///
+    /// They only touch the stored session, so they are answered with no client
+    /// up: an import is how a reader whose key no longer opens the file gets a
+    /// working one.
+    pub(crate) fn take_session_action(&mut self) -> Option<Action> {
+        let at = self.actions.iter().position(|action| {
+            matches!(
+                action,
+                Action::ExportSession { .. } | Action::ImportSession { .. }
+            )
+        })?;
+        self.actions.remove(at)
+    }
+
     /// Takes the text the reader asked to copy to the system clipboard.
     ///
     /// Drained by the caller that owns the terminal, on the same pass it read

@@ -182,6 +182,9 @@ pub enum Event {
     /// there would turn the sign-in form into an error card.
     SessionDiscarded(String),
 
+    /// An export of the session finished, or was refused; the sentence says which.
+    SessionMoved(String),
+
     /// A legacy plaintext session file was read and sealed in place.
     ///
     /// Once: the file is sealed afterwards, so no later bring-up finds it plain.
@@ -1314,6 +1317,70 @@ fn report_resealed(resealed: Option<String>, tx: &UnboundedSender<AppEvent>) {
     }
 }
 
+/// Why the stored session could not be read, in the register of [`key_trouble`]
+/// for a file and plainly for the OS keyring.
+fn unreadable_session(error: &SessionError, file: bool) -> String {
+    if file {
+        format!("{:#}", key_trouble(error))
+    } else {
+        format!("the stored session could not be read: {error}")
+    }
+}
+
+/// Copies the session in `source` into `dest`, the file at `path`.
+///
+/// The snapshot is copied as it is: the auth key lives inside it, so it is never
+/// extracted here, and `source` is only read. Whatever `dest` seals under is its
+/// own business.
+fn export_snapshot(
+    source: &dyn SessionStore,
+    source_is_file: bool,
+    dest: &dyn SessionStore,
+    path: &Path,
+) -> Result<String, String> {
+    let data = match source.load() {
+        Ok(Some(data)) => data,
+        Ok(None) => return Err("there is no stored session to export".to_owned()),
+        Err(error) => return Err(unreadable_session(&error, source_is_file)),
+    };
+    dest.save(&data)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    Ok(format!("session exported to {}", path.display()))
+}
+
+/// The refusal for a path that is the configured session file itself.
+fn is_the_configured_file(cfg: &Config, path: &Path) -> Result<(), String> {
+    if cfg.session_path.as_deref() == Some(path) {
+        return Err(format!(
+            "{} is the configured session file already; name another path",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// [`export_snapshot`] from the configured store into the file at `path`, sealed
+/// under the current key.
+fn export_session(
+    cfg: &Config,
+    path: &Path,
+    keyring: impl Fn() -> Arc<dyn KeyProvider>,
+) -> Result<String, String> {
+    is_the_configured_file(cfg, path)?;
+    let Session { store, .. } = session_store_with(cfg, &keyring);
+    let dest = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
+    export_snapshot(&*store, cfg.session_path.is_some(), &dest, path)
+}
+
+/// Runs an export off the loop: the key derivation and the keyring both block.
+fn spawn_export_session(cfg: Config, path: PathBuf, tx: UnboundedSender<AppEvent>) {
+    tokio::task::spawn_blocking(move || {
+        let sentence = export_session(&cfg, &path, || Arc::new(KeyringKeyProvider::default()))
+            .unwrap_or_else(|sentence| sentence);
+        let _ = tx.send(AppEvent::Net(Event::SessionMoved(sentence)));
+    });
+}
+
 /// The account's own profile, or why there is not one.
 ///
 /// Read once, here, and not when the panel is opened: the profile does not
@@ -1550,6 +1617,15 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // is refused for as long as the card covers the conversation, and the pass
     // after the reader backs out of it asks again.
     let arrived = !card_covers_conversation(app) && state.read_owed.take().is_some();
+    // Before the client is looked up, like the retry: these touch the stored
+    // session and nothing else, and no client is the state a reader needs them in.
+    while let Some(action) = app.take_session_action() {
+        if let (Action::ExportSession { path }, Some(cfg), Some(tx)) =
+            (action, state.cfg.clone(), state.tx.clone())
+        {
+            spawn_export_session(cfg, path, tx);
+        }
+    }
     let Some(client) = state.client.clone() else {
         // No client, so nothing is asked for — but a conversation opened
         // while there is none is still owed what the cache holds for it, or
@@ -2389,7 +2465,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // a screen they did not expect and has to be told why. It says nothing
         // about the client: there is one either way, and the `Ready` beside it is
         // what puts the screen up.
-        Event::SessionDiscarded(sentence) | Event::SessionResealed(sentence) => {
+        Event::SessionDiscarded(sentence)
+        | Event::SessionResealed(sentence)
+        | Event::SessionMoved(sentence) => {
             app.ui.status = sentence;
         }
 
@@ -9686,7 +9764,7 @@ mod tests {
 
 #[cfg(test)]
 mod session_store_tests {
-    use telegram_framework::{FileKey, SessionData};
+    use telegram_framework::{FileKey, MemoryStore, SessionData};
 
     use super::*;
     use crate::config::Secret;
@@ -9717,6 +9795,80 @@ mod session_store_tests {
         fn opening_key(&self, _salt: &[u8; 16]) -> Result<FileKey, SessionError> {
             Err(SessionError::Unavailable("no secret service".to_owned()))
         }
+    }
+
+    /// A session for `user_id` carrying an auth key whose bytes are `fill`.
+    fn snapshot(user_id: i64, fill: u8) -> SessionData {
+        SessionData {
+            user_id: Some(user_id),
+            phone: Some("+100".to_owned()),
+            home_dc_id: Some(2),
+            dc_options: vec![telegram_framework::DcOption {
+                id: 2,
+                ipv4: "149.154.167.50:443".to_owned(),
+                ipv6: "[2001:67c:4e8:f002::a]:443".to_owned(),
+                auth_key: Some(telegram_framework::AuthKey::from_bytes([fill; 256])),
+            }],
+            ..SessionData::default()
+        }
+    }
+
+    /// The bytes of the auth key a snapshot carries for its home datacenter.
+    fn auth_key_bytes(data: &SessionData) -> [u8; 256] {
+        *data.dc_options[0]
+            .auth_key
+            .as_ref()
+            .expect("the datacenter has a key")
+            .as_bytes()
+    }
+
+    #[test]
+    fn an_export_writes_a_sealed_file_another_store_loads_with_the_key_intact() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (from, to) = (dir.path().join("a.bin"), dir.path().join("b.bin"));
+        let cfg = file_config(&from, Some("right"));
+        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        store.save(&snapshot(7, 0xAB)).expect("a session is stored");
+
+        let sentence = export_session(&cfg, &to, || Arc::new(NoKeyring)).expect("it exports");
+        assert!(sentence.contains("b.bin"), "{sentence}");
+
+        let bytes = std::fs::read(&to).expect("the export is a file");
+        assert!(telegram_framework::sealed::is_sealed(&bytes), "never plain");
+        let other = FileStore::with_key_provider(&to, key_provider(&cfg, || Arc::new(NoKeyring)));
+        let copy = other.load().expect("it opens").expect("it holds a session");
+        assert_eq!(copy.account().map(|a| a.user_id), Some(7));
+        assert_eq!(auth_key_bytes(&copy), [0xAB; 256], "the key travelled");
+        assert!(store.load().expect("still loads").is_some(), "source kept");
+    }
+
+    #[test]
+    fn an_export_from_the_keyring_side_reaches_a_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let to = dir.path().join("out.bin");
+        let source = MemoryStore::default();
+        source.save(&snapshot(7, 1)).expect("stored");
+        let dest = FileStore::with_key_provider(&to, Arc::new(Fixed));
+
+        export_snapshot(&source, false, &dest, &to).expect("it exports");
+        assert_eq!(
+            auth_key_bytes(&dest.load().expect("loads").expect("some")),
+            [1; 256]
+        );
+    }
+
+    #[test]
+    fn an_export_with_nothing_stored_or_onto_the_configured_file_is_refused() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (from, to) = (dir.path().join("a.bin"), dir.path().join("b.bin"));
+        let cfg = file_config(&from, Some("right"));
+
+        let none = export_session(&cfg, &to, || Arc::new(NoKeyring)).expect_err("nothing");
+        assert!(none.contains("no stored session"), "{none}");
+        assert!(!to.exists(), "nothing was written");
+
+        let same = export_session(&cfg, &from, || Arc::new(NoKeyring)).expect_err("same file");
+        assert!(same.contains("configured session file"), "{same}");
     }
 
     fn file_config(path: &std::path::Path, passphrase: Option<&str>) -> Config {
