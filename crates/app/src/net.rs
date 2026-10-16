@@ -196,6 +196,12 @@ pub enum Event {
         rejected: bool,
     },
 
+    /// A passphrase change finished, or was refused.
+    ///
+    /// `Ok` carries the new passphrase, so this process keeps opening the files
+    /// with it. Nothing was written unless it is `Ok`.
+    PassphraseChanged(Result<tui::app::Secret, String>),
+
     /// A legacy plaintext session file was read and sealed in place.
     ///
     /// Once: the file is sealed afterwards, so no later bring-up finds it plain.
@@ -1499,6 +1505,9 @@ fn run_session_actions(app: &mut App, state: &mut State) {
             Action::SubmitSessionPassphrase { value } => {
                 submit_passphrase(state, value.expose(), &tx);
             }
+            Action::ChangeSessionPassphrase { new } => {
+                spawn_change_passphrase(cfg, state.history_file.clone(), new, tx);
+            }
             Action::ExportSession { path } => spawn_export_session(cfg, path, tx),
             Action::ImportSession { path } => {
                 let known = match &app.session.account {
@@ -1532,6 +1541,61 @@ fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEve
         state.bringing_up = true;
         spawn_bring_up(cfg, tx.clone());
     }
+}
+
+/// Re-seals the session file, and the history cache beside it, under `new`.
+///
+/// The current file is opened first with the current key, so a key that does
+/// not open it fails here, before anything is written. The session is written
+/// before the history: the cache is rebuilt from the wire if the second step
+/// fails, the session is not.
+fn change_passphrase(
+    cfg: &Config,
+    history: Option<&HistoryFile>,
+    new: &str,
+    keyring: impl Fn() -> Arc<dyn KeyProvider>,
+) -> Result<(), String> {
+    let Some(path) = &cfg.session_path else {
+        return Err(
+            "there is no session file: :passphrase changes the passphrase of the encrypted \
+             session file, and none is configured"
+                .to_owned(),
+        );
+    };
+    if new.trim().is_empty() {
+        return Err("the passphrase cannot be empty".to_owned());
+    }
+    let current = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
+    let data = match current.load() {
+        Ok(Some(data)) => data,
+        Ok(None) => return Err(format!("there is no session in {}", path.display())),
+        Err(error) => return Err(unreadable_session(&error, true)),
+    };
+    let next: Arc<dyn KeyProvider> =
+        Arc::new(PassphraseProvider::with_params(new, cfg.kdf_params()));
+    FileStore::with_key_provider(path, Arc::clone(&next))
+        .save(&data)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    if let Some(history) = history {
+        history.reseal(next);
+    }
+    Ok(())
+}
+
+/// Runs a passphrase change off the loop: deriving the key blocks.
+fn spawn_change_passphrase(
+    cfg: Config,
+    history: Option<HistoryFile>,
+    new: tui::app::Secret,
+    tx: UnboundedSender<AppEvent>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let result = change_passphrase(&cfg, history.as_ref(), new.expose(), || {
+            Arc::new(KeyringKeyProvider::default())
+        })
+        .map(|()| new);
+        let _ = tx.send(AppEvent::Net(Event::PassphraseChanged(result)));
+    });
 }
 
 /// Runs an export off the loop: the key derivation and the keyring both block.
@@ -2662,6 +2726,16 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // about the client: there is one either way, and the `Ready` beside it is
         // what puts the screen up.
         Event::SessionKeyRequired { rejected } => app.session_key_required(rejected),
+        Event::PassphraseChanged(result) => match result {
+            Ok(new) => {
+                state.passphrase = Some(zeroize::Zeroizing::new(new.expose().to_owned()));
+                if let (Some(file), Some(cfg)) = (state.history_file.take(), state.cfg_now()) {
+                    state.history_file = Some(file.rekeyed(file_key_provider(&cfg)));
+                }
+                app.passphrase_changed(Ok(()));
+            }
+            Err(sentence) => app.passphrase_changed(Err(sentence)),
+        },
 
         Event::SessionDiscarded(sentence)
         | Event::SessionResealed(sentence)
@@ -10561,6 +10635,123 @@ mod session_store_tests {
         assert_eq!(
             state.passphrase.as_deref().map(String::as_str),
             Some("second")
+        );
+    }
+
+    fn sealed_under(path: &std::path::Path, passphrase: &str) -> bool {
+        let bytes = std::fs::read(path).expect("the file exists");
+        telegram_framework::sealed::open(&bytes, &PassphraseProvider::new(passphrase))
+            .is_ok_and(|plain| plain.is_some())
+    }
+
+    /// A change moves the session file and the history cache to the new
+    /// passphrase together: both open with it, and neither with the old.
+    #[test]
+    fn changing_the_passphrase_reseals_the_session_and_the_history() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let history_path = dir.path().join("history.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("old")))
+            .save(&snapshot(7, 9))
+            .expect("a session is written");
+        let history = HistoryFile::new(
+            history_path.clone(),
+            Arc::new(PassphraseProvider::new("old")),
+        );
+        history.save(&crate::history_store::HistoryCache::default(), Some("+1"));
+        assert!(sealed_under(&history_path, "old"));
+
+        let cfg = file_config(&path, Some("old"));
+        change_passphrase(&cfg, Some(&history), "new", || Arc::new(NoKeyring))
+            .expect("the change is made");
+
+        assert!(sealed_under(&path, "new"));
+        assert!(!sealed_under(&path, "old"));
+        assert!(sealed_under(&history_path, "new"));
+        assert!(!sealed_under(&history_path, "old"));
+        let reopened =
+            FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("new")))
+                .load()
+                .expect("it opens")
+                .expect("a session");
+        assert_eq!(reopened.account().map(|a| a.user_id), Some(7));
+        assert_eq!(auth_key_bytes(&reopened), auth_key_bytes(&snapshot(7, 9)));
+    }
+
+    /// The current key does not open the file: nothing is written, to either file.
+    #[test]
+    fn a_change_under_the_wrong_current_key_writes_nothing() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let history_path = dir.path().join("history.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("old")))
+            .save(&snapshot(7, 9))
+            .expect("a session is written");
+        let history = HistoryFile::new(
+            history_path.clone(),
+            Arc::new(PassphraseProvider::new("old")),
+        );
+        history.save(&crate::history_store::HistoryCache::default(), Some("+1"));
+        let session_bytes = std::fs::read(&path).expect("exists");
+        let history_bytes = std::fs::read(&history_path).expect("exists");
+
+        let cfg = file_config(&path, Some("wrong"));
+        let error = change_passphrase(&cfg, Some(&history), "new", || Arc::new(NoKeyring))
+            .expect_err("the file does not open");
+
+        assert!(error.contains("TELEVIM_SESSION_PASSPHRASE"), "{error}");
+        assert_eq!(std::fs::read(&path).expect("exists"), session_bytes);
+        assert_eq!(std::fs::read(&history_path).expect("exists"), history_bytes);
+    }
+
+    #[test]
+    fn an_empty_new_passphrase_and_a_missing_session_file_are_refused() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("old")))
+            .save(&snapshot(7, 9))
+            .expect("a session is written");
+        let sealed = std::fs::read(&path).expect("exists");
+
+        let cfg = file_config(&path, Some("old"));
+        assert!(change_passphrase(&cfg, None, "  ", || Arc::new(NoKeyring)).is_err());
+        assert_eq!(std::fs::read(&path).expect("exists"), sealed);
+
+        let error = change_passphrase(&Config::default(), None, "new", || Arc::new(NoKeyring))
+            .expect_err("no session file is configured");
+        assert!(error.contains("no session file"), "{error}");
+    }
+
+    /// The event for a finished change keeps the new passphrase in the state, so
+    /// a reconnect in this process opens the file with it.
+    #[test]
+    fn a_finished_change_is_held_for_the_rest_of_the_process() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State::new(file_config(std::path::Path::new("/x"), Some("old")), tx);
+        let mut app = App::new();
+        apply(
+            &mut app,
+            &mut state,
+            Event::PassphraseChanged(Ok(tui::app::Secret::new("new".to_owned()))),
+        );
+        assert_eq!(
+            state
+                .cfg_now()
+                .and_then(|cfg| cfg.passphrase().map(str::to_owned)),
+            Some("new".to_owned())
+        );
+
+        // A refused change leaves what was held as it was.
+        apply(
+            &mut app,
+            &mut state,
+            Event::PassphraseChanged(Err("denied".to_owned())),
+        );
+        assert_eq!(
+            state
+                .cfg_now()
+                .and_then(|cfg| cfg.passphrase().map(str::to_owned)),
+            Some("new".to_owned())
         );
     }
 }

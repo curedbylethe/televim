@@ -7709,3 +7709,130 @@ fn a_typed_passphrase_never_shows_in_debug_output() {
     };
     assert!(!format!("{action:?}").contains("lantern"));
 }
+
+fn enter_secret(app: &mut App, text: &str) {
+    type_text(app, text);
+    app.handle_key(press(KeyCode::Enter));
+}
+
+/// `:passphrase`, `y`, and the two entries `first` and `again`.
+fn change_passphrase(app: &mut App, first: &str, again: &str) {
+    run_command_line(app, "passphrase");
+    app.handle_key(press(KeyCode::Char('y')));
+    enter_secret(app, first);
+    enter_secret(app, again);
+}
+
+#[test]
+fn passphrase_confirms_before_anything_is_asked() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "passphrase");
+
+    assert_eq!(app.ui.mode, Mode::Confirm);
+    assert_eq!(app.status_text(), "Change the session passphrase? (y/n)");
+    assert!(app.session.pass.is_none());
+
+    app.handle_key(press(KeyCode::Char('n')));
+    assert!(app.session.pass.is_none());
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn yes_asks_for_the_new_passphrase_concealed_and_then_the_repeat() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "passphrase");
+    app.handle_key(press(KeyCode::Char('y')));
+
+    assert_eq!(app.input.line.purpose(), PromptKind::NewPassphrase);
+    assert!(app.input.line.concealed());
+    enter_secret(&mut app, "fresh");
+    assert_eq!(app.input.line.purpose(), PromptKind::RepeatPassphrase);
+    assert!(app.input.line.concealed());
+    assert_eq!(app.take_action(), None, "one entry changes nothing");
+}
+
+#[test]
+fn matching_entries_queue_the_change() {
+    let mut app = App::mock();
+    change_passphrase(&mut app, "fresh", "fresh");
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::ChangeSessionPassphrase {
+            new: Secret::new("fresh".to_owned())
+        })
+    );
+    assert!(app.session.pass.as_ref().is_some_and(|pass| pass.checking));
+}
+
+#[test]
+fn entries_that_differ_change_nothing_and_start_over() {
+    let mut app = App::mock();
+    change_passphrase(&mut app, "fresh", "stale");
+
+    assert_eq!(app.take_action(), None);
+    assert_eq!(app.input.line.purpose(), PromptKind::NewPassphrase);
+    let pass = app.session.pass.as_ref().expect("the box stays");
+    assert_eq!(pass.bad.as_deref(), Some(PASS_DIFFER));
+    assert!(pass.first.is_none(), "the first entry is forgotten");
+}
+
+#[test]
+fn an_empty_new_passphrase_is_refused() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "passphrase");
+    app.handle_key(press(KeyCode::Char('y')));
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.ui.status, PASS_EMPTY);
+    assert_eq!(app.input.line.purpose(), PromptKind::NewPassphrase);
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn escape_during_a_change_writes_nothing() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "passphrase");
+    app.handle_key(press(KeyCode::Char('y')));
+    enter_secret(&mut app, "fresh");
+    app.handle_key(press(KeyCode::Esc));
+
+    assert!(app.session.pass.is_none());
+    assert_eq!(app.ui.status, PASS_CANCEL_CHANGE);
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn a_locked_session_refuses_the_change() {
+    let mut app = locked();
+    app.handle_key(press(KeyCode::Esc));
+    run_command_line(&mut app, "passphrase");
+
+    assert_eq!(app.ui.status, PASS_LOCKED);
+    assert_eq!(app.ui.mode, Mode::Normal);
+}
+
+#[test]
+fn the_result_of_a_change_is_the_box_and_esc_closes_it() {
+    let mut app = App::mock();
+    change_passphrase(&mut app, "fresh", "fresh");
+    app.passphrase_changed(Ok(()));
+
+    assert_eq!(app.ui.status, "Session passphrase changed.");
+    assert!(
+        app.session
+            .pass
+            .as_ref()
+            .is_some_and(|pass| pass.done == Some(Ok(())))
+    );
+    app.handle_key(press(KeyCode::Esc));
+    assert!(app.session.pass.is_none());
+
+    let mut app = App::mock();
+    change_passphrase(&mut app, "fresh", "fresh");
+    app.passphrase_changed(Err("denied".to_owned()));
+    assert_eq!(
+        app.ui.status,
+        "Session passphrase not changed: the file was left as it was."
+    );
+}

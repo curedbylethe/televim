@@ -853,6 +853,25 @@ impl HistoryFile {
         Self::new(self.path, keys)
     }
 
+    /// Re-seals the file in place under `to`, when it opens under the current key.
+    ///
+    /// A file the current key does not open is left alone: it is a cache, and it
+    /// reads as empty under either key. Best-effort like [`HistoryFile::write`].
+    pub(crate) fn reseal(&self, to: Arc<dyn KeyProvider>) {
+        let Ok(bytes) = fs::read(&self.path) else {
+            return;
+        };
+        let plain = match sealed::open(&bytes, self.keys.as_ref()) {
+            Ok(Some(plain)) => plain.to_vec(),
+            Ok(None) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "history file left as it was: it does not open");
+                return;
+            }
+        };
+        Self::new(self.path.clone(), to).write(&plain);
+    }
+
     /// A handle sealed under a fixed passphrase, so tests need no keyring.
     #[cfg(test)]
     pub(crate) fn for_test(path: PathBuf) -> Self {

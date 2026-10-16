@@ -157,6 +157,9 @@ fn import_prompt(path: &std::path::Path) -> String {
     )
 }
 
+/// The prompt for `:passphrase`.
+pub const CHANGE_PASSPHRASE_PROMPT: &str = "Change the session passphrase? (y/n)";
+
 /// What `:export-session` and `:import-session` say when no path was given.
 ///
 /// Required rather than defaulted to the configured session file: that file is
@@ -839,6 +842,12 @@ pub enum ConfirmKind {
         /// The file the session is read from.
         path: PathBuf,
     },
+
+    /// Change the session file's passphrase.
+    ///
+    /// Asked first because a new passphrase that is mistyped, or forgotten,
+    /// locks the file for good. `y` opens the two entries.
+    ChangePassphrase,
 
     /// Delete these messages, for both sides.
     DeleteMessages {
@@ -3007,6 +3016,7 @@ impl App {
             Some(ConfirmKind::Quit) => return QUIT_PROMPT.to_owned(),
             Some(ConfirmKind::Logout) => return LOGOUT_PROMPT.to_owned(),
             Some(ConfirmKind::ImportSession { path }) => return import_prompt(path),
+            Some(ConfirmKind::ChangePassphrase) => return CHANGE_PASSPHRASE_PROMPT.to_owned(),
             Some(ConfirmKind::DeleteMessages {
                 ids,
                 outgoing,
