@@ -38,6 +38,7 @@ dependencies = [
  "cipher 0.5.2",
  "cpubits",
  "cpufeatures 0.3.1",
+ "zeroize",
 ]
 
 [[package]]
@@ -52,6 +53,7 @@ dependencies = [
  "ctr",
  "ctutils",
  "polyval",
+ "zeroize",
 ]
 
 [[package]]
@@ -3483,6 +3485,7 @@ dependencies = [
 name = "telegram-framework"
 version = "0.4.0"
 dependencies = [
+ "aes 0.9.3",
  "aes-gcm-siv",
  "argon2",
  "getrandom 0.4.3",

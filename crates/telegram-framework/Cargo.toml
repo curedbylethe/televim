@@ -26,6 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 keyring.workspace = true
 aes-gcm-siv.workspace = true
+aes.workspace = true
 argon2.workspace = true
 getrandom.workspace = true
 zeroize.workspace = true
