@@ -1255,3 +1255,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
   blob reference count: a reference is a pointer, and a viewer has none, so counting it
   there would pin the pointer and entry caps too. Sign-out and account change do not wait
   for the viewer. No blob name, pointer format or capacity rule changed.
+- **Why a late store leaves a held file alone:** a store that reserved before a `clear`
+  and commits (or abandons) after it finds its generation stale and would unlink its
+  file unless a newer store owns it. If a viewer holds that path the unlink would take
+  the file from under it, so `commit` and `abandon` check the hold first, the same as
+  `clear` does. The file is not removed there: `release_viewer` removes it once nothing
+  owns it, so the hold has one removal path. `owns` is unchanged; it answers whether a
+  name is pending or indexed, not whether a viewer holds it.

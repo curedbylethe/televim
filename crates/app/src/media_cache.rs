@@ -664,7 +664,11 @@ impl MediaCache {
         }
         if reservation.write {
             self.release(&reservation.path);
-            if !self.owns(&reservation.path, &reservation.hash) {
+            // A held file is the viewer's: `release_viewer` removes it, so the
+            // hold outranks this removal.
+            if !self.owns(&reservation.path, &reservation.hash)
+                && !self.viewing.contains_key(&reservation.path)
+            {
                 let _ = fs::remove_file(&reservation.path);
             }
         } else {
@@ -807,8 +811,10 @@ impl MediaCache {
         } = reservation;
         if generation != self.generation {
             // The clear already swept the cache; the late files must not survive
-            // it. A newer store may own them by now, so leave what it owns.
-            if !self.owns(&path, &hash) {
+            // it. A newer store may own them by now, so leave what it owns. A
+            // viewer's hold outranks the generation check, as it does in
+            // `clear`: `release_viewer` removes the file then.
+            if !self.owns(&path, &hash) && !self.viewing.contains_key(&path) {
                 let _ = fs::remove_file(&path);
             }
             for key in keys {
@@ -1819,6 +1825,62 @@ mod tests {
         );
         assert_eq!(cache.lookup(7, 9), None);
         assert!(!path.exists(), "and the late file is removed");
+    }
+
+    /// Reserves a hashed store, holds its path for a viewer, and clears; the
+    /// store's file then materialises, as a store that had already renamed.
+    fn late_store_under_a_clear(cache: &mut MediaCache, held: bool) -> (Reservation, PathBuf) {
+        let reservation = cache
+            .reserve_hashed(&content_hash(b"late"), MediaKind::Photo, 4, 1, 1)
+            .expect("the file is reserved");
+        let path = reservation.path.clone();
+        if held {
+            cache.hold_for_viewer(&path);
+        }
+        cache.clear();
+        fs::write(&path, b"late").expect("the file materialises");
+        (reservation, path)
+    }
+
+    #[test]
+    fn a_late_commit_leaves_a_held_file_for_its_viewer() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), Some("+15550001"));
+        let (reservation, path) = late_store_under_a_clear(&mut cache, true);
+
+        assert_eq!(cache.commit(reservation, &[Key::Message(7, 9)]), None);
+        assert!(path.exists(), "a viewer holds it");
+
+        cache.release_viewer(&path);
+        assert!(!path.exists(), "released, it is removed");
+    }
+
+    #[test]
+    fn a_late_commit_still_removes_an_unheld_file() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), Some("+15550001"));
+        let (reservation, path) = late_store_under_a_clear(&mut cache, false);
+
+        assert_eq!(cache.commit(reservation, &[Key::Message(7, 9)]), None);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn an_abandoned_store_leaves_a_held_file() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), Some("+15550001"));
+        let reservation = cache
+            .reserve_hashed(&content_hash(b"late"), MediaKind::Photo, 4, 1, 1)
+            .expect("the file is reserved");
+        let path = reservation.path.clone();
+        cache.hold_for_viewer(&path);
+        fs::write(&path, b"part").expect("the file is there");
+
+        cache.abandon(&reservation);
+        assert!(path.exists(), "a viewer holds it");
+
+        cache.release_viewer(&path);
+        assert!(!path.exists(), "released, it is removed");
     }
 
     #[test]
