@@ -496,6 +496,20 @@ reader already saw as absent. `make measure-check` still passes on a clean run
 baseline was not re-recorded. Revisit if the map ever becomes reachable from a
 peer count beyond the chat list.
 
+The jumplist marks (`tui/src/jumplist.rs`) are a fourth map of the kind, and
+**declared — bounded by construction, no run needed**. `Jumplist` is a
+`HashMap<i64, Marks>`: a `Marks` holds two `VecDeque<i64>`s, and each is trimmed
+to the configured `jumplist_depth` (100 by default, allowed 1 to 1000) after
+every push, so one conversation never holds more than 2 × depth message ids — 8
+bytes each, so about 1.6 KB at the default and about 16 KB at the maximum. A
+mark is kept per conversation the reader has visited, for the life of the
+session, **never evicted until sign-out or exit**: the map grows by one entry per
+conversation opened, and the whole of it is bounded by (conversations visited ×
+2 × depth × 8 B). At the default depth a thousand visited conversations is about
+1.6 MB, and the empty list that closes the account clears it whole. Far inside
+the budget, so no named constant beyond the depth and no eviction were added.
+Declared, not measured.
+
 **The worst case is declared to fall under the 50 MB budget, by this
 arithmetic** (declared, not measured; no run recorded it). Resident: 8 MiB of
 message text plus the chat list's worst case of about 6 MB, about 14 MB. A write

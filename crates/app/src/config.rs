@@ -43,6 +43,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use telegram_framework::KdfParams;
 use tui::bidi::BidiMode;
+use tui::jumplist::DEFAULT_DEPTH;
 use tui::state::ui::{GraphicsMode, StickerMode};
 
 /// A setting that must not reach a log or a panic message.
@@ -104,6 +105,10 @@ const GRAPHICS_KITTY: &str = "kitty";
 const KDF_MEMORY_KIB_RANGE: std::ops::RangeInclusive<u32> = 8_192..=524_288;
 const KDF_PASSES_RANGE: std::ops::RangeInclusive<u32> = 1..=8;
 const KDF_LANES_RANGE: std::ops::RangeInclusive<u32> = 1..=4;
+
+/// Bounds on the jumplist depth: wide enough to tune, tight enough that a typo
+/// is neither useless nor unbounded.
+const JUMPLIST_DEPTH_RANGE: std::ops::RangeInclusive<usize> = 1..=1_000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -219,6 +224,14 @@ pub struct Config {
     /// Unset, the cap is 1 GiB. The cache also keeps at most 256 files, whatever
     /// their size; this is the byte half of that bound.
     pub media_cache_max_bytes: Option<u64>,
+
+    /// How many back/forward marks each conversation's jumplist keeps.
+    ///
+    /// Unset, the default is [`DEFAULT_DEPTH`] (100). Allowed 1 to 1000. The
+    /// cap applies to **both** stacks of every conversation, and is fixed for
+    /// the life of the run: it is handed to `tui` once, before the first frame,
+    /// so it can only be changed by a relaunch.
+    pub jumplist_depth: Option<usize>,
 }
 
 impl Default for Config {
@@ -241,6 +254,7 @@ impl Default for Config {
             session_kdf_lanes: None,
             media_cache_dir: None,
             media_cache_max_bytes: None,
+            jumplist_depth: None,
         }
     }
 }
@@ -294,7 +308,23 @@ impl Config {
             .try_deserialize()
             .context("deserialising config")?;
         cfg.validate_kdf()?;
+        cfg.validate_jumplist_depth()?;
         Ok(cfg)
+    }
+
+    /// Refuses a jumplist depth a typo could make useless or unbounded, naming
+    /// the key.
+    fn validate_jumplist_depth(&self) -> Result<()> {
+        if let Some(value) = self.jumplist_depth
+            && !JUMPLIST_DEPTH_RANGE.contains(&value)
+        {
+            anyhow::bail!(
+                "jumplist_depth = {value} is out of range: it must be {} to {}",
+                JUMPLIST_DEPTH_RANGE.start(),
+                JUMPLIST_DEPTH_RANGE.end()
+            );
+        }
+        Ok(())
     }
 
     /// Refuses a KDF cost a typo could make trivial or unbounded, naming the key.
@@ -334,6 +364,15 @@ impl Config {
             passes: self.session_kdf_passes.unwrap_or(default.passes),
             lanes: self.session_kdf_lanes.unwrap_or(default.lanes),
         }
+    }
+
+    /// The number of back/forward marks each conversation's jumplist keeps.
+    ///
+    /// The key set, or [`DEFAULT_DEPTH`] (100) when it is not — the same
+    /// default the `tui` type carries, so the two cannot drift.
+    #[must_use]
+    pub fn jumplist_depth(&self) -> usize {
+        self.jumplist_depth.unwrap_or(DEFAULT_DEPTH)
     }
 
     /// The application credentials, if both were given.
@@ -551,6 +590,56 @@ mod tests {
         }
     }
 
+    /// With no key the depth is the `tui` type's own default, so the two cannot
+    /// drift.
+    #[test]
+    fn the_jumplist_depth_defaults_to_a_hundred() {
+        assert_eq!(bare().jumplist_depth(), DEFAULT_DEPTH);
+        assert_eq!(bare().jumplist_depth(), 100);
+    }
+
+    /// The depth is read from the file under its own key.
+    #[test]
+    fn the_jumplist_depth_is_read_from_the_file() {
+        let cfg =
+            load_toml("jumplist-depth-ok", "jumplist_depth = 42\n").expect("an in-range key loads");
+
+        assert_eq!(cfg.jumplist_depth, Some(42));
+        assert_eq!(cfg.jumplist_depth(), 42);
+    }
+
+    /// `TELEVIM_JUMPLIST_DEPTH` sets the depth with no file at all.
+    #[test]
+    fn the_environment_supplies_the_jumplist_depth() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+
+        // SAFETY: process-wide environment, written only by the tests in this
+        // module and only while holding `ENV`.
+        unsafe {
+            std::env::set_var("TELEVIM_JUMPLIST_DEPTH", "250");
+        }
+
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+
+        // SAFETY: as above — clearing a name this module's tests set.
+        unsafe { std::env::remove_var("TELEVIM_JUMPLIST_DEPTH") };
+
+        assert_eq!(cfg.jumplist_depth(), 250);
+    }
+
+    #[test]
+    fn an_out_of_range_jumplist_depth_fails_the_launch_naming_the_key() {
+        for value in [0, 1_001] {
+            let error = load_toml("jumplist-depth-bad", &format!("jumplist_depth = {value}\n"))
+                .expect_err("an out-of-range value is refused");
+            assert!(
+                error.to_string().contains("jumplist_depth"),
+                "{error} names jumplist_depth"
+            );
+        }
+    }
+
     /// A configuration with nothing set but the two required-by-nobody values.
     fn bare() -> Config {
         Config::default()
@@ -578,6 +667,10 @@ mod tests {
         assert_eq!(
             cfg.media_cache_max_bytes, None,
             "the cache's own 1 GiB is the default"
+        );
+        assert_eq!(
+            cfg.jumplist_depth, None,
+            "the jumplist's own depth is the default"
         );
     }
 

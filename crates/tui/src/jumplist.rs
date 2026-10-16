@@ -14,14 +14,17 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-/// How many marks one conversation keeps.
+/// How many marks one conversation keeps unless the configuration names
+/// another.
 ///
 /// Bounded because a reader who keeps jumping would otherwise keep every
 /// message they have ever been at, in a program whose whole budget is a few
 /// megabytes. Vim's own `'jumplist'` depth is 50; 100 is the same answer with
 /// room to spare, and a reader who has forgotten the last hundred places they
-/// were was never going to walk back that far.
-const DEPTH: usize = 100;
+/// were was never going to walk back that far. [`Jumplist::new`] takes the
+/// depth, and the configuration's `jumplist_depth` is what the application
+/// hands it; this constant is the default the two agree on.
+pub const DEFAULT_DEPTH: usize = 100;
 
 /// The two stacks of marks for one conversation.
 ///
@@ -36,13 +39,44 @@ struct Marks {
     forward: VecDeque<i64>,
 }
 
+/// Drops the oldest marks of `stack` until it holds no more than `depth`.
+///
+/// Both stacks are capped after every push, so no walk and no record can leave
+/// either one longer than the depth, whatever order the reader presses the keys.
+fn trim(stack: &mut VecDeque<i64>, depth: usize) {
+    while stack.len() > depth {
+        stack.pop_front();
+    }
+}
+
 /// Where the reader has been, per conversation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Jumplist {
     conversations: HashMap<i64, Marks>,
+    /// How many marks each conversation keeps, on either stack.
+    depth: usize,
+}
+
+impl Default for Jumplist {
+    fn default() -> Self {
+        Self::new(DEFAULT_DEPTH)
+    }
 }
 
 impl Jumplist {
+    /// An empty jumplist whose conversations each keep at most `depth` marks.
+    ///
+    /// The depth is fixed at construction: it is read once from the
+    /// configuration and handed here, like the other settings resolved before
+    /// the first frame.
+    #[must_use]
+    pub fn new(depth: usize) -> Self {
+        Self {
+            conversations: HashMap::new(),
+            depth,
+        }
+    }
+
     /// Remembers that the reader was at `id` in `peer_id`'s conversation.
     ///
     /// The forward marks go, because a new jump makes every place they had been
@@ -53,6 +87,7 @@ impl Jumplist {
     /// twice on the same message has not gone anywhere, and recording it twice
     /// would make `Ctrl-o` a key that appears to do nothing once.
     pub fn record(&mut self, peer_id: i64, id: i64) {
+        let depth = self.depth;
         let marks = self.conversations.entry(peer_id).or_default();
         if marks.back.back() == Some(&id) {
             return;
@@ -60,9 +95,7 @@ impl Jumplist {
 
         marks.back.push_back(id);
         marks.forward.clear();
-        while marks.back.len() > DEPTH {
-            marks.back.pop_front();
-        }
+        trim(&mut marks.back, depth);
     }
 
     /// The message before the one at `from`, or `None` when there is none.
@@ -72,10 +105,12 @@ impl Jumplist {
     /// them back again, and it is why the first `Ctrl-o` marks the place the
     /// reader was standing at the end of the list rather than discarding it.
     pub fn back(&mut self, peer_id: i64, from: i64) -> Option<i64> {
+        let depth = self.depth;
         let marks = self.conversations.entry(peer_id).or_default();
         let target = marks.back.pop_back()?;
 
         marks.forward.push_back(from);
+        trim(&mut marks.forward, depth);
         Some(target)
     }
 
@@ -86,10 +121,12 @@ impl Jumplist {
     /// copying one: a reader who walks back and forward twice has been in the
     /// same two places, not four.
     pub fn forward(&mut self, peer_id: i64, from: i64) -> Option<i64> {
+        let depth = self.depth;
         let marks = self.conversations.entry(peer_id).or_default();
         let target = marks.forward.pop_back()?;
 
         marks.back.push_back(from);
+        trim(&mut marks.back, depth);
         Some(target)
     }
 
@@ -186,13 +223,14 @@ mod tests {
     /// ever been at.
     #[test]
     fn the_oldest_mark_goes_past_the_depth() {
-        let newest = i64::try_from(DEPTH).expect("a depth of marks fits in a message id") + 5;
+        let newest =
+            i64::try_from(DEFAULT_DEPTH).expect("a depth of marks fits in a message id") + 5;
         let mut marks = Jumplist::default();
         for id in 1..=newest {
             marks.record(CHAT, id);
         }
 
-        assert_eq!(marks.depth(CHAT), DEPTH);
+        assert_eq!(marks.depth(CHAT), DEFAULT_DEPTH);
         // The stack is walked from the newest end, so that is where the walk
         // starts: what it ends on is the oldest mark that survived.
         let mut walked = marks.back(CHAT, 0);
@@ -202,9 +240,73 @@ mod tests {
             walked = marks.back(CHAT, id);
         }
 
-        assert_eq!(visited.len(), DEPTH, "every mark is still walkable");
+        assert_eq!(visited.len(), DEFAULT_DEPTH, "every mark is still walkable");
         assert_eq!(visited.first(), Some(&newest), "the newest survived");
         assert_eq!(visited.last(), Some(&6), "and the first five did not");
+    }
+
+    /// The cap is the default's, and the default is a hundred.
+    #[test]
+    fn the_default_depth_is_a_hundred() {
+        assert_eq!(DEFAULT_DEPTH, 100);
+
+        let mut marks = Jumplist::default();
+        let past = i64::try_from(DEFAULT_DEPTH).expect("a hundred fits in a message id") + 1;
+        for id in 1..=past {
+            marks.record(CHAT, id);
+        }
+
+        assert_eq!(marks.depth(CHAT), 100, "the default caps at a hundred");
+    }
+
+    /// The depth is a parameter, not a constant: a conversation keeps whatever
+    /// the configuration named, and nothing more.
+    #[test]
+    fn a_configured_depth_is_honoured() {
+        let mut marks = Jumplist::new(3);
+        for id in 1..=10 {
+            marks.record(CHAT, id);
+        }
+
+        assert_eq!(marks.depth(CHAT), 3);
+        // The newest three survived; the seventh did not.
+        assert_eq!(marks.back(CHAT, 0), Some(10));
+        assert_eq!(marks.back(CHAT, 10), Some(9));
+        assert_eq!(marks.back(CHAT, 9), Some(8));
+        assert_eq!(marks.back(CHAT, 8), None, "and the seventh is gone");
+    }
+
+    /// Both stacks are capped: a reader who walks the whole back stack out
+    /// fills the forward one, and it holds no more than the depth either.
+    #[test]
+    fn the_forward_stack_is_capped_like_the_back_one() {
+        let depth = 3;
+        let last = i64::try_from(depth).expect("a small depth fits in a message id");
+        let mut marks = Jumplist::new(depth);
+        for id in 1..=last {
+            marks.record(CHAT, id);
+        }
+
+        // Walk the whole back stack out, which moves every mark onto the
+        // forward stack.
+        let mut walked = marks.back(CHAT, 100);
+        let mut backed = 0;
+        while let Some(id) = walked {
+            backed += 1;
+            walked = marks.back(CHAT, id);
+        }
+
+        // Then walk it all back, which refills the back stack.
+        let mut walked = marks.forward(CHAT, 0);
+        let mut forwarded = 0;
+        while let Some(id) = walked {
+            forwarded += 1;
+            walked = marks.forward(CHAT, id);
+        }
+
+        assert_eq!(backed, depth, "every back mark is walkable");
+        assert_eq!(forwarded, depth, "and no forward one past the depth");
+        assert_eq!(marks.depth(CHAT), depth);
     }
 
     #[test]

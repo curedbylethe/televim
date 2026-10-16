@@ -92,6 +92,12 @@ pub(crate) fn set_chats(
         // another account, and inheriting a stranger's words is worse than
         // losing one's own.
         drafts.drafts.clear();
+        // And the marks, for the same reason: an empty list is a sign-out or a
+        // list with no conversations in it, and either way there is nothing
+        // left for a return to walk into. A switch between conversations does
+        // *not* come through here — [`select_chat`] keeps the marks — so this is
+        // the one place the jumplist is forgotten.
+        conversation.jumplist = Jumplist::default();
     }
 }
 
@@ -316,12 +322,16 @@ pub(crate) fn park_draft(
 /// The outgoing conversation's draft is parked under its peer id first, so a
 /// reader who switches chats mid-sentence finds the sentence again on their
 /// return — [`App::select_chat`] restores it with [`resume_draft`]. The
-/// other acts of this function are resets. What is *not* kept is the draft's
-/// subject: the reply it answers and the message it edits are dropped here,
-/// because they name something in the conversation that has just closed, and
-/// a reply sent into a different chat to a message that is not in it is not a
-/// reply at all. The words survive per conversation; what they were for does
-/// not, and the draft becomes a message when it comes back.
+/// other acts of this function are resets, all of them for values that belong
+/// to the conversation being left. It does not reset the jumplist: a mark is
+/// keyed by conversation, so it outlives the switch and is what `Ctrl-o`
+/// returns through. A list that comes back empty forgets it in [`set_chats`],
+/// where there is no conversation left to return into. What is *not* kept is
+/// the draft's subject: the reply it answers and the message it edits are
+/// dropped here, because they name something in the conversation that has just
+/// closed, and a reply sent into a different chat to a message that is not in it
+/// is not a reply at all. The words survive per conversation; what they were for
+/// does not, and the draft becomes a message when it comes back.
 pub(crate) fn select_chat_none(
     ui: &mut UiState,
     outbox: &mut Outbox,
@@ -341,10 +351,6 @@ pub(crate) fn select_chat_none(
     conversation.vim = VimState::new(0);
     outbox.fetching.clear();
     pending.set_jump(None);
-    // The marks are per conversation, and this is the path every switch goes
-    // through, so this is where they go too: a reader who has closed the
-    // conversation has nowhere to walk back to.
-    conversation.jumplist = Jumplist::default();
     conversation.search.clear();
     conversation.reply_to = None;
     conversation.editing = None;

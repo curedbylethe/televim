@@ -5432,6 +5432,98 @@ fn a_bare_tab_cycles_panes_and_is_not_forward_navigation() {
     assert_eq!(reading(&app), Some(1), "a reported `Ctrl-i` still walks");
 }
 
+// ---- the jumplist survives a conversation switch --------------------
+
+/// The back/forward marks are keyed by conversation, so leaving one and
+/// returning finds them where they were: `Ctrl-o` walks into the mark taken
+/// before the switch rather than into nothing.
+#[test]
+fn marks_survive_leaving_and_returning_to_a_conversation() {
+    let mut app = with_a_loaded_quote();
+    go_to_reply(&mut app); // records where the reader stood in the open chat
+    assert_eq!(
+        app.conversation.jumplist.depth(MOCK_CHAT),
+        1,
+        "a mark is behind the reader"
+    );
+
+    app.select_chat(1); // leave for Grace
+    app.select_chat(0); // and return
+    app.apply_latest(page(&[1, 2, 3])); // the return re-loads the window
+
+    app.handle_key(press_ctrl('o'));
+
+    assert_eq!(
+        reading(&app),
+        Some(2),
+        "the mark taken before the switch is still behind them"
+    );
+}
+
+/// One conversation's marks are not another's: a mark left in the chat the
+/// reader walked away from is not visible in the one they walked into, so
+/// `Ctrl-o` there has nothing to walk to.
+#[test]
+fn a_mark_in_one_conversation_is_not_visible_in_another() {
+    let mut app = with_a_loaded_quote();
+    go_to_reply(&mut app);
+    assert_eq!(app.conversation.jumplist.depth(MOCK_CHAT), 1);
+
+    app.select_chat(1); // Grace, whose id is the sample's next
+    app.apply_latest(vec![stranger(20), stranger(21)]);
+    let before = reading(&app);
+
+    app.handle_key(press_ctrl('o'));
+
+    assert_eq!(
+        reading(&app),
+        before,
+        "there is nothing of the other chat's to walk to"
+    );
+    assert_eq!(app.pending_jump(), None, "and no page was asked for");
+    assert_eq!(
+        app.conversation.jumplist.depth(MOCK_CHAT + 1),
+        0,
+        "the other chat keeps no marks of its own here"
+    );
+}
+
+/// The depth the configuration hands the application is the cap each
+/// conversation's jumplist keeps, on both stacks.
+#[test]
+fn the_configured_jumplist_depth_bounds_each_conversation() {
+    let mut app = App::mock();
+    app.conversation = app.conversation.with_jumplist_depth(3);
+
+    for id in 1..=10 {
+        app.conversation.jumplist.record(MOCK_CHAT, id);
+    }
+
+    assert_eq!(
+        app.conversation.jumplist.depth(MOCK_CHAT),
+        3,
+        "the depth from the configuration is the cap"
+    );
+}
+
+/// An empty list — a sign-out, or a list that came back with no conversations
+/// in it — is the one path that forgets the marks: there is nothing left for a
+/// return to walk into, and a peer id can be reused by another account.
+#[test]
+fn an_empty_chat_list_forgets_every_mark() {
+    let mut app = with_a_loaded_quote();
+    go_to_reply(&mut app);
+    assert_eq!(app.conversation.jumplist.depth(MOCK_CHAT), 1);
+
+    app.set_chats(Vec::new());
+
+    assert_eq!(
+        app.conversation.jumplist.depth(MOCK_CHAT),
+        0,
+        "the marks went with the conversations"
+    );
+}
+
 // ---- the :shortcode completion --------------------------------------
 
 /// An application composing `draft`, which opens a completion if it names a

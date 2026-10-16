@@ -481,7 +481,10 @@ single-shot, so a rebuild is the only way to re-subscribe (see
 [`decisions.md`](./decisions.md)). One automatic reconnect is allowed per working
 feed, and the re-`Ready` is place-preserving — the open conversation and its
 cursor, the chat-list highlight restored by id, the jumplist, the selection, the
-register and the draft all survive — because the reader did not navigate.
+register and the draft all survive — because the reader did not navigate. The
+jumplist is the same per-conversation map a **conversation switch** preserves:
+its marks are keyed by peer id, so leaving one chat and returning finds them
+where they were, and only an empty list forgets them.
 Everything with a rule in it is a function over the state — `wanted`,
 `auto_reconnect`, `open_first_chat`, `backoff`, `chat_list_retry`,
 `feed_error_retry` — so the part
@@ -630,6 +633,15 @@ which says how a picture reaches the terminal. `auto` asks the environment once
 WezTerm) and is `kitty` only where one of them is named. It is resolved in
 `runtime.rs` and handed to `tui` as `tui::state::ui::GraphicsMode` through
 `App::with_graphics`, fixed before the first frame like the other two.
+
+`Config` also reads `TELEVIM_JUMPLIST_DEPTH` — 100 by default, allowed 1 to 1000 —
+which is how many back/forward marks each conversation's jumplist keeps. It is
+read once in `runtime.rs` and handed to `tui` as a plain `usize` through
+`ConversationState::with_jumplist_depth`, by the same construction as the three
+above, so `tui` still names no configuration type. The `tui` type's own default
+is `tui::jumplist::DEFAULT_DEPTH`, which the configuration's default reuses, and
+`Config::jumplist_depth` resolves the unset case to it. The cap applies to both
+stacks, fixed before the first frame.
 
 In `kitty` mode the conversation panel paints the block's cells blank and records
 each picture it drew in `UiState::placements`, with its screen cell and size, once
