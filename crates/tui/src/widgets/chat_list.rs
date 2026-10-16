@@ -110,4 +110,64 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn an_unread_chat_shows_its_count_after_the_title() {
+        let app = App::mock();
+        let buffer = screen(&app, 40, 10);
+
+        // Row 3 is the third chat, Alan Turing, with one unread message.
+        let third = row_text(&buffer, 3);
+        assert!(third.contains("Alan Turing (1)"), "{third:?}");
+        // A chat with nothing unread carries no count.
+        let first = row_text(&buffer, 1);
+        assert!(!first.contains('('), "{first:?}");
+    }
+
+    #[test]
+    fn the_selected_row_alone_carries_the_selection_style() {
+        let mut app = App::mock();
+        app.select_chat(1);
+        let reversed = |buffer: &Buffer, y: u16| {
+            buffer[(2, y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        };
+
+        let buffer = screen(&app, 40, 10);
+
+        assert!(reversed(&buffer, 2), "the cursor row is reversed");
+        assert!(!reversed(&buffer, 1));
+        assert!(!reversed(&buffer, 3));
+    }
+
+    #[test]
+    fn a_presence_update_leaves_every_row_unchanged() {
+        use domain::presence::Presence;
+        use domain::updates::UpdateEvent;
+
+        let mut app = App::mock();
+        let before = screen(&app, 40, 10);
+        let ids: Vec<i64> = app.chats().iter().map(|c| c.id).collect();
+
+        for (i, chat_id) in ids.into_iter().enumerate() {
+            let presence = if i % 2 == 0 {
+                Presence::Online
+            } else {
+                Presence::Offline {
+                    was_online: 1_730_000_000,
+                }
+            };
+            assert!(app.apply_update(&UpdateEvent::PeerStatus { chat_id, presence }));
+        }
+
+        let after = screen(&app, 40, 10);
+        for y in 0..10 {
+            assert_eq!(
+                row_text(&before, y),
+                row_text(&after, y),
+                "row {y} says nothing about presence"
+            );
+        }
+    }
 }
