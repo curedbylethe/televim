@@ -366,19 +366,13 @@ Real, and named so they are not mistaken for oversights:
   only at roughly 15,000 to 28,000 peers. No bound is justified at a realistic peer
   count; revisit if a flow can name peers beyond the chat list
   ([`memory.md`](./memory.md#the-history-cache)).
-- **The history file is not encrypted at rest.** `televim.history.json` is plain
-  JSON restricted to its owner (`0600`), the drafts file's precedent; the session
-  file is sealed, and the drafts and the history are not. Anyone who can read the
-  reader's files can read the newest 200 messages of up to 32 conversations and
-  the chat list's previews. Sealing both with the session file's key is the
-  follow-up — see [`decisions.md`](./decisions.md).
 - **The media cache is not encrypted at rest.** The directory holds the bytes of
   the attachments a reader has opened and the previews their messages carry, as
   plaintext `0600` blobs named `<sha256>.<ext>`, beside pointer files that name
   them — `<chat>-<message>.ref`, `m<id>.ref` and `<chat>-<message>.thumb` — and
   the fallback directory `televim.media-<account>` under the platform cache
-  directory is the same. This is the media cache's half of **The history file is
-  not encrypted at rest** above, and the follow-up is the same one: reuse the
+  directory is the same. The history file is already sealed with the session file's
+  envelope, and the follow-up here is the same one: reuse the
   sealed envelope the session file already uses — `TVIM1 | salt(16) | nonce(12) |
   ciphertext | tag(16)`, AES-256-GCM-SIV — so a downloaded file is ciphertext at
   rest too (see [`decisions.md`](./decisions.md)). Building that is not this

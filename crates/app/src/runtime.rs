@@ -699,7 +699,7 @@ async fn event_loop(
     // conversation and a false clear costs one fetch. A file that may not seed is removed rather
     // than left for the first write to overwrite, so another account's
     // messages do not wait on disk for a page that may never come.
-    let history_file = HistoryFile::new(history_path.to_path_buf());
+    let history_file = HistoryFile::new(history_path.to_path_buf(), net::file_key_provider(cfg));
     let (history, history_tag) = load_history(&history_file, cfg.phone.as_deref());
 
     // What the configuration carries goes into the sign-in flow as pre-fills,

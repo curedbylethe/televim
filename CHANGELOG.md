@@ -91,8 +91,7 @@ The areas still behind for v1:
 - Sixel images are not implemented.
 - Arabic and Persian letters are not contextually joined; default-mode RTL renders
   wrong in xterm and alacritty.
-- The history file and the expanded AES key schedule are not encrypted or zeroized at
-  rest in every path.
+- The expanded AES key schedule is not zeroized in every path.
 - The 50 MB memory ceiling is not measured under load.
 - Visual mode's `r` refuses rather than replying.
 - Groups and channels are out of scope by design; no cache exists for them.

@@ -910,15 +910,27 @@ are in [`../AGENTS.md`](../AGENTS.md).
   under a card is kept and marked on the pass after the card closes.
   Sending from the list's `Latest` open, rather than from a `tui` action, keeps the
   client out of the screen's hands and leaves the four-slot action queue for sends.
-- **Why the history file is plaintext for now:** message bodies are as
-  sensitive as the drafts, and the drafts file is plaintext JSON beside the
-  configuration, restricted to its owner (`0600`) and tagged with the account. The
-  history file follows that precedent rather than the session file's. Sealing it
-  the way the session is sealed would bring the envelope's key resolution and its
-  failure modes — a wrong passphrase, no key at all — to a file whose loss costs
-  one fetch, and would put a key derivation in front of the cache a launch draws
-  from; that is a change of its own, not something this file half-does. It is
-  recorded in [`known-gaps.md`](./known-gaps.md).
+- **Why the history file is sealed with the session file's envelope:** message
+  bodies and the chat list are as sensitive as the session, so the file is
+  ciphertext, not `0600` JSON. `HistoryFile` seals the encoded JSON through
+  `telegram-framework::sealed` — the same `TVIM1` envelope and AES-256-GCM-SIV the
+  session file uses, no second crypto stack — under the same key: the provider is
+  built from the same configuration (`net::file_key_provider`: the passphrase when
+  set, else the OS keyring's `file-key` entry), so there is no per-file key and no
+  new keyring name. A write seals, reopens the result and compares before any file
+  is touched, as the session's does. A legacy plaintext file is read once (the
+  envelope's `open` answers `Ok(None)` for it), and the same bytes are sealed in its
+  place; the pre-migration inode is zero-filled through a handle opened before the
+  replace and stale `<name>.<pid>.tmp` files are removed — the session file's
+  migration, ported as module-private helpers because each store here carries its own
+  copies. The wipe is best effort for the same reasons given there. The error policy
+  differs from the session's because this is a cache: an envelope that will not open
+  (the wrong key or a damaged file) and a key source that cannot be reached both warn
+  and start empty, and the file is **left alone**, so a wrong passphrase today does
+  not destroy a cache the right one reads tomorrow; the next successful save
+  overwrites it. Writes were already best-effort, so an unreachable key source skips
+  them and never fails a page. The cost is a key lookup on the first draw: with the
+  keyring, a locked store shows an empty cache and the wire refills it.
 - **Why the cached window's sentence ranks just above the hint:** a cached window
   has messages to show, so the `Loading…` row — which stands in for messages — is
   not drawn over it, and the wait is said on the status line instead:

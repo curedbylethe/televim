@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use domain::chat::{Chat, ChatKind};
@@ -35,6 +36,7 @@ use domain::history::CONVERSATION_WINDOW;
 use domain::message::{MediaKind, Message, MessageStatus};
 use domain::updates::UpdateEvent;
 use serde::{Deserialize, Serialize};
+use telegram_framework::{KeyProvider, sealed};
 
 /// How many messages of one conversation the file keeps.
 ///
@@ -97,6 +99,10 @@ pub(crate) const HISTORY_CACHE_CHATS: usize = 500;
 #[derive(Debug, Clone)]
 pub(crate) struct HistoryFile {
     path: PathBuf,
+
+    /// The key source the session file uses, so the cache is sealed under the
+    /// same key and no second secret exists.
+    keys: Arc<dyn KeyProvider>,
 }
 
 /// What [`HistoryFile::load`] found: the stored account tags and the cache.
@@ -835,10 +841,19 @@ impl From<CachedMedia> for MediaKind {
 }
 
 impl HistoryFile {
-    /// A handle on the history file at `path`.
+    /// A handle on the history file at `path`, sealed under `keys`.
     #[must_use]
-    pub(crate) fn new(path: PathBuf) -> Self {
-        Self { path }
+    pub(crate) fn new(path: PathBuf, keys: Arc<dyn KeyProvider>) -> Self {
+        Self { path, keys }
+    }
+
+    /// A handle sealed under a fixed passphrase, so tests need no keyring.
+    #[cfg(test)]
+    pub(crate) fn for_test(path: PathBuf) -> Self {
+        Self::new(
+            path,
+            Arc::new(telegram_framework::PassphraseProvider::new("test")),
+        )
     }
 
     /// Reads the stored cache and the account tag it was saved under.
@@ -861,27 +876,46 @@ impl HistoryFile {
             }
         };
 
-        match serde_json::from_slice::<Payload>(&bytes) {
-            Ok(payload) => {
-                let mut cache = HistoryCache::default();
-                for (peer, rows) in payload.peers {
-                    let messages: Vec<Message> =
-                        rows.iter().map(|row| row.to_message(peer)).collect();
-                    cache.put(peer, &messages);
-                }
-                cache.chats = payload.chats;
-                cache.chats.truncate(HISTORY_CACHE_CHATS);
-                LoadedHistory {
-                    account: payload.account,
-                    account_id: payload.account_id,
-                    cache,
-                }
+        match sealed::open(&bytes, self.keys.as_ref()) {
+            Ok(Some(plain)) => Self::parse(&plain).unwrap_or_else(LoadedHistory::empty),
+            Ok(None) => {
+                // Not an envelope: a file from a build that wrote plaintext.
+                // Read it once, then seal the same bytes in its place, wiping
+                // the old inode. Garbage is left for the next save to replace.
+                let Some(loaded) = Self::parse(&bytes) else {
+                    return LoadedHistory::empty();
+                };
+                self.write(&bytes);
+                loaded
             }
+            // A wrong key or a damaged envelope: a cache is recoverable, but
+            // the right key may be back tomorrow, so the file stays until a
+            // save overwrites it.
             Err(error) => {
-                tracing::warn!(%error, "discarding an unreadable history file");
+                tracing::warn!(%error, "history file could not be opened; starting empty");
                 LoadedHistory::empty()
             }
         }
+    }
+
+    /// The cache `plain` JSON holds, or `None` (warned about) when it is not
+    /// a history payload.
+    fn parse(plain: &[u8]) -> Option<LoadedHistory> {
+        let payload = serde_json::from_slice::<Payload>(plain)
+            .inspect_err(|error| tracing::warn!(%error, "discarding an unreadable history file"))
+            .ok()?;
+        let mut cache = HistoryCache::default();
+        for (peer, rows) in payload.peers {
+            let messages: Vec<Message> = rows.iter().map(|row| row.to_message(peer)).collect();
+            cache.put(peer, &messages);
+        }
+        cache.chats = payload.chats;
+        cache.chats.truncate(HISTORY_CACHE_CHATS);
+        Some(LoadedHistory {
+            account: payload.account,
+            account_id: payload.account_id,
+            cache,
+        })
     }
 
     /// Stores `cache` under the phone `account`, atomically: [`HistoryFile::encode`]
@@ -921,19 +955,47 @@ impl HistoryFile {
             .ok()
     }
 
-    /// Replaces the file with `bytes` from [`HistoryFile::encode`], atomically.
+    /// Seals `bytes` from [`HistoryFile::encode`] and replaces the file with
+    /// the envelope, atomically.
     ///
     /// Best-effort: a failure is warned about and the run carries on with the
     /// messages still in memory — the file is a head start for the next
-    /// launch, and the wire can always refill it.
+    /// launch, and the wire can always refill it. A provider that cannot open
+    /// its own envelope fails here, before any file is touched. A plaintext
+    /// file being replaced is zeroed once the envelope is in place.
     pub(crate) fn write(&self, bytes: &[u8]) {
+        let envelope = match sealed::seal(bytes, self.keys.as_ref()) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                tracing::warn!(%error, "history could not be sealed");
+                return;
+            }
+        };
+        let reopens = matches!(
+            sealed::open(&envelope, self.keys.as_ref()),
+            Ok(Some(plain)) if plain.as_slice() == bytes
+        );
+        if !reopens {
+            tracing::warn!("the sealed history did not open again; not written");
+            return;
+        }
         if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty())
             && let Err(error) = fs::create_dir_all(parent)
         {
             tracing::warn!(%error, "history directory could not be created");
             return;
         }
-        write_atomically(&self.path, bytes);
+        // Opened before the replace, which unlinks the old inode: the handle
+        // is what lets the old bytes be zeroed afterwards.
+        let legacy = open_unsealed(&self.path);
+        if write_atomically(&self.path, &envelope)
+            && let Some(mut old) = legacy
+        {
+            if let Err(error) = wipe(&mut old) {
+                tracing::warn!(%error, "could not wipe the pre-migration history file");
+            }
+            remove_stale_temps(&self.path);
+        }
     }
 
     /// Removes the file; a missing file is success.
@@ -974,7 +1036,7 @@ pub(crate) fn history_acceptable(
 /// temp in the same directory, restricted before a byte is in it, renamed over
 /// the target — so an interrupted write leaves the previous history intact
 /// rather than a truncated file, and the target inherits the temp's `0600`.
-fn write_atomically(path: &Path, bytes: &[u8]) {
+fn write_atomically(path: &Path, bytes: &[u8]) -> bool {
     let temp = temp_sibling(path);
 
     let result = (|| -> Result<()> {
@@ -985,11 +1047,83 @@ fn write_atomically(path: &Path, bytes: &[u8]) {
         Ok(())
     })();
 
-    if let Err(error) = result {
+    if let Err(error) = &result {
         // A half-written temp is not a history file, and nothing would ever
         // clean it up.
         let _ = fs::remove_file(&temp);
         tracing::warn!(%error, "history file could not be written");
+    }
+    result.is_ok()
+}
+
+/// The existing file at `path`, opened for writing, if it is not an envelope.
+///
+/// A legacy plaintext file (or junk about to be replaced); the handle is what
+/// lets [`wipe`] reach it after the path has been replaced. Unix only:
+/// elsewhere a rename over an open file is not reliable.
+#[cfg(unix)]
+fn open_unsealed(path: &Path) -> Option<fs::File> {
+    use std::io::Read as _;
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()?;
+    let mut head = Vec::with_capacity(sealed::MAGIC.len());
+    file.by_ref()
+        .take(sealed::MAGIC.len() as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    (!sealed::is_sealed(&head)).then_some(file)
+}
+
+#[cfg(not(unix))]
+fn open_unsealed(_path: &Path) -> Option<fs::File> {
+    None
+}
+
+/// Overwrites `file` with zeros, in place, and syncs it. Best effort.
+fn wipe(file: &mut fs::File) -> io::Result<()> {
+    use std::io::{Read as _, Seek as _};
+
+    let len = file.metadata()?.len();
+    file.rewind()?;
+    io::copy(&mut io::repeat(0).take(len), file)?;
+    file.sync_all()
+}
+
+/// Wipes and removes the `<name>.<pid>.tmp` files [`write_atomically`] leaves
+/// when a process dies mid-write; a build that wrote plaintext may have left
+/// one holding it.
+fn remove_stale_temps(path: &Path) {
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut prefix = name.to_os_string();
+    prefix.push(".");
+    let prefix = prefix.to_string_lossy().into_owned();
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if is_file
+            && file_name
+                .strip_prefix(&prefix)
+                .is_some_and(|rest| rest.strip_suffix(".tmp").is_some())
+        {
+            if let Ok(mut file) = fs::OpenOptions::new().write(true).open(entry.path()) {
+                let _ = wipe(&mut file);
+            }
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -1021,11 +1155,23 @@ mod tests {
 
     const PEER: i64 = 7;
 
+    /// Writes `plain` to the file as a sealed envelope, the way a save would,
+    /// for fixtures a test hand-writes.
+    fn seed(file: &HistoryFile, plain: impl AsRef<[u8]>) {
+        let envelope = sealed::seal(plain.as_ref(), file.keys.as_ref()).expect("the fixture seals");
+        fs::write(&file.path, envelope).expect("the fixture is written");
+    }
+
+    /// A key source whose key is not the one `for_test` seals under.
+    fn other_keys() -> Arc<dyn KeyProvider> {
+        Arc::new(telegram_framework::PassphraseProvider::new("another"))
+    }
+
     /// A history file in a scratch directory, so a run never touches the
     /// developer's own.
     fn scratch(name: &str) -> (tempfile::TempDir, HistoryFile) {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        let file = HistoryFile::new(dir.path().join(name));
+        let file = HistoryFile::for_test(dir.path().join(name));
         (dir, file)
     }
 
@@ -1077,6 +1223,16 @@ mod tests {
 
         file.save(&cache, Some("+15551234567"));
 
+        let on_disk = fs::read(&file.path).expect("the file the save wrote");
+        assert!(
+            sealed::is_sealed(&on_disk),
+            "the bytes on disk are an envelope"
+        );
+        assert!(
+            !String::from_utf8_lossy(&on_disk).contains("first"),
+            "no message body is readable on disk"
+        );
+
         let loaded = file.load();
         assert_eq!(loaded.account.as_deref(), Some("+15551234567"));
         assert_eq!(loaded.cache, cache);
@@ -1126,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_file_is_forgotten_and_the_next_save_overwrites_it() {
+    fn garbage_that_is_neither_envelope_nor_json_is_forgotten_and_the_next_save_overwrites_it() {
         let (_dir, file) = scratch("history.json");
         fs::write(&file.path, "{ not json").expect("the corrupt file");
 
@@ -1146,6 +1302,117 @@ mod tests {
         );
     }
 
+    const LEGACY: &str = r#"{"account": "+1555", "peers": {"7": [
+        {"id": 4, "text": "legacy secret", "timestamp": 40, "is_outgoing": true}
+    ]}}"#;
+
+    #[test]
+    fn a_legacy_plaintext_file_is_rewritten_sealed() {
+        let (_dir, file) = scratch("history.json");
+        fs::write(&file.path, LEGACY).expect("the legacy file");
+
+        let loaded = file.load();
+        assert_eq!(ids(&loaded.cache.get(PEER)), vec![4], "read once as it was");
+        assert_eq!(loaded.account.as_deref(), Some("+1555"));
+
+        let on_disk = fs::read(&file.path).expect("the file is still there");
+        assert!(sealed::is_sealed(&on_disk), "rewritten as an envelope");
+        assert!(
+            !String::from_utf8_lossy(&on_disk).contains("legacy secret"),
+            "the plaintext is gone from the file"
+        );
+        assert_eq!(file.load(), loaded, "and the sealed file loads the same");
+    }
+
+    /// The old inode is zeroed, not merely unlinked.
+    #[cfg(unix)]
+    #[test]
+    fn migration_wipes_the_pre_migration_bytes() {
+        use std::io::Read as _;
+
+        let (dir, file) = scratch("history.json");
+        fs::write(&file.path, LEGACY).expect("the legacy file");
+        let stale = dir.path().join("history.json.99999.tmp");
+        fs::write(&stale, LEGACY).expect("a stale temp");
+        let unrelated = dir.path().join("other.json.1.tmp");
+        fs::write(&unrelated, b"x").expect("an unrelated file");
+        let mut old = fs::File::open(&file.path).expect("a handle on the old inode");
+
+        file.load();
+
+        let mut left = Vec::new();
+        old.read_to_end(&mut left).expect("the old inode reads");
+        assert_eq!(left.len(), LEGACY.len(), "the old file changed length");
+        assert!(
+            left.iter().all(|byte| *byte == 0),
+            "plaintext was left behind"
+        );
+        assert!(!stale.exists(), "the stale temp was left");
+        assert!(unrelated.exists(), "a file of another name was touched");
+    }
+
+    #[test]
+    fn a_file_sealed_under_another_key_is_left_alone_and_loads_empty() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "one")]);
+        file.save(&cache, None);
+        let before = fs::read(&file.path).expect("the sealed file");
+
+        let stranger = HistoryFile::new(file.path.clone(), other_keys());
+
+        assert_eq!(stranger.load(), LoadedHistory::empty());
+        assert_eq!(
+            fs::read(&file.path).expect("the file is still there"),
+            before,
+            "a wrong key never destroys what the right one could read"
+        );
+        assert_eq!(file.load().cache, cache, "the right key still reads it");
+    }
+
+    /// A key source that cannot be reached: a locked keyring.
+    #[derive(Debug)]
+    struct Locked;
+
+    impl KeyProvider for Locked {
+        fn sealing_key(
+            &self,
+        ) -> Result<(sealed::Salt, telegram_framework::FileKey), telegram_framework::SessionError>
+        {
+            Err(telegram_framework::SessionError::Unavailable(
+                "locked".into(),
+            ))
+        }
+
+        fn opening_key(
+            &self,
+            _salt: &sealed::Salt,
+        ) -> Result<telegram_framework::FileKey, telegram_framework::SessionError> {
+            Err(telegram_framework::SessionError::Unavailable(
+                "locked".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn an_unreachable_key_source_skips_the_write_and_loads_empty() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "one")]);
+        file.save(&cache, None);
+        let before = fs::read(&file.path).expect("the sealed file");
+
+        let locked = HistoryFile::new(file.path.clone(), Arc::new(Locked));
+        assert_eq!(locked.load(), LoadedHistory::empty());
+        locked.save(&HistoryCache::default(), None);
+
+        assert_eq!(
+            fs::read(&file.path).expect("the file is still there"),
+            before,
+            "nothing is written, and nothing is lost"
+        );
+    }
+
     #[test]
     fn a_save_leaves_a_whole_file_and_no_temp_behind() {
         let (_dir, file) = scratch("history.json");
@@ -1156,9 +1423,13 @@ mod tests {
 
         file.save(&cache, Some("+15551234567"));
 
-        let raw = fs::read_to_string(&file.path).expect("the file the save wrote");
+        let raw = fs::read(&file.path).expect("the file the save wrote");
+        assert!(sealed::is_sealed(&raw), "the target is ciphertext");
+        let plain = sealed::open(&raw, file.keys.as_ref())
+            .expect("the envelope opens")
+            .expect("the target is only ever the finished file");
         let parsed: serde_json::Value =
-            serde_json::from_str(&raw).expect("the target is only ever the finished file");
+            serde_json::from_slice(&plain).expect("the sealed payload is JSON");
         let expected: serde_json::Value = serde_json::from_str(
             r#"{"account": "+15551234567", "peers": {"7": [
                 {"id": 1, "text": "", "timestamp": 10, "is_outgoing": false, "media": "photo"}
@@ -1420,13 +1691,12 @@ mod tests {
     #[test]
     fn a_file_without_a_chat_list_loads_its_messages() {
         let (_dir, file) = scratch("history.json");
-        fs::write(
-            &file.path,
+        seed(
+            &file,
             r#"{"account": "+1555", "peers": {"7": [
                 {"id": 4, "text": "hello", "timestamp": 40, "is_outgoing": true}
             ]}}"#,
-        )
-        .expect("the older file");
+        );
 
         let loaded = file.load();
         assert_eq!(ids(&loaded.cache.get(PEER)), vec![4]);
@@ -1495,15 +1765,14 @@ mod tests {
     #[test]
     fn a_hand_written_file_seeds_the_cache_within_its_bounds() {
         let (_dir, file) = scratch("history.json");
-        fs::write(
-            &file.path,
+        seed(
+            &file,
             r#"{"account": "+1555", "peers": {"7": [
                 {"id": -1, "text": "never sent", "timestamp": 1, "is_outgoing": true},
                 {"id": 4, "text": "hello", "timestamp": 40, "is_outgoing": true, "reply_to": 3},
                 {"id": 5, "text": "", "timestamp": 50, "is_outgoing": false, "media": "voice"}
             ]}}"#,
-        )
-        .expect("the hand-written file");
+        );
 
         let loaded = file.load();
         assert!(history_acceptable(
@@ -2151,11 +2420,10 @@ mod tests {
             peers,
             chats: Vec::new(),
         };
-        fs::write(
-            &file.path,
+        seed(
+            &file,
             serde_json::to_vec(&payload).expect("the payload serialises"),
-        )
-        .expect("the wide file");
+        );
 
         let cache = file.load().cache;
         assert_eq!(cache.peers.len(), HISTORY_CACHE_PEERS);
@@ -2177,11 +2445,10 @@ mod tests {
             peers: BTreeMap::from([(PEER, rows)]),
             chats: Vec::new(),
         };
-        fs::write(
-            &file.path,
+        seed(
+            &file,
             serde_json::to_vec(&payload).expect("the payload serialises"),
-        )
-        .expect("the over-deep file");
+        );
 
         let kept = ids(&file.load().cache.get(PEER));
         assert_eq!(kept.len(), HISTORY_CACHE_DEPTH);
@@ -2244,11 +2511,10 @@ mod tests {
             peers,
             chats: Vec::new(),
         };
-        fs::write(
-            &file.path,
+        seed(
+            &file,
             serde_json::to_vec(&payload).expect("the payload serialises"),
-        )
-        .expect("the heavy file");
+        );
 
         let cache = file.load().cache;
         assert!(cache.text_bytes() <= HISTORY_CACHE_BYTES);

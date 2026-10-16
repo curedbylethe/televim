@@ -11,8 +11,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
+use telegram_framework::{PassphraseProvider, sealed};
 use tempfile::TempDir;
 use termlens::Terminal;
+
+/// The passphrase the sandboxed binary seals under and the seeded history is
+/// sealed with, so no run reaches the developer's OS keyring.
+const PASSPHRASE: &str = "e2e-passphrase";
 
 /// A scratch directory holding an empty config and a session path.
 ///
@@ -48,6 +53,7 @@ pub fn spawn_offline(sandbox: &Sandbox) -> Terminal {
         .timeout(Duration::from_secs(5))
         .current_dir(sandbox.dir.path())
         .env("TELEVIM_SESSION_PATH", &sandbox.session)
+        .env("TELEVIM_SESSION_PASSPHRASE", PASSPHRASE)
         .args(["--config", config])
         .spawn(env!("CARGO_BIN_EXE_televim"))
         .expect("spawn televim in a PTY")
@@ -55,7 +61,7 @@ pub fn spawn_offline(sandbox: &Sandbox) -> Terminal {
 
 /// Writes the warm-start cache beside the sandbox config, before launch.
 ///
-/// The file is `history.json` with the config's extension replaced, the path
+/// Sealed under the sandbox passphrase. The file is `history.json` with the config's extension replaced, the path
 /// `runtime.rs` loads from. The sandbox sets no phone number, so the account
 /// is `null`, the unnamed account `history_acceptable` accepts. `chats` is
 /// `(id, title)`; `peers` is `(peer id, message texts)`, numbered from 1 in
@@ -84,7 +90,9 @@ pub fn seed_history(sandbox: &Sandbox, chats: &[(i64, &str)], peers: &[(i64, Vec
             .map(|(id, title)| SeedChat { id: *id, title })
             .collect(),
     };
-    let bytes = serde_json::to_vec(&file).expect("serialise seeded history");
+    let plain = serde_json::to_vec(&file).expect("serialise seeded history");
+    let bytes =
+        sealed::seal(&plain, &PassphraseProvider::new(PASSPHRASE)).expect("seal seeded history");
     let path = sandbox.config.with_extension("history.json");
     std::fs::write(&path, bytes).expect("write seeded history.json");
 }

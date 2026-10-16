@@ -79,8 +79,13 @@ below.
   tests use `ratatui`'s `TestBackend`.
 - **History cache:** two layers, both on every job and neither needing a
   client. The **store** (`app/src/history_store.rs`) is pure functions over
-  `HistoryCache` and one file in a temp directory: the file's round trip, its
-  `0600` mode, an atomic write that leaves no temp behind, a corrupt or missing
+  `HistoryCache` and one file in a temp directory: the file's round trip as an
+  envelope on disk (through a passphrase provider, never the keyring), its
+  `0600` mode, an atomic write that leaves no temp behind, a legacy plaintext file
+  rewritten sealed with its old inode zeroed
+  (`a_legacy_plaintext_file_is_rewritten_sealed`,
+  `migration_wipes_the_pre_migration_bytes`), a file sealed under another key or
+  behind an unreachable key source left alone and loaded empty, garbage or a missing
   file as an empty cache, the account rules (`a_payload_round_trips_the_signed_in_account_id`,
   `a_legacy_phone_tag_still_accepts_only_the_configured_phone`,
   `a_mismatched_account_id_does_not_seed_the_cache`), the depth, peer, text-byte

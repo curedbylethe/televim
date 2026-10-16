@@ -356,7 +356,7 @@ Working today:
 - **History cache:** media bytes are not in this file; they are in the media cache
   (see **Media** above). The newest 200 messages of each of the 32 most recently
   touched private conversations, and the first 500 rows of the chat list, are kept
-  in `televim.history.json` beside the config — plain JSON, `0600`, written
+  in `televim.history.json` beside the config — sealed JSON (the session file's envelope), `0600`, written
   atomically and off the loop's thread, behind every page, feed event and list
   change. A launch with a warm cache draws the cached chat list and the first
   conversation (or the `--chat` one, when the cache holds it) **before any network
@@ -370,7 +370,8 @@ Working today:
   its Telegram media id are kept; media bytes, presence and unsent placeholders
   never are. The file is used only by a launch configured with the same phone it was
   written under, and is removed on sign-out and when a launch finds no session. It is
-  **not encrypted** — see [`docs/known-gaps.md`](./docs/known-gaps.md).
+  sealed with the session file's envelope and key; a plaintext file from an older
+  build is read once and rewritten sealed.
 
 Not built, and named here so nobody reads the roadmap below as current:
 
