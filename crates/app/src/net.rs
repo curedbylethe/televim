@@ -1363,6 +1363,12 @@ fn key_provider(
     }
 }
 
+/// The key source the history cache is sealed under: the session file's own,
+/// built from the same configuration, so the two share one key.
+pub(crate) fn file_key_provider(cfg: &Config) -> Arc<dyn KeyProvider> {
+    key_provider(cfg, || Arc::new(KeyringKeyProvider::default()))
+}
+
 /// The `offline:` sentence for a session file whose key is missing or wrong.
 ///
 /// Names what the reader can set, and says the file was left alone, because the
@@ -5780,12 +5786,12 @@ mod tests {
     fn signing_out_removes_the_history_file() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let path = dir.path().join("televim.history.json");
-        HistoryFile::new(path.clone()).save(&HistoryCache::default(), Some("+1555"));
+        HistoryFile::for_test(path.clone()).save(&HistoryCache::default(), Some("+1555"));
         assert!(path.exists());
 
         let mut app = app_with_a_conversation(CHAT, 2);
         let mut state = State::default();
-        state.set_history_file(HistoryFile::new(path.clone()));
+        state.set_history_file(HistoryFile::for_test(path.clone()));
         apply_logged_out(&mut app, &mut state, Ok(()));
 
         assert!(!path.exists(), "the messages went with the account");
@@ -5800,7 +5806,7 @@ mod tests {
             history: opened(CHAT),
             ..State::default()
         };
-        state.set_history_file(HistoryFile::new(path.to_path_buf()));
+        state.set_history_file(HistoryFile::for_test(path.to_path_buf()));
         state
     }
 
@@ -5854,7 +5860,7 @@ mod tests {
     }
 
     fn file_ids(path: &std::path::Path) -> Vec<i64> {
-        HistoryFile::new(path.to_path_buf())
+        HistoryFile::for_test(path.to_path_buf())
             .load()
             .cache
             .get(CHAT)
@@ -5881,6 +5887,10 @@ mod tests {
         assert!(!path.exists(), "and on disk only once the loop writes it");
 
         persist(&mut state).await;
+        assert!(
+            telegram_framework::sealed::is_sealed(&std::fs::read(&path).expect("the file")),
+            "the loop writes the cache as an envelope"
+        );
         assert_eq!(file_ids(&path), vec![1, 2, 3]);
     }
 
@@ -6124,7 +6134,7 @@ mod tests {
     }
 
     fn file_chats(path: &std::path::Path) -> Vec<(i64, Option<String>)> {
-        HistoryFile::new(path.to_path_buf())
+        HistoryFile::for_test(path.to_path_buf())
             .load()
             .cache
             .chats()
@@ -6141,7 +6151,7 @@ mod tests {
         let path = dir.path().join("televim.history.json");
         let mut app = App::new();
         let mut state = State::default();
-        state.set_history_file(HistoryFile::new(path.clone()));
+        state.set_history_file(HistoryFile::for_test(path.clone()));
 
         apply_ready_to_screen(
             &mut app,
@@ -7114,8 +7124,8 @@ mod tests {
         let mut app = launching();
         app.session.credentials_configured = true;
         let mut state = warm_state();
-        HistoryFile::new(path.clone()).save(&state.cached.messages, None);
-        state.set_history_file(HistoryFile::new(path.clone()));
+        HistoryFile::for_test(path.clone()).save(&state.cached.messages, None);
+        state.set_history_file(HistoryFile::for_test(path.clone()));
         open_from_cache(&mut app, &mut state);
 
         apply_ready_to_screen(
@@ -7140,8 +7150,8 @@ mod tests {
     fn tagged_launch(path: &Path, tag: HistoryTag) -> (App, State) {
         let mut app = launching();
         let mut state = warm_state();
-        HistoryFile::new(path.to_path_buf()).save(&state.cached.messages, None);
-        state.set_history_file(HistoryFile::new(path.to_path_buf()));
+        HistoryFile::for_test(path.to_path_buf()).save(&state.cached.messages, None);
+        state.set_history_file(HistoryFile::for_test(path.to_path_buf()));
         state.restore_history_tag(tag);
         open_from_cache(&mut app, &mut state);
         assert_eq!(open_id(&app), CHAT, "the cache drew the conversation");
@@ -7272,7 +7282,7 @@ mod tests {
         let (mut app, mut state) = tagged_launch(&path, legacy);
         state.cached.dirty = true;
         persist_list(&mut state, &app).await;
-        let loaded = HistoryFile::new(path.clone()).load();
+        let loaded = HistoryFile::for_test(path.clone()).load();
         assert_eq!(
             loaded.account.as_deref(),
             Some("+1555"),
@@ -7289,7 +7299,7 @@ mod tests {
         state.cached.dirty = true;
         persist_list(&mut state, &app).await;
 
-        let loaded = HistoryFile::new(path).load();
+        let loaded = HistoryFile::for_test(path).load();
         assert_eq!((loaded.account_id, loaded.account), (Some(9), None));
     }
 
@@ -10053,7 +10063,7 @@ mod media_tests {
         forwarded.media_id = Some(MEDIA);
         let mut history = HistoryCache::default();
         history.put(CHAT + 1, &[forwarded]);
-        let file = HistoryFile::new(root.path().join("televim.history.json"));
+        let file = HistoryFile::for_test(root.path().join("televim.history.json"));
         file.save(&history, Some("+1555"));
 
         // A new launch: the cache is reopened, the file re-read, and the id
