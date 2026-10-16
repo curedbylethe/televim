@@ -192,6 +192,18 @@ impl ConversationState {
         self.stickers.clear();
     }
 
+    /// Sets the depth each conversation's jumplist keeps, from the
+    /// configuration.
+    ///
+    /// A plain number rather than a configuration type: `tui` names none, and
+    /// the caller resolves the value. Applied before the first frame, so the
+    /// cap is fixed for the life of the run, like the bidi and sticker modes.
+    #[must_use]
+    pub fn with_jumplist_depth(mut self, depth: usize) -> Self {
+        self.jumplist = Jumplist::new(depth);
+        self
+    }
+
     /// Replaces the selection outright.
     ///
     /// The writer half of the selection reader, and the whole of what a motion

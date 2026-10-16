@@ -203,7 +203,11 @@ Working today:
   with `Jumping to the quoted message…` said while that page is in flight.
   `Ctrl-o` goes back to the message the jump left and `Ctrl-i` forward again —
   a return to a message the window no longer holds is fetched the same way, and
-  says `Jumping back…` or `Jumping forward…`. While a page is in flight only
+  says `Jumping back…` or `Jumping forward…`. The marks are kept per
+  conversation, so leaving a chat and returning walks back to where the reader
+  stood before the switch; an empty chat list — a sign-out — forgets them. Each
+  conversation keeps up to `jumplist_depth` marks on **either** stack (default
+  100, `TELEVIM_JUMPLIST_DEPTH`, 1 to 1000). While a page is in flight only
   `Esc` answers, and it leaves the reader where they were. `gd` on a message
   that quotes nothing refuses with `Not a reply: gd jumps to the message a reply
   quotes.`, and a quote the client cannot fetch at all with `That message is no

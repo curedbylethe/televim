@@ -611,17 +611,23 @@ are in [`../AGENTS.md`](../AGENTS.md).
   same rank and the same ink.
 - **Why the return is a bounded per-conversation jumplist, and why `Tab` still
   cycles panes:** the criterion asks for `Ctrl-o` or `Ctrl-i` to return to where
-  the reader was, so CUR-34 builds that pair and leaves CUR-35 the general thing —
-  no `gg`/`n`/`N` producers and no configurable depth, because only a reply jump
-  records. `jumplist::Jumplist` is two `VecDeque` stacks per conversation, capped
-  at `DEPTH` (100, against Vim's own `'jumplist'` depth of 50): unbounded, a
-  reader who keeps jumping keeps every message they have ever been at, in a
-  program whose whole memory budget is a few megabytes. A mark is a **message
-  identifier**, not a row, which is the whole reason a return works at all after a
-  jump replaced the window — a row means a different message on either side of
-  that — and the stacks are keyed by peer id so one conversation's history cannot
-  put `Ctrl-o` in another. Vim's move is kept as Vim has it: the entry walked off
-  one stack is marked on the other, so a new jump discards what was ahead and the
+  the reader was; CUR-34 built the pair and CUR-35 made it the general thing.
+  `jumplist::Jumplist` is two `VecDeque` stacks per conversation, capped at a
+  configurable depth: `jumplist_depth` (100 by default, against Vim's own
+  `'jumplist'` depth of 50; allowed 1 to 1000, read once before the first frame).
+  The cap applies to **both** stacks — capping only the back one would leave the
+  forward one free to grow the same way — because unbounded, a reader who keeps
+  jumping keeps every message they have ever been at, in a program whose whole
+  memory budget is a few megabytes. The stacks are keyed by peer id, which is
+  what keeps one conversation's history from putting `Ctrl-o` in another; it is
+  also what lets the marks **survive a conversation switch** — leaving one chat
+  and returning finds them where they were, and only an empty list (a sign-out,
+  or a list with no conversations left) forgets them, beside the drafts, since a
+  peer id can be reused and there is nothing left to return into. A mark is a
+  **message identifier**, not a row, which is the whole reason a return works at
+  all after a jump replaced the window — a row means a different message on
+  either side of that. Vim's move is kept as Vim has it: the entry walked off one
+  stack is marked on the other, so a new jump discards what was ahead and the
   first `Ctrl-o` from the end of the list marks where the reader was standing.
 
   The precedence is the harder half. `Ctrl-i` and `Tab` are the same byte unless

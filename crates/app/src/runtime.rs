@@ -695,6 +695,10 @@ async fn event_loop(
         .with_bidi(cfg.bidi_mode())
         .with_stickers(cfg.sticker_mode())
         .with_graphics(cfg.graphics_mode(|key| std::env::var(key).ok()));
+    // The jumplist's depth, read once here and fixed for the life of the run,
+    // like the modes above: handed to `tui` as a plain number, so `tui` names no
+    // configuration type. It caps both stacks of every conversation.
+    app.conversation = app.conversation.with_jumplist_depth(cfg.jumplist_depth());
     if let Some(id) = initial_chat {
         app.set_initial_chat(id);
     }
