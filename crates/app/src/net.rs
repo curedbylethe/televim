@@ -3294,7 +3294,8 @@ fn apply_ready_to_screen(
     // read, which may be a read the feed never delivered. It is folded in
     // before the list lands, so the open view and the record agree on it.
     app.record_read_positions(&chats);
-    let restored = if app.conversation.conversation.window.chat_id != 0 && !no_session {
+    let conversation_open = app.conversation.conversation.window.chat_id != 0;
+    let restored = if conversation_open && !no_session {
         state.history.cursor = None;
         state.history.jump = None;
         state.history.retry_at = None;
@@ -3333,9 +3334,17 @@ fn apply_ready_to_screen(
         // take. A `:` or `/` prompt mid-answer is still cleared, as it was.
         let draft = (!interrupted && app.input.line.purpose().is_buffer())
             .then(|| std::mem::take(&mut app.input.line));
+        // `login_complete` also settles focus onto the conversation. A reader
+        // typing a draft into an open conversation has put it in the input
+        // line, and a `Ready` is not theirs to move: it goes back there.
+        let keep_input =
+            draft.is_some() && conversation_open && app.ui.focus == tui::app::Focus::Input;
         app.login_complete();
         if let Some(draft) = draft {
             app.input.line = draft;
+        }
+        if keep_input {
+            app.ui.focus = tui::app::Focus::Input;
         }
     }
     app.set_account(account);
@@ -6863,6 +6872,34 @@ mod tests {
 
             assert_eq!(app.input.line.text(), "unsent", "{what}");
         }
+    }
+
+    /// A reader typing into the open conversation's line while `connecting…`
+    /// is up keeps the line when the `Ready` lands.
+    #[test]
+    fn ready_leaves_input_focus_with_a_conversation_open() {
+        let mut app = launching();
+        let mut state = warm_state();
+        open_from_cache(&mut app, &mut state);
+        app.ui.focus = tui::app::Focus::Input;
+        app.input.line.restore("typing".to_owned());
+
+        ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
+
+        assert_eq!(app.ui.focus, tui::app::Focus::Input);
+        assert_eq!(app.input.line.text(), "typing");
+    }
+
+    /// With nothing open the `Ready` lands the reader as it always did.
+    #[test]
+    fn ready_settles_focus_with_no_conversation_open() {
+        let mut app = launching();
+        let mut state = State::default();
+        app.ui.focus = tui::app::Focus::Input;
+
+        ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
+
+        assert_ne!(app.ui.focus, tui::app::Focus::Input);
     }
 
     /// A bring-up that fails leaves the cached list and conversation readable
