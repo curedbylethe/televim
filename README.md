@@ -117,7 +117,13 @@ Working today:
   `session_passphrase` in the configuration; prefer the variable), else a random key
   kept in the OS keyring. With neither, the launch ends at `offline:` naming the
   missing key and the file is left as it was — it is never written in plaintext —
-  and a wrong passphrase ends the same way and never discards the session. A file
+  and a wrong passphrase ends the same way and never discards the session. Either
+  way televim then asks for the passphrase in a box over the right column, typed
+  as bullets and held in memory only: `⏎` tries it (a wrong one is refused, kept
+  on the box, and writes nothing), `Esc` leaves the session locked and `:unlock`
+  asks again. Put it in `TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` to
+  skip the question. `:passphrase` changes the passphrase of the open file (see
+  the commands). A file
   written by an older build is encrypted on its first launch, and the status line
   says once that it was not encrypted and now is. A passphrase is stretched with
   Argon2id at 19 MiB, 2 passes, 1 lane unless `session_kdf_memory_kib` (8192 to
@@ -343,7 +349,15 @@ Working today:
   internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
   registers are deliberately not shared, because their formats differ.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
-  `:settings`, `:signin`, `:retry`, `:export-session <path>` and `:import-session <path>`.
+  `:settings`, `:signin`, `:retry`, `:unlock`, `:passphrase`, `:export-session <path>`
+  and `:import-session <path>`.
+  `:unlock` asks for the session passphrase again after `Esc` left the session
+  locked. `:passphrase` asks `y/n`, then the new passphrase twice, and re-seals the
+  session file and the history cache under it; the old one stops opening either,
+  the OS keyring is left alone, and the box says to update
+  `TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` if the old passphrase was
+  set there. A mismatch between the two entries, `Esc`, or a key that does not open
+  the file changes nothing; the command is refused while the session is locked.
   The last two copy the stored session between backends: `:export-session` writes
   it, sealed under the current key, to a file; `:import-session` reads such a file
   into the configured store (the file at `session_path`, or the OS keyring when none

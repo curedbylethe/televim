@@ -300,20 +300,23 @@ Real, and named so they are not mistaken for oversights:
   to the existing `[you]` tag and `text-dim` vocabulary; no OpenDesign artifact
   was commissioned for it. `DESIGN.md` mirrors the OpenDesign project, so an entry
   there is a `make design-push`, which edits the project, and it waits for that call.
-- **The session file's key has no prompt.** The key is `TELEVIM_SESSION_PASSPHRASE`
-  or the OS keyring and nothing else, so a machine with neither ends at `offline:`
-  and the reader sets the variable and types `:retry`. An interactive launch-time
-  prompt is the deferred alternative: it needs a new prompt kind, a widget and a
-  design pass. There is also no re-keying — changing the passphrase makes the old
-  file unopenable, and the way out is to remove it and sign in again. The same
-  holds for the Argon2id cost keys (`session_kdf_*`): the envelope does not record
-  the cost, so a file opens only under the cost it was sealed with, and a changed
-  value reads as a wrong passphrase.
-- **A wrong passphrase is never recovered, only reported.** An envelope that does
-  not open is `offline:` with the file untouched, by design (see
-  [`decisions.md`](./decisions.md)); a reader who has lost the passphrase for good
-  removes the file by hand. A file that cannot be read at all is a separate,
-  permissions-worded `offline:` sentence, not this one.
+- **A passphrase typed at the prompt is not remembered.** When the session file has
+  no key or a refused one, the launch asks for the passphrase (and `:unlock` asks
+  again after `Esc`); it is held in memory for that process and never written, so
+  every launch asks again until `TELEVIM_SESSION_PASSPHRASE`, `session_passphrase`
+  or the OS keyring has the key. `:passphrase` re-seals the session file and the
+  history cache under a new passphrase, but it leaves the keyring's `file-key`
+  entry alone, so a reader who relied on the keyring is asked at the next launch.
+  The Argon2id cost keys (`session_kdf_*`) are still not recorded in the envelope:
+  a file opens only under the cost it was sealed with, and a changed value reads as
+  a wrong passphrase. `:passphrase` seals under the configured cost but opens under
+  it too, so it cannot move a file from one cost to another.
+- **A wrong passphrase is retried, and a lost one is not recovered.** A passphrase
+  the file refuses leaves it untouched and asks again; there is no attempt limit,
+  since nothing is written and a guess costs the reader only the key derivation.
+  Nothing recovers a passphrase that is lost for good: the reader removes the file
+  by hand and signs in again. A file that cannot be read at all is a separate,
+  permissions-worded `offline:` sentence, and asks for no passphrase.
 - **Legacy plaintext is still read, and its wipe is best effort.** A file from an
   older build loads and is encrypted in place, and the old bytes are zero-filled —
   on Unix only, and not past SSD wear levelling, a journaling or copy-on-write
