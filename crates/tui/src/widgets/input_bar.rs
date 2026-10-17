@@ -1437,8 +1437,8 @@ mod tests {
         );
     }
 
-    /// A caret inside the first word of two, seven `Left`s from the end: before
-    /// the `ا` of `سلام`. A terminal that reverses each word in place (kitty)
+    /// A caret inside the first word of two, before the `ا` of `سلام` (typed
+    /// around, since `Left` steps by painted column and not by character). A terminal that reverses each word in place (kitty)
     /// draws that word's `ا` second from the left under `terminal`, and
     /// second from the left of the *last* word under `words`, which has put it
     /// there. The style goes on the emitted cell the glyph is moved onto, not on
@@ -1449,10 +1449,9 @@ mod tests {
         let caret_x = |mode: BidiMode| {
             let mut app = App::mock().with_bidi(mode);
             press(&mut app, KeyCode::Char('i'));
-            type_text(&mut app, "سلام خوبی");
-            for _ in 0..7 {
-                press(&mut app, KeyCode::Left);
-            }
+            type_text(&mut app, "ام خوبی");
+            press(&mut app, KeyCode::Home);
+            type_text(&mut app, "سل");
             let buffer = screen(&app, 80, 24);
             let top = bar_top(&rows_of(&buffer)) as u16;
             carets(&buffer, top)[0].0

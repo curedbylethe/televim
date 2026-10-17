@@ -1589,23 +1589,23 @@ fn a_word_motion_on_non_ascii_text_runs_and_says_nothing() {
     );
 }
 
-/// Behind an operator the motion and the slice happen inside one key, which
-/// is the one place snapping cannot help. It is refused — and it says so,
-/// because a key that does nothing and says nothing reads as a hang.
+/// Behind an operator a word motion on non-ASCII text runs in the wrapper
+/// and deletes the word, with no refusal.
 #[test]
-fn a_word_motion_behind_an_operator_on_non_ascii_text_is_refused_and_says_so() {
+fn a_word_motion_behind_an_operator_on_non_ascii_text_deletes_the_word() {
     let mut app = App::mock();
     app.handle_key(press(KeyCode::Char('i')));
     type_text(&mut app, "héllo wörld");
     app.handle_key(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Char('0')));
     app.handle_key(press(KeyCode::Char('d')));
 
     app.handle_key(press(KeyCode::Char('w')));
 
-    assert_eq!(app.input.line.text(), "héllo wörld", "nothing ran");
+    assert_eq!(app.input.line.text(), "wörld");
     assert!(
-        app.ui.status.contains("not built yet"),
-        "and the refusal says so: {:?}",
+        !app.ui.status.contains("not built yet"),
+        "and nothing is owed the reader: {:?}",
         app.ui.status
     );
 }

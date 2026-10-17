@@ -169,16 +169,17 @@ Real, and named so they are not mistaken for oversights:
   see [`decisions.md`](./decisions.md). Neither `domain::utf16_len` nor the rendering of an
   incoming quote's fragment is written, because both exist only for a quote this
   build cannot send.
-- **Word motions *behind an operator* in the input refuse non-ASCII text.** `w`,
-  `b`, `e` and a vertical motion say no with a flash, because `vim-line` counts
-  those motions in bytes and `d`/`c` slice in the same key. Everywhere else they
-  run: in the line's normal mode and as a visual selection's extent, where the
-  only thing a motion can do is move a cursor the next key re-snaps. The
-  wrapper's cursor is snapped to boundaries around every key either way.
-- **The input line's `w`, `b` and `e` ignore a ZWNJ (U+200C).** Word motions in
-  message text break at a ZWNJ, as a reader hears a Persian compound as two words;
-  the input line runs `vim-line`'s own word motions, which do not. A compound
-  typed in the bar is one word to these keys. See [`decisions.md`](./decisions.md).
+- **Only `W`, `B`, `E`, `j` and `k` *behind an operator* in the input refuse
+  non-ASCII text.** They say no with a flash, because `vim-line` counts those
+  motions in bytes and `d`/`c` slice in the same key. `w`, `b` and `e` on
+  non-ASCII text are the wrapper's own, through `domain::vim::char_motion`, so
+  `dw` deletes and `cw` changes; ASCII-only text keeps `vim-line`'s motions.
+  `h`/`l` and the arrows step by painted column on non-ASCII text, from the rows
+  the last frame measured, so a resize is one frame late.
+- **The input line's `w`, `b` and `e` break at a ZWNJ (U+200C) on non-ASCII text.**
+  A Persian compound typed in the bar is two words to these keys, as it is in a
+  message. A word motion that has nowhere to go stays put, as in a message, where
+  `vim-line` would run to the last character. See [`decisions.md`](./decisions.md).
 - **Three keys mean something else while a `:shortcode` completion is up.**
   `Tab`, `Enter` and `↑`/`↓` choose or accept a candidate instead of walking a
   pane, sending the message, or moving the caret. `Esc` closes the popup and

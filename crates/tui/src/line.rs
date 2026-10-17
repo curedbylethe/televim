@@ -123,9 +123,11 @@
 //! accepting an emoji over the `:query` the reader typed needs.
 //! `App::accept_completion` is its only caller.
 
+use std::cell::RefCell;
 use std::ops::Range;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use domain::vim::{CharMotion, char_motion};
 use vim_line::{Key, KeyCode as VKey, LineEditor as _, TextEdit, VimLineEditor};
 
 use crate::app::PromptKind;
@@ -210,6 +212,14 @@ pub struct LineEditor {
 
     /// The text the line's last yank produced, waiting to be taken.
     yanked: Option<String>,
+
+    /// The wrap the last [`LineEditor::laid_out_in`] measured, which is what a
+    /// visual `h`/`l` steps along.
+    ///
+    /// A key does not know the bar's width and render does, every frame, so
+    /// the rows are remembered from there. A resize is one frame late: that is
+    /// the ceiling. Empty, or stale against the text, means one row.
+    rows: RefCell<Vec<Range<usize>>>,
 }
 
 impl Default for LineEditor {
@@ -230,6 +240,7 @@ impl LineEditor {
             caret_before: 0,
             pending_g: false,
             yanked: None,
+            rows: RefCell::new(Vec::new()),
         }
     }
 
@@ -370,6 +381,7 @@ impl LineEditor {
     #[must_use]
     pub fn laid_out_in(&self, width: u16, mode: BidiMode) -> LaidOut {
         let rows = wrap_keeping_whitespace(&self.text, width);
+        self.rows.replace(rows.clone());
         let caret = self.caret();
 
         // A caret on the boundary between two rows is the *start* of the second
@@ -536,6 +548,12 @@ impl LineEditor {
     /// key says so ([`LineVerdict::Refused`]) and changes nothing, not even the
     /// pending operator: the reader can follow it with a motion that is safe.
     pub fn feed(&mut self, key: KeyEvent) -> LineVerdict {
+        self.feed_with(key, BidiMode::Terminal)
+    }
+
+    /// [`LineEditor::feed`], with the mode the bar is painted in, which is what
+    /// `h` and `l` step by on a non-ASCII draft.
+    pub fn feed_with(&mut self, key: KeyEvent, mode: BidiMode) -> LineVerdict {
         // Spent here rather than where it is set, so that `Esc` and `Enter` —
         // which return before any key is dispatched — spend it too. A `g` that
         // survived a second `Esc` would be waiting behind a mode the reader had
@@ -583,9 +601,12 @@ impl LineEditor {
         // invariant; this keeps it when the text was replaced under the editor.
         self.snap_cursor();
 
-        // Byte-indexed motions on multi-byte text, before they can run.
+        // Non-ASCII text: the wrapper owns the caret and word motions, and
+        // refuses what is left behind an operator.
         if !self.text.is_ascii()
-            && let Some(verdict) = self.guard_multibyte(key)
+            && let Some(verdict) = self
+                .take_over(key, mode)
+                .or_else(|| self.guard_multibyte(key))
         {
             return verdict;
         }
@@ -792,6 +813,174 @@ impl LineEditor {
         }
     }
 
+    /// `h`/`l`/`Left`/`Right` by painted column and `w`/`b`/`e` by
+    /// [`char_motion`], on non-ASCII text, in place of the library's logical
+    /// and byte-indexed ones. `None` means the key is the library's.
+    ///
+    /// Not in insert (where `h`, `l`, `w`, `b` and `e` are letters; only the
+    /// arrows are keys there) and not behind `r`. ASCII text never gets here,
+    /// so it keeps the library's motions byte for byte. A caret inside a
+    /// cluster steps by code point, as it always has; a step the painted order
+    /// would leave on a line's newline in normal mode is the library's too,
+    /// because it stops at the end of a line.
+    ///
+    /// Behind an operator `l` takes the cluster under the caret and `h` the
+    /// cluster painted to its left, and a word motion takes the range from the
+    /// caret to where it lands, all snapped to clusters and applied here.
+    fn take_over(&mut self, key: Key, mode: BidiMode) -> Option<LineVerdict> {
+        if key.ctrl || key.alt {
+            return None;
+        }
+        let status = self.editor.status();
+        let operator = match status {
+            "d..." | "c..." | "y..." => status.chars().next(),
+            _ => None,
+        };
+        let moving = operator.is_some() || matches!(status, "NORMAL" | "VISUAL");
+        let insert = status == "INSERT";
+        let step = match key.code {
+            VKey::Left => Some(false),
+            VKey::Right => Some(true),
+            VKey::Char('h') if moving => Some(false),
+            VKey::Char('l') if moving => Some(true),
+            _ => None,
+        };
+        let word = match key.code {
+            VKey::Char('w') if moving => Some(CharMotion::WordStart { forward: true }),
+            VKey::Char('b') if moving => Some(CharMotion::WordStart { forward: false }),
+            VKey::Char('e') if moving => Some(CharMotion::WordEnd),
+            _ => None,
+        };
+        let at = self.caret();
+
+        if let Some(motion) = word {
+            return Some(self.word_motion(motion, operator, at));
+        }
+
+        let right = step?;
+        if !insert && !moving {
+            return None;
+        }
+        // Inside a cluster the step is one code point, the library's.
+        let start = grapheme::cluster_start(&self.text, at);
+        let next = self.text[at..]
+            .chars()
+            .next()
+            .map_or(at, |c| at + c.len_utf8());
+        if if right {
+            next < self.cluster_after(start)
+        } else {
+            at != start
+        } {
+            return None;
+        }
+
+        let mut to = bidi::visual_step(
+            &self.text,
+            &self.sane_rows(),
+            at,
+            mode,
+            &bidi::base_direction(&self.text),
+            right,
+        );
+        let moved = to != start;
+        // Insert may stand one past the last cluster, which no painted cluster
+        // names.
+        if insert && right && !moved && self.cluster_after(start) == self.text.len() {
+            to = self.text.len();
+        }
+        if !insert && moved && self.text[to..].starts_with('\n') {
+            return None;
+        }
+
+        if let Some(op) = operator {
+            let range = if right {
+                if self.text[start..].starts_with('\n') {
+                    start..start
+                } else {
+                    start..self.cluster_after(start)
+                }
+            } else if moved {
+                to..self.cluster_after(to)
+            } else {
+                start..start
+            };
+            return Some(self.operate(range, op));
+        }
+        // Entering a cluster from after it lands on its last code point, as the
+        // library's own `h` always has, so a cluster is walked the same way
+        // from either side.
+        if to < at && to != self.text.len() {
+            let end = self.cluster_after(to);
+            to = self.text[..end]
+                .char_indices()
+                .next_back()
+                .map_or(to, |(i, _)| i);
+        }
+        self.editor.set_cursor(to, &self.text);
+        Some(LineVerdict::Ignored)
+    }
+
+    /// A word motion by [`char_motion`], from `at`: the caret moves, or an
+    /// operator is applied over the range up to where it lands.
+    fn word_motion(
+        &mut self,
+        motion: CharMotion,
+        operator: Option<char>,
+        at: usize,
+    ) -> LineVerdict {
+        let from = self.text[..at].chars().count();
+        let to = char_motion(&self.text, from, motion);
+        let landing = self
+            .text
+            .char_indices()
+            .nth(to)
+            .map_or(self.text.len(), |(offset, _)| offset);
+        let Some(op) = operator else {
+            self.editor.set_cursor(landing, &self.text);
+            self.snap_cursor();
+            return LineVerdict::Ignored;
+        };
+        // A word never carries an operator over a newline, and `w` that
+        // goes nowhere takes the rest of the line.
+        let line_end = self.text[at..]
+            .find('\n')
+            .map_or(self.text.len(), |n| at + n);
+        let range = match motion {
+            CharMotion::WordStart { forward: true } if landing <= at => at..line_end,
+            CharMotion::WordStart { forward: true } => at..landing.min(line_end),
+            CharMotion::WordStart { forward: false } => landing..at,
+            _ => at..self.cluster_after(landing.max(at)).min(line_end),
+        };
+        self.operate(range, op)
+    }
+
+    /// The end of the cluster that starts at `start`.
+    fn cluster_after(&self, start: usize) -> usize {
+        let next = self.text[start..]
+            .chars()
+            .next()
+            .map_or(start, |c| start + c.len_utf8());
+        grapheme::cluster_end(&self.text, next)
+    }
+
+    /// The rows the last frame measured, or one row when they no longer
+    /// describe this text.
+    fn sane_rows(&self) -> Vec<Range<usize>> {
+        let rows = self.rows.borrow();
+        let fits = rows.last().is_some_and(|last| last.end == self.text.len())
+            && rows.iter().all(|row| {
+                self.text.is_char_boundary(row.start) && self.text.is_char_boundary(row.end)
+            });
+        if fits {
+            rows.clone()
+        } else {
+            #[allow(clippy::single_range_in_vec_init)]
+            let whole = vec![0..self.text.len()];
+            whole
+        }
+    }
+
     /// Applies a visual operator to the snapped selection, without handing the
     /// key to the library.
     ///
@@ -803,6 +992,19 @@ impl LineEditor {
     /// typing after.
     fn visual_op(&mut self, op: char) -> LineVerdict {
         let range = self.selection().unwrap_or_default();
+        self.operate(range, op)
+    }
+
+    /// `op` (`d`, `x`, `y` or `c`) over `range`, snapped to clusters, then the
+    /// library back in normal mode, or insert after a change.
+    fn operate(&mut self, range: Range<usize>, op: char) -> LineVerdict {
+        let start = grapheme::cluster_start(&self.text, range.start);
+        let end = if grapheme::cluster_start(&self.text, range.end) == range.end {
+            range.end
+        } else {
+            grapheme::cluster_end(&self.text, range.end)
+        };
+        let range = start..end.max(start);
         let cut = self.text[range.clone()].to_owned();
 
         if op != 'y' && !range.is_empty() {
@@ -2372,7 +2574,7 @@ mod tests {
     #[test]
     fn a_visual_word_motion_extends_the_selection_by_whole_characters() {
         let mut line = composing();
-        type_text(&mut line, "héllo wörld");
+        type_text(&mut line, "héllo wörld ünd");
         line.feed(press(KeyCode::Esc));
         line.feed(press(KeyCode::Char('0')));
         line.feed(press(KeyCode::Char('v')));
@@ -2394,37 +2596,69 @@ mod tests {
         );
     }
 
-    /// Behind an operator the motion and its slice happen inside one key, so a
-    /// word motion there is not merely misplaced but a panic. It is refused —
-    /// and the operator is kept, so the reader can follow it with a motion that
-    /// is safe rather than retyping the operator.
+    /// Behind an operator a word motion on non-ASCII text runs in the wrapper
+    /// over whole characters, rather than being handed to the byte-indexed
+    /// library.
     #[test]
-    fn a_word_motion_behind_an_operator_is_refused_and_the_operator_is_kept() {
+    fn a_word_motion_behind_an_operator_deletes_the_word() {
         let mut line = composing();
         type_text(&mut line, "héllo wörld");
         line.feed(press(KeyCode::Esc));
+        line.feed(press(KeyCode::Char('0')));
         line.feed(press(KeyCode::Char('d')));
-        assert_eq!(line.status(), "d...");
 
         let verdict = line.feed(press(KeyCode::Char('w')));
 
-        assert_eq!(verdict, LineVerdict::Refused);
-        assert_eq!(line.status(), "d...", "the operator is still waiting");
-        assert_eq!(line.text(), "héllo wörld");
-
-        line.feed(press(KeyCode::Char('0')));
-
-        assert_eq!(
-            line.text(),
-            "d",
-            "`d0` walks a boundary and is safe to run — and it ran, so the operator survived the refusal"
-        );
+        assert_eq!(verdict, LineVerdict::Edited);
+        assert_eq!(line.text(), "wörld");
+        assert_eq!(line.status(), "NORMAL", "the operator is spent");
+        assert_eq!(line.take_yanked().as_deref(), Some("héllo "));
     }
 
-    /// The guard that survived the relaxation of the other two cases, said the
-    /// other way round: nothing else in this module may have started refusing,
-    /// or a half-applied edit may have started leaking. A refused key is a key
-    /// that changed nothing at all.
+    /// `d` then `e` takes through the end of the word, `b` back to its start,
+    /// and `c` leaves the reader inserting.
+    #[test]
+    fn e_and_b_behind_an_operator_and_c_enters_insert() {
+        let mut line = normal_with("héllo wörld");
+        line.feed(press(KeyCode::Char('0')));
+        keys(&mut line, "de");
+        assert_eq!(line.text(), " wörld");
+
+        let mut line = normal_with("héllo wörld");
+        keys(&mut line, "db");
+        assert_eq!(line.text(), "héllo d", "back from the last letter");
+
+        let mut line = normal_with("héllo wörld");
+        line.feed(press(KeyCode::Char('0')));
+        keys(&mut line, "cw");
+        assert_eq!(line.status(), "INSERT");
+        assert_eq!(line.text(), "wörld");
+    }
+
+    /// A ZWNJ is a word break for the input line as it is for a message.
+    #[test]
+    fn word_motions_break_at_a_zwnj() {
+        let text = "کتاب\u{200C}ها";
+        let ha = text.find('ه').unwrap_or_default();
+
+        let mut line = normal_with(text);
+        line.feed(press(KeyCode::Char('0')));
+        keys(&mut line, "w");
+        assert_eq!(line.caret(), ha, "`w` lands on the second part");
+        keys(&mut line, "b");
+        assert_eq!(line.caret(), 0, "`b` returns to the first");
+        keys(&mut line, "e");
+        assert_eq!(line.caret(), text.find('\u{200C}').unwrap_or_default() - 2);
+
+        let mut line = normal_with(text);
+        line.feed(press(KeyCode::Char('0')));
+        keys(&mut line, "dw");
+        assert_eq!(line.text(), "ها", "one part, not the whole compound");
+    }
+
+    /// The guard that survived the relaxation of the word motions, said the
+    /// other way round: what is still refused is a key that changed nothing at
+    /// all.
     #[test]
     fn a_refused_motion_behind_an_operator_leaves_the_text_alone() {
         let mut line = composing();
@@ -2434,7 +2668,7 @@ mod tests {
         let before = line.text().to_owned();
         let caret = line.caret();
 
-        for key in ['w', 'e', 'b', 'W', 'j', 'k'] {
+        for key in ['W', 'B', 'E', 'j', 'k'] {
             let verdict = line.feed(press(KeyCode::Char(key)));
 
             assert_eq!(verdict, LineVerdict::Refused, "`d{key}`");
@@ -2458,6 +2692,17 @@ mod tests {
 
         assert_eq!(line.text(), "");
         assert_eq!(line.take_yanked().as_deref(), Some("héllo"));
+    }
+
+    /// `cc` is the library's, like `dd`: it clears the line and the reader types.
+    #[test]
+    fn a_doubled_change_clears_non_ascii_text_and_inserts() {
+        let mut line = normal_with("سلام دنیا");
+
+        keys(&mut line, "cc");
+
+        assert_eq!(line.text(), "");
+        assert_eq!(line.status(), "INSERT");
     }
 
     /// A vertical motion behind an operator carries a column counted in bytes,
@@ -2722,19 +2967,87 @@ mod tests {
     fn a_visual_selection_ends_on_a_cluster_edge() {
         let family = "👨‍👩‍👧";
         let mut line = composing();
-        type_text(&mut line, &format!("a{family}b"));
+        type_text(&mut line, &format!("a {family} b"));
         line.feed(press(KeyCode::Esc));
         line.feed(press(KeyCode::Char('0')));
         line.feed(press(KeyCode::Char('v')));
         line.feed(press(KeyCode::Char('w')));
         let selection = line.selection().expect("a selection is up");
-        assert_eq!(selection, 0..1 + family.len());
+        assert_eq!(selection, 0..2 + family.len());
         let drawn = line.text()[selection].to_owned();
 
         line.feed(press(KeyCode::Char('d')));
 
-        assert_eq!(line.text(), "b");
+        assert_eq!(line.text(), " b");
         assert_eq!(line.take_yanked().as_deref(), Some(drawn.as_str()));
+    }
+
+    /// `h` and `l` and the arrows land on the byte `visual_step` names, in
+    /// every mode, and `l` in a left-to-right Persian-and-Latin draft still
+    /// reads left to right.
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn the_caret_steps_by_painted_column_in_every_mode() {
+        let text = "ab سلام";
+        for mode in [BidiMode::Terminal, BidiMode::Visual, BidiMode::Words] {
+            for right in [true, false] {
+                for visual in [false, true] {
+                    let mut line = normal_with(text);
+                    let _ = line.laid_out_in(40, mode);
+                    line.feed_with(press(KeyCode::Char('0')), mode);
+                    line.feed_with(press(KeyCode::Char('l')), mode);
+                    line.feed_with(press(KeyCode::Char('l')), mode);
+                    line.feed_with(press(KeyCode::Char('l')), mode);
+                    if visual {
+                        line.feed_with(press(KeyCode::Char('v')), mode);
+                    }
+                    let at = line.caret();
+                    let want = bidi::visual_step(
+                        text,
+                        &[0..text.len()],
+                        at,
+                        mode,
+                        &bidi::base_direction(text),
+                        right,
+                    );
+                    let code = if right { KeyCode::Right } else { KeyCode::Left };
+
+                    line.feed_with(press(code), mode);
+
+                    assert_eq!(line.caret(), want, "{mode:?} right={right} visual={visual}");
+                }
+            }
+        }
+    }
+
+    /// An `l` and an `h` over right-to-left text are the painted neighbours:
+    /// the cluster a column to the right of the caret.
+    #[test]
+    fn l_in_a_right_to_left_word_moves_to_the_cluster_on_its_right() {
+        let text = "سلام";
+        let mut line = normal_with(text);
+        let _ = line.laid_out_in(40, BidiMode::Visual);
+        line.feed_with(press(KeyCode::Char('0')), BidiMode::Visual);
+        let first = line.caret();
+
+        line.feed_with(press(KeyCode::Char('h')), BidiMode::Visual);
+        let after_h = line.caret();
+        line.feed_with(press(KeyCode::Char('l')), BidiMode::Visual);
+
+        assert_eq!(first, 0);
+        assert_ne!(after_h, first, "the first letter is painted rightmost");
+        assert_eq!(line.caret(), first, "and `l` undid it");
+    }
+
+    /// In insert `h` and `l` are letters, and the arrows reach one past the end.
+    #[test]
+    fn insert_types_h_and_l_and_the_right_arrow_reaches_the_end() {
+        let mut line = composing();
+        type_text(&mut line, "héllo");
+        assert_eq!(line.text(), "héllo");
+        line.feed(press(KeyCode::Left));
+        line.feed(press(KeyCode::Right));
+        assert_eq!(line.caret(), line.text().len());
     }
 
     /// `h` and `l` stay on code points. A caret that jumped the family would be
