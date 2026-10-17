@@ -137,7 +137,8 @@ Working today:
   for the chat list three times and waited between them, naming the reason, the
   wait and the count on the status line each time — and `:retry` asks again.
 - **Chat List:** private chats only, filtered to exclude bots, groups and
-  channels, with unread counts and last-message previews. `j`/`k` move the
+  channels, with pins and unread counts (the last-message preview is the forward
+  picker's). `j`/`k` move the
   highlight, `gg`/`G` reach both ends, and `Enter` shows the highlighted chat's
   profile card, which `Enter` in turn confirms into the conversation (see the
   profile card above). `:chat <id>` still works. Moving the

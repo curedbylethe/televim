@@ -286,4 +286,32 @@ mod tests {
             "the title is in visual order"
         );
     }
+
+    /// The first chat's last message, drawn in the picker under `mode`.
+    fn preview_under(mode: BidiMode, message: &str) -> Buffer {
+        let mut app = picking_arabic(mode);
+        let mut chats = app.chats().to_vec();
+        chats[0].last_message = Some(message.to_owned().into());
+        app.set_chats(chats);
+        screen(&app, 100, 24)
+    }
+
+    #[test]
+    fn the_last_message_preview_follows_the_bidi_mode() {
+        const TWO: &str = "سلام عليكم";
+        let reversed = |s: &str| s.chars().rev().collect::<String>();
+        let words: String = TWO.split(' ').rev().collect::<Vec<_>>().join(" ");
+
+        for (mode, message, expected) in [
+            (BidiMode::Visual, ARABIC, reversed(ARABIC)),
+            (BidiMode::Terminal, ARABIC, ARABIC.to_string()),
+            (BidiMode::Words, TWO, words),
+        ] {
+            let buffer = preview_under(mode, message);
+            assert!(
+                row_of(&buffer, &expected).is_some(),
+                "{mode:?}: the preview is drawn as {expected:?}"
+            );
+        }
+    }
 }
