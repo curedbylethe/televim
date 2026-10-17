@@ -2881,6 +2881,7 @@ impl App {
             // block rows come after the text rows, so the two heights add.
             let block = rows::sticker_block_rows(message, &self.conversation.stickers);
             let len = rows.len() + block;
+            self.conversation.stash_rows(message.id, rows);
 
             laid_out.push(RowSpan {
                 kind: RowKind::Message { index },

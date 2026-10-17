@@ -1331,8 +1331,8 @@ pub(crate) fn handle_visual(
         KeyCode::Char('j') => conversation.move_focus_to_message(true),
         KeyCode::Char('k') => conversation.move_focus_to_message(false),
 
-        KeyCode::Char('h') => conversation.move_focus(CharMotion::Step { forward: false }),
-        KeyCode::Char('l') => conversation.move_focus(CharMotion::Step { forward: true }),
+        KeyCode::Char('h') | KeyCode::Left => conversation.move_focus_visual(false, ui.bidi),
+        KeyCode::Char('l') | KeyCode::Right => conversation.move_focus_visual(true, ui.bidi),
         KeyCode::Char('w') => conversation.move_focus(CharMotion::WordStart { forward: true }),
         KeyCode::Char('b') => conversation.move_focus(CharMotion::WordStart { forward: false }),
         KeyCode::Char('e') => conversation.move_focus(CharMotion::WordEnd),

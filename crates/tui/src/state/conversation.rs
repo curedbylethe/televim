@@ -1,5 +1,7 @@
 //! The open conversation's view, its editing and selection registers, and its search surfaces.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 
 use domain::global_search::{GlobalHit, GlobalSearchState};
@@ -11,6 +13,7 @@ use domain::user::{UserCandidate, UserSearchState};
 use domain::vim::{CharMotion, Motion, VimState, char_motion};
 
 use crate::app::{ConfirmKind, Deletion, Register};
+use crate::bidi::{self, BidiMode};
 use crate::download::Downloads;
 use crate::jumplist::Jumplist;
 use crate::sticker::StickerCache;
@@ -153,6 +156,14 @@ pub struct ConversationState {
     /// it, so a cached window is asked about exactly as an empty one is, and a
     /// revalidation that fails is reported as any other failed page is.
     pub(crate) cached: bool,
+
+    /// Each laid-out message's wrap, as byte ranges of its display body, keyed
+    /// by message identifier.
+    ///
+    /// Filled by the layout pass, which has the `App` that wrapping needs, and
+    /// read by the visual `h` and `l`, which do not. A resize is one frame late
+    /// and a message with no entry is one row.
+    row_stash: RefCell<HashMap<i64, Vec<Range<usize>>>>,
 }
 
 impl ConversationState {
@@ -177,6 +188,7 @@ impl ConversationState {
             stickers: StickerCache::default(),
             downloads: Downloads::default(),
             cached: false,
+            row_stash: RefCell::new(HashMap::new()),
         }
     }
 
@@ -190,6 +202,7 @@ impl ConversationState {
         // The pictures belong to the chat on show, as the marks do: a reader
         // who returns finds them fetched again rather than mislabelled.
         self.stickers.clear();
+        self.row_stash.get_mut().clear();
     }
 
     /// Sets the depth each conversation's jumplist keeps, from the
@@ -582,6 +595,61 @@ impl ConversationState {
         };
 
         selection.focus.char = Some(char_motion(message.display_body(), at, motion));
+    }
+
+    /// Records the wrap the layout pass drew for message `id`.
+    pub(crate) fn stash_rows(&self, id: i64, rows: Vec<Range<usize>>) {
+        self.row_stash.borrow_mut().insert(id, rows);
+    }
+
+    /// Steps the focus one painted column right or left.
+    ///
+    /// ASCII stays on the logical step: it is painted in the order it is
+    /// stored, and the answer is the same. Anything else steps over the
+    /// message's wrap in painted order, onto the next row's edge at the end of
+    /// one.
+    pub(crate) fn move_focus_visual(&mut self, right: bool, mode: BidiMode) {
+        let Some(selection) = &self.selection else {
+            return;
+        };
+        let Some(at) = selection.focus.char else {
+            return;
+        };
+        let id = selection.focus.message_id;
+        let Some(message) = self.conversation.window.iter().find(|m| m.id == id) else {
+            return;
+        };
+        let text = message.display_body();
+        if text.is_ascii() {
+            self.move_focus(CharMotion::Step { forward: right });
+            return;
+        }
+
+        let rows = {
+            let stash = self.row_stash.borrow();
+            match stash.get(&id) {
+                // A stash from before an edit may not fit the text now.
+                Some(rows)
+                    if rows.last().is_some_and(|r| r.end == text.len())
+                        && rows.iter().all(|r| {
+                            text.is_char_boundary(r.start) && text.is_char_boundary(r.end)
+                        }) =>
+                {
+                    rows.clone()
+                }
+                #[allow(clippy::single_range_in_vec_init)]
+                _ => vec![0..text.len()],
+            }
+        };
+        let byte = text
+            .char_indices()
+            .nth(at)
+            .map_or(text.len(), |(offset, _)| offset);
+        let to = bidi::visual_step(text, &rows, byte, mode, &bidi::base_direction(text), right);
+        let focus = text[..to].chars().count();
+        if let Some(selection) = &mut self.selection {
+            selection.focus.char = Some(focus);
+        }
     }
 
     /// Moves the focus to the next or the previous message, and the cursor with it.

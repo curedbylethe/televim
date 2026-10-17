@@ -1051,6 +1051,37 @@ fn v_then_l_selects_one_character() {
     assert_eq!(selected_chars(&app), Some((1, 0..1)));
 }
 
+/// `h` and `Left` go to the cluster painted on the left, `l` and `Right` to the
+/// one on the right, and on a right-to-left message that is the reverse of the
+/// logical step.
+#[test]
+fn visual_h_and_l_follow_the_painted_column_on_an_rtl_message() {
+    let mut app = App::mock().with_bidi(BidiMode::Visual);
+    app.conversation
+        .conversation
+        .window
+        .replace(vec![message(1, "שלום")]);
+    app.conversation.vim.set_total(1);
+    app.conversation.vim.set_cursor(0);
+    let focus = |app: &App| app.selection().and_then(|s| s.focus.char);
+
+    key(&mut app, 'v');
+    assert_eq!(
+        focus(&app),
+        Some(0),
+        "the first letter is painted rightmost"
+    );
+
+    key(&mut app, 'l');
+    assert_eq!(focus(&app), Some(0), "nothing lies right of it");
+    key(&mut app, 'h');
+    assert_eq!(focus(&app), Some(1));
+    app.handle_key(press(KeyCode::Left));
+    assert_eq!(focus(&app), Some(2));
+    app.handle_key(press(KeyCode::Right));
+    assert_eq!(focus(&app), Some(1));
+}
+
 #[test]
 fn v_then_j_selects_two_messages() {
     let mut app = App::mock();
