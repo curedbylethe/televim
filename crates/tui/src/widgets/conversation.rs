@@ -1682,11 +1682,8 @@ mod tests {
         // the row's own width — which a permutation cannot change, because it
         // moves the cells and not the count of them.
         //
-        // The Hebrew row, and not the Arabic: `سلام` holds the lam-alef pair, which
-        // [`columns`] measures as one cell narrower than a terminal draws it, so on
-        // the default path the renderer offsets the next span by a column short and
-        // the note lands one column early. That is this tree's width of a lam-alef
-        // and nothing to do with the reorder, so pinning it here would pin a defect.
+        // The Hebrew row first. The Arabic row is pinned after it, in all three
+        // modes, by `an_arabic_note_stands_where_an_ascii_one_does`.
         let theirs = FIRST;
         let hour = clock_at(0);
         assert_eq!(
@@ -1705,6 +1702,59 @@ mod tests {
             spelled(&after, theirs, text_column(&after, theirs, "them"), HEBREW).len(),
             "and so is the text in front of it"
         );
+    }
+
+    /// The Arabic note: the gap is `drawn_cells` of the text, not [`columns`].
+    ///
+    /// `سلام` is three columns as a string and four cells as drawn, so a gap worked
+    /// out from [`columns`] would leave the note a cell too far right, and a span
+    /// advanced by it would leave the note a cell too far left. The note is
+    /// right-aligned, so its column is the width less its own, and an ASCII row of
+    /// four cells from the same sender (no lam-alef, the same note) has the same
+    /// column. The
+    /// text keeps all four cells in front of it. The note math does not read the
+    /// mode, and `push_text` keeps the last letter, so the three modes agree.
+    #[test]
+    fn an_arabic_note_stands_where_an_ascii_one_does() {
+        assert_eq!(columns(ARABIC), 3, "unicode-width joins the lam-alef");
+        assert_eq!(drawn_cells(ARABIC), 4, "the terminal keeps a cell for each");
+
+        for mode in [BidiMode::Terminal, BidiMode::Words, BidiMode::Visual] {
+            let note_of = |body: &'static str, mode: BidiMode| {
+                let app = showing(vec![at(1, 60, true, body)]).with_bidi(mode);
+                let screen = screen(&app, 80, 24);
+                let y = message_rows(&screen)
+                    .into_iter()
+                    .find(|&y| row(&screen, y).contains("[you]"))
+                    .expect("the message is on the screen");
+                let note = column_holding(&screen, y, &clock_at(60)[..1]);
+                (screen, y, note)
+            };
+            let (_, _, ascii_note) = note_of("salm", mode);
+            let (screen, you, arabic_note) = note_of(ARABIC, mode);
+            let text = text_column(&screen, you, "you");
+
+            assert_eq!(
+                arabic_note,
+                ascii_note,
+                "{mode:?}: the note is right-aligned, so it is the width less its own: {}",
+                row(&screen, you)
+            );
+            assert_eq!(
+                spelled(&screen, you, text, ARABIC)
+                    .iter()
+                    .filter(|(_, symbol)| symbol != " ")
+                    .count(),
+                drawn_cells(ARABIC),
+                "{mode:?}: the text keeps a cell for each letter: {}",
+                row(&screen, you)
+            );
+            assert!(
+                arabic_note > text + u16::try_from(drawn_cells(ARABIC)).expect("four fits a u16"),
+                "{mode:?}: the note is clear of the last letter: {}",
+                row(&screen, you)
+            );
+        }
     }
 
     /// A selection follows its own characters, not its columns.
