@@ -158,6 +158,27 @@ SCENES = {
         ],
         "wait": "see you",
     },
+    # A lam-alef word with a trailing clock, in the default mode (`Terminal`, no
+    # TELEVIM_BIDI). `سلام` is three columns as a string and four cells as drawn.
+    # This script asserts nothing: read `lam_alef_note.txt` and check that the
+    # last letter `م` is present and the clock stands to its right and not on top
+    # of it, then look at the png for how kitty shaped the pair. Not part of
+    # `make ci`; the unit tests pin the width and the note column, not shaping.
+    "lam_alef_note": {
+        "chats": [(1, "Ada")],
+        "messages": {
+            1: [
+                {"id": 1, "text": "سلام", "timestamp": 1700000000, "is_outgoing": False},
+                {"id": 2, "text": "سلام", "timestamp": 1700000060, "is_outgoing": True},
+            ]
+        },
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("\r", lambda s: "سلام" in s),
+        ],
+        "wait": "سلام",
+    },
     # A Persian word with a zero-width non-joiner (the half-space) inside it.
     "draft_zwnj": {
         "chats": [(1, "Ada")],
