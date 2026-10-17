@@ -32,6 +32,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
 use crate::app::App;
 use crate::emoji::MAX_CANDIDATES;
+use crate::wrap::columns;
 
 /// How wide the popup draws.
 ///
@@ -68,7 +69,7 @@ fn popup_area(app: &App, above: Rect, bar: Rect, frame: Rect) -> Option<Rect> {
 
     let y = bar.y.saturating_sub(height as u16);
     let popup_width = POPUP_WIDTH.min(frame.width);
-    let x = (bar.x + 1 + app.prompt_prefix().len() as u16 + caret as u16)
+    let x = (bar.x + 1 + columns(app.prompt_prefix()) as u16 + caret as u16)
         .min(frame.width.saturating_sub(popup_width));
 
     Some(Rect::new(x, y, popup_width, height as u16))
