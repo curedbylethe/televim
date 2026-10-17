@@ -42,6 +42,7 @@ use crate::app::{
     PassPrompt, ProfileId, PromptKind, Register, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow,
     TYPING_FOR,
 };
+use crate::bidi::BidiMode;
 use crate::card::CardRow;
 use crate::date;
 use crate::jumplist::Jumplist;
@@ -2557,17 +2558,29 @@ pub(crate) fn start_card_visual(profile: &mut ProfileCard) {
 }
 
 /// One charwise motion within the cursor row's value over already-drawn rows.
-pub(crate) fn card_motion_char(profile: &mut ProfileCard, rows: &[CardRow], c: char) {
+///
+/// `h` and `l` step by painted column under `mode`, and report whether the
+/// caret moved; every other key reports `true`.
+pub(crate) fn card_motion_char(
+    profile: &mut ProfileCard,
+    rows: &[CardRow],
+    c: char,
+    mode: BidiMode,
+) -> bool {
     let Some(motion) = CharMotion::from_key(c) else {
-        return;
+        return true;
     };
     let Some(value) = rows
         .get(profile.profile_vim.cursor())
         .map(|row| row.value.clone())
     else {
-        return;
+        return true;
     };
+    if let CharMotion::Step { forward } = motion {
+        return profile.step_char(&value, forward, mode);
+    }
     profile.move_char(motion, &value);
+    true
 }
 
 /// A motion between rows over already-drawn rows, which resets the inline position.
@@ -4029,12 +4042,21 @@ pub(crate) fn handle_profile(
         // inline position has nowhere left to go. A card is one column of
         // values, so there is no column to the left of the first one, so the
         // motion is at its edge rather than the key being repurposed mid-word.
-        KeyCode::Char('h') if profile.card_caret_at_start() => {
-            close_card(&mut *ui, &mut *profile);
+        // On a right-to-left value that edge is the leftmost glyph, not the
+        // first character, so the card closes when the step does not move.
+        KeyCode::Char('h') => {
+            if !card_motion_char(&mut *profile, rows, 'h', ui.bidi) {
+                close_card(&mut *ui, &mut *profile);
+            }
             false
         }
-        KeyCode::Char(c @ ('l' | 'h' | 'w' | 'b' | 'e' | '0' | '$')) => {
-            card_motion_char(&mut *profile, rows, c);
+        KeyCode::Left | KeyCode::Right => {
+            let c = if key.code == KeyCode::Left { 'h' } else { 'l' };
+            card_motion_char(&mut *profile, rows, c, ui.bidi);
+            false
+        }
+        KeyCode::Char(c @ ('l' | 'w' | 'b' | 'e' | '0' | '$')) => {
+            card_motion_char(&mut *profile, rows, c, ui.bidi);
             false
         }
         KeyCode::Char(c @ ('j' | 'k' | 'g' | 'G')) => {

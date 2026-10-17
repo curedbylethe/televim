@@ -426,6 +426,29 @@ fn paint_piece<'a>(
     }
 }
 
+/// Where the caret's style goes under [`crate::bidi::BidiMode::Visual`], as a byte offset.
+///
+/// A caret at the end of the row has no character to carry its style, so
+/// this module would emit it as a cell of its own after the piece that owns it,
+/// which pushes the rest of the word along. A right-to-left draft that ends in
+/// a run has its last letter drawn first, so that cell would split the word. The
+/// caret goes on the last letter instead: it is the leftmost cell of the run, the
+/// one the next letter would take.
+pub(crate) fn visual_caret(text: &str, range: &Range<usize>, at: usize) -> usize {
+    let Some(row) = text.get(range.clone()) else {
+        return at;
+    };
+    match crate::grapheme::clusters(row).last() {
+        Some((offset, cluster))
+            if at == range.end
+                && crate::bidi::base_direction(cluster) == crate::bidi::Direction::Rtl =>
+        {
+            range.start + offset
+        }
+        _ => at,
+    }
+}
+
 /// The style a span is painted in: the caret's where the caret is, and its own
 /// everywhere else.
 fn effective(row: &TextRow<'_>, style: Style, on_caret: bool) -> Style {

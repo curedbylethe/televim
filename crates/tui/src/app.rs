@@ -1771,7 +1771,8 @@ impl App {
     #[cfg(test)]
     pub(crate) fn handle_card_motion(&mut self, key: char) {
         let rows = crate::card::rows(self);
-        coordinate::card_motion_char(&mut self.profile, &rows, key);
+        let mode = self.bidi();
+        coordinate::card_motion_char(&mut self.profile, &rows, key, mode);
     }
 
     /// One key at the card, for a test that is about the key and not the path.

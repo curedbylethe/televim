@@ -1,10 +1,14 @@
 //! The profile card's buffer and its per-keystroke state.
 
+use std::cell::Cell;
+
 use domain::account::Account;
 use domain::selection::Mark;
 use domain::vim::{CharMotion, VimState, char_motion};
 
 use crate::app::{AccountState, ContactProfile, ProfileId};
+use crate::bidi::{self, BidiMode};
+use crate::wrap;
 
 /// The profile card's buffer and its per-keystroke state.
 pub struct ProfileCard {
@@ -56,6 +60,13 @@ pub struct ProfileCard {
     /// a prefix. Bare `Ctrl-w` keeps its existing meaning — leaving the input line
     /// — which is the same prefix-with-a-bare-fallback shape `g`/`gg` has.
     pub(crate) profile_pending_w: bool,
+
+    /// The width a value is wrapped at, as the last paint measured it.
+    ///
+    /// A cell because paint takes `&self`. The visual step wraps the value the
+    /// way the card drew it, so it reads this instead of deriving the width a
+    /// second time. `None` before the first paint, when the value is one row.
+    pub(crate) value_width: Cell<Option<u16>>,
 }
 
 impl ProfileCard {
@@ -70,6 +81,7 @@ impl ProfileCard {
             contact: None,
             profile_count: None,
             profile_pending_w: false,
+            value_width: Cell::new(None),
         }
     }
 
@@ -193,8 +205,37 @@ impl ProfileCard {
         i64::try_from(self.profile_vim.cursor()).unwrap_or(i64::MAX)
     }
 
-    /// Whether the inline position is at the start of the cursor row's value.
-    pub(crate) fn card_caret_at_start(&self) -> bool {
-        self.profile_caret == 0
+    /// `h`/`l` over `value`: one painted column under `mode`, reporting whether
+    /// the position moved.
+    ///
+    /// ASCII is painted in the order it is stored, so it keeps the logical step.
+    /// Anything else steps over the value's wrap at the last painted width, onto
+    /// the next row's edge at the end of one. A step that does not move is the
+    /// edge the caller closes the card on.
+    pub(crate) fn step_char(&mut self, value: &str, right: bool, mode: BidiMode) -> bool {
+        let before = self.profile_caret;
+        if value.is_ascii() {
+            self.move_char(CharMotion::Step { forward: right }, value);
+            return self.profile_caret != before;
+        }
+        let rows = match self.value_width.get().map(|width| wrap::wrap(value, width)) {
+            Some(rows)
+                if rows.last().is_some_and(|r| r.end == value.len())
+                    && rows.iter().all(|r| {
+                        value.is_char_boundary(r.start) && value.is_char_boundary(r.end)
+                    }) =>
+            {
+                rows
+            }
+            #[allow(clippy::single_range_in_vec_init)]
+            _ => vec![0..value.len()],
+        };
+        let at = value
+            .char_indices()
+            .nth(before)
+            .map_or(value.len(), |(offset, _)| offset);
+        let to = bidi::visual_step(value, &rows, at, mode, &bidi::base_direction(value), right);
+        self.profile_caret = value[..to].chars().count();
+        self.profile_caret != before
     }
 }
