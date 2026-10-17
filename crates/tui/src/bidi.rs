@@ -284,7 +284,101 @@ pub fn stored_words_in(text: &str, row: Range<usize>) -> Vec<Chunk> {
         .collect()
 }
 
+/// The clusters of `rows`, as byte offsets, in the order they are painted
+/// left to right, and the index the caret one past the end of the last row
+/// sits on (the sequence's length when that caret is past the right edge).
+///
+/// Pieces are the ones the caret column is counted over: [`stored_words_in`]
+/// under [`BidiMode::Terminal`], each laid out by the algorithm on its own, and
+/// [`permuted_in`] otherwise. A piece that reads right-to-left is painted
+/// reversed, so its clusters go in descending order.
+fn painted(
+    text: &str,
+    rows: &[Range<usize>],
+    mode: BidiMode,
+    base: &Direction,
+) -> (Vec<usize>, usize) {
+    // `Direction` is neither `Copy` nor `Clone`; rebuild it per row.
+    let again = || match base {
+        Direction::Ltr => Direction::Ltr,
+        Direction::Rtl => Direction::Rtl,
+        Direction::Mixed => Direction::Mixed,
+    };
+    let mut order: Vec<usize> = Vec::new();
+    let mut end_at = None;
+    for (index, row) in rows.iter().enumerate() {
+        let pieces: Vec<Chunk> = if mode == BidiMode::Terminal {
+            stored_words_in(text, row.clone())
+                .into_iter()
+                .flat_map(|word| visual_row_in(text, word.logical, Direction::Ltr))
+                .collect()
+        } else {
+            permuted_in(mode, text, row.clone(), again())
+        };
+        for piece in pieces {
+            let Some(slice) = text.get(piece.logical.clone()) else {
+                continue;
+            };
+            let reversed = base_direction(slice) == Direction::Rtl;
+            let mut starts: Vec<usize> = clusters(slice)
+                .map(|(offset, _)| offset + piece.logical.start)
+                .collect();
+            if reversed {
+                starts.reverse();
+            }
+            if index + 1 == rows.len() && piece.logical.end == row.end && reversed {
+                end_at = Some(order.len());
+            }
+            order.extend(starts);
+        }
+    }
+    let end = end_at.unwrap_or(order.len());
+    (order, end)
+}
+
+/// The byte offset of the cluster one painted column to the right (`right`) or
+/// to the left of the cluster holding `at`.
+///
+/// `rows` is the wrap, as byte ranges in order; one range covering `text` is
+/// the unwrapped case. The sequence stepped along is each row's clusters in
+/// painted order, so on left-to-right text it is the logical order and the
+/// answer is what `h` and `l` give. Leaving a row's right edge enters the next
+/// row's left edge and the reverse, and the ends of the buffer clamp. A caret
+/// past the end of the last row sits where [`crate::line`] paints it: the
+/// leftmost cell of a right-to-left piece, else past the right edge, from which
+/// `right` stays put.
+///
+/// An `at` inside a cluster steps from the cluster's start, and the result is
+/// always a cluster start (or `at` itself, snapped, when there is nowhere to go).
+#[must_use]
+pub fn visual_step(
+    text: &str,
+    rows: &[Range<usize>],
+    at: usize,
+    mode: BidiMode,
+    base: &Direction,
+    right: bool,
+) -> usize {
+    let (order, end) = painted(text, rows, mode, base);
+    let at = crate::grapheme::cluster_start(text, at.min(text.len()));
+    let here = if at >= text.len() {
+        Some(end)
+    } else {
+        order.iter().position(|&start| start == at)
+    };
+    let next = match (here, right) {
+        (Some(i), true) => order.get(i + 1),
+        (Some(i), false) => i.checked_sub(1).and_then(|j| order.get(j)),
+        // Not on a painted cluster (a gap between rows): fall back to logical order.
+        (None, true) => order.iter().filter(|&&s| s > at).min(),
+        (None, false) => order.iter().filter(|&&s| s < at).max(),
+    };
+    next.copied().unwrap_or(at)
+}
+
+// One row covering the text is the unwrapped case, not a mistyped range.
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 
@@ -607,6 +701,106 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn step(text: &str, rows: &[Range<usize>], at: usize, mode: BidiMode, right: bool) -> usize {
+        visual_step(text, rows, at, mode, &base_direction(text), right)
+    }
+
+    #[test]
+    fn a_step_over_left_to_right_text_is_logical() {
+        let rows = [0..3];
+        for mode in [BidiMode::Terminal, BidiMode::Visual, BidiMode::Words] {
+            assert_eq!(step("abc", &rows, 0, mode, true), 1);
+            assert_eq!(step("abc", &rows, 2, mode, true), 2);
+            assert_eq!(step("abc", &rows, 1, mode, false), 0);
+            assert_eq!(step("abc", &rows, 0, mode, false), 0);
+            assert_eq!(step("abc", &rows, 3, mode, false), 2);
+            assert_eq!(step("abc", &rows, 3, mode, true), 3);
+        }
+    }
+
+    #[test]
+    fn a_step_over_a_right_to_left_word_runs_against_the_logical_order() {
+        let text = "שלום";
+        let rows = [0..text.len()];
+        // Drawn first is the last letter: 6, 4, 2, 0 from the left.
+        assert_eq!(step(text, &rows, 6, BidiMode::Visual, true), 4);
+        assert_eq!(step(text, &rows, 0, BidiMode::Visual, false), 2);
+        assert_eq!(step(text, &rows, 6, BidiMode::Visual, false), 6);
+        assert_eq!(step(text, &rows, 0, BidiMode::Visual, true), 0);
+        // A caret inside a letter steps from the letter.
+        assert_eq!(step(text, &rows, 5, BidiMode::Visual, true), 2);
+        // The caret past the end is on the leftmost cell.
+        assert_eq!(step(text, &rows, 8, BidiMode::Visual, true), 4);
+        assert_eq!(step(text, &rows, 8, BidiMode::Visual, false), 8);
+    }
+
+    #[test]
+    fn a_step_across_a_mixed_row_keeps_the_digits_in_order() {
+        let text = "שלום 123";
+        let rows = [0..text.len()];
+        // Painted: 1 2 3, a space, then the word reversed.
+        assert_eq!(step(text, &rows, 9, BidiMode::Visual, true), 10);
+        assert_eq!(step(text, &rows, 10, BidiMode::Visual, true), 11);
+        assert_eq!(step(text, &rows, 11, BidiMode::Visual, true), 8);
+        assert_eq!(step(text, &rows, 8, BidiMode::Visual, true), 6);
+        assert_eq!(step(text, &rows, 8, BidiMode::Visual, false), 11);
+        assert_eq!(step(text, &rows, 9, BidiMode::Visual, false), 9);
+        // Under the default each stored word is reversed in place.
+        assert_eq!(step(text, &rows, 0, BidiMode::Terminal, true), 8);
+        assert_eq!(step(text, &rows, 8, BidiMode::Terminal, true), 9);
+        assert_eq!(step(text, &rows, 10, BidiMode::Terminal, true), 11);
+    }
+
+    #[test]
+    fn a_step_crosses_from_one_wrapped_row_to_the_next() {
+        let text = "שלום שלום";
+        let rows = [0..8, 9..17];
+        assert_eq!(step(text, &rows, 0, BidiMode::Visual, true), 15);
+        assert_eq!(step(text, &rows, 15, BidiMode::Visual, false), 0);
+        assert_eq!(step(text, &rows, 9, BidiMode::Visual, true), 9);
+        let ascii = "ab cd";
+        let rows = [0..3, 3..5];
+        assert_eq!(step(ascii, &rows, 2, BidiMode::Terminal, true), 3);
+        assert_eq!(step(ascii, &rows, 3, BidiMode::Terminal, false), 2);
+    }
+
+    #[test]
+    fn an_empty_text_has_nowhere_to_step() {
+        assert_eq!(step("", &[0..0], 0, BidiMode::Visual, true), 0);
+        assert_eq!(step("", &[], 0, BidiMode::Visual, false), 0);
+    }
+
+    #[test]
+    fn a_right_to_left_row_keeps_its_brackets_unmirrored() {
+        let text = "שלום (אבג)";
+        let drawn: String = visual_row(text, Direction::Rtl)
+            .iter()
+            .map(|c| &text[c.logical.clone()])
+            .collect();
+        assert!(drawn.contains('(') && drawn.contains(')'));
+        for mirrored in ['\u{FD3E}', '\u{FD3F}', '\u{2768}', '\u{2769}'] {
+            assert!(!drawn.contains(mirrored));
+        }
+        assert_eq!(drawn.matches('(').count(), 1);
+        assert_eq!(drawn.matches(')').count(), 1);
+    }
+
+    #[test]
+    fn a_right_to_left_row_is_not_shaped() {
+        let text = "سلام";
+        let chunks = visual_row(text, Direction::Rtl);
+        assert!(!chunks.is_empty());
+        for chunk in chunks {
+            let piece = &text[chunk.logical];
+            assert!(text.contains(piece));
+            assert!(
+                piece
+                    .chars()
+                    .all(|c| !matches!(c, '\u{FB50}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}'))
+            );
         }
     }
 }
