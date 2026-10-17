@@ -429,7 +429,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let prefix = app.prompt_prefix();
     // The prefix sits in front of the first row, so the rows are cut for the
     // columns that are left over once it is drawn.
-    let lead_columns = u16::try_from(prefix.len()).unwrap_or(u16::MAX);
+    let lead_columns = u16::try_from(columns(prefix)).unwrap_or(u16::MAX);
     let laid_out = app
         .input
         .line
@@ -1409,6 +1409,47 @@ mod tests {
             " ",
             "and the caret added no cell of its own after them"
         );
+        // One past the end of a right-to-left row is the leftmost cell: the
+        // run is left-aligned, so no cell lies further left. Column 0 of the
+        // layout, cell 1 of the bar (the border is cell 0), on the `م`.
+        assert_eq!(column, 0, "the end caret is the layout's leftmost column");
+        assert_eq!(
+            caret_x, 1,
+            "which is the bar's first cell inside the border"
+        );
+        assert_eq!(buffer[(caret_x, body)].symbol(), "م");
+    }
+
+    /// `h` on a Visual right-to-left draft steps by painted cluster, so the
+    /// caret's screen `x` falls, and `l` raises it again.
+    #[test]
+    fn h_and_l_move_a_visual_arabic_caret_across_the_painted_cells() {
+        let mut app = App::mock().with_bidi(BidiMode::Visual);
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "سلام");
+        press(&mut app, KeyCode::Esc);
+        // The logical start is the rightmost cell, so there is room to go left.
+        press(&mut app, KeyCode::Char('0'));
+
+        let x = |app: &App| {
+            let buffer = screen(app, 80, 24);
+            let top = bar_top(&rows_of(&buffer)) as u16;
+            carets(&buffer, top)[0].0
+        };
+        let start = x(&app);
+        press(&mut app, KeyCode::Char('h'));
+        let left = x(&app);
+        assert!(left < start, "h moved the caret left: {start} -> {left}");
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(x(&app), start, "and l brought it back");
+    }
+
+    /// A prefix is counted in columns: a two-column string is two columns
+    /// wide however many bytes it takes, so the lead never regresses to `len`.
+    #[test]
+    fn the_prompt_prefix_is_counted_in_columns_not_bytes() {
+        assert_eq!(columns("中"), 2);
+        assert_eq!("中".len(), 3);
     }
 
     /// Under `Words` a two-word draft reaches the terminal with its words in
