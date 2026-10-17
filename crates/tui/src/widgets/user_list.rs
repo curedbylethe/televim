@@ -247,10 +247,10 @@ fn push_marked<'a>(
 /// [`BidiMode::Terminal`] the text goes out as stored.
 ///
 /// Under [`BidiMode::Visual`] the range is laid out by runs in visual order, the
-/// way a conversation row is, with the whole text's direction. A run is inked
-/// `mark` when it overlaps a match of the fragment: the run is the unit that is
-/// drawn, so a match is shown on whichever runs it touches rather than split
-/// from them.
+/// way a conversation row is, with the whole text's direction. Each run is cut
+/// at the edges of the matches that overlap it, so only the overlapping
+/// characters are inked `mark`; the pieces keep the run's stored order. A
+/// reversed right-to-left run is one cluster, so a hit on it inks it whole.
 fn marked_in<'a>(
     text: &'a str,
     range: Range<usize>,
@@ -272,11 +272,26 @@ fn marked_in<'a>(
 
             bidi::permuted_in(mode, text, range.clone(), bidi::base_direction(text))
                 .into_iter()
-                .map(|piece| {
-                    let inked = hits
-                        .iter()
-                        .any(|hit| hit.start < piece.logical.end && piece.logical.start < hit.end);
-                    Span::styled(&text[piece.logical], if inked { mark } else { base })
+                .flat_map(|piece| {
+                    let logical = piece.logical;
+                    let mut spans = Vec::new();
+                    let mut at = logical.start;
+                    for hit in &hits {
+                        let start = hit.start.max(at);
+                        let end = hit.end.min(logical.end);
+                        if start >= end {
+                            continue;
+                        }
+                        if start > at {
+                            spans.push(Span::styled(&text[at..start], base));
+                        }
+                        spans.push(Span::styled(&text[start..end], mark));
+                        at = end;
+                    }
+                    if at < logical.end {
+                        spans.push(Span::styled(&text[at..logical.end], base));
+                    }
+                    spans
                 })
                 .collect()
         }
@@ -398,17 +413,22 @@ mod tests {
     /// query has to be the one the search is *for* before a result is accepted,
     /// and only the real route establishes that.
     fn showing(candidates: Vec<UserCandidate>) -> App {
+        showing_query("no", candidates)
+    }
+
+    /// [`showing`] for a search typed as `query`.
+    fn showing_query(query: &str, candidates: Vec<UserCandidate>) -> App {
         let mut app = App::mock();
         press(&mut app, KeyCode::Char('h'));
         press(&mut app, KeyCode::Char('/'));
-        for ch in "no".chars() {
+        for ch in query.chars() {
             press(&mut app, KeyCode::Char(ch));
         }
         press(&mut app, KeyCode::Enter);
 
         assert!(app.user_search().is_active(), "the search was started");
         assert!(
-            app.apply_users("no", candidates),
+            app.apply_users(query, candidates),
             "the fixture's answer is for the query on show"
         );
         app
@@ -663,5 +683,51 @@ mod tests {
             row_with(&buffer, &reversed).is_some(),
             "the name is in visual order"
         );
+    }
+
+    /// The x of the cell drawing `symbol` on the row that holds `needle`.
+    fn cell_of(buffer: &Buffer, needle: &str, symbol: &str) -> (u16, u16) {
+        let y = row_with(buffer, needle).expect("the row is drawn");
+        let x = (0..buffer.area.width)
+            .find(|&x| buffer[(x, y)].symbol() == symbol)
+            .expect("the symbol is drawn");
+        (x, y)
+    }
+
+    /// A match inks the characters it covers, not the whole run: one digit of
+    /// `123` is inked, its neighbours are not.
+    #[test]
+    fn a_match_inks_its_digit_not_the_whole_run() {
+        let match_fg = Theme::default()
+            .match_hit
+            .fg
+            .expect("a match is a foreground");
+        for mode in [BidiMode::Visual, BidiMode::Words] {
+            let app = showing_query("2", vec![candidate(7, "سلام 123", None)]).with_bidi(mode);
+            let buffer = screen(&app, 80, 24);
+            let (x, y) = cell_of(&buffer, "123", "2");
+
+            assert_eq!(buffer[(x, y)].fg, match_fg, "{mode:?}: `2` is inked");
+            assert_ne!(buffer[(x - 1, y)].fg, match_fg, "{mode:?}: `1` is not");
+            assert_ne!(buffer[(x + 1, y)].fg, match_fg, "{mode:?}: `3` is not");
+        }
+    }
+
+    /// One Persian letter as the fragment inks that letter only, and the name
+    /// stays reversed.
+    #[test]
+    fn a_one_letter_persian_match_inks_that_letter() {
+        let match_fg = Theme::default()
+            .match_hit
+            .fg
+            .expect("a match is a foreground");
+        let app = showing_query("ل", vec![candidate(7, ARABIC, None)]).with_bidi(BidiMode::Visual);
+        let buffer = screen(&app, 80, 24);
+        let reversed: String = ARABIC.chars().rev().collect();
+
+        assert!(row_with(&buffer, &reversed).is_some(), "still reversed");
+        let (x, y) = cell_of(&buffer, &reversed, "ل");
+        assert_eq!(buffer[(x, y)].fg, match_fg, "the letter is inked");
+        assert_ne!(buffer[(x - 1, y)].fg, match_fg, "its neighbour is not");
     }
 }
