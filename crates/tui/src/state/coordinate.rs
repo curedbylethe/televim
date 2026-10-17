@@ -3034,7 +3034,7 @@ pub(crate) fn handle_line(
     profile: &mut ProfileCard,
     key: KeyEvent,
 ) -> bool {
-    let opened = match input.line.feed(key) {
+    let opened = match input.line.feed_with(key, ui.bidi) {
         LineVerdict::Submit => submit(
             &mut *ui,
             &mut *conversation,
