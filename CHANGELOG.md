@@ -5,6 +5,20 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.6.0] - 2026-10-17
+
+### Added
+
+- **config:** Per-kind viewer commands
+- **media:** Carry the media kind to the viewer
+- **runtime:** Wait on a configured viewer command
+
+### Fixed
+
+- **runtime:** Wait for the viewer on Windows by default
+- **media:** A late commit leaves a viewer's file alone
+- **media:** Sweep a download temp only when it is ours or dead
+
 ## [0.5.1] - 2026-10-16
 
 ### Changed
