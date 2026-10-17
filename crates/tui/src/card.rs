@@ -462,6 +462,7 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
     let value_width = inner
         .saturating_sub(u16::try_from(VALUE_X).unwrap_or(u16::MAX))
         .max(1);
+    app.profile.value_width.set(Some(value_width));
     let cursor = app.profile_cursor();
     let selection = app.card_selection();
 
@@ -504,8 +505,17 @@ pub fn lines<'r>(app: &App, rows: &'r [CardRow], width: u16) -> Vec<(usize, Line
                     .map(|chars| rows::byte_span(&row.value, chars)),
                 // A motion counts characters and a caret is a byte offset;
                 // `rows::byte_span` is the one converter in the program.
-                caret: (on_cursor && row.is_selectable() && !row.is_action())
-                    .then(|| app.card_caret_byte(&row.value)),
+                caret: (on_cursor && row.is_selectable() && !row.is_action()).then(|| {
+                    let at = app.card_caret_byte(&row.value);
+                    // The cell a caret at the end would add lands on the
+                    // piece drawn first and splits a right-to-left run.
+                    match app.bidi() {
+                        BidiMode::Terminal => at,
+                        BidiMode::Visual | BidiMode::Words => {
+                            text_row::visual_caret(&row.value, &range, at)
+                        }
+                    }
+                }),
                 reversed: on_cursor,
                 // Nothing on a card is secret: a value is the reader's own
                 // profile or somebody they are talking to, and neither is a
@@ -1029,6 +1039,73 @@ mod drawing {
         let text = rtl_bio_screen(crate::bidi::BidiMode::Visual);
         assert!(text.contains("مالس"), "reversed and whole: {text}");
         assert!(!text.contains("سلام"), "and not in stored order: {text}");
+    }
+
+    /// The name row goes through the same painter as the bio, so it reverses
+    /// the same way; the border title stays as stored.
+    #[test]
+    fn a_right_to_left_name_is_drawn_reversed_in_visual_mode() {
+        let mut app = self_card().with_bidi(crate::bidi::BidiMode::Visual);
+        if let crate::app::AccountState::Known(account) = &mut app.session.account {
+            account.first_name = "سلام".to_owned();
+            account.last_name = String::new();
+        }
+        let text = rows_of(&screen(&app, 40)).join("\n");
+        assert!(text.contains("مالس"), "reversed and whole: {text}");
+        assert!(!text.contains("سلام"), "and not in stored order: {text}");
+    }
+
+    /// A caret past the end of a right-to-left value sits on its leftmost glyph
+    /// rather than in a cell of its own that would split the word.
+    #[test]
+    fn the_caret_at_the_end_of_a_right_to_left_value_does_not_split_it() {
+        let mut app = self_card().with_bidi(crate::bidi::BidiMode::Visual);
+        if let crate::app::AccountState::Known(account) = &mut app.session.account {
+            account.bio = Some("سلام".to_owned());
+        }
+        let bio = rows(&app)
+            .iter()
+            .position(|r| r.value == "سلام")
+            .expect("the bio is a row");
+        app.handle_card_row(bio);
+        app.profile.set_caret(99);
+        let text = rows_of(&screen(&app, 40)).join("\n");
+        assert!(text.contains("مالس"), "the word is whole: {text}");
+    }
+
+    /// `h` and `l` and the arrows follow the painted column on a right-to-left
+    /// value, and `h` closes the card only at the leftmost glyph.
+    #[test]
+    fn h_and_l_follow_the_painted_column_on_a_right_to_left_value() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut app = self_card().with_bidi(crate::bidi::BidiMode::Visual);
+        if let crate::app::AccountState::Known(account) = &mut app.session.account {
+            account.bio = Some("سلام".to_owned());
+        }
+        let bio = rows(&app)
+            .iter()
+            .position(|r| r.value == "سلام")
+            .expect("the bio is a row");
+        app.handle_card_row(bio);
+        // The first paint records the width the step wraps at.
+        let _ = screen(&app, 40);
+
+        // Logical 0 is the rightmost glyph: `l` has nowhere to go, `h` moves.
+        app.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(app.card_caret(), 0);
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(app.card_caret(), 1);
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.card_caret(), 2);
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.card_caret(), 1);
+        app.handle_key(key(KeyCode::Char('h')));
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(app.card_caret(), 3);
+        assert!(app.ui.pane.is_profile(), "still open on the last glyph");
+        app.handle_key(key(KeyCode::Char('h')));
+        assert!(!app.ui.pane.is_profile(), "h at the leftmost glyph closes");
     }
 
     /// The cursor row is reverse video, and **the inline caret on it is not** —

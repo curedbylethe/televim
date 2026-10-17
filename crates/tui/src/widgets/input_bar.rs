@@ -511,28 +511,6 @@ fn emitted_caret(text: &str, range: &Range<usize>, at: usize, mode: BidiMode) ->
     range.end
 }
 
-/// Where the caret's style goes under [`BidiMode::Visual`], as a byte offset.
-///
-/// A caret at the end of the row has no character to carry its style, so
-/// `text_row` would emit it as a cell of its own after the piece that owns it,
-/// which pushes the rest of the word along. A right-to-left draft that ends in
-/// a run has its last letter drawn first, so that cell would split the word. The
-/// caret goes on the last letter instead: it is the leftmost cell of the run, the
-/// one the next letter would take.
-fn visual_caret(text: &str, range: &Range<usize>, at: usize) -> usize {
-    let Some(row) = text.get(range.clone()) else {
-        return at;
-    };
-    match crate::grapheme::clusters(row).last() {
-        Some((offset, cluster))
-            if at == range.end && bidi::base_direction(cluster) == bidi::Direction::Rtl =>
-        {
-            range.start + offset
-        }
-        _ => at,
-    }
-}
-
 /// One row of the draft.
 ///
 /// The text, the selection and the caret are [`text_row`]'s, because a card row
@@ -585,7 +563,7 @@ fn body_row<'a>(
             BidiMode::Terminal | BidiMode::Words => {
                 emitted_caret(text, range, app.input.line.caret(), mode)
             }
-            BidiMode::Visual => visual_caret(text, range, app.input.line.caret()),
+            BidiMode::Visual => text_row::visual_caret(text, range, app.input.line.caret()),
         }),
         reversed: false,
         // A password is Telegram's secret rather than the reader's draft, and it
