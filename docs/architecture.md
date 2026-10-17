@@ -609,8 +609,10 @@ session opens the sign-in field with the phone already in the bar, and the flow
 asks for the code there, then for a two-factor password when Telegram says the
 account has one.
 
-`Config` also reads `TELEVIM_BIDI` — `terminal` (the default) or `visual` — which
-says whether this program or the terminal arranges a right-to-left row. It is
+`Config` also reads `TELEVIM_BIDI` — `terminal` (the default), `words` or `visual` — which
+says whether this program or the terminal arranges a right-to-left row. In every
+mode `h`/`l` and the arrows step by painted column through `tui::bidi::visual_step`:
+on the input line, in the conversation's Visual mode and on the profile card. It is
 read once in `runtime.rs` and handed to `tui` as a plain `tui::bidi::BidiMode`
 through `App::with_bidi`, which is the only path a configuration value takes into
 `App`; `tui` names no configuration type. The value is per machine rather than per
