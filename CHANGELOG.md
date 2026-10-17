@@ -5,6 +5,20 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.7.0] - 2026-10-17
+
+### Added
+
+- **tui:** Visual step over the caret's piece list
+- **tui:** Step the input caret by painted column
+- **tui:** Visual h and l in the conversation
+- **tui:** Visual h and l on the profile card
+
+### Fixed
+
+- **tui:** Ink the user-list match, not the whole bidi run
+- **tui:** Count the prompt prefix in columns
+
 ## [0.6.0] - 2026-10-17
 
 ### Added
