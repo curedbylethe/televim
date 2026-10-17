@@ -270,7 +270,13 @@ Real, and named so they are not mistaken for oversights:
   exists (`app/tests/tui_e2e.rs`, a pty through `termlens`), so the follow-up is
   unblocked for the screen-level half. It still cannot show how the user's own
   terminal shapes or draws the bytes: `termlens` reads the screen through its
-  emulator, not through a shaping terminal. The input bar's right-to-left
+  emulator, not through a shaping terminal, and `make test` proves no shaping.
+  The shaping check is manual: `make rtl-shots` (not in `make ci`, no assertions)
+  has a `lam_alef_note` scene, `سلام` with a trailing clock in the default mode,
+  where a person reads `target/rtl-shots/lam_alef_note.txt` for the last letter
+  and a clock that is not on top of it. The width it rests on is pinned in
+  `make test`: `columns("لا")` is 1 and `drawn_cells("لا")` is 2, and the Arabic
+  trailing note's column is asserted from `drawn_cells` in all three modes. The input bar's right-to-left
   tests inherit the same ceiling whole: the glyph-order tests drive
   `BidiMode::Visual` only, and the default path is pinned by the ASCII tests beside
   them, which cannot tell a shaper's reorder from no reorder at all. The caret tests
