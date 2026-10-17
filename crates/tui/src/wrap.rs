@@ -249,6 +249,20 @@ fn row_width(row: usize, width: usize, prefix: usize, suffix: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// Every per-cluster RTL calculation moves with the width `unicode-width`
+    /// gives a lam-alef, so this fails the day it changes. The pair is joined
+    /// into one column by [`columns`] and kept as a cell each by [`drawn_cells`];
+    /// a single Arabic letter is one of each.
+    #[test]
+    fn the_lam_alef_pair_is_one_column_and_two_drawn_cells() {
+        assert_eq!(columns("لا"), 1);
+        assert_eq!(drawn_cells("لا"), 2);
+        assert_eq!(columns("سلام"), 3);
+        assert_eq!(drawn_cells("سلام"), 4);
+        assert_eq!((columns("ل"), columns("ا")), (1, 1));
+        assert_eq!((drawn_cells("ل"), drawn_cells("ا")), (1, 1));
+    }
+
     /// The character ranges a text is laid out into.
     fn bounds(text: &str, width: u16) -> Vec<Range<usize>> {
         wrap(text, width)
