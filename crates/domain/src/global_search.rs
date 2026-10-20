@@ -1,10 +1,10 @@
-//! Searching every private conversation at once.
+//! Searching every conversation at once.
 //!
-//! `:search` asks the server for matches across all peers, so this module is
+//! `?` asks the server for matches across all peers, so this module is
 //! server-authoritative: there is no local pass, because the history cache
 //! holds at most a few peers' windows and a scan over it would look like an
 //! answer while missing most of the archive. The state therefore moves from
-//! in-flight to either a server answer or a failure, and nothing in between.
+//! in-flight to either a server answer, a pause, or a failure.
 //!
 //! # Grouping
 //!
@@ -12,17 +12,96 @@
 //! [`crate::search`], which keeps oldest first). Grouping keeps that order and
 //! splits it into contiguous runs of one chat: a chat that the
 //! server interleaves with another appears as two groups, not one. There is
-//! deliberately no per-chat cap; the total cap is the only limit.
+//! deliberately no per-chat cap.
 //!
-//! # Why the list is bounded
+//! # Paging
 //!
-//! Like [`SEARCH_MATCHES`] for a single conversation, the cap is a round-trip
-//! bound, not a memory one: the first page is all that is requested, and the
-//! true total travels beside the list so truncation is stated, not hidden. A
-//! hit is a few small fields, so the memory is negligible either way.
+//! A page is a round-trip bound, not a memory one: the state keeps every page it
+//! is given, [`GlobalSearchState::has_more`] says whether the server holds more,
+//! and [`GlobalSearchState::needs_more`] says whether another may be asked for.
+//! Nothing is truncated, and the reader stops paging when they stop asking.
+//!
+//! # Coverage and pauses
+//!
+//! The loop keeps only correspondents ([`crate::chat::Chat::is_correspondent`])
+//! and hands this state the count of hits it dropped, which the label reports. A
+//! flood wait becomes a pause that keeps the rows already fetched.
+
+use std::time::{Duration, Instant};
 
 use crate::message::MediaKind;
-use crate::search::SEARCH_MATCHES;
+
+/// What a global search is narrowed to, by attachment kind.
+///
+/// [`MediaFilter::None`] is no narrowing at all; the other variants are the
+/// words the parser accepts and the label echoes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaFilter {
+    #[default]
+    None,
+    PhotoVideo,
+    Document,
+    Music,
+    Voice,
+    Url,
+}
+
+impl MediaFilter {
+    /// The reader's word for this filter, or `None` when nothing is narrowed.
+    #[must_use]
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::PhotoVideo => Some("photo_video"),
+            Self::Document => Some("document"),
+            Self::Music => Some("music"),
+            Self::Voice => Some("voice"),
+            Self::Url => Some("url"),
+        }
+    }
+}
+
+/// The search the reader asked for: the words sent, what they typed, and the
+/// narrowing that rides with them.
+///
+/// Equality is what makes a stale answer detectably stale, so every field takes
+/// part in it. `text` is the query the server sees, with tokens removed; `echo`
+/// is the line as typed, tokens included, so the status line can quote the
+/// reader back to themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchSpec {
+    /// The words sent to the server, filter tokens removed.
+    pub text: String,
+
+    /// The line as the reader typed it, filter tokens included.
+    pub echo: String,
+
+    /// The attachment kind to keep, if any.
+    pub media: MediaFilter,
+
+    /// The earliest date to keep, as unix seconds, inclusive.
+    pub since: Option<i64>,
+
+    /// The latest date to keep, as unix seconds, inclusive.
+    pub until: Option<i64>,
+}
+
+impl SearchSpec {
+    /// The tokenless spec: `text` and `echo` are the trimmed input, no narrowing.
+    ///
+    /// It keeps the tree green until the parser lands; it is not a second parser.
+    #[must_use]
+    pub fn plain(text: &str) -> Self {
+        let text = text.trim();
+        Self {
+            text: text.to_owned(),
+            echo: text.to_owned(),
+            media: MediaFilter::None,
+            since: None,
+            until: None,
+        }
+    }
+}
 
 /// One message the server matched, with what is needed to show it.
 ///
@@ -82,15 +161,15 @@ pub struct ChatGroup<'a> {
 
 /// The results of the last global search, and where the reader is among them.
 ///
-/// Pure state: no clock, no client. Like [`crate::user::UserSearchState`], it
-/// owns the query, so an answer to a query the reader has since replaced is
-/// refused here rather than by every caller.
+/// Pure state: no client, and its only clock is the [`Instant`] a pause counts
+/// down to. The state owns the spec, so an answer to a spec the reader has since
+/// replaced is refused here rather than by every caller.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GlobalSearchState {
-    /// The query, or empty when there has been no search.
-    query: String,
+    /// The spec being searched for, or `None` when there has been no search.
+    spec: Option<SearchSpec>,
 
-    /// The matches, newest first, capped at [`SEARCH_MATCHES`].
+    /// Every page accumulated so far, newest first, nothing truncated.
     hits: Vec<GlobalHit>,
 
     /// The selected hit, an index into `hits`, or zero on an empty list.
@@ -99,67 +178,158 @@ pub struct GlobalSearchState {
     /// How many matches the server holds in all, which may exceed `hits`.
     total: usize,
 
+    /// How many hits the loop dropped for being outside a correspondent.
+    dropped: usize,
+
+    /// Whether the server said another page exists.
+    has_more: bool,
+
     /// Whether an answer is still on its way.
     in_flight: bool,
+
+    /// When a flood-wait pause ends, if the search is paused.
+    paused_until: Option<Instant>,
 
     /// Why the search failed, if it did.
     failure: Option<String>,
 }
 
 impl GlobalSearchState {
-    /// Starts a search: records the query, clears the old hits, and marks the
-    /// answer as pending.
+    /// Starts a search, or asks for another page of the current one.
     ///
-    /// An empty query is no search at all, so it clears the state rather than
-    /// leaving an active search with nothing to ask for.
-    pub fn begin(&mut self, query: &str) {
-        if query.is_empty() {
+    /// A new spec clears the old hits and marks the answer as pending. The same
+    /// spec is a continuation: the rows already fetched stay, the selection
+    /// stays, and the answer is awaited. An empty `text` is no search at all, so
+    /// it clears the state rather than leaving an active search with nothing to
+    /// ask for.
+    pub fn begin(&mut self, spec: &SearchSpec) {
+        if spec.text.is_empty() {
             self.clear();
             return;
         }
 
-        query.clone_into(&mut self.query);
-        self.hits.clear();
-        self.selected = 0;
-        self.total = 0;
+        if self.spec.as_ref() != Some(spec) {
+            self.hits.clear();
+            self.selected = 0;
+            self.total = 0;
+            self.dropped = 0;
+            self.has_more = false;
+        }
+
+        self.spec = Some(spec.clone());
         self.in_flight = true;
+        self.paused_until = None;
         self.failure = None;
     }
 
-    /// Replaces the hits with the server's answer to `query`, if still wanted.
+    /// Replaces the hits with the server's first answer to `spec`, if still wanted.
     ///
-    /// Returns `false` when `query` is not the one being searched for, so an
-    /// answer to a replaced query cannot overwrite the current one. The list is
-    /// capped at [`SEARCH_MATCHES`] keeping the newest, and the total is never
-    /// less than what is held.
-    pub fn adopt(&mut self, query: &str, mut hits: Vec<GlobalHit>, total: usize) -> bool {
-        if !self.is_for(query) {
+    /// Returns `false` when `spec` is not the one being searched for, so an
+    /// answer to a replaced search cannot overwrite the current one. Nothing is
+    /// truncated; `has_more` is the server's word on whether another page
+    /// exists, and the total is never less than what is held.
+    pub fn adopt(
+        &mut self,
+        spec: &SearchSpec,
+        hits: Vec<GlobalHit>,
+        total: usize,
+        dropped: usize,
+        has_more: bool,
+    ) -> bool {
+        if !self.is_for(spec) {
             return false;
         }
 
-        hits.truncate(SEARCH_MATCHES);
         self.hits = hits;
         self.total = total.max(self.hits.len());
-        self.selected = 0;
+        self.dropped = dropped;
+        self.has_more = has_more;
+        self.selected = self.selected.min(self.hits.len().saturating_sub(1));
+        self.in_flight = false;
+        self.paused_until = None;
+        self.failure = None;
+
+        true
+    }
+
+    /// Adds the server's next page for `spec`, if still wanted.
+    ///
+    /// Returns `false` when `spec` is stale, as [`GlobalSearchState::adopt`]
+    /// does. The rows already held and the selection survive; `dropped` is this
+    /// page's count and is added to the running one.
+    pub fn append(
+        &mut self,
+        spec: &SearchSpec,
+        hits: Vec<GlobalHit>,
+        total: usize,
+        dropped: usize,
+        has_more: bool,
+    ) -> bool {
+        if !self.is_for(spec) {
+            return false;
+        }
+
+        self.hits.extend(hits);
+        self.total = total.max(self.hits.len());
+        self.dropped += dropped;
+        self.has_more = has_more;
+        self.in_flight = false;
+        self.paused_until = None;
+        self.failure = None;
+
+        true
+    }
+
+    /// Records that the server asked the search to wait, keeping the rows.
+    ///
+    /// Returns `false` when `spec` is stale. The wait starts now and is the
+    /// server's own figure; nothing is cleared, so a reader who waits out the
+    /// pause still has what was already fetched.
+    pub fn pause(&mut self, spec: &SearchSpec, retry_after: Duration) -> bool {
+        if !self.is_for(spec) {
+            return false;
+        }
+
+        self.paused_until = Some(Instant::now() + retry_after);
         self.in_flight = false;
         self.failure = None;
 
         true
     }
 
-    /// Records that the search for `query` failed.
+    /// Marks the search as no longer in flight, keeping every row.
     ///
-    /// Returns `false` when `query` is stale, as [`GlobalSearchState::adopt`]
-    /// does. A failure leaves nothing to show, so the hits are cleared with it.
-    pub fn fail(&mut self, query: &str, reason: impl Into<String>) -> bool {
-        if !self.is_for(query) {
+    /// What a continuation that failed leaves behind: the page already shown
+    /// stays, and the end of the list simply asks again.
+    pub fn settle(&mut self, spec: &SearchSpec) -> bool {
+        if !self.is_for(spec) {
+            return false;
+        }
+
+        self.in_flight = false;
+        self.paused_until = None;
+
+        true
+    }
+
+    /// Records that the search for `spec` failed.
+    ///
+    /// Returns `false` when `spec` is stale, as [`GlobalSearchState::adopt`]
+    /// does. A first page that failed left nothing to show, so the hits are
+    /// cleared with it; a continuation calls [`GlobalSearchState::settle`]
+    /// instead.
+    pub fn fail(&mut self, spec: &SearchSpec, reason: impl Into<String>) -> bool {
+        if !self.is_for(spec) {
             return false;
         }
 
         self.hits.clear();
         self.total = 0;
+        self.dropped = 0;
+        self.has_more = false;
         self.selected = 0;
         self.in_flight = false;
+        self.paused_until = None;
         self.failure = Some(reason.into());
 
         true
@@ -173,13 +343,13 @@ impl GlobalSearchState {
     /// Whether a search has been started and not cleared.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        !self.query.is_empty()
+        self.spec.is_some()
     }
 
-    /// The query being searched for, if there has been one.
+    /// The spec being searched for, if there has been one.
     #[must_use]
-    pub fn query(&self) -> Option<&str> {
-        (!self.query.is_empty()).then_some(self.query.as_str())
+    pub fn spec(&self) -> Option<&SearchSpec> {
+        self.spec.as_ref()
     }
 
     /// Whether an answer is still on its way.
@@ -188,7 +358,7 @@ impl GlobalSearchState {
         self.in_flight
     }
 
-    /// The matches, newest first, in server order.
+    /// The matches held so far, newest first, in server order.
     #[must_use]
     pub fn hits(&self) -> &[GlobalHit] {
         &self.hits
@@ -200,7 +370,7 @@ impl GlobalSearchState {
         self.hits.len()
     }
 
-    /// Whether the search matched nothing.
+    /// Whether the search has shown nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.hits.is_empty()
@@ -210,6 +380,44 @@ impl GlobalSearchState {
     #[must_use]
     pub fn total(&self) -> usize {
         self.total
+    }
+
+    /// How many hits the loop dropped for being outside a correspondent.
+    #[must_use]
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    /// Whether the server said another page exists.
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.has_more
+    }
+
+    /// Whether another page may be asked for: the server has one, none is on its
+    /// way, and the search is not paused.
+    #[must_use]
+    pub fn needs_more(&self) -> bool {
+        self.has_more && !self.in_flight && !self.is_paused()
+    }
+
+    /// When the pause ends, if the search was paused.
+    #[must_use]
+    pub fn paused_until(&self) -> Option<Instant> {
+        self.paused_until
+    }
+
+    /// Whether the search is paused and the wait has not run out.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Whether a later page is on its way, so the list already has rows to keep.
+    #[must_use]
+    pub fn is_paging(&self) -> bool {
+        self.in_flight && !self.hits.is_empty()
     }
 
     /// Where the selection stands among the held hits.
@@ -266,42 +474,130 @@ impl GlobalSearchState {
         groups
     }
 
-    /// What the status line says about the search.
+    /// What the status line says about the search, as of now.
     ///
-    /// One function owns every wording: `?query — …`, the query echoed with the
+    /// One function owns every wording: `?{echo} — …`, the query echoed with the
     /// `?` that asked for it, as the conversation's search echoes `/`.
     #[must_use]
     pub fn label(&self) -> String {
-        let Some(query) = self.query() else {
+        self.label_at(Instant::now())
+    }
+
+    /// [`GlobalSearchState::label`] at a stated instant, so a countdown can be
+    /// tested without waiting for it.
+    #[must_use]
+    pub fn label_at(&self, now: Instant) -> String {
+        let Some(spec) = &self.spec else {
             return String::new();
         };
 
         let description = if self.in_flight {
-            "searching…".to_owned()
+            if self.hits.is_empty() {
+                "searching…".to_owned()
+            } else {
+                format!("{}, loading more…", self.count_clause(spec))
+            }
         } else if let Some(reason) = &self.failure {
             format!("search failed ({reason})")
-        } else if self.hits.is_empty() {
+        } else if let Some(pause) = self.pause_clause(now) {
+            if self.hits.is_empty() {
+                pause
+            } else {
+                format!("{}, {pause}", self.count_clause(spec))
+            }
+        } else {
+            self.count_clause(spec)
+        };
+
+        format!("?{} — {description}", spec.echo)
+    }
+
+    /// The results clause: a count, the chats it spans or the filters that
+    /// narrowed it, and how many hits were dropped.
+    fn count_clause(&self, spec: &SearchSpec) -> String {
+        let mut clause = if self.hits.is_empty() {
             "no matches".to_owned()
         } else {
-            let chats = self.groups().len();
-            let chat_noun = if chats == 1 { "chat" } else { "chats" };
-            let shown = self.hits.len();
+            let held = self.hits.len();
+            let noun = if held == 1 { "result" } else { "results" };
 
-            if self.total > shown {
-                format!("{shown} of {} results in {chats} {chat_noun}", self.total)
+            // A filtered count is pooled, so naming chats would overstate it.
+            if let Some(filters) = Self::filter_clause(spec) {
+                format!("{filters} — {held} {noun}")
             } else {
-                let noun = if shown == 1 { "result" } else { "results" };
-                format!("{shown} {noun} in {chats} {chat_noun}")
+                let chats = self.groups().len();
+                let chat_noun = if chats == 1 { "chat" } else { "chats" };
+                format!("{held} {noun} in {chats} {chat_noun}")
             }
         };
 
-        format!("?{query} — {description}")
+        if self.dropped > 0 {
+            use std::fmt::Write as _;
+            let _ = write!(clause, ", {} dropped", self.dropped);
+        }
+
+        clause
     }
 
-    /// Whether `query` is the search being waited on or shown.
-    fn is_for(&self, query: &str) -> bool {
-        !self.query.is_empty() && self.query == query
+    /// The reader's filters in reading order, or `None` when nothing is narrowed.
+    fn filter_clause(spec: &SearchSpec) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+
+        if let Some(media) = spec.media.label() {
+            parts.push(media.to_owned());
+        }
+
+        match (spec.since, spec.until) {
+            (Some(since), Some(until)) => {
+                parts.push(format!("{} to {}", date(since), date(until)));
+            }
+            (Some(since), None) => parts.push(format!("from {}", date(since))),
+            (None, Some(until)) => parts.push(format!("to {}", date(until))),
+            (None, None) => {}
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
     }
+
+    /// The pause clause, while the wait has not run out.
+    fn pause_clause(&self, now: Instant) -> Option<String> {
+        let remaining = self.paused_until.filter(|until| *until > now)? - now;
+        // Round up: a wait with any part of a second left still needs that second.
+        let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+
+        Some(format!("paused: retry in {seconds}s"))
+    }
+
+    /// Whether `spec` is the search being waited on or shown.
+    fn is_for(&self, spec: &SearchSpec) -> bool {
+        self.spec.as_ref() == Some(spec)
+    }
+}
+
+/// The `YYYY-MM-DD` a unix timestamp names, in UTC.
+fn date(seconds: i64) -> String {
+    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Howard Hinnant's `civil_from_days`: day 0 is 1970-01-01, and a negative day
+/// counts back before it.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    (year, month, day)
 }
 
 #[cfg(test)]
@@ -327,17 +623,33 @@ mod tests {
             .collect()
     }
 
-    /// A state with a search for `query` answered by `hits`.
-    fn answered(query: &str, hits: Vec<GlobalHit>, total: usize) -> GlobalSearchState {
+    /// A state with `spec` answered by `hits`.
+    fn answered(spec: &SearchSpec, hits: Vec<GlobalHit>, total: usize) -> GlobalSearchState {
+        answered_with(spec, hits, total, 0, false)
+    }
+
+    /// A state with `spec` answered by `hits`, and the rest of the answer.
+    fn answered_with(
+        spec: &SearchSpec,
+        hits: Vec<GlobalHit>,
+        total: usize,
+        dropped: usize,
+        has_more: bool,
+    ) -> GlobalSearchState {
         let mut state = GlobalSearchState::default();
-        state.begin(query);
-        assert!(state.adopt(query, hits, total));
+        state.begin(spec);
+        assert!(state.adopt(spec, hits, total, dropped, has_more));
         state
     }
 
     #[test]
     fn hits_group_into_contiguous_runs_in_server_order() {
-        let state = answered("x", vec![hit(1, 13), hit(1, 12), hit(2, 11), hit(1, 10)], 4);
+        let spec = SearchSpec::plain("x");
+        let state = answered(
+            &spec,
+            vec![hit(1, 13), hit(1, 12), hit(2, 11), hit(1, 10)],
+            4,
+        );
 
         let groups = state.groups();
         let shape: Vec<(i64, usize, usize)> = groups
@@ -352,7 +664,8 @@ mod tests {
 
     #[test]
     fn selection_wraps_at_both_ends() {
-        let mut state = answered("x", vec![hit(1, 3), hit(1, 2), hit(2, 1)], 3);
+        let spec = SearchSpec::plain("x");
+        let mut state = answered(&spec, vec![hit(1, 3), hit(1, 2), hit(2, 1)], 3);
 
         state.move_selection(1);
         assert_eq!(state.selected(), 1);
@@ -370,40 +683,31 @@ mod tests {
 
     #[test]
     fn selection_on_an_empty_list_does_nothing() {
-        let mut state = answered("x", Vec::new(), 0);
+        let spec = SearchSpec::plain("x");
+        let mut state = answered(&spec, Vec::new(), 0);
         state.move_selection(3);
         assert_eq!(state.selected(), 0);
         assert!(state.selected_hit().is_none());
     }
 
     #[test]
-    fn a_stale_answer_is_refused() {
-        let mut state = GlobalSearchState::default();
-        state.begin("a");
-        state.begin("b");
-
-        assert!(!state.adopt("a", vec![hit(1, 1)], 1));
-        assert!(!state.fail("a", "flood"));
-
-        assert!(state.in_flight());
-        assert!(state.hits().is_empty());
-        assert_eq!(state.query(), Some("b"));
-    }
-
-    #[test]
     fn an_answer_arrives_with_nothing_searched_for_is_refused() {
+        let spec = SearchSpec::plain("a");
         let mut state = GlobalSearchState::default();
-        assert!(!state.adopt("a", vec![hit(1, 1)], 1));
-        assert!(!state.fail("a", "flood"));
+
+        assert!(!state.adopt(&spec, vec![hit(1, 1)], 1, 0, false));
+        assert!(!state.append(&spec, vec![hit(1, 1)], 1, 0, false));
+        assert!(!state.fail(&spec, "flood"));
+        assert!(!state.pause(&spec, Duration::from_secs(9)));
         assert!(!state.is_active());
     }
 
     #[test]
     fn a_later_answer_replaces_an_earlier_one() {
-        let mut state = answered("q", vec![hit(1, 1)], 1);
-        state.move_selection(0);
+        let spec = SearchSpec::plain("q");
+        let mut state = answered(&spec, vec![hit(1, 1)], 1);
 
-        assert!(state.adopt("q", vec![hit(2, 5), hit(2, 6)], 2));
+        assert!(state.adopt(&spec, vec![hit(2, 5), hit(2, 6)], 2, 0, false));
 
         assert_eq!(state.hits().len(), 2);
         assert_eq!(state.hits()[0].chat_id, 2);
@@ -413,40 +717,240 @@ mod tests {
     }
 
     #[test]
-    fn the_list_is_capped_keeping_the_newest_and_the_total_is_reported() {
-        let count = SEARCH_MATCHES + 50;
+    fn the_cap_no_longer_truncates_an_answer() {
+        let spec = SearchSpec::plain("q");
+        let count = 150;
         let newest_first: Vec<GlobalHit> = one_chat(count).into_iter().rev().collect();
-        let state = answered("q", newest_first, count);
+        let state = answered(&spec, newest_first, count);
 
-        // Ids run count down to 1 in server order; the cap keeps the first N,
-        // which are the newest N: count down to count - N + 1.
-        assert_eq!(state.len(), SEARCH_MATCHES);
+        assert_eq!(state.len(), count, "every hit the server sent is kept");
         assert_eq!(
             state.hits()[0].message_id,
             i64::try_from(count).expect("the count fits in an i64")
         );
-        assert_eq!(
-            state.hits()[SEARCH_MATCHES - 1].message_id,
-            i64::try_from(count - SEARCH_MATCHES + 1).expect("the cap fits in an i64")
-        );
+        assert_eq!(state.hits()[count - 1].message_id, 1);
         assert_eq!(state.total(), count);
+        assert_eq!(state.label(), "?q — 150 results in 1 chat");
+    }
+
+    #[test]
+    fn pages_append_and_keep_the_selection() {
+        let spec = SearchSpec::plain("q");
+        let mut state = GlobalSearchState::default();
+        state.begin(&spec);
+        assert!(state.adopt(&spec, one_chat(3), 9, 0, true));
+        state.move_selection(1);
+
+        assert!(state.append(&spec, one_chat(3), 9, 0, true));
+        assert_eq!(state.len(), 6, "the second page is added, not swapped in");
+        assert_eq!(state.total(), 9);
+        assert_eq!(
+            state.selected(),
+            1,
+            "appending moves nothing under the reader"
+        );
+        assert_eq!(state.hits()[3].message_id, 1, "page two follows page one");
+
+        assert!(state.append(&spec, one_chat(3), 9, 0, false));
+        assert_eq!(state.len(), 9, "three pages, all kept");
+        assert_eq!(state.hits()[8].message_id, 3);
+        assert!(!state.has_more());
+        assert!(!state.needs_more());
+        assert_eq!(state.label(), "?q — 9 results in 1 chat");
+    }
+
+    #[test]
+    fn an_answer_for_a_replaced_spec_is_refused() {
+        let old = SearchSpec::plain("a");
+        let new = SearchSpec::plain("b");
+        let mut state = GlobalSearchState::default();
+        state.begin(&old);
+        state.begin(&new);
+
+        assert!(!state.adopt(&old, vec![hit(1, 1)], 1, 0, false));
+        assert!(!state.append(&old, vec![hit(1, 2)], 2, 0, false));
+        assert!(!state.fail(&old, "flood"));
+        assert!(!state.pause(&old, Duration::from_secs(9)));
+
+        assert!(state.in_flight());
+        assert!(state.hits().is_empty());
+        assert_eq!(state.spec(), Some(&new));
+        assert_eq!(state.label(), "?b — searching…");
+    }
+
+    #[test]
+    fn a_pause_keeps_the_rows_and_counts_down() {
+        let spec = SearchSpec::plain("q");
+        let mut state = answered(&spec, vec![hit(1, 1), hit(2, 2)], 2);
+
+        assert!(state.pause(&spec, Duration::from_secs(30)));
+        assert!(state.is_paused());
+        assert_eq!(state.hits().len(), 2, "a flood wait keeps what was fetched");
+
+        let until = state.paused_until().expect("a pause names its end");
+        let start = until
+            .checked_sub(Duration::from_secs(30))
+            .expect("the test clock is after the epoch");
+
+        assert_eq!(
+            state.label_at(start),
+            "?q — 2 results in 2 chats, paused: retry in 30s",
+            "the count clause stays in front of the pause"
+        );
+        assert_eq!(
+            state.label_at(start + Duration::from_secs(30)),
+            "?q — 2 results in 2 chats",
+            "the wait has run out, and the rows are still named"
+        );
+        assert_eq!(
+            state.label_at(start + Duration::from_secs(31)),
+            "?q — 2 results in 2 chats"
+        );
+
+        let mut empty = GlobalSearchState::default();
+        empty.begin(&spec);
+        assert!(empty.pause(&spec, Duration::from_secs(30)));
+        let until = empty.paused_until().expect("a pause names its end");
+        let start = until
+            .checked_sub(Duration::from_secs(30))
+            .expect("the test clock is after the epoch");
+        assert_eq!(
+            empty.label_at(start),
+            "?q — paused: retry in 30s",
+            "with no rows there is no count clause"
+        );
+    }
+
+    #[test]
+    fn the_dropped_count_reads_in_the_status_line() {
+        let spec = SearchSpec::plain("q");
+
+        let nine_in_three = answered_with(
+            &spec,
+            vec![
+                hit(1, 9),
+                hit(1, 8),
+                hit(1, 7),
+                hit(2, 6),
+                hit(2, 5),
+                hit(2, 4),
+                hit(3, 3),
+                hit(3, 2),
+                hit(3, 1),
+            ],
+            12,
+            3,
+            false,
+        );
+        assert_eq!(
+            nine_in_three.label(),
+            "?q — 9 results in 3 chats, 3 dropped"
+        );
+
+        let nothing_kept = answered_with(&spec, Vec::new(), 0, 4, false);
+        assert_eq!(nothing_kept.label(), "?q — no matches, 4 dropped");
+
+        let one_kept = answered_with(&spec, vec![hit(1, 1)], 2, 1, false);
+        assert_eq!(one_kept.label(), "?q — 1 result in 1 chat, 1 dropped");
+    }
+
+    #[test]
+    fn a_filtered_count_drops_the_chat_count() {
+        let media = SearchSpec {
+            media: MediaFilter::PhotoVideo,
+            ..SearchSpec::plain("q")
+        };
+        let state = answered(&media, one_chat(9), 9);
+        assert_eq!(state.label(), "?q — photo_video — 9 results");
+
+        let both_dates = SearchSpec {
+            media: MediaFilter::PhotoVideo,
+            since: Some(1_767_225_600), // 2026-01-01
+            until: Some(1_769_904_000), // 2026-02-01
+            ..SearchSpec::plain("q")
+        };
+        let state = answered(&both_dates, one_chat(9), 9);
+        assert_eq!(
+            state.label(),
+            "?q — photo_video, 2026-01-01 to 2026-02-01 — 9 results"
+        );
+
+        let since_only = SearchSpec {
+            since: Some(1_767_225_600),
+            ..SearchSpec::plain("q")
+        };
+        assert_eq!(
+            answered(&since_only, one_chat(9), 9).label(),
+            "?q — from 2026-01-01 — 9 results"
+        );
+
+        let until_only = SearchSpec {
+            until: Some(1_769_904_000),
+            ..SearchSpec::plain("q")
+        };
+        assert_eq!(
+            answered(&until_only, one_chat(9), 9).label(),
+            "?q — to 2026-02-01 — 9 results"
+        );
+    }
+
+    #[test]
+    fn needs_more_is_false_while_a_page_is_in_flight_or_paused() {
+        let spec = SearchSpec::plain("q");
+        let mut state = answered_with(&spec, one_chat(2), 5, 0, true);
+        assert!(state.needs_more());
+
+        state.begin(&spec);
+        assert!(state.is_paging(), "the same spec is a continuation");
+        assert!(!state.needs_more(), "one page at a time");
+
+        assert!(state.settle(&spec));
+        assert!(state.needs_more());
+
+        assert!(state.pause(&spec, Duration::from_secs(30)));
+        assert!(
+            !state.needs_more(),
+            "nothing is asked for during a flood wait"
+        );
+    }
+
+    #[test]
+    fn settle_keeps_the_rows_and_stops_asking() {
+        let spec = SearchSpec::plain("q");
+        let mut state = answered_with(&spec, one_chat(2), 5, 0, true);
+        state.begin(&spec);
+        assert!(state.in_flight());
+
+        assert!(state.settle(&spec));
+
+        assert_eq!(state.hits().len(), 2, "an abandoned page keeps what it had");
+        assert_eq!(state.total(), 5);
+        assert_eq!(state.selected(), 0);
+        assert!(!state.in_flight());
+        assert_eq!(state.label(), "?q — 2 results in 1 chat");
+        assert!(
+            state.needs_more(),
+            "a later j at the end of the list asks again"
+        );
     }
 
     #[test]
     fn clearing_forgets_the_search() {
-        let mut state = answered("q", vec![hit(1, 1)], 1);
+        let spec = SearchSpec::plain("q");
+        let mut state = answered(&spec, vec![hit(1, 1)], 1);
         state.clear();
 
         assert!(!state.is_active());
-        assert_eq!(state.query(), None);
+        assert_eq!(state.spec(), None);
         assert!(state.hits().is_empty());
         assert_eq!(state.label(), "");
     }
 
     #[test]
     fn an_empty_query_is_no_search() {
-        let mut state = answered("q", vec![hit(1, 1)], 1);
-        state.begin("");
+        let spec = SearchSpec::plain("q");
+        let mut state = answered(&spec, vec![hit(1, 1)], 1);
+        state.begin(&SearchSpec::plain(""));
 
         assert!(!state.is_active());
         assert_eq!(state.label(), "");
@@ -454,9 +958,10 @@ mod tests {
 
     #[test]
     fn a_failure_clears_the_hits_and_says_why() {
-        let mut state = answered("q", Vec::new(), 0);
-        state.begin("q");
-        assert!(state.fail("q", "flood wait"));
+        let spec = SearchSpec::plain("q");
+        let mut state = answered(&spec, Vec::new(), 0);
+        state.begin(&spec);
+        assert!(state.fail(&spec, "flood wait"));
 
         assert!(!state.in_flight());
         assert_eq!(state.label(), "?q — search failed (flood wait)");
@@ -465,32 +970,29 @@ mod tests {
     #[test]
     fn label_while_searching() {
         let mut state = GlobalSearchState::default();
-        state.begin("hi");
+        state.begin(&SearchSpec::plain("hi"));
         assert_eq!(state.label(), "?hi — searching…");
     }
 
     #[test]
     fn label_with_no_matches() {
-        let state = answered("hi", Vec::new(), 0);
+        let spec = SearchSpec::plain("hi");
+        let state = answered(&spec, Vec::new(), 0);
         assert_eq!(state.label(), "?hi — no matches");
     }
 
     #[test]
     fn label_with_one_result_in_one_chat() {
-        let state = answered("hi", vec![hit(1, 1)], 1);
+        let spec = SearchSpec::plain("hi");
+        let state = answered(&spec, vec![hit(1, 1)], 1);
         assert_eq!(state.label(), "?hi — 1 result in 1 chat");
     }
 
     #[test]
     fn label_with_several_results_across_chats() {
-        let state = answered("hi", vec![hit(1, 1), hit(1, 2), hit(2, 3)], 3);
+        let spec = SearchSpec::plain("hi");
+        let state = answered(&spec, vec![hit(1, 1), hit(1, 2), hit(2, 3)], 3);
         assert_eq!(state.label(), "?hi — 3 results in 2 chats");
-    }
-
-    #[test]
-    fn label_when_the_server_holds_more_than_it_sends() {
-        let state = answered("hi", one_chat(SEARCH_MATCHES), 240);
-        assert_eq!(state.label(), "?hi — 100 of 240 results in 1 chat");
     }
 
     #[test]
