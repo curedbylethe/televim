@@ -7650,17 +7650,42 @@ fn answer_global(app: &mut App, query: &str, hits: Vec<domain::global_search::Gl
     assert!(app.adopt_global_search(query, hits, total, 0));
 }
 
-/// The 80x24 frame as one string per row.
-fn frame_rows(app: &App) -> Vec<String> {
+/// The 80x24 frame's buffer, for reading styles as well as text.
+fn frame_buffer(app: &App) -> ratatui::buffer::Buffer {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
         .expect("the test backend builds");
     terminal
         .draw(|frame| app.render(frame))
         .expect("the frame draws");
-    let buffer = terminal.backend().buffer().clone();
+    terminal.backend().buffer().clone()
+}
+
+/// The 80x24 frame as one string per row.
+fn frame_rows(app: &App) -> Vec<String> {
+    let buffer = frame_buffer(app);
     (0..24)
-        .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect())
+        .map(|y| {
+            (0..80)
+                .map(|x| buffer[(x as u16, y as u16)].symbol())
+                .collect()
+        })
         .collect()
+}
+
+/// The cell column where `needle` starts on the frame's row `y`.
+fn column_of(rows: &[String], y: usize, needle: &str) -> usize {
+    let row: Vec<char> = rows[y].chars().collect();
+    let needle: Vec<char> = needle.chars().collect();
+    row.windows(needle.len())
+        .position(|window| window == needle.as_slice())
+        .expect("the text is on the row")
+}
+
+/// Whether the frame's cell is drawn in reverse video.
+fn reversed_at(buffer: &ratatui::buffer::Buffer, x: usize, y: usize) -> bool {
+    buffer[(x as u16, y as u16)]
+        .modifier
+        .contains(ratatui::style::Modifier::REVERSED)
 }
 
 /// The row of the frame that holds `needle`, if any.
@@ -7699,22 +7724,34 @@ fn the_cursor_row_is_reverse_video_across_the_interior_and_nothing_else_is() {
     use ratatui::style::Modifier;
 
     let mut app = App::mock();
-    answer_global(&mut app, "hit", two_chat_hits());
+    let long = format!("hit one {}", "x".repeat(70));
+    answer_global(
+        &mut app,
+        "hit",
+        vec![
+            global_text(MOCK_CHAT, 902, &long),
+            global_text(MOCK_CHAT, 901, "hit two"),
+        ],
+    );
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24))
         .expect("the test backend builds");
     terminal.draw(|frame| app.render(frame)).expect("draws");
     let buffer = terminal.backend().buffer().clone();
     let rows = frame_rows(&app);
     let cursor = row_of(&rows, "hit one").expect("the first hit is drawn");
+    let second = cursor + 1;
     let other = row_of(&rows, "hit two").expect("the second hit is drawn");
+    assert_eq!(other, second + 1, "the cursor's hit draws a second row");
 
+    for y in [cursor, second] {
+        for x in 1..79 {
+            assert!(
+                buffer[(x, y as u16)].modifier.contains(Modifier::REVERSED),
+                "cell {x} of the cursor hit's row {y}"
+            );
+        }
+    }
     for x in 1..79 {
-        assert!(
-            buffer[(x, cursor as u16)]
-                .modifier
-                .contains(Modifier::REVERSED),
-            "cell {x} of the cursor row"
-        );
         assert!(
             !buffer[(x, other as u16)]
                 .modifier
@@ -7731,10 +7768,362 @@ fn a_long_snippet_is_cut_around_its_match_with_ellipses() {
     answer_global(&mut app, "needle", vec![global_text(MOCK_CHAT, 900, &text)]);
 
     let rows = frame_rows(&app);
-    let row = row_of(&rows, "needle").expect("the match is drawn");
-    let cut = &rows[row];
-    assert!(cut.contains("needle"), "{cut:?}");
-    assert_eq!(cut.matches('…').count(), 2, "both ends are cut: {cut:?}");
+    let first = row_of(&rows, "needle").expect("the match is on the first line");
+    let second = first + 1;
+    assert_eq!(
+        rows[first].matches('…').count(),
+        1,
+        "the first line starts cut: {:?}",
+        rows[first]
+    );
+    assert!(
+        rows[second].contains('…'),
+        "the second line ends cut: {:?}",
+        rows[second]
+    );
+    let indent: String = rows[second].chars().skip(1).take(16).collect();
+    assert_eq!(
+        indent,
+        " ".repeat(16),
+        "the second line starts at the body column"
+    );
+}
+
+/// A body of one line's cells or less is one row: no trailing blank line.
+#[test]
+fn a_short_body_draws_one_row() {
+    let mut app = App::mock();
+    let short = format!("needle{}", "x".repeat(54));
+    answer_global(
+        &mut app,
+        "needle",
+        vec![
+            global_text(MOCK_CHAT, 902, &short),
+            global_text(MOCK_CHAT, 901, "second hit"),
+        ],
+    );
+
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "needle").expect("the hit is drawn");
+    assert!(
+        !rows[first].contains('…'),
+        "a body that fits is not cut: {:?}",
+        rows[first]
+    );
+    assert_eq!(
+        row_of(&rows, "second hit"),
+        Some(first + 1),
+        "the short body takes no second row: {rows:#?}"
+    );
+}
+
+/// A body past the window is two rows, and only the cut end carries `…`.
+#[test]
+fn a_body_that_overflows_draws_two_rows() {
+    let mut app = App::mock();
+    let long = format!("needle{}", "x".repeat(144));
+    answer_global(&mut app, "needle", vec![global_text(MOCK_CHAT, 902, &long)]);
+
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "needle").expect("the hit is drawn");
+    let second = first + 1;
+    assert_eq!(
+        rows[first].matches('…').count() + rows[second].matches('…').count(),
+        1,
+        "the match is at the start, so only the tail is cut: {:?} {:?}",
+        rows[first],
+        rows[second]
+    );
+    let indent: String = rows[second].chars().skip(1).take(16).collect();
+    assert_eq!(
+        indent,
+        " ".repeat(16),
+        "the second row belongs to the hit: {:?}",
+        rows[second]
+    );
+}
+
+/// The second line starts at the body column the first line's body starts at.
+#[test]
+fn a_two_line_body_indents_its_second_line_to_the_snippet_column() {
+    let mut app = App::mock();
+    let long = format!("needle{}", "x".repeat(144));
+    answer_global(&mut app, "needle", vec![global_text(MOCK_CHAT, 902, &long)]);
+
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "needle").expect("the hit is drawn");
+    let second = first + 1;
+    assert_eq!(column_of(&rows, first, "needle"), 17, "the body column");
+    assert_eq!(
+        rows[second].chars().nth(17),
+        Some('x'),
+        "the second line's body starts at the same column: {:?}",
+        rows[second]
+    );
+}
+
+/// The time and the sender tag are the first line's: the second carries the
+/// gutter alone.
+#[test]
+fn time_and_tag_appear_only_on_the_first_line() {
+    let mut app = App::mock();
+    let long = format!("needle{}", "x".repeat(144));
+    answer_global(&mut app, "needle", vec![global_text(MOCK_CHAT, 902, &long)]);
+
+    let time = crate::date::clock(1_730_000_000, app.offset()).expect("the hit has a time");
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "needle").expect("the hit is drawn");
+    let second = first + 1;
+
+    assert!(rows[first].contains(&time), "the clock: {:?}", rows[first]);
+    assert!(rows[first].contains("[them]"), "{:?}", rows[first]);
+    assert!(
+        !rows[second].contains(&time),
+        "no clock: {:?}",
+        rows[second]
+    );
+    assert!(
+        !rows[second].contains("[them]"),
+        "no tag: {:?}",
+        rows[second]
+    );
+}
+
+/// Both lines ink their matches, and the run between them stays plain.
+#[test]
+fn every_match_on_both_lines_is_inked() {
+    let mut app = App::mock();
+    let text = format!("needle{}needle{}", "a".repeat(60), "b".repeat(60));
+    answer_global(&mut app, "needle", vec![global_text(MOCK_CHAT, 902, &text)]);
+
+    let buffer = frame_buffer(&app);
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "needle").expect("the first match is drawn");
+    let second = first + 1;
+    assert!(
+        rows[second].contains("needle"),
+        "the second line carries a match too: {:?}",
+        rows[second]
+    );
+
+    let match_fg = app.ui.theme.match_hit.fg.expect("a match is a foreground");
+    for y in [first, second] {
+        let at = column_of(&rows, y, "needle");
+        for x in at..at + "needle".len() {
+            assert_eq!(
+                buffer[(x as u16, y as u16)].fg,
+                match_fg,
+                "row {y} cell {x} is a match: {:?}",
+                rows[y]
+            );
+        }
+    }
+
+    let after_first = column_of(&rows, first, "needle") + "needle".len();
+    assert_eq!(buffer[(after_first as u16, first as u16)].symbol(), "a");
+    assert_ne!(
+        buffer[(after_first as u16, first as u16)].fg,
+        match_fg,
+        "the run between the matches is not inked: {:?}",
+        rows[first]
+    );
+    let before_second = column_of(&rows, second, "needle") - 1;
+    assert_eq!(buffer[(before_second as u16, second as u16)].symbol(), "a");
+    assert_ne!(
+        buffer[(before_second as u16, second as u16)].fg,
+        match_fg,
+        "the run between the matches is not inked: {:?}",
+        rows[second]
+    );
+}
+
+/// The cursor reverses every row of the selected hit and no row of another.
+#[test]
+fn the_cursor_reverses_both_rows_of_a_hit_and_neither_row_of_a_neighbour() {
+    let mut app = App::mock();
+    let long = format!("longrow {}", "x".repeat(70));
+    answer_global(
+        &mut app,
+        "hit",
+        vec![
+            global_text(MOCK_CHAT, 902, &long),
+            global_text(MOCK_CHAT, 901, "neighbour hit"),
+        ],
+    );
+
+    let buffer = frame_buffer(&app);
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "longrow").expect("the selected hit is drawn");
+    let second = first + 1;
+    let neighbour = row_of(&rows, "neighbour hit").expect("the neighbour is drawn");
+    assert_eq!(
+        neighbour,
+        second + 1,
+        "the selected hit draws two rows: {rows:#?}"
+    );
+
+    for y in [first, second] {
+        for x in 1..79 {
+            assert!(reversed_at(&buffer, x, y), "cell {x} of the hit's row {y}");
+        }
+    }
+    for x in 1..79 {
+        assert!(
+            !reversed_at(&buffer, x, neighbour),
+            "cell {x} of a row the cursor is not on"
+        );
+    }
+}
+
+/// One `j` walks past both rows of a hit, and `k` wraps over them.
+#[test]
+fn j_moves_by_hits_not_rows() {
+    let mut app = App::mock();
+    let long = format!("longrow {}", "x".repeat(70));
+    answer_global(
+        &mut app,
+        "hit",
+        vec![
+            global_text(MOCK_CHAT, 902, &long),
+            global_text(MOCK_CHAT, 901, "second hit"),
+        ],
+    );
+
+    key_press(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.global_search().selected(),
+        1,
+        "one j, past the first hit's two rows"
+    );
+
+    let buffer = frame_buffer(&app);
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "longrow").expect("the first hit is drawn");
+    let second = row_of(&rows, "second hit").expect("the second hit is drawn");
+    for y in [first, first + 1] {
+        assert!(
+            !reversed_at(&buffer, 1, y),
+            "the first hit's row {y} is not the cursor's"
+        );
+    }
+    for x in 1..79 {
+        assert!(
+            reversed_at(&buffer, x, second),
+            "cell {x} of the second hit"
+        );
+    }
+
+    key_press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.global_search().selected(), 0, "one k back");
+    key_press(&mut app, KeyCode::Char('k'));
+    assert_eq!(
+        app.global_search().selected(),
+        1,
+        "k wraps to the last hit, not to its first row"
+    );
+}
+
+/// Scrolling leaves the selected hit's last row on the last interior row.
+#[test]
+fn scrolling_keeps_the_selected_hits_last_row_visible() {
+    let mut app = App::mock();
+    let hits = (0..20)
+        .map(|id| {
+            global_text(
+                MOCK_CHAT,
+                9_000 + id,
+                &format!("hit{id} {}", "x".repeat(70)),
+            )
+        })
+        .collect();
+    answer_global(&mut app, "hit", hits);
+
+    key_press(&mut app, KeyCode::Char('G'));
+
+    let rows = frame_rows(&app);
+    assert_eq!(
+        row_of(&rows, "hit19"),
+        Some(20),
+        "the last hit's first row, one above the last interior row: {rows:#?}"
+    );
+    let indent: String = rows[21].chars().skip(1).take(16).collect();
+    assert_eq!(
+        indent,
+        " ".repeat(16),
+        "its second row is on the last interior row: {rows:#?}"
+    );
+    assert!(
+        rows[21].contains('x'),
+        "the second row is drawn: {:?}",
+        rows[21]
+    );
+    assert!(
+        rows[22].contains("Esc: close"),
+        "row 22 is the foot, so row 21 is the last interior one: {:?}",
+        rows[22]
+    );
+}
+
+/// An attachment with no caption is its label, and one row.
+#[test]
+fn a_media_only_hit_is_one_row() {
+    let mut app = App::mock();
+    let mut photo = global_text(MOCK_CHAT, 902, "");
+    photo.media = Some(domain::message::MediaKind::Photo);
+    answer_global(
+        &mut app,
+        "photo",
+        vec![photo, global_text(MOCK_CHAT, 901, "second hit")],
+    );
+
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "[image]").expect("the label is drawn");
+    assert!(
+        !rows[first].contains('…'),
+        "the label is not cut: {:?}",
+        rows[first]
+    );
+    assert_eq!(
+        row_of(&rows, "second hit"),
+        Some(first + 1),
+        "the label takes one row: {rows:#?}"
+    );
+}
+
+/// A wide-character body is split on character boundaries, not bytes or cells.
+#[test]
+fn a_multibyte_cut_lands_on_a_character_boundary() {
+    let mut app = App::mock();
+    let text = format!("needle{}", "字".repeat(100));
+    answer_global(&mut app, "needle", vec![global_text(MOCK_CHAT, 902, &text)]);
+
+    let rows = frame_rows(&app);
+    let first = row_of(&rows, "needle").expect("the hit is drawn");
+    let second = first + 1;
+
+    assert_eq!(
+        rows[first].matches('字').count(),
+        28,
+        "62 cells is 6 plus 28 two-cell glyphs: {:?}",
+        rows[first]
+    );
+    assert_eq!(
+        rows[second].matches('字').count(),
+        30,
+        "the second line is whole glyphs too: {:?}",
+        rows[second]
+    );
+    assert!(
+        rows[second].contains('…'),
+        "the cut is marked: {:?}",
+        rows[second]
+    );
+    assert!(
+        !rows[first].contains('\u{fffd}') && !rows[second].contains('\u{fffd}'),
+        "no glyph is broken across the cut: {:?} {:?}",
+        rows[first],
+        rows[second]
+    );
 }
 
 #[test]
