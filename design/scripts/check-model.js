@@ -98,17 +98,12 @@ const RTL = [
   ['[1]abc', 'rtl', ['abc', ']', '1', '[']],
   ['[1]abc', 'ltr', ['[1]abc']],
   ['}א[abc]', 'ltr', ['}א[abc]']],
-  /* Two shapes this model gets wrong, and says so rather than pinning a wrong
-     answer. Both need the algorithm's BD16 bracket-pair procedure, which pairs
-     brackets by canonical equivalence across the whole paragraph and reorders
-     them by opening position — a paragraph-level pass, not the per-row one every
-     other fixture here exercises. The Rust asks `unicode-bidi` and gets this
-     right; this is a model and the Rust is the authority (`design/README.md`).
-
-     They are listed so that a future fix can delete the line rather than
-     re-derive it, and so nobody reads the 5/4000 divergence as unknown. */
-  // ['字"מ}[1]', 'ltr', ['字"', ']', '1', '[', '}', 'מ']],   // BD16
-  // ['א1]Z(漢!)ב', 'rtl', ['ב', 'Z(漢!)', ']', '1', 'א']], // BD16
+  // rule BD16 and N0 — brackets pair across the row by canonical equivalence, and a pair
+  // takes its direction from what it holds and what comes before it. These two shapes
+  // were generated against `unicode-bidi` 0.3.18; they are adversarial bracket
+  // sequences, not message text, and they pin the pass.
+  ['字"מ}[1]', 'ltr', ['字"', ']', '1', '[', '}', 'מ']],
+  ['א1]Z(漢!)ב', 'rtl', ['ב', 'Z(漢!)', ']', '1', 'א']],
   // an emoji is a NEUTRAL: it has no direction of its own, so it takes the
   // direction of what surrounds it and never decides a message's base
   ['👨‍👩‍👧)א·👍🏽(ו👍🏽', 'rtl', ['👍🏽', 'ו', '(', '👍🏽', '·', 'א', ')', '👨‍👩‍👧']],

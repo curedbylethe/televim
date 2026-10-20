@@ -153,8 +153,32 @@
      neutral. */
   const isMark = (ch) => inRanges(ch.codePointAt(0), ZERO_WIDTH) || ch === '‍';
 
+  /* Bidi_Paired_Bracket, opening then closing: the 64 pairs of BidiBrackets.txt (Unicode 15). Each
+     character is bracket type ON, whatever range it falls in, so the table is asked first. */
+  const BRACKET_PAIRS = [
+    [0x28, 0x29], [0x5b, 0x5d], [0x7b, 0x7d], [0xf3a, 0xf3b], [0xf3c, 0xf3d], [0x169b, 0x169c],
+    [0x2045, 0x2046], [0x207d, 0x207e], [0x208d, 0x208e], [0x2308, 0x2309], [0x230a, 0x230b],
+    [0x2329, 0x232a], [0x2768, 0x2769], [0x276a, 0x276b], [0x276c, 0x276d], [0x276e, 0x276f],
+    [0x2770, 0x2771], [0x2772, 0x2773], [0x2774, 0x2775], [0x27c5, 0x27c6], [0x27e6, 0x27e7],
+    [0x27e8, 0x27e9], [0x27ea, 0x27eb], [0x27ec, 0x27ed], [0x27ee, 0x27ef], [0x2983, 0x2984],
+    [0x2985, 0x2986], [0x2987, 0x2988], [0x2989, 0x298a], [0x298b, 0x298c], [0x298d, 0x2990],
+    [0x298f, 0x298e], [0x2991, 0x2992], [0x2993, 0x2994], [0x2995, 0x2996], [0x2997, 0x2998],
+    [0x29d8, 0x29d9], [0x29da, 0x29db], [0x29fc, 0x29fd], [0x2e22, 0x2e23], [0x2e24, 0x2e25],
+    [0x2e26, 0x2e27], [0x2e28, 0x2e29], [0x2e55, 0x2e56], [0x2e57, 0x2e58], [0x2e59, 0x2e5a],
+    [0x2e5b, 0x2e5c], [0x3008, 0x3009], [0x300a, 0x300b], [0x300c, 0x300d], [0x300e, 0x300f],
+    [0x3010, 0x3011], [0x3014, 0x3015], [0x3016, 0x3017], [0x3018, 0x3019], [0x301a, 0x301b],
+    [0xfe59, 0xfe5a], [0xfe5b, 0xfe5c], [0xfe5d, 0xfe5e], [0xff08, 0xff09], [0xff3b, 0xff3d],
+    [0xff5b, 0xff5d], [0xff5f, 0xff60], [0xff62, 0xff63]
+  ];
+  const BR_OPEN = new Map(BRACKET_PAIRS), BR_CLOSE = new Map(BRACKET_PAIRS.map(([o, c]) => [c, o]));
+  /* BD16 matches by canonical equivalence; the only canonical equivalents among the brackets are
+     U+2329/U+232A and U+3008/U+3009. */
+  const canonBracket = (cp) => (cp === 0x2329 ? 0x3008 : cp === 0x232a ? 0x3009 : cp);
+  const BRACKET_DEPTH = 63;
+
   function bidiType(ch) {
     const cp = ch.codePointAt(0);
+    if (BR_OPEN.has(cp) || BR_CLOSE.has(cp)) return 'ON';
     if (inRanges(cp, RTL_RANGES)) return 'R';
     if (inRanges(cp, ARABIC_NUMBER_RANGES)) return 'AN';
     if (cp >= 0x30 && cp <= 0x39) return 'EN';
@@ -181,10 +205,10 @@
     const baseLevel = base === 'rtl' ? 1 : 0;
     const cls = clusters(text);
     /* rule W1: a cluster of marks is the direction of the one before it. */
-    const type = cls.map((cluster, i) => {
+    const type = [];
+    cls.forEach((cluster, i) => {
       const first = Array.from(cluster)[0];
-      if (i > 0 && isMark(first)) return type[i - 1];
-      return bidiType(first);
+      type.push(i > 0 && isMark(first) ? type[i - 1] : bidiType(first));
     });
     /* Rules W4 and W5, which are what keep `21:30` one left-to-right run — a clock
        time read as `30:21` is the failure this exists to prevent — and they have
@@ -225,58 +249,65 @@
     for (let i = 0; i < type.length; i++) {
       if (type[i] === 'ON' && (isSep(ch(i)) || isCs(ch(i)) || isEs(ch(i)))) type[i] = 'CS';
     }
-    /* Rule N0, before W7 and before the neutrals: a MATCHED pair of brackets is set
-       to the EMBEDDING direction — the paragraph's — and an unmatched one is left
-       as the neutral it is. So `(abc)`, `(1)` and `[س]` all keep their two halves
-       at the paragraph's level in a right-to-left row, with whatever they hold
-       one level in, which is what stops a bracket pair being torn off the
-       sentence it belongs to. This is bracket PAIRING and nothing else: the
-       glyph is not mirrored (see DESIGN.md).
-
-       A paired bracket is recorded rather than applied: the pair's CONTENTS are
-       skipped by W7 below, because a number outside a pair does not inherit the
-       direction of what the pair holds. `(abc) 42` in a right-to-left row is a
-       left-to-letter `(abc)`, a right-to-letter `42` and nothing in between —
-       without this the `42` would take the `c` and read `24`. */
-    const OPEN = { '(': ')', '[': ']', '{': '}', '<': '>' };
-    const CLOSE = { ')': '(', ']': '[', '}': '{', '>': '<' };
-    const embedding = baseLevel ? 'R' : 'L';
-    for (let i = 0; i < type.length; i++) {
-      const c = Array.from(cls[i])[0];
-      if (type[i] !== 'ON') continue;
-      /* A MATCHED pair takes the EMBEDDING direction, whatever it holds: `(abc)`
-         in a right-to-left row is a pair at the paragraph's level with its `abc`
-         one level inside it, and `(שלום)` is a pair at the paragraph's level with
-         a right-to-left word inside it. Whatever the pair holds is resolved on its
-         own afterwards, which is why the two read differently without the
-         brackets moving. An unmatched bracket is left to N1/N2 like any other
-         neutral. This is bracket PAIRING and nothing else — the glyph is not
-         mirrored (see DESIGN.md). */
-      if (!OPEN[c]) continue;
-      const stack = [c];
-      let end = -1;
-      for (let j = i + 1; j < type.length; j++) {
-        const k = Array.from(cls[j])[0];
-        if (OPEN[k]) stack.push(k);
-        else if (stack[stack.length - 1] === CLOSE[k]) {
-          stack.pop();
-          if (stack.length === 0) { end = j; break; }
-        }
-      }
-      if (end < 0) continue;
-      type[i] = embedding;
-      type[end] = embedding;
-    }
     /* Rule W7: a European number takes the direction of the last STRONG character
        before it, wherever that was — neutrals in between are skipped, because a
        number and the punctuation beside it are one thing to a reader. So `Z0!0`
        is one left-to-right piece and the second `0` does not start a run of its
-       own. A bracket pair is not strong, so the `42` of `(abc) 42` belongs to
-       the paragraph rather than to the `abc` inside it. */
+       own. A bracket is not strong until N0 has resolved it, so it neither sets
+       nor breaks this run. */
     let strong = baseLevel ? 'R' : 'L';
     for (let i = 0; i < type.length; i++) {
       if (type[i] === 'L' || type[i] === 'R') { strong = type[i]; continue; }
       if (type[i] === 'EN' && strong === 'L') type[i] = 'L';
+    }
+    /* BD16 and rule N0, after W7 and before the neutrals. A bracket pair is two brackets of the ROW
+       that match: an opening bracket is pushed on a stack of 63, a closing one pairs with the
+       nearest opening bracket it is canonically equivalent to, and every opening bracket above
+       that one is dropped. Only a character still of type ON is a bracket, which is how an
+       unmatched or overridden one stays a plain neutral. A 64th opening bracket abandons every
+       pair. The unit is the row the caller hands in, as the Rust hands each wrapped row to
+       `ParagraphBidiInfo`; pairs are then taken in order of their opening bracket.
+
+       N0, per pair: EN and AN count as R. A strong type inside that matches the embedding sets
+       both brackets to it. Otherwise a strong type opposite the embedding sets them opposite when
+       the strong type before the pair (sos if none) is opposite too, and to the embedding when it
+       is not — which is the same as setting them to that preceding type. No strong type inside
+       leaves the pair to N1/N2. A pair resolved earlier counts as strong for a later one. A mark
+       after a bracket takes the bracket's type. This is pairing and nothing else: the glyph is
+       not mirrored (see DESIGN.md). */
+    const leans = (t) => (t === 'L' ? 'L' : t === 'R' || t === 'EN' || t === 'AN' ? 'R' : null);
+    const embedding = baseLevel ? 'R' : 'L';
+    const pairs = [], open = [];
+    for (let i = 0; i < type.length; i++) {
+      if (type[i] !== 'ON') continue;
+      const cp = ch(i).codePointAt(0);
+      if (BR_OPEN.has(cp)) {
+        if (open.length === BRACKET_DEPTH) { pairs.length = 0; break; }
+        open.push([canonBracket(BR_OPEN.get(cp)), i]);
+      } else if (BR_CLOSE.has(cp)) {
+        for (let k = open.length - 1; k >= 0; k--) {
+          if (open[k][0] !== canonBracket(cp)) continue;
+          pairs.push([open[k][1], i]); open.length = k; break;
+        }
+      }
+    }
+    pairs.sort((x, y) => x[0] - y[0]);
+    for (const [o, c] of pairs) {
+      let opposite = false, dir = null;
+      for (let k = o + 1; k < c; k++) {
+        const d = leans(type[k]);
+        if (d === embedding) { dir = embedding; break; }
+        if (d) opposite = true;
+      }
+      if (!dir && opposite) {
+        dir = embedding;
+        for (let k = o - 1; k >= 0; k--) { const d = leans(type[k]); if (d) { dir = d; break; } }
+      }
+      if (!dir) continue;
+      for (const at of [o, c]) {
+        type[at] = dir;
+        for (let k = at + 1; k < type.length && isMark(ch(k)); k++) type[k] = dir;
+      }
     }
     /* Rules N1 and N2: a run of NEUTRALS — every character that is not strongly
        directional and not a number, including the separators W4 and W5 left
@@ -290,7 +321,6 @@
        beside it are resolved together, so a `!` and the space after it cannot end
        up on opposite sides of the run they belong to. */
     const isNeutral = (t) => t === 'ON' || t === 'CS' || t === 'ET' || t === 'WS';
-    const leans = (t) => (t === 'L' ? 'L' : t === 'R' || t === 'EN' || t === 'AN' ? 'R' : null);
     for (let i = 0; i < type.length; i++) {
       if (!isNeutral(type[i])) continue;
       let j = i;

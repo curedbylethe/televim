@@ -372,14 +372,23 @@ correctly on a terminal that neither shapes nor applies the algorithm is the
 `Visual` mode's reason to exist, and it is a half of the feature: no assertion in
 this repository can prove how a given terminal renders the bytes emitted for it.
 
-**One thing the design model does not do, and the program does.** The model in
-`design/` implements the reorder per row and agrees with `unicode-bidi` on 3995 of
-4000 generated cases. The five it misses all need rule BD16 — bracket pairs
-matched by canonical equivalence across the whole paragraph and reordered by
-opening position, which is a paragraph-level pass rather than the per-row one a
-row is drawn in. They are adversarial bracket sequences (`א1]Z(漢!)ב`), not
-message text. `crates/tui/src/bidi.rs` asks `unicode-bidi` and is right on all of
-them; where the model and that file disagree, that file is the answer.
+**Brackets are paired per row, as the program pairs them.** The model in `design/`
+implements the reorder per row, and the row is the unit: `crates/tui/src/bidi.rs`
+hands each wrapped row to `ParagraphBidiInfo`, so a bracket in one row is never
+paired with one in another. Within a row the model runs BD16 and then N0 after W7
+and before N1/N2. BD16 keeps a stack of 63 opening brackets, matches a closing
+bracket to the nearest opening one it is canonically equivalent to (U+2329/U+232A
+with U+3008/U+3009 are the only equivalents), takes the pairs in order of their
+opening bracket, and abandons every pair if the stack overflows. N0 counts EN and
+AN as R and sets a pair from what it holds: the embedding direction if that is
+inside, the opposite direction only when the strong type before the pair is
+opposite too, and nothing when it holds no strong type. A mark after a bracket takes
+the bracket's type; an unmatched bracket is a plain neutral. Two adversarial
+sequences, `字"מ}[1]` at left-to-right and `א1]Z(漢!)ב` at right-to-left, pin
+the pass; their expected drawing orders were captured from `unicode-bidi` 0.3.18
+and live in `design/scripts/check-model.js`. `crates/tui/src/bidi.rs` asks
+`unicode-bidi` and is the authority; where the model and that file disagree, that
+file is the answer.
 
 ## Layout
 
