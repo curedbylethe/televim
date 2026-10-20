@@ -1555,7 +1555,10 @@ pub(crate) fn run_global_search(
     query: &str,
 ) {
     let query = if query.is_empty() {
-        conversation.global_search.query().map(str::to_owned)
+        conversation
+            .global_search
+            .spec()
+            .map(|spec| spec.echo.clone())
     } else {
         Some(query.to_owned())
     };

@@ -6690,6 +6690,47 @@ fn accepting_a_candidate_that_is_not_a_chat_lists_and_opens_them() {
     assert!(!app.user_search().is_active(), "and the list is put away");
 }
 
+/// The overlay's rows read as the design model ranks them — closest match,
+/// then no conversation first, then by name — whatever order the server
+/// answered in.
+#[test]
+fn the_new_chat_row_order_matches_the_model() {
+    let mut app = App::mock();
+    let person = |user_id: i64, display_name: &str, username: &str| UserCandidate {
+        user_id,
+        display_name: display_name.to_owned(),
+        username: Some(username.to_owned()),
+    };
+    let existing = person(MOCK_CHAT, "Adaline Poe", "ada");
+    let closest = person(MOCK_CHAT + 900, "Ada Byron", "abyron");
+    let looser = person(MOCK_CHAT + 901, "Grace Ada", "hopper");
+
+    start_user_search(&mut app, "ada");
+    assert!(app.apply_users(
+        "ada",
+        vec![existing.clone(), looser.clone(), closest.clone()]
+    ));
+
+    let rows = frame_rows(&app);
+    let closest_row = row_of(&rows, "Ada Byron").expect("the prefix match is drawn");
+    let looser_row = row_of(&rows, "Grace Ada").expect("the substring match is drawn");
+    let existing_row = row_of(&rows, "Adaline Poe").expect("the person with a chat is drawn");
+
+    assert!(
+        closest_row < looser_row && looser_row < existing_row,
+        "a new closer match leads, and the existing conversation sorts last: {rows:#?}"
+    );
+    assert_eq!(
+        app.user_search()
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.user_id)
+            .collect::<Vec<_>>(),
+        vec![closest.user_id, looser.user_id, existing.user_id],
+        "and the state holds that order, not just the frame"
+    );
+}
+
 // ---- the open draft --------------------------------------------------
 
 /// Types `text` into the open conversation's line, and leaves it the way the
@@ -7434,7 +7475,10 @@ fn submitting_a_global_query_queues_exactly_one_search() {
     );
     assert_eq!(app.take_action(), None, "one action per submit");
     assert_eq!(app.ui.focus, Focus::Conversation);
-    assert_eq!(app.global_search().query(), Some("hello"));
+    assert_eq!(
+        app.global_search().spec().map(|s| s.echo.as_str()),
+        Some("hello")
+    );
     assert!(app.global_search().in_flight(), "the search has begun");
 }
 
@@ -7451,7 +7495,10 @@ fn colon_search_with_a_query_queues_exactly_one_search() {
         })
     );
     assert_eq!(app.take_action(), None);
-    assert_eq!(app.global_search().query(), Some("ada lovelace"));
+    assert_eq!(
+        app.global_search().spec().map(|s| s.echo.as_str()),
+        Some("ada lovelace")
+    );
 }
 
 /// `:search` with no query repeats the last global search, as `/` does.
@@ -7470,7 +7517,10 @@ fn an_empty_colon_search_repeats_the_last_global_search() {
         }),
         "asked again, because the answer may have changed"
     );
-    assert_eq!(app.global_search().query(), Some("hello"));
+    assert_eq!(
+        app.global_search().spec().map(|s| s.echo.as_str()),
+        Some("hello")
+    );
 }
 
 /// With no earlier global search, a bare `:search` says so and asks nothing.
@@ -7548,7 +7598,7 @@ fn the_status_line_names_the_global_search_through_every_state() {
     run_command_line(&mut app, "search big");
     let hits: Vec<_> = (1..=100).map(|id| global_hit(1, id)).collect();
     assert!(app.adopt_global_search("big", hits, 240, 0));
-    assert_eq!(app.status_text(), "?big — 100 of 240 results in 1 chat");
+    assert_eq!(app.status_text(), "?big — 100 results in 1 chat");
 
     run_command_line(&mut app, "search tickets");
     assert!(app.fail_global_search("tickets", "flood wait".to_owned()));
@@ -7868,7 +7918,7 @@ fn esc_closes_the_overlay_clears_the_query_and_returns_to_the_chat_list() {
     key_press(&mut app, KeyCode::Esc);
 
     assert!(!app.global_search().is_active(), "the query is discarded");
-    assert_eq!(app.global_search().query(), None);
+    assert_eq!(app.global_search().spec().map(|s| s.echo.as_str()), None);
     assert_eq!(
         app.ui.focus,
         Focus::ChatList,
