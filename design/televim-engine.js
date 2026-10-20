@@ -949,7 +949,20 @@
     jl.i++; goTo(s, jl.list[jl.i], JUMP_FORWARD, null);
   }
 
+  /* The count a reader types before a day walk (`2gg`, `3G`). It is the conversation's own, apart
+     from the card's row count. A digit extends it, and a `0` only when one is open; the first `g`
+     only arms the pending `g`, so the count survives both presses; `gg` and `G` consume it; any
+     other key clears it. The model holds no day-boundary data, so it shows the armed count in the
+     title and does not walk — as the binary's `take_count` hands the count to the walk and
+     forgets it. Returns true when the key was the count's. */
+  function dayCount(s, k, p) {
+    const n = s.days || 0; s.days = 0;
+    if (/^[1-9]$/.test(k) || (k === '0' && n)) { s.days = Math.min(9999, n * 10 + Number(k)); return true; }
+    if (k === 'g' && p !== 'g') { s.days = n; return false; }   /* arms the pending g; the count waits */
+    return n > 0 && (k === 'G' || (k === 'g' && p === 'g'));
+  }
   function convKey(s, k, p) {
+    if (dayCount(s, k, p)) return;
     if (common(s, k)) return;
     const c = chat(s), m = c.msgs[c.cur];
     switch (k) {
@@ -1561,7 +1574,7 @@
   }
   function setMode(s, name) {
     if (s.view !== 'chat') return;
-    s.confirm = null; s.line = null; s.vis = null; s.search = null; s.newchat = null; s.jump = null; s.pend = ''; s.flash = '';
+    s.confirm = null; s.line = null; s.vis = null; s.search = null; s.newchat = null; s.jump = null; s.pend = ''; s.flash = ''; s.days = 0;
     /* a card has no insert stage and its confirmation comes from d on the logout row */
     if (s.card) {
       s.card.vis = name === 'VISUAL' ? { mode: 'char', row: s.card.row, anchorCol: s.card.col } : null;
@@ -1840,6 +1853,8 @@
   function drawConv(g, s, x0, h) {
     const c = chat(s), w = RW, V = h - 2;
     let title = 'Conversation (' + (c.msgs.length ? c.cur + 1 : 0) + '/' + c.msgs.length + ')';
+    /* the count being typed before a day walk: bare, because the next key may clear it */
+    if (s.days) title += ' · ' + s.days;
     if (s.vis) { const [lo, hi] = range(s); title += ' · ' + (hi - lo + 1) + ' selected'; }
     if (s.search) title += ' · ' + s.search.hits.length + ' match(es)';
     /* the peer's note comes last and is dropped whole, never cut, when the title has no room for it */
@@ -2425,7 +2440,9 @@
     { id: 'grouping', name: 'Groups · days · receipts', variants: [
       { name: 'Newest: [read], [delivered], [sending…], [failed]', keys: '<Tab>j<Tab>' },
       { name: 'Cursor inside a group: one state, one time', keys: '<Tab>j<Tab>kk' },
-      { name: 'Oldest: full date, weekday, Yesterday, Today', keys: '<Tab>j<Tab>kkkkkkkkkkkkkkk' }] },
+      { name: 'Oldest: full date, weekday, Yesterday, Today', keys: '<Tab>j<Tab>kkkkkkkkkkkkkkk' },
+      /* the count a reader types before a day walk, while it is still being typed */
+      { name: 'A count typed before a day walk: bare in the title', keys: '<Tab>j<Tab>2' }] },
     /* gd follows a reply's quote. Ada's chat: the cursor starts on message 106; `kkk` is the reply
        'The one by the window.', whose target is loaded, and `jj` is 'Sorry, I missed your earlier
        message.', whose target the window does not hold, so it is fetched (<wait> is the answer). */
