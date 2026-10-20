@@ -25,9 +25,9 @@ program does, run the program.
 
 The engine earns its place by being *drivable*: eight hand-written frames could
 only ever have shown eight states, and the three profile frames had already gone
-stale — silently, because nothing measured them. The engine has 104 scenes, and
-`design-system/build-specimen.js` regenerates the specimen from them so a frame
-cannot disagree with the model that produced it.
+stale — silently, because nothing measured them. The engine has 20 scenes and 122
+variants, and `design-system/build-specimen.js` regenerates the specimen from them
+so a frame cannot disagree with the model that produced it.
 
 It can also represent **text direction**, which is the other thing a frame that
 was drawn by hand cannot do: `baseDir` answers which way a message reads, and
@@ -43,12 +43,13 @@ compares the frame against it cell for cell, so "the bar follows the same rules 
 a message" is a check rather than a claim.
 
 It is a model, and the rules it does not implement are named rather than left to
-be discovered: it lays out one row at a time, and it does not run the algorithm's
-BD16 bracket-pair pass, which matches brackets across a whole paragraph. That is
-5 of 4000 generated cases, all adversarial bracket sequences rather than message
-text, and `check-model.js` carries the two as a comment saying so.
-`DESIGN.md`'s "Text direction" clause is the spec; `crates/tui/src/bidi.rs` is the
-implementation, and where this model and that file disagree, that file is right.
+be discovered: it lays out one row at a time, the way `crates/tui/src/bidi.rs`
+hands each wrapped row to `ParagraphBidiInfo`, and it does not mirror glyphs
+(rule L4) or shape. It does run the BD16 bracket-pair pass and rule N0, per row,
+after W7: two adversarial bracket sequences captured from `unicode-bidi` 0.3.18
+pin it in `check-model.js`. `DESIGN.md`'s "Text direction" clause is the spec;
+`crates/tui/src/bidi.rs` is the implementation, and where this model and that file
+disagree, that file is right.
 
 ## Layout
 
@@ -162,5 +163,5 @@ TV.SCENES.forEach((s,i)=>s.variants.forEach((v,j)=>{const g=TV.render(TV.scene(i
 n++;const w=[...new Set(g.map(r=>r.reduce((m,c)=>m+TV.cells(c[0]),0)))];\
 if(g.length!==24||w.length!==1||w[0]!==80)b++}));\
 console.log((n-b)+'/'+n+' scenes are 24 rows x 80 cells')"
-104/104 scenes are 24 rows x 80 cells
+122/122 scenes are 24 rows x 80 cells
 ```

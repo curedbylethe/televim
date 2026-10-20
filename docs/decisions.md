@@ -385,9 +385,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
   same reason `h` cannot be both a motion and a pane: one key in two places is a key
   a reader learns twice.
 - **Why the design model is vendored into the repository:** it is the most faithful
-  model of every screen — 43 drivable scenes, each verified at exactly 24 rows by
-  80 columns, with a generator that rebuilds the specimen from them — and it was
-  living in an application data directory that is not a git repository.
+  model of every screen — 20 drivable scenes and 122 frames, each verified at
+  exactly 24 rows by 80 columns, with a generator that rebuilds the specimen from
+  them — and it was living in an application data directory that is not a git
+  repository.
   OpenDesign keeps its own store of UUID-named files, which is an *undo* history
   rather than a reviewable one: no branches, no diff on a screen, no pull request.
   So the repo is the versioned record and OpenDesign is the working surface, and
