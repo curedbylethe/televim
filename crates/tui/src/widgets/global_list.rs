@@ -99,7 +99,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
             if cursor {
                 cursor_line = lines.len();
             }
-            let query = search.query().unwrap_or("");
+            let query = search.spec().map_or("", |spec| spec.text.as_str());
             lines.push(message_line(app, hit, query, width, cursor));
         }
     }

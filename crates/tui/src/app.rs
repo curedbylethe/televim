@@ -2518,11 +2518,14 @@ impl App {
     }
 
     /// Fills the new-conversation list with the answer to `query`, if it is still
-    /// wanted.
+    /// wanted, ranked the way the design ranks candidates.
     ///
     /// Delegates to [`ConversationState::apply_users`].
     pub fn apply_users(&mut self, query: &str, candidates: Vec<UserCandidate>) -> bool {
-        self.conversation.apply_users(query, candidates)
+        let ranked = domain::user::rank_candidates(query, candidates, |id| {
+            self.chats().iter().any(|chat| chat.id == id)
+        });
+        self.conversation.apply_users(query, ranked)
     }
 
     /// Records that the lookup for `query` failed.

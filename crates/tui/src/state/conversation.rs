@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 
-use domain::global_search::{GlobalHit, GlobalSearchState};
+use domain::global_search::{GlobalHit, GlobalSearchState, SearchSpec};
 use domain::history::ConversationView;
 use domain::message::{Message, MessageStatus};
 use domain::search::SearchState;
@@ -798,7 +798,7 @@ impl ConversationState {
     /// The one place a global search begins, so the net layer only ever answers
     /// one: it is called from the submit path, once per submit.
     pub(crate) fn begin_global_search(&mut self, query: &str) {
-        self.global_search.begin(query);
+        self.global_search.begin(&SearchSpec::plain(query));
         self.global_dropped = 0;
     }
 
@@ -813,7 +813,10 @@ impl ConversationState {
         total: usize,
         dropped: usize,
     ) -> bool {
-        if !self.global_search.adopt(query, hits, total) {
+        if !self
+            .global_search
+            .adopt(&SearchSpec::plain(query), hits, total, dropped, false)
+        {
             return false;
         }
         self.global_dropped = dropped;
@@ -824,7 +827,7 @@ impl ConversationState {
     ///
     /// Returns whether it landed.
     pub(crate) fn fail_global_search(&mut self, query: &str, reason: String) -> bool {
-        if !self.global_search.fail(query, reason) {
+        if !self.global_search.fail(&SearchSpec::plain(query), reason) {
             return false;
         }
         self.global_dropped = 0;

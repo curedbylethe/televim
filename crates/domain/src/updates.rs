@@ -329,34 +329,48 @@ impl ChatList {
     /// Focuses the private conversation with `user_id`, adding it if absent.
     ///
     /// Returns the index of the chat with this `user_id`, whether it was already
-    /// listed or was just appended. A private chat's identifier *is* the peer's
+    /// listed or was just inserted. A private chat's identifier *is* the peer's
     /// identifier, so a match here means the conversation already exists and
-    /// must be focused rather than duplicated.
+    /// must be focused where it is rather than duplicated or moved.
     ///
-    /// The list keeps whatever order Telegram gave it, and this helper does not
-    /// try to reconstruct that order: an inserted chat is appended, and the next
-    /// fetch is what reconciles the order. Reordering would mean guessing a
-    /// comparator the list deliberately does not have.
+    /// A new chat is inserted at the first unpinned index — the top of the
+    /// unpinned block, below any pinned chats — or appended when every chat is
+    /// pinned. That is where the design opens a conversation the reader just
+    /// created, and recency cannot place it: a chat with no messages has
+    /// `last_timestamp: None`, which [`sorts_before`] sends to the bottom of the
+    /// unpinned block. This is the only place the list departs from the server's
+    /// order, and the next fetch is what reconciles it.
     pub fn ensure_private_chat(&mut self, user_id: i64, title: String) -> usize {
         if let Some(index) = self.chats.iter().position(|chat| chat.id == user_id) {
             return index;
         }
 
-        self.chats.push(Chat {
-            read_outbox_max_id: None,
-            id: user_id,
-            title,
-            kind: ChatKind::Private,
-            last_message: None,
-            unread_count: 0,
-            last_message_id: None,
-            last_timestamp: None,
-            pinned: false,
-            presence: None,
-            deleted: false,
-        });
+        // The pinned block leads the list, so the first unpinned chat is where
+        // the top of the unpinned block begins.
+        let index = self
+            .chats
+            .iter()
+            .position(|chat| !chat.pinned)
+            .unwrap_or(self.chats.len());
 
-        self.chats.len() - 1
+        self.chats.insert(
+            index,
+            Chat {
+                read_outbox_max_id: None,
+                id: user_id,
+                title,
+                kind: ChatKind::Private,
+                last_message: None,
+                unread_count: 0,
+                last_message_id: None,
+                last_timestamp: None,
+                pinned: false,
+                presence: None,
+                deleted: false,
+            },
+        );
+
+        index
     }
 
     /// The conversation with this identifier, if the client holds it.
@@ -1012,15 +1026,14 @@ mod tests {
     }
 
     #[test]
-    fn ensure_private_chat_appends_a_private_chat_for_an_unknown_user() {
+    fn a_new_chat_goes_above_the_unpinned_block() {
         let mut list = list();
 
         let index = list.ensure_private_chat(42, "Ada Lovelace".to_owned());
 
-        assert_eq!(index, list.chats.len() - 1, "the new chat is the one added");
-        assert_eq!(list.chats.len(), 3);
+        assert_eq!(index, 0, "the first unpinned index");
+        assert_eq!(ids(&list), vec![42, 1, 2], "above both unpinned chats");
         let added = &list.chats[index];
-        assert_eq!(added.id, 42);
         assert_eq!(added.title, "Ada Lovelace");
         assert_eq!(added.kind, ChatKind::Private);
         assert!(!added.has_unread());
@@ -1028,14 +1041,50 @@ mod tests {
     }
 
     #[test]
-    fn ensure_private_chat_leaves_the_existing_chats_in_their_order() {
-        let mut list = list();
+    fn a_new_chat_lands_below_every_pinned_chat() {
+        let mut list = ChatList::with_chats(vec![
+            Chat {
+                pinned: true,
+                ..chat_at(1, 100)
+            },
+            Chat {
+                pinned: true,
+                ..chat_at(2, 900)
+            },
+            chat_at(3, 500),
+        ]);
 
-        let _ = list.ensure_private_chat(42, "Ada".to_owned());
+        let index = list.ensure_private_chat(42, "Ada".to_owned());
 
-        assert_eq!(list.chats[0].id, 1, "the first existing chat has not moved");
-        assert_eq!(list.chats[1].id, 2, "nor the second");
-        assert_eq!(list.chats[2].id, 42, "and the new one is appended");
+        assert_eq!(index, 2, "the first unpinned index");
+        assert_eq!(ids(&list), vec![1, 2, 42, 3]);
+
+        let mut all_pinned = ChatList::with_chats(vec![
+            Chat {
+                pinned: true,
+                ..chat_at(1, 100)
+            },
+            Chat {
+                pinned: true,
+                ..chat_at(2, 900)
+            },
+        ]);
+        let index = all_pinned.ensure_private_chat(42, "Ada".to_owned());
+
+        assert_eq!(index, 2, "with nothing unpinned the new chat is appended");
+        assert_eq!(ids(&all_pinned), vec![1, 2, 42]);
+    }
+
+    #[test]
+    fn an_existing_chat_is_not_moved() {
+        let mut list =
+            ChatList::with_chats(vec![chat_at(1, 100), chat_at(2, 900), chat_at(3, 500)]);
+
+        let index = list.ensure_private_chat(3, "Ada".to_owned());
+
+        assert_eq!(index, 2, "its index, unchanged");
+        assert_eq!(ids(&list), vec![1, 2, 3], "and nothing moved");
+        assert_eq!(list.chats[2].title, "chat-3", "nor was it renamed");
     }
 
     #[test]

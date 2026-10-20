@@ -48,6 +48,76 @@ pub struct UserCandidate {
     pub username: Option<String>,
 }
 
+/// Orders `candidates` the way the design model ranks a new-chat list.
+///
+/// Closest match first, then no-conversation-first, then display name
+/// case-insensitively, then `user_id` so the order is total. `query` opening
+/// with `@` is a username query, and only the handles are scored: an exact
+/// handle, then a prefix, then a substring, then no match. Any other query
+/// scores the display name before the handle, so `gracer` still finds Grace
+/// Hopper.
+///
+/// Every candidate the server returned is kept: the lookup has already decided
+/// who matches, and a candidate that resembles neither field sorts last rather
+/// than vanishing. An empty query is not a ranking at all — it asks for the
+/// people most contacted — so that list keeps the server's order as it stands.
+/// Names are lowercased and compared with `Ord`, not a locale collation, so the
+/// order does not depend on the machine.
+#[must_use]
+pub fn rank_candidates(
+    query: &str,
+    mut candidates: Vec<UserCandidate>,
+    has_conversation: impl Fn(i64) -> bool,
+) -> Vec<UserCandidate> {
+    let query = query.trim();
+    let by_username = query.starts_with('@');
+    let needle = query.trim_start_matches('@').to_lowercase();
+
+    if needle.is_empty() {
+        return candidates;
+    }
+
+    candidates.sort_by_cached_key(|candidate| {
+        let handle = candidate
+            .username
+            .as_deref()
+            .unwrap_or_default()
+            .to_lowercase();
+        let name = candidate.display_name.to_lowercase();
+
+        let score = if by_username {
+            if handle == needle {
+                0
+            } else if handle.starts_with(&needle) {
+                1
+            } else if handle.contains(&needle) {
+                2
+            } else {
+                3
+            }
+        } else if name.starts_with(&needle) {
+            0
+        } else if name.contains(&needle) {
+            1
+        } else if handle.starts_with(&needle) {
+            2
+        } else if handle.contains(&needle) {
+            3
+        } else {
+            4
+        };
+
+        (
+            has_conversation(candidate.user_id),
+            score,
+            name,
+            candidate.user_id,
+        )
+    });
+
+    candidates
+}
+
 /// The results of the last user search, and where the reader is among them.
 ///
 /// Pure state: no clock, no client, no error type. The query is an
@@ -423,5 +493,112 @@ mod tests {
         state.adopt("ada", Vec::new());
 
         assert_eq!(state.label(), "/ada — no candidates");
+    }
+
+    // ---- ranking the candidates -----------------------------------------
+
+    /// A candidate with the given identifier, name and handle.
+    fn person(user_id: i64, display_name: &str, username: &str) -> UserCandidate {
+        UserCandidate {
+            user_id,
+            display_name: display_name.to_owned(),
+            username: Some(username.to_owned()),
+        }
+    }
+
+    fn ids(ranked: &[UserCandidate]) -> Vec<i64> {
+        ranked.iter().map(|candidate| candidate.user_id).collect()
+    }
+
+    #[test]
+    fn a_name_prefix_outranks_a_name_contains() {
+        let ranked = rank_candidates(
+            "ada",
+            vec![
+                person(1, "Grace Ada", "hopper"),
+                person(2, "ada byron", "abyron"),
+            ],
+            |_| false,
+        );
+
+        assert_eq!(ids(&ranked), vec![2, 1], "the prefix leads the substring");
+    }
+
+    /// The stage file names this `an_existing_conversation_outranks_a_closer_new_one`,
+    /// but its own ordering rule — and the model's comparator — put the person
+    /// with no conversation first, so the closer new candidate wins.
+    #[test]
+    fn a_closer_new_candidate_outranks_an_existing_conversation() {
+        let ranked = rank_candidates(
+            "ada",
+            vec![
+                person(1, "Ada Byron", "abyron"),
+                person(2, "Grace Ada", "hopper"),
+            ],
+            |id| id == 2,
+        );
+
+        assert_eq!(
+            ids(&ranked),
+            vec![1, 2],
+            "no conversation leads, even though the other name matches more closely"
+        );
+    }
+
+    #[test]
+    fn a_handle_query_ranks_handles_only() {
+        let ranked = rank_candidates(
+            "@ada",
+            vec![
+                person(1, "ada", "zzz"),
+                person(2, "Grace", "ada"),
+                person(3, "Nobody", "adalovelace"),
+            ],
+            |_| false,
+        );
+
+        assert_eq!(
+            ids(&ranked),
+            vec![2, 3, 1],
+            "exact handle, then prefix; a display name never matches a `@` query"
+        );
+    }
+
+    #[test]
+    fn an_empty_query_keeps_the_servers_order() {
+        let ranked = rank_candidates(
+            "",
+            vec![
+                person(9, "Zoe", "z"),
+                person(3, "Ada", "a"),
+                person(5, "Babbage", "b"),
+            ],
+            |_| false,
+        );
+
+        assert_eq!(
+            ids(&ranked),
+            vec![9, 3, 5],
+            "the most-contacted list is the server's, not a name sort"
+        );
+    }
+
+    #[test]
+    fn ties_break_by_name_then_id() {
+        let ranked = rank_candidates(
+            "a",
+            vec![
+                person(9, "Ada Zeta", "z"),
+                person(7, "ada alpha", "y"),
+                person(5, "Ada Alpha", "x"),
+            ],
+            |_| false,
+        );
+
+        assert_eq!(
+            ids(&ranked),
+            vec![5, 7, 9],
+            "equal names differ only by case, so the lower id leads"
+        );
     }
 }
