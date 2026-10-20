@@ -1,3 +1,9 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="design/logo/televim.svg">
+  <source media="(prefers-color-scheme: light)" srcset="design/logo/televim-light.svg">
+  <img src="design/logo/televim-light.svg" alt="televim" width="320">
+</picture>
+
 # televim
 
 A cross-platform Telegram client for the terminal, written in Rust. `televim` is
@@ -21,6 +27,7 @@ RSS at idle after loading 50+ chats.
 | [`docs/memory.md`](./docs/memory.md) | The memory budget: measured baseline, declared work, and what the harness does not measure |
 | [`docs/known-gaps.md`](./docs/known-gaps.md) | Known gaps and v2 hooks |
 | [`DESIGN.md`](./DESIGN.md) | The design system |
+| [`design/logo/`](./design/logo/) | The mark: the dark and light lockups, the favicon, and the social-preview card |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Release history, generated per release from the commits |
 
 ## Project Goals
