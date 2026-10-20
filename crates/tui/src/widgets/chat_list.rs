@@ -250,4 +250,74 @@ mod tests {
             row_text(&buffer, 1)
         );
     }
+
+    // ---- the pinned frame -----------------------------------------------
+
+    /// The frame as text: one row per line, with trailing spaces stripped.
+    ///
+    /// Trailing spaces are the terminal's padding, not the layout's content, so
+    /// keeping them would make the diff noise; a change that moves content still
+    /// shows.
+    fn frame_text(buffer: &Buffer) -> String {
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| row_text(buffer, y).trim_end().to_owned())
+            .collect();
+
+        rows.join("\n") + "\n"
+    }
+
+    /// Compares the frame with its committed golden, or rewrites the golden.
+    ///
+    /// The rewrite exists so an intended layout change is a one-line edit rather
+    /// than a hand-copied screen. It fails the run that writes, so a stale golden
+    /// cannot pass unnoticed.
+    fn assert_pinned(frame: &str, name: &str, path: &str, golden: &str) {
+        if std::env::var("UPDATE_GOLDENS").is_ok_and(|value| value == "1") {
+            std::fs::write(path, frame).expect("the golden is writable");
+            panic!("rewrote {name}; rerun without UPDATE_GOLDENS=1");
+        }
+
+        if golden == frame {
+            return;
+        }
+
+        let differing = golden
+            .lines()
+            .zip(frame.lines())
+            .enumerate()
+            .find(|(_, (want, got))| want != got);
+
+        match differing {
+            Some((index, (want, got))) => panic!(
+                "{name} differs at row {}:\n  golden: {want:?}\n  drawn:  {got:?}",
+                index + 1
+            ),
+            None => panic!(
+                "{name} has {} rows; its golden has {}",
+                frame.lines().count(),
+                golden.lines().count()
+            ),
+        }
+    }
+
+    /// The list's whole frame, pinned as text, so a layout or copy change is a
+    /// reviewable diff instead of a silent pass.
+    ///
+    /// `App::mock()` fixes the chats and the theme, so the frame is a fact about
+    /// the code. `UPDATE_GOLDENS=1` rewrites the file and fails.
+    #[test]
+    fn the_chat_list_frame_is_pinned() {
+        let app = App::mock();
+        let screen = screen(&app, 80, 24);
+
+        assert_pinned(
+            &frame_text(&screen),
+            "the chat list frame",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/widgets/goldens/chat_list_frame.txt"
+            ),
+            include_str!("goldens/chat_list_frame.txt"),
+        );
+    }
 }
