@@ -4,6 +4,17 @@
 debug/
 target/
 
+# libFuzzer's crash reproducers and the inputs it grows, from the detached
+# workspace in `fuzz/`. The named seeds in `fuzz/corpus/session/` are committed;
+# everything a run adds there is a fact about that run. `target/` above already
+# covers `fuzz/target`.
+/fuzz/artifacts/
+/fuzz/corpus/session/*
+!/fuzz/corpus/session/empty
+!/fuzz/corpus/session/envelope-empty
+!/fuzz/corpus/session/snapshot-empty
+!/fuzz/corpus/session/snapshot-valid
+
 # `Cargo.lock` is deliberately NOT ignored. This is a binary, so the lockfile is
 # what makes a build reproducible, and one pin in it is load-bearing: grammers
 # 0.10.0 does not compile against glass_pumpkin 2.0.0-rc1, so the lockfile holds
