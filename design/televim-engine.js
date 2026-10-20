@@ -1101,10 +1101,12 @@
      state the reader is looking at. */
   function newChatStatus(s) {
     const n = s.newchat, q = '/' + n.q;
-    if (n.pending) return q + ' - searching...';
-    if (n.failed) return q + ' - no candidates (search failed: ' + n.failed + ')';
-    if (!n.hits.length) return q + ' - no candidates';
-    return q + ' - ' + n.hits.length + ' candidate' + (n.hits.length === 1 ? '' : 's');
+    /* in flight, the candidates already known are `known` (the model's list is drawn only once the
+       answer lands, so it sets none); landed, they are the hits */
+    const k = n.pending ? n.known || 0 : n.hits.length;
+    const count = k ? k + ' candidate' + (k === 1 ? '' : 's') : 'no candidates';
+    if (n.pending) return q + ' — ' + (k ? count + ' — ' : '') + 'searching…';
+    return q + ' — ' + count + (n.failed ? ' (search failed: ' + n.failed + ')' : '');
   }
   /* the results list's own keys: move and wrap, open, close. */
   function newchatKey(s, k) {
@@ -1598,8 +1600,11 @@
     if (L.kind === 'message') { const c = chat(s); return 'Message to ' + (c ? c.name : ''); }
     return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', newchat: 'New chat', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password', passphrase: 'Passphrase', newpass: 'New passphrase', repeat: 'Repeat passphrase' }[L.kind];
   }
+  /* App::prompt_prefix: a person search and a message search are both queries, so they share `/ `;
+     the status label tells them apart. */
+  const PROMPT_PREFIX = { command: ': ', find: '/ ', newchat: '/ ' };
   function barRows(L) {
-    const prefix = L.kind === 'command' || L.kind === 'find';
+    const prefix = !!PROMPT_PREFIX[L.kind];
     const shown = L.kind === 'pw' ? '•'.repeat(L.buf.length) : L.buf;
     return wrap(shown, prefix ? 74 : 76, 76, true);
   }
@@ -1623,7 +1628,7 @@
       return { title: kindTitle(s, { kind: s.pass.pendKind }), shown, rows, cr, n, start, lit: false, prefix: '', conceal: true, base: 'ltr' };
     }
     let title = 'Input', buf = '', pos = 0, lit = false, prefix = '', conceal = false;
-    if (L) { lit = true; title = kindTitle(s, L); buf = L.buf; pos = L.pos; prefix = L.kind === 'command' ? ': ' : L.kind === 'find' ? '/ ' : ''; conceal = L.kind === 'pw' || !!PASS_KIND[L.kind]; }
+    if (L) { lit = true; title = kindTitle(s, L); buf = L.buf; pos = L.pos; prefix = PROMPT_PREFIX[L.kind] || ''; conceal = L.kind === 'pw' || !!PASS_KIND[L.kind]; }
     else if (d && d.ctx === ctx(s) && s.view === 'chat') { title = 'draft'; buf = d.buf; pos = d.pos; }
     const shown = conceal ? '•'.repeat(buf.length) : buf;
     const rows = wrap(shown, prefix ? 74 : 76, 76, true);

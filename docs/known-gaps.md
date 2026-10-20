@@ -288,21 +288,6 @@ Real, and named so they are not mistaken for oversights:
   and `words`; a middle position and any other shaping terminal are not checked.
   `words` is written for a terminal that reverses each word on its own, and is wrong
   on one that reverses the whole line, where the words would be reversed twice.
-- **The new-chat prompt's prefix and the status sentence's punctuation differ
-  between the model and the binary.** The revised design run agrees with the
-  binary on the invocation (`/` on the chat list, `:new <query>`), the
-  submit-time list, the `New chat` titles, the `j`/`k`/`↑`/`↓`/`⏎`/`Esc` keys,
-  the `chat`/`new` standing, and the `match` ink — but two small drawing details
-  remain. The model draws the prompt line with **no prefix**, beside `Find`'s `/`
-  and `Command`'s `:`; the binary draws the shared `/` prefix, because the person
-  search is the message search's idiom and the two are told apart by what answers
-  them rather than by a second glyph (`App::prompt_prefix`). And the model writes
-  the status sentence with an ASCII hyphen and three dots — `/query -
-  searching...` — where the binary uses the design system's own em dash and
-  ellipsis — `/query — searching…` — the punctuation the conversation's search
-  label has always used (`SearchState::label`). Each is a one-line change in the
-  binary, but neither is a hand edit to `DESIGN.md` or the engine
-  (`design/README.md`); a design run settles them.
 - **The new-chat row order and a new chat's place in the list are the binary's
   own.** The model sorts its local candidates closest-match, then
   no-conversation-first, then by name, and inserts a new conversation at the top
