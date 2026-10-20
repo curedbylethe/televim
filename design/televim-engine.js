@@ -684,6 +684,10 @@
     else if (view === 'signedout' || view === 'reading') beginShell(s, view);
     else if (view === 'contactReading') beginContactShell(s, 'personReading');
     else if (view === 'contactFailed') beginContactShell(s, 'personFailed');
+    /* no read tracking in the model: the start names Ada's first unread message, outside the window
+       (93, a page away) or inside it (104) */
+    else if (view === 'unreadFar') s.chats[0].firstUnread = 93;
+    else if (view === 'unreadNear') s.chats[0].firstUnread = 104;
     else if (view === 'media') s.chats.unshift(makeMediaChat());
     else if (view === 'sticker') s.chats.unshift(makeStickerChat(true));
     else if (view === 'stickerFallback') s.chats.unshift(makeStickerChat(false));
@@ -861,6 +865,7 @@
      does. A mark is a message id, never a row: the window it was set in may be gone. */
   const REVALIDATING = 'Cached messages — loading the latest…';
   const JUMP_QUOTE = 'Jumping to the quoted message…', JUMP_BACK = 'Jumping back…', JUMP_FORWARD = 'Jumping forward…';
+  const JUMP_UNREAD = 'Jumping to first unread…';
   const PAGE_RADIUS = 3;
   const hereId = (c) => (c.msgs[c.cur] ? c.msgs[c.cur].id : null);
   function mark(c, id) {
@@ -890,6 +895,18 @@
     if (!m.reply || m.reply.to == null) { refuse(s, 'Not a reply: gd jumps to the message a reply quotes.'); return; }
     goTo(s, m.reply.to, JUMP_QUOTE, hereId(c));
   }
+  /* `gg`: the first unread message. The model has no read tracking, so the destination is the chat's
+     `firstUnread` id, which a scene's start sets; a chat without one keeps the top of the window.
+     A window that holds it only moves the cursor. One it does not is fetched through `goTo`, and the
+     page's arrival lands the cursor. A destination the server holds nothing for is an empty page: it
+     says nothing, where `goTo` would flash. */
+  function jumpUnread(s) {
+    const c = chat(s), id = c.firstUnread;
+    if (id == null) { c.cur = 0; return; }
+    const at = c.msgs.findIndex((m) => m.id === id);
+    if (at >= 0) c.cur = at;
+    else if (c.all && c.all.some((m) => m.id === id)) goTo(s, id, JUMP_UNREAD, hereId(c));
+  }
   function jumpBack(s) {
     const c = chat(s), jl = c.jl;
     if (!jl || !jl.list.length) return;
@@ -911,7 +928,7 @@
       case 'k': case 'Up': move(s, -1); break;
       case 'C-d': move(s, 5); break;
       case 'C-u': move(s, -5); break;
-      case 'g': if (p === 'g') c.cur = 0; else s.pend = 'g'; break;
+      case 'g': if (p === 'g') jumpUnread(s); else s.pend = 'g'; break;
       case 'C-o': jumpBack(s); break;
       case 'C-i': jumpForward(s); break;
       case 'G': c.cur = Math.max(0, c.msgs.length - 1); break;
@@ -1283,9 +1300,10 @@
       /* the three sign-in steps do not answer here: they enter the in-flight state, and the
          answer (the code, SESSION_PASSWORD_NEEDED, a refusal) lands in answer(). */
       case 'phone': case 'code': case 'pw': {
+        s.signin.refusal = '';
         if (L.kind === 'phone' && buf.replace(/\D/g, '').length < 7)
-          return refuse(s, authSentence('PHONE_NUMBER_INVALID'));
-        if (L.kind === 'pw' && !buf) return refuse(s, 'The password cannot be empty.');
+          return signinRefuse(s, authSentence('PHONE_NUMBER_INVALID'));
+        if (L.kind === 'pw' && !buf) return signinRefuse(s, 'The password cannot be empty.');
         s.signin.pending = { kind: L.kind, value: L.kind === 'code' ? buf.trim() : L.kind === 'pw' ? buf : buf.trim() };
         s.signin.checking = true; s.signin.checkN = 0;
         s.line = null; s.focus = 'list';
@@ -1293,6 +1311,8 @@
       }
     }
   }
+  /* a sign-in refusal is not a flash: it stays on the status line until the next ⏎ (see statusText) */
+  function signinRefuse(s, t) { s.search = null; s.signin.refusal = t; }
   function openSigninLine(s, kind) {
     /* the phone is the one field configuration can pre-fill; the code and the password are the
        reader's to type, so they open empty. */
@@ -1306,7 +1326,7 @@
     const out = !!(s.signin && s.signin.out);
     s.signin = {
       out, step: 0, phone: s.profile.phone || '', code: '', bad: '', twofa: true, attempts: 3,
-      checking: false, checkN: 0, pending: null, away: false, lost: false, action: ''
+      checking: false, checkN: 0, pending: null, away: false, lost: false, action: '', refusal: ''
     };
     openSigninLine(s, 'phone');
   }
@@ -1336,7 +1356,7 @@
       if (L.kind === 'code') A.lost = true;   /* the code is typed once and is not kept */
       s.line = null;
     }
-    A.away = true; s.focus = 'list';
+    A.away = true; A.refusal = ''; s.focus = 'list';
     s.flash = 'sign-in paused; Tab brings it back';
   }
   function signinBack(s) {
@@ -1348,7 +1368,7 @@
   }
   function signinCancel(s) {
     const A = s.signin;
-    A.step = 0; A.code = ''; A.bad = '';
+    A.step = 0; A.code = ''; A.bad = ''; A.refusal = '';
     openSigninLine(s, 'phone');
     s.flash = CANCEL_COST;
   }
@@ -1374,7 +1394,7 @@
       openSigninLine(s, 'code');
     } else if (p.kind === 'code') {
       if (p.value !== '42424') {
-        A.bad = p.value; s.flash = authSentence('PHONE_CODE_INVALID');
+        A.bad = p.value; A.refusal = authSentence('PHONE_CODE_INVALID');
         openSigninLine(s, 'code');
       } else {
         A.code = p.value; A.bad = '';
@@ -1384,7 +1404,7 @@
       signinDone(s);
     } else {
       A.attempts = Math.max(0, A.attempts - 1);
-      s.flash = authSentence('PASSWORD_HASH_INVALID', A.attempts);
+      A.refusal = authSentence('PASSWORD_HASH_INVALID', A.attempts);
       openSigninLine(s, 'pw');
     }
     return s;
@@ -1660,33 +1680,45 @@
   }
 
   /* ---------- status row ---------- */
+  /* highest first: a sign-in refusal, the line's own states, a confirmation, the forward picker, a
+     message selection, the new-chat list, a search, a jump in flight, why the cursor message failed,
+     a flash, a cached window waiting for its newest page, and last the resting hint. */
   function statusText(s) {
-    /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
-    if (s.confirm) return { t: ' ' + s.confirm.prompt, a: 't' };
-    if (s.flash) return { t: ' ' + s.flash, a: 't' };
-    if (s.view === 'signin' && s.signin && s.signin.checking)
-      return { t: ' ' + CHECKING + ' — the request is in flight', a: 't' };
+    const A = s.view === 'signin' && s.signin, L = s.line;
+    /* a refusal is Telegram's answer about the value just typed, and it stays above even the line's
+       hint: a reader who cannot see it types the same value again. */
+    if (A && A.refusal) return { t: ' ' + A.refusal, a: 't' };
+    if (A && A.checking) return { t: ' ' + CHECKING + ' — the request is in flight', a: 't' };
     if (s.pass && s.pass.checking) return { t: ' ' + CHECKING + ' — the key is being derived', a: 't' };
-    const L = s.line;
     if (L && PASS_KIND[L.kind]) return { t: L.kind === 'passphrase' ? HINT.pass : HINT.passNew, a: 'd' };
     if (s.pass) return { t: HINT.passDone, a: 'd' };
-    if (L && s.view === 'signin' && s.signin.out && s.signin.step === 0 && L.from === 'signin')
-      return { t: ' ' + SIGNED_OUT, a: 'd' };
+    if (L && A && A.out && A.step === 0 && L.from === 'signin') return { t: ' ' + SIGNED_OUT, a: 'd' };
     if (L) {
       if (L.mode === 'insert' && activeComp(L)) return { t: HINT.complete, a: 'd' };
       return { t: L.mode === 'insert' ? HINT.typing : L.mode === 'normal' ? HINT.lnormal : HINT.lvisual, a: 'd' };
     }
-    if (s.view === 'signin' && s.signin && s.signin.away) return { t: ' sign-in paused; Tab brings it back', a: 'd' };
-    if (s.view === 'nocreds') return { t: HINT.cardReading, a: 'd' };
+    if (A && A.away) return { t: ' sign-in paused; Tab brings it back', a: 'd' };
+    /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
+    if (s.confirm) return { t: ' ' + s.confirm.prompt, a: 't' };
     if (s.focus === 'forward' && s.fwd) return { t: HINT.forward, a: 'd' };
-    if (s.vis) return { t: HINT.visual, a: 'd' };
+    if (s.vis && s.focus === 'conv') {
+      const [lo, hi] = range(s);
+      return { t: ' ' + (hi - lo + 1) + ' message(s) selected — Esc clears', a: 't' };
+    }
     if (s.focus === 'newchat' && s.newchat) return { t: ' ' + newChatStatus(s), a: 't' };
     if (s.search) {
       const c = chat(s), h = s.search.hits, at = h.indexOf(c.cur), q = '/' + s.search.q;
       return { t: ' ' + (at >= 0 ? q + ' — match ' + (at + 1) + ' of ' + h.length : q + ' — ' + h.length + ' loaded'), a: 't' };
     }
-    /* a jump in flight sits below a search and above a failed send's reason */
     if (s.jump) return { t: ' ' + s.jump.label, a: 't' };
+    /* a shell with no chats has no cursor message */
+    const c = chat(s), m = c && c.msgs[c.cur];
+    if (m && m.status && m.status.startsWith('failed')) return { t: ' [' + m.status + ']', a: 't' };
+    if (s.flash) return { t: ' ' + s.flash, a: 't' };
+    /* below everything written to the status, above the resting hint */
+    if (c && c.revalidating) return { t: ' ' + REVALIDATING, a: 't' };
+    if (s.view === 'nocreds') return { t: HINT.cardReading, a: 'd' };
+    if (s.vis) return { t: HINT.visual, a: 'd' };
     if (s.focus === 'settings') return { t: HINT.settings, a: 'd' };
     if (s.focus === 'profile') {
       const C = s.card;
@@ -1696,10 +1728,6 @@
       return { t: h, a: 'd' };
     }
     if (s.focus === 'list') return { t: HINT.list, a: 'd' };
-    const c = chat(s), m = c.msgs[c.cur];
-    if (m && m.status && m.status.startsWith('failed')) return { t: ' [' + m.status + ']', a: 't' };
-    /* below everything written to the status, above the resting hint */
-    if (c.revalidating) return { t: ' ' + REVALIDATING, a: 't' };
     if (s.draft && s.draft.ctx === ctx(s)) return { t: HINT.draft, a: 'd' };
     return { t: HINT.normal, a: 'd' };
   }
@@ -2378,7 +2406,11 @@
       { name: 'Ctrl-i: forward again', keys: 'kkkgd<C-o><C-i>' },
       { name: 'Ctrl-o: back needs a fetch too', keys: 'jjgd<wait><C-o>' },
       { name: 'Ctrl-o: back on the reply that was left', keys: 'jjgd<wait><C-o><wait>' },
-      { name: 'gd on a message that is not a reply', keys: 'gd' }] },
+      { name: 'gd on a message that is not a reply', keys: 'gd' },
+      /* gg is the first unread; the start marks it, since the model keeps no read state */
+      { name: 'gg: the first unread is not loaded, a fetch is in flight', start: 'unreadFar', keys: 'gg' },
+      { name: 'gg: the page arrived, the cursor rests on the first unread', start: 'unreadFar', keys: 'gg<wait>' },
+      { name: 'gg: the first unread is loaded, only the cursor moves', start: 'unreadNear', keys: 'gg' }] },
     /* a window painted from the cache, with the newest page still on its way (rank 9 of the status line) */
     { id: 'cached', name: 'Cached conversation', variants: [
       { name: 'The newest page is on its way', keys: '<cached>' },
