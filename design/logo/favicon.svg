@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 56" role="img" aria-label="teleVim">
+  <title>teleVim</title>
+  <rect width="36" height="56" fill="#5BC0DE"/>
+    <polygon fill="#216883" points="4.43 51.50 31.57 4.50 19.47 10.56 11.03 25.17 10.03 25.17"/>
+    <polygon fill="#1E1E1E" points="4.43 10.56 4.43 51.50 11.03 25.17 11.03 10.56"/>
+    <rect x="27.57" y="43.50" width="4" height="8" fill="#1E1E1E"/>
+</svg>

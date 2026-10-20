@@ -30,6 +30,10 @@ PAIRS=(
   "design/design-system/tokens.css:design-system/tokens.css"
   "design/design-system/components.html:design-system/components.html"
   "design/design-system/build-specimen.js:design-system/build-specimen.js"
+  "design/logo/televim.svg:logo/televim.svg"
+  "design/logo/televim-light.svg:logo/televim-light.svg"
+  "design/logo/favicon.svg:logo/favicon.svg"
+  "design/logo/favicon.ico:logo/favicon.ico"
 )
 
 die() { printf 'design-sync: %s\n' "$1" >&2; exit 1; }

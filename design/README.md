@@ -67,10 +67,25 @@ for it.
 | `design-system/tokens.css` | `design-system/tokens.css` |
 | `design-system/components.html` | `design-system/components.html` |
 | `design-system/build-specimen.js` | `design-system/build-specimen.js` |
+| `logo/televim.svg` | `logo/televim.svg` |
+| `logo/televim-light.svg` | `logo/televim-light.svg` |
+| `logo/favicon.svg` | `logo/favicon.svg` |
+| `logo/favicon.ico` | `logo/favicon.ico` |
 
 `build-specimen.js` resolves the engine as `../televim-engine.js`, which is why the
 layout is mirrored rather than flattened. Editing a vendored file here and not
 there is the one way to break the sync, and `make design-check` catches it.
+
+## The logo
+
+`logo/` holds the mark and is hand-drawn SVG, not generated. `televim.svg` is the
+`teleVim` lockup for a dark ground (letters are `currentColor`, default `#E8EAED`),
+`televim-light.svg` is the same for a light ground, and `favicon.svg` is the icon
+alone. All three are plain shapes with no text, fonts or strokes, so they scale
+without a font installed. `favicon.ico` carries 16, 32 and 48 px renders of
+`favicon.svg` on a transparent square; regenerate it from the SVG if the SVG changes.
+The cyan box is `5BC0DE`, the stem `1E1E1E` and the fold `216883` (`1F7394` on the
+light ground); none is a `DESIGN.md` role, since the palette there is the TUI's.
 
 ## The specimen is half hand-written
 
