@@ -549,7 +549,7 @@ code.
 | `Delete 3 of your messages? (y/n)` | a count, and pluralisation | `delete_yours_prompt` |
 | `NORMAL` `INSERT` `VISUAL` `CONFIRM` | upper case, in a filled label | `status_bar.rs` |
 | ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the fifteen rows above |
-| `: ` `/ ` | a prompt's prefix, on its first row only | `App::prompt_prefix` |
+| `: ` `/ ` | a prompt's prefix, on its first row only; `/ ` is shared by the find line and the new-chat line | `App::prompt_prefix` |
 | `3 message(s) selected — Esc clears` | the status line's sentence for a selection, **stating the unit** | `selection_note` |
 | `3 character(s) selected — Esc clears` | ditto for a selection inside one message | ditto |
 | `/query — match 2 of 5` | a search: the query, then where the walk is | `SearchState::label` |
@@ -557,10 +557,12 @@ code.
 | `/query — 2 loaded — searching…` | a local search with the server still working | ditto |
 | `/query — match 1 of 5 (first 2)` | a server walk that is still capped | `server_position` |
 | `New chat` | the new-chat prompt's bar title, and the results box's title | `kindTitle`, `drawNewChat` |
-| `/query - searching...` | the new-chat list while the query is in flight | `newChatStatus` |
-| `/query - N candidates` | the new-chat list once the answer lands, singular and plural | `newChatStatus` |
-| `/query - no candidates` | the answer was nobody | `newChatStatus` |
-| `/query - no candidates (search failed: reason)` | the request itself failed | `newChatStatus` |
+| `/query — searching…` | the new-chat list while the query is in flight | `newChatStatus` |
+| `/query — N candidates — searching…` | ditto, when candidates are already known | `newChatStatus` |
+| `/query — N candidates` | the new-chat list once the answer lands, singular and plural | `newChatStatus` |
+| `/query — no candidates` | the answer was nobody | `newChatStatus` |
+| `/query — no candidates (search failed: reason)` | the request itself failed | `newChatStatus` |
+| `/query — N candidates (search failed: reason)` | the request failed with some candidates | `newChatStatus` |
 | `new` `chat` | a result row's standing: no conversation yet, or one to focus | `newChatHits` |
 | `Profile · you` `Profile · Ada Lovelace` | a card's title; the `(n/m)` is the row the cursor is on | `cardTitle` |
 | `Profile` | a card with no subject: not signed in, or nothing read yet | `cardTitle` |
@@ -899,10 +901,13 @@ and a key that answered "start a chat" there would answer a different question
 from the one the screen is about. On the chat list `/` is the only question the
 pane is about.
 
-**The prompt.** A line like `Find` and `Command`: bar title `New chat`, no
-prefix, the reader's query in `text`, the caret in the bar. There is no live
-narrowing: the query is sent on `⏎` and the candidates arrive afterwards, so the
-prompt draws no list while it has the focus.
+**The prompt.** A line like `Find` and `Command`: bar title `New chat`, the
+shared `/ ` prefix on its first row, the reader's query in `text`, the caret in
+the bar. The prefix is the one `App::prompt_prefix` gives the find line: a person
+search and a message search are both queries, so they are told apart by the
+status label, not by a second glyph. It is chrome: never permuted and never part
+of the draft. There is no live narrowing: the query is sent on `⏎` and the
+candidates arrive afterwards, so the prompt draws no list while it has the focus.
 
 **The results list.** Drawn only after `⏎`, a transient overlay over the
 chat-list column alone: a bordered box titled `New chat`, growing up from that
@@ -920,10 +925,13 @@ wrap; `⏎` opens the highlighted person; `Esc` dismisses. Long names truncate a
 character boundary, and the standing is always shown.
 
 **The status.** While the list is up the status line carries the query and the
-request's state, just under a selection and above the conversation's own find:
-`/query - searching...` in flight, `/query - N candidates` once the answer lands,
-`/query - no candidates` when it was nobody, and `/query - no candidates (search
-failed: reason)` when the request itself failed.
+request's state, just under a selection and above the conversation's own find,
+in six forms: `/query — searching…` in flight, or `/query — N candidates —
+searching…` when candidates are already known; `/query — N candidates` once the
+answer lands; `/query — no candidates` when it was nobody; `/query — no
+candidates (search failed: reason)` when the request itself failed; and
+`/query — N candidates (search failed: reason)` when it failed with some. The
+dash is an em dash and the ellipsis one character, as in the find sentence.
 
 **What a choice does.** A query is a username when it opens with `@` and a
 display name otherwise (a name query falls back to the username, so `gracer`
@@ -1050,7 +1058,7 @@ regressing.
    | 1 | a key inside the line — the line's own hint | ` i/a: ins  w/b/e  …` |
    | 2 | a confirmation | `Quit televim? (y/n)` |
    | 3 | a selection, **with its unit** | `2 message(s) selected — Esc clears`, or `3 row(s) selected — Esc clears` on a card |
-   | 4 | the new-chat list, while it is up | `/ad - searching...`, `/ad - 2 candidates` |
+   | 4 | the new-chat list, while it is up | `/ad — searching…`, `/ad — 2 candidates` |
    | 5 | an active search | `/bench — match 1 of 2` |
    | 6 | a jump in flight | `Jumping to first unread…`, `Jumping to the quoted message…` |
    | 7 | why the message under the cursor failed | the send's own reason |
