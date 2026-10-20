@@ -77,6 +77,16 @@ for it.
 layout is mirrored rather than flattened. Editing a vendored file here and not
 there is the one way to break the sync, and `make design-check` catches it.
 
+`scripts/check-model.js` is the exception that is not mapped: it is
+**repository-only**, so it has no project copy and no row in the table above. It is
+the invariant-bearing checker — every scene at 24 rows by 80 cells, the `HINT_W`
+budget in cells and code points, the RTL permutations — and it runs from here, in
+`make design-check`, resolving the engine beside it. The pair map cannot see a file
+with no counterpart, and a project copy once existed and was replaced by a design
+run with a scenario script that dropped those checks, so `design-sync.sh check`
+fails if the project ever grows `scripts/check-model.js` again. If it does, delete
+it: the repository copy is the one that runs.
+
 ## The logo
 
 `logo/` holds the mark and is hand-drawn SVG, not generated. `televim.svg` is the
