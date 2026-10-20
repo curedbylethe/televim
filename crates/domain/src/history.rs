@@ -180,6 +180,8 @@ impl ConversationWindow {
     /// that hands over a whole conversation should not be able to blow the
     /// budget by doing so.
     ///
+    /// A page that names the same message twice keeps one copy — the first
+    /// after the sort — so the window never holds two rows for one identifier.
     pub fn replace(&mut self, messages: impl IntoIterator<Item = Message>) {
         let mut page: Vec<Message> = messages
             .into_iter()
@@ -187,6 +189,7 @@ impl ConversationWindow {
             .collect();
 
         page.sort_by_key(|message| message.id);
+        page.dedup_by_key(|message| message.id);
 
         let dropped = page.len().saturating_sub(CONVERSATION_WINDOW);
         self.messages = page.into_iter().skip(dropped).collect();
@@ -792,6 +795,28 @@ mod tests {
             window.oldest_id(),
             Some(6),
             "the oldest are the ones that were dropped"
+        );
+    }
+
+    /// A page that names one message twice used to leave both copies in the
+    /// window: the row was drawn twice and edited once, because a lookup finds
+    /// the first.
+    #[test]
+    fn a_replacement_page_keeps_one_copy_of_a_message() {
+        let mut window = ConversationWindow::new(42);
+
+        window.replace([
+            message(42, 2, "b"),
+            message(42, 1, "a"),
+            message(42, 2, "b again"),
+        ]);
+
+        assert_eq!(ids(&window), vec![1, 2], "one row per identifier");
+        assert_eq!(window.position_of(2), Some(1));
+        assert_eq!(
+            window.get(1).map(|message| message.text.as_ref()),
+            Some("b"),
+            "the first after the sort is the copy kept"
         );
     }
 
@@ -1664,6 +1689,27 @@ mod tests {
                         op
                     );
                 }
+            }
+        }
+
+        /// The window must never render one message twice. This is the property
+        /// that failed before `replace` deduplicated its page.
+        #[test]
+        fn the_window_never_holds_one_id_twice(ops in prop::collection::vec(an_op(), 0..12)) {
+            let mut window = ConversationWindow::new(42);
+
+            for op in &ops {
+                apply(&mut window, op);
+
+                let held = ids(&window);
+                let unique: HashSet<i64> = held.iter().copied().collect();
+                prop_assert_eq!(
+                    held.len(),
+                    unique.len(),
+                    "duplicate identifiers after {:?}: {:?}",
+                    op,
+                    held
+                );
             }
         }
 
