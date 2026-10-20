@@ -71,6 +71,7 @@ for it.
 | `logo/televim-light.svg` | `logo/televim-light.svg` |
 | `logo/favicon.svg` | `logo/favicon.svg` |
 | `logo/favicon.ico` | `logo/favicon.ico` |
+| `logo/televim-social.png` | `logo/televim-social.png` |
 
 `build-specimen.js` resolves the engine as `../televim-engine.js`, which is why the
 layout is mirrored rather than flattened. Editing a vendored file here and not
@@ -86,6 +87,22 @@ without a font installed. `favicon.ico` carries 16, 32 and 48 px renders of
 `favicon.svg` on a transparent square; regenerate it from the SVG if the SVG changes.
 The cyan box is `5BC0DE`, the stem `1E1E1E` and the fold `216883` (`1F7394` on the
 light ground); none is a `DESIGN.md` role, since the palette there is the TUI's.
+
+`televim-social.png` is the 1280×640 social-preview card: the dark lockup on a
+`#0b0d10` ground, 1040 px wide, which is a ground for the card rather than a logo
+colour. It is rendered from the SVG rather than drawn, so regenerate it from the
+commands below if the SVG changes. The `sed` is not decoration: this host's
+ImageMagick renders SVG with only its internal `MSVG` engine and no librsvg
+delegate, so it does not resolve `currentColor` and the letters would come out
+invisible.
+
+```console
+$ tmp=$(mktemp -d)
+$ sed 's/fill="currentColor"/fill="#E8EAED"/g' logo/televim.svg > "$tmp/dark.svg"
+$ magick -background none -density 300 "$tmp/dark.svg" -resize 1040x -depth 8 "$tmp/mark.png"
+$ magick "$tmp/mark.png" -background '#0b0d10' -gravity center -extent 1280x640 \
+    -depth 8 -strip logo/televim-social.png
+```
 
 ## The specimen is half hand-written
 

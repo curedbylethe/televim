@@ -34,6 +34,7 @@ PAIRS=(
   "design/logo/televim-light.svg:logo/televim-light.svg"
   "design/logo/favicon.svg:logo/favicon.svg"
   "design/logo/favicon.ico:logo/favicon.ico"
+  "design/logo/televim-social.png:logo/televim-social.png"
 )
 
 die() { printf 'design-sync: %s\n' "$1" >&2; exit 1; }
