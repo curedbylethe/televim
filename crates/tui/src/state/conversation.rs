@@ -1062,3 +1062,170 @@ impl ConversationState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::history::CONVERSATION_WINDOW;
+    use proptest::prelude::*;
+
+    const CHAT: i64 = 42;
+
+    /// A message with nothing but the fields under test filled in.
+    fn message(id: i64) -> Message {
+        Message {
+            id,
+            chat_id: CHAT,
+            text: "text".into(),
+            timestamp: 1_700_000_000 + id,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+            media: None,
+            media_id: None,
+        }
+    }
+
+    /// An open conversation holding `ids`, as the newest page would leave it.
+    fn opened(ids: &[i64]) -> ConversationState {
+        let mut state = ConversationState::new();
+        state.open_conversation(CHAT);
+        assert!(
+            state.seed(CHAT, ids.iter().map(|id| message(*id)).collect()),
+            "the seed lands in an empty window for the open chat"
+        );
+        state
+    }
+
+    /// A window change, generated as a page from either side or a replacement.
+    #[derive(Debug, Clone)]
+    enum Change {
+        Older(Vec<i64>),
+        Newer(Vec<i64>),
+        Replace(Vec<i64>),
+    }
+
+    fn a_change() -> impl Strategy<Value = Change> {
+        prop_oneof![
+            prop::collection::vec(0i64..600, 0..8).prop_map(Change::Older),
+            prop::collection::vec(0i64..600, 0..8).prop_map(Change::Newer),
+            prop::collection::vec(0i64..600, 0..12).prop_map(Change::Replace),
+        ]
+    }
+
+    /// Applies the change the way the fetch paths do, then restores the reader.
+    ///
+    /// Straight to the window for a replacement: `apply_latest` deliberately
+    /// puts the reader at the newest message and drops the selection, and what
+    /// is under test here is `after_window_change`'s contract.
+    fn apply_change(state: &mut ConversationState, change: &Change, anchor: Option<i64>) {
+        match change {
+            Change::Older(ids) => {
+                state
+                    .conversation
+                    .window
+                    .push_front(ids.iter().map(|id| message(*id)));
+            }
+            Change::Newer(ids) => {
+                state
+                    .conversation
+                    .window
+                    .push_back(ids.iter().map(|id| message(*id)));
+            }
+            Change::Replace(ids) => state
+                .conversation
+                .window
+                .replace(ids.iter().map(|id| message(*id))),
+        }
+
+        state.after_window_change(anchor);
+    }
+
+    proptest! {
+        /// The reader's place survives a window that moves, and the follow state
+        /// agrees with where the cursor ended up.
+        ///
+        /// A pinned view is re-pinned to the newest message, so its anchor is
+        /// only ever the message the cursor was already on; a reader scrolled
+        /// back is the case an arbitrary anchor exists for.
+        #[test]
+        fn the_anchor_is_restored_by_identifier(
+            seed in prop::collection::vec(0i64..600, 1..8),
+            anchor in prop::option::of(0i64..600),
+            pinned in any::<bool>(),
+            change in a_change(),
+        ) {
+            let mut state = opened(&seed);
+
+            let anchor = if pinned {
+                state.conversation.follow();
+                state.cursor_message_id()
+            } else {
+                state.conversation.unfollow();
+                anchor
+            };
+
+            apply_change(&mut state, &change, anchor);
+
+            let window = &state.conversation.window;
+            let cursor = state.vim.cursor();
+
+            prop_assert!(window.len() <= CONVERSATION_WINDOW);
+
+            if window.is_empty() {
+                prop_assert_eq!(cursor, 0, "an empty window has one place to be");
+            } else {
+                prop_assert!(cursor < window.len(), "cursor {} off {} rows", cursor, window.len());
+            }
+
+            if let Some(at) = anchor.and_then(|id| window.position_of(id)) {
+                // A pinned view is moved to the newest message after the anchor
+                // is restored, so the two only have to agree when the reader
+                // was scrolled back; `pinned` is where following wins.
+                if !pinned {
+                    prop_assert_eq!(cursor, at, "the anchor is where the cursor goes");
+                }
+            }
+
+            prop_assert_eq!(
+                state.conversation.auto_follow(),
+                window.is_empty() || cursor == window.len() - 1,
+                "following means the cursor is on the newest message"
+            );
+        }
+
+        /// A selection is kept whole or dropped entirely: never narrowed to the
+        /// end that happened to survive.
+        #[test]
+        fn a_selection_survives_whole_or_not_at_all(
+            seed in prop::collection::vec(0i64..600, 1..8),
+            anchor_id in 0i64..600,
+            focus_id in 0i64..600,
+            change in a_change(),
+        ) {
+            let mut state = opened(&seed);
+
+            let selection = Selection {
+                anchor: Mark::whole(anchor_id),
+                focus: Mark::text(focus_id, 3),
+            };
+            state.set_selection(selection);
+
+            apply_change(&mut state, &change, None);
+
+            let window = &state.conversation.window;
+            let both = window.position_of(anchor_id).is_some()
+                && window.position_of(focus_id).is_some();
+
+            if both {
+                prop_assert_eq!(state.selection, Some(selection));
+            } else {
+                prop_assert!(
+                    state.selection.is_none(),
+                    "half a selection was kept: {:?}",
+                    state.selection
+                );
+            }
+        }
+    }
+}
