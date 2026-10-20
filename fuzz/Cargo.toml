@@ -1,0 +1,28 @@
+[package]
+name = "fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys.workspace = true
+# Only the decoders: `sealed` and `session` are exported without `live`.
+telegram-framework = { path = "../crates/telegram-framework", default-features = false }
+
+[[bin]]
+name = "session"
+path = "fuzz_targets/session.rs"
+test = false
+doc = false
+bench = false
+
+# Detached on purpose: the root workspace keeps its 1.98.1 pin, its lockfile and
+# its manifests untouched, and `cargo fuzz` is not part of `make ci`.
+[workspace]
+resolver = "2"
+
+[workspace.dependencies]
+libfuzzer-sys = "0.4"
