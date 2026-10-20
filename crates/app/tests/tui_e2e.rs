@@ -1,9 +1,19 @@
 //! PTY end-to-end tests: the real `televim` binary runs in a pseudo-terminal
 //! driven by `termlens`, and each test asserts on the screen it draws.
 //!
-//! Run policy: these are ordinary tests with no `#[ignore]`. `make test` and
-//! CI's `cargo test --all --all-features` run them on every job. They need a
-//! pty and nothing else: no network, no credentials.
+//! Run policy: these are ordinary tests with no `#[ignore]` in a debug build.
+//! `make test` and CI's `cargo test --all --all-features` run them on every job.
+//! They need a pty and nothing else: no network, no credentials.
+//!
+//! Two states only the network can produce — an arrival, and a page in flight —
+//! are replayed by a debug-only seam. `spawn_offline_with_scenario` writes a
+//! script into the sandbox and hands its path to the binary in `TELEVIM_SCENARIO`;
+//! the binary waits for the sibling `<path>.fire` and then sends each directive
+//! through the same path the network's events take. `Scenario::fire` is the
+//! trigger, so a test can put the screen in the state an arrival must not
+//! disturb before releasing it. A release build carries no seam, which is why
+//! those three cases name it in a `#[cfg_attr(not(debug_assertions), ignore)]`
+//! rather than running there.
 //!
 //! Harness (`common/mod.rs`): `sandbox()` makes a temporary config directory,
 //! `seed_history()` writes a `history.json` beside it so cached chats are on
@@ -11,17 +21,72 @@
 //! from `CARGO_BIN_EXE_televim`. Assert with `wait_until` on positive
 //! predicates, or `snapshot_after` when the screen text is needed.
 //!
-//! Deferred: AC5–AC7 (an arrival moving a pinned view, an arrival leaving a
-//! scrolled-back view alone, a fetch in flight shown at its edge) stay
-//! `#[ignore]`d with reasons. Nothing offline can inject an arrival or start a
-//! fetch; see `docs/known-gaps.md`.
-//!
 //! Sending, editing and deleting are covered by unit tests and by the
 //! `TestBackend` assertions in `tui`'s conversation panel.
 
 mod common;
 
-use termlens::Key;
+use termlens::{Key, Screen};
+
+/// The conversation panel's body on the 80x24 PTY: the chat list takes the
+/// left 30%, the panel's border the top and bottom rows of the 20 rows above
+/// the input bar and the status line. The scrollbar has a column of its own on
+/// the right, which is why the body ends one column early.
+const CONVERSATION_TOP: u16 = 1;
+const CONVERSATION_BOTTOM: u16 = 18;
+const CONVERSATION_FIRST_COL: u16 = 25;
+const CONVERSATION_LAST_COL: u16 = 77;
+
+/// One conversation row as text, without the scrollbar's column.
+fn body_row(screen: &Screen, row: u16) -> String {
+    screen
+        .row_text(row)
+        .chars()
+        .skip(usize::from(CONVERSATION_FIRST_COL))
+        .take(usize::from(
+            CONVERSATION_LAST_COL - CONVERSATION_FIRST_COL + 1,
+        ))
+        .collect()
+}
+
+/// The conversation's body as one piece of text, without the scrollbar.
+fn conversation(screen: &Screen) -> String {
+    (CONVERSATION_TOP..=CONVERSATION_BOTTOM)
+        .map(|row| body_row(screen, row))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The row the cursor's `REVERSED` selection is drawn on.
+fn cursor_row(screen: &Screen) -> u16 {
+    (CONVERSATION_TOP..=CONVERSATION_BOTTOM)
+        .find(|&row| {
+            (CONVERSATION_FIRST_COL..=CONVERSATION_LAST_COL).any(|col| {
+                screen
+                    .cell(row, col)
+                    .is_some_and(|cell| cell.style().reverse)
+            })
+        })
+        .expect("the conversation draws its cursor on one of its rows")
+}
+
+/// The prelude the conversation tests share: wait for the first frame, then
+/// clear the sign-in card so the conversation takes keys.
+fn open_conversation(t: &mut termlens::Terminal) {
+    t.wait_until(|s| s.contains("NORMAL"))
+        .expect("ready in NORMAL mode");
+    t.send_str(":").expect("open command line");
+    t.send(Key::Esc).expect("close command line");
+    t.wait_until(|s| !s.contains("Sign in to Telegram"))
+        .expect("sign-in card cleared");
+}
+
+/// Forty seeded messages in chat 1, named `msg01` upward.
+fn seeded_chat(sandbox: &common::Sandbox) {
+    let texts: Vec<String> = (1..=40).map(|n| format!("msg{n:02}")).collect();
+    let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+    common::seed_history(sandbox, &[(1, "Ada")], &[(1, texts)]);
+}
 
 #[test]
 fn launches_to_chat_list_in_normal_mode() {
@@ -188,28 +253,101 @@ fn scrolling_up_and_down_moves_the_visible_slice() {
 /// and an arrival is supposed to move it. The flag transitions are unit-tested;
 /// what a screen adds is that the viewport actually follows.
 #[test]
-#[ignore = "needs a prod seam to inject arrivals; deferred per O4, see GAPS.md"]
+#[cfg_attr(not(debug_assertions), ignore = "the scenario seam is debug-only")]
 fn an_arrival_scrolls_a_pinned_view() {
-    // TODO: with a conversation open and pinned to the bottom, deliver an
-    // arrival for that conversation; assert the new message is the last row.
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline_with_scenario(&sandbox, "arrival 1 41 msg41");
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("Conversation (40/40)"))
+        .expect("the conversation opens pinned to the newest message");
+
+    t.fire();
+
+    let after = t
+        .snapshot_after(|s| s.contains("Conversation (41/41)"))
+        .expect("the pinned view followed the arrival to the new newest message");
+    let body = conversation(&after);
+    assert!(
+        body.contains("msg41"),
+        "the arrival is on screen: {}",
+        after.full_text()
+    );
+    assert!(
+        body.contains("msg40"),
+        "the viewport followed rather than jumped to it: {}",
+        after.full_text()
+    );
 }
 
 /// The counterpart: a reader who has scrolled away must not be dragged back by
 /// an arrival. This is the case the anchor exists for, and it is invisible
 /// until something arrives.
 #[test]
-#[ignore = "needs a prod seam to inject arrivals; deferred per O4, see GAPS.md"]
+#[cfg_attr(not(debug_assertions), ignore = "the scenario seam is debug-only")]
 fn an_arrival_leaves_a_scrolled_back_view_alone() {
-    // TODO: send `Ctrl+u`, note the first visible row, deliver an arrival for
-    // the same conversation; assert the first visible row is unchanged and the
-    // cursor is still on the message it was on.
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline_with_scenario(&sandbox, "arrival 1 41 msg41");
+    open_conversation(&mut t);
+
+    t.send(Key::Ctrl('u')).expect("scroll up");
+    let before = t
+        .snapshot_after(|s| s.contains("Conversation (22/40)"))
+        .expect("scrolled back to 22/40");
+    let first = body_row(&before, CONVERSATION_TOP);
+    let cursor = cursor_row(&before);
+    let on_cursor = body_row(&before, cursor);
+
+    t.fire();
+
+    let after = t
+        .snapshot_after(|s| s.contains("Conversation (22/41)"))
+        .expect("the arrival joined the window without moving the reader");
+    assert_eq!(
+        body_row(&after, CONVERSATION_TOP),
+        first,
+        "the first conversation row is unchanged: {}",
+        after.full_text()
+    );
+    assert_eq!(
+        body_row(&after, cursor),
+        on_cursor,
+        "the cursor is still on the message it was on: {}",
+        after.full_text()
+    );
+    assert!(
+        !conversation(&after).contains("msg41"),
+        "the arrival is below the viewport, not forced into it: {}",
+        after.full_text()
+    );
 }
 
 /// Fetching is off the render loop, so a page in flight has to be visible as
 /// such rather than as a frozen panel.
 #[test]
-#[ignore = "needs a prod seam to inject arrivals; deferred per O4, see GAPS.md"]
+#[cfg_attr(not(debug_assertions), ignore = "the scenario seam is debug-only")]
 fn a_fetch_in_flight_is_shown_at_the_edge_it_is_coming_from() {
-    // TODO: with the older page in flight, assert "Loading older…" is the first
-    // row; with the newer page in flight, assert it is the last.
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline_with_scenario(&sandbox, "fetch older\nfetch newer");
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("Conversation (40/40)"))
+        .expect("the seeded window on show");
+
+    t.fire();
+
+    let after = t
+        .snapshot_after(|s| s.contains("Loading older…") && s.contains("Loading newer…"))
+        .expect("both pages are in flight");
+    assert!(
+        body_row(&after, CONVERSATION_TOP).contains("Loading older…"),
+        "the older page is announced at the top, where it will be joined: {}",
+        after.full_text()
+    );
+    assert!(
+        body_row(&after, CONVERSATION_BOTTOM).contains("Loading newer…"),
+        "the newer page is announced at the bottom: {}",
+        after.full_text()
+    );
 }
