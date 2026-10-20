@@ -33,16 +33,28 @@
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --all-targets --all-features -- -D warnings`
 3. `make boundary`
-4. `cargo test --all --all-features`
-5. `make design-check`
-6. `cargo build --release`
-7. `scripts/memory/measure.py` then `scripts/memory/check.py` — the regression
+4. `cargo test --all --all-features`, with
+   `TERMLENS_ARTIFACT_DIR=${{ github.workspace }}/target/termlens-artifacts` for
+   the pty tests
+5. `actions/upload-artifact` for that directory, with `if: always()` and
+   `if-no-files-found: warn`
+6. `make design-check`
+7. `cargo build --release`
+8. `scripts/memory/measure.py` then `scripts/memory/check.py` — the regression
    budget, described above
-8. `actions/upload-artifact` for `target/memory-report.json`, with `if: always()`
+9. `actions/upload-artifact` for `target/memory-report.json`, with `if: always()`
    so the report survives a failed comparison
 
-Steps 7 and 8 are **not** in `make ci`: they need a release build and a pty, so
-they run in CI on the artifact rather than on every commit. Step 7 exits zero on
+The PTY upload is step 5 because `termlens` writes a screen only when an error
+carries one (a failed wait, EOF, emulator or write error); a green run produces
+no files, which is why `warn` is the honest setting rather than `error`. The
+variable is `termlens`'s, not televim's, so a bump can change the file naming or
+scope; the test process reads it, not the spawned binary, which is also why it
+is pinned to the workspace — an integration test's working directory is the
+crate directory.
+
+Steps 8 and 9 are **not** in `make ci`: they need a release build and a pty, so
+they run in CI on the artifact rather than on every commit. Step 8 exits zero on
 a host with no stored baseline, which is why CI is green on its first run on a
 new machine and enforcing from the second.
 
@@ -72,11 +84,51 @@ below.
 
 ## Test Layers
 
+Everything below runs under `make test` unless its bullet says otherwise: the
+goldens and property tests are ordinary `#[test]`s, and the deterministic
+mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
+`fuzz/` is the only local-only command.
+
 - **Unit Tests:** `#[cfg(test)]` modules live beside the code they cover, in
   `domain`, `tui`, `telegram-framework` and `app`. Test the Vim motion logic
   exhaustively (e.g., `gg` on an empty buffer, `G` at the last message, `o` on a
   one-line, mid-row, empty and multi-line draft). Widget
-  tests use `ratatui`'s `TestBackend`.
+  tests use `ratatui`'s `TestBackend`. Two layers sit in those same modules: the
+  committed golden frames below, and the `proptest` properties in `domain` and
+  `tui`.
+- **Golden tests:** `crates/tui/src/widgets/goldens/` holds two committed 80x24
+  text frames, `conversation_frame.txt` and `chat_list_frame.txt`, drawn from
+  `App::mock()` and compared one row at a time. They are text-only: the style
+  assertions (selection reversal, colours, modifiers) stay as the inline
+  `TestBackend` assertions beside each widget. `UPDATE_GOLDENS=1 cargo test -p
+  tui` rewrites a frame and fails that run, so an accepted layout change is a
+  reviewable diff rather than a hand-copied screen.
+- **Property tests:** `proptest` is a dev-dependency of `domain` and `tui`; no
+  release build carries it. `domain/src/history.rs` generates operation
+  sequences over the window and asserts the cap (`CONVERSATION_WINDOW`), that one
+  identifier never appears twice, and that a page from the correct side leaves
+  the window ordered and its lookups agreeing. The flat chat list's separate
+  `MESSAGE_WINDOW` cap is asserted in the same module. `tui/src/state/conversation.rs`
+  generates window changes and asserts the reader's anchor is restored by
+  identifier, the cursor stays inside the window, `auto_follow` agrees with the
+  cursor, and a selection survives whole or is dropped whole. `PROPTEST_CASES=1000`
+  deepens a local run; a failure shrinks and writes a seed under
+  `proptest-regressions/`, which is committed.
+- **Fuzzing:** `fuzz/` is a detached workspace with its own `[workspace]` and
+  nightly toolchain, so it never enters the root pin, lockfile or `make` targets.
+  Its one libFuzzer target, `session`, drives the two in-tree decoders of
+  untrusted bytes: `SessionData::from_bytes` (a persisted snapshot) and
+  `sealed::open` (the encrypted session envelope). The first input byte selects
+  the decoder; a panic is the finding. Run it with `rustup toolchain install
+  nightly`, `cargo install cargo-fuzz`, then `cd fuzz && cargo fuzz run session --
+  -runs=10000`. Neither tool is on the runner, so the fuzzer is a local command,
+  not a CI step. The seeds in `fuzz/corpus/session/` are committed; inputs
+  libFuzzer grows and crash reproducers under `fuzz/artifacts/` are ignored. The
+  MTProto wire decoder itself is external (`grammers-mtproto`), not this
+  repository's code: the in-tree surface is the session snapshot and envelope.
+  The same property runs on stable in `telegram-framework`'s test module, which
+  flips every byte of a valid snapshot and envelope with three masks and asserts
+  an answer rather than a panic on each.
 - **History cache:** two layers, both on every job and neither needing a
   client. The **store** (`app/src/history_store.rs`) is pure functions over
   `HistoryCache` and one file in a temp directory: the file's round trip as an
@@ -196,19 +248,24 @@ below.
   counting test double stands in for `download_media`, so inline drains and
   settles while `off` performs zero traffic. All of those run on every job.
 - **TUI E2E Tests:** `app/tests/tui_e2e.rs` runs the `televim` binary in a pty
-  through `termlens` and asserts on the screen: the chat list after launch, a
-  seeded cache drawn before the first frame, typing in INSERT, `:q` quitting, and
-  Ctrl-u/Ctrl-d moving the conversation's visible slice. **Run policy:** these are
-  not `#[ignore]`d; `make test` and CI's `cargo test --all --all-features` run them
-  on every job. They need a pty, not a network or credentials. **File map:** the
-  tests are in `tui_e2e.rs`; the helpers (`sandbox`, `seed_history`,
-  `spawn_offline`) are in `app/tests/common/mod.rs`. Three cases stay `#[ignore]`d
-  with reasons, AC5–AC7 (an arrival moving a pinned view, an arrival leaving a
-  scrolled-back view alone, a fetch in flight shown at its edge), because nothing
-  offline can inject an arrival or start a fetch; see
-  [`known-gaps.md`](./known-gaps.md). Their bodies are empty, so
-  `--include-ignored` passes them without proving anything. Rendering of other
-  keystroke flows is still covered by `tui`'s `TestBackend` tests.
+  through `termlens` and asserts on the screen. Nine tests: the chat list after
+  launch, a seeded cache drawn before the first frame, typing in INSERT, resuming
+  a draft, `:q` quitting, Ctrl-u/Ctrl-d moving the conversation's visible slice,
+  an arrival moving a pinned view, an arrival leaving a scrolled-back view alone,
+  and a fetch in flight shown at the edge it is coming from. **Run policy:** none
+  is `#[ignore]`d in a debug build; `make test` and CI's `cargo test --all
+  --all-features` run them on every job. They need a pty, not a network or
+  credentials. **File map:** the tests are in `tui_e2e.rs`; the helpers
+  (`sandbox`, `seed_history`, `spawn_offline`, `spawn_offline_with_scenario`) are
+  in `app/tests/common/mod.rs`. The last three use that last helper: it writes
+  `scenario.txt` into the sandbox and passes its path in `TELEVIM_SCENARIO`; the
+  binary waits for the sibling `<path>.fire`, which `Scenario::fire` writes, and
+  then replays each directive through its event channel as an
+  `AppEvent::Scenario`, an arrival through `net::apply` as a real
+  `UpdateEvent::NewMessage` and a fetch through `App::begin_fetch`. The seam is
+  `#[cfg(debug_assertions)]`, so a release build has neither it nor the string
+  and those three are ignored with that reason. Rendering of other keystroke
+  flows is still covered by `tui`'s `TestBackend` tests.
 - **RTL Screenshots:** `make rtl-shots` (`scripts/rtl/kitty_shots.py`) launches the
   debug binary in kitty, types into it through `kitty @`, and crops a screenshot of the
   window to `target/rtl-shots/`. It writes the cell text beside each image. It shows

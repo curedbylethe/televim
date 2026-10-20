@@ -51,8 +51,11 @@ There is no workspace-level `tests/` or `benches/`. Integration tests live in th
 crate that owns the seam they exercise: `app`'s because it is the only crate that
 can hold a framework `Client` and a `ProtoClient` at once, `telegram-framework`'s
 for the login flow. `app/tests/tui_e2e.rs` runs the binary in a pty through
-`termlens` and asserts on the screen; its tests run in the normal gate, and the
-three deferred cases (AC5–AC7) are `#[ignore]`d. Benchmarks follow the same rule:
+`termlens` and asserts on the screen; its nine tests run in the normal gate. The
+three cases only the network can produce — an arrival moving a pinned view, an
+arrival leaving a scrolled-back view alone, and a fetch in flight at its edge —
+are replayed through a debug-only scenario file, so the gate covers them and a
+release-profile test run skips them with a reason. Benchmarks follow the same rule:
 the micro-benches on pure functions live beside the code they measure, in
 `crates/domain/benches` (`history_window`, `search`, `vim`) and
 `crates/tui/benches` (`wrap_rows`). `domain` owns the window, search and motion
@@ -447,7 +450,7 @@ crates/app/
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
 ├── tests/
 │   ├── proto_integration.rs  # Opt-in, against a real datacenter
-│   └── tui_e2e.rs            # PTY tests via termlens; AC5–AC7 #[ignore]d
+│   └── tui_e2e.rs            # PTY tests; arrivals/fetches via a debug seam
 └── Cargo.toml
 ```
 
