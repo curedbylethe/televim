@@ -209,6 +209,16 @@ pub enum FrameworkError {
     #[error("peer {0} is not a person, and only a person has a profile")]
     NotAUser(i64),
 
+    /// The account has the top-correspondents list switched off.
+    ///
+    /// `contacts.getTopPeers` answers `contacts.topPeersDisabled` when the
+    /// account turned Settings → Privacy → "Suggest frequent contacts" off. That
+    /// is a normal answer, not a failure and not a decoding fault: the request
+    /// was accepted and the answer was understood, so the reader is told which
+    /// setting is responsible rather than sent looking for a parsing bug.
+    #[error("the account has frequent contacts switched off in Telegram's settings")]
+    TopPeersDisabled,
+
     /// The conversation is not in the session's peer cache.
     ///
     /// Addressing a peer takes the `access_hash` Telegram handed out for it, and

@@ -228,8 +228,9 @@ impl Client {
     /// # Errors
     ///
     /// Returns [`FrameworkError::Request`] when Telegram rejects the request,
-    /// when the connection fails, when the answer cannot be decoded, or when
-    /// the account has top peers switched off on Telegram's side.
+    /// when the connection fails, or when the answer cannot be decoded, and
+    /// [`FrameworkError::TopPeersDisabled`] when the account has top peers
+    /// switched off on Telegram's side.
     pub async fn top_peers(&self, limit: usize) -> Result<Vec<ResolvedUser>, FrameworkError> {
         let request = tl::functions::contacts::GetTopPeers {
             correspondents: true,
@@ -320,8 +321,8 @@ pub const TOP_PEERS_LIMIT: usize = 5;
 /// dropped, the same rule `remember_peer` applies.
 ///
 /// `NotModified` is empty: it is only sent against a non-zero hash, which this
-/// client never sends. `Disabled` is an error, because the reader asked for a
-/// list the account's settings do not give out.
+/// client never sends. `Disabled` is [`FrameworkError::TopPeersDisabled`], because
+/// the answer says the account's own setting is what withholds the list.
 fn top_peers_from(
     response: tl::enums::contacts::TopPeers,
     limit: usize,
@@ -329,14 +330,10 @@ fn top_peers_from(
     let peers = match response {
         tl::enums::contacts::TopPeers::Peers(peers) => peers,
         tl::enums::contacts::TopPeers::NotModified => return Ok(Vec::new()),
-        // `RequestError` has no variant for a feature the server switched off,
-        // and the caller needs only a reason to show. `Deserialize` is the
-        // closest, and the reason names the actual fact.
-        tl::enums::contacts::TopPeers::Disabled => {
-            return Err(FrameworkError::Request(RequestError::Deserialize(
-                "top peers are disabled for this account".to_owned(),
-            )));
-        }
+        // `NotModified` is empty: it is only sent against a non-zero hash, which
+        // this client never sends. `Disabled` is the account's own setting, so it
+        // is reported as that rather than as an unreadable response.
+        tl::enums::contacts::TopPeers::Disabled => return Err(FrameworkError::TopPeersDisabled),
     };
 
     Ok(peers
@@ -857,15 +854,55 @@ mod tests {
     }
 
     #[test]
-    fn not_modified_is_an_empty_list_and_disabled_is_an_error() {
+    fn a_disabled_top_peers_answer_names_the_setting() {
+        let error = top_peers_from(tl::enums::contacts::TopPeers::Disabled, 5)
+            .expect_err("a switched-off list is reported, not hidden as empty");
+
+        assert!(
+            matches!(error, FrameworkError::TopPeersDisabled),
+            "a switched-off feature is its own answer, not a parse failure: {error:?}"
+        );
+    }
+
+    #[test]
+    fn the_disabled_sentence_does_not_mention_parsing() {
+        let sentence = FrameworkError::TopPeersDisabled.to_string();
+
+        assert_eq!(
+            sentence,
+            "the account has frequent contacts switched off in Telegram's settings"
+        );
+        assert!(
+            !sentence.contains("could not read") && !sentence.contains("response"),
+            "the flash must not blame the answer for the account's setting: {sentence}"
+        );
+    }
+
+    #[test]
+    fn a_peers_answer_still_lists_correspondents() {
+        let answer = top_peers_answer(
+            vec![category(
+                tl::enums::TopPeerCategory::Correspondents,
+                vec![top_peer(7), top_peer(42)],
+            )],
+            vec![
+                user(7, Some("Grace"), None, None, false),
+                user(42, Some("Ada"), None, None, false),
+            ],
+        );
+
+        let ids: Vec<i64> = top_peers_from(answer, 5)
+            .expect("a list")
+            .iter()
+            .map(id_of)
+            .collect();
+        assert_eq!(ids, vec![7, 42]);
+
+        // `NotModified` is still an empty list, not the disabled answer.
         assert!(
             top_peers_from(tl::enums::contacts::TopPeers::NotModified, 5)
                 .expect("not modified is not an error")
                 .is_empty()
-        );
-        assert!(
-            top_peers_from(tl::enums::contacts::TopPeers::Disabled, 5).is_err(),
-            "a list the account does not have is reported, not hidden as empty"
         );
     }
 }
