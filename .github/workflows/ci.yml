@@ -43,7 +43,21 @@ jobs:
       # grammers-backed client is not even compiled. The tests that need a real
       # datacenter skip themselves unless `TELEVIM_TEST_DC` is set.
       - name: test
+        env:
+          # termlens resolves this against the test process's cwd, which for an
+          # integration test is the crate directory; pin it to the workspace.
+          TERMLENS_ARTIFACT_DIR: ${{ github.workspace }}/target/termlens-artifacts
         run: cargo test --all --all-features
+
+      # termlens writes only when an error carries a screen, so a green run
+      # uploads nothing; `warn` is the honest setting, not `error`.
+      - name: upload PTY screens
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: termlens-screens
+          path: target/termlens-artifacts
+          if-no-files-found: warn
 
       # The vendored design model is verified here, and the diff against the
       # OpenDesign project is not: a runner has no such project, so that half
