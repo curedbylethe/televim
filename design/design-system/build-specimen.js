@@ -79,10 +79,13 @@ function sec05() {
 const STATUS_STATES = ['iHello', '<Tab>q', 'kkkkdd', '/tickets<CR>vj', 'iHello<Esc>vhh', '/tickets<CR>'];
 /* the rest of the ranks, second frame: a jump in flight, a failed send, a flash, a cached window, the hint.
    Eleven rows at the two-row spacing do not fit in 24, so the ranks are split across two frames. */
-const STATUS_STATES_REST = ['jjgd', 'jjjj', 'gd', '<cached>', ''];
+const STATUS_STATES_REST = ['jjgd', 'jjjj', 'gd', '<cached>', '', ['gg', 'unreadFar']];
 function statusFrame(states) {
   const g = blank();
-  states.forEach((k, i) => rowCopy(g, i * 3, G(k), H - 1));
+  states.forEach((k, i) => {
+    const [keys, start] = Array.isArray(k) ? k : [k, undefined];
+    rowCopy(g, i * 3, G(keys, start), H - 1);
+  });
   return g;
 }
 const sec06 = () => statusFrame(STATUS_STATES);
