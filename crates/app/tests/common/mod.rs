@@ -7,7 +7,7 @@
 //! starts there and never finds the repository's `.env`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -43,17 +43,71 @@ pub fn sandbox() -> Sandbox {
 
 /// Spawn the `televim` binary with no credentials, 80x24, in `sandbox`.
 pub fn spawn_offline(sandbox: &Sandbox) -> Terminal {
+    spawn(sandbox, None)
+}
+
+/// Spawn the offline binary, which replays `script` once [`Scenario::fire`] runs.
+///
+/// Debug builds only: the release binary has no seam to replay into, and the
+/// tests that need one are ignored there.
+pub fn spawn_offline_with_scenario(sandbox: &Sandbox, script: &str) -> Scenario {
+    let path = sandbox.dir.path().join("scenario.txt");
+    std::fs::write(&path, script).expect("write the scenario script");
+
+    let mut fire = path.clone().into_os_string();
+    fire.push(".fire");
+
+    Scenario {
+        terminal: spawn(sandbox, Some(&path)),
+        fire: PathBuf::from(fire),
+    }
+}
+
+/// A running binary replaying a scenario script.
+pub struct Scenario {
+    terminal: Terminal,
+    fire: PathBuf,
+}
+
+impl Scenario {
+    /// Writes the trigger file: the binary sends every directive, in order.
+    pub fn fire(&self) {
+        std::fs::write(&self.fire, "").expect("write the scenario trigger file");
+    }
+}
+
+impl std::ops::Deref for Scenario {
+    type Target = Terminal;
+
+    fn deref(&self) -> &Terminal {
+        &self.terminal
+    }
+}
+
+impl std::ops::DerefMut for Scenario {
+    fn deref_mut(&mut self) -> &mut Terminal {
+        &mut self.terminal
+    }
+}
+
+/// The one spawn path: `scenario` is the script the binary replays, if any.
+fn spawn(sandbox: &Sandbox, scenario: Option<&Path>) -> Terminal {
     let config = sandbox
         .config
         .to_str()
         .expect("sandbox config path is UTF-8");
-    Terminal::builder()
+    let builder = Terminal::builder()
         .size(80, 24)
         .env_clear()
         .timeout(Duration::from_secs(5))
         .current_dir(sandbox.dir.path())
         .env("TELEVIM_SESSION_PATH", &sandbox.session)
-        .env("TELEVIM_SESSION_PASSPHRASE", PASSPHRASE)
+        .env("TELEVIM_SESSION_PASSPHRASE", PASSPHRASE);
+    let builder = match scenario {
+        Some(path) => builder.env("TELEVIM_SCENARIO", path),
+        None => builder,
+    };
+    builder
         .args(["--config", config])
         .spawn(env!("CARGO_BIN_EXE_televim"))
         .expect("spawn televim in a PTY")

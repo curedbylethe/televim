@@ -37,6 +37,8 @@ use crate::history_store::{
 };
 use crate::media_cache::MediaCache;
 use crate::net;
+#[cfg(debug_assertions)]
+use crate::scenario;
 use domain::message::MediaKind;
 use tui::app::App;
 use tui::state::ui::{GraphicsMode, StickerMode};
@@ -53,6 +55,13 @@ pub(crate) enum AppEvent {
 
     /// Something that happened away from the keyboard.
     Net(net::Event),
+
+    /// A directive replayed from a script, debug builds only.
+    ///
+    /// The PTY tests need a state the network produces — an arrival, a page in
+    /// flight — and an offline run has no network. See [`scenario`].
+    #[cfg(debug_assertions)]
+    Scenario(scenario::Event),
 
     /// A viewer has exited, reported by the thread that waited for it.
     Viewer(ViewerDone),
@@ -700,11 +709,28 @@ fn drain_while_suspended(
     while let Ok(event) = rx.try_recv() {
         match event {
             AppEvent::Net(event) => net::apply(app, network, event),
+            // A replayed directive is the network's answer as far as this is
+            // concerned, so it is applied for the same reason.
+            #[cfg(debug_assertions)]
+            AppEvent::Scenario(event) => apply_scenario(app, network, event),
             input @ AppEvent::Input(_) => held.push_back(input),
             // At most one viewer is in flight, so nothing else waits behind the
             // one that just reported.
             AppEvent::Viewer(_) => {}
         }
+    }
+}
+
+/// Replays one scripted directive through the path the network's would take.
+#[cfg(debug_assertions)]
+fn apply_scenario(app: &mut App, network: &mut net::State, event: scenario::Event) {
+    match event {
+        scenario::Event::Arrival(message) => net::apply(
+            app,
+            network,
+            net::Event::Update(domain::updates::UpdateEvent::NewMessage(message)),
+        ),
+        scenario::Event::Fetch(direction) => app.begin_fetch(direction),
     }
 }
 
@@ -811,6 +837,10 @@ async fn event_loop(
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let mut viewers = Viewers::default();
     spawn_reader(tx.clone(), viewers.gate.clone());
+    // Only in a debug build, and only when `TELEVIM_SCENARIO` names a script:
+    // the PTY tests replay the states an offline run cannot reach.
+    #[cfg(debug_assertions)]
+    scenario::spawn(tx.clone());
 
     // Holds the configuration and this channel, because a sign-out has to rebuild
     // the client and `apply` cannot be handed either.
@@ -880,6 +910,10 @@ async fn event_loop(
             Ok(Some(AppEvent::Input(Event::FocusLost))) => focus_changed(&mut app, keys, false)?,
             Ok(Some(AppEvent::Input(_))) | Err(_) => {}
             Ok(Some(AppEvent::Net(event))) => net::apply(&mut app, &mut network, event),
+            // The same doors the network's answers go through: an arrival walks
+            // the update path, and a fetch is the screen's own in-flight mark.
+            #[cfg(debug_assertions)]
+            Ok(Some(AppEvent::Scenario(event))) => apply_scenario(&mut app, &mut network, event),
             Ok(Some(AppEvent::Viewer(done))) => {
                 viewers.finish(&mut TuiViewer { terminal, keys }, &mut app, &done)?;
                 drain_while_suspended(&mut rx, &mut app, &mut network, &mut held);
