@@ -241,7 +241,12 @@ fn record_placements(app: &App, body: Rect, offset: usize, pictures: &[Pending])
 /// `width` is the panel's own width, because the title decides for itself whether
 /// the note fits: see [`title_note_fits`].
 fn conversation_title(app: &App, width: u16) -> Line<'static> {
-    let notes = format!("{}{}", search_note(app), selection_note(app));
+    let notes = format!(
+        "{}{}{}",
+        count_note(app),
+        search_note(app),
+        selection_note(app)
+    );
     let total = app.conversation.conversation.window.len();
     let count = if total == 0 {
         String::new()
@@ -313,6 +318,16 @@ fn presence_note(app: &App) -> Option<String> {
     let peer = app.conversation.conversation.window.chat_id;
     let words = crate::presence::wording(app.peer_presence(peer)?, app.now(), app.offset())?;
     Some(format!(" · {words}"))
+}
+
+/// What the title says about a numeric prefix, while it is being typed.
+///
+/// A bare count, like the selection's: the motion has not read it yet, so the
+/// title cannot say what it will count, and the next key may clear it.
+fn count_note(app: &App) -> String {
+    app.pending
+        .count()
+        .map_or_else(String::new, |n| format!(" · {n}"))
 }
 
 /// What the title says about a search, if one is running.
@@ -4200,6 +4215,38 @@ mod tests {
         assert!(
             row(&screen, 0).contains("1 match(es)"),
             "the title carries what the search found: {}",
+            row(&screen, 0)
+        );
+    }
+
+    #[test]
+    fn the_pending_count_is_in_the_panel_title_while_it_is_typed() {
+        let mut app = App::mock();
+        app.pending.push_count(2);
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            row(&screen, 0).contains("· 2"),
+            "the title carries the count being typed: {}",
+            row(&screen, 0)
+        );
+        assert!(
+            row(&screen, 0).contains("Conversation ("),
+            "and the cursor/total it follows: {}",
+            row(&screen, 0)
+        );
+    }
+
+    #[test]
+    fn a_consumed_count_leaves_the_title() {
+        let mut app = App::mock();
+        app.pending.push_count(2);
+        app.pending.set_count(None);
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            !row(&screen, 0).contains("· 2"),
+            "a count that went away leaves no note: {}",
             row(&screen, 0)
         );
     }
