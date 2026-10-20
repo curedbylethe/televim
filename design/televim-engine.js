@@ -1802,6 +1802,13 @@
       const full = qp + m.text, mask = new Array(full.length).fill(false);
       if (q) { const lt = m.text.toLowerCase(); for (let i = lt.indexOf(q); i >= 0; i = lt.indexOf(q, i + q.length)) for (let j = 0; j < q.length; j++) mask[qp.length + i + j] = true; }
       const first = rows.length;
+      /* the last row of a message carries its own status; the last row of a group also carries
+         the peer's read state (outgoing only, never beside a status) and the group's time. The
+         note's width is known before the text is broken, because the text is broken around it. */
+      const rcpt = tail && m.from === 'you' && !m.status && m.rcpt ? m.rcpt : '';
+      const suf = m.status ? '[' + m.status + ']' : rcpt ? '[' + rcpt + ']' : '';
+      const tm = tail && m.at != null ? clock(m.at) : '';
+      const need = cells(suf) + (suf && tm ? 1 : 0) + cells(tm);
       /* Which way this message reads is one answer for the whole message, asked
          across every paragraph of it: a message that opens with `---` and then
          says `שלום` is right-to-left, and the neutrals at the top cannot outvote
@@ -1815,23 +1822,14 @@
            it — so the cursor, selection, time and status rules below read them like
            any rows of the message. */
         m.art.forEach((line, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full: line, qlen: 0, mask: [], base, s: 0, e: line.length, from: m.from, ph: false }));
-      } else wrap(full, CW, CW, false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, base, s: r.s, e: r.e, from: m.from, ph: !!m.ph }));
-      /* the last row of a message carries its own status; the last row of a group also carries
-         the peer's read state (outgoing only, never beside a status) and the group's time */
-      const rcpt = tail && m.from === 'you' && !m.status && m.rcpt ? m.rcpt : '';
-      const suf = m.status ? '[' + m.status + ']' : rcpt ? '[' + rcpt + ']' : '';
-      const tm = tail && m.at != null ? clock(m.at) : '';
+      } else wrap(full, CW, Math.max(1, CW - need), false).forEach((r, i) => rows.push({ mi, first: i === 0, lab: i === 0 && head, full, qlen: qp.length, mask, base, s: r.s, e: r.e, from: m.from, ph: !!m.ph }));
       if (suf || tm) {
         const sufA = m.status && m.status.startsWith('failed') ? 't' : 'd', last = rows[rows.length - 1];
-        const need = cells(suf) + (suf && tm ? 1 : 0) + cells(tm);
-        /* The trailing note goes on the last row when the text has left the room
-           for it, and that row is measured in cells — the note and the text are
-           drawn into the same 45 columns. The extra column is the engine's own
-           margin over `wrap_decorated`, which reserves the note's width before the
-           text is broken rather than after; it is kept because every row in this
-           model was laid out with it, and dropping it moves notes onto rows the
-           committed specimen shows elsewhere. */
-        if (cells(last.full.slice(last.s, last.e)) + 1 + need <= CW) Object.assign(last, { suf, sufA, tm });
+        /* The note goes on the last row when the text and the note fit the row's own columns,
+           measured in cells. The breaking above already left the note's width room on every
+           row after the first, so the last of those fits by construction; the first row, and
+           an inline sticker's rows, are checked here. Exactly as `wrap_decorated` does it. */
+        if (cells(last.full.slice(last.s, last.e)) + need <= CW) Object.assign(last, { suf, sufA, tm });
         else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, suf, sufA, tm });
       }
       rows[first].hasStart = true;
