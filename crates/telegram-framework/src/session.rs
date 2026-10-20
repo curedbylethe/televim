@@ -2079,6 +2079,30 @@ mod tests {
         assert!(session.peers.is_empty());
     }
 
+    /// Every single-byte corruption of a snapshot has an answer: a parsed
+    /// snapshot, or `Corrupt`. None of them is a panic — the property the
+    /// fuzzer in `fuzz/` searches for, here on a fixed corpus and on stable.
+    /// The buffer is flipped in place, because 500 bytes times three masks is
+    /// 1500 decodes and a copy per iteration would dwarf them.
+    #[test]
+    fn every_corrupted_snapshot_is_an_answer_rather_than_a_panic() {
+        let mut bytes = sample_session().to_bytes().expect("serialises");
+        for index in 0..bytes.len() {
+            let original = bytes[index];
+            for mask in [0x01, 0x80, 0xff] {
+                bytes[index] = original ^ mask;
+                if let Ok(data) = SessionData::from_bytes(&bytes) {
+                    assert_eq!(data.version, SessionData::VERSION, "byte {index}");
+                }
+            }
+            bytes[index] = original;
+        }
+        assert!(
+            SessionData::from_bytes(&bytes).is_ok(),
+            "the snapshot is restored in place"
+        );
+    }
+
     #[test]
     fn auth_key_debug_never_leaks_key_material() {
         let key = AuthKey::from_bytes([0xab; AuthKey::LEN]);

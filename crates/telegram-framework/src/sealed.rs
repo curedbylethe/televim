@@ -582,6 +582,36 @@ mod tests {
         }
     }
 
+    /// Every single-byte corruption of an envelope has an answer: "not an
+    /// envelope", an opened plaintext, or a load error — never a panic. Only a
+    /// magic byte can turn it into legacy plaintext for the caller to reject.
+    /// The buffer is flipped in place; the fixed-corpus twin of `fuzz/`.
+    #[test]
+    fn every_corrupted_envelope_is_an_answer_rather_than_a_panic() {
+        let mut bytes = seal(PLAINTEXT, &FixedProvider(1)).expect("seal");
+        for index in 0..bytes.len() {
+            let original = bytes[index];
+            for mask in [0x01, 0x80, 0xff] {
+                bytes[index] = original ^ mask;
+                match open(&bytes, &FixedProvider(1)) {
+                    Ok(None) => assert!(index < MAGIC.len(), "byte {index} stopped being sealed"),
+                    Ok(Some(_)) => panic!("byte {index} opened"),
+                    Err(SessionError::Load(_)) => {}
+                    Err(error) => panic!("byte {index}: unexpected {error:?}"),
+                }
+            }
+            bytes[index] = original;
+        }
+        assert_eq!(
+            open(&bytes, &FixedProvider(1))
+                .expect("restored")
+                .as_deref()
+                .map(Vec::as_slice),
+            Some(PLAINTEXT),
+            "the envelope is restored in place"
+        );
+    }
+
     #[test]
     fn wrong_key_is_load_not_corrupt() {
         let sealed = seal(PLAINTEXT, &FixedProvider(1)).expect("seal");
