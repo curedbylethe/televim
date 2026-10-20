@@ -229,14 +229,18 @@ Real, and named so they are not mistaken for oversights:
   character motions) is measured as a workload with no candidate. So a claim that a
   candidate should replace production code has no full-mode result behind it until
   that change is made. `make measure` still measures one tree and does not compare.
-- **Three PTY tests are deferred, `#[ignore]`d with reasons.** In
-  `app/tests/tui_e2e.rs`: AC5 `an_arrival_scrolls_a_pinned_view`, AC6
-  `an_arrival_leaves_a_scrolled_back_view_alone`, and AC7
-  `a_fetch_in_flight_is_shown_at_the_edge_it_is_coming_from`. The warm-start cache
-  loads once, and arrivals and fetches enter only as network events, so no offline
-  run can produce them, and no seam injects them. Their bodies are empty. The
-  follow-up is a seam (an issue is to be filed). The other PTY tests (launch,
-  seeded chat list, INSERT typing, `:q`, scrolling) run in the normal gate.
+- **The arrival and in-flight-fetch PTY cases are covered only in a debug
+  build.** In `app/tests/tui_e2e.rs`, `an_arrival_scrolls_a_pinned_view`,
+  `an_arrival_leaves_a_scrolled_back_view_alone` and
+  `a_fetch_in_flight_is_shown_at_the_edge_it_is_coming_from` replay their state
+  through a scenario file: `TELEVIM_SCENARIO` names a script, the test writes
+  `<path>.fire`, and the binary sends each directive through its event channel.
+  That seam is `#[cfg(debug_assertions)]`, so the shipped binary carries neither
+  the module nor the variable, and `cargo test --release` ignores those three
+  cases with that reason. The normal gate and CI use a debug build, so the
+  coverage exists there; a release-profile PTY run is the half that does not.
+  The other PTY tests (launch, seeded chat list, INSERT typing, `:q`, scrolling)
+  run in both.
 - **A peer with no bare identifier is skipped**, and the skip is unreachable
   today. See [`decisions.md`](./decisions.md) for why, and which test guards it.
 
