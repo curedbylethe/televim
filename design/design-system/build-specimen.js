@@ -137,6 +137,7 @@ const CARD_FRAMES = [
   ['profile-self-card-frame', 'self card', 'S', 'profile card, self card', 'Profile · you'],
   ['profile-add-account-frame', 'add account refuses', 'SGkd', 'profile card, add account refuses', 'add account refuses'],
   ['profile-logout-the-confirmation-frame', 'logout: the confirmation', 'SGd', 'profile card, logout: the confirmation', 'logout raises the confirmation'],
+  ['profile-logged-out-frame', 'logout: signed out', 'SGdy', 'profile card, logout: signed out', 'y signs out: the sign-in field comes back'],
   ['profile-esc-ladder-frame', 'self card, mid Esc ladder', 'S:<Esc><Esc>', 'profile card, self card mid Esc ladder', "Esc Esc: back on the card"],
   ['profile-esc-closes-frame', 'Esc Esc Esc: the card closes', 'S:<Esc><Esc><Esc>', 'profile card, Esc Esc Esc closes the card', 'Esc Esc Esc: the card closes'],
   ['profile-contact-card-frame', 'contact card', 'A', 'profile card, contact card', 'Profile · a person'],
