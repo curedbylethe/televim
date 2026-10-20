@@ -21,6 +21,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project="${OPEN_DESIGN_PROJECT:-$HOME/Library/Application Support/Open Design/namespaces/release-stable/data/projects/televim-app}"
 
 # repo-relative path : project-relative path
+#
+# design/scripts/check-model.js is deliberately absent. It is repository-only: the
+# copy beside this script is the one that runs in `make design-check` and carries
+# the invariants (24x80 cells, the HINT_W budget, the RTL permutations), and a
+# project copy is what a design run once replaced with a scenario script that
+# dropped them. A one-sided file cannot live in a two-sided map — the precondition
+# below treats a missing side as an error — so `check` guards it instead.
 PAIRS=(
   "DESIGN.md:design-system/DESIGN.md"
   "design/index.html:index.html"
@@ -91,6 +98,11 @@ move() {
 
 case "$mode" in
   check)
+    if [ -f "$project/scripts/check-model.js" ]; then
+      die "the project carries scripts/check-model.js, which is repository-only by
+  decision; delete it from the project. The repository copy,
+  design/scripts/check-model.js, is the one that runs."
+    fi
     drifted=0
     for pair in "${PAIRS[@]}"; do
       repo_rel="${pair%%:*}"
