@@ -546,12 +546,12 @@ code.
 | `Loading…` `Loading older…` `Loading newer…` | a fetch in flight | `FetchDirection::label` |
 | `Cached messages — loading the latest…` | a conversation drawn from the local history cache while its newest page is in flight. On the **status line**, not as a row: `Loading…` stands in for messages, and a cached window has messages to show | `REVALIDATING_LABEL` |
 | `Jumping to first unread…` | a jump the window could not answer | `JUMP_LABEL` |
-| `Jumping to the quoted message…` | `gd` on a reply whose target is not loaded: the page around it is in flight | specified here; not yet in the binary |
-| `Jumping back…` `Jumping forward…` | `Ctrl-o` / `Ctrl-i` to a position whose message is no longer loaded | ditto |
+| `Jumping to the quoted message…` | `gd` on a reply whose target is not loaded: the page around it is in flight | `JUMP_REPLY_LABEL` |
+| `Jumping back…` `Jumping forward…` | `Ctrl-o` / `Ctrl-i` to a position whose message is no longer loaded | `JUMP_BACK_LABEL` / `JUMP_FORWARD_LABEL` |
 | `Jumping to <day>…` | a day or date jump (`[N]gg` / `[N]G` / `:date <ISO>`) whose target day is not loaded — `<day>` in the day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`) | `App::jump_label` (falls back to `JUMP_DAY_LABEL` when no clock stands) |
 | `Jumping to the match…` | an `n`/`N` search jump whose match is outside the loaded window (criterion 3): own label, not the first-unread one | `JUMP_MATCH_LABEL` |
-| `Not a reply: gd jumps to the message a reply quotes.` | `gd` on a message with no quote: a refusal, a `flash` | ditto |
-| `That message is no longer available.` | `gd` on a reply whose target the client does not hold at all | ditto |
+| `Not a reply: gd jumps to the message a reply quotes.` | `gd` on a message with no quote: a refusal, a `flash` | `NOT_A_REPLY` |
+| `That message is no longer available.` | `gd` on a reply whose target the client does not hold at all | `JUMP_UNAVAILABLE` |
 | `televim` | the resting status line, when there is nothing to say | `IDLE_STATUS` |
 | `Quit televim? (y/n)` | a screen-wide confirmation | `QUIT_PROMPT` |
 | `Delete your message from both sides? (y/n)` | ditto, naming **which side** | `DELETE_OUTGOING_PROMPT` |
@@ -582,7 +582,7 @@ code.
 | `could not read this profile` | the contact card **when the read failed**; the reason follows, wrapped and dim | `CONTACT_UNAVAILABLE` |
 | `Profile · {name}` | a contact shell's title: the subject is named even when there are no rows | `cardTitle` |
 | `Set the credentials again with :signin.` | where to put the credentials back | `SET_CREDENTIALS` |
-| `signed out` | the status the screen rests on after the reader signs out, until the sign-in field arrives | the screen after a sign-out |
+| `signed out` | the status the screen rests on after the reader signs out, until the sign-in field arrives | `apply_logged_out` |
 | `Sign out and forget this session? (y/n)` | a screen-wide confirmation, raised by the `logout` row; `y` signs out | the card |
 | `not yet: this build cannot add an account` | the `add account` row's refusal | ditto |
 | `Not yours: a contact card has no row you can act on.` | `d` on a contact's card | ditto |
@@ -1172,9 +1172,10 @@ regressing.
     `session_passphrase`, if the old passphrase was set there, or the next launch will not
     open the file. Failure: the status reads `Session passphrase not changed: the file was left
     as it was.` and the box names the reason. A locked session refuses with `the session is
-    locked: :unlock first`. `:passphrase` and `:unlock` are proposed here and not yet in the
-    shipped command set. What would catch it regressing: the change is never reached without
-    the y/n row, and no failure path writes the file.
+    locked: :unlock first`. `:passphrase` and `:unlock` are in the shipped command set:
+    `run_command` dispatches them to `run_passphrase` and `run_unlock`. What would
+    catch it regressing: the change is never reached without the y/n row, and no
+    failure path writes the file.
 
 ## Profile
 
