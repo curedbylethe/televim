@@ -179,6 +179,7 @@ impl ConversationWindow {
     /// what Telegram returns, so in practice nothing is dropped, but a caller
     /// that hands over a whole conversation should not be able to blow the
     /// budget by doing so.
+    ///
     pub fn replace(&mut self, messages: impl IntoIterator<Item = Message>) {
         let mut page: Vec<Message> = messages
             .into_iter()
@@ -1556,5 +1557,158 @@ mod tests {
         }
 
         assert_eq!(view.window.len(), CONVERSATION_WINDOW);
+    }
+
+    // ---- properties ----------------------------------------------------
+    //
+    // Generated ranges stay small so a shrinking failure reads like a test:
+    // identifiers in `0..600`, pages of at most a couple of hundred. What the
+    // sequences buy is the combinations the deterministic tests cannot write
+    // out — a page straddling the cap, a replacement with a repeated id, a
+    // push in either direction at an arbitrary window size.
+
+    use crate::chat::{Chat, ChatKind};
+    use crate::updates::{ChatList, MESSAGE_WINDOW};
+    use proptest::prelude::*;
+
+    /// Operations over the window, in every shape its public surface offers.
+    #[derive(Debug, Clone)]
+    enum Op {
+        Replace(Vec<i64>),
+        Older(Vec<i64>),
+        Newer(Vec<i64>),
+        Arrival(i64),
+    }
+
+    fn an_id() -> impl Strategy<Value = i64> {
+        0i64..600
+    }
+
+    fn an_op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            // Wide enough that the cap is reached and a duplicate id is drawn.
+            prop::collection::vec(an_id(), 0..250).prop_map(Op::Replace),
+            prop::collection::vec(an_id(), 0..8).prop_map(Op::Older),
+            prop::collection::vec(an_id(), 0..8).prop_map(Op::Newer),
+            an_id().prop_map(Op::Arrival),
+        ]
+    }
+
+    fn apply(window: &mut ConversationWindow, op: &Op) {
+        match op {
+            Op::Replace(ids) => window.replace(page(42, ids)),
+            Op::Older(ids) => {
+                window.push_front(page(42, ids));
+            }
+            Op::Newer(ids) => {
+                window.push_back(page(42, ids));
+            }
+            Op::Arrival(id) => {
+                let _ = window.apply_event(&arrival(42, *id, "arrived"));
+            }
+        }
+    }
+
+    fn op_messages(op: &Op) -> Vec<Message> {
+        match op {
+            Op::Replace(ids) | Op::Older(ids) | Op::Newer(ids) => page(42, ids),
+            Op::Arrival(id) => vec![message(42, *id, "arrived")],
+        }
+    }
+
+    /// The one conversation a `ChatList` needs for an arrival to be applied.
+    fn held_chat() -> Chat {
+        Chat {
+            read_outbox_max_id: None,
+            id: 42,
+            title: "chat-42".to_owned(),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            presence: None,
+            deleted: false,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn the_window_never_outgrows_its_cap(ops in prop::collection::vec(an_op(), 0..12)) {
+            let mut window = ConversationWindow::new(42);
+
+            for op in &ops {
+                apply(&mut window, op);
+                prop_assert!(
+                    window.len() <= CONVERSATION_WINDOW,
+                    "{} rows after {:?}",
+                    window.len(),
+                    op
+                );
+            }
+        }
+
+        #[test]
+        fn the_chat_list_never_outgrows_its_cap(ops in prop::collection::vec(an_op(), 0..12)) {
+            let mut list = ChatList::with_chats(vec![held_chat()]);
+
+            for op in &ops {
+                for message in op_messages(op) {
+                    let changed = list.apply_update(UpdateEvent::NewMessage(message));
+                    prop_assert!(changed, "an arrival for a conversation the list holds");
+                    prop_assert!(
+                        list.messages.len() <= MESSAGE_WINDOW,
+                        "{} messages after {:?}",
+                        list.messages.len(),
+                        op
+                    );
+                }
+            }
+        }
+
+        /// A page whose ids are on the correct side of the seam: older than the
+        /// oldest, newer than the newest. The code sorts within a page rather
+        /// than across the seam, so the other side is deliberately not asserted.
+        #[test]
+        fn pages_from_the_right_side_leave_the_window_ordered(
+            seed in prop::collection::hash_set(60i64..600, 1..12),
+            older in prop::collection::hash_set(1i64..50, 0..8),
+            newer in prop::collection::hash_set(1i64..50, 0..8),
+        ) {
+            let mut seed: Vec<i64> = seed.into_iter().collect();
+            seed.sort_unstable();
+
+            let mut window = ConversationWindow::new(42);
+            window.replace(page(42, &seed));
+
+            let oldest = seed[0];
+            let newest = *seed.last().expect("a seed is never empty");
+            let older: Vec<i64> = older.into_iter().map(|delta| oldest - delta).collect();
+            let newer: Vec<i64> = newer.into_iter().map(|delta| newest + delta).collect();
+
+            window.push_front(page(42, &older));
+            window.push_back(page(42, &newer));
+
+            let ordered = ids(&window);
+            prop_assert!(
+                ordered.windows(2).all(|pair| pair[0] < pair[1]),
+                "out of order: {:?}",
+                ordered
+            );
+
+            for (index, id) in ordered.iter().enumerate() {
+                prop_assert_eq!(
+                    window.position_of(*id),
+                    Some(index),
+                    "lookup disagrees with the row {} holds",
+                    index
+                );
+                prop_assert_eq!(window.get(index).map(|message| message.id), Some(*id));
+            }
+
+            prop_assert_eq!(window.oldest_id(), ordered.first().copied());
+            prop_assert_eq!(window.newest_id(), ordered.last().copied());
+        }
     }
 }
