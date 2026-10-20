@@ -11,6 +11,8 @@ mod history_store;
 mod media_cache;
 mod net;
 mod runtime;
+#[cfg(debug_assertions)]
+mod scenario;
 
 use anyhow::Result;
 use clap::Parser;
