@@ -425,8 +425,7 @@
   const SIGNED_OUT_REASON = 'no session: the OS credential store holds no entry for televim, and there is no plaintext file at ~/.local/state/televim/session';
   const SET_CREDENTIALS = 'Set the credentials again with :signin.';
   const SIGNED_OUT = 'signed out';
-  const READING = 'reading the session…';
-  const READING_NOTE = 'Nothing has been read yet, so nothing is known either way.';
+  const READING = 'reading the account…';
   /* a contact's shell. Its problem is never credentials, so it names no way back into :signin. */
   const CONTACT_READING = 'reading their profile…';
   const CONTACT_UNAVAILABLE = 'could not read this profile';
@@ -672,7 +671,7 @@
       vis: null, search: null, newchat: null, fwd: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
       sset: 0, signin: null, card: null, count: 0,
       bidi: BIDI_MODES.includes(bidi) ? bidi : 'terminal',
-      profile: { name: 'Noor Haddad', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
+      profile: { name: 'Noor Haddad', id: '1480276305', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
     };
     if (view === 'signin') beginSignin(s);
     /* launch with no key: the cached list stays on show, and the passphrase is asked over the right column */
@@ -1933,16 +1932,14 @@
     /* no rows at all until the profile is read: the shell sentence replaces the card */
     if (C.sub === 'personReading' || C.sub === 'personFailed') return [];
     if (C.sub === 'self') {
-      const P = s.profile;
-      return [
-        { kind: 'value', label: 'name', value: P.name },
-        { kind: 'value', label: 'username', value: '@' + P.username },
-        { kind: 'value', label: 'phone', value: P.phone },
-        { kind: 'value', label: 'bio', value: P.bio },
-        { kind: 'value', label: 'birthday', value: P.birthday },
-        { kind: 'action', label: 'add account', act: 'add' },
-        { kind: 'action', label: 'logout', act: 'logout' }
-      ];
+      const P = s.profile, who = [P.username && '@' + P.username, P.phone].filter(Boolean).join(' · ');
+      const rows = [{ kind: 'value', label: 'name', value: P.name }, { kind: 'value', label: 'username', value: who || 'not set' }];
+      if (P.bio) rows.push({ kind: 'value', label: 'bio', value: P.bio });
+      if (P.birthday) rows.push({ kind: 'value', label: 'birthday', value: P.birthday });
+      /* the session sits in the OS keyring; the encrypted file is the passphrase scenes' fallback */
+      rows.push({ kind: 'value', label: 'id', value: P.id }, { kind: 'value', label: 'session', value: 'OS keyring' });
+      rows.push({ kind: 'action', label: 'add account', act: 'add' }, { kind: 'action', label: 'logout', act: 'logout' });
+      return rows;
     }
     const c = s.chats[C.chat];
     if (!c) return [];
@@ -1971,7 +1968,8 @@
   }
   function cardTitle(s) {
     const C = s.card;
-    if (C.sub === 'signedout' || C.sub === 'reading') return 'Profile';
+    /* the subject is named in every state; the count only when rows exist */
+    if (C.sub === 'signedout' || C.sub === 'reading') return 'Profile · you';
     if (C.sub === 'personReading' || C.sub === 'personFailed') return 'Profile · ' + (s.chats[C.chat] ? s.chats[C.chat].name : '');
     const rows = cardRows(s), nav = navRows(rows);
     let t = C.sub === 'self' ? 'Profile · you' : 'Profile · ' + (s.chats[C.chat] ? s.chats[C.chat].name : '');
@@ -1997,7 +1995,7 @@
     const w = RW, C = s.card;
     box(g, x0, 0, w, h, cardTitle(s), s.line ? false : s.focus === 'profile');
     if (C.sub === 'signedout') { shellLines(g, x0, h, NOT_SIGNED_IN, SIGNED_OUT_REASON, SET_CREDENTIALS); return; }
-    if (C.sub === 'reading') { shellLines(g, x0, h, READING, READING_NOTE, ''); return; }
+    if (C.sub === 'reading') { shellLines(g, x0, h, READING, '', '', 'd'); return; }
     if (C.sub === 'personReading') { shellLines(g, x0, h, CONTACT_READING, '', '', 'd'); return; }
     if (C.sub === 'personFailed') { shellLines(g, x0, h, CONTACT_UNAVAILABLE, CONTACT_FAILED_REASON, ''); return; }
     const { rows, nav, ri } = cardAt(s);

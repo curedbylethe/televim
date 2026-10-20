@@ -564,11 +564,11 @@ code.
 | `/query — no candidates (search failed: reason)` | the request itself failed | `newChatStatus` |
 | `/query — N candidates (search failed: reason)` | the request failed with some candidates | `newChatStatus` |
 | `new` `chat` | a result row's standing: no conversation yet, or one to focus | `newChatHits` |
-| `Profile · you` `Profile · Ada Lovelace` | a card's title; the `(n/m)` is the row the cursor is on | `cardTitle` |
-| `Profile` | a card with no subject: not signed in, or nothing read yet | `cardTitle` |
+| `Profile · you` `Profile · Ada Lovelace` | a card's title; the `(n/m)` is the row the cursor is on, counting drawn rows (the reserved colour slot is not one) and appearing only when rows exist | `cardTitle` |
+| `Profile · you` | the account's two shells too, signed out and nothing read yet: the subject is named in every state, with no count | `cardTitle` |
 | `· name        Noor Haddad` | a card row: the cue, the label, the value | `CUE` |
 | `not signed in` | the shell card's first line, then the reason, wrapped | `NOT_SIGNED_IN` |
-| `reading the session…` | the shell card **before anything has been read**; it does not borrow the other one's wording | `READING` |
+| `reading the account…` | the account's shell **before anything has been read**: one dim line, and nothing more; it does not borrow the other one's wording | `READING` |
 | `reading their profile…` | the contact card **before their profile has been read**: one dim line, and no rows | `CONTACT_READING` |
 | `could not read this profile` | the contact card **when the read failed**; the reason follows, wrapped and dim | `CONTACT_UNAVAILABLE` |
 | `Profile · {name}` | a contact shell's title: the subject is named even when there are no rows | `cardTitle` |
@@ -1215,15 +1215,18 @@ inside a row and cannot be seen is one nobody knows.
 
 ### The self card
 
-Rows, in order: `name`; `username`; `phone`; `bio`; `birthday`; then
-`add account`, dim, which refuses, and `logout`, which signs out. No `id` and
-no `session`: the card is what the reader came to read, and both were the
-program's bookkeeping
-rather than the person's.
+Rows, in order: `name`; `username`; `bio`; `birthday`; `id`; `session`; then
+`add account`, dim, which refuses, and `logout`, which signs out.
 
-- `username` and `phone` each take their own row, so the phone's own key
-  (`phone`) names it, rather than the phone sharing `username`'s row and
-  borrowing its label.
+- `username` is the row's label, as in the binary's card; its value is the joined
+  identity, `@username` and the phone number with ` · `
+  (`@noorh · +44 7700 900142`). The identity is one thing and one row, so the handle
+  and the phone share this one row and there is no `phone` row. With neither, it
+  reads `not set`. A half-filled identity shows the half it has.
+- `bio` and `birthday` are drawn only when present.
+- `id` is the account's numeric id, written after the label.
+- `session` says where the session is kept: `OS keyring`. Had the model placed it
+  in a file it would read `encrypted file <path>`.
 - `birthday` is written as the month, day and year, then the age in
   parentheses: `Oct 19, 2001 (24 years old)`. **Without the year when there is
   no year** — `10 December` — because a year is a disclosure the account was
@@ -1372,15 +1375,15 @@ escape hatch**, and it forwards straight to the protocol layer.
 
 Before either card there is the state a reader on a machine with no credentials
 sees, and it is the easiest one to get wrong: an empty panel is indistinguishable
-from a widget that has gone wrong. So the panel is never empty. `Profile` and
-then, on its own line, `not signed in`, then the reason — wrapped, never clipped,
+from a widget that has gone wrong. So the panel is never empty. Its title is
+`Profile · you`, and then, on its own line, `not signed in`, then the reason — wrapped, never clipped,
 because a bring-up failure carries a chain and a reason cut at the edge is a
 reason the reader cannot act on — then a line saying where to set the credentials:
 `Set the credentials again with :signin.`
 
 There is a third state, **before anything has been read**, and it must not borrow
-the other one's wording: `reading the session…`, then `Nothing has been read yet,
-so nothing is known either way.` It does not say the session is missing, because
+the other one's wording: the title is again `Profile · you`, and the body is one
+dim line, `reading the account…`. It does not say the session is missing, because
 nothing has established that yet. Its hint names `q` only, and the signed-out
 card's hint names `::signin` and `q`: the shell cards are the whole program, so
 there is nothing behind them to go back to and `Esc` has nowhere to land.
@@ -1391,7 +1394,8 @@ is a card with a way back: the chat list is still there behind it and `Esc`
 lands on a row. Only the account's shells, which have no list behind them,
 borrow the `q` hint. And because a contact's card can have no rows at all, its
 title takes the subject-name form: the subject is named even, especially, when
-there is nothing else to name.
+there is nothing else to name. The account's shells take it too: the title is
+`Profile · you` with no count, because the count appears only when rows exist.
 
 ## Principles
 
