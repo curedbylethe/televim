@@ -539,6 +539,7 @@ code.
 | `[read]` | an outgoing group the peer has read; same row, same place | ditto |
 | `21:04` | a group's time, `HH:MM`, once, on the group's **last** row, right-aligned after any state | `rows::trailing_note` |
 | `──── Today ────` | a day separator: a rule the width of the text with the day set into it | `rows::day_of` |
+| `· 2` | the count a reader is typing before a day walk (`2gg`, `2G`): a bare number straight after the cursor and total, in `text`, with no noun because the next key may clear it | `dayCount` |
 | `· 2 selected` | joined onto a panel title by `·` | `selection_note` |
 | `· 3 match(es)` | a search's count, in the title | `search_note` |
 | `· typing` | the peer is typing in the open conversation: a note on the conversation's title, in `text-dim`; the one title note that is not a count | `typing_note` |
@@ -890,6 +891,18 @@ harder to aim and un-Vim-like.
   every other status-line sentence (`text`), at rank 6. `<where>` uses the
   day-separator vocabulary, so the sentences are things like
   `Jumping to Sep 26, 2026…`, `Jumping to Yesterday…`, `Jumping to Today…`.
+- *The typed count is visible.* While a count is being typed it sits on the
+  conversation's title as `Conversation (n/m) · N`, straight after the cursor and
+  total and before the selection and search notes. It is a bare number in `text`,
+  with no noun, because the next key may clear it, and it is not a status-line
+  rank: the status line keeps its ranks. A digit extends it, and a `0` only when a
+  count is already open. The first `g` only arms the pending `gg`, so `2gg` keeps
+  the count through both presses. `gg` and `G` read it, and any other key clears
+  it. The count is the conversation's own, apart from the card's row count. The
+  design model holds no day-boundary data, so it shows the armed count and clears
+  it as those keys read it, and does not walk; the `Jumping to <day>…` label above
+  is unchanged and is for a day that is not loaded. The `grouping` scene has one
+  frame for it, `2` typed in Grace Hopper's chat.
 - *Scenes.* `jump` covers the fetch-in-flight shape; the day/date variants add
   nothing new to draw (same page, same cursor position on the first message of a
   day), so no new frames are required — the label sentence is the new thing, and it
