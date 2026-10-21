@@ -15,6 +15,7 @@ pub mod global_search;
 pub mod history;
 pub mod message;
 pub mod presence;
+pub mod report;
 pub mod search;
 pub mod selection;
 pub mod session;

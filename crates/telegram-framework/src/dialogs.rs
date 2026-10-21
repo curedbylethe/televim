@@ -195,6 +195,48 @@ impl Client {
         Ok(())
     }
 
+    /// Fetches the conversations in the archive folder.
+    ///
+    /// `grammers`' dialog iterator hard-codes `folder_id: None`, so the archive
+    /// is unreachable through it. This asks `messages.getDialogs` directly and
+    /// maps the same primitives `fetch_dialogs` does. The session is flushed
+    /// because the answer is the only place some archived peers disclose their
+    /// access hashes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::Request`] when Telegram refuses or a page
+    /// cannot be decoded.
+    pub async fn fetch_archived_dialogs(&self) -> Result<Vec<DialogInfo>, FrameworkError> {
+        let request = archived_dialogs_request();
+        let response = self.invoke(&request).await?;
+
+        let (conversations, peers) = archived_from(response);
+
+        for peer in peers {
+            self.remember_peer(peer).await;
+        }
+        self.flush_session();
+
+        tracing::debug!(conversations = conversations.len(), "fetched the archive");
+
+        Ok(conversations)
+    }
+
+    /// Moves a conversation into or out of the archive folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] when the conversation is not in
+    /// the session's peer cache, and the request's error when Telegram refuses.
+    pub async fn set_archived(&self, peer_id: i64, archived: bool) -> Result<(), FrameworkError> {
+        let peer = self
+            .peer_ref(peer_id)
+            .ok_or(FrameworkError::UnknownPeer(peer_id))?;
+        self.invoke(&archive_request(peer, archived)).await?;
+        Ok(())
+    }
+
     /// Marks a conversation read on the account's own side, up to `max_id`.
     ///
     /// Sends `messages.readHistory`. Telegram marks every message of the
@@ -216,6 +258,180 @@ impl Client {
         self.invoke(&read_history_request(peer, max_id)).await?;
         Ok(())
     }
+}
+
+/// Telegram's archive folder. A convention, not a TL constant.
+const ARCHIVE_FOLDER_ID: i32 = 1;
+
+/// The full archive page, with no exclusions.
+fn archived_dialogs_request() -> tl::functions::messages::GetDialogs {
+    tl::functions::messages::GetDialogs {
+        exclude_pinned: false,
+        folder_id: Some(ARCHIVE_FOLDER_ID),
+        offset_date: 0,
+        offset_id: 0,
+        offset_peer: tl::enums::InputPeer::Empty,
+        limit: 100,
+        hash: 0,
+    }
+}
+
+/// The request that puts one conversation in a folder.
+fn archive_request(peer: PeerRef, archived: bool) -> tl::functions::folders::EditPeerFolders {
+    tl::functions::folders::EditPeerFolders {
+        folder_peers: vec![tl::enums::InputFolderPeer::Peer(
+            tl::types::InputFolderPeer {
+                peer: peer.into(),
+                folder_id: if archived { ARCHIVE_FOLDER_ID } else { 0 },
+            },
+        )],
+    }
+}
+
+/// Maps a raw archive page to the primitive conversations and the peers it
+/// disclosed.
+fn archived_from(
+    response: tl::enums::messages::Dialogs,
+) -> (
+    Vec<DialogInfo>,
+    Vec<grammers_client::session::types::PeerInfo>,
+) {
+    use grammers_client::session::types::PeerInfo;
+
+    let (dialogs, messages, users, chats) = match response {
+        tl::enums::messages::Dialogs::Dialogs(page) => {
+            (page.dialogs, page.messages, page.users, page.chats)
+        }
+        tl::enums::messages::Dialogs::Slice(page) => {
+            (page.dialogs, page.messages, page.users, page.chats)
+        }
+        tl::enums::messages::Dialogs::NotModified(_) => return (Vec::new(), Vec::new()),
+    };
+
+    let mut conversations: Vec<DialogInfo> = dialogs
+        .iter()
+        .filter_map(|dialog| {
+            let tl::enums::Dialog::Dialog(raw) = dialog else {
+                return None;
+            };
+            let peer_id = raw_peer_id(&raw.peer);
+            let last = raw_last(raw.top_message, &messages);
+
+            Some(DialogInfo {
+                peer_id,
+                title: raw_title(peer_id, &raw.peer, &users, &chats),
+                kind: raw_kind(&raw.peer, &users),
+                deleted: raw_deleted(&raw.peer, &users),
+                unread_count: unread_count(raw.unread_count),
+                last_message_id: last.0,
+                last_timestamp: last.1,
+                last_text: last.2,
+                pinned: raw.pinned,
+                read_outbox_max_id: read_outbox_max_id(raw.read_outbox_max_id),
+            })
+        })
+        .collect();
+
+    conversations.sort_by(newest_first);
+
+    let peers = users
+        .iter()
+        .map(PeerInfo::from)
+        .chain(chats.iter().map(PeerInfo::from))
+        .collect();
+
+    (conversations, peers)
+}
+
+/// The bare identifier of a peer on the wire.
+fn raw_peer_id(peer: &tl::enums::Peer) -> i64 {
+    match peer {
+        tl::enums::Peer::User(user) => user.user_id,
+        tl::enums::Peer::Chat(chat) => chat.chat_id,
+        tl::enums::Peer::Channel(channel) => channel.channel_id,
+    }
+}
+
+/// The name a raw peer's user or chat carries.
+fn raw_title(
+    peer_id: i64,
+    peer: &tl::enums::Peer,
+    users: &[tl::enums::User],
+    chats: &[tl::enums::Chat],
+) -> String {
+    match peer {
+        tl::enums::Peer::User(user) => {
+            let Some(tl::enums::User::User(found)) = users
+                .iter()
+                .find(|candidate| candidate.id() == user.user_id)
+            else {
+                return join_title(None, None, None, peer_id);
+            };
+            join_title(
+                found.first_name.as_deref(),
+                found.last_name.as_deref(),
+                found.username.as_deref(),
+                peer_id,
+            )
+        }
+        tl::enums::Peer::Chat(chat) => raw_chat_title(chat.chat_id, chats)
+            .map_or_else(|| join_title(None, None, None, peer_id), str::to_owned),
+        tl::enums::Peer::Channel(channel) => raw_chat_title(channel.channel_id, chats)
+            .map_or_else(|| join_title(None, None, None, peer_id), str::to_owned),
+    }
+}
+
+fn raw_chat_title(id: i64, chats: &[tl::enums::Chat]) -> Option<&str> {
+    chats.iter().find_map(|chat| match chat {
+        tl::enums::Chat::Chat(found) if found.id == id => Some(found.title.as_str()),
+        tl::enums::Chat::Channel(found) if found.id == id => Some(found.title.as_str()),
+        _ => None,
+    })
+}
+
+fn raw_kind(peer: &tl::enums::Peer, users: &[tl::enums::User]) -> DialogKind {
+    match peer {
+        tl::enums::Peer::User(user) => users
+            .iter()
+            .find(|candidate| candidate.id() == user.user_id)
+            .and_then(|candidate| match candidate {
+                tl::enums::User::User(found) => Some(classify_user(found.bot)),
+                tl::enums::User::Empty(_) => None,
+            })
+            .unwrap_or(DialogKind::PrivateUser),
+        tl::enums::Peer::Chat(_) => DialogKind::Group,
+        tl::enums::Peer::Channel(_) => DialogKind::Channel,
+    }
+}
+
+fn raw_deleted(peer: &tl::enums::Peer, users: &[tl::enums::User]) -> bool {
+    let tl::enums::Peer::User(user) = peer else {
+        return false;
+    };
+    users.iter().any(|candidate| {
+        matches!(candidate, tl::enums::User::User(found) if found.id == user.user_id && found.deleted)
+    })
+}
+
+fn raw_last(
+    message_id: i32,
+    messages: &[tl::enums::Message],
+) -> (Option<i64>, Option<i64>, Option<String>) {
+    if message_id == 0 {
+        return (None, None, None);
+    }
+    let Some(tl::enums::Message::Message(message)) = messages
+        .iter()
+        .find(|candidate| candidate.id() == message_id)
+    else {
+        return (Some(i64::from(message_id)), None, None);
+    };
+
+    (
+        Some(i64::from(message.id)),
+        message_timestamp(i64::from(message.date)),
+        last_text(message.message.as_str()),
+    )
 }
 
 /// The `inputDialogPeer` that names this conversation.
@@ -604,6 +820,32 @@ mod tests {
         assert_eq!(user.user_id, 42);
         assert_eq!(user.access_hash, 7);
         assert_eq!(request.max_id, 99);
+    }
+
+    #[test]
+    fn archiving_names_folder_one_and_unarchiving_folder_zero() {
+        let peer = PeerRef {
+            id: PeerId::user(42).expect("42 is in the user range"),
+            auth: PeerAuth::from_hash(7),
+        };
+
+        for (archived, expected) in [(true, 1), (false, 0)] {
+            let request = archive_request(peer, archived);
+            let tl::enums::InputFolderPeer::Peer(folder) = &request.folder_peers[0];
+            assert_eq!(folder.folder_id, expected);
+            let tl::enums::InputPeer::User(user) = &folder.peer else {
+                panic!("a person addresses as an input user peer");
+            };
+            assert_eq!(user.user_id, 42);
+            assert_eq!(user.access_hash, 7);
+        }
+    }
+
+    #[test]
+    fn the_archive_request_asks_for_the_archive_folder() {
+        let request = archived_dialogs_request();
+        assert_eq!(request.folder_id, Some(ARCHIVE_FOLDER_ID));
+        assert!(!request.exclude_pinned);
     }
 
     #[test]
