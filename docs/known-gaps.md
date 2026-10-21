@@ -72,12 +72,15 @@ Real, and named so they are not mistaken for oversights:
     run on Windows: no CI leg runs there, and the release check is the manual steps in
     the `OPENER` doc comment in `crates/app/src/runtime.rs`. A target that detaches
     itself can still return early; a configured viewer command is the escape hatch.
-- **Global search shows only the first page, capped at 100 hits.** `?` and
-  `:search` ask the server once. The overlay keeps the newest 100 matches, and the
-  status line says `100 of <total>` when there are more; there is no way to page
-  past them (server pagination is not built). There is no local pre-pass, so a
-  match that exists only in the local cache and is not on the server's first page
-  does not appear.
+- **The global search has no sender filter.** `from:`, `sender:` and `by:` are
+  refused by the prompt's parser, each with `from:ada is not a filter here: global
+  search has no sender filter.`, and the prompt reopens with the line still in it
+  so the token can be removed. Only `messages.search` with `peer = inputPeerEmpty`
+  takes a `from_id`, and it is a different method: its own paging, no chat
+  grouping, and it does not carry the `users_only` scope. So a sender filter is a
+  second request shape and a page model for it, not another token in the parser.
+  Closing it means building that path, or Telegram adding `from_id` to
+  `messages.searchGlobal`.
 - **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
   between a contact's `name` and `username`, draws nothing, is not selectable, is
   not something `d` can act on, is skipped by a yank, and is neither counted nor
@@ -284,13 +287,16 @@ Real, and named so they are not mistaken for oversights:
   and `words`; a middle position and any other shaping terminal are not checked.
   `words` is written for a terminal that reverses each word on its own, and is wrong
   on one that reverses the whole line, where the words would be reversed twice.
-- **The new-chat row order and a new chat's place in the list are the binary's
-  own.** The model sorts its local candidates closest-match, then
-  no-conversation-first, then by name, and inserts a new conversation at the top
-  of the list; the binary draws the candidates in the order the lookup returned
-  them and appends a new chat (`ChatList::ensure_private_chat`, which leaves the
-  existing order alone rather than guessing a comparator). Both are properties of
-  the lookup and the chat list rather than of the widget.
+- **The search's new design frames are byte-synced, not scene-checked.**
+  `design/global-search-states.html` and `global-search-states-frames.js` are
+  drawn from the rules in `DESIGN.md`'s global-search section, not as scenes of
+  `televim-engine.js`, so `make design-check` does not render them:
+  `design/scripts/check-model.js` validates the engine's scenes, and
+  `scripts/design-sync.sh check` then compares the vendored copies with the
+  OpenDesign project byte for byte. A frame that drifts from its own rules is
+  therefore caught only when the OpenDesign copy disagrees, and an edit made on
+  both sides is checked by nothing. Closing it means teaching the checker a second
+  frame format, which is a new harness rather than a change to this one.
 
 - **The draft row is shown only while following the newest message.** Scrolled
   up, it is not drawn and reserves no rows, because it is drawn after the slice

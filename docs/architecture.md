@@ -184,7 +184,8 @@ crates/proto/
 │   ├── stream.rs       # Update subscription & event mapping
 │   ├── history.rs      # History page -> domain window
 │   ├── messages.rs     # Send/edit/delete, and identifier widening
-│   ├── search.rs       # Server-side search
+│   ├── search.rs       # Per-conversation search, and the global DTOs:
+│   │                   #   GlobalSearchRequest/Results, GlobalCursor, GlobalPeer
 │   └── users.rs        # Resolve a @username, or search people -> candidates
 └── Cargo.toml          # deps: domain, telegram-framework, thiserror, tracing
 ```
@@ -207,6 +208,8 @@ crates/domain/
 │   ├── message.rs      # Message entity
 │   ├── history.rs      # ConversationWindow, and the page/anchor rules
 │   ├── search.rs       # Query parsing, match scoring, local scanning
+│   ├── global_search.rs # SearchSpec, GlobalSearchState: every conversation at
+│   │                   #   once, paged, paused, and dropped
 │   ├── selection.rs    # Mark, Selection: the two ends of a selection
 │   ├── session.rs      # Session state
 │   ├── updates.rs      # UpdateEvent vocabulary, including PeerStatus
@@ -221,7 +224,24 @@ person the server offered (their identifier, display name and optional
 `@username`), and `UserSearchState` holds the query, the candidates and the
 reader's place among them — with `adopt` refusing an answer whose query the
 reader has already replaced, the same stale-answer discipline `SearchState`
-keeps.
+keeps. `rank_candidates` orders the list rather than taking the server's order: a
+candidate with no conversation before one that has a conversation, then the
+closest match (for a name query, a name prefix, then a name that contains it, then
+a handle prefix, then a handle that contains it; for a `@handle` query the handles
+alone, exact before prefix before substring), then the display name
+case-insensitively, then the user identifier so the order is total. An empty
+query asks for the most-contacted list rather than a ranking, so that one keeps
+the server's order.
+
+`domain::global_search` is the other search: `SearchSpec` is what the reader asked
+for — the words sent, the words the status echoes, the media kind and the two day
+bounds — and `GlobalSearchState` holds every page the server answered, newest
+first, with the selection, the server's total, the count of hits the loop dropped
+and whether another page exists. Paging is a round-trip bound, not a memory one:
+`adopt` and `append` keep every page, `needs_more` guards the next request, and a
+flood wait becomes `paused_until` rather than a failure. `label` owns the whole
+status sentence, so the count, the filters, the dropped clause and the pause
+countdown are written in one place.
 
 `domain::presence::Presence` is a peer's standing as reported: `Online`, `Offline`
 with the raw Unix seconds it was last online, the three restricted buckets, or
@@ -259,6 +279,7 @@ crates/tui/
 │   │   ├── outbox.rs       # Outbox: queued actions, fetches in flight, the clipboard
 │   │   ├── pending.rs      # Pending: half-typed keys and deferred requests
 │   │   ├── conversation.rs # ConversationState: the open view, registers, searches
+│   │   ├── search_query.rs # The typed filters (media:/since:/until:) -> SearchSpec
 │   │   ├── input.rs        # InputState: the live line and the emoji popup
 │   │   ├── drafts.rs       # DraftStore: per-peer parked drafts and read receipts
 │   │   └── ui.rs           # UiState, FrameMetrics: mode, focus, the frame's cells, each peer's presence
@@ -288,6 +309,7 @@ crates/tui/
 │   │   ├── chat_list.rs
 │   │   ├── conversation.rs
 │   │   ├── emoji_popup.rs  # The `:shortcode` completion above the bar
+│   │   ├── global_list.rs  # The every-conversation search overlay, grouped by chat
 │   │   ├── input_bar.rs
 │   │   ├── profile.rs   # The card, in the conversation's rectangle
 │   │   ├── status_bar.rs
@@ -348,7 +370,22 @@ the composition root — `tui` never reaches the network. Its answer is drawn by
 `widgets/user_list.rs`, a transient overlay over the chat list in the
 `emoji_popup`'s shape, walked with `j`/`k`/`⏎`/`Esc` while it is up; the status
 line carries the query and the count, ranked above the conversation's own search
-label. It is a prompt and an overlay, not a third pane.
+label. It is a prompt and an overlay, not a third pane. A conversation the reader
+chooses is inserted at the top of the unpinned block — below the pinned chats,
+above every unpinned one — so the chat they just picked is where their eye is;
+the fetched list keeps Telegram's order and the next fetch reconciles it.
+
+The every-conversation search is the third prompt-driven surface, and the only
+overlay that covers the whole body rather than a column. `?` on either pane or
+`:search` opens it, `state/search_query.rs` turns the typed line into a
+`SearchSpec` — refusing a token the server cannot honour and reopening the prompt
+with the line still in it — and `widgets/global_list.rs` draws one rule per
+contiguous run of one chat's hits, then one or two rows per message. Paging is
+demanded by the reader's motion: `coordinate::ask_for_more` asks for the next page
+when the cursor reaches the last hit, and the answer is appended under the rows
+already read rather than replacing them. The status sentence is the state's
+`label`, not the widget's, so the count, the filters, the dropped clause and a
+pause are all written once.
 
 Forwarding is the other overlay that queues an action. `f` or `s` raises the
 destination picker over the conversation, and `⏎` queues an `Action::Forward

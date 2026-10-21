@@ -1272,3 +1272,88 @@ are in [`../AGENTS.md`](../AGENTS.md).
   `clear` does. The file is not removed there: `release_viewer` removes it once nothing
   owns it, so the hold has one removal path. `owns` is unchanged; it answers whether a
   name is pending or indexed, not whether a viewer holds it.
+- **Why a global-search page is anchored on its last message:** a continuation has
+  to tell `messages.searchGlobal` where the previous page stopped, and the call
+  names that with three values — `offset_rate`, `offset_peer` and `offset_id`. The
+  rate is Telegram's `next_rate` when the slice carried one and the last message's
+  date when it did not: `next_rate` is the server's own boundary score, and the
+  date is the only other quantity both sides already agree on. The peer and the
+  identifier come from the last message that actually names one, because an empty
+  entry has neither and a `MessageEmpty` counted in the total would otherwise
+  anchor the next page on nothing. The peer travels as an `InputPeer` with
+  `access_hash: 0`: a global search wants the kind and the identifier, not a peer
+  it could address. A later page is asked for when the cursor reaches the last hit
+  and the server said there is more, which means a short page does **not** end the
+  list and an empty page does — it yields no anchor, so it yields no cursor.
+  Rejected: counting pages in the client and multiplying by the page size, and
+  trusting `limit` to be honoured exactly. An answer that fits arrives unsliced
+  with no `next_rate` at all, and a slice can come back short, so neither a page
+  count nor a full page is a safe end-of-list signal.
+- **Why a bot conversation is a correspondent:** the request already asks for
+  `users_only: true`, Telegram's "one-to-one chats", which includes a bot's direct
+  messages in the answer; this client then dropped them, because `ChatKind::Bot`
+  is not `Private` and the global filter used `is_private`. The server's total and
+  the drawn rows therefore disagreed, with nothing on screen to explain it. So the
+  search has a predicate of its own, `Chat::is_correspondent()` = `Private | Bot`,
+  and keeps every hit whose chat the list holds as one; a group, a channel and a
+  chat the list does not hold at all are dropped and counted. `is_private` is not
+  changed: it is the chat list's rule, the list still displays people only, so the
+  two predicates mean different things and both keep their tests. The fetched list
+  carries people only, so a bot's hit is dropped as an unheld chat until the client
+  lists that bot; the predicate is the half the search owns. Rejected: leaving bots
+  outside, which would make `users_only` a lie in the request and the count a lie
+  in the status.
+- **Why a flood wait pauses instead of failing:** message search has no daily
+  quota — the `search_flood` field a slice can carry belongs to
+  `channels.searchPosts`, and TDLib treats it as an error on every other method —
+  so the only limit `messages.searchGlobal` reports is `420 FLOOD_WAIT_X`. A wait
+  is not a verdict on the search: the rows already fetched are still good and the
+  stored cursor still names the page that was withheld, so
+  `GlobalSearchState::pause` records `paused_until` and keeps both. `drive` runs on
+  every pass, the 250 ms tick included, and once the delay has run out it sends the
+  withheld page again; beginning the same spec is a continuation, so the rows stay
+  and the next pass cannot ask twice. The label reads `paused: retry in {s}s`
+  beside the count, or alone when nothing was held. Rejected: the old
+  `search failed (flood wait 30s)` label and a `:retry` command. The first threw
+  away a list the reader already had over a wait, and the second asked for a second
+  keystroke for a search they had already asked for. Only a non-flood failure on
+  the first page clears the list.
+- **Why the dropped hits say `dropped`:** the clause reports hits the server found
+  and this client will not show, and the status names them after the result clause
+  — `no matches, 4 dropped` when every hit was outside. `dropped` is the data's own
+  word: those hits existed in the answer and were
+  discarded before the list was built, which is why the count can be larger than
+  zero while the list is short. It fits beside the result count in the artifact's
+  70 cells, and the alternatives are worse. Rejected: `filtered`, which suggests a
+  filter the reader set — no query token drops a group hit, and
+  `media:`/`since:`/`until:` narrow the request rather than the drawn rows — and
+  `hidden`, which sends a reader looking for the key that would show them.
+- **Why the new-chat list ranks its candidates, and where a chosen chat lands:**
+  the server's answer is ordered for a search box that knows nothing about this
+  client's chat list, so the person the reader meant could sit under people they
+  already talk to. The list is ranked locally instead: a candidate with no
+  conversation first, because starting one is the only reason the list exists;
+  then the closest match (a name prefix, a name that contains the query, a handle
+  prefix, a handle that contains it; for a `@` query the handles alone, exact
+  before prefix before substring); then the display name, case-insensitively; then
+  the user identifier, so the order is total and a test can assert it. An empty
+  query is the most-contacted list, not a ranking, so it keeps the server's order.
+  A new conversation goes to the first unpinned index — the top of the unpinned
+  block — rather than the end: the fetched order is Telegram's, and a later fetch
+  re-sorts the list anyway, so what matters is that the chat the reader just chose
+  is visible now. Rejected: the server's order and an append, which left the
+  chosen chat below every pinned chat and every conversation fetched since, so the
+  pick looked like it had done nothing.
+- **Why the global-search prompt stays on the input bar:** the search artifact
+  draws the query on the box's last interior row, because it also draws the box
+  over the body and concludes that the screen's own bar cannot hold a prompt
+  beneath it. The bar is a row of the frame beside the body, not a line inside the
+  box, so that geometry does not apply here, and the search already has a prompt:
+  `PromptKind::GlobalSearch` on the bar, with its `?` prefix, its line editor and
+  the vocabulary sentence it shows while the reader types. Moving the query into
+  the box would mean a second line editor inside the overlay and would replace the
+  one every other search uses, for no acceptance criterion. Rejected: the
+  artifact's placement. The box would own a line, the bar's prompt would have to be
+  kept for a search whose overlay cannot show it, and the result is two edit paths
+  for one line. The artifact's intent — the reader sees what a filter token can be
+  while typing — is carried by the status sentence instead.
