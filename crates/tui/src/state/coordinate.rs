@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
-use domain::global_search::{GlobalSearchState, SearchSpec};
+use domain::global_search::GlobalSearchState;
 use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
 use domain::message::Message;
 use domain::search::word_prefix_match;
@@ -57,6 +57,7 @@ use super::input::InputState;
 use super::outbox::Outbox;
 use super::pending::Pending;
 use super::profile::ProfileCard;
+use super::search_query;
 use super::session::SessionState;
 use super::ui::UiState;
 
@@ -1542,23 +1543,38 @@ pub(crate) fn run_search(
     }
 }
 
-/// Answers `?` and `:search`: asks every correspondent for `spec` at once.
+/// Answers `?` and `:search`: asks every correspondent for the parsed query at
+/// once.
 ///
 /// The search begins here, once per submit, and the request is queued for the
 /// caller to make; the answer comes back through [`App::adopt_global_search`].
 /// An empty query repeats the last global search, filters and all, as `/`
 /// repeats its own. With nothing to repeat, the refusal is visible rather than
 /// the key doing nothing.
+///
+/// A query the parser refuses flashes its sentence and reopens the prompt with
+/// the reader's line, so a typo costs a correction and not the whole query.
 pub(crate) fn run_global_search(
     ui: &mut UiState,
     conversation: &mut ConversationState,
+    input: &mut InputState,
     outbox: &mut Outbox,
     query: &str,
 ) {
     let spec = if query.is_empty() {
         conversation.global_search.spec().cloned()
     } else {
-        Some(SearchSpec::plain(query))
+        match search_query::parse(query, ui.metrics.offset.get()) {
+            Ok(spec) => Some(spec),
+            Err(refusal) => {
+                ui.flash(refusal.message);
+                input
+                    .line
+                    .open_with(PromptKind::GlobalSearch, query.to_owned());
+                ui.set_focus(Focus::Input);
+                return;
+            }
+        }
     };
     let Some(spec) = spec else {
         ui.flash("no previous global search");
@@ -2861,7 +2877,13 @@ pub(crate) fn submit(
         }
         PromptKind::GlobalSearch => {
             let query = input.line.take();
-            run_global_search(&mut *ui, &mut *conversation, &mut *outbox, query.trim());
+            run_global_search(
+                &mut *ui,
+                &mut *conversation,
+                &mut *input,
+                &mut *outbox,
+                query.trim(),
+            );
             false
         }
         // Unreachable: a sign-in field answers `Enter` itself, so that its
@@ -2883,9 +2905,12 @@ pub(crate) fn submit(
     // `:new` keeps its query line for the same reason: the reader is about
     // to type into it, and the reset below would empty it.
     // `:unlock` and `:passphrase` leave a passphrase line open, for the same reason.
+    // A refused global search reopens its prompt with the typed line, so the
+    // reader can correct it; the reset below would take that line away again.
     if session.signin_field().is_some()
         || session.pass.is_some()
         || input.line.purpose() == PromptKind::NewChat
+        || input.line.purpose() == PromptKind::GlobalSearch
     {
         conversation.set_reply_to(None);
         conversation.set_editing(None);
@@ -2950,12 +2975,14 @@ pub(crate) fn run_command(
         }
         // The same search `?` opens a prompt for, run at once: the query is
         // already on the command line, so there is nothing left to edit.
-        "search" => {
-            run_global_search(&mut *ui, &mut *conversation, &mut *outbox, "");
-            false
-        }
-        _ if cmd.starts_with("search ") => {
-            run_global_search(&mut *ui, &mut *conversation, &mut *outbox, cmd[7..].trim());
+        _ if cmd == "search" || cmd.starts_with("search ") => {
+            run_global_search(
+                &mut *ui,
+                &mut *conversation,
+                &mut *input,
+                &mut *outbox,
+                cmd["search".len()..].trim(),
+            );
             false
         }
         // Two spellings of one refusal: the path is required, because the

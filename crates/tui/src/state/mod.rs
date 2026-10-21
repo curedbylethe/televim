@@ -9,5 +9,6 @@ pub mod input;
 pub mod outbox;
 pub mod pending;
 pub mod profile;
+pub(crate) mod search_query;
 pub mod session;
 pub mod ui;
