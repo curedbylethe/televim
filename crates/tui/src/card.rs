@@ -855,12 +855,21 @@ mod drawing {
 
     /// Opens a card the way the delegate did: the seam, then the sizing.
     fn open_card(app: &mut App, subject: crate::app::ProfileId) {
+        let name = match subject {
+            crate::app::ProfileId::User(id) => app
+                .chats()
+                .iter()
+                .find(|chat| chat.id == id)
+                .map(|chat| chat.title.clone()),
+            crate::app::ProfileId::SelfAccount => None,
+        };
         coordinate::open_card(
             &mut app.profile,
             &mut app.ui,
             &mut app.conversation,
             &mut app.outbox,
             subject,
+            name,
         );
         app.profile.resize(navigable(&rows(app)));
     }
@@ -881,7 +890,7 @@ mod drawing {
         let mut app = self_card();
         let chat = app.any_chat().expect("the mock has a chat");
         open_card(&mut app, crate::app::ProfileId::User(chat.id));
-        app.set_contact(chat.id, Ok(crate::app::mock_account()));
+        app.set_contact(chat.id, false, Ok(crate::app::mock_account()));
         (app, chat)
     }
 
@@ -1228,7 +1237,7 @@ mod drawing {
             title(&app)
         );
 
-        app.set_contact(chat.id, Ok(crate::app::mock_account()));
+        app.set_contact(chat.id, false, Ok(crate::app::mock_account()));
         assert!(
             !rows(&app).is_empty(),
             "and the rows arrive with the answer"
@@ -1249,6 +1258,7 @@ mod drawing {
 
         app.set_contact(
             chat.id + 1,
+            false,
             Ok(domain::account::Account {
                 user_id: 99,
                 first_name: "Somebody".to_owned(),
@@ -1278,7 +1288,7 @@ mod drawing {
         let mut app = self_card();
         let chat = app.any_chat().expect("the mock has a chat");
         open_card(&mut app, crate::app::ProfileId::User(chat.id));
-        app.set_contact(chat.id, Err("peer 42 is not a person".to_owned()));
+        app.set_contact(chat.id, false, Err("peer 42 is not a person".to_owned()));
 
         assert!(rows(&app).is_empty());
         let text = rows_of(&screen(&app, 40)).join("\n");
@@ -1314,6 +1324,7 @@ mod drawing {
         // Nothing they said but a name.
         app.set_contact(
             peer,
+            false,
             Ok(domain::account::Account {
                 user_id: 42,
                 first_name: "Grace".to_owned(),
@@ -1619,6 +1630,7 @@ mod drawing {
         let (mut app, chat) = contact_card();
         app.set_contact(
             chat.id,
+            false,
             Ok(domain::account::Account {
                 presence: Some(domain::presence::Presence::Recently),
                 ..crate::app::mock_account()

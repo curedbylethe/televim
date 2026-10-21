@@ -119,6 +119,9 @@ pub enum Event {
         /// The conversations, newest first.
         chats: Vec<Chat>,
 
+        /// The conversations in the archive folder.
+        archived: Vec<Chat>,
+
         /// The account's own profile, or why there is not one.
         ///
         /// Its own `Result` rather than a second event, because a profile that
@@ -302,8 +305,36 @@ pub enum Event {
         /// Bare identifier of the person who was asked about.
         peer_id: i64,
 
-        /// Their profile, or why there is not one.
-        result: Result<domain::account::Account, ProtoError>,
+        /// Their profile and block state, or why there is not one.
+        result: Result<domain::account::UserProfile, ProtoError>,
+    },
+
+    /// An archive change came back, or the request failed.
+    Archived {
+        chat_id: i64,
+        archived: bool,
+        result: Result<(), ProtoError>,
+    },
+
+    /// A block change came back, or the request failed.
+    Blocked {
+        peer_id: i64,
+        blocked: bool,
+        result: Result<(), ProtoError>,
+    },
+
+    /// A conversation deletion came back, or the request failed.
+    ConversationDeleted {
+        chat_id: i64,
+        both: bool,
+        result: Result<(), ProtoError>,
+    },
+
+    /// A report came back, or the request failed.
+    Reported {
+        peer_id: i64,
+        reason: domain::report::ReportReason,
+        result: Result<(), ProtoError>,
     },
 
     /// A send came back, or the request failed.
@@ -1255,6 +1286,7 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         let _ = tx.send(AppEvent::Net(Event::Ready {
             client,
             chats: Vec::new(),
+            archived: Vec::new(),
             account: Err(String::new()),
             session_store,
         }));
@@ -1291,6 +1323,7 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         }
     };
     let account = read_account(&client).await;
+    let archived = read_archived(&client).await;
 
     // The list is fetched before the feed is taken. Resolving what arrived while
     // the client was offline reads peers back out of the session, and iterating
@@ -1303,6 +1336,7 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
     let _ = tx.send(AppEvent::Net(Event::Ready {
         client,
         chats,
+        archived,
         account,
         session_store,
     }));
@@ -1537,6 +1571,18 @@ fn run_session_actions(app: &mut App, state: &mut State) {
     }
 }
 
+/// Writes local names through the history cache.
+///
+/// No client is needed, so this runs before `drive`'s early return: a rename
+/// made while the client is down still reaches the file.
+fn run_local_name_actions(app: &mut App, state: &mut State) {
+    while let Some(Action::SetLocalName { peer_id, name }) = app.take_local_name_action() {
+        if state.cached.messages.set_alias(peer_id, name.as_deref()) {
+            state.cached.dirty = true;
+        }
+    }
+}
+
 /// Holds a typed passphrase for this process and brings the client up again on it.
 ///
 /// The file is opened by the bring-up and by nothing else here, so a wrong
@@ -1636,6 +1682,20 @@ async fn read_account(client: &ProtoClient) -> Result<domain::account::Account, 
         Err(error) => {
             tracing::warn!(%error, "the account's own profile could not be read");
             Err(format!("{error:#}"))
+        }
+    }
+}
+
+/// Reads the archive folder, treating a failure as an empty archive.
+///
+/// The archive is not load-bearing for bring-up: a reader whose chat list
+/// arrived can use the program, and the next launch asks again.
+async fn read_archived(client: &ProtoClient) -> Vec<Chat> {
+    match client.fetch_archived_chats().await {
+        Ok(chats) => chats,
+        Err(error) => {
+            tracing::warn!(%error, "the archive could not be fetched");
+            Vec::new()
         }
     }
 }
@@ -1918,6 +1978,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // Before the client is looked up, like the retry: these touch the stored
     // session and nothing else, and no client is the state a reader needs them in.
     run_session_actions(app, state);
+    run_local_name_actions(app, state);
     let Some(client) = state.client.clone() else {
         // No client, so nothing is asked for — but a conversation opened
         // while there is none is still owed what the cache holds for it, or
@@ -2557,6 +2618,7 @@ async fn report_sign_in(
                     Vec::new()
                 }
             };
+            let archived = read_archived(&client).await;
             // The launch path reads the account's own profile, and this one has
             // to reach the same screen: the login hand-back carries the identity
             // and nothing else, and the card does not re-read on open, so a bio
@@ -2578,6 +2640,7 @@ async fn report_sign_in(
             let _ = tx.send(AppEvent::Net(Event::Ready {
                 client,
                 chats,
+                archived,
                 account: Ok(account),
                 session_store,
             }));
@@ -2666,8 +2729,44 @@ fn request_plain(
             // this task's shape for the same reason: a round trip here would stop
             // the reader's keystrokes being read while it runs.
             Action::FetchContact { peer_id } => {
-                let result = client.fetch_user(peer_id).await;
+                let result = client.fetch_user_profile(peer_id).await;
                 let _ = tx.send(AppEvent::Net(Event::Contact { peer_id, result }));
+            }
+
+            Action::SetArchived { chat_id, archived } => {
+                let result = client.set_archived(chat_id, archived).await;
+                let _ = tx.send(AppEvent::Net(Event::Archived {
+                    chat_id,
+                    archived,
+                    result,
+                }));
+            }
+
+            Action::SetBlocked { peer_id, blocked } => {
+                let result = client.set_blocked(peer_id, blocked).await;
+                let _ = tx.send(AppEvent::Net(Event::Blocked {
+                    peer_id,
+                    blocked,
+                    result,
+                }));
+            }
+
+            Action::DeleteConversation { chat_id, both } => {
+                let result = client.delete_conversation(chat_id, both).await;
+                let _ = tx.send(AppEvent::Net(Event::ConversationDeleted {
+                    chat_id,
+                    both,
+                    result,
+                }));
+            }
+
+            Action::ReportPeer { peer_id, reason } => {
+                let result = client.report_peer(peer_id, reason).await;
+                let _ = tx.send(AppEvent::Net(Event::Reported {
+                    peer_id,
+                    reason,
+                    result,
+                }));
             }
 
             // A search is not an operation on the conversation's messages: it
@@ -2708,6 +2807,7 @@ fn request_plain(
             | Action::LoginCancelled
             | Action::Logout
             | Action::MoreGlobal { .. }
+            | Action::SetLocalName { .. }
             | Action::ExportSession { .. }
             | Action::ImportSession { .. }
             | Action::SubmitSessionPassphrase { .. }
@@ -2815,10 +2915,11 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         Event::Ready {
             client,
             chats,
+            archived,
             account,
             session_store,
         } => {
-            apply_ready(app, state, client, chats, account, session_store);
+            apply_ready(app, state, client, chats, archived, account, session_store);
             // Opened, so whatever lock the launch found is over.
             app.session_unlocked();
         }
@@ -2887,9 +2988,10 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // card is already on show and already says it is waiting, so the answer
         // fills it in — and an answer for a card the reader has left is dropped by
         // `set_contact`, which is the only place that knows which card is on show.
-        Event::Contact { peer_id, result } => {
-            app.set_contact(peer_id, result.map_err(|error| format!("{error:#}")));
-        }
+        Event::Contact { peer_id, result } => match result {
+            Ok(profile) => app.set_contact(peer_id, profile.blocked, Ok(profile.account)),
+            Err(error) => app.set_contact(peer_id, false, Err(format!("{error:#}"))),
+        },
 
         Event::Offline(reason) => apply_offline(app, state, &reason),
 
@@ -2968,6 +3070,75 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             pinned,
             result,
         } => apply_pin_toggled(app, chat_id, pinned, result),
+
+        Event::Archived {
+            chat_id,
+            archived,
+            result,
+        } => match result {
+            Ok(()) => {
+                if let Some(name) = app.set_archived(chat_id, archived) {
+                    app.flash(format!(
+                        "{}{name}",
+                        if archived { "archived " } else { "unarchived " }
+                    ));
+                }
+            }
+            Err(error) => app.flash(format!("archive: {}", failure_reason(&error))),
+        },
+
+        Event::Blocked {
+            peer_id,
+            blocked,
+            result,
+        } => match result {
+            Ok(()) => {
+                app.set_blocked(peer_id, blocked);
+                app.flash(format!(
+                    "{}{}",
+                    if blocked { "blocked " } else { "unblocked " },
+                    chat_name(app, peer_id)
+                ));
+            }
+            Err(error) => app.flash(format!("block: {}", failure_reason(&error))),
+        },
+
+        Event::ConversationDeleted {
+            chat_id,
+            both,
+            result,
+        } => match result {
+            Ok(()) => {
+                let name = chat_name(app, chat_id);
+                app.remove_conversation(chat_id);
+                state.cached.messages.remove(chat_id);
+                state.cached.messages.set_chats(app.chats());
+                state.cached.dirty = true;
+                if let Some(cache) = state.media_cache.as_ref()
+                    && let Ok(mut cache) = cache.lock()
+                {
+                    cache.remove_chat(chat_id);
+                }
+                app.flash(format!(
+                    "deleted {name}{}",
+                    if both { " for both sides" } else { "" }
+                ));
+            }
+            Err(error) => app.flash(format!("delete chat: {}", failure_reason(&error))),
+        },
+
+        Event::Reported {
+            peer_id,
+            reason,
+            result,
+        } => match result {
+            Ok(()) => app.flash(format!(
+                "reported {} as {}",
+                chat_name(app, peer_id),
+                reason.label()
+            )),
+            Err(error) => app.flash(format!("report: {}", failure_reason(&error))),
+        },
 
         Event::Deleted {
             chat_id,
@@ -3656,10 +3827,11 @@ fn apply_ready(
     state: &mut State,
     client: Arc<ProtoClient>,
     chats: Vec<Chat>,
+    archived: Vec<Chat>,
     account: Result<domain::account::Account, String>,
     session_store: tui::SessionStore,
 ) {
-    apply_ready_to_screen(app, state, chats, account, session_store);
+    apply_ready_to_screen_with_archive(app, state, chats, archived, account, session_store);
     state.client = Some(client);
     state.bringing_up = false;
     // The client is there, so the sign-in flow's `waiting` flag means
@@ -3890,10 +4062,22 @@ fn apply_feed_ended(app: &mut App, state: &mut State) {
 /// Everything a `Ready` says *about the screen*, with the client itself left to
 /// the caller: a client cannot be built without a runtime, and these effects can
 /// be checked without one.
+#[cfg(test)]
 fn apply_ready_to_screen(
     app: &mut App,
     state: &mut State,
     chats: Vec<Chat>,
+    account: Result<domain::account::Account, String>,
+    session_store: tui::SessionStore,
+) {
+    apply_ready_to_screen_with_archive(app, state, chats, Vec::new(), account, session_store);
+}
+
+fn apply_ready_to_screen_with_archive(
+    app: &mut App,
+    state: &mut State,
+    mut chats: Vec<Chat>,
+    mut archived: Vec<Chat>,
     account: Result<domain::account::Account, String>,
     session_store: tui::SessionStore,
 ) {
@@ -3947,6 +4131,27 @@ fn apply_ready_to_screen(
         // this does not ask for: a quiet `Ready` owes the file nothing.
         state.cached.tag = live;
     }
+    // Local names are loaded before anything is installed: the fetched titles
+    // are the server's, and the reader's own names have to win.
+    app.local_names.clear();
+    for (peer_id, text) in state.cached.messages.aliases() {
+        let server = chats
+            .iter()
+            .chain(archived.iter())
+            .find(|chat| chat.id == *peer_id)
+            .map(|chat| chat.title.clone())
+            .unwrap_or_default();
+        app.local_names.insert(
+            *peer_id,
+            tui::app::LocalName {
+                text: text.clone(),
+                server,
+            },
+        );
+    }
+    app.apply_local_names(&mut chats);
+    app.apply_local_names(&mut archived);
+
     // The list is the feed's word on what this account's messages the peer has
     // read, which may be a read the feed never delivered. It is folded in
     // before the list lands, so the open view and the record agree on it.
@@ -3957,9 +4162,11 @@ fn apply_ready_to_screen(
         state.history.jump = None;
         state.history.retry_at = None;
         state.history.retry_peer = None;
+        app.set_archived_chats(archived);
         app.refresh_chats(chats)
     } else {
         open_first_chat(app, chats);
+        app.set_archived_chats(archived);
         true
     };
 
@@ -4140,6 +4347,14 @@ fn apply_edited(app: &mut App, chat_id: i64, message_id: i64, result: Result<(),
 
 /// Folds a pin's answer in. The list moves and the status says so when Telegram
 /// agreed; the status says why not when it did not.
+/// The title a person or chat is known by on screen, falling back to the id.
+fn chat_name(app: &App, chat_id: i64) -> String {
+    app.chats()
+        .iter()
+        .find(|chat| chat.id == chat_id)
+        .map_or_else(|| chat_id.to_string(), |chat| chat.title.clone())
+}
+
 fn apply_pin_toggled(app: &mut App, chat_id: i64, pinned: bool, result: Result<(), ProtoError>) {
     match result {
         Ok(()) => {
@@ -12093,5 +12308,110 @@ mod media_tests {
             !thumbnail_is_cached(&cache, CHAT, 10),
             "and only for the message it belongs to"
         );
+    }
+}
+
+#[cfg(test)]
+mod action_status_tests {
+    use super::*;
+    use domain::chat::{Chat, ChatKind};
+
+    const CHAT: i64 = 7;
+
+    fn chat(id: i64) -> Chat {
+        Chat {
+            id,
+            title: format!("chat-{id}"),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            presence: None,
+            deleted: false,
+            read_outbox_max_id: None,
+        }
+    }
+
+    #[test]
+    fn an_archived_answer_moves_the_chat_out_of_the_list() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Archived {
+                chat_id: CHAT,
+                archived: true,
+                result: Ok(()),
+            },
+        );
+
+        assert!(app.chats().is_empty(), "the chat left the visible list");
+        assert_eq!(app.ui.status, "archived chat-7");
+    }
+
+    #[test]
+    fn a_deleted_conversation_leaves_the_list_and_the_cache() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        let mut state = State::default();
+        state.cached.messages.set_chats(&[chat(CHAT)]);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ConversationDeleted {
+                chat_id: CHAT,
+                both: false,
+                result: Ok(()),
+            },
+        );
+
+        assert!(app.chats().is_empty());
+        assert!(state.cached.messages.chats().is_empty());
+        assert!(state.cached.dirty, "the next save forgets it on disk");
+        assert_eq!(app.ui.status, "deleted chat-7");
+    }
+
+    #[test]
+    fn a_block_answer_names_the_person() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Blocked {
+                peer_id: CHAT,
+                blocked: true,
+                result: Ok(()),
+            },
+        );
+
+        assert_eq!(app.ui.status, "blocked chat-7");
+    }
+
+    #[test]
+    fn a_report_answer_names_the_person_and_the_reason() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Reported {
+                peer_id: CHAT,
+                reason: domain::report::ReportReason::Spam,
+                result: Ok(()),
+            },
+        );
+
+        assert_eq!(app.ui.status, "reported chat-7 as spam");
     }
 }

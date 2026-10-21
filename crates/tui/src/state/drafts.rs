@@ -82,6 +82,12 @@ impl DraftStore {
         self.drafts.remove(&chat_id).unwrap_or_default()
     }
 
+    /// Forgets a conversation's parked draft and read mark.
+    pub(crate) fn forget(&mut self, chat_id: i64) {
+        self.drafts.remove(&chat_id);
+        self.read_receipts.borrow_mut().remove(&chat_id);
+    }
+
     /// Exports every draft as plain `(peer id, text)` pairs.
     ///
     /// The parked map plus the open conversation's live line, when `open`

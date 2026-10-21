@@ -2529,6 +2529,7 @@ pub(crate) fn open_card(
     conversation: &mut ConversationState,
     outbox: &mut Outbox,
     subject: ProfileId,
+    name: Option<String>,
 ) -> bool {
     // One read per card opened, asked for here rather than by the panel: the
     // panel draws what it has, and the reader asked a question by pressing `A`.
@@ -2537,6 +2538,8 @@ pub(crate) fn open_card(
             queue_action(&mut *outbox, &mut *ui, Action::FetchContact { peer_id });
             Some(ContactProfile {
                 peer_id,
+                name: name.unwrap_or_else(|| peer_id.to_string()),
+                blocked: None,
                 state: AccountState::Unfetched,
             })
         }
@@ -2572,7 +2575,14 @@ pub(crate) fn open_contact(
     let Some(chat) = list.list.chats.get(list.selected_chat) else {
         return false;
     };
-    open_card(profile, ui, conversation, outbox, ProfileId::User(chat.id))
+    open_card(
+        profile,
+        ui,
+        conversation,
+        outbox,
+        ProfileId::User(chat.id),
+        Some(chat.title.clone()),
+    )
 }
 
 /// Puts the profile in the right-hand pane.
@@ -2585,7 +2595,14 @@ pub(crate) fn open_profile(
     conversation: &mut ConversationState,
     outbox: &mut Outbox,
 ) -> bool {
-    open_card(profile, ui, conversation, outbox, ProfileId::SelfAccount)
+    open_card(
+        profile,
+        ui,
+        conversation,
+        outbox,
+        ProfileId::SelfAccount,
+        None,
+    )
 }
 
 /// Starts a card selection at the inline position, or extends the one there is.

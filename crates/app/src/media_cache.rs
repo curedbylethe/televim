@@ -785,6 +785,23 @@ impl MediaCache {
         self.remove_keys(&keys);
     }
 
+    /// Drops every pointer belonging to one conversation.
+    ///
+    /// Content-addressed `m{media_id}` entries are shared by forwarded copies
+    /// and are left alone; only the per-chat message and thumbnail keys go.
+    pub(crate) fn remove_chat(&mut self, chat_id: i64) {
+        let keys: Vec<Key> = self
+            .entries
+            .keys()
+            .copied()
+            .filter(|key| match key {
+                Key::Message(chat, _) | Key::Thumbnail(chat, _) => *chat == chat_id,
+                Key::Media(_) => false,
+            })
+            .collect();
+        self.remove_keys(&keys);
+    }
+
     /// Unindexes each key that is held, removes its pointer, and gives back its
     /// reference to its blob.
     ///

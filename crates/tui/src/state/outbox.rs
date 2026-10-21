@@ -68,6 +68,15 @@ impl Outbox {
         self.actions.pop_front()
     }
 
+    /// Takes the oldest local-name write, leaving network actions queued.
+    pub(crate) fn take_local_name_action(&mut self) -> Option<Action> {
+        let at = self
+            .actions
+            .iter()
+            .position(|action| matches!(action, Action::SetLocalName { .. }))?;
+        self.actions.remove(at)
+    }
+
     /// Takes the oldest session export or import, leaving the rest queued.
     ///
     /// They only touch the stored session, so they are answered with no client

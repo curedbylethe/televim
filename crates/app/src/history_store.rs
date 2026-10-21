@@ -184,6 +184,12 @@ pub(crate) struct HistoryCache {
     /// The count the next touch is stamped with.
     clock: u64,
 
+    /// The reader's own names for people, keyed by peer id.
+    ///
+    /// In the same account-tagged file as the chats, so sign-out takes them
+    /// with the history they describe.
+    aliases: BTreeMap<i64, String>,
+
     /// The chat list as the wire last showed it, head first, at most
     /// [`HISTORY_CACHE_CHATS`] long.
     ///
@@ -199,7 +205,7 @@ pub(crate) struct HistoryCache {
 /// and a cache loaded from disk has neither.
 impl PartialEq for HistoryCache {
     fn eq(&self, other: &Self) -> bool {
-        self.peers == other.peers && self.chats == other.chats
+        self.peers == other.peers && self.chats == other.chats && self.aliases == other.aliases
     }
 }
 
@@ -320,6 +326,24 @@ impl HistoryCache {
     pub(crate) fn remove(&mut self, peer: i64) {
         self.peers.remove(&peer);
         self.touched.remove(&peer);
+        self.aliases.remove(&peer);
+    }
+
+    /// The reader's names, as a borrowed map.
+    #[must_use]
+    pub(crate) fn aliases(&self) -> &BTreeMap<i64, String> {
+        &self.aliases
+    }
+
+    /// Stores or clears one local name, saying whether the file changed.
+    pub(crate) fn set_alias(&mut self, peer: i64, name: Option<&str>) -> bool {
+        match name.map(str::trim).filter(|name| !name.is_empty()) {
+            Some(name) => self
+                .aliases
+                .insert(peer, name.to_owned())
+                .is_none_or(|old| old != name),
+            None => self.aliases.remove(&peer).is_some(),
+        }
     }
 
     /// Stamps `peer` as the most recently touched, which keeps it out of the
@@ -695,6 +719,8 @@ struct Payload {
     peers: BTreeMap<i64, Vec<CachedMessage>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     chats: Vec<CachedChat>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    aliases: BTreeMap<i64, String>,
 }
 
 /// One conversation of the cached chat list: what its row draws.
@@ -956,6 +982,7 @@ impl HistoryFile {
         }
         cache.chats = payload.chats;
         cache.chats.truncate(HISTORY_CACHE_CHATS);
+        cache.aliases = payload.aliases;
         Some(LoadedHistory {
             account: payload.account,
             account_id: payload.account_id,
@@ -994,6 +1021,7 @@ impl HistoryFile {
             account_id: tag.account_id,
             peers: cache.peers.clone(),
             chats: cache.chats.clone(),
+            aliases: cache.aliases.clone(),
         };
         serde_json::to_vec(&payload)
             .inspect_err(|error| tracing::warn!(%error, "history could not be serialised"))
@@ -2464,6 +2492,7 @@ mod tests {
             account_id: None,
             peers,
             chats: Vec::new(),
+            aliases: BTreeMap::new(),
         };
         seed(
             &file,
@@ -2489,6 +2518,7 @@ mod tests {
             account_id: None,
             peers: BTreeMap::from([(PEER, rows)]),
             chats: Vec::new(),
+            aliases: BTreeMap::new(),
         };
         seed(
             &file,
@@ -2555,6 +2585,7 @@ mod tests {
             account_id: None,
             peers,
             chats: Vec::new(),
+            aliases: BTreeMap::new(),
         };
         seed(
             &file,
@@ -2835,5 +2866,27 @@ mod tests {
             mb(run.write_peak)
         );
         println!("cache_worst_case: peak RSS (load)  = {}", mb(run.load_peak));
+    }
+}
+
+#[cfg(test)]
+mod alias_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn local_names_survive_a_save_and_a_load() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = HistoryFile::for_test(dir.path().join("history.json"));
+        let mut cache = HistoryCache::default();
+
+        assert!(cache.set_alias(7, Some("Ada")));
+        file.save(&cache, None);
+
+        let mut loaded = file.load().cache;
+        assert_eq!(loaded.aliases().get(&7).map(String::as_str), Some("Ada"));
+
+        assert!(loaded.set_alias(7, None));
+        file.save(&loaded, None);
+        assert!(file.load().cache.aliases().is_empty());
     }
 }

@@ -127,12 +127,19 @@ impl ProfileCard {
     /// somebody else is dropped: the reader may open a second card while the
     /// first read is in flight, and the second card's fields are not the first
     /// one's.
-    pub(crate) fn adopt_contact(&mut self, peer_id: i64, profile: Result<Account, String>) -> bool {
+    pub(crate) fn adopt_contact(
+        &mut self,
+        peer_id: i64,
+        blocked: bool,
+        profile: Result<Account, String>,
+    ) -> bool {
         let Some(open) = self.contact.as_ref().filter(|open| open.peer_id == peer_id) else {
             return false;
         };
         self.contact = Some(ContactProfile {
             peer_id: open.peer_id,
+            name: open.name.clone(),
+            blocked: Some(blocked),
             state: match profile {
                 Ok(account) => AccountState::Known(account),
                 Err(reason) => AccountState::Unavailable(reason),
