@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>televim: global message search, the next five states (80×24)</title>
+<link rel="stylesheet" href="design-system/tokens.css">
+<link rel="stylesheet" href="televim.css">
+<style>
+  .state { margin: 0 0 1.5lh; }
+  .pair { display: flex; flex-wrap: wrap; gap: 2lh 32px; align-items: flex-start; }
+  .pair figure { margin: 0; }
+  .pair figcaption { color: var(--text-dim); padding-bottom: 6px; }
+  .state > .caption { margin: 1lh 0 6px; color: var(--text); }
+  .state > .legend { margin: 0 0 1lh; max-width: 88ch; }
+  .pair { margin-bottom: 2lh; }
+  table.spec { border-collapse: collapse; margin: 1lh 0 1lh; max-width: 100ch; color: var(--text-dim); }
+  table.spec th, table.spec td { text-align: left; padding: 2px 3ch 2px 0; vertical-align: top; font-weight: normal; }
+  table.spec th { color: var(--text); border-bottom: 1px solid var(--border); }
+  table.spec code { color: var(--text); }
+  h2 { font-size: 1em; font-weight: bold; margin: 3lh 0 1lh; }
+  h2 .n { color: var(--text-dim); font-weight: normal; }
+  pre.paste {
+    margin: 1lh 0 0; padding: 2ch 0 0; border-top: 1px solid var(--border);
+    max-width: 88ch; white-space: pre-wrap; color: var(--text); font-size: 13px;
+    line-height: 1.5;
+  }
+  details { margin-top: 1lh; }
+  summary { color: var(--text-dim); cursor: pointer; }
+  summary:focus-visible { outline: 1px solid var(--border-focused); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div class="chrome" data-od-id="chrome">
+  <h1 data-od-id="page-title">global message search: the next five states</h1>
+  <p class="sub" data-od-id="page-sub">The overlay's grammar is the one <b>global-search-overlay.html</b> set and this page does not restyle it: the box over the body, one rule per chat, one row per hit, reverse video on the cursor, the hint on the box's bottom edge, the state in the status line. What changes is what a hit is made of, what the private-chat rule costs, what a query may carry, what a wait looks like, and who fetches the next page. Twelve frames, every one an exact 80×24 grid, in both terminals. The last block is the section for <b>design-system/DESIGN.md</b>, written to be pasted after the existing overlay material.</p>
+  <div id="states" data-od-id="states"></div>
+
+  <h2 data-od-id="spec-heading">The section for DESIGN.md</h2>
+  <p class="legend" data-od-id="spec-paste-note">Paste from the rule to the end of the block. It follows the overlay's existing sections: placement, rows, keys, status line, footer hints, open points. Two rows of that status table are superseded and the block says which.</p>
+  <details open data-od-id="design-md-details">
+  <summary data-od-id="design-md-summary">the section itself, as markdown, from ## to the frames line</summary>
+  <pre class="paste" data-od-id="design-md-section">## Global message search: the five states after the list
+
+The overlay's grammar does not change: 80 by 24, the box over the body, one rule
+per chat, reverse video on the cursor, the hint on the box's bottom edge, the
+status line for the state. This section adds what happens when a hit needs more
+than one line, when the private-chat rule discards hits, when the query carries
+filters, when the server says wait, and when the next page arrives by itself.
+
+**Two lines per hit.** A hit draws up to two lines of its body, 62 cells each,
+the second indented to the snippet's column. Time and `[you]`/`[them]` are on
+the first line only, and that first line's time is what marks where a hit
+starts. The window is chosen around the first match and each cut end is `…`. A
+match is `match` ink in bold on either line. A message whose body fits one line
+draws one row. The cursor reverses every row its hit occupies, because those
+rows are one hit: a half-reversed hit would read as two rows to a reader moving
+one hit at a time with `j`.
+
+- **Why two lines.** One line showed the match and nothing around it, so the
+  reader had to open the chat to learn whether the hit was the message they
+  meant, which is the one cost the overlay exists to avoid. Two is the smallest
+  number that shows a match and the sentence it sits in.
+- **What it costs.** The 21 interior rows hold nine hits and three headers (19
+  rows) where one line per hit held eighteen hits. Half as many hits fit on a
+  screen, which is why the next page is fetched without a key, below, and why
+  the count in the status matters more than it did.
+- **Not two lines for the cursor row only.** A row's height would then depend on
+  where the cursor was, and every `j` would relayout the list under the reader.
+
+**Dropped hits.** `messages.searchGlobal` searches every chat and this client is
+private correspondents, so a hit in a group or a channel cannot be opened here.
+Those hits are discarded before the list is built and counted in the status, in
+one comma clause after the count:
+
+| Case | Status line, as drawn |
+| :--- | :-------------------- |
+| 9 kept, 3 dropped of 12 | `?tickets — 9 results in 3 chats, 3 dropped` |
+| 100 held of 412, 2 dropped | `?tickets — 100 of 412 results in 3 chats, 2 dropped` |
+| nothing kept, 4 dropped | `?tickets — no matches, 4 dropped` |
+
+- **One clause, one place.** `, N dropped` is the same clause in all three, so a
+  reader learns it once. `no matches` is the overlay's existing sentence for an
+  empty answer, unaltered; the clause after it explains an emptiness the reader
+  did not expect.
+- **`dropped`, not `filtered` or `hidden`.** The search never held these: they
+  were discarded before the list existed. That is what `dropped` says and what
+  `filtered` does not.
+
+**Filters are typed into the same query.** `messages.searchGlobal` takes a media
+`filter` and `min_date`/`max_date`, and no sender, so media and dates are the
+only filters offered and there is no sender token. The reader writes them as
+tokens in the prompt: `media:photo_video`, `since:2026-01-01`,
+`until:2026-02-01`. Media values are `photo_video`, `document`, `music`,
+`voice`, `url`.
+
+- **The prompt is the box's last interior row:** two columns of indent, the
+  query, the insert caret. The overlay owns rows 0 to 22, so the screen's own
+  bar cannot hold a prompt while the box is up; the box draws it on its bottom
+  interior row and keeps `Esc: close` on its bottom edge. The mode label reads
+  `INSERT`, as it does for every line being typed. (Chosen here: the existing
+  section says the prompt is the bar at the foot, and the geometry rules the
+  screen's bar out.)
+- **While typing, the status names the vocabulary.** The vocabulary is the one
+  thing the frame cannot show and the one thing the reader needs at that moment:
+  `Filters: photo_video, document, music, voice, url — since:, until:`
+- **With filters active the tokens leave the echo** and are restated as a clause
+  before the count, in the answer's reading rather than the prompt's grammar:
+  the values are the reader's own words, the `media:`/`since:`/`until:` names
+  are the prompt's: `?tickets — photo_video, 2026-01-01 to 2026-02-01 — 9
+  results`. A one-sided range reads `from 2026-01-01` or `to 2026-02-01`.
+- **With filters active the count loses `in N chats`.** The clause costs 37 of
+  the line's 70 cells, and a date range makes the chat count the least
+  interesting half of the count. (Chosen here; without filters the count keeps
+  both numbers.)
+- **A malformed token refuses the search without a request.** The prompt keeps
+  the query so it can be fixed, and the flash names the token and one legal
+  value: `media:photo is not a media filter: try photo_video.` An unknown value,
+  an unknown token name and an unparseable date take the same shape. (Chosen
+  here: one legal value is named, not five, because five do not fit beside the
+  token in 70 cells.)
+
+**`FLOOD_WAIT` is a pause, not a failure.** It is the only limit
+`messages.searchGlobal` has, there is no daily quota, and what the server
+returns is a number of seconds, not an error.
+
+- **The overlay stays up and keeps its rows.** A reader who has results does not
+  lose them to a wait: the rows stay, the cursor stays, and `j`/`k`, `{`/`}` and
+  `⏎` still answer. Only the next request is withheld.
+- **The status says paused and counts down** in whole seconds:
+  `?tickets — 9 results in 3 chats, paused: retry in 42s`. With nothing held the
+  clause stands alone, `?tickets — paused: retry in 42s`; the count is absent
+  because there is no count.
+- **The foot does not change.** With rows up it is the full hint, because every
+  key on it still answers; with none it is `Esc: close`, as in every state with
+  no list. A wait is not a reason to stop reading, so no word in the foot says
+  "waiting": the status is the only place the wait is written.
+- **The retry is automatic.** When the delay runs out the same query with the
+  same filters is sent again; no key repeats it.
+
+**The next page is fetched, not requested.** When the cursor reaches the last hit
+and the server has more, the next page is requested and appended, grouped by
+chat as the first page was, and the cursor stays on the row it was on: that row
+does not move and the list grows under it.
+
+- **In flight** the status says so and nothing else changes:
+  `?gate — 7 results in 2 chats, loading more…`. No row is inserted for the
+  fetch, because an inserted row would move the row the cursor is on, and the
+  foot is unchanged.
+- **Once the last page is in** the count is the full total and no "more" marker
+  appears: `?gate — 9 results in 3 chats`. Nothing on the screen asks the reader
+  to act, which is the point: a reader who pages by walking should never be told
+  to press a key for the rest.
+- **`100 of 412` is gone.** That state described a cap the reader had to live
+  with; the cap is a page size now, and the list grows by itself.
+
+**The status line's budget.** Every sentence above is measured against the 70
+cells the line has after ` NORMAL  ` and its space. When one does not fit, the
+query's free text yields first and is cut with `…`; the filters and the count
+never yield, because they are the answer. No hint string changes: the foot's
+hint is the existing 53-cell row and `Esc: close` is its existing short form.
+
+**What this replaces.** Two rows of the existing status table.
+`search failed (flood wait 30s)` is not a failure and is drawn as the pause
+above. `100 of 412 results in 3 chats` is a page size, not a cap the reader
+meets. No other row changes.
+
+**Palette.** No new roles. The second line is body ink and `match` as the first
+is, the cursor row is reverse video on both of its rows, the prompt is body ink
+with the insert caret, and the flash is body ink on the status line.
+
+Frames: twelve in `global-search-states.html`, their rows in
+`global-search-states-frames.js`: two for the two-line hit, three for the
+dropped count, three for filters (the prompt, the filtered answer, a refused
+token), two for the wait (with results and without), two for the page boundary
+(in flight, and the last page in). They are drawn from these rules, not from
+`televim-engine.js`; a `globalsearch` scene in the engine is the next step.</pre>
+  </details>
+</div>
+<script src="global-search-states-frames.js"></script>
+<script>
+  (function () {
+    'use strict';
+    const host = document.getElementById('states');
+    const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const html = (rows) => rows.map((r) => r.map(([t, role]) => '<span class="' + role + '">' + esc(t) + '</span>').join('')).join('\n');
+    const STATES = [
+      ['two-line', '1. Two lines per hit', 'One line showed the match and hid the sentence around it. A hit now draws up to two lines, 62 cells each, the second indented under the snippet. The cursor reverses both rows because they are one hit; a message that fits one line still draws one. These are the same nine hits the existing overlay art draws, so the two pages are one glance apart. The 21 interior rows hold 19 of them and two rows are spare, which is the trade: half as many hits a screen, and the count carries more weight than it did.'],
+      ['dropped', '2. Dropped count', 'Hits in chats that are not private correspondents are discarded before the list exists, and counted in one comma clause after the count. <b>dropped</b> is the word: the search never held them, so nothing was filtered out of the list the reader is looking at. The empty case keeps <b>no matches</b> and takes the same clause, which is what explains an emptiness the reader did not expect.'],
+      ['filters', '3. Filters', 'Media and dates only, because <b>messages.searchGlobal</b> takes a media filter and <b>min_date</b>/<b>max_date</b> and no sender. The reader types them as tokens in the same query. The prompt cannot be the screen\'s bar while the box owns rows 0 to 22, so it is the box\'s last interior row. The status names the vocabulary while typing, names the parsed filters once the answer lands, and names the offending token when one is malformed.'],
+      ['wait', '4. Rate limit', '<b>FLOOD_WAIT</b> is the only limit this method has, and it is a pause: the rows stay, the cursor stays, every key on the hint still answers, and only the next request is withheld. The countdown lives in the status, which is the one place the wait is written. The foot says nothing about it, because a reader who has results has not lost them.'],
+      ['paging', '5. The next page', 'Paging past the first page is automatic, not a key. When the cursor reaches the last hit and the server has more, the page is fetched and appended under the cursor, which does not move. In flight the status says <b>loading more…</b> and no row is inserted for the fetch; when the last page is in, the count is the total and nothing on screen asks the reader to do anything.']
+    ];
+    STATES.forEach(([id, title, lead]) => {
+      const sec = document.createElement('div');
+      sec.className = 'state';
+      sec.setAttribute('data-od-id', 'state-' + id);
+      const h = document.createElement('h2');
+      h.textContent = title;
+      sec.appendChild(h);
+      const p = document.createElement('p');
+      p.className = 'legend';
+      p.setAttribute('data-od-id', 'lead-' + id);
+      p.innerHTML = lead;
+      sec.appendChild(p);
+      GS2.frames.filter((f) => f.state === id).forEach((f) => {
+        const cap = document.createElement('p');
+        cap.className = 'caption';
+        cap.setAttribute('data-od-id', 'caption-' + f.id);
+        cap.textContent = f.label;
+        sec.appendChild(cap);
+        const pair = document.createElement('div');
+        pair.className = 'pair';
+        ['dark', 'light'].forEach((theme) => {
+          const fig = document.createElement('figure');
+          const fc = document.createElement('figcaption');
+          fc.textContent = theme + ' terminal';
+          fig.appendChild(fc);
+          const pre = document.createElement('pre');
+          pre.className = 'screen';
+          pre.setAttribute('data-terminal', theme);
+          pre.setAttribute('data-od-id', 'frame-' + f.id + '-' + theme);
+          pre.setAttribute('role', 'img');
+          pre.setAttribute('aria-label', 'Global message search, ' + f.label + ' ' + theme + ' terminal, 80 by 24. Status: ' + f.status);
+          pre.innerHTML = html(f.rows);
+          fig.appendChild(pre);
+          pair.appendChild(fig);
+        });
+        sec.appendChild(pair);
+      });
+      host.appendChild(sec);
+    });
+  })();
+</script>
+</body>
+</html>

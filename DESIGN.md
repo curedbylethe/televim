@@ -643,7 +643,7 @@ the one place that cost would be spent for nothing.
 
 ### Media placeholders
 
-Decided: the six tokens are **unchanged**. This section adds what the table above
+Decided: the seven tokens are **unchanged**. This section adds what the table above
 could not say, the ink, and the constraints the row vocabulary already implies.
 
 | `MediaKind` | Token | Carries | Ink |
@@ -653,9 +653,10 @@ could not say, the ink, and the constraints the row vocabulary already implies.
 | `Gif` | `[gif]` | an animated GIF | `text-dim` |
 | `Voice` | `[voice]` | a voice note | `text-dim` |
 | `Sticker` | `[sticker]` | a static sticker | `text-dim` |
+| `AnimatedSticker` | `[animated sticker]` | a TGS or WebM sticker | `text-dim` |
 | `File` | `[file]` | a document, contact, or any kind the build does not model | `text-dim` |
 
-**The ink is `text-dim`, not body `text`.** One role for all six, no new token, and
+**The ink is `text-dim`, not body `text`.** One role for all seven, no new token, and
 no bold, italic or underline (there is no second weight or slant in this surface).
 
 - *Why not body ink.* The token is the program's word for something the sender did
@@ -737,7 +738,7 @@ conversation around it stays on screen.
 sent, the way a caption is, so the scene paints it in `text` — the binary paints
 true colours where the model paints `text`, and the decision the scene pins is
 "content, not chrome". The `[sticker]` token underneath is the program's word for
-the same thing and stays `text-dim`, like the other five.
+the same thing and stays `text-dim`, like the other six.
 
 **Ink in each state** (the block follows the message rules, row for row):
 
@@ -751,13 +752,20 @@ the same thing and stays `text-dim`, like the other five.
 
 **Whole-selection yanks the literal `[sticker]`.** There is no text on the block
 to select character by character, so `vy` over the message yanks the token — the
-same string a reply quotes (`> [sticker] ‖`) and the fallback row shows. An
-animated sticker is out of scope and stays `File` → `[file]`; a captioned sticker
-shows the caption and no block, by the caption rule above.
+same string a reply quotes (`> [sticker] ‖`) and the fallback row shows. A
+captioned sticker shows the caption and no block, by the caption rule above.
 
-**`[sticker]` is also the fallback.** Flag off, no bytes, or a failed decode all
-draw the token row in `text-dim`, exactly like `[image]`: the message's whole
-`text` is the token, so search, yank and reply need no second path.
+**An animated sticker is a token, never a picture.** A TGS or a WebM is not
+decoded inline: it draws `[animated sticker]` in `text-dim`, by the token rule, and
+`o` opens its cached file in the viewer. Telegram's preview for one is an SVG
+outline or a stripped JPEG, not a WebP, and neither is decoded here — so the
+token is the representation, not a fallback from a missing picture.
+
+**`[sticker]` is the static sticker's fallback.** Flag off, no bytes, or a failed
+decode of a *static* sticker all draw the token row in `text-dim`, exactly like
+`[image]`: the message's whole `text` is the token, so search, yank and reply need
+no second path. An animated sticker has no inline block to fall back from; its
+token is the only row it ever draws.
 
 Scenes: `media` in the engine (start `media`, a chat put first by the scene), eight
 frames at 80×24: `[image]` alone, `[voice]`, `[file]`, a caption suppressing the
@@ -978,6 +986,142 @@ failed search, an exact username opening a new empty conversation, and an exact
 username that focuses an existing conversation instead of duplicating it. A query
 opening with `!` stands in for the failed search, so the failure sentence has a
 frame to be seen in.
+
+## Global message search: the five states after the list
+
+The overlay's grammar does not change: 80 by 24, the box over the body, one rule
+per chat, reverse video on the cursor, the hint on the box's bottom edge, the
+status line for the state. This section adds what happens when a hit needs more
+than one line, when the private-chat rule discards hits, when the query carries
+filters, when the server says wait, and when the next page arrives by itself.
+
+**Two lines per hit.** A hit draws up to two lines of its body, 62 cells each,
+the second indented to the snippet's column. Time and `[you]`/`[them]` are on
+the first line only, and that first line's time is what marks where a hit
+starts. The window is chosen around the first match and each cut end is `…`. A
+match is `match` ink in bold on either line. A message whose body fits one line
+draws one row. The cursor reverses every row its hit occupies, because those
+rows are one hit: a half-reversed hit would read as two rows to a reader moving
+one hit at a time with `j`.
+
+- **Why two lines.** One line showed the match and nothing around it, so the
+  reader had to open the chat to learn whether the hit was the message they
+  meant, which is the one cost the overlay exists to avoid. Two is the smallest
+  number that shows a match and the sentence it sits in.
+- **What it costs.** The 21 interior rows hold nine hits and three headers (19
+  rows) where one line per hit held eighteen hits. Half as many hits fit on a
+  screen, which is why the next page is fetched without a key, below, and why
+  the count in the status matters more than it did.
+- **Not two lines for the cursor row only.** A row's height would then depend on
+  where the cursor was, and every `j` would relayout the list under the reader.
+
+**Dropped hits.** `messages.searchGlobal` searches every chat and this client is
+private correspondents, so a hit in a group or a channel cannot be opened here.
+Those hits are discarded before the list is built and counted in the status, in
+one comma clause after the count:
+
+| Case | Status line, as drawn |
+| :--- | :-------------------- |
+| 9 kept, 3 dropped of 12 | `?tickets — 9 results in 3 chats, 3 dropped` |
+| 100 held of 412, 2 dropped | `?tickets — 100 of 412 results in 3 chats, 2 dropped` |
+| nothing kept, 4 dropped | `?tickets — no matches, 4 dropped` |
+
+- **One clause, one place.** `, N dropped` is the same clause in all three, so a
+  reader learns it once. `no matches` is the overlay's existing sentence for an
+  empty answer, unaltered; the clause after it explains an emptiness the reader
+  did not expect.
+- **`dropped`, not `filtered` or `hidden`.** The search never held these: they
+  were discarded before the list existed. That is what `dropped` says and what
+  `filtered` does not.
+
+**Filters are typed into the same query.** `messages.searchGlobal` takes a media
+`filter` and `min_date`/`max_date`, and no sender, so media and dates are the
+only filters offered and there is no sender token. The reader writes them as
+tokens in the prompt: `media:photo_video`, `since:2026-01-01`,
+`until:2026-02-01`. Media values are `photo_video`, `document`, `music`,
+`voice`, `url`.
+
+- **The prompt is the box's last interior row:** two columns of indent, the
+  query, the insert caret. The overlay owns rows 0 to 22, so the screen's own
+  bar cannot hold a prompt while the box is up; the box draws it on its bottom
+  interior row and keeps `Esc: close` on its bottom edge. The mode label reads
+  `INSERT`, as it does for every line being typed. (Chosen here: the existing
+  section says the prompt is the bar at the foot, and the geometry rules the
+  screen's bar out.)
+- **While typing, the status names the vocabulary.** The vocabulary is the one
+  thing the frame cannot show and the one thing the reader needs at that moment:
+  `Filters: photo_video, document, music, voice, url — since:, until:`
+- **With filters active the tokens leave the echo** and are restated as a clause
+  before the count, in the answer's reading rather than the prompt's grammar:
+  the values are the reader's own words, the `media:`/`since:`/`until:` names
+  are the prompt's: `?tickets — photo_video, 2026-01-01 to 2026-02-01 — 9
+  results`. A one-sided range reads `from 2026-01-01` or `to 2026-02-01`.
+- **With filters active the count loses `in N chats`.** The clause costs 37 of
+  the line's 70 cells, and a date range makes the chat count the least
+  interesting half of the count. (Chosen here; without filters the count keeps
+  both numbers.)
+- **A malformed token refuses the search without a request.** The prompt keeps
+  the query so it can be fixed, and the flash names the token and one legal
+  value: `media:photo is not a media filter: try photo_video.` An unknown value,
+  an unknown token name and an unparseable date take the same shape. (Chosen
+  here: one legal value is named, not five, because five do not fit beside the
+  token in 70 cells.)
+
+**`FLOOD_WAIT` is a pause, not a failure.** It is the only limit
+`messages.searchGlobal` has, there is no daily quota, and what the server
+returns is a number of seconds, not an error.
+
+- **The overlay stays up and keeps its rows.** A reader who has results does not
+  lose them to a wait: the rows stay, the cursor stays, and `j`/`k`, `{`/`}` and
+  `⏎` still answer. Only the next request is withheld.
+- **The status says paused and counts down** in whole seconds:
+  `?tickets — 9 results in 3 chats, paused: retry in 42s`. With nothing held the
+  clause stands alone, `?tickets — paused: retry in 42s`; the count is absent
+  because there is no count.
+- **The foot does not change.** With rows up it is the full hint, because every
+  key on it still answers; with none it is `Esc: close`, as in every state with
+  no list. A wait is not a reason to stop reading, so no word in the foot says
+  "waiting": the status is the only place the wait is written.
+- **The retry is automatic.** When the delay runs out the same query with the
+  same filters is sent again; no key repeats it.
+
+**The next page is fetched, not requested.** When the cursor reaches the last hit
+and the server has more, the next page is requested and appended, grouped by
+chat as the first page was, and the cursor stays on the row it was on: that row
+does not move and the list grows under it.
+
+- **In flight** the status says so and nothing else changes:
+  `?gate — 7 results in 2 chats, loading more…`. No row is inserted for the
+  fetch, because an inserted row would move the row the cursor is on, and the
+  foot is unchanged.
+- **Once the last page is in** the count is the full total and no "more" marker
+  appears: `?gate — 9 results in 3 chats`. Nothing on the screen asks the reader
+  to act, which is the point: a reader who pages by walking should never be told
+  to press a key for the rest.
+- **`100 of 412` is gone.** That state described a cap the reader had to live
+  with; the cap is a page size now, and the list grows by itself.
+
+**The status line's budget.** Every sentence above is measured against the 70
+cells the line has after ` NORMAL  ` and its space. When one does not fit, the
+query's free text yields first and is cut with `…`; the filters and the count
+never yield, because they are the answer. No hint string changes: the foot's
+hint is the existing 53-cell row and `Esc: close` is its existing short form.
+
+**What this replaces.** Two rows of the existing status table.
+`search failed (flood wait 30s)` is not a failure and is drawn as the pause
+above. `100 of 412 results in 3 chats` is a page size, not a cap the reader
+meets. No other row changes.
+
+**Palette.** No new roles. The second line is body ink and `match` as the first
+is, the cursor row is reverse video on both of its rows, the prompt is body ink
+with the insert caret, and the flash is body ink on the status line.
+
+Frames: twelve in `global-search-states.html`, their rows in
+`global-search-states-frames.js`: two for the two-line hit, three for the
+dropped count, three for filters (the prompt, the filtered answer, a refused
+token), two for the wait (with results and without), two for the page boundary
+(in flight, and the last page in). They are drawn from these rules, not from
+`televim-engine.js`; a `globalsearch` scene in the engine is the next step.
 
 ## Forwarding a message
 
