@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
-use domain::global_search::GlobalSearchState;
+use domain::global_search::{GlobalSearchState, SearchSpec};
 use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
 use domain::message::Message;
 use domain::search::word_prefix_match;
@@ -1542,33 +1542,51 @@ pub(crate) fn run_search(
     }
 }
 
-/// Answers `?` and `:search`: asks every private chat for `query` at once.
+/// Answers `?` and `:search`: asks every correspondent for `spec` at once.
 ///
 /// The search begins here, once per submit, and the request is queued for the
 /// caller to make; the answer comes back through [`App::adopt_global_search`].
-/// An empty query repeats the last global search, as `/` repeats its own. With
-/// nothing to repeat, the refusal is visible rather than the key doing nothing.
+/// An empty query repeats the last global search, filters and all, as `/`
+/// repeats its own. With nothing to repeat, the refusal is visible rather than
+/// the key doing nothing.
 pub(crate) fn run_global_search(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     outbox: &mut Outbox,
     query: &str,
 ) {
-    let query = if query.is_empty() {
-        conversation
-            .global_search
-            .spec()
-            .map(|spec| spec.echo.clone())
+    let spec = if query.is_empty() {
+        conversation.global_search.spec().cloned()
     } else {
-        Some(query.to_owned())
+        Some(SearchSpec::plain(query))
     };
-    let Some(query) = query else {
+    let Some(spec) = spec else {
         ui.flash("no previous global search");
         return;
     };
 
-    conversation.begin_global_search(&query);
-    queue_action(&mut *outbox, &mut *ui, Action::GlobalSearch { query });
+    conversation.global_search.begin(&spec);
+    queue_action(&mut *outbox, &mut *ui, Action::GlobalSearch { spec });
+}
+
+/// Asks for the page after the one shown, once the cursor reaches its last hit.
+///
+/// Only the reader's motion calls this, so a page is asked for exactly when they
+/// run out of rows and the server said there are more: `needs_more` is what
+/// keeps a second request off a list with one already on its way, and off a
+/// search the server has asked to wait. Beginning the same spec again is a
+/// continuation — the rows stay where they are.
+fn ask_for_more(outbox: &mut Outbox, ui: &mut UiState, conversation: &mut ConversationState) {
+    let search = &mut conversation.global_search;
+    if search.is_empty() || search.selected() + 1 != search.len() || !search.needs_more() {
+        return;
+    }
+    let Some(spec) = search.spec().cloned() else {
+        return;
+    };
+
+    search.begin(&spec);
+    queue_action(&mut *outbox, &mut *ui, Action::MoreGlobal { spec });
 }
 
 /// The one way in, whatever the reader came from: the signed-out card's
@@ -4230,10 +4248,19 @@ fn handle_global_search(
     pending.set_g(false);
 
     match key.code {
-        KeyCode::Char('j') | KeyCode::Down => conversation.global_search.move_selection(1),
-        KeyCode::Char('k') | KeyCode::Up => conversation.global_search.move_selection(-1),
+        KeyCode::Char('j') | KeyCode::Down => {
+            conversation.global_search.move_selection(1);
+            ask_for_more(&mut *outbox, &mut *ui, &mut *conversation);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            conversation.global_search.move_selection(-1);
+            ask_for_more(&mut *outbox, &mut *ui, &mut *conversation);
+        }
         KeyCode::Char('{') if plain => step_chat(&mut conversation.global_search, false),
-        KeyCode::Char('}') if plain => step_chat(&mut conversation.global_search, true),
+        KeyCode::Char('}') if plain => {
+            step_chat(&mut conversation.global_search, true);
+            ask_for_more(&mut *outbox, &mut *ui, &mut *conversation);
+        }
         KeyCode::Char('g') if plain => {
             if armed {
                 let selected = conversation.global_search.selected();
@@ -4248,6 +4275,7 @@ fn handle_global_search(
             let search = &mut conversation.global_search;
             let rest = search.len().saturating_sub(search.selected() + 1);
             search.move_selection(to_isize(rest));
+            ask_for_more(&mut *outbox, &mut *ui, &mut *conversation);
         }
         KeyCode::Enter if plain => accept_global_search(
             &mut *ui,
@@ -4320,7 +4348,6 @@ fn accept_global_search(
         return;
     };
     conversation.global_search.clear();
-    conversation.global_dropped = 0;
 
     let on_screen = conversation.conversation.window.chat_id == hit.chat_id
         && conversation
@@ -4376,7 +4403,6 @@ fn dismiss_global_search(
     origin: Focus,
 ) {
     conversation.global_search.clear();
-    conversation.global_dropped = 0;
     set_focus(
         &mut *ui,
         &mut *conversation,

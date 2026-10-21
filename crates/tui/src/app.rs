@@ -12,7 +12,7 @@ use crossterm::event::KeyEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 use domain::account::Account;
 use domain::chat::Chat;
-use domain::global_search::{GlobalHit, GlobalSearchState};
+use domain::global_search::{GlobalHit, GlobalSearchState, SearchSpec};
 #[cfg(test)]
 use domain::history::{CONVERSATION_WINDOW, ConversationWindow};
 use domain::message::Message;
@@ -1036,14 +1036,24 @@ pub enum Action {
         query: String,
     },
 
-    /// Search every private conversation for `query`.
+    /// Search every correspondent for the first page of `spec`.
     ///
     /// One action for the whole search, not one per chat: the answer is the
-    /// server's, matched back to the query it was asked for, and the action
+    /// server's, matched back to the spec it was asked for, and the action
     /// queue is bounded.
     GlobalSearch {
-        /// What to look for.
-        query: String,
+        /// What to look for, and how it is narrowed.
+        spec: SearchSpec,
+    },
+
+    /// Ask for the page after the one already shown, for the same `spec`.
+    ///
+    /// The cursor itself is not here: it belongs to `proto`, which `tui` may not
+    /// name, so the loop holds it and this action only says the reader reached
+    /// the end of what was fetched.
+    MoreGlobal {
+        /// The search the next page belongs to.
+        spec: SearchSpec,
     },
 
     /// Find a person named or handle-matching `query`, to start a conversation
@@ -1471,39 +1481,80 @@ impl App {
         &self.conversation.global_search
     }
 
-    /// How many hits of the last global answer were outside the private chats.
+    /// How many hits of the last global answer were outside the correspondents.
+    ///
+    /// The state owns the count, so there is one number rather than a copy that
+    /// can disagree with it.
     #[must_use]
     pub fn global_dropped(&self) -> usize {
-        self.conversation.global_dropped
+        self.conversation.global_search.dropped()
     }
 
-    /// Starts a global search for `query`.
+    /// Starts a global search for `spec`, or asks for another page of it.
     ///
-    /// Delegates to [`ConversationState::begin_global_search`]. Called by the
-    /// submit path before the action is queued.
-    pub fn begin_global_search(&mut self, query: &str) {
-        self.conversation.begin_global_search(query);
+    /// Called by the submit path before the action is queued, and by a
+    /// continuation: the same spec leaves the rows where they are, because
+    /// [`GlobalSearchState::begin`] clears only when the spec differs.
+    pub fn begin_global_search(&mut self, spec: &SearchSpec) {
+        self.conversation.global_search.begin(spec);
     }
 
-    /// Fills the global list with the answer to `query`, if it is still wanted.
+    /// Fills the global list with the server's first answer to `spec`, if it is
+    /// still wanted.
     ///
-    /// Delegates to [`ConversationState::adopt_global_search`].
+    /// Returns whether the answer landed. The dropped count travels with the
+    /// hits so the two cannot disagree about which answer they came from.
     pub fn adopt_global_search(
         &mut self,
-        query: &str,
+        spec: &SearchSpec,
         hits: Vec<GlobalHit>,
         total: usize,
         dropped: usize,
+        has_more: bool,
     ) -> bool {
         self.conversation
-            .adopt_global_search(query, hits, total, dropped)
+            .global_search
+            .adopt(spec, hits, total, dropped, has_more)
     }
 
-    /// Records that the global search for `query` failed, if it is still wanted.
+    /// Adds the server's next page for `spec` to the list, if it is still wanted.
     ///
-    /// Delegates to [`ConversationState::fail_global_search`].
-    pub fn fail_global_search(&mut self, query: &str, reason: String) -> bool {
-        self.conversation.fail_global_search(query, reason)
+    /// Returns whether the page landed. The rows already shown and the selection
+    /// stay, and `dropped` is this page's own count.
+    pub fn append_global_search(
+        &mut self,
+        spec: &SearchSpec,
+        hits: Vec<GlobalHit>,
+        total: usize,
+        dropped: usize,
+        has_more: bool,
+    ) -> bool {
+        self.conversation
+            .global_search
+            .append(spec, hits, total, dropped, has_more)
+    }
+
+    /// Records that the server asked the search to wait, keeping the rows.
+    ///
+    /// Delegates to [`GlobalSearchState::pause`].
+    pub fn pause_global_search(&mut self, spec: &SearchSpec, retry_in: Duration) -> bool {
+        self.conversation.global_search.pause(spec, retry_in)
+    }
+
+    /// Marks the search as no longer in flight, keeping every row.
+    ///
+    /// What a continuation that failed leaves behind: the page already shown
+    /// stays, and the end of the list simply asks again.
+    pub fn settle_global_search(&mut self, spec: &SearchSpec) -> bool {
+        self.conversation.global_search.settle(spec)
+    }
+
+    /// Records that the global search for `spec` failed, if it is still wanted.
+    ///
+    /// A first page that failed leaves nothing to show, so the hits are cleared;
+    /// a continuation calls [`App::settle_global_search`] instead.
+    pub fn fail_global_search(&mut self, spec: &SearchSpec, reason: String) -> bool {
+        self.conversation.global_search.fail(spec, reason)
     }
 
     /// What the reader has selected, for the panel to mark and the operations to

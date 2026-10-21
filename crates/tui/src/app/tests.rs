@@ -7469,7 +7469,7 @@ fn submitting_a_global_query_queues_exactly_one_search() {
     assert_eq!(
         app.take_action(),
         Some(Action::GlobalSearch {
-            query: "hello".to_owned()
+            spec: SearchSpec::plain("hello")
         }),
         "the query is trimmed on its way out"
     );
@@ -7491,7 +7491,7 @@ fn colon_search_with_a_query_queues_exactly_one_search() {
     assert_eq!(
         app.take_action(),
         Some(Action::GlobalSearch {
-            query: "ada lovelace".to_owned()
+            spec: SearchSpec::plain("ada lovelace")
         })
     );
     assert_eq!(app.take_action(), None);
@@ -7513,7 +7513,7 @@ fn an_empty_colon_search_repeats_the_last_global_search() {
     assert_eq!(
         app.take_action(),
         Some(Action::GlobalSearch {
-            query: "hello".to_owned()
+            spec: SearchSpec::plain("hello")
         }),
         "asked again, because the answer may have changed"
     );
@@ -7547,7 +7547,7 @@ fn an_empty_question_mark_submit_repeats_the_last_global_search() {
     assert_eq!(
         app.take_action(),
         Some(Action::GlobalSearch {
-            query: "hello".to_owned()
+            spec: SearchSpec::plain("hello")
         })
     );
     assert_eq!(app.take_action(), None);
@@ -7580,28 +7580,35 @@ fn the_status_line_names_the_global_search_through_every_state() {
     assert_eq!(app.status_text(), "?hello — searching…");
 
     assert!(app.adopt_global_search(
-        "hello",
+        &SearchSpec::plain("hello"),
         vec![global_hit(1, 1), global_hit(1, 2), global_hit(2, 3)],
         3,
         0,
+        false,
     ));
     assert_eq!(app.status_text(), "?hello — 3 results in 2 chats");
 
     run_command_line(&mut app, "search zebra");
-    assert!(app.adopt_global_search("zebra", Vec::new(), 0, 0));
+    assert!(app.adopt_global_search(&SearchSpec::plain("zebra"), Vec::new(), 0, 0, false));
     assert_eq!(app.status_text(), "?zebra — no matches");
 
     run_command_line(&mut app, "search hi");
-    assert!(app.adopt_global_search("hi", vec![global_hit(1, 1)], 1, 0));
+    assert!(app.adopt_global_search(
+        &SearchSpec::plain("hi"),
+        vec![global_hit(1, 1)],
+        1,
+        0,
+        false
+    ));
     assert_eq!(app.status_text(), "?hi — 1 result in 1 chat");
 
     run_command_line(&mut app, "search big");
     let hits: Vec<_> = (1..=100).map(|id| global_hit(1, id)).collect();
-    assert!(app.adopt_global_search("big", hits, 240, 0));
+    assert!(app.adopt_global_search(&SearchSpec::plain("big"), hits, 240, 0, false));
     assert_eq!(app.status_text(), "?big — 100 results in 1 chat");
 
     run_command_line(&mut app, "search tickets");
-    assert!(app.fail_global_search("tickets", "flood wait".to_owned()));
+    assert!(app.fail_global_search(&SearchSpec::plain("tickets"), "flood wait".to_owned()));
     assert_eq!(app.status_text(), "?tickets — search failed (flood wait)");
 }
 
@@ -7613,7 +7620,13 @@ fn a_replaced_global_answer_does_not_reach_the_status_line() {
     run_command_line(&mut app, "search first");
     run_command_line(&mut app, "search second");
 
-    assert!(!app.adopt_global_search("first", vec![global_hit(1, 1)], 1, 1));
+    assert!(!app.adopt_global_search(
+        &SearchSpec::plain("first"),
+        vec![global_hit(1, 1)],
+        1,
+        1,
+        false
+    ));
     assert_eq!(app.status_text(), "?second — searching…");
     assert_eq!(app.global_dropped(), 0);
 }
@@ -7645,9 +7658,23 @@ fn global_text(chat_id: i64, message_id: i64, text: &str) -> domain::global_sear
 
 /// Starts a global search for `query` and answers it with `hits`.
 fn answer_global(app: &mut App, query: &str, hits: Vec<domain::global_search::GlobalHit>) {
-    app.begin_global_search(query);
+    let spec = SearchSpec::plain(query);
+    app.begin_global_search(&spec);
     let total = hits.len();
-    assert!(app.adopt_global_search(query, hits, total, 0));
+    assert!(app.adopt_global_search(&spec, hits, total, 0, false));
+}
+
+/// Starts a global search for `query` and answers it with the first of several
+/// pages: `total` matches exist, and the server named a cursor for the rest.
+fn answer_global_with_more(
+    app: &mut App,
+    query: &str,
+    hits: Vec<domain::global_search::GlobalHit>,
+) {
+    let spec = SearchSpec::plain(query);
+    let total = hits.len() + 1;
+    app.begin_global_search(&spec);
+    assert!(app.adopt_global_search(&spec, hits, total, 0, true));
 }
 
 /// The 80x24 frame's buffer, for reading styles as well as text.
@@ -8135,7 +8162,7 @@ fn the_foot_names_the_keys_while_the_list_is_up_and_only_esc_otherwise() {
     assert!(rows[foot].contains("Esc: close"), "{:?}", rows[foot]);
 
     let mut app = App::mock();
-    app.begin_global_search("tickets");
+    app.begin_global_search(&SearchSpec::plain("tickets"));
     let rows = frame_rows(&app);
     assert!(row_of(&rows, "j/k: move").is_none(), "{rows:#?}");
     assert!(row_of(&rows, "Esc: close").is_some(), "{rows:#?}");
@@ -8145,7 +8172,7 @@ fn the_foot_names_the_keys_while_the_list_is_up_and_only_esc_otherwise() {
 #[test]
 fn the_empty_states_leave_the_body_blank_and_name_the_state_on_the_status_line() {
     let mut app = App::mock();
-    app.begin_global_search("tickets");
+    app.begin_global_search(&SearchSpec::plain("tickets"));
     let rows = frame_rows(&app);
     assert!(row_of(&rows, "?tickets — searching…").is_some());
     assert!(
@@ -8160,8 +8187,8 @@ fn the_empty_states_leave_the_body_blank_and_name_the_state_on_the_status_line()
     assert!(row_of(&rows, "Esc: close").is_some(), "{rows:#?}");
 
     let mut app = App::mock();
-    app.begin_global_search("tickets");
-    assert!(app.fail_global_search("tickets", "timeout".to_owned()));
+    app.begin_global_search(&SearchSpec::plain("tickets"));
+    assert!(app.fail_global_search(&SearchSpec::plain("tickets"), "timeout".to_owned()));
     let rows = frame_rows(&app);
     assert!(
         row_of(&rows, "search failed (timeout)").is_some(),
@@ -8199,6 +8226,50 @@ fn j_and_k_skip_the_chat_headers_and_wrap_at_both_ends() {
 /// A key press with no modifiers, for the overlay's walk keys.
 fn key_press(app: &mut App, code: KeyCode) {
     app.handle_key(press(code));
+}
+
+/// Reaching the last hit of a page asks for the one after it, exactly once.
+#[test]
+fn reaching_the_last_hit_asks_for_the_next_page() {
+    let mut app = App::mock();
+    answer_global_with_more(&mut app, "hit", two_chat_hits());
+    assert_eq!(app.take_action(), None, "nothing is asked for on arrival");
+
+    key_press(&mut app, KeyCode::Char('j'));
+    key_press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.global_search().selected(), 2, "the page's last hit");
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::MoreGlobal {
+            spec: SearchSpec::plain("hit")
+        }),
+        "the end of the page asks for the next one"
+    );
+    assert_eq!(app.take_action(), None, "one request per page");
+    assert!(
+        app.global_search().is_paging(),
+        "the rows stay while the next page is on its way"
+    );
+}
+
+/// A second arrival at the end while a page is in flight asks for nothing: the
+/// cursor is a round trip, not one per key.
+#[test]
+fn reaching_the_last_hit_while_in_flight_asks_once() {
+    let mut app = App::mock();
+    answer_global_with_more(&mut app, "hit", two_chat_hits());
+    key_press(&mut app, KeyCode::Char('j'));
+    key_press(&mut app, KeyCode::Char('j'));
+    assert!(app.take_action().is_some(), "the first arrival asks");
+
+    // Back to the top and down to the end again, all while the page is coming.
+    key_press(&mut app, KeyCode::Char('j'));
+    key_press(&mut app, KeyCode::Char('j'));
+    key_press(&mut app, KeyCode::Char('j'));
+
+    assert_eq!(app.global_search().selected(), 2);
+    assert_eq!(app.take_action(), None, "one page is already on its way");
 }
 
 #[test]

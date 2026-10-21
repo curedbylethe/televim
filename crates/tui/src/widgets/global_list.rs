@@ -468,8 +468,9 @@ mod tests {
     /// The screen's row that carries the sender tag, as its cells read left to right.
     fn hit_screen(mode: BidiMode) -> (Buffer, u16) {
         let mut app = App::mock().with_bidi(mode);
-        app.begin_global_search("لا");
-        assert!(app.adopt_global_search("لا", vec![arabic_hit()], 1, 0));
+        let spec = domain::global_search::SearchSpec::plain("لا");
+        app.begin_global_search(&spec);
+        assert!(app.adopt_global_search(&spec, vec![arabic_hit()], 1, 0, false));
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("the backend builds");
         terminal

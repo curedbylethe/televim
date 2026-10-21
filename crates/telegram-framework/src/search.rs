@@ -31,6 +31,15 @@
 //! unconditionally would report zero for exactly the small conversations a
 //! search is most used in, which is why [`results_from`] reads whichever the
 //! variant offers.
+//!
+//! # Paging
+//!
+//! A global page carries the cursor a later one is counted from: the score
+//! Telegram sent as `next_rate`, and the peer and identifier of the last
+//! message it named. The cursor is built from that message rather than from the
+//! last hit, because empty and service entries are counted but are not hits;
+//! anchoring on a hit could skip a page the server counted. Whether to ask for
+//! the next page is the caller's decision, not this module's.
 
 use grammers_client::session::types::PeerInfo;
 
@@ -71,12 +80,148 @@ pub struct GlobalHit {
 ///
 /// The same invariant as [`SearchResults`]: `total >= hits.len()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GlobalSearchResults {
+pub struct GlobalSearchPage {
     /// The matched messages, in the order Telegram sent them (newest first).
     pub hits: Vec<GlobalHit>,
 
     /// How many matches Telegram holds across every private conversation.
     pub total: usize,
+
+    /// Where the next page starts, or `None` when Telegram sent every match.
+    pub next: Option<GlobalOffset>,
+}
+
+/// What a global search is narrowed to, by attachment kind.
+///
+/// `None` is no narrowing at all. The other five are the kinds
+/// `messages.searchGlobal` filters on the server; a sender filter is not one of
+/// them, because the request has no field for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlobalFilter {
+    /// Every match, whatever it carries.
+    #[default]
+    None,
+
+    /// Photos and videos.
+    PhotoVideo,
+
+    /// Documents, including files.
+    Document,
+
+    /// Music.
+    Music,
+
+    /// Voice messages.
+    Voice,
+
+    /// Messages carrying a link.
+    Url,
+}
+
+impl GlobalFilter {
+    /// The wire filter this narrowing asks for.
+    fn messages_filter(self) -> tl::enums::MessagesFilter {
+        use tl::enums::MessagesFilter;
+
+        match self {
+            Self::None => MessagesFilter::InputMessagesFilterEmpty,
+            Self::PhotoVideo => MessagesFilter::InputMessagesFilterPhotoVideo,
+            Self::Document => MessagesFilter::InputMessagesFilterDocument,
+            Self::Music => MessagesFilter::InputMessagesFilterMusic,
+            Self::Voice => MessagesFilter::InputMessagesFilterVoice,
+            Self::Url => MessagesFilter::InputMessagesFilterUrl,
+        }
+    }
+}
+
+/// The conversation a page stops in, as the bare identifier the rest of the
+/// crate reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalPeer {
+    /// A person.
+    User(i64),
+
+    /// A group.
+    Chat(i64),
+
+    /// A channel or supergroup.
+    Channel(i64),
+}
+
+impl GlobalPeer {
+    /// The peer a [`tl::enums::Peer`] names.
+    fn of(peer: &tl::enums::Peer) -> Self {
+        match peer {
+            tl::enums::Peer::User(peer) => Self::User(peer.user_id),
+            tl::enums::Peer::Chat(peer) => Self::Chat(peer.chat_id),
+            tl::enums::Peer::Channel(peer) => Self::Channel(peer.channel_id),
+        }
+    }
+
+    /// The input peer a continuation sends.
+    ///
+    /// The access hash is zero on purpose: Telegram accepts an offset peer that
+    /// names only the identifier, and looking the hash up would make a page
+    /// depend on the peer cache.
+    fn input_peer(self) -> tl::enums::InputPeer {
+        match self {
+            Self::User(user_id) => tl::enums::InputPeer::User(tl::types::InputPeerUser {
+                user_id,
+                access_hash: 0,
+            }),
+            Self::Chat(chat_id) => tl::enums::InputPeer::Chat(tl::types::InputPeerChat { chat_id }),
+            Self::Channel(channel_id) => {
+                tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
+                    channel_id,
+                    access_hash: 0,
+                })
+            }
+        }
+    }
+}
+
+/// Where a page of a global search starts.
+///
+/// `rate` is the server's score for the message (the slice's `next_rate`), and
+/// `peer` and `message_id` name it. Telegram asks for all three as
+/// `offset_rate`, `offset_peer` and `offset_id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalOffset {
+    /// The server's score for the message the page starts after.
+    pub rate: i32,
+
+    /// The conversation the message is in.
+    pub peer: GlobalPeer,
+
+    /// The message's identifier within that conversation.
+    pub message_id: i32,
+}
+
+/// Which matches a global search asks for.
+///
+/// The fields only mean something together, so they are one value rather than
+/// loose arguments — the same argument [`SearchArgs`] makes. `min_date` and
+/// `max_date` are unix seconds and zero means "no bound"; `after` is the cursor
+/// a later page starts from, or `None` for the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalSearchArgs {
+    /// What to look for, passed through as typed.
+    pub query: String,
+
+    /// The attachment kind to keep, if any.
+    pub filter: GlobalFilter,
+
+    /// The earliest send time to keep, as unix seconds; zero is no bound.
+    pub min_date: i64,
+
+    /// The latest send time to keep, as unix seconds; zero is no bound.
+    pub max_date: i64,
+
+    /// The page to start after, or `None` for the first page.
+    pub after: Option<GlobalOffset>,
+
+    /// How many matches to return.
+    pub limit: usize,
 }
 
 /// The largest page a search will return.
@@ -256,14 +401,16 @@ impl Client {
         Ok(results)
     }
 
-    /// Searches every private conversation for messages matching `query`.
+    /// Searches every private conversation for the matches `args` asks for.
     ///
-    /// One request, and the result is its first page: `limit` is clamped into
-    /// what Telegram accepts, and the matches are not continued past it. The
+    /// One request, and the answer is one page: `limit` is clamped into what
+    /// Telegram accepts, and the filter and date bounds ride with it. The
     /// request sets `users_only`, so Telegram restricts the search to one-to-one
     /// chats; groups and channels are not searched at all.
     ///
-    /// The hits come back in Telegram's order, **newest first**.
+    /// The hits come back in Telegram's order, **newest first**. The page's
+    /// `next` is the cursor for the following page, or `None` when Telegram sent
+    /// every match; this module never follows it itself.
     ///
     /// The peers the response names are added to the peer cache, so a hit in a
     /// conversation the chat list has not shown can still be opened.
@@ -275,24 +422,9 @@ impl Client {
     /// that matches nothing is an ordinary empty result.
     pub async fn search_global(
         &self,
-        query: String,
-        limit: usize,
-    ) -> Result<GlobalSearchResults, FrameworkError> {
-        let request = tl::functions::messages::SearchGlobal {
-            broadcasts_only: false,
-            groups_only: false,
-            users_only: true,
-            folder_id: None,
-            q: query,
-            filter: tl::enums::MessagesFilter::InputMessagesFilterEmpty,
-            min_date: 0,
-            max_date: 0,
-            // The first page: no anchor peer and no anchor message.
-            offset_rate: 0,
-            offset_peer: tl::enums::InputPeer::Empty,
-            offset_id: 0,
-            limit: clamp_limit(limit),
-        };
+        args: GlobalSearchArgs,
+    ) -> Result<GlobalSearchPage, FrameworkError> {
+        let request = request_of(args);
 
         let response = self
             .inner()
@@ -301,18 +433,52 @@ impl Client {
             .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
 
         self.remember_answer_peers(&response).await;
-        let results = global_hits_from(response);
+        let page = global_page_of(response);
 
         self.flush_session();
 
         tracing::debug!(
-            returned = results.hits.len(),
-            total = results.total,
+            returned = page.hits.len(),
+            total = page.total,
             "searched every private conversation"
         );
 
-        Ok(results)
+        Ok(page)
     }
+}
+
+/// Builds the request a page of a global search sends.
+///
+/// A first page sends the same empty anchor the module always sent; a later one
+/// sends the cursor it was handed.
+fn request_of(args: GlobalSearchArgs) -> tl::functions::messages::SearchGlobal {
+    let (offset_rate, offset_peer, offset_id) = match args.after {
+        Some(offset) => (offset.rate, offset.peer.input_peer(), offset.message_id),
+        None => (0, tl::enums::InputPeer::Empty, 0),
+    };
+
+    tl::functions::messages::SearchGlobal {
+        broadcasts_only: false,
+        groups_only: false,
+        users_only: true,
+        folder_id: None,
+        q: args.query,
+        filter: args.filter.messages_filter(),
+        min_date: date_of(args.min_date),
+        max_date: date_of(args.max_date),
+        offset_rate,
+        offset_peer,
+        offset_id,
+        limit: clamp_limit(args.limit),
+    }
+}
+
+/// Narrows unix seconds into the wire's signed 32-bit date.
+///
+/// The wire cannot express a date past 2038; a bound past it is clamped to the
+/// last representable second rather than silently dropped to "no bound".
+fn date_of(seconds: i64) -> i32 {
+    i32::try_from(seconds).unwrap_or(if seconds < 0 { 0 } else { i32::MAX })
 }
 
 /// Reads the messages and the total off a search response.
@@ -378,14 +544,52 @@ fn users_of(response: &tl::enums::messages::Messages) -> &[tl::enums::User] {
     }
 }
 
-/// Reads the hits and the total off a global search response.
-fn global_hits_from(response: tl::enums::messages::Messages) -> GlobalSearchResults {
+/// Reads the hits, the total and the next cursor off a global search response.
+fn global_page_of(response: tl::enums::messages::Messages) -> GlobalSearchPage {
+    let next = next_cursor(&response);
     let (raw, total) = page_of(response);
 
     let hits: Vec<GlobalHit> = raw.into_iter().filter_map(hit_of).collect();
     let total = total.max(hits.len());
 
-    GlobalSearchResults { hits, total }
+    GlobalSearchPage { hits, total, next }
+}
+
+/// The cursor a later page starts from, or `None` when there is no later page.
+///
+/// Telegram's `next_rate` when it sent one, else the date of the last message
+/// the page named. The anchor walks back over empty entries, which carry no
+/// peer and no date: a cursor on one would start from nowhere.
+fn next_cursor(response: &tl::enums::messages::Messages) -> Option<GlobalOffset> {
+    use tl::enums::messages::Messages;
+
+    // An unsliced answer is the whole result: every match fit one page, so
+    // there is no continuation, whatever its last message's date.
+    let Messages::Slice(page) = response else {
+        return None;
+    };
+
+    let (peer, message_id, date) = page.messages.iter().rev().find_map(anchor_of)?;
+
+    Some(GlobalOffset {
+        rate: page.next_rate.filter(|rate| *rate > 0).unwrap_or(date),
+        peer,
+        message_id,
+    })
+}
+
+/// The conversation, identifier and date of a message, when it names them.
+fn anchor_of(message: &tl::enums::Message) -> Option<(GlobalPeer, i32, i32)> {
+    match message {
+        tl::enums::Message::Message(message) => {
+            Some((GlobalPeer::of(&message.peer_id), message.id, message.date))
+        }
+        tl::enums::Message::Service(message) => {
+            Some((GlobalPeer::of(&message.peer_id), message.id, message.date))
+        }
+        // Empty entries carry no date, so they cannot anchor the date fallback.
+        tl::enums::Message::Empty(_) => None,
+    }
 }
 
 /// Describes a message as a hit, if it is a message rather than an empty or
@@ -448,17 +652,38 @@ mod tests {
 
     /// A sliced page: the ids are a page of `count` matches in all.
     fn sliced(ids: &[i32], count: i32) -> tl::enums::messages::Messages {
+        sliced_of(ids.iter().copied().map(empty).collect(), count, None)
+    }
+
+    /// A sliced page over the messages themselves, with an optional `next_rate`.
+    fn sliced_of(
+        messages: Vec<tl::enums::Message>,
+        count: i32,
+        next_rate: Option<i32>,
+    ) -> tl::enums::messages::Messages {
         tl::enums::messages::Messages::Slice(tl::types::messages::MessagesSlice {
             inexact: false,
             count,
-            next_rate: None,
+            next_rate,
             offset_id_offset: None,
             search_flood: None,
-            messages: ids.iter().copied().map(empty).collect(),
+            messages,
             topics: Vec::new(),
             chats: Vec::new(),
             users: Vec::new(),
         })
+    }
+
+    /// A global search for "hello" narrowed to photos and videos, with a cursor.
+    fn global_args(after: Option<GlobalOffset>) -> GlobalSearchArgs {
+        GlobalSearchArgs {
+            query: "hello".to_owned(),
+            filter: GlobalFilter::PhotoVideo,
+            min_date: 1_600_000_000,
+            max_date: 1_700_000_000,
+            after,
+            limit: 50,
+        }
     }
 
     /// A channel's sliced page, which carries its count in the same place.
@@ -602,10 +827,14 @@ mod tests {
             users: Vec::new(),
         });
 
-        let results = global_hits_from(response);
+        let page = global_page_of(response);
 
-        assert!(results.hits.is_empty(), "nothing to show");
-        assert_eq!(results.total, 4, "Telegram counted them, so the total does");
+        assert!(page.hits.is_empty(), "nothing to show");
+        assert_eq!(page.total, 4, "Telegram counted them, so the total does");
+        assert!(
+            page.next.is_none(),
+            "an empty message cannot anchor a page, so there is no cursor"
+        );
     }
 
     /// A plain text message from user 42, with the given direction and send time.
@@ -709,9 +938,148 @@ mod tests {
 
     #[test]
     fn an_empty_global_answer_is_an_empty_result() {
-        let results = global_hits_from(unsliced(&[]));
+        let page = global_page_of(unsliced(&[]));
 
-        assert!(results.hits.is_empty());
-        assert_eq!(results.total, 0);
+        assert!(page.hits.is_empty());
+        assert_eq!(page.total, 0);
+        assert!(page.next.is_none());
+    }
+
+    /// The first page is the request the module always sent: no anchor at all.
+    #[test]
+    fn first_page_still_sends_the_empty_peer() {
+        let request = request_of(global_args(None));
+
+        assert_eq!(request.offset_rate, 0);
+        assert_eq!(request.offset_peer, tl::enums::InputPeer::Empty);
+        assert_eq!(request.offset_id, 0);
+        assert!(request.users_only, "only one-to-one chats are searched");
+    }
+
+    /// A later page is anchored on the message the cursor names, including the
+    /// server's rate — not on the first page's zeroes.
+    #[test]
+    fn a_second_page_sends_the_first_pages_last_message() {
+        let request = request_of(global_args(Some(GlobalOffset {
+            rate: 1_690_000_000,
+            peer: GlobalPeer::Channel(77),
+            message_id: 4_096,
+        })));
+
+        assert_eq!(request.offset_rate, 1_690_000_000);
+        assert_eq!(request.offset_id, 4_096);
+        assert_eq!(
+            request.offset_peer,
+            tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
+                channel_id: 77,
+                access_hash: 0,
+            }),
+            "an offset peer names only the identifier"
+        );
+    }
+
+    /// The wire's own continuation score wins when Telegram sent one.
+    #[test]
+    fn next_cursor_uses_next_rate_when_present() {
+        let cursor = next_cursor(&sliced_of(
+            vec![text_message(9, 1_600_000_000, false, "q")],
+            12,
+            Some(1_650_000_000),
+        ))
+        .expect("a slice with messages has a continuation");
+
+        assert_eq!(cursor.rate, 1_650_000_000);
+        assert_eq!(cursor.peer, GlobalPeer::User(42));
+        assert_eq!(cursor.message_id, 9);
+    }
+
+    /// Without `next_rate` the last message's date is the continuation score.
+    #[test]
+    fn next_cursor_falls_back_to_the_last_message_date() {
+        let cursor = next_cursor(&sliced_of(
+            vec![text_message(9, 1_600_000_000, false, "q")],
+            12,
+            None,
+        ))
+        .expect("a slice with messages has a continuation");
+
+        assert_eq!(cursor.rate, 1_600_000_000);
+        assert_eq!(cursor.message_id, 9);
+    }
+
+    /// An empty entry cannot anchor a cursor: the walk goes back to the last
+    /// message that names a peer.
+    #[test]
+    fn next_cursor_walks_back_over_a_message_empty() {
+        let cursor = next_cursor(&sliced_of(
+            vec![text_message(5, 1_700_000_000, false, "q"), empty(4)],
+            3,
+            Some(1_690_000_000),
+        ))
+        .expect("the earlier message anchors the page");
+
+        assert_eq!(cursor.message_id, 5);
+        assert_eq!(cursor.peer, GlobalPeer::User(42));
+        assert_eq!(cursor.rate, 1_690_000_000);
+    }
+
+    /// Nothing was returned, so there is nothing to continue from.
+    #[test]
+    fn next_cursor_is_none_for_an_empty_page() {
+        assert_eq!(
+            next_cursor(&sliced_of(Vec::new(), 0, Some(1_690_000_000))),
+            None
+        );
+    }
+
+    /// Every narrowing maps to Telegram's own filter, and none of them is a
+    /// sender filter — the request has no field for one.
+    #[test]
+    fn every_filter_maps_to_its_constructor() {
+        use tl::enums::MessagesFilter;
+
+        let cases = [
+            (GlobalFilter::None, MessagesFilter::InputMessagesFilterEmpty),
+            (
+                GlobalFilter::PhotoVideo,
+                MessagesFilter::InputMessagesFilterPhotoVideo,
+            ),
+            (
+                GlobalFilter::Document,
+                MessagesFilter::InputMessagesFilterDocument,
+            ),
+            (
+                GlobalFilter::Music,
+                MessagesFilter::InputMessagesFilterMusic,
+            ),
+            (
+                GlobalFilter::Voice,
+                MessagesFilter::InputMessagesFilterVoice,
+            ),
+            (GlobalFilter::Url, MessagesFilter::InputMessagesFilterUrl),
+        ];
+
+        for (filter, expected) in cases {
+            assert_eq!(filter.messages_filter(), expected, "{filter:?}");
+        }
+    }
+
+    /// A slice's count is the total, even when the page holds fewer hits.
+    #[test]
+    fn total_comes_from_the_slice_count() {
+        let page = global_page_of(sliced_of(
+            vec![
+                text_message(9, 1_700_000_000, false, "q"),
+                text_message(8, 1_699_000_000, false, "q"),
+            ],
+            1_243,
+            None,
+        ));
+
+        assert_eq!(page.hits.len(), 2);
+        assert_eq!(
+            page.total, 1_243,
+            "the caller reports 'the first two of 1,243'"
+        );
     }
 }
