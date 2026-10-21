@@ -7282,6 +7282,28 @@ fn o_on_a_captioned_media_message_still_queues_its_open() {
     );
 }
 
+/// An animated sticker has no inline picture but it still has a file, so `o`
+/// queues its open exactly like any other media message.
+#[test]
+fn o_on_an_animated_sticker_queues_its_open() {
+    let mut app = App::mock();
+    app.apply_latest(vec![with_media(
+        1,
+        "",
+        domain::message::MediaKind::AnimatedSticker,
+    )]);
+
+    key(&mut app, 'o');
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::OpenMedia {
+            chat_id: MOCK_CHAT,
+            message_id: 1,
+        })
+    );
+}
+
 /// A download in flight draws its percentage on the message's row, inside the
 /// placeholder's own brackets; with no declared size it says the megabytes so far.
 #[test]
