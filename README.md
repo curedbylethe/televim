@@ -178,18 +178,33 @@ Working today:
   dismissed with `Esc`. Each row is the person's name, their `@username` when
   they have one, and a standing — `chat` when a conversation with them already
   exists, `new` when choosing them makes one — with the fragment the reader typed
-  inked `match`. Picking someone already in the list focuses that chat rather than
-  creating a second; picking someone new lists and opens one. Submitting the
+  inked `match`. The rows are ranked rather than taken in the server's order:
+  someone with no conversation yet leads someone who already has one, then comes
+  the closest match (a name prefix, then a name that contains the words, then a
+  handle prefix, then a handle that contains them; for a `@handle` query the
+  handles alone, exact before prefix before substring), then the name itself.
+  Picking someone already in the list focuses that chat rather than
+  creating a second; picking someone new lists and opens one at the top of the
+  unpinned block, above the conversations that were already there. Submitting the
   prompt empty lists the reader's most-contacted people instead, the server's
-  top correspondents (`contacts.GetTopPeers`), in the same overlay. The status line says
+  top correspondents (`contacts.GetTopPeers`), in the same overlay, in the
+  server's order. An account with frequent contacts switched off says so —
+  `the account has frequent contacts switched off in Telegram's settings` —
+  rather than reporting a read that failed. The status line says
   where the search stands: `searching…` while an answer is in flight, the count
   when it lands, and why when it finds nobody or fails.
-- **Searching every private chat:** `?` opens a prompt on the bar, from the
+- **Searching every conversation:** `?` opens a prompt on the bar, from the
   conversation and from the chat list alike, and `:search <query>` runs the same
   search from anywhere `:` reaches; a bare `:search` or an empty `?` repeats the
-  last one. The search asks the server once for matches across every private
-  chat. The answer is drawn as an overlay over the whole body: one rule per chat
-  with the chat's name and its count, then one row per message with the time, the
+  last one, filters and all. Matches come from the server: the request asks for
+  one-to-one chats, so a person's private chat and a bot's direct messages are
+  both in its answer, a hundred at a time. The
+  list pages itself: when the cursor reaches the last hit and the server has more,
+  the next page is asked for and appended under the rows already read, and an empty
+  page ends the list. A hit in a group, a channel or a chat the client does not
+  hold is dropped from the list and counted. The answer is drawn as an overlay
+  over the whole body: one rule per chat with the chat's name and its count, then
+  one row per message with the time, the
   sender as `[them]` or `[you]`, and a snippet cut around the first match, with
   every match inked `match`. `j`/`k` or the arrows move between messages, `{` and
   `}` between chat headers, and `gg`/`G` to the first and last message. `Enter`
@@ -201,9 +216,17 @@ Working today:
   and `?` still open their prompts, and `?` is refused while the new-chat list is
   up. The status line says where the search stands: `?<query> — searching…`, then
   `?<query> — N results in M chats` when it lands, `no matches`, or
-  `search failed (<reason>)`. A result list that is more than 100 matches says
-  `100 of <total>`, and only the first 100 are shown. Only private chats are
-  searched; groups and channels are dropped. `/` keeps its meaning on each pane.
+  `search failed (<reason>)`. Hits that were dropped add `, N dropped`; a page on
+  its way adds `, loading more…`; a flood wait keeps whatever rows were fetched
+  and says `paused: retry in Ns`, then sends the same request again when the wait
+  is over.
+  Filters are typed into the same line: `media:` takes `photo_video`, `document`,
+  `music`, `voice` or `url`, and `since:`/`until:` take a `YYYY-MM-DD` day in the
+  reader's zone, both inclusive. With a filter the status names it in place of the
+  chat count — `?<query> — photo_video, from 2026-01-01 — N results` — and
+  `from:`, `sender:` and `by:` are refused, because the server's global search has
+  no sender filter; a malformed token refuses the search and reopens the prompt
+  with the line still in it. `/` keeps its meaning on each pane.
 - **Conversation View:** `j`/`k` by message, `g`/`G`, `Ctrl+d`/`Ctrl+u` by a
   screenful, `gg` to the first unread, `n` to cycle search matches. A numeric
   prefix makes `gg`/`G` walk day boundaries instead: `[N]gg` steps N day
