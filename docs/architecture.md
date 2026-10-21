@@ -667,9 +667,10 @@ says whether a decoded sticker draws its picture or its token. It is read once
 in `runtime.rs` and handed to `tui` as a plain `tui::state::ui::StickerMode`
 through `App::with_stickers`, by the same construction and for the same reason:
 the layout counts block rows for a picture and token rows for a token, so the
-mode is fixed before the first frame. `off` draws `[sticker]` for every sticker
-message and never downloads — the fetch drain is gated on the same value, so
-flag off means zero fetch traffic. An unknown spelling falls back to `inline`,
+mode is fixed before the first frame. `off` draws `[sticker]` for a static sticker
+message and `[animated sticker]` for an animated one, and never downloads — the
+fetch drain is gated on the same value, so flag off means zero fetch traffic. An
+unknown spelling falls back to `inline`,
 because a value the program cannot read that guessed `off` would take the
 pictures away from precisely the reader who never asked for that.
 

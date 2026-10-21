@@ -857,6 +857,7 @@ enum CachedMedia {
     Gif,
     Voice,
     Sticker,
+    AnimatedSticker,
     File,
 }
 
@@ -868,6 +869,7 @@ impl From<MediaKind> for CachedMedia {
             MediaKind::Gif => Self::Gif,
             MediaKind::Voice => Self::Voice,
             MediaKind::Sticker => Self::Sticker,
+            MediaKind::AnimatedSticker => Self::AnimatedSticker,
             MediaKind::File => Self::File,
         }
     }
@@ -881,6 +883,7 @@ impl From<CachedMedia> for MediaKind {
             CachedMedia::Gif => Self::Gif,
             CachedMedia::Voice => Self::Voice,
             CachedMedia::Sticker => Self::Sticker,
+            CachedMedia::AnimatedSticker => Self::AnimatedSticker,
             CachedMedia::File => Self::File,
         }
     }
@@ -1349,6 +1352,34 @@ mod tests {
         assert!(
             rows[1].get("media_id").is_none(),
             "and a row without one omits the key, as an older file did"
+        );
+    }
+
+    /// `CachedMedia` is this module's spelling of `MediaKind`, so a kind's tag
+    /// round-trips through the file. The animated sticker's tag is new, which is
+    /// why no existing tag changed and an older file still reads.
+    #[test]
+    fn every_media_kind_round_trips_through_the_files_spelling() {
+        for kind in [
+            MediaKind::Photo,
+            MediaKind::Video,
+            MediaKind::Gif,
+            MediaKind::Voice,
+            MediaKind::Sticker,
+            MediaKind::AnimatedSticker,
+            MediaKind::File,
+        ] {
+            let cached = CachedMedia::from(kind);
+            let json = serde_json::to_string(&cached).expect("a media tag serialises");
+            let read: CachedMedia = serde_json::from_str(&json).expect("and reads back");
+
+            assert_eq!(read, cached, "{kind:?}");
+            assert_eq!(MediaKind::from(read), kind);
+        }
+        assert_eq!(
+            serde_json::to_string(&CachedMedia::AnimatedSticker).expect("a tag serialises"),
+            "\"animatedsticker\"",
+            "the file's spelling of the new kind"
         );
     }
 

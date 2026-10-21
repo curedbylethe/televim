@@ -25,6 +25,8 @@ pub enum MediaKind {
     Gif,
     Voice,
     Sticker,
+    /// A sticker that moves — a TGS or a `WebM` — which is not a GIF.
+    AnimatedSticker,
     File,
 }
 
@@ -41,6 +43,7 @@ impl MediaKind {
             Self::Gif => "[gif]",
             Self::Voice => "[voice]",
             Self::Sticker => "[sticker]",
+            Self::AnimatedSticker => "[animated sticker]",
             Self::File => "[file]",
         }
     }
@@ -160,6 +163,12 @@ mod tests {
     fn a_captioned_sticker_shows_its_caption() {
         let message = attachment(Some(MediaKind::Sticker), "back at you");
         assert_eq!(message.display_body(), "back at you");
+    }
+
+    #[test]
+    fn a_captionless_animated_sticker_degrades_to_its_own_label() {
+        let message = attachment(Some(MediaKind::AnimatedSticker), "");
+        assert_eq!(message.display_body(), "[animated sticker]");
     }
 
     #[test]
