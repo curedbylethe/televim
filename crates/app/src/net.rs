@@ -11882,6 +11882,41 @@ mod media_tests {
         assert_eq!(message_id, 5);
     }
 
+    /// An animated sticker's saved event keeps its own kind, and the file it
+    /// names is the one the viewer's extension tells the opener to use.
+    #[test]
+    fn an_animated_sticker_keeps_its_kind_when_saved_and_served() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cache = Mutex::new(MediaCache::open(dir.path().to_path_buf(), None, None));
+        let bytes = [0x1a, 0x45, 0xdf, 0xa3, 0x01];
+
+        let Event::MediaSaved {
+            path,
+            kind,
+            message_id,
+            ..
+        } = keep_download(&cache, CHAT, 8, None, MediaKind::AnimatedSticker, &bytes)
+        else {
+            panic!("a stored download answers with its file");
+        };
+        assert_eq!(kind, MediaKind::AnimatedSticker);
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("webm"));
+        assert_eq!(message_id, 8);
+
+        let Some(Event::MediaSaved {
+            path: again, kind, ..
+        }) = cached_media(&cache, CHAT, 8, None, MediaKind::AnimatedSticker)
+        else {
+            panic!("the cached message is served from disk");
+        };
+        assert_eq!(again, path, "the same file, not a second copy");
+        assert_eq!(
+            kind,
+            MediaKind::AnimatedSticker,
+            "the kind is not lost on the way back"
+        );
+    }
+
     /// A flash still on its deadline when a download begins must not clear the
     /// progress sentence: the sentence carries no deadline of its own.
     #[test]
