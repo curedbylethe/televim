@@ -15,6 +15,12 @@ pub struct ChatListState {
     pub(crate) list: ChatList,
 
     pub selected_chat: usize,
+
+    /// The conversations in Telegram's archive folder.
+    ///
+    /// Kept beside the visible list because the archive is a place, not a flag
+    /// on a chat: the visible list is exactly what the reader sees.
+    pub(crate) archived: Vec<Chat>,
 }
 
 impl ChatListState {
@@ -24,6 +30,7 @@ impl ChatListState {
         Self {
             list: ChatList::default(),
             selected_chat: 0,
+            archived: Vec::new(),
         }
     }
 
@@ -86,6 +93,34 @@ impl ChatListState {
             self.selected_chat = 0;
             false
         }
+    }
+
+    /// Replaces the archived conversations, leaving the visible list alone.
+    pub(crate) fn install_archived(&mut self, archived: Vec<Chat>) {
+        self.archived = archived;
+    }
+
+    /// Moves `chat_id` out of the visible list and into the archive.
+    ///
+    /// Returns the chat's name when it moved, so the caller can say so.
+    pub(crate) fn archive(&mut self, chat_id: i64) -> Option<String> {
+        let chat = self.list.remove(chat_id)?;
+        let name = chat.title.clone();
+        self.archived.retain(|present| present.id != chat_id);
+        self.archived.push(chat);
+        self.selected_chat = self
+            .selected_chat
+            .min(self.list.chats.len().saturating_sub(1));
+        Some(name)
+    }
+
+    /// Puts an archived chat back at its ordered place in the visible list.
+    pub(crate) fn unarchive(&mut self, chat_id: i64) -> Option<String> {
+        let at = self.archived.iter().position(|chat| chat.id == chat_id)?;
+        let chat = self.archived.remove(at);
+        let name = chat.title.clone();
+        self.list.insert(chat);
+        Some(name)
     }
 
     /// Moves the highlight to `index` in the chat list.

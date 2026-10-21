@@ -399,6 +399,28 @@ impl ChatList {
         true
     }
 
+    /// Puts a chat back at the place its own order gives it.
+    ///
+    /// Used when an archived chat returns. A chat already present is left where
+    /// it is; the list never holds two of one peer.
+    pub fn insert(&mut self, chat: Chat) {
+        if self.chats.iter().any(|present| present.id == chat.id) {
+            return;
+        }
+        let at = self
+            .chats
+            .iter()
+            .position(|other| sorts_before(&chat, other))
+            .unwrap_or(self.chats.len());
+        self.chats.insert(at, chat);
+    }
+
+    /// Removes a conversation, returning it when it was present.
+    pub fn remove(&mut self, chat_id: i64) -> Option<Chat> {
+        let at = self.chats.iter().position(|chat| chat.id == chat_id)?;
+        Some(self.chats.remove(at))
+    }
+
     /// Clears a conversation's unread count, reporting whether there was one.
     ///
     /// Only the count moves: the preview and the chat's place in the list stay

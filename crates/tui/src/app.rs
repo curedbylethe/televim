@@ -1,5 +1,6 @@
 //! Top-level TUI state.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -493,8 +494,27 @@ pub struct ContactProfile {
     /// Bare identifier of the person, which is what an answer is matched back on.
     pub peer_id: i64,
 
+    /// The name the card draws, which may be a local name rather than the peer's.
+    pub name: String,
+
+    /// Whether the account has blocked this person, once a read has said so.
+    pub blocked: Option<bool>,
+
     /// Unfetched, unavailable, or known — the same three as the account's.
     pub state: AccountState,
+}
+
+/// A name the reader gave a person, and the name it replaced.
+///
+/// The server's name is kept so that clearing the local one needs no second
+/// fetch. It is refreshed whenever a fetched list carries the same peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalName {
+    /// What the reader typed.
+    pub text: String,
+
+    /// What Telegram called the person when the local name was set.
+    pub server: String,
 }
 
 /// Where the session is kept, as the panel says it.
@@ -1189,6 +1209,24 @@ pub enum Action {
         /// The message whose download to stop.
         message_id: i64,
     },
+
+    /// Move the chat with `chat_id` into or out of the archive.
+    SetArchived { chat_id: i64, archived: bool },
+
+    /// Block or unblock the person with `peer_id`.
+    SetBlocked { peer_id: i64, blocked: bool },
+
+    /// Keep `name` as the reader's local name for `peer_id`; `None` clears it.
+    SetLocalName { peer_id: i64, name: Option<String> },
+
+    /// Delete the conversation with `chat_id`, locally or for both sides.
+    DeleteConversation { chat_id: i64, both: bool },
+
+    /// Report the person with `peer_id` for `reason`.
+    ReportPeer {
+        peer_id: i64,
+        reason: domain::report::ReportReason,
+    },
 }
 
 /// A `f`, `t`, `F` or `T` that has been pressed and is waiting for its character.
@@ -1327,6 +1365,13 @@ pub struct App {
     /// focus to the line and leaving the line puts it on the conversation: by the
     /// time the overlay is up the origin would otherwise be lost.
     pub global_origin: Focus,
+
+    /// Local names, keyed by peer id.
+    ///
+    /// Kept on the screen as well as in the history file so a rename is visible
+    /// before the write lands, and so clearing it can restore the server's name
+    /// without a fetch.
+    pub local_names: BTreeMap<i64, LocalName>,
 }
 
 impl Default for App {
@@ -1354,6 +1399,7 @@ impl App {
             input: InputState::new(),
             drafts: DraftStore::new(),
             global_origin: Focus::ChatList,
+            local_names: BTreeMap::new(),
         }
     }
 
@@ -1663,6 +1709,144 @@ impl App {
         self.list.list.mark_read(chat_id)
     }
 
+    /// Applies every local name to a fetched list, refreshing the server title
+    /// the local name replaced.
+    pub fn apply_local_names(&mut self, chats: &mut [Chat]) {
+        for chat in chats {
+            let Some(entry) = self.local_names.get_mut(&chat.id) else {
+                continue;
+            };
+            entry.server.clone_from(&chat.title);
+            chat.title = entry.text.clone();
+        }
+    }
+
+    /// Sets or clears the reader's name for a person.
+    pub fn set_local_name(&mut self, peer_id: i64, name: Option<&str>) {
+        let text = name.map(str::trim).filter(|name| !name.is_empty());
+        let old_server = self
+            .local_names
+            .get(&peer_id)
+            .map(|entry| entry.server.clone());
+
+        if let Some(text) = text {
+            let server = old_server.clone().unwrap_or_else(|| {
+                self.list
+                    .list
+                    .chats
+                    .iter()
+                    .chain(self.list.archived.iter())
+                    .find(|chat| chat.id == peer_id)
+                    .map(|chat| chat.title.clone())
+                    .or_else(|| {
+                        self.profile
+                            .contact
+                            .as_ref()
+                            .filter(|contact| contact.peer_id == peer_id)
+                            .map(|contact| contact.name.clone())
+                    })
+                    .unwrap_or_default()
+            });
+            self.local_names.insert(
+                peer_id,
+                LocalName {
+                    text: text.to_owned(),
+                    server,
+                },
+            );
+            for chat in self
+                .list
+                .list
+                .chats
+                .iter_mut()
+                .chain(self.list.archived.iter_mut())
+                .filter(|chat| chat.id == peer_id)
+            {
+                text.clone_into(&mut chat.title);
+            }
+        } else {
+            if let Some(server) = &old_server {
+                for chat in self
+                    .list
+                    .list
+                    .chats
+                    .iter_mut()
+                    .chain(self.list.archived.iter_mut())
+                    .filter(|chat| chat.id == peer_id)
+                {
+                    chat.title.clone_from(server);
+                }
+            }
+            self.local_names.remove(&peer_id);
+        }
+
+        if let Some(contact) = self.profile.contact.as_mut()
+            && contact.peer_id == peer_id
+        {
+            if let Some(text) = text {
+                text.clone_into(&mut contact.name);
+            } else if let Some(server) = old_server {
+                contact.name = server;
+            }
+        }
+    }
+
+    /// Installs the archived conversations, applying local names first.
+    pub fn set_archived_chats(&mut self, mut chats: Vec<Chat>) {
+        self.apply_local_names(&mut chats);
+        self.list.install_archived(chats);
+    }
+
+    /// Moves a chat into or out of the archive and says which chat moved.
+    pub fn set_archived(&mut self, chat_id: i64, archived: bool) -> Option<String> {
+        let name = if archived {
+            self.list.archive(chat_id)
+        } else {
+            self.list.unarchive(chat_id)
+        }?;
+        if archived && self.conversation.conversation.window.chat_id == chat_id {
+            self.remove_open_conversation();
+        }
+        Some(name)
+    }
+
+    /// Records the block flag on the card that is on show.
+    pub fn set_blocked(&mut self, peer_id: i64, blocked: bool) {
+        if let Some(contact) = self.profile.contact.as_mut()
+            && contact.peer_id == peer_id
+        {
+            contact.blocked = Some(blocked);
+        }
+    }
+
+    /// Closes the open conversation without touching the list.
+    fn remove_open_conversation(&mut self) {
+        coordinate::select_chat_none(
+            &mut self.ui,
+            &mut self.outbox,
+            &mut self.pending,
+            &mut self.conversation,
+            &mut self.input,
+            &mut self.drafts,
+        );
+    }
+
+    /// Removes a deleted conversation from the screen, the draft store and the
+    /// local-name map.
+    pub fn remove_conversation(&mut self, chat_id: i64) {
+        if self.conversation.conversation.window.chat_id == chat_id {
+            self.remove_open_conversation();
+        }
+        self.list.list.remove(chat_id);
+        self.list.archived.retain(|chat| chat.id != chat_id);
+        self.local_names.remove(&chat_id);
+        self.drafts.forget(chat_id);
+        self.list.selected_chat = self
+            .list
+            .selected_chat
+            .min(self.list.list.chats.len().saturating_sub(1));
+    }
+
     /// Installs a freshly fetched chat list.
     ///
     /// Delegates to [`coordinate::set_chats`].
@@ -1720,8 +1904,8 @@ impl App {
     /// An answer about somebody the card is not on show for is dropped. The
     /// reader may open a second card while the first read is in flight, and the
     /// second card's fields are not the first one's.
-    pub fn set_contact(&mut self, peer_id: i64, profile: Result<Account, String>) {
-        if !self.profile.adopt_contact(peer_id, profile) {
+    pub fn set_contact(&mut self, peer_id: i64, blocked: bool, profile: Result<Account, String>) {
+        if !self.profile.adopt_contact(peer_id, blocked, profile) {
             return;
         }
         // The highlight is re-sized because the row count just changed under it.
@@ -2347,6 +2531,11 @@ impl App {
     }
 
     // ---- what the reader asked for --------------------------------------
+
+    /// Takes the oldest local-name write, leaving network actions queued.
+    pub fn take_local_name_action(&mut self) -> Option<Action> {
+        self.outbox.take_local_name_action()
+    }
 
     /// Takes the operation the reader asked for, if there is one.
     ///

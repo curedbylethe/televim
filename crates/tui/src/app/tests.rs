@@ -9199,3 +9199,62 @@ fn the_result_of_a_change_is_the_box_and_esc_closes_it() {
         "Session passphrase not changed: the file was left as it was."
     );
 }
+
+#[test]
+fn a_local_name_wins_over_the_server_title_and_clearing_restores_it() {
+    let mut app = App::mock();
+    let server = app.chats()[0].title.clone();
+
+    app.set_local_name(MOCK_CHAT, Some("  Countess  "));
+    assert_eq!(app.chats()[0].title, "Countess");
+    assert_eq!(app.local_names[&MOCK_CHAT].server, server);
+
+    app.set_local_name(MOCK_CHAT, Some("Ada"));
+    assert_eq!(app.chats()[0].title, "Ada");
+    assert_eq!(app.local_names[&MOCK_CHAT].server, server);
+
+    app.set_local_name(MOCK_CHAT, None);
+    assert_eq!(app.chats()[0].title, server);
+    assert!(!app.local_names.contains_key(&MOCK_CHAT));
+}
+
+#[test]
+fn archiving_moves_a_chat_and_unarchiving_puts_it_back() {
+    let mut app = App::mock();
+    let title = app.chats()[1].title.clone();
+
+    assert_eq!(app.set_archived(2, true), Some(title.clone()));
+    assert!(app.chats().iter().all(|chat| chat.id != 2));
+    assert!(app.list.archived.iter().any(|chat| chat.id == 2));
+
+    assert_eq!(app.set_archived(2, false), Some(title));
+    assert!(app.chats().iter().any(|chat| chat.id == 2));
+    assert!(app.list.archived.is_empty());
+}
+
+#[test]
+fn archiving_the_open_chat_closes_the_conversation() {
+    let mut app = App::mock();
+    assert_eq!(app.conversation.conversation.window.chat_id, MOCK_CHAT);
+
+    app.set_archived(MOCK_CHAT, true);
+
+    assert_eq!(app.conversation.conversation.window.chat_id, 0);
+    assert!(app.chats().iter().all(|chat| chat.id != MOCK_CHAT));
+}
+
+#[test]
+fn deleting_a_conversation_forgets_its_name_draft_and_archived_row() {
+    let mut app = App::mock();
+    app.set_local_name(2, Some("Grace"));
+    app.drafts.restore(vec![(2, "half a thought".to_owned())]);
+    assert_eq!(app.drafts.snapshot(None).len(), 1);
+    app.set_archived(2, true);
+
+    app.remove_conversation(2);
+
+    assert!(app.chats().iter().all(|chat| chat.id != 2));
+    assert!(app.list.archived.iter().all(|chat| chat.id != 2));
+    assert!(!app.local_names.contains_key(&2));
+    assert!(app.drafts.snapshot(None).is_empty());
+}
