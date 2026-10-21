@@ -129,6 +129,21 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   The same property runs on stable in `telegram-framework`'s test module, which
   flips every byte of a valid snapshot and envelope with three masks and asserts
   an answer rather than a panic on each.
+- **Chat and contact actions:** the command surface is tested in
+  `tui/src/app/tests.rs` by driving the real `:` line and asserting the queued
+  `Action`: `:archive` moves the highlighted chat, `:block`/`:unblock`,
+  `:delete-chat [both]` and `:report [reason]` raise their `ConfirmKind` with
+  the subject and direction captured, `y` queues exactly that action and `n`
+  changes nothing, bare `:rename` clears while a name queues
+  `SetLocalName`, and an unknown report reason is refused before any question.
+  The contact card's three action rows and `d` dispatch are covered in
+  `tui/src/card.rs` with the same `App::mock` and `TestBackend` harness the
+  other card rows use. The app side — archive moving a chat out of the visible
+  list, a local name surviving a refetch and a save/load, a deletion removing
+  the row, cache, draft, alias and per-chat media keys, and the block/report
+  status sentences — is in `app/src/net.rs` and `app/src/history_store.rs`
+  over `State` with no client.
+
 - **History cache:** two layers, both on every job and neither needing a
   client. The **store** (`app/src/history_store.rs`) is pure functions over
   `HistoryCache` and one file in a temp directory: the file's round trip as an

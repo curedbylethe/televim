@@ -37,7 +37,7 @@ use domain::vim::{CharMotion, Motion, VimState};
 use crate::app::{
     ACTION_QUEUE, ADD_ACCOUNT_REFUSAL, AccountState, Action, ChatChoice, ConfirmKind,
     ContactProfile, Find, Focus, JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_DATE,
-    NOT_A_REPLY, NOT_YOURS_REFUSAL, PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED,
+    NOT_A_REPLY, NOTHING_TO_ACT_ON, PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED,
     PASS_OPEN_ALREADY, PASS_STILL_CHECKING, PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode,
     PassPrompt, ProfileId, PromptKind, Register, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow,
     TYPING_FOR,
@@ -1256,6 +1256,34 @@ pub(crate) fn handle_confirm(
                         },
                     );
                 }
+                Some(ConfirmKind::Block {
+                    peer_id, blocked, ..
+                }) => queue_action(
+                    &mut *outbox,
+                    &mut *ui,
+                    Action::SetBlocked {
+                        peer_id: *peer_id,
+                        blocked: *blocked,
+                    },
+                ),
+                Some(ConfirmKind::DeleteConversation { chat_id, both, .. }) => queue_action(
+                    &mut *outbox,
+                    &mut *ui,
+                    Action::DeleteConversation {
+                        chat_id: *chat_id,
+                        both: *both,
+                    },
+                ),
+                Some(ConfirmKind::Report {
+                    peer_id, reason, ..
+                }) => queue_action(
+                    &mut *outbox,
+                    &mut *ui,
+                    Action::ReportPeer {
+                        peer_id: *peer_id,
+                        reason: *reason,
+                    },
+                ),
                 Some(ConfirmKind::ChangePassphrase) | None => {}
             }
             conversation.set_confirm(None);
@@ -2741,20 +2769,11 @@ pub(crate) fn yank_card(
 pub(crate) fn activate_profile_row(
     ui: &mut UiState,
     conversation: &mut ConversationState,
-    is_contact: bool,
+    profile: &mut ProfileCard,
+    input: &mut InputState,
     rows: &[CardRow],
     cursor: usize,
 ) {
-    // A contact's card has no row that acts, and that is decided by *who it is
-    // about* rather than by which row the cursor is on — so the refusal comes
-    // before the row is looked for. A card whose profile has not been read has
-    // no rows at all, and a key that means "you cannot" has to say so there
-    // too: swallowing it is the one thing such a key must not do.
-    if is_contact {
-        ui.flash(NOT_YOURS_REFUSAL);
-        return;
-    }
-
     // The row is whatever the drawn rows say the panel is drawing, rather than
     // a second enumeration of it. A key that acted on its own list could act
     // on a row the panel is not showing, and that failure is silent: no
@@ -2778,6 +2797,41 @@ pub(crate) fn activate_profile_row(
         crate::card::LOGOUT => {
             ui.set_mode(Mode::Confirm);
             conversation.set_confirm(Some(ConfirmKind::Logout));
+        }
+        crate::card::RENAME => {
+            set_focus(
+                &mut *ui,
+                &mut *conversation,
+                &mut *input,
+                &mut *profile,
+                Focus::Input,
+            );
+            input
+                .line
+                .open_with(PromptKind::Command, "rename ".to_owned());
+        }
+        crate::card::BLOCK | crate::card::UNBLOCK => {
+            let Some(contact) = profile.contact.as_ref() else {
+                return;
+            };
+            let blocked = label == crate::card::BLOCK;
+            ui.set_mode(Mode::Confirm);
+            conversation.set_confirm(Some(ConfirmKind::Block {
+                peer_id: contact.peer_id,
+                name: contact.name.clone(),
+                blocked,
+            }));
+        }
+        crate::card::REPORT => {
+            let Some(contact) = profile.contact.as_ref() else {
+                return;
+            };
+            ui.set_mode(Mode::Confirm);
+            conversation.set_confirm(Some(ConfirmKind::Report {
+                peer_id: contact.peer_id,
+                name: contact.name.clone(),
+                reason: domain::report::ReportReason::Other,
+            }));
         }
         _ => {}
     }
@@ -2941,9 +2995,68 @@ pub(crate) fn submit(
     opened
 }
 
+/// What a command acts on: the card's person, else the highlighted chat.
+#[derive(Debug, Clone)]
+struct CommandSubject {
+    peer_id: i64,
+    name: String,
+    /// Whether the subject is also a chat that `:archive`/`:delete-chat` can act on.
+    chat: bool,
+}
+
+/// Picks the subject the design names: a card on show wins, then the highlight.
+fn command_subject(
+    ui: &UiState,
+    list: &ChatListState,
+    profile: &ProfileCard,
+) -> Option<CommandSubject> {
+    if let Pane::Profile(ProfileId::User(id)) = ui.pane {
+        let name = profile
+            .contact
+            .as_ref()
+            .filter(|contact| contact.peer_id == id)
+            .map_or_else(
+                || {
+                    list.list
+                        .chats
+                        .iter()
+                        .chain(list.archived.iter())
+                        .find(|chat| chat.id == id)
+                        .map_or_else(|| id.to_string(), |chat| chat.title.clone())
+                },
+                |contact| contact.name.clone(),
+            );
+        let chat = list.list.chats.iter().any(|chat| chat.id == id);
+        return Some(CommandSubject {
+            peer_id: id,
+            name,
+            chat,
+        });
+    }
+
+    list.list
+        .chats
+        .get(list.selected_chat)
+        .map(|chat| CommandSubject {
+            peer_id: chat.id,
+            name: chat.title.clone(),
+            chat: true,
+        })
+}
+
+/// Refuses a network command while no client is up.
+fn command_needs_client(ui: &mut UiState, session: &SessionState) -> bool {
+    if session.client_available {
+        return true;
+    }
+    ui.flash("not connected yet — the client is not up");
+    false
+}
+
 /// Runs a `:` command.
 ///
 /// Returns true when a card was opened and its highlight still needs sizing.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_command(
     ui: &mut UiState,
     list: &mut ChatListState,
@@ -3061,6 +3174,120 @@ pub(crate) fn run_command(
                 &mut *conversation,
                 cmd["date".len()..].trim(),
             );
+            false
+        }
+        "archive" => {
+            let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            };
+            if !subject.chat {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            }
+            if command_needs_client(&mut *ui, &*session) {
+                ui.set_status(format!("archiving {}…", subject.name));
+                queue_action(
+                    &mut *outbox,
+                    &mut *ui,
+                    Action::SetArchived {
+                        chat_id: subject.peer_id,
+                        archived: true,
+                    },
+                );
+            }
+            false
+        }
+        "block" | "unblock" => {
+            let blocked = cmd == "block";
+            let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            };
+            if command_needs_client(&mut *ui, &*session) {
+                ui.set_mode(Mode::Confirm);
+                conversation.set_confirm(Some(ConfirmKind::Block {
+                    peer_id: subject.peer_id,
+                    name: subject.name,
+                    blocked,
+                }));
+            }
+            false
+        }
+        _ if cmd == "rename" || cmd.starts_with("rename ") => {
+            let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            };
+            let name = cmd["rename".len()..].trim();
+            let name = (!name.is_empty()).then(|| name.to_owned());
+            if let Some(ref name) = name {
+                ui.flash(format!("renamed {name}"));
+            } else {
+                ui.flash("local name cleared");
+            }
+            queue_action(
+                &mut *outbox,
+                &mut *ui,
+                Action::SetLocalName {
+                    peer_id: subject.peer_id,
+                    name,
+                },
+            );
+            false
+        }
+        _ if cmd == "delete-chat" || cmd.starts_with("delete-chat ") => {
+            let argument = cmd["delete-chat".len()..].trim();
+            let both = match argument {
+                "" => false,
+                "both" => true,
+                _ => {
+                    ui.flash("usage: :delete-chat [both]");
+                    return false;
+                }
+            };
+            let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            };
+            if !subject.chat {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            }
+            if command_needs_client(&mut *ui, &*session) {
+                ui.set_mode(Mode::Confirm);
+                conversation.set_confirm(Some(ConfirmKind::DeleteConversation {
+                    chat_id: subject.peer_id,
+                    name: subject.name,
+                    both,
+                }));
+            }
+            false
+        }
+        _ if cmd == "report" || cmd.starts_with("report ") => {
+            let token = cmd["report".len()..].trim();
+            let reason = if token.is_empty() {
+                domain::report::ReportReason::Other
+            } else if let Some(reason) = domain::report::ReportReason::from_token(token) {
+                reason
+            } else {
+                ui.flash(format!(
+                    "unknown report reason: {token} — use spam, violence, …"
+                ));
+                return false;
+            };
+            let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            };
+            if command_needs_client(&mut *ui, &*session) {
+                ui.set_mode(Mode::Confirm);
+                conversation.set_confirm(Some(ConfirmKind::Report {
+                    peer_id: subject.peer_id,
+                    name: subject.name,
+                    reason,
+                }));
+            }
             false
         }
         _ => {
@@ -4055,6 +4282,7 @@ fn toggle_pin_highlighted(
 /// precomputed frame geometry, for the same reason.
 ///
 /// Returns true when a card was opened and its highlight still needs sizing.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle_profile(
     profile: &mut ProfileCard,
     ui: &mut UiState,
@@ -4066,7 +4294,7 @@ pub(crate) fn handle_profile(
     drafts: &mut DraftStore,
     rows: &[CardRow],
     lines: Vec<String>,
-    is_contact: bool,
+    _is_contact: bool,
     cursor: usize,
     layout: &[RowSpan],
     key: KeyEvent,
@@ -4148,7 +4376,14 @@ pub(crate) fn handle_profile(
             false
         }
         KeyCode::Char('d') => {
-            activate_profile_row(&mut *ui, &mut *conversation, is_contact, rows, cursor);
+            activate_profile_row(
+                &mut *ui,
+                &mut *conversation,
+                &mut *profile,
+                &mut *input,
+                rows,
+                cursor,
+            );
             false
         }
         KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {

@@ -9258,3 +9258,116 @@ fn deleting_a_conversation_forgets_its_name_draft_and_archived_row() {
     assert!(!app.local_names.contains_key(&2));
     assert!(app.drafts.snapshot(None).is_empty());
 }
+
+// ---- the chat and contact command surface ------------------------------
+
+#[test]
+fn archive_queues_the_highlighted_chat() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "archive");
+
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::SetArchived {
+            chat_id: MOCK_CHAT,
+            archived: true
+        })
+    ));
+}
+
+#[test]
+fn block_asks_first_and_then_queues_the_answer() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "block");
+
+    assert_eq!(app.ui.mode, Mode::Confirm);
+    assert_eq!(app.status_text(), "Block Ada Lovelace? (y/n)");
+    assert!(app.take_action().is_none(), "nothing is sent before y");
+
+    app.handle_key(press(KeyCode::Char('y')));
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::SetBlocked { blocked: true, .. })
+    ));
+}
+
+#[test]
+fn cancelling_a_block_changes_nothing() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "block");
+    app.handle_key(press(KeyCode::Char('n')));
+
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert!(app.take_action().is_none());
+}
+
+#[test]
+fn delete_chat_carries_the_side_into_the_confirmation() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "delete-chat both");
+
+    assert_eq!(
+        app.status_text(),
+        "Delete this conversation for both sides? (y/n)"
+    );
+    app.handle_key(press(KeyCode::Char('y')));
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::DeleteConversation {
+            chat_id: MOCK_CHAT,
+            both: true
+        })
+    ));
+}
+
+#[test]
+fn rename_queues_a_local_name_without_asking() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "rename Ada");
+
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert_eq!(app.ui.status, "renamed Ada");
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::SetLocalName { peer_id: MOCK_CHAT, name: Some(ref name) }) if name == "Ada"
+    ));
+
+    run_command_line(&mut app, "rename");
+    assert_eq!(app.ui.status, "local name cleared");
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::SetLocalName {
+            peer_id: MOCK_CHAT,
+            name: None
+        })
+    ));
+}
+
+#[test]
+fn report_defaults_to_other_and_refuses_a_token_it_does_not_know() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "report");
+
+    assert_eq!(
+        app.status_text(),
+        "Report Ada Lovelace to Telegram as other? (y/n)"
+    );
+    app.handle_key(press(KeyCode::Char('y')));
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::ReportPeer {
+            reason: domain::report::ReportReason::Other,
+            ..
+        })
+    ));
+
+    run_command_line(&mut app, "report not-a-reason");
+    assert_eq!(
+        app.ui.status,
+        "unknown report reason: not-a-reason — use spam, violence, …"
+    );
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert!(app.take_action().is_none());
+}

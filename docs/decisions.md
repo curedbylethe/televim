@@ -1356,3 +1356,96 @@ are in [`../AGENTS.md`](../AGENTS.md).
   kept for a search whose overlay cannot show it, and the result is two edit paths
   for one line. The artifact's intent — the reader sees what a filter token can be
   while typing — is carried by the status sentence instead.
+
+- **Why the six management actions share the `:` surface, and the contact card
+  gains the only key:** the chat-list hint is already 69 of 71 columns, so a
+  new key there would either be unnamed or take a column from a key that
+  already exists. The `:` line already carries every operation that is not a
+  motion, and the six actions are operations: `:archive`, `:archived`,
+  `:block`/`:unblock`, `:rename`, `:delete-chat` and `:report`. The contact
+  card is the one place that gains `d`, and only because rename, block and
+  report have no other home for a person who is not in the chat list. `d` is
+  already the card's action key for the account's own card, so the key is
+  learned once.
+
+- **Why only block, unblock, delete and report ask:** a confirmation is for an
+  action the screen cannot undo. Block and report are visible to another
+  account; a deletion removes local data and, for both sides, the peer's copy
+  too. Archive is undone by `:archived`, and bare `:rename` restores the peer's
+  name, so both report their result in a flash instead of interrupting the
+  reader with a question. The confirmation captures its subject and its
+  captured `both`/blocked direction when it is raised, so `y` cannot act on a
+  row the reader moved to afterwards; `n` and `Esc` change nothing. The prompt
+  is the status line, the hint row is empty, and the mode label is the one red
+  `CONFIRM` role.
+
+- **Why the subject is card first, then highlight:** a card is an explicit
+  question about one person, so a command run while it is on show must act on
+  that person rather than on whatever row the chat list happens to hold. With
+  no card, the list highlight is the subject, and opening a conversation moves
+  that highlight to it. `:archive` and `:delete-chat` need a chat; a card over
+  a person with no conversation is refused rather than guessing at a row. The
+  refusal names all three ways to give the command a subject.
+
+- **Why a local name is stored with the history file rather than with the
+  chat:** Telegram at layer 227 has no `contacts.updateContact`; the only
+  contact writes are adding a contact and changing a note. A local name is
+  therefore the reader's own label, not a claim about the peer, and it must
+  survive a refetch that replaces the chat list wholesale. It lives in the
+  history payload's `aliases` map, account-tagged and sealed with the rest of
+  the history file, and is re-applied to every fetched `Chat` before the list
+  is installed. Bare `:rename` clears the alias and restores the server title
+  captured when the alias was set. Signing out removes the history file, so the
+  names go with it — the same scope as the messages and drafts they describe.
+  A write that fails leaves the name on screen and says
+  `rename: could not save — {reason}`; the next launch is the authority.
+
+- **Why archive is a separate list and not a flag on `Chat`:** a chat is in
+  folder 0 or folder 1, and the visible list only ever holds folder 0. Keeping
+  archived chats in `ChatListState::archived` means every existing `Chat`
+  constructor, reducer and fixture keeps its shape, and the visible ordering
+  rules cannot accidentally draw an archived row. The archive fetch is the raw
+  `messages.getDialogs { folder_id: Some(1) }` because `grammers`' dialog
+  iterator does not name the folder; the answer is mapped through the same
+  title, kind and preview helpers as folder 0. `:archived` exists because an
+  archive with no way back is a deletion with extra steps: it draws the
+  archived rows over the list column, `Enter` sends `folder_id: 0`, and the
+  chat returns to the list's own order. Archiving the open conversation closes
+  it, because it has left the list that owns it.
+
+- **Why block is a property of the profile, not a second list:** `userFull`
+  already reports `blocked`, so opening a card answers the question without a
+  paginated `contacts.getBlocked` fetch and without a new list surface. The
+  chat row does not move and carries no badge; the card's action row reads
+  `block` or `unblock` from the read, and the status sentence names the result.
+  Blocking a person the account has never written to still works because the
+  contact list and username resolution seed the peer cache with the
+  `access_hash` the request needs.
+
+- **Why delete cleans local state only after Telegram answers:** the local
+  cleanup is destructive and the network request can fail. Applying it first
+  would leave the row gone on screen while the conversation still existed on
+  the server; applying it on `Ok` keeps the two in step. The cleanup removes
+  the row, the open conversation, the cached messages and chat row, the local
+  name, the draft and the per-chat media keys; shared media blobs keyed by
+  media id are left for their other references. `:delete-chat both` changes the
+  request to `revoke: true`; the status names the side. A failure changes
+  nothing and says `delete chat: {reason}`.
+
+- **Why report carries a reason token:** `account.reportPeer` requires a
+  `ReportReason`, and the reasons are the reader's words rather than the
+  wire's. The command accepts the ten tokens the design names, defaults to
+  `other`, and refuses an unknown one before raising a confirmation. The
+  prompt spells `child-abuse` as `child abuse`, because the hyphen is the
+  wire's spelling. The reason is captured with the subject so the `y` sends
+  exactly what the prompt named.
+
+- **Why there is no optimistic update:** the tree applies pins on the answer,
+  removes messages when the feed says so, and marks read only on
+  `InboxRead`. The six actions follow that rule: archive, block, delete and
+  report change after `Ok`, while a local rename is the one immediate change
+  because it never leaves the process. The issue's shared "optimistic-update
+  path" does not exist in this tree; inventing one for these actions would
+  make them the only optimistic writes and would need a rollback story the
+  other writes do not have. The consequence — a slow request leaves the row
+  where it is until the answer — is the same one pins already have.
