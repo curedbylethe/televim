@@ -309,6 +309,14 @@ pub enum Event {
         result: Result<domain::account::UserProfile, ProtoError>,
     },
 
+    /// The contact directory came back, or the fetch failed.
+    ///
+    /// No identifier travels with it: there is one directory, and the list that
+    /// asked is the only one that can be on show when the answer lands.
+    Contacts {
+        result: Result<Vec<UserCandidate>, ProtoError>,
+    },
+
     /// An archive change came back, or the request failed.
     Archived {
         chat_id: i64,
@@ -2734,6 +2742,11 @@ fn request_plain(
                 let _ = tx.send(AppEvent::Net(Event::Contact { peer_id, result }));
             }
 
+            Action::FetchContacts => {
+                let result = client.fetch_contacts().await;
+                let _ = tx.send(AppEvent::Net(Event::Contacts { result }));
+            }
+
             Action::SetArchived { chat_id, archived } => {
                 let result = client.set_archived(chat_id, archived).await;
                 let _ = tx.send(AppEvent::Net(Event::Archived {
@@ -2992,6 +3005,21 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         Event::Contact { peer_id, result } => match result {
             Ok(profile) => app.set_contact(peer_id, profile.blocked, Ok(profile.account)),
             Err(error) => app.set_contact(peer_id, false, Err(format!("{error:#}"))),
+        },
+
+        // The directory, with any local name the reader has given one of its
+        // people. The name is applied here rather than in the widget so that the
+        // list and the chat row cannot disagree about what somebody is called.
+        Event::Contacts { result } => match result {
+            Ok(mut people) => {
+                for person in &mut people {
+                    if let Some(local) = app.local_names.get(&person.user_id) {
+                        person.display_name.clone_from(&local.text);
+                    }
+                }
+                app.conversation.contacts.adopt(people);
+            }
+            Err(error) => app.conversation.contacts.fail(format!("{error:#}")),
         },
 
         Event::Offline(reason) => apply_offline(app, state, &reason),

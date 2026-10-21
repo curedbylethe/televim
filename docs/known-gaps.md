@@ -540,6 +540,26 @@ Real, and named so they are not mistaken for oversights:
   `messages.getPinnedDialogs` is not called. A pin made here goes to the front of the
   block until that fetch says otherwise.
 
+- **The chat and contact actions are unproven against a live account.** Archive
+  and block are raw TL calls (`folders.EditPeerFolders`, `contacts.Block`/
+  `Unblock`) because `grammers` wraps neither, and the archive folder id is the
+  convention of `1` rather than a published constant. The both-sides form of
+  `:delete-chat` sends `messages.DeleteHistory` with `revoke: true`, and whether
+  a peer sees the conversation disappear is not something an offline test can
+  answer. `:report` is likewise unexercised: reporting a real account is
+  irreversible, so the live suite skips it. Contact browsing reads
+  `contacts.GetContacts` whole, with no pagination, so a very large directory is
+  one response.
+- **Archive, block and folder updates from another device are not folded.** The
+  update feed models messages and presence; `updateFolderPeers`,
+  `updatePeerBlocked` and `updatePeerSettings` are dropped, so a change made
+  elsewhere appears on the next fetch that carries it, not when Telegram sends
+  it. A local name lives only in this process and its history file.
+- **The archived list is fetched once per launch, not followed.** `:archived`
+  draws what the last `messages.getDialogs { folder_id: 1 }` returned; an
+  archive made on another device is not pulled in until the next launch or
+  sign-in.
+
 ## v2 Hooks
 
 The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists, `o` streams the bytes into the media cache, and the platform viewer opens it.

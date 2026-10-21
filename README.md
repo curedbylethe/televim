@@ -405,6 +405,12 @@ Working today:
   another conversation. `p` is not bound in Visual. The line keeps its own
   internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
   registers are deliberately not shared, because their formats differ.
+- **Chat and contact actions:** `:archive` and `:archived`, `:block`/`:unblock`,
+  `:rename [name]`, `:delete-chat [both]`, `:report [reason]` and `:contacts`.
+  A local name is yours, kept with the history file and cleared by bare
+  `:rename`; archive keeps a chat in the archive folder rather than deleting it;
+  block, delete and report ask `y/n` first; the contacts list opens a person's
+  card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
   `:date <ISO>`, `:settings`, `:signin`, `:retry`, `:unlock`, `:passphrase`,
   `:export-session <path>` and `:import-session <path>`.

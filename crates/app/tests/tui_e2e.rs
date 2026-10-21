@@ -206,6 +206,21 @@ fn command_prompt_quits() {
     );
 }
 
+/// The directory is a network question, so offline it is refused by name rather
+/// than opening an empty panel — which would read as an account with no contacts.
+#[test]
+fn contacts_offline_is_refused_by_name() {
+    let sandbox = common::sandbox();
+    let mut t = common::spawn_offline(&sandbox);
+    t.wait_until(|s| s.contains("NORMAL"))
+        .expect("ready in NORMAL mode");
+
+    t.send_str(":contacts").expect("type :contacts");
+    t.send(Key::Enter).expect("submit command");
+    t.wait_until(|s| s.contains("not connected yet"))
+        .expect("the refusal names the missing client");
+}
+
 /// The cursor is what tells the panel which slice to draw, so a scroll that
 /// moves the cursor but not the slice — or the reverse — is a rendering bug
 /// that only shows on a screen.
