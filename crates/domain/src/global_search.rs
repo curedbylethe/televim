@@ -66,14 +66,15 @@ impl MediaFilter {
 ///
 /// Equality is what makes a stale answer detectably stale, so every field takes
 /// part in it. `text` is the query the server sees, with tokens removed; `echo`
-/// is the line as typed, tokens included, so the status line can quote the
-/// reader back to themselves.
+/// is the same words, because the status line restates each filter as a clause
+/// rather than quoting the token back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchSpec {
     /// The words sent to the server, filter tokens removed.
     pub text: String,
 
-    /// The line as the reader typed it, filter tokens included.
+    /// The words the status line echoes; equal to `text` whenever a parser
+    /// supplied the spec, so a filter is never printed twice.
     pub echo: String,
 
     /// The attachment kind to keep, if any.

@@ -7553,6 +7553,69 @@ fn an_empty_question_mark_submit_repeats_the_last_global_search() {
     assert_eq!(app.take_action(), None);
 }
 
+/// A refused query flashes the parser's sentence, reopens the prompt with the
+/// line as typed, and queues nothing.
+#[test]
+fn a_refused_query_keeps_the_prompt_open_and_sends_nothing() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('?')));
+    type_text(&mut app, "media:photo");
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(app.take_action(), None, "nothing was asked of the server");
+    assert_eq!(
+        app.ui.status,
+        "media:photo is not a media filter: try photo_video."
+    );
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert_eq!(app.input.line.purpose(), PromptKind::GlobalSearch);
+    assert_eq!(app.input.line.text(), "media:photo", "the line is kept");
+    assert!(!app.global_search().is_active());
+}
+
+/// An empty submit after a filtered search reuses that spec, filters and all.
+#[test]
+fn a_repeat_reuses_the_stored_spec_with_its_filters() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('?')));
+    type_text(&mut app, "media:voice since:2026-03-01 hello");
+    app.handle_key(press(KeyCode::Enter));
+
+    let Some(Action::GlobalSearch { spec: filtered }) = app.take_action() else {
+        panic!("the filtered search is queued");
+    };
+    assert_eq!(filtered.media, domain::global_search::MediaFilter::Voice);
+    assert!(filtered.since.is_some(), "the date is in the spec");
+    assert_eq!(filtered.text, "hello");
+
+    app.handle_key(press(KeyCode::Char('?')));
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::GlobalSearch { spec: filtered }),
+        "the stored spec, not a reparse of an empty line"
+    );
+}
+
+/// A query with no filter tokens carries exactly the words that were typed.
+#[test]
+fn an_unfiltered_query_still_carries_the_typed_words() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('?')));
+    type_text(&mut app, "ada lovelace");
+    app.handle_key(press(KeyCode::Enter));
+
+    let Some(Action::GlobalSearch { spec }) = app.take_action() else {
+        panic!("the search is queued");
+    };
+    assert_eq!(spec.text, "ada lovelace");
+    assert_eq!(spec.echo, "ada lovelace");
+    assert_eq!(spec.media, domain::global_search::MediaFilter::None);
+    assert_eq!((spec.since, spec.until), (None, None));
+}
+
 /// The `/` on each pane keeps its meaning: the window search in the
 /// conversation, the person search on the list. `?` changes neither.
 #[test]
