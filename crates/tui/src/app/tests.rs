@@ -7572,6 +7572,11 @@ fn a_refused_query_keeps_the_prompt_open_and_sends_nothing() {
     assert_eq!(app.input.line.purpose(), PromptKind::GlobalSearch);
     assert_eq!(app.input.line.text(), "media:photo", "the line is kept");
     assert!(!app.global_search().is_active());
+    assert_eq!(
+        app.status_text(),
+        "media:photo is not a media filter: try photo_video.",
+        "the refusal must outrank the vocabulary, or the reader never sees it"
+    );
 }
 
 /// An empty submit after a filtered search reuses that spec, filters and all.

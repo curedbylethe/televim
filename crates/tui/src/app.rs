@@ -3154,6 +3154,12 @@ impl App {
             // the artifact, so the status line is where its vocabulary goes:
             // the frame cannot show the tokens the reader may type.
             if self.input.line.purpose() == PromptKind::GlobalSearch {
+                // A refusal outranks the vocabulary: the reader just learned
+                // something about the words they typed, and the vocabulary is
+                // only a reminder of what they may type next.
+                if self.ui.status != IDLE_STATUS {
+                    return self.ui.status.clone();
+                }
                 return GLOBAL_SEARCH_FILTERS.to_owned();
             }
             return widgets::input_bar::hint(self).to_owned();
