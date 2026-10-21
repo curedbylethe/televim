@@ -181,6 +181,37 @@ pub const CHANGE_PASSPHRASE_PROMPT: &str = "Change the session passphrase? (y/n)
 /// Required rather than defaulted to the configured session file: that file is
 /// where the session already is, so copying it onto itself is never what was
 /// meant.
+/// The prompt for blocking or unblocking one person.
+#[must_use]
+pub fn block_prompt(name: &str, blocked: bool) -> String {
+    format!(
+        "{} {name}? (y/n)",
+        if blocked { "Block" } else { "Unblock" }
+    )
+}
+
+/// The prompt for deleting a conversation on this side.
+pub const DELETE_CONVERSATION_PROMPT: &str = "Delete this conversation? (y/n)";
+
+/// The prompt for deleting a conversation for both sides.
+pub const DELETE_CONVERSATION_BOTH_PROMPT: &str = "Delete this conversation for both sides? (y/n)";
+
+/// The prompt for deleting a conversation.
+#[must_use]
+pub fn delete_conversation_prompt(both: bool) -> String {
+    if both {
+        DELETE_CONVERSATION_BOTH_PROMPT.to_owned()
+    } else {
+        DELETE_CONVERSATION_PROMPT.to_owned()
+    }
+}
+
+/// The prompt for reporting one person.
+#[must_use]
+pub fn report_prompt(name: &str, reason: domain::report::ReportReason) -> String {
+    format!("Report {name} to Telegram as {}? (y/n)", reason.label())
+}
+
 pub const SESSION_PATH_USAGE: &str = "usage: :export-session <path> or :import-session <path>";
 
 /// What the profile panel says when `add account` is pressed.
@@ -196,6 +227,10 @@ pub const ADD_ACCOUNT_REFUSAL: &str = "not yet: this build cannot add an account
 /// a contact's card has no row the reader can act on at all, and one word is too
 /// long to tell a reader which of the two reasons applies.
 pub const NOT_YOURS_REFUSAL: &str = "Not yours: a contact card has no row you can act on.";
+
+/// What a command says when there is no chat or card to act on.
+pub const NOTHING_TO_ACT_ON: &str =
+    "nothing to act on: highlight a chat, open a conversation, or open a card";
 
 /// Which page of a conversation a fetch is asking for.
 ///
@@ -938,6 +973,27 @@ pub enum ConfirmKind {
         /// Carried so the prompt can say so: a reader who selected five and had
         /// three deleted should not have to infer the other two.
         skipped: usize,
+    },
+
+    /// Block or unblock a person.
+    Block {
+        peer_id: i64,
+        name: String,
+        blocked: bool,
+    },
+
+    /// Delete a conversation, locally or for both sides.
+    DeleteConversation {
+        chat_id: i64,
+        name: String,
+        both: bool,
+    },
+
+    /// Report a person to Telegram.
+    Report {
+        peer_id: i64,
+        name: String,
+        reason: domain::report::ReportReason,
     },
 }
 
@@ -3364,6 +3420,15 @@ impl App {
                 outgoing,
                 skipped,
             }) => return delete_prompt(ids, *outgoing, *skipped),
+            Some(ConfirmKind::Block { name, blocked, .. }) => {
+                return block_prompt(name, *blocked);
+            }
+            Some(ConfirmKind::DeleteConversation { both, .. }) => {
+                return delete_conversation_prompt(*both);
+            }
+            Some(ConfirmKind::Report { name, reason, .. }) => {
+                return report_prompt(name, *reason);
+            }
             None => {}
         }
         // The picker outranks the selection's own note: it is the question the

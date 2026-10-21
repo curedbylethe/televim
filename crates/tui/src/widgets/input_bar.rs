@@ -111,14 +111,10 @@ const CARD_SELF_HINT: &str = " j/k: row  h/l: within  v: vis  y: yank  d: act  E
 
 /// A contact's card.
 ///
-/// The same keys as the account's own **except** `d`, and the difference is the
-/// whole of what a contact's card cannot do: it has no row to act on, so naming
-/// `d` here would be naming a key that refuses. And `yy` rather than `y`, because
-/// a contact has no actions and yanking the row whole is the only yank it has.
-///
-/// The two rows differ because their rows differ. A key named on a card that does
-/// not answer it tells the reader the key is wrong, so neither names the other's.
-const CARD_CONTACT_HINT: &str = " j/k: row  h/l: within  v: vis  y/yy: yank  Esc: back";
+/// The same keys as the account's own, including `d`: three actions have no other
+/// home, so this is the one card that gained a key. `yy` rather than `y` because
+/// a contact's rows are read whole more often than the account's are.
+const CARD_CONTACT_HINT: &str = " j/k: row  h/l: within  v: vis  y/yy: yank  d: act  Esc: back";
 
 /// The hint while the bar holds a draft and the conversation has the focus.
 ///

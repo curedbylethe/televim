@@ -1577,6 +1577,7 @@ fn run_session_actions(app: &mut App, state: &mut State) {
 /// made while the client is down still reaches the file.
 fn run_local_name_actions(app: &mut App, state: &mut State) {
     while let Some(Action::SetLocalName { peer_id, name }) = app.take_local_name_action() {
+        app.set_local_name(peer_id, name.as_deref());
         if state.cached.messages.set_alias(peer_id, name.as_deref()) {
             state.cached.dirty = true;
         }

@@ -69,6 +69,18 @@ pub const ADD_ACCOUNT: &str = "add account";
 /// client to discard the session.
 pub const LOGOUT: &str = "logout";
 
+/// The label of the row that gives the person a local name.
+pub const RENAME: &str = "rename";
+
+/// The label of the row that blocks the person.
+pub const BLOCK: &str = "block";
+
+/// The label of the row that unblocks the person.
+pub const UNBLOCK: &str = "unblock";
+
+/// The label of the row that reports the person.
+pub const REPORT: &str = "report";
+
 /// Where the cue, the label and the value start, measured from the panel's border.
 ///
 /// Fixed rather than measured, because a label column that moved with the longest
@@ -337,6 +349,13 @@ fn contact_rows(app: &App) -> Vec<CardRow> {
     if let Some(birthday) = birthday(account.birthday) {
         rows.push(CardRow::value("birthday", birthday));
     }
+    rows.push(CardRow::action(RENAME));
+    rows.push(CardRow::action(if contact.blocked.unwrap_or(false) {
+        UNBLOCK
+    } else {
+        BLOCK
+    }));
+    rows.push(CardRow::action(REPORT));
     rows
 }
 
@@ -1207,10 +1226,18 @@ mod drawing {
             "the card is about them: {}",
             title(&app)
         );
-        assert!(theirs.len() < mine, "{theirs:?} is fewer than {mine}");
         assert!(
-            !theirs.iter().any(CardRow::is_action),
-            "and a contact has no row to act on: {theirs:?}"
+            theirs.iter().filter(|row| !row.is_action()).count() < mine,
+            "{theirs:?} is fewer value rows than {mine}"
+        );
+        assert_eq!(
+            theirs
+                .iter()
+                .filter(|row| row.is_action())
+                .map(|row| row.label)
+                .collect::<Vec<_>>(),
+            [RENAME, BLOCK, REPORT],
+            "and the three actions have no other home: {theirs:?}"
         );
     }
 
@@ -1317,8 +1344,10 @@ mod drawing {
         let full = rows(&app);
         assert_eq!(
             full.iter().map(|row| row.label).collect::<Vec<_>>(),
-            ["name", COLOUR, "username", "bio", "birthday"],
-            "the colour slot sits between the name and the identity"
+            [
+                "name", COLOUR, "username", "bio", "birthday", RENAME, BLOCK, REPORT
+            ],
+            "the colour slot sits between the name and the identity, and the actions end the card"
         );
 
         // Nothing they said but a name.
@@ -1335,8 +1364,8 @@ mod drawing {
         let bare = rows(&app);
         assert_eq!(
             bare.iter().map(|row| row.label).collect::<Vec<_>>(),
-            ["name", COLOUR],
-            "no username, no bio, no birthday: no rows either"
+            ["name", COLOUR, RENAME, BLOCK, REPORT],
+            "no username, no bio, no birthday: no value rows either"
         );
         assert!(
             !bare.iter().any(|row| row.value == "not set"),
@@ -1345,26 +1374,17 @@ mod drawing {
         assert!(bare.len() < full.len(), "and the count says a row went");
     }
 
-    /// `d` on a contact's card refuses, and says which of the two reasons applies
-    /// rather than a bare "no": a reader who pressed it wants to know it will not
-    /// happen.
+    /// `d` on a contact's card acts on the row it is on. The last row is a
+    /// report, so it raises that confirmation and names the person and the
+    /// reason the reader will send.
     #[test]
-    fn d_on_a_contacts_card_refuses_and_says_why() {
-        // Both states a contact's card can be in when `d` is pressed: the read has
-        // landed, and it has not. A card with no rows must not swallow the key —
-        // saying "you cannot" quietly is the one thing such a key must not do.
+    fn d_on_a_contacts_card_raises_the_action_on_its_row() {
         let (mut read, _) = contact_card();
+        read.handle_card_key('G');
         read.handle_card_key('d');
-        assert_eq!(read.status_text(), crate::app::NOT_YOURS_REFUSAL);
-
-        let mut unread = self_card();
-        let chat = unread.any_chat().expect("the mock has a chat");
-        open_card(&mut unread, crate::app::ProfileId::User(chat.id));
-        unread.handle_card_key('d');
         assert_eq!(
-            unread.status_text(),
-            crate::app::NOT_YOURS_REFUSAL,
-            "and it refuses with no rows on show too"
+            read.status_text(),
+            "Report Ada Lovelace to Telegram as other? (y/n)"
         );
     }
 
