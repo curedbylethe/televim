@@ -499,6 +499,26 @@ Real, and named so they are not mistaken for oversights:
   tag, so rows 1 to 7 start at column 0 while row 0 starts after the tag. The
   `kitty` placement follows row 0's column, as the picture's first row does.
   Not changed here.
+- **An animated sticker has no inline picture, not even from its thumbnail.**
+  Telegram's preview for a TGS or WebM sticker is an SVG outline (`PhotoSize::Path`)
+  or a stripped JPEG; the workspace decodes only WEBP, and adding a JPEG or SVG
+  decoder is a new dependency and a design decision. The token is the representation;
+  the thumbnail the `o` job already persists is not read by any draw path. Upgrade
+  path: a bounded JPEG decoder for `Stripped`, or rasterising `Path`, plus a decision
+  about the block's alpha.
+- **An animated sticker's playback is the viewer's, not the program's.** `o` hands
+  the cached `.tgs` or `.webm` to the generic `viewer` key, else the platform opener.
+  There is no Lottie or VP9 decode here; a TGS usually has no default player, and a
+  WebM plays only if the configured program supports it. `viewer_video` is
+  deliberately not used, because a TGS is not a video.
+- **An animated sticker whose bytes are neither gzip nor EBML is cached as `.bin`.**
+  The first four bytes decide `.tgs` (`1f 8b`), `.webm` (`1a 45 df a3`) or `.bin`; an
+  unreadable temp also falls back to `.bin`. The file is still opened by the viewer
+  key, but a platform opener that dispatches on the extension cannot know the format.
+- **Sticker sending and the sticker picker are not built.** The send half needs
+  upload and `messages.sendMedia`, which CUR-11 covers; no wrapper for either exists
+  in this tree. The two lists are scoped under `## v2 Hooks` below, and no Normal-mode
+  key is bound until the picker can send. `:stickers` is not a command in this build.
 - **Forwarding has no live proof in CI.** The batching and the error mapping are
   unit-tested, and the key path is driven through the `tui` app tests with
   action assertions. No test sends a forward to Telegram: the live round
@@ -567,3 +587,19 @@ Real, and named so they are not mistaken for oversights:
 ## v2 Hooks
 
 The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists, `o` streams the bytes into the media cache, and the platform viewer opens it.
+
+**The sticker lists, scoped.** Sending a sticker arrives with upload and
+`messages.sendMedia` (CUR-11); both lists are deferred until then, and this is what
+they will mean when it lands.
+
+- **Sendable list.** The stickers in the account's installed sets, grouped by set.
+  Telegram supplies them (`messages.getAllStickers` for the installed sets,
+  `messages.getStickerSet` for a set's stickers) when the picker opens. It is not a
+  local folder, not the media cache, and not a set the account has not installed.
+- **Recent list.** Telegram's recent-stickers list (`messages.getRecentStickers`),
+  most recently used first and shared across the account's devices. It is not a local
+  MRU and is not derived from sent history.
+- **Surface.** One picker with the two sections; `:stickers` opens it, `Enter` sends,
+  `Esc` closes. A Normal-mode key is not bound until sending exists.
+- **Out of scope.** Authoring or favouriting stickers, installing sets, searching a
+  set, persisting the lists locally, and any Lottie or VP9 rendering.
