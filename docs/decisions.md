@@ -385,7 +385,7 @@ are in [`../AGENTS.md`](../AGENTS.md).
   same reason `h` cannot be both a motion and a pane: one key in two places is a key
   a reader learns twice.
 - **Why the design model is vendored into the repository:** it is the most faithful
-  model of every screen — 20 drivable scenes and 122 frames, each verified at
+  model of every screen — 20 drivable scenes and 123 frames, each verified at
   exactly 24 rows by 80 columns, with a generator that rebuilds the specimen from
   them — and it was living in an application data directory that is not a git
   repository.
