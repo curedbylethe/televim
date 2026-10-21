@@ -27,6 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -77,9 +78,12 @@ fn download_temp_pid(name: &str) -> Option<u32> {
 
 /// Every extension a cached file can carry, one per [`suffix`]. A name with any
 /// other extension is not ours and is left alone.
-const SUFFIXES: [&str; 6] = ["jpg", "mp4", "gif", "ogg", "webp", "bin"];
+const SUFFIXES: [&str; 8] = ["jpg", "mp4", "gif", "ogg", "webp", "tgs", "webm", "bin"];
 
 /// The extension a kind of media is stored under.
+///
+/// An animated sticker's format is in its bytes, so [`suffix`] can only answer
+/// with the one the store falls back to; see [`suffix_from_bytes`].
 pub(crate) fn suffix(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Photo => "jpg",
@@ -87,8 +91,36 @@ pub(crate) fn suffix(kind: MediaKind) -> &'static str {
         MediaKind::Gif => "gif",
         MediaKind::Voice => "ogg",
         MediaKind::Sticker => "webp",
-        MediaKind::AnimatedSticker => "bin",
-        MediaKind::File => "bin",
+        MediaKind::AnimatedSticker | MediaKind::File => "bin",
+    }
+}
+
+/// The extension an animated sticker's bytes name, or `suffix(kind)` for every
+/// other kind.
+///
+/// A TGS is gzipped Lottie and a `WebM` is EBML; the first four bytes are enough
+/// to give the platform opener an extension it can dispatch on. Anything else
+/// is `bin`, which is what a kind with no known format gets.
+fn suffix_from_bytes(kind: MediaKind, bytes: &[u8]) -> &'static str {
+    if kind != MediaKind::AnimatedSticker {
+        return suffix(kind);
+    }
+    match bytes {
+        [0x1f, 0x8b, ..] => "tgs",
+        [0x1a, 0x45, 0xdf, 0xa3, ..] => "webm",
+        _ => "bin",
+    }
+}
+
+/// [`suffix_from_bytes`] for a file already on disk, reading only its magic.
+fn suffix_from_path(kind: MediaKind, path: &Path) -> &'static str {
+    if kind != MediaKind::AnimatedSticker {
+        return suffix(kind);
+    }
+    let mut magic = [0u8; 4];
+    match fs::File::open(path).and_then(|mut file| file.read_exact(&mut magic)) {
+        Ok(()) => suffix_from_bytes(kind, &magic),
+        Err(_) => "bin",
     }
 }
 
@@ -181,8 +213,8 @@ fn is_cache_file(name: &str) -> bool {
     parse_blob(name).is_some() || parse_pointer(name).is_some() || parse_legacy(name).is_some()
 }
 
-fn blob_name(hash: &str, kind: MediaKind) -> String {
-    format!("{hash}.{}", suffix(kind))
+fn blob_name(hash: &str, extension: &str) -> String {
+    format!("{hash}.{extension}")
 }
 
 /// A content hash computed over bytes as they arrive: the sha256 that names the
@@ -519,10 +551,11 @@ impl MediaCache {
         crc: u32,
         size: u64,
     ) -> Option<PathBuf> {
+        let extension = suffix_from_path(kind, temp);
         let reservation = cache
             .lock()
             .expect("the media cache lock is not poisoned")
-            .reserve_hashed(hash, kind, size, crc, keys.len())?;
+            .reserve_named(hash, extension, size, crc, keys.len())?;
 
         if reservation.write {
             if let Err(error) = fs::rename(temp, &reservation.path) {
@@ -617,7 +650,7 @@ impl MediaCache {
     }
 
     /// Claims the blob for `hash`, a store of `bytes` that will name it under
-    /// `refs` pointers. The whole-buffer twin of [`MediaCache::reserve_hashed`],
+    /// `refs` pointers. The whole-buffer twin of [`MediaCache::reserve_named`],
     /// for the tests that store bytes directly.
     #[cfg(test)]
     fn reserve(
@@ -630,7 +663,7 @@ impl MediaCache {
         let mut hasher = ContentHasher::new();
         hasher.update(bytes);
         let (_, crc, size) = hasher.finish();
-        self.reserve_hashed(hash, kind, size, crc, refs)
+        self.reserve_named(hash, suffix_from_bytes(kind, bytes), size, crc, refs)
     }
 
     /// Claims the blob named by `hash` of `size` bytes with checksum `crc`, that
@@ -640,11 +673,12 @@ impl MediaCache {
     ///
     /// The streamed store knows its size and checksum before this runs — it has
     /// written the bytes to a temp file and hashed them — so they arrive as
-    /// values rather than as a buffer.
-    fn reserve_hashed(
+    /// values rather than as a buffer, and the extension is already resolved
+    /// from the bytes, which is what an animated sticker needs.
+    fn reserve_named(
         &mut self,
         hash: &str,
-        kind: MediaKind,
+        extension: &str,
         size: u64,
         crc: u32,
         refs: usize,
@@ -658,7 +692,7 @@ impl MediaCache {
             blob.refs += refs;
             (blob.path.clone(), false)
         } else {
-            let path = self.dir.join(blob_name(hash, kind));
+            let path = self.dir.join(blob_name(hash, extension));
             *self.pending.entry(path.clone()).or_insert(0) += 1;
             (path, true)
         };
@@ -1662,6 +1696,86 @@ mod tests {
         assert!(cache.lookup(1, 2).is_some());
     }
 
+    /// The extension is part of the path the opener receives, so an animated
+    /// sticker is named by its magic rather than by the kind's fallback.
+    #[test]
+    fn an_animated_sticker_is_named_by_its_magic_bytes() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+
+        let tgs = cache
+            .store(
+                1,
+                1,
+                MediaKind::AnimatedSticker,
+                &[0x1f, 0x8b, 0x08, 0x00, 1],
+            )
+            .expect("cached");
+        assert_eq!(tgs.extension().and_then(|ext| ext.to_str()), Some("tgs"));
+
+        let webm = cache
+            .store(
+                1,
+                2,
+                MediaKind::AnimatedSticker,
+                &[0x1a, 0x45, 0xdf, 0xa3, 1],
+            )
+            .expect("cached");
+        assert_eq!(webm.extension().and_then(|ext| ext.to_str()), Some("webm"));
+
+        let unknown = cache
+            .store(1, 3, MediaKind::AnimatedSticker, b"nope")
+            .expect("cached");
+        assert_eq!(
+            unknown.extension().and_then(|ext| ext.to_str()),
+            Some("bin"),
+            "an unrecognised format still gets a file"
+        );
+
+        let still = cache
+            .store(1, 4, MediaKind::Sticker, b"RIFF....WEBP")
+            .expect("cached");
+        assert_eq!(
+            still.extension().and_then(|ext| ext.to_str()),
+            Some("webp"),
+            "a static sticker keeps its kind's extension"
+        );
+    }
+
+    /// The store that streams a download reads the magic from the temp file
+    /// instead of a buffer; the path it returns is the one a viewer gets.
+    #[test]
+    fn a_streamed_animated_sticker_is_named_from_its_temp_file() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let cache = Mutex::new(cache_in(dir.path(), None));
+        let bytes = [0x1a, 0x45, 0xdf, 0xa3, 0x01];
+        let temp = dir.path().join(".download-test.tmp");
+        fs::write(&temp, bytes).expect("the temp is written");
+        let mut hasher = ContentHasher::new();
+        hasher.update(&bytes);
+        let (hash, crc, size) = hasher.finish();
+
+        let path = MediaCache::store_from_path(
+            &cache,
+            &[Key::Message(2, 2)],
+            MediaKind::AnimatedSticker,
+            &temp,
+            &hash,
+            crc,
+            size,
+        )
+        .expect("cached");
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("webm"));
+
+        drop(cache);
+        let mut reopened = cache_in(dir.path(), None);
+        assert_eq!(
+            reopened.lookup(2, 2),
+            Some(path),
+            "a reopen finds it under the extension it was stored with"
+        );
+    }
+
     #[test]
     fn a_deleted_message_drops_its_cache_entry() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -1806,9 +1920,7 @@ mod tests {
             .store(7, 9, MediaKind::Photo, b"kept")
             .expect("cached");
         drop(cache);
-        let orphan = dir
-            .path()
-            .join(blob_name(&content_hash(b"orphan"), MediaKind::File));
+        let orphan = dir.path().join(blob_name(&content_hash(b"orphan"), "bin"));
         fs::write(&orphan, b"orphan").expect("a file can be written");
 
         let mut reopened = cache_in(dir.path(), None);
@@ -1954,7 +2066,7 @@ mod tests {
     /// store's file then materialises, as a store that had already renamed.
     fn late_store_under_a_clear(cache: &mut MediaCache, held: bool) -> (Reservation, PathBuf) {
         let reservation = cache
-            .reserve_hashed(&content_hash(b"late"), MediaKind::Photo, 4, 1, 1)
+            .reserve_named(&content_hash(b"late"), "jpg", 4, 1, 1)
             .expect("the file is reserved");
         let path = reservation.path.clone();
         if held {
@@ -1993,7 +2105,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let mut cache = cache_in(dir.path(), Some("+15550001"));
         let reservation = cache
-            .reserve_hashed(&content_hash(b"late"), MediaKind::Photo, 4, 1, 1)
+            .reserve_named(&content_hash(b"late"), "jpg", 4, 1, 1)
             .expect("the file is reserved");
         let path = reservation.path.clone();
         cache.hold_for_viewer(&path);
