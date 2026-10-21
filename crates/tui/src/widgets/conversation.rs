@@ -2235,6 +2235,7 @@ mod tests {
             (MediaKind::Gif, "[gif]"),
             (MediaKind::Voice, "[voice]"),
             (MediaKind::Sticker, "[sticker]"),
+            (MediaKind::AnimatedSticker, "[animated sticker]"),
             (MediaKind::File, "[file]"),
         ] {
             let app = showing(vec![attachment(1, 0, false, media)]);
@@ -2405,6 +2406,39 @@ mod tests {
             !body_row(&screen, FIRST).contains('▀'),
             "and paints no picture cells"
         );
+    }
+
+    /// An animated sticker is never a block, even when bytes have somehow been
+    /// inserted under its id: the kind is the gate, not the cache.
+    #[test]
+    fn an_animated_sticker_draws_no_block_even_with_bytes() {
+        let mut app = showing(vec![attachment(1, 0, false, MediaKind::AnimatedSticker)]);
+        app.conversation
+            .stickers
+            .insert_bytes(1, STICKER_TEST_WEBP)
+            .expect("the fixture decodes");
+
+        let screen = screen(&app, 80, 24);
+        assert!(
+            row(&screen, FIRST).contains("[animated sticker]"),
+            "the token is the whole row: {}",
+            row(&screen, FIRST)
+        );
+        assert!(
+            !body_row(&screen, FIRST).contains('▀') && !body_row(&screen, FIRST).contains('▄'),
+            "no block cells even with a decoded picture in the cache"
+        );
+        assert!(
+            app.conversation.stickers.take_pending().is_empty(),
+            "an animated sticker asks for no bytes"
+        );
+
+        let layout = app.row_layout();
+        let span = layout
+            .iter()
+            .find(|span| span.kind.index() == Some(0))
+            .expect("the message is laid out");
+        assert_eq!(span.len, 1, "one token row, not the eight-row block");
     }
 
     #[test]
