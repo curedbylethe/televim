@@ -13,7 +13,9 @@
 //! that no `telegram_framework` or `grammers` type reaches `domain` or `tui`.
 
 #[cfg(feature = "live")]
-use domain::account::{Account, Birthday};
+use domain::account::{Account, Birthday, UserProfile};
+#[cfg(feature = "live")]
+use domain::report::ReportReason;
 
 #[cfg(feature = "live")]
 use crate::ProtoError;
@@ -61,17 +63,67 @@ impl crate::ProtoClient {
     /// second of those is a fact about this client rather than about the
     /// connection, and the card says which it is.
     pub async fn fetch_user(&self, peer_id: i64) -> Result<Account, ProtoError> {
+        Ok(self.fetch_user_profile(peer_id).await?.account)
+    }
+
+    /// Reads a contact's profile together with the block flag.
+    ///
+    /// The card needs both in one answer: it draws the rows and the block action
+    /// from the same read, and a second request would let the two disagree.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`ProtoClient::fetch_user`](crate::ProtoClient::fetch_user).
+    pub async fn fetch_user_profile(&self, peer_id: i64) -> Result<UserProfile, ProtoError> {
         let account = self.inner().fetch_user(peer_id).await?;
+        let blocked = account.blocked;
 
         tracing::debug!(
             peer_id,
             user_id = account.user_id,
+            blocked,
             has_username = account.username.is_some(),
             has_bio = account.bio.is_some(),
             "read a contact's profile"
         );
 
-        Ok(translate(account))
+        Ok(UserProfile {
+            account: translate(account),
+            blocked,
+        })
+    }
+
+    /// Reports a person to Telegram.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] when the peer is not cached, is not a
+    /// person, or Telegram refuses the report.
+    pub async fn report_peer(&self, peer_id: i64, reason: ReportReason) -> Result<(), ProtoError> {
+        self.inner()
+            .report_peer(peer_id, report_reason(reason), "")
+            .await?;
+
+        Ok(())
+    }
+}
+
+/// Maps the domain's vocabulary onto the framework's.
+#[cfg(feature = "live")]
+fn report_reason(reason: ReportReason) -> telegram_framework::ReportReason {
+    use telegram_framework::ReportReason as Framework;
+
+    match reason {
+        ReportReason::Spam => Framework::Spam,
+        ReportReason::Violence => Framework::Violence,
+        ReportReason::Pornography => Framework::Pornography,
+        ReportReason::ChildAbuse => Framework::ChildAbuse,
+        ReportReason::Other => Framework::Other,
+        ReportReason::Copyright => Framework::Copyright,
+        ReportReason::GeoIrrelevant => Framework::GeoIrrelevant,
+        ReportReason::Fake => Framework::Fake,
+        ReportReason::IllegalDrugs => Framework::IllegalDrugs,
+        ReportReason::PersonalDetails => Framework::PersonalDetails,
     }
 }
 
@@ -121,6 +173,7 @@ mod tests {
             birthday: None,
             bio: None,
             presence: None,
+            blocked: false,
         }
     }
 
@@ -209,5 +262,28 @@ mod tests {
         });
 
         assert_eq!(account.birthday.map(|b| b.year), Some(None));
+    }
+
+    #[test]
+    fn every_report_reason_crosses_the_boundary() {
+        use domain::report::ReportReason;
+        use telegram_framework::ReportReason as Framework;
+
+        let cases = [
+            (ReportReason::Spam, Framework::Spam),
+            (ReportReason::Violence, Framework::Violence),
+            (ReportReason::Pornography, Framework::Pornography),
+            (ReportReason::ChildAbuse, Framework::ChildAbuse),
+            (ReportReason::Other, Framework::Other),
+            (ReportReason::Copyright, Framework::Copyright),
+            (ReportReason::GeoIrrelevant, Framework::GeoIrrelevant),
+            (ReportReason::Fake, Framework::Fake),
+            (ReportReason::IllegalDrugs, Framework::IllegalDrugs),
+            (ReportReason::PersonalDetails, Framework::PersonalDetails),
+        ];
+
+        for (domain, framework) in cases {
+            assert_eq!(report_reason(domain), framework, "{domain:?}");
+        }
     }
 }

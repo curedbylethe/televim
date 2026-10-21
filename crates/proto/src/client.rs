@@ -79,6 +79,34 @@ impl ProtoClient {
         Ok(())
     }
 
+    /// Fetches the private conversations in the archive folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] when Telegram refuses or the answer
+    /// cannot be decoded.
+    pub async fn fetch_archived_chats(&self) -> Result<Vec<Chat>, ProtoError> {
+        let dialogs = self.inner.fetch_archived_dialogs().await?;
+
+        Ok(dialogs
+            .into_iter()
+            .filter(|dialog| chat_kind(dialog.kind).is_private())
+            .map(|dialog| Chat::from(ProtoChat::from(dialog)))
+            .collect())
+    }
+
+    /// Moves a chat into or out of the archive folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] when the chat is not known to this
+    /// session or Telegram refuses the change.
+    pub async fn set_archived(&self, chat_id: i64, archived: bool) -> Result<(), ProtoError> {
+        self.inner.set_archived(chat_id, archived).await?;
+
+        Ok(())
+    }
+
     /// Subscribes to the updates Telegram sends for this account.
     ///
     /// The feed is already narrowed to private conversations, so everything it
