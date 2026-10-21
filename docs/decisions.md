@@ -477,8 +477,9 @@ are in [`../AGENTS.md`](../AGENTS.md).
 - **Why RTL word order is terminal-delegated by default and visual reordering is opt-in:** no mainstream terminal applies the Unicode Bidirectional Algorithm to displayed cells by default — not xterm, not alacritty, not kitty; wezterm carries `bidi_enabled=false`, VTE waits for `CSI ? 2501 h`, and Windows Terminal needs AtlasEngine and a setting turned on. The hazard is not the algorithm but the **shaper**: every terminal that renders Arabic or Hebrew at all runs HarfBuzz, CoreText, DirectWrite or Pango, and shaping reverses RTL runs. Logical emission is therefore right for **one run**: a single word is reversed once by the shaper and reads correctly, while visual emission reverses a second time there and scrambles it. It is not right for a whole line. Checked on kitty 0.49.2 (`scripts/rtl/kitty_shots.py`), the shaper reverses **each RTL run separately and a space ends a run**, so a two-word Arabic draft emitted in logical order reads with its first word on the left. That is what `BidiMode::Words` is for: it reverses the order of the words and leaves each word's letters to the shaper, which gives the right reading order on kitty. It is opt-in for the same reason `Visual` is, because on a terminal that reverses the whole line it would flip the words twice. terminal-wg's "explicit mode", `CSI 8 l`, tells a UBA-aware terminal that the application did the bidi itself, and it does **not** disable the shaper, so it cannot make visual emission safe either. The default is `BidiMode::Terminal` — logical order, byte-for-byte what this binary already emits — and `BidiMode::Visual` is the opt-in escape hatch for the terminals that shape nothing (xterm, alacritty), where the application's own permutation is the only reordering that will happen. Terminal detection was rejected rather than offered as a third answer: bidi and shaping are settings rather than identity, and no probe of the far end survives tmux or ssh. What that leaves is named rather than claimed: in the default mode xterm and alacritty render RTL wrong, and kitty orders the words of a multi-word draft wrong (use `words`); `Visual` does not join Arabic or Persian letters (`Words` does, the shaper still has the word), Rule L4 glyph mirroring is absent, and the default's correctness rests on the terminal matrix above rather than on any assertion in this repository — `ratatui::TestBackend` has no bidi and no shaper, so it can prove that a permutation reached the cells and cannot prove how a terminal drew them.
 - **Why the bidi mode is one configuration key rather than a per-terminal setting:** the escape hatch is reachable through the same key surface as everything else in `app/src/config.rs` — `bidi = "terminal"`, `"visual"` or `"words"`, `TELEVIM_BIDI` from the environment, default `terminal` — read once at composition and handed to `tui` as a plain `BidiMode`, so the `tui` crate names no configuration type and `make boundary` still holds. It is **per machine, not per terminal**: an ssh hop keeps whatever the session was launched with and `tmux` multiplexes one value over every pane it holds, so a reader whose terminals differ cannot have both answers at once. Per-`TERM` is the v2 hook, and it is the reason the value is a setting rather than a probe. Only the exact words `visual` and `words` select them; any other spelling leaves the terminal in charge, because an unrecognised value that guessed `Visual` would scramble a run on precisely the terminals whose shaper is the reason `Terminal` is the default. Whatever the mode, only the **display** changes: the text that is stored and sent is never reordered. The caret is a style laid on the emitted cell whose index is its visual column, because kitty keeps a cell's background where it was emitted while it moves the glyphs, and the emoji popup anchors on the same cell (`LaidOut::visual_column`, counted one cell per cluster, not the string's width — `سلام` is three columns as a string and four cells as drawn).
 - **Why a media kind is a plain `domain` DTO and the unknown case degrades:**
-  `domain::MediaKind` is `Photo`, `Video`, `Gif`, `Voice`, `File` — five `Copy`
-  variants and nothing else. It is deliberately payload-free: no filename, no
+  `domain::MediaKind` is `Photo`, `Video`, `Gif`, `Voice`, `Sticker`,
+  `AnimatedSticker`, `File` — seven `Copy` variants and nothing else. It is
+  deliberately payload-free: no filename, no
   path, no access hash, no locator. A description is rebuilt on every history
   page, so anything cached on it goes stale, and a stale locator is worse than
   none: the bytes are re-derived from the message when something is actually
@@ -501,9 +502,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
   translation.
 
   The visible token is the same decision applied to the screen: a media-only
-  message shows `[image]`, `[video]`, `[gif]`, `[voice]` or `[file]` through
+  message shows `[image]`, `[video]`, `[gif]`, `[voice]`, `[sticker]`,
+  `[animated sticker]` or `[file]` through
   `Message::display_body()`, and a caption always wins over it. Both halves are
-  decided. The wording is final, and all five tokens are drawn in
+  decided. The wording is final, and all seven tokens are drawn in
   `Theme::text_dim`: a placeholder stands in for something the peer sent rather
   than for something they wrote, so it does not carry the weight of their words.
   A caption is the peer's own text and keeps the body ink.
@@ -785,18 +787,22 @@ are in [`../AGENTS.md`](../AGENTS.md).
   sentences — retrying, `reconnecting`, `offline:` — clear the flash deadline on
   the way in, because a sentence that ends in an event must not expire back to
   idle while what it reports is still true.
-- **Why the sticker attribute is asked about last:** a document's attributes are
-  read in the order they can be told apart in — the `voice` flag, then animation,
-  video, and a voice-marked audio attribute — and the sticker attribute comes
-  after all of them, so a sticker carrying another attribute keeps its more
-  specific kind: a sticker that moves was already answered as a GIF, as any
-  animation is. Only a document that is nothing but a sticker is one. On the
-  typed path the same rule is a second clause: `grammers` reads the sticker off
-  the document for us, and a sticker whose `animated` bit is set stays `File` —
-  animated stickers are out of scope, and a static-only pipeline that promoted
-  one would fetch and paint what it cannot show. The order is stated in a code
-  comment at the arm, because an arm order that silently changed would silently
-  reclassify.
+- **Why the sticker attribute is asked about first:** a document's `voice` flag
+  is Telegram's word that the message is a voice note, and it stays first. The
+  sticker attribute is asked next, because it is the most specific answer a
+  document carries: it says what the document *is*, while animation and video say
+  how it moves or what container it is in. A TGS carries the animation, a WebM
+  carries the video attribute its container needs, and both are stickers — asked
+  after those two, every animated sticker was answered as a GIF and every WebM
+  sticker as a video. So the sticker attribute decides the kind and the animation
+  bit decides which sticker: `AnimatedSticker` when `is_animated()`, `Sticker`
+  otherwise. A document with the animation and no sticker attribute is still a
+  `Gif`, as any animation is. The typed path states the same rule in one clause:
+  `grammers` reads the sticker off the document for us, and `is_animated()` splits
+  the two kinds, so both paths agree on the same document — the defect this
+  replaces was one path calling an animated sticker a GIF while the other called
+  it a file. The order is stated in a code comment at the arm, because an arm
+  order that silently changed would silently reclassify.
 - **Why sticker decode is synchronous and the cache is bounded twice:** decode
   runs on the event loop — no `spawn_blocking`, no threads — because the runtime
   is a current-thread one and a sticker that misses its frame draws `[sticker]`

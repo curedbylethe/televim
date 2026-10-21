@@ -670,9 +670,6 @@ could not say, the ink, and the constraints the row vocabulary already implies.
 | `AnimatedSticker` | `[animated sticker]` | a TGS or WebM sticker | `text-dim` |
 | `File` | `[file]` | a document, contact, or any kind the build does not model | `text-dim` |
 
-The binary has six `MediaKind`s: it does not yet separate `AnimatedSticker`, and an
-animated sticker draws `[file]` there. The row is the model's, ahead of the code.
-
 **The ink is `text-dim`, not body `text`.** One role for all seven, no new token, and
 no bold, italic or underline (there is no second weight or slant in this surface).
 

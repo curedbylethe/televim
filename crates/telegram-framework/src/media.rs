@@ -69,8 +69,11 @@ pub enum MediaKind {
     /// A voice note.
     Voice,
 
-    /// A sticker.
+    /// A static sticker.
     Sticker,
+
+    /// An animated sticker: a TGS or `WebM` file, which is not a GIF.
+    AnimatedSticker,
 
     /// Anything else the message carries: a plain document, or a media kind
     /// this build does not model.
@@ -105,10 +108,10 @@ pub(crate) fn classify_raw(
 /// Agrees with [`classify_raw`] by construction: a document is decided by one
 /// shared function, and the sticker `grammers` reads off a document's
 /// attributes is answered here — a static sticker is [`MediaKind::Sticker`],
-/// and an animated one stays [`MediaKind::File`]. Everything else `grammers`
-/// flattens away or builds that this crate does not read — a contact, a poll,
-/// a location, a web page — all land on [`MediaKind::File`], the same answer
-/// the raw path gives them.
+/// and an animated one is [`MediaKind::AnimatedSticker`]. Everything else
+/// `grammers` flattens away or builds that this crate does not read — a
+/// contact, a poll, a location, a web page — all land on [`MediaKind::File`],
+/// the same answer the raw path gives them.
 ///
 /// The one residue is a kind `grammers` itself declines to build: its
 /// `Media::from_raw` returns `None` for a handful of variants, so on this path
@@ -119,16 +122,16 @@ pub(crate) fn classify_typed(media: Option<&Media>) -> Option<(MediaKind, Option
         Media::Photo(photo) => (MediaKind::Photo, photo_id(&photo.raw)),
         Media::Document(document) => (classify_document(&document.raw), document_id(&document.raw)),
         // `grammers` reads a document with a sticker attribute as a sticker, so
-        // this is where a sticker arrives: a static one is its own kind, and an
-        // animated one stays a file — animated stickers are out of scope, and
-        // the raw path answers a sticker that moves as a GIF by attribute
-        // order. Everything `grammers` flattens away or builds that this crate
-        // does not read — a contact, a poll, a location, a web page, and any
-        // kind added after this build — is one arm, deliberately: all of them
-        // carry something, and none of them is nothing.
+        // this is where a sticker arrives: an animated one is its own kind, and
+        // a static one is the other. The same split is asked of the raw path by
+        // the shared document classifier, so the two agree. Everything
+        // `grammers` flattens away or builds that this crate does not read — a
+        // contact, a poll, a location, a web page, and any kind added after
+        // this build — is one arm, deliberately: all of them carry something,
+        // and none of them is nothing.
         Media::Sticker(sticker) => {
             let kind = if sticker.is_animated() {
-                MediaKind::File
+                MediaKind::AnimatedSticker
             } else {
                 MediaKind::Sticker
             };
@@ -163,15 +166,19 @@ fn document_id(document: &tl::types::MessageMediaDocument) -> Option<i64> {
 /// Decides a document's kind from what the document itself says.
 ///
 /// The document's own `voice` flag is Telegram's statement that this is a voice
-/// note, so it is asked first. Otherwise the attributes are read in the order
-/// they can be told apart in: an animation is a GIF whatever else it carries, a
-/// video attribute names a video, and an audio attribute only counts as a voice
-/// note when it says so — a music file carries one too, and is a file.
+/// note, so it is asked first. The sticker attribute is asked next, because it is
+/// the most specific answer: it says the document is a sticker whatever else the
+/// document carries, and a `WebM` sticker also carries a video attribute while an
+/// animated one also carries the animation. Only then are the remaining
+/// attributes read in the order they can be told apart in: an animation without
+/// a sticker attribute is a GIF, a video attribute names a video, and an audio
+/// attribute only counts as a voice note when it says so — a music file carries
+/// one too, and is a file.
 ///
-/// The sticker attribute is asked about last, deliberately: a sticker carrying
-/// another attribute keeps its more specific kind — a sticker that moves was
-/// already answered as a GIF above, as any animation is. Only a document that
-/// is nothing but a sticker is one.
+/// An animated sticker is [`MediaKind::AnimatedSticker`] rather than a GIF: the
+/// sticker attribute is what makes it a sticker, and animation is only how the
+/// sticker moves. A document with [`DocumentAttribute::Animated`] and no sticker
+/// attribute stays [`MediaKind::Gif`].
 ///
 /// Everything else is [`MediaKind::File`], including a document with no
 /// attributes at all: it still carries bytes.
@@ -184,6 +191,22 @@ fn classify_document(document: &tl::types::MessageMediaDocument) -> MediaKind {
         Some(tl::enums::Document::Document(document)) => document.attributes.as_slice(),
         Some(tl::enums::Document::Empty(_)) | None => &[],
     };
+
+    // First, so that a sticker carrying a video or an animation keeps the more
+    // specific kind: both of those are how a sticker moves, not what it is.
+    if attributes
+        .iter()
+        .any(|a| matches!(a, tl::enums::DocumentAttribute::Sticker(_)))
+    {
+        let animated = attributes
+            .iter()
+            .any(|a| matches!(a, tl::enums::DocumentAttribute::Animated));
+        return if animated {
+            MediaKind::AnimatedSticker
+        } else {
+            MediaKind::Sticker
+        };
+    }
 
     if attributes
         .iter()
@@ -204,16 +227,6 @@ fn classify_document(document: &tl::types::MessageMediaDocument) -> MediaKind {
         .any(|a| matches!(a, tl::enums::DocumentAttribute::Audio(audio) if audio.voice))
     {
         return MediaKind::Voice;
-    }
-
-    // Last, so that a sticker carrying another attribute keeps its more
-    // specific kind: the arms above already answered a sticker that moves, or
-    // one that names a video or a voice note.
-    if attributes
-        .iter()
-        .any(|a| matches!(a, tl::enums::DocumentAttribute::Sticker(_)))
-    {
-        return MediaKind::Sticker;
     }
 
     MediaKind::File
@@ -563,10 +576,10 @@ impl Client {
 mod tests {
     use super::*;
     use crate::testing::{
-        attribute_audio, attribute_filename, attribute_sticker, attribute_video, media_document,
-        media_document_with_thumbs, media_empty, media_photo, media_photo_with_sizes,
-        media_refused_by_grammers, media_typed, media_unmodelled, raw_message, thumbnail_cached,
-        thumbnail_fetchable,
+        attribute_audio, attribute_filename, attribute_sticker, attribute_video,
+        media_animated_sticker, media_document, media_document_with_thumbs, media_empty,
+        media_photo, media_photo_with_sizes, media_refused_by_grammers, media_typed,
+        media_unmodelled, media_webm_sticker, raw_message, thumbnail_cached, thumbnail_fetchable,
     };
 
     use tl::enums::DocumentAttribute;
@@ -757,19 +770,28 @@ mod tests {
         assert_eq!(typed(sticker), expected);
     }
 
-    /// Animated stickers are out of scope, so one stays a file. `grammers` keys
-    /// `animated` off the document's own Animated attribute, which is what the
-    /// typed path asks; the raw path answers the same document as a GIF by
-    /// attribute order, an animation winning there whatever else the document
-    /// carries.
+    /// An animated sticker is its own kind on both paths. The two classifiers
+    /// must agree: the defect this replaces was one path answering a GIF and the
+    /// other a file for the same document.
     #[test]
-    fn an_animated_sticker_stays_a_file() {
-        let animated = media_document(
-            vec![attribute_sticker(), DocumentAttribute::Animated],
-            false,
-        );
+    fn an_animated_sticker_is_an_animated_sticker_on_both_paths() {
+        let sticker = media_animated_sticker();
+        let expected = Some(MediaKind::AnimatedSticker);
 
-        assert_eq!(typed(animated), Some(MediaKind::File));
+        assert_eq!(raw(&sticker), expected);
+        assert_eq!(typed(sticker), expected);
+    }
+
+    /// A `WebM` sticker names the video attribute its container needs, and it is
+    /// still a sticker: the sticker attribute is the most specific answer, so it
+    /// is asked before the video one.
+    #[test]
+    fn a_webm_sticker_is_an_animated_sticker_not_a_video() {
+        let sticker = media_webm_sticker();
+        let expected = Some(MediaKind::AnimatedSticker);
+
+        assert_eq!(raw(&sticker), expected);
+        assert_eq!(typed(sticker), expected);
     }
 
     /// The whole reason the classification has a catch-all. A kind this build

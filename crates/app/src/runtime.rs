@@ -462,14 +462,16 @@ impl ViewerSpec {
 
 /// The viewer for a media kind: its own key, else `viewer`, else the platform's.
 ///
-/// Photos and stickers are images, videos and GIFs are video, voice messages are
-/// audio, and everything else takes the generic key.
+/// Photos and static stickers are images, videos and GIFs are video, voice
+/// messages are audio, and everything else takes the generic key. An animated
+/// sticker is not a video: a TGS is a Lottie document, so it takes the generic
+/// key, which is the one a reader can point at a Lottie-capable player.
 fn viewer_spec(cfg: &Config, kind: MediaKind) -> ViewerSpec {
     let specific = match kind {
         MediaKind::Photo | MediaKind::Sticker => &cfg.viewer_image,
         MediaKind::Video | MediaKind::Gif => &cfg.viewer_video,
         MediaKind::Voice => &cfg.viewer_audio,
-        MediaKind::File => &None,
+        MediaKind::AnimatedSticker | MediaKind::File => &None,
     };
     [specific, &cfg.viewer]
         .into_iter()
@@ -1788,6 +1790,7 @@ mod tests {
             (MediaKind::Video, "vid"),
             (MediaKind::Gif, "vid"),
             (MediaKind::Voice, "aud"),
+            (MediaKind::AnimatedSticker, "any"),
             (MediaKind::File, "any"),
         ] {
             assert_eq!(viewer_spec(&cfg, kind), spec(program, &[]), "{kind:?}");
@@ -1810,6 +1813,21 @@ mod tests {
             viewer_spec(&only_image, MediaKind::File),
             ViewerSpec::platform(),
             "a specific key does not leak to other kinds"
+        );
+        assert_eq!(
+            viewer_spec(&only_image, MediaKind::AnimatedSticker),
+            ViewerSpec::platform(),
+            "a TGS is not an image, so the image key does not take it"
+        );
+
+        let only_video = Config {
+            viewer_video: Some("vid".to_owned()),
+            ..Config::default()
+        };
+        assert_eq!(
+            viewer_spec(&only_video, MediaKind::AnimatedSticker),
+            ViewerSpec::platform(),
+            "a TGS is not a video either"
         );
     }
 

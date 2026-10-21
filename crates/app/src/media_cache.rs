@@ -87,6 +87,7 @@ pub(crate) fn suffix(kind: MediaKind) -> &'static str {
         MediaKind::Gif => "gif",
         MediaKind::Voice => "ogg",
         MediaKind::Sticker => "webp",
+        MediaKind::AnimatedSticker => "bin",
         MediaKind::File => "bin",
     }
 }

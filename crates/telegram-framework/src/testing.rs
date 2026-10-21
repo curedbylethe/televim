@@ -230,6 +230,49 @@ pub(crate) fn attribute_sticker() -> tl::enums::DocumentAttribute {
     })
 }
 
+/// Builds a document's media whose record carries `mime`.
+///
+/// The classification reads attributes rather than the mime, but the wire says
+/// what the file is, and a fixture that names the format is the one a later
+/// reader of these tests will recognise.
+pub(crate) fn media_document_with_mime(
+    attributes: Vec<tl::enums::DocumentAttribute>,
+    voice: bool,
+    mime: &str,
+) -> tl::enums::MessageMedia {
+    let mut media = media_document(attributes, voice);
+    if let tl::enums::MessageMedia::Document(message) = &mut media
+        && let Some(tl::enums::Document::Document(record)) = &mut message.document
+    {
+        mime.clone_into(&mut record.mime_type);
+    }
+    media
+}
+
+/// Builds an animated sticker: the sticker attribute and the animation, which
+/// is what makes it one rather than a GIF. Telegram sends a TGS in this mime.
+pub(crate) fn media_animated_sticker() -> tl::enums::MessageMedia {
+    media_document_with_mime(
+        vec![attribute_sticker(), tl::enums::DocumentAttribute::Animated],
+        false,
+        "application/x-tgsticker",
+    )
+}
+
+/// Builds an animated sticker in the other format Telegram sends: a `WebM`, which
+/// also carries the video attribute its container needs.
+pub(crate) fn media_webm_sticker() -> tl::enums::MessageMedia {
+    media_document_with_mime(
+        vec![
+            attribute_sticker(),
+            tl::enums::DocumentAttribute::Animated,
+            attribute_video(),
+        ],
+        false,
+        "video/webm",
+    )
+}
+
 /// Builds a media value `grammers` declines to build at all.
 ///
 /// `grammers` refuses a handful of raw media kinds — a game, an invoice, a
