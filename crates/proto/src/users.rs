@@ -111,6 +111,26 @@ impl crate::ProtoClient {
     /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) on the
     /// same failures as `resolve_user`, and when the account has top peers
     /// switched off.
+    pub async fn fetch_contacts(
+        &self,
+    ) -> Result<Vec<domain::user::UserCandidate>, crate::ProtoError> {
+        let users = self.inner().fetch_contacts().await?;
+
+        Ok(users.into_iter().map(to_candidate).collect())
+    }
+
+    /// Blocks or unblocks a person.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ProtoError::Framework`] when the person is not in the
+    /// session's cache, is not a person, or Telegram refuses.
+    pub async fn set_blocked(&self, peer_id: i64, blocked: bool) -> Result<(), crate::ProtoError> {
+        self.inner().set_blocked(peer_id, blocked).await?;
+
+        Ok(())
+    }
+
     pub async fn top_peers(&self) -> Result<Vec<domain::user::UserCandidate>, crate::ProtoError> {
         let users = self
             .inner()

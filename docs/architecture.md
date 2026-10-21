@@ -117,10 +117,13 @@ A **first-party crate** that wraps `grammers-client` and provides:
 - `SessionStore` trait with pluggable backends (keyring, encrypted file, memory).
 - Typed event stream: `Updates` filtered to messages in private conversations with people — groups, channels and bots never reach the caller.
 - Peer presence: `UpdateKind::PeerStatus` from `updateUserStatus`, and the `status` a profile read already carries, both classified into `UserPresence` (`Online`, `Offline { was_online }`, `Recently`, `LastWeek`, `LastMonth`, `Hidden`). An empty status is `Hidden`.
-- Chat listing with automatic `InputPeer` resolution and caching.
+- Chat listing with automatic `InputPeer` resolution and caching, including the
+  archive folder that `grammers`' own iterator cannot request.
 - The account's own profile, which is the only call that discloses the account's
   own user identifier: `grammers` reports none for a peer that is the account
   itself, so a client that has not made it cannot name its own user.
+- Chat actions: archive/unarchive, block/unblock, delete a conversation's history
+  (locally or for both sides), report a person, and list the account's contacts.
 - Message send/edit/delete builders.
 - An **escape hatch**: `Client::invoke()` that forwards directly to `grammers`.
 
@@ -138,7 +141,7 @@ migrates a plaintext file on its first load. An envelope that will not open is
 [`decisions.md`](./decisions.md).
 
 The modules beyond the three above are the ones with a rule in them: `dialogs`,
-`account`, `history`, `messages`, `search`, `users` and `updates`. Each keeps every decision that can
+`account`, `contacts`, `history`, `messages`, `search`, `users` and `updates`. Each keeps every decision that can
 be wrong in a free function over primitives, so it is testable on CI without a
 datacenter, and keeps the `grammers`-reading code as thin as it can be made. That
 is the same rule `app/src/net.rs` follows.
@@ -170,7 +173,7 @@ what `live` gates.
 
 A **thin translation layer**. Consumes `telegram-framework` and maps its types into `domain` types. It must not expose any `grammers` or `telegram-framework` types to `domain` or `tui`.
 
-`to_presence` (`types.rs`) maps each `UserPresence` to its `domain::presence::Presence` twin. The `Offline` timestamp passes through unchanged, so what the time means and how it reads stays in `tui`. `account.rs` carries the presence into the domain `Account`, and `stream.rs` maps `UpdateKind::PeerStatus` to `UpdateEvent::PeerStatus`.
+`to_presence` (`types.rs`) maps each `UserPresence` to its `domain::presence::Presence` twin. `account.rs` also maps a reported person's block flag into `domain::account::UserProfile`, and `domain::report::ReportReason` into the framework's own reason enum; the contact and archive calls stay typed through `telegram-framework::contacts` and `dialogs`. The `Offline` timestamp passes through unchanged, so what the time means and how it reads stays in `tui`. `account.rs` carries the presence into the domain `Account`, and `stream.rs` maps `UpdateKind::PeerStatus` to `UpdateEvent::PeerStatus`.
 
 ```
 crates/proto/
@@ -178,7 +181,7 @@ crates/proto/
 │   ├── lib.rs          # The `tl` re-export rule, and why app is exempt
 │   ├── error.rs        # ProtoError, and the framework-error mapping
 │   ├── client.rs       # Wraps telegram-framework::Client
-│   ├── account.rs      # The account's own profile -> a domain Account
+│   ├── account.rs      # The account's own profile -> a domain Account; block state -> UserProfile
 │   ├── auth.rs         # Login, 2FA, session management
 │   ├── types.rs        # Internal DTOs (never expose grammers types); to_presence
 │   ├── stream.rs       # Update subscription & event mapping
@@ -202,7 +205,8 @@ reader might start a conversation with.
 crates/domain/
 ├── src/
 │   ├── lib.rs
-│   ├── account.rs      # The signed-in account, its two display questions, its presence
+│   ├── account.rs      # The signed-in account, its two display questions, its presence, UserProfile
+│   ├── report.rs       # The ten report reasons, their command tokens and sentence labels
 │   ├── presence.rs     # Presence: online, or the raw Unix time last online. No clock, no formatting
 │   ├── chat.rs         # Chat entity, filtering rules, the peer's last presence
 │   ├── message.rs      # Message entity

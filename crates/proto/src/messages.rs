@@ -140,6 +140,21 @@ impl crate::ProtoClient {
         Ok(())
     }
 
+    /// Deletes a conversation's history.
+    ///
+    /// `both` is the wire's `revoke`: `false` clears this account's copy,
+    /// `true` asks Telegram to delete both sides.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) when the
+    /// conversation is not in the session's peer cache or Telegram refuses.
+    pub async fn delete_conversation(&self, peer_id: i64, both: bool) -> Result<(), ProtoError> {
+        self.inner().delete_conversation(peer_id, both).await?;
+
+        Ok(())
+    }
+
     /// Deletes messages, for both sides.
     ///
     /// # Errors
