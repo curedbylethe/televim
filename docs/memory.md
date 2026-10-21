@@ -518,6 +518,26 @@ found, and only there does the cache not survive.
 
 These are **declared, not measured**, and the RSS budget is unaffected by the disk bound.
 
+### The decoded sticker cache
+
+The decoded-sticker cache (`tui/src/sticker.rs`) is resident and is bounded by
+`STICKER_CACHE_MAX_BYTES`, **32 KiB**, with `MAX_STICKER_DECODE_BYTES` at 1 MiB for a
+single decode. An entry is a decoded RGBA picture fitted to the 24×16 box, at most
+1536 bytes, so the cap holds about 21 pictures; anything past it evicts oldest-first,
+and a conversation switch clears the cache. The bound is asserted, not sampled:
+`the_cache_evicts_oldest_first_under_its_cap` loops past the cap and checks the bytes,
+and `the_ceilings_leave_room_inside_the_memory_budget` asserts the constants stay
+inside the 50 MB ceiling.
+
+The cache is **not** evicted on scroll-out. The window is bounded at
+`CONVERSATION_WINDOW` (200 messages) and scrolling only rebuilds the placements of
+pictures that are already decoded; under a hard 32 KiB cap, evicting on scroll-out
+cannot lower the ceiling and would only cause refetches on scroll-back. The cache is
+owned per conversation (`tui/src/state/conversation.rs`), not per page.
+
+Like the media cache, these figures are **declared, not measured**: `make measure`
+does not exercise the decode path, and no RSS number is claimed for it.
+
 ### The history cache
 
 The cache (`app/src/history_store.rs`) is resident for the whole run and copied

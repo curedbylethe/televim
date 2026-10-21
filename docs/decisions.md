@@ -1455,3 +1455,33 @@ are in [`../AGENTS.md`](../AGENTS.md).
   make them the only optimistic writes and would need a rollback story the
   other writes do not have. The consequence — a slow request leaves the row
   where it is until the answer — is the same one pins already have.
+
+- **Why the decoded sticker cache evicts by size, not on scroll-out:** the cache is
+  capped at `STICKER_CACHE_MAX_BYTES`, 32 KiB, oldest-first, and cleared on a
+  conversation switch. The alternative — evicting a picture when its message leaves
+  the visible slice — was rejected because it cannot lower a ceiling that already
+  binds: the cache is smaller than one screen of blocks, so the cap, not the scroll
+  position, is what decides what is resident. It would also make scroll-back refetch
+  and re-decode pictures that never needed to leave, and the window has no hook for a
+  message leaving it: `CONVERSATION_WINDOW` truncates a `VecDeque` in `domain`, and
+  scrolling only rebuilds placements. A per-page cache would be a second structure
+  with the same bound and worse reuse.
+- **Why an animated sticker's file is named by its bytes:** `MediaKind` says the
+  message is a sticker, not whether its file is a TGS or a WebM, and carrying the
+  wire mime into `domain` would put a payload back on a `Copy` DTO (113 `Message`
+  literals) for one extension. The cache already has the bytes at the first store, so
+  it reads their magic — gzip `1f 8b` for `.tgs`, EBML `1a 45 df a3` for `.webm` — and
+  falls back to `.bin`. Only the first store reads them: a hit returns the path the
+  scan rebuilt from the filename, so no format is stored in the pointer. `.bin` for
+  everything was rejected because the platform opener dispatches on the extension for
+  both formats the ticket names. `tgs` and `webm` join `SUFFIXES` so the orphan scan
+  keeps them.
+- **Why the sticker send and recent lists wait for sending:** the original ticket
+  covered sending only, and the tree has no upload, no `messages.sendMedia`, and no
+  sticker-list read; only text `send_message` exists. A picker whose `Enter` cannot
+  send is dead UI, so both lists are scoped rather than built: the sendable list is
+  the account's installed sets (`messages.getAllStickers` / `messages.getStickerSet`),
+  the recent list is Telegram's `messages.getRecentStickers`, and both surface through
+  one `:stickers` picker once CUR-11's send-media work lands. No Normal-mode key is
+  bound before that, and no list is cached locally: the server's answer is the
+  account's, across devices.

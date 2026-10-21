@@ -265,8 +265,8 @@ Working today:
   last.
 - **Media:** a message that carries something and says nothing about it still has
   a body — `[image]`, `[video]`, `[gif]`, `[voice]`, `[sticker]`,
-  `[animated sticker]` or `[file]` — so an
-  attachment does not render as an empty row. A message with a caption shows the
+  `[animated sticker]` or `[file]` — so an attachment does not render as an empty
+  row. A message with a caption shows the
   caption and nothing else, and a kind this build does not model becomes
   `[file]` rather than disappearing; a message with no media at all is unchanged.
   A static sticker with its bytes draws its picture inline — a bounded block,
@@ -274,7 +274,8 @@ Working today:
   missing. An animated sticker is never decoded: a TGS or a WebM draws
   `[animated sticker]`, and `o` opens the cached file in the viewer.
   `stickers = "off"` (or `TELEVIM_STICKERS=off`) draws the token for
-  every sticker message and fetches nothing. `graphics = "auto"` (or
+  every sticker message and fetches nothing. Sending a sticker and a sticker
+  picker are not built; both wait on send-media. `graphics = "auto"` (or
   `TELEVIM_GRAPHICS`) places the picture with the kitty graphics protocol where
   the environment names kitty, ghostty or WezTerm; `kitty` forces it and `off`
   keeps the half-block cells everywhere. Sixel is not yet supported. Fetching the bytes is a client-level operation today
