@@ -1135,7 +1135,7 @@
       openPersonChat(s, (hits.find((h) => h.exact) || hits[0]).name);
       return;
     }
-    s.newchat = { q: raw, hits, at: 0, pending: true, failed: failed ? 'timeout' : '' };
+    s.newchat = { q: raw, hits, at: 0, pending: true, known: hits.length, failed: failed ? 'timeout' : '' };
     s.focus = 'newchat';
   }
   /* The status line's sentence while the prompt's list is up: the query, then where the request is.
@@ -1143,8 +1143,8 @@
      state the reader is looking at. */
   function newChatStatus(s) {
     const n = s.newchat, q = '/' + n.q;
-    /* in flight, the candidates already known are `known` (the model's list is drawn only once the
-       answer lands, so it sets none); landed, they are the hits */
+    /* in flight, the candidates already known are `known` — the model knows its local hits as soon
+       as the query goes out; landed, they are the hits */
     const k = n.pending ? n.known || 0 : n.hits.length;
     const count = k ? k + ' candidate' + (k === 1 ? '' : 's') : 'no candidates';
     if (n.pending) return q + ' — ' + (k ? count + ' — ' : '') + 'searching…';
