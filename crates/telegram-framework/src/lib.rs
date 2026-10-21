@@ -126,7 +126,10 @@ pub use media::MediaKind;
 #[cfg(feature = "live")]
 pub use messages::{TEXT_LIMIT, validate_text};
 #[cfg(feature = "live")]
-pub use search::{SEARCH_LIMIT, SearchArgs, SearchResults};
+pub use search::{
+    GlobalFilter, GlobalHit, GlobalOffset, GlobalPeer, GlobalSearchArgs, GlobalSearchPage,
+    SEARCH_LIMIT, SearchArgs, SearchResults,
+};
 #[cfg(feature = "live")]
 pub use updates::{MessageInfo, UpdateKind, UpdateSubscription, UserPresence};
 

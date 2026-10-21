@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use domain::chat::Chat;
-use domain::global_search::GlobalHit;
+use domain::global_search::{GlobalHit, SearchSpec};
 use domain::history::ConversationView;
 use domain::message::{MediaKind, Message};
 use domain::search::SEARCH_MATCHES;
@@ -428,16 +428,21 @@ pub enum Event {
 
     /// A global search answered, or failed.
     ///
-    /// The query is echoed back for the same reason as [`Event::Searched`]'s: an
-    /// answer to a query the reader has replaced must not replace the newer list.
+    /// The spec is echoed back for the same reason as [`Event::Searched`]'s: an
+    /// answer to a search the reader has replaced must not replace the newer
+    /// list. `append` says whether the answer is a continuation, which joins the
+    /// rows already shown rather than replacing them.
     GlobalSearched {
-        /// The query it was for, echoed back.
-        query: String,
+        /// The search it was for, echoed back.
+        spec: SearchSpec,
 
-        /// The matches across private conversations, newest first, or why there
-        /// are none. Hits in chats that are not known private chats are dropped
-        /// when this is applied, not here.
+        /// The matches on this page, newest first, or why there are none. Hits
+        /// in chats that are not correspondents are dropped when this is
+        /// applied, not here.
         result: Result<proto::search::GlobalSearchResults, ProtoError>,
+
+        /// Whether this page follows the ones already shown.
+        append: bool,
     },
 
     /// A username resolved to the person who owns it, or found nobody.
@@ -625,6 +630,15 @@ pub struct State {
     /// replaces the window: that page moves the cursor to the end, and the
     /// reader is put back on the message if the page still holds it.
     cached_landing: Option<Jump>,
+
+    /// The cursor the next page of a global search starts after, and the spec it
+    /// belongs to.
+    ///
+    /// Here rather than in `tui` because a cursor is a `proto` type and `tui` may
+    /// not name one; the action that asks for the page carries the spec and not
+    /// the cursor. It survives a flood wait, so the resume [`drive`] schedules
+    /// asks for the same page rather than starting the search again.
+    global_next: Option<(SearchSpec, proto::search::GlobalCursor)>,
 
     /// The sign-in tokens, and the store the session is in.
     ///
@@ -1819,6 +1833,28 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
     let _ = tx.send(AppEvent::Net(Event::FeedEnded));
 }
 
+/// The request a flood-wait pause is still holding, once its wait has run out.
+///
+/// The page asked for is the one that was withheld: the continuation the stored
+/// cursor names, or the first page when no cursor was reached. Beginning the
+/// spec again is a continuation, so the rows already shown stay, and it is what
+/// stops the next pass asking a second time. `None` while the wait is still
+/// running, and with no search at all.
+fn take_resumed_search(app: &mut App, state: &State, now: Instant) -> Option<Action> {
+    let search = app.global_search();
+    if now < search.paused_until()? {
+        return None;
+    }
+    let spec = search.spec()?.clone();
+    let action = match &state.global_next {
+        Some((stored, _)) if stored == &spec => Action::MoreGlobal { spec: spec.clone() },
+        _ => Action::GlobalSearch { spec: spec.clone() },
+    };
+
+    app.begin_global_search(&spec);
+    Some(action)
+}
+
 /// Asks for whatever page the screen is about to need.
 ///
 /// Called after every event and every tick, so it has to be cheap and it has to
@@ -1927,6 +1963,13 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             _ => None,
         };
         request_action(&client, state, action, media, tx);
+    }
+
+    // A flood wait is the one failure with a time on it, and the reader is not
+    // asked for a key once it has passed: the withheld page is asked for again.
+    // This is the clock because it runs on every pass, the 250 ms tick included.
+    if let Some(action) = take_resumed_search(app, state, Instant::now()) {
+        request_action(&client, state, action, None, tx);
     }
 
     let next = wanted(app, state.history, Instant::now());
@@ -2319,6 +2362,38 @@ async fn lookup(client: &ProtoClient, query: &str) -> Result<Lookup, ProtoError>
 /// two-factor challenge are `proto` types `tui` may not name, so they are spent
 /// here. Both are taken **before** the task is spawned, because a task that
 /// borrowed them would outlive this function and neither token can be copied.
+/// Asks for the page the stored cursor starts after.
+///
+/// Answered before `request_plain` because the cursor lives in `State`, which
+/// that function does not hold. A cursor for another spec is no cursor at all —
+/// the search it belonged to is gone.
+fn request_more_global(
+    client: &Arc<ProtoClient>,
+    state: &State,
+    spec: &SearchSpec,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    let Some((stored, cursor)) = state.global_next.as_ref() else {
+        return;
+    };
+    if stored != spec {
+        return;
+    }
+
+    let request = global_request(spec, Some(*cursor));
+    let spec = spec.clone();
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = client.search_global(&request).await;
+        let _ = tx.send(AppEvent::Net(Event::GlobalSearched {
+            spec,
+            result,
+            append: true,
+        }));
+    });
+}
+
 fn request_action(
     client: &Arc<ProtoClient>,
     state: &mut State,
@@ -2362,12 +2437,22 @@ fn request_action(
         other => other,
     };
 
+    // The reader reached the end of the page: ask for the one the stored cursor
+    // starts after.
+    if let Action::MoreGlobal { spec } = &action {
+        request_more_global(client, state, spec, tx);
+        return;
+    }
+
     // An empty query is no search: nothing is asked of the network for it. The
     // search itself was begun on the `tui` side, before the action was queued.
-    if let Action::GlobalSearch { query } = &action
-        && query.is_empty()
-    {
-        return;
+    // A first page begins a new sequence, so a cursor left from an older search
+    // is dropped rather than resumed later.
+    if let Action::GlobalSearch { spec } = &action {
+        if spec.text.is_empty() {
+            return;
+        }
+        state.global_next = None;
     }
 
     let Action::Login { field, value } = action else {
@@ -2599,11 +2684,18 @@ fn request_plain(
                 }));
             }
 
-            // One request for every private conversation, not one per chat: the
-            // action queue is bounded, and the server already ranks across peers.
-            Action::GlobalSearch { query } => {
-                let result = client.search_global(&query, SEARCH_MATCHES).await;
-                let _ = tx.send(AppEvent::Net(Event::GlobalSearched { query, result }));
+            // One request for the first page across every correspondent, not one
+            // per chat: the action queue is bounded, and the server already ranks
+            // across peers. A continuation is asked for by `request_action`,
+            // which holds the cursor `tui` may not name.
+            Action::GlobalSearch { spec } => {
+                let request = global_request(&spec, None);
+                let result = client.search_global(&request).await;
+                let _ = tx.send(AppEvent::Net(Event::GlobalSearched {
+                    spec,
+                    result,
+                    append: false,
+                }));
             }
 
             // The sign-in actions are handled by `request_action`, which has to
@@ -2616,6 +2708,7 @@ fn request_plain(
             Action::Login { .. }
             | Action::LoginCancelled
             | Action::Logout
+            | Action::MoreGlobal { .. }
             | Action::ExportSession { .. }
             | Action::ImportSession { .. }
             | Action::SubmitSessionPassphrase { .. }
@@ -2843,7 +2936,11 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             result,
         } => apply_searched(app, chat_id, &query, result),
 
-        Event::GlobalSearched { query, result } => apply_global_searched(app, &query, result),
+        Event::GlobalSearched {
+            spec,
+            result,
+            append,
+        } => apply_global_searched(app, state, &spec, result, append),
 
         Event::UserResolved { query, user } => apply_user_resolved(app, &query, user),
         Event::UsersListed { query, users } => apply_users_listed(app, &query, users),
@@ -4214,46 +4311,109 @@ fn apply_searched(
     }
 }
 
-/// Folds a global search's answer in, or says why there is not one.
+/// The request `spec` makes: its first page, or the page after `after`.
 ///
-/// The answer replaces the list rather than joining it: the server's answer is
-/// the whole search, and a local list would be a partial one. Hits outside the
-/// known private chats are dropped here and counted in
-/// [`App::global_dropped`], because search results do not seed the peer cache.
-/// A stale query is refused by the state itself, as [`App::adopt_global_search`]
-/// and [`App::fail_global_search`] do.
+/// One place builds it so a continuation repeats the query, the attachment kind
+/// and the date bounds the first page asked for, rather than dropping them.
+fn global_request(
+    spec: &SearchSpec,
+    after: Option<proto::search::GlobalCursor>,
+) -> proto::search::GlobalSearchRequest {
+    proto::search::GlobalSearchRequest {
+        query: spec.text.clone(),
+        media: spec.media,
+        since: spec.since,
+        until: spec.until,
+        after,
+        limit: SEARCH_MATCHES,
+    }
+}
+
+/// Folds a global search's page in, or says why there is not one.
+///
+/// A first page replaces the list: the server's answer is the whole search, and
+/// a local list would be a partial one. A continuation appends, keeping what the
+/// reader has already read. Hits outside the correspondents are dropped here and
+/// counted in [`App::global_dropped`], because search results do not seed the
+/// peer cache. A stale spec is refused by the state itself.
+///
+/// A **flood wait** pauses rather than fails, keeping the rows and the cursor, so
+/// [`drive`] can ask again once the wait has passed. Any other failure on a
+/// continuation calls `settle`, because the page already shown is still good; the
+/// same failure on the first page clears the list, because there is nothing in it.
 ///
 /// Like [`apply_searched`], a failure does **not** touch [`History::retry_at`]:
 /// it leaves the open conversation as it was.
 fn apply_global_searched(
     app: &mut App,
-    query: &str,
+    state: &mut State,
+    spec: &SearchSpec,
     result: Result<proto::search::GlobalSearchResults, ProtoError>,
+    append: bool,
 ) {
     match result {
         Ok(results) => {
-            let (hits, dropped) = private_hits(app.chats(), results.hits);
-            app.adopt_global_search(query, hits, results.total, dropped);
+            let total = results.total;
+            let next = results.next;
+            let (hits, dropped) = correspondent_hits(app.chats(), results.hits);
+            let shown = if append {
+                app.global_search().len() + hits.len()
+            } else {
+                hits.len()
+            };
+            // The server's total is the last word: a cursor past it is not a
+            // page the reader is owed.
+            let has_more = next.is_some() && shown < total;
+            let landed = if append {
+                app.append_global_search(spec, hits, total, dropped, has_more)
+            } else {
+                app.adopt_global_search(spec, hits, total, dropped, has_more)
+            };
+
+            if landed {
+                state.global_next = next
+                    .filter(|_| has_more)
+                    .map(|cursor| (spec.clone(), cursor));
+            }
         }
         Err(error) => {
-            tracing::debug!(query, %error, "a global search failed");
-            app.fail_global_search(query, failure_reason(&error));
+            tracing::debug!(query = %spec.text, %error, "a global search failed");
+
+            if is_flood_wait(&error) {
+                // `backoff` is the server's own wait, and the cursor is left
+                // where it is: the page that failed is the page resumed.
+                app.pause_global_search(spec, backoff(&error));
+            } else if append {
+                let reason = failure_reason(&error);
+                app.settle_global_search(spec);
+                app.flash(reason);
+            } else {
+                let reason = failure_reason(&error);
+                app.fail_global_search(spec, reason);
+                state.global_next = None;
+            }
         }
     }
 }
 
-/// The hits whose chat is a known private conversation, and how many were
-/// dropped for being anything else, including a chat the list does not hold.
-fn private_hits(chats: &[Chat], hits: Vec<proto::search::GlobalHit>) -> (Vec<GlobalHit>, usize) {
-    let private: HashSet<i64> = chats
+/// The hits whose chat is a correspondent, and how many were dropped for being
+/// anything else, including a chat the list does not hold.
+///
+/// A private conversation and a bot conversation are both one-to-one
+/// correspondents, so both are kept; a group and a channel are not.
+fn correspondent_hits(
+    chats: &[Chat],
+    hits: Vec<proto::search::GlobalHit>,
+) -> (Vec<GlobalHit>, usize) {
+    let correspondents: HashSet<i64> = chats
         .iter()
-        .filter(|chat| chat.is_private())
+        .filter(|chat| chat.is_correspondent())
         .map(|chat| chat.id)
         .collect();
     let total = hits.len();
     let kept: Vec<GlobalHit> = hits
         .into_iter()
-        .filter(|hit| private.contains(&hit.chat_id))
+        .filter(|hit| correspondents.contains(&hit.chat_id))
         .map(|hit| GlobalHit {
             chat_id: hit.chat_id,
             message_id: hit.message_id,
@@ -7506,7 +7666,13 @@ mod tests {
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let _ = app.take_action();
-        assert!(app.adopt_global_search("hit", vec![search_hit(CHAT, message_id)], 1, 0));
+        assert!(app.adopt_global_search(
+            &SearchSpec::plain("hit"),
+            vec![search_hit(CHAT, message_id)],
+            1,
+            0,
+            false
+        ));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(
             app.pending_jump().map(|jump| jump.kind),
@@ -9220,11 +9386,20 @@ mod tests {
 
     // ---- what a global search answers -----------------------------------
 
-    /// A global answer carrying the given `(chat, message, text)` hits, newest
-    /// first, as the proto layer hands them over.
+    /// A global page carrying the given `(chat, message, text)` hits, newest
+    /// first, as the proto layer hands them over, with nowhere to continue.
     fn global_answer(
         hits: &[(i64, i64, &str)],
         total: usize,
+    ) -> proto::search::GlobalSearchResults {
+        global_page(hits, total, None)
+    }
+
+    /// The same, naming the cursor a later page starts after.
+    fn global_page(
+        hits: &[(i64, i64, &str)],
+        total: usize,
+        next: Option<proto::search::GlobalCursor>,
     ) -> proto::search::GlobalSearchResults {
         proto::search::GlobalSearchResults {
             hits: hits
@@ -9239,28 +9414,54 @@ mod tests {
                 })
                 .collect(),
             total,
+            next,
         }
+    }
+
+    /// A cursor for `message_id` in the test conversation.
+    fn cursor(message_id: i64) -> proto::search::GlobalCursor {
+        proto::search::GlobalCursor {
+            rate: 100,
+            peer: proto::search::GlobalPeer::User(CHAT),
+            message_id,
+        }
+    }
+
+    /// `count` hits in the test conversation, identified from `first` upward.
+    fn page_of(first: i64, count: i64) -> Vec<(i64, i64, &'static str)> {
+        (first..first + count).map(|id| (CHAT, id, "hit")).collect()
+    }
+
+    /// The flood wait the server answers with.
+    fn flood_wait(seconds: u32) -> ProtoError {
+        ProtoError::Framework(FrameworkError::Request(RequestError::Rpc {
+            code: 420,
+            name: "FLOOD_WAIT".to_owned(),
+            value: Some(seconds),
+        }))
     }
 
     #[test]
     fn a_global_answer_lands_on_the_global_state() {
         let mut app = app_with_a_conversation(CHAT, 3);
         let mut state = State::default();
-        app.begin_global_search("hello");
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
 
         apply(
             &mut app,
             &mut state,
             Event::GlobalSearched {
-                query: "hello".to_owned(),
+                spec: spec.clone(),
                 result: Ok(global_answer(
                     &[(CHAT, 4, "hello two"), (CHAT, 1, "hello one")],
                     9,
                 )),
+                append: false,
             },
         );
 
-        assert_eq!(app.global_search().query(), Some("hello"));
+        assert_eq!(app.global_search().spec(), Some(&spec));
         assert!(!app.global_search().in_flight());
         assert_eq!(app.global_search().hits().len(), 2);
         assert_eq!(app.global_search().hits()[0].message_id, 4);
@@ -9273,7 +9474,8 @@ mod tests {
     fn a_media_only_hit_shows_the_token_for_its_kind() {
         let mut app = app_with_a_conversation(CHAT, 3);
         let mut state = State::default();
-        app.begin_global_search("pic");
+        let spec = SearchSpec::plain("pic");
+        app.begin_global_search(&spec);
         let mut answer = global_answer(&[(CHAT, 1, "")], 1);
         answer.hits[0].media = Some(MediaKind::Photo);
 
@@ -9281,8 +9483,9 @@ mod tests {
             &mut app,
             &mut state,
             Event::GlobalSearched {
-                query: "pic".to_owned(),
+                spec,
                 result: Ok(answer),
+                append: false,
             },
         );
 
@@ -9293,23 +9496,26 @@ mod tests {
     fn a_global_answer_replaces_rather_than_joins_what_was_there() {
         let mut app = app_with_a_conversation(CHAT, 3);
         let mut state = State::default();
-        app.begin_global_search("hello");
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
         apply(
             &mut app,
             &mut state,
             Event::GlobalSearched {
-                query: "hello".to_owned(),
+                spec: spec.clone(),
                 result: Ok(global_answer(&[(CHAT, 1, "old")], 1)),
+                append: false,
             },
         );
 
-        app.begin_global_search("hello");
+        app.begin_global_search(&spec);
         apply(
             &mut app,
             &mut state,
             Event::GlobalSearched {
-                query: "hello".to_owned(),
+                spec,
                 result: Ok(global_answer(&[(CHAT, 2, "new")], 1)),
+                append: false,
             },
         );
 
@@ -9317,23 +9523,28 @@ mod tests {
         assert_eq!(app.global_search().hits()[0].display_body(), "new");
     }
 
+    /// An answer for a spec the reader has replaced lands nowhere: the hits stay
+    /// the newer search's, and the late page's cursor is not kept.
     #[test]
-    fn a_global_result_for_a_replaced_query_is_dropped() {
+    fn a_late_first_page_does_not_displace_a_newer_search() {
         let mut app = app_with_a_conversation(CHAT, 3);
         let mut state = State::default();
-        app.begin_global_search("first");
-        app.begin_global_search("second");
+        let first = SearchSpec::plain("first");
+        let second = SearchSpec::plain("second");
+        app.begin_global_search(&first);
+        app.begin_global_search(&second);
 
         apply(
             &mut app,
             &mut state,
             Event::GlobalSearched {
-                query: "first".to_owned(),
-                result: Ok(global_answer(&[(CHAT, 1, "first hit")], 1)),
+                spec: first,
+                result: Ok(global_page(&[(CHAT, 1, "first hit")], 250, Some(cursor(1)))),
+                append: false,
             },
         );
 
-        assert_eq!(app.global_search().query(), Some("second"));
+        assert_eq!(app.global_search().spec(), Some(&second));
         assert!(
             app.global_search().in_flight(),
             "still waiting on the second"
@@ -9342,6 +9553,33 @@ mod tests {
             app.global_search().hits().is_empty(),
             "and not the first's hits"
         );
+        assert!(
+            state.global_next.is_none(),
+            "a page nobody is waiting for leaves no cursor behind"
+        );
+    }
+
+    /// A failed first page leaves nothing to show, so the rows and the cursor go.
+    #[test]
+    fn a_failed_first_page_clears_the_rows() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+                append: false,
+            },
+        );
+
+        assert!(app.global_search().hits().is_empty());
+        assert!(app.global_search().label().contains("search failed"));
+        assert!(state.global_next.is_none());
     }
 
     /// A failed global search leaves the open conversation alone, and must not
@@ -9352,14 +9590,16 @@ mod tests {
         let mut state = State::default();
         let gate = Instant::now() + RETRY;
         state.history.retry_at = Some(gate);
-        app.begin_global_search("hello");
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
 
         apply(
             &mut app,
             &mut state,
             Event::GlobalSearched {
-                query: "hello".to_owned(),
+                spec,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+                append: false,
             },
         );
 
@@ -9376,61 +9616,262 @@ mod tests {
         assert!(app.global_search().label().contains("search failed"));
     }
 
+    /// A flood wait is a pause, not a failure: the rows already fetched stay, the
+    /// cursor stays with them, and the label names the wait it asks for.
     #[test]
-    fn a_flood_wait_on_a_global_search_is_labelled_with_the_wait_it_asks_for() {
+    fn a_flood_wait_pauses_and_keeps_the_rows() {
         let mut app = app_with_a_conversation(CHAT, 3);
         let mut state = State::default();
-        app.begin_global_search("hello");
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
 
         apply(
             &mut app,
             &mut state,
             Event::GlobalSearched {
-                query: "hello".to_owned(),
-                result: Err(ProtoError::Framework(FrameworkError::Request(
-                    RequestError::Rpc {
-                        code: 420,
-                        name: "FLOOD_WAIT".to_owned(),
-                        value: Some(42),
-                    },
-                ))),
+                spec: spec.clone(),
+                result: Ok(global_page(&page_of(100, 2), 250, Some(cursor(100)))),
+                append: false,
+            },
+        );
+        app.begin_global_search(&spec);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec: spec.clone(),
+                result: Err(flood_wait(42)),
+                append: true,
             },
         );
 
+        assert!(app.global_search().is_paused());
+        assert!(!app.global_search().in_flight());
+        assert_eq!(app.global_search().hits().len(), 2, "nothing is discarded");
+        assert_eq!(app.global_dropped(), 0);
+        assert_eq!(
+            state.global_next.as_ref().map(|(_, cursor)| *cursor),
+            Some(cursor(100)),
+            "the cursor is kept so the resume asks for the same page"
+        );
         assert!(
-            app.global_search()
-                .label()
-                .contains("flood wait, retry in 42s"),
+            app.global_search().label().contains("paused: retry in 42s"),
             "got {:?}",
             app.global_search().label()
         );
     }
 
-    /// Hits in chats that are not known private chats are dropped at the seam,
-    /// and the drop is counted: a group, and a chat the list does not hold.
+    /// Once the wait the server asked for has run out, the withheld page is asked
+    /// for again — with no key, and without losing what is already shown.
     #[test]
-    fn non_private_global_hits_are_dropped_and_counted() {
-        let mut app = App::new();
-        let mut group = chat(CHAT + 2);
-        group.kind = ChatKind::Group;
-        app.set_chats(vec![chat(CHAT), group]);
+    fn a_pause_resumes_when_the_wait_expires() {
+        let mut app = app_with_a_conversation(CHAT, 3);
         let mut state = State::default();
-        app.begin_global_search("hello");
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec: spec.clone(),
+                result: Ok(global_page(&page_of(100, 2), 250, Some(cursor(100)))),
+                append: false,
+            },
+        );
+        app.begin_global_search(&spec);
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec: spec.clone(),
+                result: Err(flood_wait(42)),
+                append: true,
+            },
+        );
+
+        let until = app
+            .global_search()
+            .paused_until()
+            .expect("a pause names its end");
+        let start = until
+            .checked_sub(Duration::from_secs(42))
+            .expect("the test clock is after the epoch");
+
+        assert_eq!(
+            take_resumed_search(&mut app, &state, start),
+            None,
+            "nothing is asked for while the wait is still running"
+        );
+        assert!(app.global_search().is_paused());
+
+        assert_eq!(
+            take_resumed_search(&mut app, &state, until),
+            Some(Action::MoreGlobal { spec: spec.clone() }),
+            "the same page, once the wait has passed"
+        );
+        assert!(!app.global_search().is_paused());
+        assert!(
+            app.global_search().is_paging(),
+            "the resume is one request, not one per pass"
+        );
+        assert_eq!(
+            app.global_search().hits().len(),
+            2,
+            "and the rows already read stay put"
+        );
+    }
+
+    /// The second page joins the first, and the count grows with it.
+    #[test]
+    fn a_second_page_appends_to_the_first() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
 
         apply(
             &mut app,
             &mut state,
             Event::GlobalSearched {
-                query: "hello".to_owned(),
+                spec: spec.clone(),
+                result: Ok(global_page(&page_of(1, 100), 250, Some(cursor(100)))),
+                append: false,
+            },
+        );
+        assert_eq!(
+            app.global_search().label(),
+            "?hello — 100 results in 1 chat"
+        );
+
+        app.begin_global_search(&spec);
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec: spec.clone(),
+                result: Ok(global_page(&page_of(101, 100), 250, Some(cursor(200)))),
+                append: true,
+            },
+        );
+
+        assert_eq!(app.global_search().hits().len(), 200);
+        assert_eq!(app.global_search().hits()[199].message_id, 200);
+        assert_eq!(
+            app.global_search().label(),
+            "?hello — 200 results in 1 chat",
+            "the label counts what is held, not the server's total"
+        );
+        assert!(app.global_search().has_more());
+        assert_eq!(
+            state.global_next.as_ref().map(|(_, cursor)| *cursor),
+            Some(cursor(200)),
+            "the newer cursor is the one the next page starts after"
+        );
+    }
+
+    /// The page after the first asks the same question, narrowed the same way.
+    #[test]
+    fn a_second_page_carries_the_same_filters() {
+        let spec = SearchSpec {
+            media: domain::global_search::MediaFilter::PhotoVideo,
+            since: Some(1_600_000_000),
+            until: Some(1_700_000_000),
+            ..SearchSpec::plain("holiday")
+        };
+
+        let request = global_request(&spec, Some(cursor(100)));
+
+        assert_eq!(request.query, "holiday");
+        assert_eq!(
+            request.media,
+            domain::global_search::MediaFilter::PhotoVideo
+        );
+        assert_eq!(request.since, Some(1_600_000_000));
+        assert_eq!(request.until, Some(1_700_000_000));
+        assert_eq!(request.after, Some(cursor(100)));
+        assert_eq!(request.limit, SEARCH_MATCHES);
+    }
+
+    /// A continuation that fails leaves the page already shown alone and says why
+    /// on the status line; the end of the list simply asks again.
+    #[test]
+    fn a_second_page_failure_keeps_the_first_page() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec: spec.clone(),
+                result: Ok(global_page(&page_of(1, 2), 250, Some(cursor(2)))),
+                append: false,
+            },
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        app.begin_global_search(&spec);
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec: spec.clone(),
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+                append: true,
+            },
+        );
+
+        assert_eq!(
+            app.global_search().hits().len(),
+            2,
+            "page one is still here"
+        );
+        assert_eq!(app.global_search().selected(), 1, "under the reader");
+        assert!(!app.global_search().in_flight(), "nothing is on its way");
+        assert!(
+            app.ui.status.contains("not in the session's peer cache"),
+            "the failure is flashed: {:?}",
+            app.ui.status
+        );
+        assert!(
+            app.global_search().needs_more(),
+            "and the end of the list asks again"
+        );
+    }
+
+    /// Hits in chats that are not correspondents are dropped at the seam, and the
+    /// drop is counted: a group, and a chat the list does not hold. A bot is a
+    /// correspondent, so its hits stay.
+    #[test]
+    fn hits_outside_private_and_bot_chats_are_dropped_and_counted() {
+        let mut app = App::new();
+        let mut group = chat(CHAT + 2);
+        group.kind = ChatKind::Group;
+        let mut bot = chat(CHAT + 3);
+        bot.kind = ChatKind::Bot;
+        app.set_chats(vec![chat(CHAT), group, bot]);
+        let mut state = State::default();
+        let spec = SearchSpec::plain("hello");
+        app.begin_global_search(&spec);
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec,
                 result: Ok(global_answer(
                     &[
-                        (CHAT, 4, "private again"),
+                        (CHAT, 5, "private"),
+                        (CHAT + 3, 4, "from a bot"),
                         (CHAT + 9, 3, "unknown peer"),
                         (CHAT + 2, 2, "in a group"),
-                        (CHAT, 1, "private"),
+                        (CHAT, 1, "private again"),
                     ],
-                    4,
+                    5,
                 )),
+                append: false,
             },
         );
 
@@ -9440,8 +9881,16 @@ mod tests {
             .iter()
             .map(|hit| hit.message_id)
             .collect();
-        assert_eq!(kept, vec![4, 1], "only the private chat's hits remain");
-        assert_eq!(app.global_dropped(), 2, "and the two others are counted");
+        assert_eq!(
+            kept,
+            vec![5, 4, 1],
+            "the private and bot chats' hits remain"
+        );
+        assert_eq!(
+            app.global_dropped(),
+            2,
+            "and the group and the unknown chat are counted"
+        );
     }
 
     /// The old `gg` jump path is untouched by search, and a jump landing keeps
