@@ -22,13 +22,18 @@
     lnormal: ' i/a: ins  w/b/e  x: del  dw/cc  p: paste  gg/G: ends  ⏎: send  Esc',
     lvisual: ' y: yank  d: cut  Esc: back',
     settings: ' e/Enter: edit  j/k: field  Esc/Tab/Ctrl+w: leave',
-    /* the two cards differ because their rows differ: d acts on the self card's two action
-       rows, and only the contact's card has a yy worth teaching. A key named on a card that
-       does not answer it tells the reader the key is wrong, so neither names the other's. */
+    /* the two cards differ because their rows differ: both act now — the self card on its
+       two rows, a contact's on its three — and only the contact's has a yy worth teaching.
+       A key named on a card that does not answer it tells the reader the key is wrong, so
+       neither names the other's. */
     cardSelf: ' j/k: row  h/l: within  v: vis  y: yank  d: act  Esc: back',
-    cardContact: ' j/k: row  h/l: within  v: vis  y/yy: yank  Esc: back',
+    cardContact: ' j/k: row  h/l: within  v: vis  y/yy: yank  d: act  Esc: back',
     cardSignedOut: ' ::signin  q:quit',
     cardReading: ' q:quit',
+    /* the two lists :contacts and :archived raise over the chat-list column. Their keys
+       are theirs alone: neither adds a key to the list behind it. */
+    contacts: ' j/k: contact  ⏎: card  Esc: close',
+    archived: ' j/k: chat  ⏎: unarchive  Esc: close',
     /* the status line while the forward picker is up: the picker's own hint, which the Rust
        names FORWARD_PICKER_HINT and which carries the mode's name, unlike the rest. */
     forward: 'VISUAL  j/k: choose  ⏎: forward  Esc: cancel',
@@ -700,6 +705,11 @@
       view: 'chat', right: 'conv', focus: 'conv', chat: 0, chats: makeChats(),
       vis: null, search: null, newchat: null, fwd: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
       sset: 0, signin: null, card: null, count: 0,
+      /* what the reader has said about a person, keyed by the peer's own name: the local
+         name drawn over it, and the block flag. Both outlive a rename, which is why the
+         key is the name the peer gave rather than the one the reader sees. */
+      local: {}, blocked: {},
+      contacts: null, archived: { items: [], sel: 0 },
       bidi: BIDI_MODES.includes(bidi) ? bidi : 'terminal',
       profile: { name: 'Noor Haddad', id: '1480276305', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
     };
@@ -730,6 +740,23 @@
   function refuse(s, t) { s.search = null; s.flash = t; }
   function range(s) { const c = chat(s); return [Math.min(s.vis.anchor, c.cur), Math.max(s.vis.anchor, c.cur)]; }
   function hitsOf(s) { return s.search ? s.search.hits : []; }
+
+  /* ---------- the reader's own names ----------
+     A chat's `name` is what the peer calls themselves, and it is what PERSON is keyed by,
+     so a local name is drawn OVER it rather than written into it: `:rename` must not
+     cost the reader the bio and the birthday the card reads by that name. Every surface
+     that draws a person asks `localName`, and every surface that looks one up does not. */
+  const localName = (s, name) => (name && s.local[name]) || name || '';
+  /* who :block, :rename and :report act on: the card's subject while the card has the
+     focus, and otherwise the open conversation's */
+  function subject(s) {
+    const C = s.card;
+    if (C && s.focus === 'profile') return C.who || (s.chats[C.chat] ? s.chats[C.chat].name : '');
+    const c = chat(s);
+    return c ? c.name : '';
+  }
+  /* the person a card is about, whether or not a conversation with them exists */
+  const cardWho = (s) => (s.card ? s.card.who || (s.chats[s.card.chat] ? s.chats[s.card.chat].name : '') : '');
 
   /* The rows a string occupies, as code-unit ranges into it — so a row is
      `str.slice(r.s, r.e)` and nothing else, and a range that fell inside a
@@ -822,7 +849,9 @@
     if (s.line) { lineKey(s, k); return s; }
     const p = s.pend; s.pend = '';
     if (s.view === 'nocreds') { common(s, k); return s; }
-    if (s.focus === 'settings') settingsKey(s, k, p);
+    if (s.focus === 'contacts') contactsKey(s, k, p);
+    else if (s.focus === 'archived') archivedKey(s, k, p);
+    else if (s.focus === 'settings') settingsKey(s, k, p);
     else if (s.focus === 'profile') cardKey(s, k, p);
     else if (s.focus === 'newchat') newchatKey(s, k, p);
     else if (s.focus === 'forward') fwdKey(s, k, p);
@@ -845,10 +874,12 @@
   }
   function openSettings(s) { s.right = 'settings'; s.card = null; s.focus = 'settings'; s.sset = 0; }
   /* the card: the same widget as the conversation over different items. It starts at the top
-     every time and remembers nothing, where the conversation keeps the reader's place. */
-  function openCard(s, sub) {
+     every time and remembers nothing, where the conversation keeps the reader's place. A
+     `who` names a person with no conversation — the contacts overlay's card — so the card
+     is not the conversation's private property. */
+  function openCard(s, sub, who) {
     s.right = 'profile'; s.focus = 'profile';
-    s.card = { sub, chat: s.chat, row: 0, col: 0, vis: null };
+    s.card = { sub, who, chat: s.chat, row: 0, col: 0, vis: null };
   }
   function leaveCard(s) { s.card = null; s.right = 'conv'; s.focus = 'conv'; }
   function beginShell(s, sub) {
@@ -867,6 +898,148 @@
   function confirmKey(s, k) {
     if (k === 'y') { const c = s.confirm; s.confirm = null; c.run(s); }
     else if (k === 'n' || k === 'Escape') s.confirm = null;
+  }
+
+  /* ---------- the chat and contact actions ----------
+     Eight commands on one `:` line, and three rows on a contact's card. Block, unblock, delete
+     and report ask first: each one is visible to somebody else or throws something away, so the
+     question is the reader's way back. Archive and rename act and then say what they did,
+     because both are undone from the screen they act on — `:archived`, and a bare `:rename`.
+     The subject is the card's person while a card has the focus and the open conversation
+     otherwise; the open conversation is the chat-list highlight, because opening one moves it. */
+  const NOTHING_TO_ACT_ON = 'nothing to act on: highlight a chat, open a conversation, or open a card';
+  /* The ten reasons Telegram takes, token and label. The prompt names the LABEL, because a
+     token with a hyphen in it is the wire's spelling and not a reader's. `other` is the default:
+     a report with no reason is still a report, and the token list is the command's own help. */
+  const REPORT = {
+    spam: 'spam', violence: 'violence', pornography: 'pornography', 'child-abuse': 'child abuse',
+    other: 'other', copyright: 'copyright', 'geo-irrelevant': 'geo-irrelevant', fake: 'fake',
+    'illegal-drugs': 'illegal drugs', 'personal-details': 'personal details'
+  };
+  const REPORT_TOKENS = Object.keys(REPORT).join(', ');
+
+  /* The chat an action acts on — a chat, not a person. A card over a person with no
+     conversation has none, and the chat behind the card belongs to somebody else, so this
+     answers -1 rather than picking it. */
+  function subjectChat(s) {
+    if (s.card && s.focus === 'profile') return s.chats.findIndex((c) => c.name === cardWho(s));
+    return s.chat;
+  }
+  /* Archiving takes the row out of the list and keeps it, with the place it held, so
+     `:archived` can put it back where it was. The folder itself is Telegram's folder 1; the
+     model does not name a number, because the reader never sees one. */
+  function archiveChat(s) {
+    const i = subjectChat(s), c = s.chats[i];
+    if (!c) return refuse(s, NOTHING_TO_ACT_ON);
+    s.chats.splice(i, 1);
+    s.archived.items.push({ c, at: i });
+    if (s.card && s.focus === 'profile') leaveCard(s);
+    s.chat = clamp(s.chat, 0, Math.max(0, s.chats.length - 1));
+    s.flash = 'archived ' + localName(s, c.name);
+  }
+  function openArchived(s) {
+    const A = s.archived;
+    A.sel = clamp(A.sel, 0, Math.max(0, A.items.length - 1));
+    s.focus = 'archived';
+  }
+  function unarchive(s, it) {
+    const A = s.archived, at = A.items.indexOf(it);
+    if (at < 0) return;
+    A.items.splice(at, 1);
+    s.chats.splice(Math.min(it.at, s.chats.length), 0, it.c);
+    if (it.at <= s.chat) s.chat++;      /* the reader's highlight keeps its chat, not its index */
+    A.sel = clamp(A.sel, 0, Math.max(0, A.items.length - 1));
+    s.flash = 'unarchived ' + localName(s, it.c.name);
+    /* the last row left: an empty frame is not a list, so the overlay closes with it */
+    if (!A.items.length) s.focus = 'list';
+  }
+  function blockPerson(s, blocked) {
+    const who = subject(s);
+    if (!who) return refuse(s, NOTHING_TO_ACT_ON);
+    const name = localName(s, who);
+    ask(s, (blocked ? 'Block ' : 'Unblock ') + name + '? (y/n)', (x) => {
+      if (blocked) x.blocked[who] = true; else delete x.blocked[who];
+      x.flash = (blocked ? 'blocked ' : 'unblocked ') + name;
+    });
+  }
+  /* The card's rename row opens the command line the reader would have typed, prefilled with
+     the name on show: one rename path, and the row teaches the command rather than hiding a
+     second prompt behind itself. */
+  function openRename(s) {
+    const who = subject(s);
+    if (!who) return refuse(s, NOTHING_TO_ACT_ON);
+    const buf = 'rename ' + localName(s, who);
+    openLine(s, { kind: 'command' });
+    s.line.buf = buf; s.line.pos = buf.length;
+  }
+  function renameTo(s, who, name) {
+    if (!who) return refuse(s, NOTHING_TO_ACT_ON);
+    const n = (name || '').trim();
+    /* a name beginning with `!` stands in for a write that failed, the way a new passphrase
+       beginning with one does, so the failure sentence has a frame to be seen in */
+    if (n[0] === '!') return refuse(s, 'rename: could not save — ' + (n.slice(1).trim() || 'the write failed'));
+    if (!n) { delete s.local[who]; s.flash = 'local name cleared'; return; }
+    s.local[who] = n; s.flash = 'renamed ' + n;
+  }
+  function deleteChat(s, both) {
+    const i = subjectChat(s), c = s.chats[i];
+    if (!c) return refuse(s, NOTHING_TO_ACT_ON);
+    const name = localName(s, c.name);
+    ask(s, both ? 'Delete this conversation for both sides? (y/n)' : 'Delete this conversation? (y/n)', (x) => {
+      const j = x.chats.indexOf(c);
+      if (j >= 0) x.chats.splice(j, 1);
+      if (x.card && x.focus === 'profile') leaveCard(x);
+      x.chat = clamp(x.chat, 0, Math.max(0, x.chats.length - 1));
+      x.vis = null;
+      x.flash = 'deleted ' + name + (both ? ' for both sides' : '');
+    });
+  }
+  function reportPerson(s, token) {
+    const who = subject(s);
+    if (!who) return refuse(s, NOTHING_TO_ACT_ON);
+    const t = (token || '').trim() || 'other', label = REPORT[t];
+    if (!label) return refuse(s, 'unknown report reason: ' + t + ' — use ' + REPORT_TOKENS);
+    const name = localName(s, who);
+    ask(s, 'Report ' + name + ' to Telegram as ' + label + '? (y/n)', (x) => {
+      x.flash = 'reported ' + name + ' as ' + label;
+    });
+  }
+  /* The account's people: the chats, then the people in the directory with no conversation.
+     That second half is the whole reason the list exists — a person the reader has not
+     messaged for months is in no list the chat column shows. */
+  function contactItems(s) {
+    const out = s.chats.concat(s.archived.items.map((it) => it.c)).map((c) => c.name);
+    Object.keys(PERSON).forEach((n) => { if (!out.includes(n)) out.push(n); });
+    return out;
+  }
+  function openContacts(s) {
+    s.contacts = { items: contactItems(s), sel: 0 };
+    s.focus = 'contacts';
+  }
+  /* The two lists own j/k, ⏎ and Esc. Neither adds a key to the list behind it: every other
+     key is theirs to drop, which is what their hint rows say. */
+  function contactsKey(s, k) {
+    if (common(s, k)) return;
+    const C = s.contacts, n = C ? C.items.length : 0;
+    if (k === 'Escape') { s.contacts = null; s.focus = 'list'; return; }
+    if ((k === 'j' || k === 'Down') && n) { C.sel = (C.sel + 1) % n; return; }
+    if ((k === 'k' || k === 'Up') && n) { C.sel = (C.sel + n - 1) % n; return; }
+    if (k === 'Enter' && n) {
+      /* no synthetic chat: a person with none gets a card, and the card is what the list is
+         for. A conversation behind the card is theirs when it exists and otherwise left alone. */
+      const name = C.items[C.sel], at = s.chats.findIndex((c) => c.name === name);
+      s.contacts = null;
+      if (at >= 0) s.chat = at;
+      openCard(s, 'person', name);
+    }
+  }
+  function archivedKey(s, k) {
+    if (common(s, k)) return;
+    const A = s.archived, n = A.items.length;
+    if (k === 'Escape') { s.focus = 'list'; return; }
+    if ((k === 'j' || k === 'Down') && n) { A.sel = (A.sel + 1) % n; return; }
+    if ((k === 'k' || k === 'Up') && n) { A.sel = (A.sel + n - 1) % n; return; }
+    if (k === 'Enter' && n) unarchive(s, A.items[A.sel]);
   }
 
   function move(s, d) { const c = chat(s); if (c.msgs.length) c.cur = clamp(c.cur + d, 0, c.msgs.length - 1); }
@@ -1326,6 +1499,17 @@
         const c = buf.trim().replace(/^:/, ''); closeLine(s);
         if (c === 'settings') openSettings(s);
         else if (c === 'new' || c.startsWith('new ')) openNewChat(s, c.replace(/^new\s*/, ''));
+        else if (c === 'archive') archiveChat(s);
+        else if (c === 'archived') openArchived(s);
+        else if (c === 'block') blockPerson(s, true);
+        else if (c === 'unblock') blockPerson(s, false);
+        else if (c === 'rename') renameTo(s, subject(s), '');
+        else if (c.startsWith('rename ')) renameTo(s, subject(s), c.replace(/^rename\s+/, ''));
+        else if (c === 'delete-chat') deleteChat(s, false);
+        else if (c === 'delete-chat both') deleteChat(s, true);
+        else if (c === 'report') reportPerson(s, '');
+        else if (c.startsWith('report ')) reportPerson(s, c.replace(/^report\s+/, ''));
+        else if (c === 'contacts') openContacts(s);
         else if (c === 'signin') beginSignin(s);
         else if (c === 'passphrase') beginChange(s);
         else if (c === 'unlock') { if (s.locked) beginUnlock(s); else refuse(s, 'the session is open already'); }
@@ -1590,7 +1774,7 @@
       if (i >= 0) { c.cur = i; key(s, 'd'); key(s, 'd'); } else { key(s, 'q'); }
     }
   }
-  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', newchat: 'new-chat results', forward: 'forward picker', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell' };
+  const FOCUS_NAME = { list: 'chat list', conv: 'conversation', newchat: 'new-chat results', forward: 'forward picker', settings: 'editable profile', profile: 'profile card', input: 'input bar', nocreds: 'shell', contacts: 'contacts list', archived: 'archived chats' };
 
   /* ---------- the grid ---------- */
   const newGrid = () => Array.from({ length: H }, () => Array.from({ length: W }, () => [' ', 't']));
@@ -1639,7 +1823,7 @@
 
   /* ---------- the bar ---------- */
   function kindTitle(s, L) {
-    if (L.kind === 'message') { const c = chat(s); return 'Message to ' + (c ? c.name : ''); }
+    if (L.kind === 'message') { const c = chat(s); return 'Message to ' + (c ? localName(s, c.name) : ''); }
     return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', newchat: 'New chat', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password', passphrase: 'Passphrase', newpass: 'New passphrase', repeat: 'Repeat passphrase' }[L.kind];
   }
   /* App::prompt_prefix: a person search and a message search are both queries, so they share `/ `;
@@ -1748,6 +1932,8 @@
     /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
     if (s.confirm) return { t: ' ' + s.confirm.prompt, a: 't' };
     if (s.focus === 'forward' && s.fwd) return { t: HINT.forward, a: 'd' };
+    if (s.focus === 'contacts' && s.contacts) return { t: HINT.contacts, a: 'd' };
+    if (s.focus === 'archived') return { t: HINT.archived, a: 'd' };
     if (s.vis && s.focus === 'conv') {
       const [lo, hi] = range(s);
       return { t: ' ' + (hi - lo + 1) + ' message(s) selected — Esc clears', a: 't' };
@@ -1793,7 +1979,7 @@
     s.chats.slice(0, h - 2).forEach((c, i) => {
       const cur = i === s.chat, a = cur ? 'tr' : 't', y = 1 + i;
       fill(g, 1, y, LW - 2, a);
-      put(g, 2, y, trunc(c.name, 17), a);
+      put(g, 2, y, trunc(localName(s, c.name), 17), a);
       if (c.unread) { const u = String(c.unread); put(g, LW - 3 - u.length + 1, y, u, cur ? 'tr' : 'd'); }
     });
   }
@@ -1984,9 +2170,9 @@
       rows.push({ kind: 'action', label: 'add account', act: 'add' }, { kind: 'action', label: 'logout', act: 'logout' });
       return rows;
     }
-    const c = s.chats[C.chat];
-    if (!c) return [];
-    const p = PERSON[c.name] || {}, rows = [{ kind: 'value', label: 'name', value: c.name }];
+    const who = cardWho(s), p = PERSON[who] || {};
+    if (!who) return [];
+    const rows = [{ kind: 'value', label: 'name', value: localName(s, who) }];
     /* slot 1 is reserved for the local colour row and is always absent here: Telegram has no
        field for it, the program has not been asked for one, and a row is only drawn when
        something says it. The slot is held so the field lands in place. */
@@ -1994,6 +2180,12 @@
     if (p.username) rows.push({ kind: 'value', label: 'username', value: '@' + p.username });
     if (p.bio) rows.push({ kind: 'value', label: 'bio', value: p.bio });
     if (p.birthday) rows.push({ kind: 'value', label: 'birthday', value: p.birthday });
+    /* The three rows that act, and the only three: each one does something no other surface
+       does, which is the rule. Reply, search and delete already live in the conversation, so
+       they stay there; a local name, a block and a report have no other home. */
+    rows.push({ kind: 'action', label: 'rename', act: 'rename' });
+    rows.push({ kind: 'action', label: s.blocked[who] ? 'unblock' : 'block', act: 'block' });
+    rows.push({ kind: 'action', label: 'report', act: 'report' });
     return rows;
   }
   const navRows = (rows) => rows.map((r, i) => (r.kind === 'colour' ? -1 : i)).filter((i) => i >= 0);
@@ -2013,9 +2205,9 @@
     const C = s.card;
     /* the subject is named in every state; the count only when rows exist */
     if (C.sub === 'signedout' || C.sub === 'reading') return 'Profile · you';
-    if (C.sub === 'personReading' || C.sub === 'personFailed') return 'Profile · ' + (s.chats[C.chat] ? s.chats[C.chat].name : '');
+    if (C.sub === 'personReading' || C.sub === 'personFailed') return 'Profile · ' + localName(s, cardWho(s));
     const rows = cardRows(s), nav = navRows(rows);
-    let t = C.sub === 'self' ? 'Profile · you' : 'Profile · ' + (s.chats[C.chat] ? s.chats[C.chat].name : '');
+    let t = C.sub === 'self' ? 'Profile · you' : 'Profile · ' + localName(s, cardWho(s));
     t += ' (' + (nav.length ? clamp(C.row, 0, nav.length - 1) + 1 : 0) + '/' + nav.length + ')';
     if (C.vis) t += ' · ' + cardSel(s) + ' selected';
     return t;
@@ -2095,8 +2287,13 @@
       else ask(s, 'Sign out and forget this session? (y/n)', beginLoggedOut);
       return;
     }
-    if (s.card.sub === 'self') refuse(s, 'Not a row that acts: add account and logout are the two.');
-    else refuse(s, 'Not yours: a contact card has no row you can act on.');
+    if (s.card.sub === 'self') { refuse(s, 'Not a row that acts: add account and logout are the two.'); return; }
+    /* a contact's card: d acts on the three rows that act, and a value row does nothing — a
+       row's answer is its own, and reading a name is not an action. */
+    if (r.kind !== 'action') return;
+    if (r.act === 'rename') openRename(s);
+    else if (r.act === 'block') blockPerson(s, !s.blocked[cardWho(s)]);
+    else reportPerson(s, '');
   }
   function cardVisKey(s, k, p) {
     const C = s.card, { r } = cardAt(s), val = r.kind === 'value' ? r.value : '';
@@ -2118,7 +2315,10 @@
     if (k === 'd' || k === 'e') {
       if (s.card.sub === 'self' && k === 'd') refuse(s, 'Not a row that acts: add account and logout are the two.');
       else if (s.card.sub === 'self') refuse(s, 'Not editable here: :settings opens the editable profile.');
-      else refuse(s, 'Not yours: nothing on a contact card is editable.');
+      /* a selection is up, and these two are the card's own keys only without one: e refuses
+         because nothing here is editable, and d is dropped rather than asking about a row the
+         reader has already gathered into a selection. */
+      else if (k === 'e') refuse(s, 'Not yours: nothing on a contact card is editable.');
       return;
     }
     if (k === 'y') {
@@ -2327,7 +2527,46 @@
     }
   }
 
-  /* ---------- frame ---------- */
+  /* ---------- the contacts and archived lists ----------
+     The new-chat results' shape over the chat-list column: a bordered box as tall as its rows
+     need it to be, drawn up from the column's bottom and never taller than the column, the
+     selected row in reverse video. The box's title carries the count and the status row
+     carries the keys, which is the split these two surfaces have: the count is what the box
+     is, and the keys are the one thing the screen would otherwise not say. Neither list is a
+     panel and neither is a mode: Esc puts it away and the column is what it was. */
+  function overlay(g, y0, title, n, row) {
+    const rows = Math.min(n, Math.max(0, y0 - 2)), bw = LW, bh = rows + 2, y = y0 - bh;
+    if (!rows || y < 0) return;
+    box(g, 0, y, bw, bh, title, false);
+    for (let i = 0; i < rows; i++) row(i, y + 1 + i);
+  }
+  function drawContacts(g, s, y0) {
+    const C = s.contacts;
+    if (s.focus !== 'contacts' || !C) return;
+    overlay(g, y0, 'Contacts · ' + C.items.length, C.items.length, (i, y) => {
+      const name = C.items[i], on = i === C.sel, base = on ? 'tr' : 't', quiet = on ? 'tr' : 'd';
+      const stand = s.chats.concat(s.archived.items.map((it) => it.c)).some((c) => c.name === name) ? 'chat' : 'new';
+      const sw = cells(stand), budget = LW - 4 - sw;   /* the name's field, less the standing */
+      fill(g, 1, y, LW - 2, base);
+      const col = put(g, 2, y, trunc(localName(s, name), budget), base);
+      const handle = (PERSON[name] && PERSON[name].username) ? ' @' + PERSON[name].username : '';
+      /* the handle only when it fits WHOLE: a truncated @name is a name the reader cannot
+         search for and a row that lies about how much of it there is */
+      if (handle && cells(handle) <= budget - col) put(g, 2 + col, y, handle, quiet);
+      put(g, LW - 1 - sw, y, stand, quiet);
+    });
+  }
+  function drawArchived(g, s, y0) {
+    const A = s.archived;
+    if (s.focus !== 'archived') return;
+    overlay(g, y0, 'Archived · ' + A.items.length, A.items.length, (i, y) => {
+      const c = A.items[i].c, on = i === A.sel, a = on ? 'tr' : 't', u = c.unread ? String(c.unread) : '';
+      fill(g, 1, y, LW - 2, a);
+      put(g, 2, y, trunc(localName(s, c.name), u ? 16 : 20), a);
+      if (u) put(g, LW - 3 - u.length + 1, y, u, on ? 'tr' : 'd');
+    });
+  }
+
   function render(s) {
     const g = newGrid();
     if (s.line) syncComp(s.line);
@@ -2346,6 +2585,8 @@
     drawComplete(g, s, top);
     drawNewChat(g, s, top);
     drawForward(g, s, top);
+    drawContacts(g, s, top);
+    drawArchived(g, s, top);
     drawBar(g, s, b, top);
     drawStatus(g, s);
     return g;
@@ -2372,7 +2613,7 @@
       const idx = start + i, c = s.chats[idx], on = idx === f.at, yy = 2 + i;
       const base = on ? 'tr' : 't', quiet = on ? 'tr' : 'd';
       fill(g, x0 + 1, yy, bw - 2, base);
-      const title = trunc((c.pin ? '📌 ' : '') + c.name, 24);
+      const title = trunc((c.pin ? '📌 ' : '') + localName(s, c.name), 24);
       put(g, x0 + 2, yy, title, base);
       const x = x0 + 2 + cells(title) + 2, last = c.msgs.length ? c.msgs[c.msgs.length - 1].text : '';
       if (x < x0 + bw - 2) put(g, x, yy, trunc(last, x0 + bw - 2 - x), quiet);
@@ -2610,7 +2851,33 @@
       { name: 'The repeat differs: nothing is changed', keys: ':passphrase<CR>yfresh<CR>stale<CR>' },
       { name: 'Success: the sentence and the reminder', keys: ':passphrase<CR>yfresh<CR>fresh<CR><wait>' },
       { name: 'Failure: the file is left as it was', keys: ':passphrase<CR>y!fresh<CR>!fresh<CR><wait>' },
-      { name: 'Locked: :passphrase is refused', start: 'passphrase', keys: '<Esc>:passphrase<CR>' }] }
+      { name: 'Locked: :passphrase is refused', start: 'passphrase', keys: '<Esc>:passphrase<CR>' }] },
+    /* The chat and contact actions. Every frame is reached with the keys a reader presses: a
+       command typed on the `:` line, the `y` on the confirmation it raises, or a row on a
+       contact's card. The two lists own `j`/`k`, `⏎` and `Esc` and nothing else, so their
+       frames are the overlay and the status row's own hint, not a key added to the list. */
+    { id: 'manage', name: 'Chat and contact actions', variants: [
+      { name: 'Archive: the row leaves the list, the sentence says so', keys: ':archive<CR>' },
+      { name: ':archived: the one archived chat, ⏎ brings it back', keys: ':archive<CR>:archived<CR>' },
+      { name: 'Unarchived: the row returns where it was, the overlay closes', keys: ':archive<CR>:archived<CR><CR>' },
+      { name: 'Block: the question names the person', keys: ':block<CR>' },
+      { name: 'Blocked: the card row now says unblock', keys: ':block<CR>yAjjjjj' },
+      { name: 'Unblock: the other question, from the same command pair', keys: ':block<CR>y:unblock<CR>' },
+      { name: 'Rename: the card row opens the command line, prefilled', keys: 'Ajjjjd' },
+      { name: 'Renamed: the chat list uses the local name', keys: ':rename Ada<CR>' },
+      { name: 'Renamed: the message bar names it too', keys: ':rename Ada<CR>i' },
+      { name: 'Renamed: the card is the local name too', keys: ':rename Ada<CR>A' },
+      { name: 'Bare :rename clears it, and the server name is back', keys: ':rename Ada<CR>:rename<CR>' },
+      { name: 'A rename that could not be saved', keys: ':rename !permission denied<CR>' },
+      { name: 'Delete: the local question', keys: ':delete-chat<CR>' },
+      { name: 'Delete: the both-sides question', keys: ':delete-chat both<CR>' },
+      { name: 'Deleted: the row is gone and the next chat is open', keys: ':delete-chat<CR>y' },
+      { name: 'Report: the prompt names the reason as a reader reads it', keys: ':report child-abuse<CR>' },
+      { name: 'Reported: the reason is echoed back', keys: ':report spam<CR>y' },
+      { name: 'Report: an unknown reason is refused before the question', keys: ':report nonsense<CR>' },
+      { name: 'Contacts: the account\'s people, over the chat column', keys: ':contacts<CR>' },
+      { name: 'A contact with no chat: ⏎ opens their card, not yours', keys: ':contacts<CR>' + 'j'.repeat(13) + '<CR>' },
+      { name: 'Contacts: Esc puts the list back', keys: ':contacts<CR><Esc>' }] }
   ];
   function scene(si, vi) {
     const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start, v.bidi);

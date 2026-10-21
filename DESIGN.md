@@ -230,9 +230,9 @@ has one cell height and the reader chose the cell.
   caret in here right now* — the reason the dot exists is that a caret is
   standing on a blank cell, and that is true of a search query too.
 
-### The fifteen hint rows
+### The nineteen hint rows
 
-`ALL_HINTS` is the array a test iterates. These are the fifteen, verbatim, with
+`ALL_HINTS` is the array a test iterates. These are the nineteen, verbatim, with
 the width each one measures. The width is
 `chars().count()`, the same count the test makes, and the array is the authority:
 the numbers below were re-measured from it.
@@ -251,7 +251,9 @@ the numbers below were re-measured from it.
 | a selection inside the line | ` y: yank  d: cut  Esc: back` | 27 |
 | the editable profile has the focus | ` e/Enter: edit  j/k: field  Esc/Tab/Ctrl+w: leave` | 49 |
 | the self card has the focus | ` j/k: row  h/l: within  v: vis  y: yank  d: act  Esc: back` | 58 |
-| a contact's card has the focus | ` j/k: row  h/l: within  v: vis  y/yy: yank  Esc: back` | 53 |
+| a contact's card has the focus | ` j/k: row  h/l: within  v: vis  y/yy: yank  d: act  Esc: back` | 60 |
+| the contacts list is up | ` j/k: contact  ⏎: card  Esc: close` | 39 |
+| the archived list is up | ` j/k: chat  ⏎: unarchive  Esc: close` | 44 |
 | the session is not signed in | ` ::signin  q:quit` | 17 |
 | nothing has been read yet | ` q:quit` | 7 |
 
@@ -557,8 +559,19 @@ code.
 | `Quit televim? (y/n)` | a screen-wide confirmation | `QUIT_PROMPT` |
 | `Delete your message from both sides? (y/n)` | ditto, naming **which side** | `DELETE_OUTGOING_PROMPT` |
 | `Delete 3 of your messages? (y/n)` | a count, and pluralisation | `delete_yours_prompt` |
+| `Block {name}? (y/n)` `Unblock {name}? (y/n)` | the two block confirmations, naming the person | `block_prompt` |
+| `Delete this conversation? (y/n)` | a local conversation deletion | `DELETE_CONVERSATION_PROMPT` |
+| `Delete this conversation for both sides? (y/n)` | the same, naming **which side** | `DELETE_CONVERSATION_BOTH_PROMPT` |
+| `Report {name} to Telegram as {reason}? (y/n)` | a report, naming the reason in the reader's spelling | `report_prompt` |
+| `archived {name}` `unarchived {name}` | the archive moved a chat, and brought it back | `archive` status |
+| `blocked {name}` `unblocked {name}` | the block answer | `block` status |
+| `renamed {name}` `local name cleared` | a local name was set, or cleared back to the peer's name | `:rename` |
+| `deleted {name}` `deleted {name} for both sides` | the conversation is gone | `delete-chat` |
+| `reported {name} as {reason}` | the report was accepted | `:report` |
+| `contacts — {n}` `archived — {n}` | an open list and how many it holds | `contacts`, `archived` |
+| `archive: {reason}` `block: {reason}` `delete chat: {reason}` `report: {reason}` `rename: could not save — {reason}` | a failed action, in its own sentence | the answer path |
 | `NORMAL` `INSERT` `VISUAL` `CONFIRM` | upper case, in a filled label | `status_bar.rs` |
-| ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the fifteen rows above |
+| ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the nineteen rows above |
 | `: ` `/ ` | a prompt's prefix, on its first row only; `/ ` is shared by the find line and the new-chat line | `App::prompt_prefix` |
 | `3 message(s) selected — Esc clears` | the status line's sentence for a selection, **stating the unit** | `selection_note` |
 | `3 character(s) selected — Esc clears` | ditto for a selection inside one message | ditto |
@@ -586,7 +599,7 @@ code.
 | `signed out` | the status the screen rests on after the reader signs out, until the sign-in field arrives | `apply_logged_out` |
 | `Sign out and forget this session? (y/n)` | a screen-wide confirmation, raised by the `logout` row; `y` signs out | the card |
 | `not yet: this build cannot add an account` | the `add account` row's refusal | ditto |
-| `Not yours: a contact card has no row you can act on.` | `d` on a contact's card | ditto |
+| `Not a row that acts: rename, block and report are the three.` | `d` on a value row of a contact's card | the card |
 | `Not a row that acts: add account and logout are the two.` | `d` on a value row of the self card | ditto |
 | `Not editable here: :settings opens the editable profile.` | `e` on the self card: the one route to the editable screen | ditto |
 | `p: a card has no buffer to paste into` | why `p` is unbound, written to the hint's own row | ditto |
@@ -1182,6 +1195,90 @@ Scenes: `forward` in the engine, two frames: a Visual selection of three message
 with the forward key named in the hint, and the picker raised over the
 conversation, with its header, a pinned chat, and a preview.
 
+## Chat and contact actions
+
+Six actions share one surface: the `:` line. They add no key to the chat list,
+whose hint is already 69 of 71 columns. The contact card is the one place that
+gains a key, `d`, because three actions have no other home.
+
+| Command | Acts on | Asks first? | Sentence |
+| :------ | :------ | :---------- | :------- |
+| `:archive` | the highlighted chat | no — `:archived` undoes it | `archived {name}` |
+| `:archived` | — | no | lists the archived chats; `⏎` unarchives |
+| `:block` / `:unblock` | the card's person, else the highlighted chat | yes | `Block {name}? (y/n)` / `Unblock {name}? (y/n)` |
+| `:rename [name]` | the card's person, else the highlighted chat | no — bare `:rename` clears | `renamed {name}` / `local name cleared` |
+| `:delete-chat [both]` | the highlighted chat | yes | `Delete this conversation? (y/n)` or `… for both sides?` |
+| `:report [reason]` | the card's person, else the highlighted chat | yes, naming the reason | `Report {name} to Telegram as {reason}? (y/n)` |
+| `:contacts` | — | no | lists the account's contacts; `⏎` opens the card |
+
+**Confirmation is for what cannot be undone from the screen.** Block, unblock,
+delete and report ask; archive and rename do not, because `:archived` brings the
+chat back and bare `:rename` restores the peer's name. A confirmation captures
+its subject when it is raised, so `y` cannot act on a different row, and `n` or
+`Esc` changes nothing. The prompt is the status line; the bar is empty; the mode
+label is `CONFIRM` in the one red role. The archive and rename results are
+`flash` sentences, not prompts.
+
+**The subject rule is one rule.** A contact card on show wins; otherwise the
+chat-list highlight is the subject, and opening a conversation moves that
+highlight to it. `:archive` and `:delete-chat` need a chat, so a card over a
+person with no conversation is refused with `nothing to act on: highlight a
+chat, open a conversation, or open a card`.
+
+**Archive is a place, not a deletion.** The chat leaves the visible column and
+is kept in the archive folder. `:archived` draws a small bordered list over the
+chat column, title `Archived · {n}`, the selected row in reverse video; `j`/`k`
+walk it, `⏎` unarchives and puts the chat back in the list's own order, and `Esc`
+closes it. When the last row leaves, the overlay closes with it. If the open
+conversation is archived, the conversation closes, because it is no longer in
+the list that owns it.
+
+**A local name is a name over the peer's, not a replacement of it.** The chat
+row, the message bar, the card and the contacts list all draw the local name;
+the peer's own name is what a bare `:rename` brings back. The name is
+account-scoped and stored with the history file, so it survives a restart and a
+refetch and goes when the reader signs out. A save that cannot be written says
+`rename: could not save — {reason}` and leaves the local name on screen until
+the next launch, which is the honest state: the screen has it, the file does not.
+
+**Block is a property of the person, not a second list.** The card's action row
+flips between `block` and `unblock` from the profile read; the chat stays where
+it is and the card is the place the state is visible. The status sentence names
+the result. There is no blocked badge and no blocked-people screen.
+
+**Delete has two depths.** `:delete-chat` asks the local question and removes the
+row, the open conversation, the cached messages, the local name, the draft and
+the per-chat media keys. `:delete-chat both` asks the both-sides question and
+sends the revoke form; the local cleanup happens only when Telegram answers. A
+failure changes nothing and says `delete chat: {reason}`.
+
+**Report carries a reason the reader can read.** The ten tokens are `spam`,
+`violence`, `pornography`, `child-abuse`, `other`, `copyright`,
+`geo-irrelevant`, `fake`, `illegal-drugs` and `personal-details`; absent means
+`other`. `child-abuse` is drawn in the prompt as `child abuse`, because the
+hyphen is the wire's spelling. An unknown token is refused before the question:
+`unknown report reason: {token} — use spam, violence, …`.
+
+**The contacts list is the directory, not a search.** It draws over the chat
+column, title `Contacts · {n}`, one row per person — the local name, `@username`
+when there is one, and `chat`/`new` only when the fact is already in hand. The
+server's order is kept; there is no sort, no query and no second cache. `⏎`
+opens the person's card even when no conversation exists, which is the reason
+the list is separate from the chat list; the card's own `⏎` opens a conversation.
+`Esc` closes the list. A failed fetch leaves the previous list and says
+`contacts: {reason}`.
+
+**The status line ranks the open list above selection and search.** The confirm
+prompt still outranks everything. `contacts — {n}` and `archived — {n}` are the
+list labels; a failure is the same line with its reason, so the reader never
+loses the place they were in.
+
+Scenes: `manage` in the engine, twenty-two frames, each reached by the keys a
+reader presses: archive and unarchive, the block and unblock questions, a contact
+card with the three action rows, rename from the card and from the command line,
+both delete questions, a report naming its reason, an unknown-reason refusal, and
+the contacts list with a person who has no chat.
+
 ## Components
 
 Ten, with their states, and the `TestBackend` assertion that would catch each
@@ -1201,7 +1298,7 @@ regressing.
    which are *different modes that share a word*. The label belongs to whichever
    mode the keys about to be pressed will mean, and a confirmation is a question
    about the whole screen.
-4. **Hint row** — fifteen variants, one per state of the screen, all under
+4. **Hint row** — nineteen variants, one per state of the screen, all under
    `ASSUMED_WIDTH - MODE_LABEL_WIDTH`. Three keys mean something else while a
    `:shortcode` completion is up, and the status line names them for as long as
    it is. The settings hint and the card hints lose to a confirmation and to an
@@ -1353,9 +1450,11 @@ different items, so one interaction model serves a chat, a settings card and a
 person.
 
 What differs between "my profile" and "someone else's profile" is then a
-**capability** question, not a layout question: *is this row yours to change?*
-The self card has two rows that act and refuses inside both; a contact's card has
-none, and says so. Nothing else about the two cards differs, and neither is a new
+**capability** question, not a layout question: *does this row have a home on this
+card?* The self card has two rows that act; a contact's card has the three
+actions that have no home in a conversation or a chat-list key — rename, block
+and report. Reply, search and delete stay in the conversation, so the card does
+not repeat them. Nothing else about the two cards differs, and neither is a new
 widget.
 
 ### The row
@@ -1369,7 +1468,7 @@ columns. The conversation writes a word; a card writes one cell.
 | Kind | Draws | Answers |
 | :--- | :---- | :------ |
 | value | the label in `text-dim`, the value in `text`, wrapped at the value column | `h`/`l` inline, `v`, `y`, `yy` |
-| action | the label alone, dim | `d` on the self card; nothing on a contact's card |
+| action | the label alone, dim | `d` on either card; the contact rows are `rename`, `block`/`unblock` and `report` |
 | reserved | nothing | nothing: the colour slot, held and not drawn |
 
 **A row exists only when the peer says something.** An empty bio, a missing
@@ -1417,19 +1516,28 @@ Rows, in order: `name`; `username`; `bio`; `birthday`; `id`; `session`; then
 ### A contact's card
 
 Rows, in order: `name`; the reserved colour slot; `username`; `bio`; `birthday`,
-each only when the peer gives one. **No phone**: a client cannot ask a contact
+each only when the peer gives one; then the three action rows `rename`,
+`block`/`unblock` and `report`. **No phone**: a client cannot ask a contact
 for their number. No `add account`, no `logout`, no birthday-forcing. The colour
 slot sits immediately after `name` and not lower, because it is the name's own
 property — the thing that backs the name in the chat list and inks `[them]` in a
 conversation — so it belongs beside the row it qualifies, not under the rows that
 merely describe the person.
 
-Because a person cannot be replied to, searched for, or deleted *from their own
-card* — all three already exist in the conversation, and duplicating them is
-worse than not having them — the card's verbs are read. `y` yanks the character
-selection; `yy` yanks the row's whole value into the register and then offers it
-to the system clipboard by OSC 52, the same two-part rule the conversation's `y`
-already follows. `d` and `e` refuse: the rows are not yours.
+A person cannot be replied to, searched for, or deleted *from their own card* —
+all three already exist in the conversation, and duplicating them is worse than
+not having them. The three rows that do act are the ones with no other home:
+`rename` sets a local name, `block`/`unblock` changes whether the person can
+message the reader, and `report` sends a reason to Telegram. `d` runs the row
+under the cursor; `e` still refuses because nothing here is editable. `y` yanks
+the character selection; `yy` yanks the row's whole value into the register and
+then offers it to the system clipboard by OSC 52, the same two-part rule the
+conversation's `y` already follows.
+
+A rename is local: the card's `name` row draws the reader's name, the peer's own
+name is what the row replaces, and a bare `:rename` puts the peer's name back.
+The card is the one place both are visible at once, which is why the action lives
+here rather than only on the command line.
 
 A contact's card has no rows at all until the profile is read. It does not open
 on a half-filled name row: the shell sentence replaces the card. Before the read
@@ -1498,7 +1606,7 @@ Every key, with the reason beside it, judged against what Vim itself does.
 | `h` `l` | **inline**, within the row's text | exactly as a message moves within its text. The value is one logical line, so these are single-cell motions and the wrap is only how it is drawn. |
 | `v` | charwise selection, extended by `j`/`k` to become a selection of *rows* | a set, not a range of characters: the same distinction the conversation makes |
 | `y` / `yy` | the selection, or the row's whole value | `y` is an operator and `yy` is linewise, which is what Vim means by them. With a selection up, `y` acts at once, as it does in Visual. |
-| `d` | acts on the self card's two action rows, and refuses on a contact's | `d` is the conversation's act; here it acts on the row the cursor is on, and the refusal names which rows act |
+| `d` | acts on an action row: the self card's two, or a contact's `rename`, `block`/`unblock` and `report` | `d` is the conversation's act; here it acts on the row the cursor is on, and a value row is not an action |
 | `e` | refuses | the editable profile is a separate screen, and the refusal names it: `:settings` |
 | `p` | **unbound, and says why in the hint area** | there is no buffer in a card to paste into, and a bound key that cannot work is worse than an absent one. The reason is written to the status row, which is the row the hint is on. |
 | `zz` `zt` `zb` | no-ops | a card cannot scroll, and pretending it can is a lie about state. The key is dropped rather than answered with motion that moves nothing. |
@@ -1543,8 +1651,10 @@ own is `UserSelf`, a contact's is `User(id, access_hash)`, and the
 `access_hash` is already in the peer cache the chat list fills. The shared rule is
 the row rule above — a row exists only when the peer says something — which is why
 a contact's birthday row is absent whenever their privacy hides it, and why the
-same rule governs an empty bio and a missing username. **The one write is the
-escape hatch**, and it forwards straight to the protocol layer.
+same rule governs an empty bio and a missing username. The card's own write is
+the block flag, read from the same answer; rename is local and never reaches the
+wire, and report is its own request with its own confirmation. Every write is the
+escape hatch, and it forwards straight to the protocol layer.
 
 ### The shell cards
 
