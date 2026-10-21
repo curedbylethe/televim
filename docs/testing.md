@@ -272,7 +272,13 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   the eight-row block geometry and its half-block cells, the `[sticker]`
   fallbacks (miss, corrupt bytes, caption, flag off), and the fetch drain — a
   counting test double stands in for `download_media`, so inline drains and
-  settles while `off` performs zero traffic. All of those run on every job.
+  settles while `off` performs zero traffic. An animated sticker is pinned on
+  both sides of the seam: `classify_raw` and `classify_typed` agree on
+  `AnimatedSticker` for a TGS and for a WebM, the widget table draws
+  `[animated sticker]` with no block and no pending fetch, `o` queues its open,
+  `viewer_spec` gives it the generic viewer rather than the image or video key,
+  and the media cache names its file `.tgs`, `.webm` or `.bin` from the magic
+  bytes. All of those run on every job.
 - **TUI E2E Tests:** `app/tests/tui_e2e.rs` runs the `televim` binary in a pty
   through `termlens` and asserts on the screen. Nine tests: the chat list after
   launch, a seeded cache drawn before the first frame, typing in INSERT, resuming
