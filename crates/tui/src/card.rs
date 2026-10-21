@@ -250,22 +250,26 @@ pub fn navigable(rows: &[CardRow]) -> usize {
 }
 
 /// Whom the card is about.
-#[derive(Debug, Clone, Copy)]
-pub enum CardSubject<'a> {
+#[derive(Debug, Clone)]
+pub enum CardSubject {
     /// The signed-in account.
     SelfAccount,
 
-    /// Somebody the reader is talking to, named by the chat they were in.
-    Contact(&'a domain::chat::Chat),
+    /// Somebody the reader is talking to, by the name the card draws.
+    ///
+    /// A name rather than a chat, because a person reached from the contacts
+    /// directory has no chat: their card still has to be about them, and a
+    /// subject that could only be a chat would send that reader to their own.
+    Contact(String),
 }
 
-impl CardSubject<'_> {
+impl CardSubject {
     /// The title's name for the subject.
     #[must_use]
     pub fn name(&self) -> String {
         match self {
             CardSubject::SelfAccount => "you".to_owned(),
-            CardSubject::Contact(chat) => chat.title.clone(),
+            CardSubject::Contact(name) => name.clone(),
         }
     }
 }

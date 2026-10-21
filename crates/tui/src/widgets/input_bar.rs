@@ -75,6 +75,17 @@ pub const INPUT_MAX_ROWS: usize = 6;
 /// carries the arithmetic and what else the row has paid for.
 const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct";
 
+/// The hint while the contacts directory is up.
+///
+/// The list owns every key while it is open, so the row names only its own:
+/// walking it, opening the person's card, and the way out.
+const CONTACTS_HINT: &str = " j/k: contact  ⏎: card  Esc: close";
+
+/// The hint while the archived list is up.
+///
+/// `⏎` is the whole reason the list exists: it puts the chat back.
+const ARCHIVED_HINT: &str = " j/k: chat  ⏎: unarchive  Esc: close";
+
 /// The hint while the chat list has the focus.
 ///
 /// The same two card keys as the conversation's row, and `S` spelled **differently**
@@ -231,15 +242,12 @@ const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
 ///
-/// Eighteen entries, the last three being the passphrase box's; fifteen of them: the design's fourteen minus the two this build cannot reach —
-/// the editable profile's row, because there is no editable profile, and the
-/// deletion confirmation's, because a confirmation outranks every hint and so is
-/// never asked for one — plus the three sign-in rows, which the design does not
-/// list because the sign-in surface is new. A string that is width-checked by a
-/// test and displayed by nothing is the defect this list exists to prevent, and
-/// it is why the count is written out rather than derived.
+/// Twenty entries: the design's hints, the sign-in rows, and the two overlays
+/// this build adds. A string that is width-checked by a test and displayed by
+/// nothing is the defect this list exists to prevent, and it is why the count is
+/// written out rather than derived.
 #[cfg(test)]
-const ALL_HINTS: [&str; 18] = [
+const ALL_HINTS: [&str; 20] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
     VISUAL_HINT,
@@ -249,6 +257,8 @@ const ALL_HINTS: [&str; 18] = [
     CARD_READING_HINT,
     DRAFT_HINT,
     INSERT_HINT,
+    CONTACTS_HINT,
+    ARCHIVED_HINT,
     COMPLETION_HINT,
     LINE_NORMAL_HINT,
     LINE_VISUAL_HINT,
@@ -299,6 +309,9 @@ pub fn hint(app: &App) -> &'static str {
                 _ => INSERT_HINT,
             }
         }
+        // An open overlay owns the row the way it owns the keys.
+        (Focus::ChatList, _) if app.conversation.contacts.is_active() => CONTACTS_HINT,
+        (Focus::ChatList, _) if app.list.archived_is_open() => ARCHIVED_HINT,
         (Focus::ChatList, _) => CHAT_LIST_HINT,
         // Before the conversation's own arms, and matched on the pane as well as
         // the mode: a card is in the right-hand column with the focus on it, so

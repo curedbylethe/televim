@@ -67,6 +67,12 @@ pub struct ConversationState {
     /// live at once without either overwriting the other.
     pub(crate) user_search: UserSearchState,
 
+    /// The account's contacts, open over the chat column.
+    ///
+    /// Its own state rather than a second search: the directory answers "who do
+    /// I know", not "who matches this query", and it stays until it is closed.
+    pub contacts: crate::state::contacts::ContactListState,
+
     /// Set by a global search: the query, the messages found in every private
     /// chat, and where the reader is among them.
     ///
@@ -170,6 +176,7 @@ impl ConversationState {
             vim: VimState::new(0),
             search: SearchState::default(),
             user_search: UserSearchState::default(),
+            contacts: crate::state::contacts::ContactListState::default(),
             global_search: GlobalSearchState::default(),
             register: Register::default(),
             selection: None,

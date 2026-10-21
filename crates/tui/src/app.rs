@@ -1113,6 +1113,13 @@ pub enum Action {
         peer_id: i64,
     },
 
+    /// Fetch the account's contact directory.
+    ///
+    /// The same hand-over as every other action: `tui` cannot reach the network,
+    /// so the ask is recorded here and taken once by the caller that can. The
+    /// answer fills the contacts list that is already on show.
+    FetchContacts,
+
     /// Search `chat_id` for `query`.
     ///
     /// A question rather than a fetch: it does not touch the window or the
@@ -1993,19 +2000,33 @@ impl App {
     /// a subject that is not there is the account's own: a card whose subject has
     /// gone should not read as somebody else's, and there is nobody else.
     #[must_use]
-    pub fn card_subject(&self) -> crate::card::CardSubject<'_> {
+    pub fn card_subject(&self) -> crate::card::CardSubject {
         match self.profile.profile_subject {
             ProfileId::SelfAccount => crate::card::CardSubject::SelfAccount,
-            ProfileId::User(id) => self
-                .list
-                .list
-                .chats
-                .iter()
-                .find(|chat| chat.id == id)
-                .map_or(
-                    crate::card::CardSubject::SelfAccount,
-                    crate::card::CardSubject::Contact,
-                ),
+            // The chat's name first: it already carries the local name when one
+            // is set. A person with no chat — somebody reached from the contacts
+            // directory — is named by the card's own profile, or by their
+            // identifier if even that has not arrived. Never by falling back to
+            // the account: a card about somebody else must not become yours.
+            ProfileId::User(id) => {
+                let name = self
+                    .list
+                    .list
+                    .chats
+                    .iter()
+                    .chain(self.list.archived.iter())
+                    .find(|chat| chat.id == id)
+                    .map(|chat| chat.title.clone())
+                    .or_else(|| {
+                        self.profile
+                            .contact
+                            .as_ref()
+                            .filter(|contact| contact.peer_id == id)
+                            .map(|contact| contact.name.clone())
+                    })
+                    .unwrap_or_else(|| id.to_string());
+                crate::card::CardSubject::Contact(name)
+            }
         }
     }
 
@@ -3079,6 +3100,10 @@ impl App {
         // asked from, and above it — the `Clear` inside the widget is what makes
         // the list a panel rather than a smear of two lists.
         widgets::user_list::render(self, horizontal[0], frame);
+        // The directory and the archive are drawn over the same column, and in
+        // that order: a reader who opened one cannot have the other up.
+        widgets::contact_list::render(self, horizontal[0], frame);
+        widgets::archived_list::render(self, horizontal[0], frame);
         // The forward picker is drawn over the conversation column it forwards
         // from, above the messages and the bar, and below the status line.
         widgets::forward_picker::render(self, horizontal[1], frame);
@@ -3463,6 +3488,14 @@ impl App {
             && let Some(reason) = self.conversation.conversation.failure(message.id)
         {
             return reason.to_owned();
+        }
+        // An open overlay owns the line: it is what the next key will act on,
+        // and a flash from before it was opened would be about another surface.
+        if self.conversation.contacts.is_active() {
+            return self.conversation.contacts.label();
+        }
+        if self.list.archived_is_open() {
+            return format!("archived — {}", self.list.archived().len());
         }
         // A status worth reading — a refusal, a failure — outranks the hint. The
         // resting state is the hint rather than the program's name, because the

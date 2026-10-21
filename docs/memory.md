@@ -438,6 +438,11 @@ while calibrating this one.
   (8 MiB) of JSON-encoded message text over all of them, and `HISTORY_CACHE_CHATS` (500)
   chat-list rows, in memory and in the file beside the configuration — see
   [The history cache](#the-history-cache).
+- A bounded local-name map: one alias for each of at most `HISTORY_CACHE_CHATS`
+  (500) chat rows, in the same account-tagged history file and written with the
+  same coalesced save as the cache. The contacts list is transient — one fetch's
+  answer, at most `contacts.GetContacts`'s own response — and is dropped when
+  the overlay closes.
 - Measurement-only `Instant` probes in the event loop, gated on
   `TELEVIM_MEASURE` and written to the log rather than the screen, so a launch's
   first frame and a keypress's latency have numbers behind them.

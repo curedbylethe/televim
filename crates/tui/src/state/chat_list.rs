@@ -21,6 +21,12 @@ pub struct ChatListState {
     /// Kept beside the visible list because the archive is a place, not a flag
     /// on a chat: the visible list is exactly what the reader sees.
     pub(crate) archived: Vec<Chat>,
+
+    /// Whether the archived list is drawn over the chat column.
+    pub(crate) archived_open: bool,
+
+    /// The cursor in that list.
+    pub(crate) archived_selected: usize,
 }
 
 impl ChatListState {
@@ -31,6 +37,8 @@ impl ChatListState {
             list: ChatList::default(),
             selected_chat: 0,
             archived: Vec::new(),
+            archived_open: false,
+            archived_selected: 0,
         }
     }
 
@@ -98,6 +106,58 @@ impl ChatListState {
     /// Replaces the archived conversations, leaving the visible list alone.
     pub(crate) fn install_archived(&mut self, archived: Vec<Chat>) {
         self.archived = archived;
+        self.clamp_archived();
+    }
+
+    /// Opens the archived list over the chat column.
+    pub(crate) fn open_archived(&mut self) {
+        self.archived_open = true;
+        self.clamp_archived();
+    }
+
+    /// Puts the archived list away.
+    pub(crate) fn close_archived(&mut self) {
+        self.archived_open = false;
+    }
+
+    /// Whether the archived list is on show.
+    #[must_use]
+    pub(crate) fn archived_is_open(&self) -> bool {
+        self.archived_open
+    }
+
+    /// The archived conversations, newest first.
+    #[must_use]
+    pub(crate) fn archived(&self) -> &[Chat] {
+        &self.archived
+    }
+
+    /// Where the cursor is in the archived list.
+    #[must_use]
+    pub(crate) fn archived_cursor(&self) -> usize {
+        self.archived_selected
+    }
+
+    /// Moves the archived cursor by `delta`, wrapping at either end.
+    pub(crate) fn move_archived(&mut self, delta: isize) {
+        if self.archived.is_empty() {
+            return;
+        }
+        let len = i64::try_from(self.archived.len()).unwrap_or(i64::MAX);
+        let next = (i64::try_from(self.archived_selected).unwrap_or(0)
+            + i64::try_from(delta).unwrap_or(0))
+        .rem_euclid(len);
+        self.archived_selected = usize::try_from(next).unwrap_or(0);
+    }
+
+    /// Keeps the archived cursor on a row, and closes an empty list.
+    fn clamp_archived(&mut self) {
+        if self.archived.is_empty() {
+            self.archived_open = false;
+            self.archived_selected = 0;
+        } else {
+            self.archived_selected = self.archived_selected.min(self.archived.len() - 1);
+        }
     }
 
     /// Moves `chat_id` out of the visible list and into the archive.
@@ -120,6 +180,7 @@ impl ChatListState {
         let chat = self.archived.remove(at);
         let name = chat.title.clone();
         self.list.insert(chat);
+        self.clamp_archived();
         Some(name)
     }
 

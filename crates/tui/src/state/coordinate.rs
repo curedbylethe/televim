@@ -3176,6 +3176,22 @@ pub(crate) fn run_command(
             );
             false
         }
+        "archived" => {
+            list.open_archived();
+            if !list.archived_is_open() {
+                ui.flash("archived — 0");
+            }
+            false
+        }
+        "contacts" => {
+            if command_needs_client(&mut *ui, &*session) {
+                conversation.dismiss_user_search();
+                list.close_archived();
+                conversation.contacts.begin();
+                queue_action(&mut *outbox, &mut *ui, Action::FetchContacts);
+            }
+            false
+        }
         "archive" => {
             let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
                 ui.set_status(NOTHING_TO_ACT_ON.to_owned());
@@ -4744,6 +4760,60 @@ fn intercept_key(
     // selection could change or drop what the picker is about to forward.
     if conversation.picking().is_some() {
         handle_forward_pick(&mut *ui, &*list, &mut *outbox, &mut *conversation, key);
+        return true;
+    }
+
+    // The contacts directory owns its keys while it is up: `j`/`k` walk the
+    // people, `Enter` opens the one under the cursor and puts the list away, and
+    // `Esc` closes it. Like the new-chat overlay it is skipped while the line has
+    // the focus, so the same letters still type.
+    if ui.focus != Focus::Input && conversation.contacts.is_active() {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => conversation.contacts.move_selection(1),
+            KeyCode::Char('k') | KeyCode::Up => conversation.contacts.move_selection(-1),
+            KeyCode::Enter => {
+                if let Some(candidate) = conversation.contacts.selected_candidate().cloned() {
+                    let name = candidate.display_name;
+                    conversation.contacts.close();
+                    open_card(
+                        &mut *profile,
+                        &mut *ui,
+                        &mut *conversation,
+                        &mut *outbox,
+                        ProfileId::User(candidate.user_id),
+                        Some(name),
+                    );
+                }
+            }
+            KeyCode::Esc => conversation.contacts.close(),
+            _ => {}
+        }
+        return true;
+    }
+
+    // The archived list owns the same keys, and `Enter` brings a chat back.
+    // The row leaves when the answer lands, not when the key is pressed, so the
+    // list does not move under a request that may be refused.
+    if ui.focus != Focus::Input && list.archived_is_open() {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => list.move_archived(1),
+            KeyCode::Char('k') | KeyCode::Up => list.move_archived(-1),
+            KeyCode::Enter => {
+                if let Some(chat) = list.archived().get(list.archived_cursor()) {
+                    let chat_id = chat.id;
+                    queue_action(
+                        &mut *outbox,
+                        &mut *ui,
+                        Action::SetArchived {
+                            chat_id,
+                            archived: false,
+                        },
+                    );
+                }
+            }
+            KeyCode::Esc => list.close_archived(),
+            _ => {}
+        }
         return true;
     }
 

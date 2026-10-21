@@ -9371,3 +9371,46 @@ fn report_defaults_to_other_and_refuses_a_token_it_does_not_know() {
     assert_eq!(app.ui.mode, Mode::Normal);
     assert!(app.take_action().is_none());
 }
+
+#[test]
+fn contacts_opens_the_directory_and_asks_for_it() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "contacts");
+
+    assert!(app.conversation.contacts.is_active());
+    assert_eq!(app.status_text(), "contacts — loading…");
+    assert!(matches!(app.take_action(), Some(Action::FetchContacts)));
+}
+
+#[test]
+fn contacts_enter_opens_the_card_of_the_person_under_the_cursor() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "contacts");
+    let _ = app.take_action();
+    app.conversation
+        .contacts
+        .adopt(vec![domain::user::UserCandidate {
+            user_id: 99,
+            display_name: "Ada".to_owned(),
+            username: Some("ada".to_owned()),
+        }]);
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert!(!app.conversation.contacts.is_active());
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::FetchContact { peer_id: 99 })
+    ));
+    assert_eq!(app.card_subject().name(), "Ada");
+}
+
+#[test]
+fn archived_says_how_many_it_holds_and_esc_closes_it() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "archived");
+
+    assert_eq!(app.ui.status, "archived — 0");
+    assert!(!app.list.archived_is_open());
+    assert!(app.take_action().is_none());
+}
