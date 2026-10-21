@@ -93,6 +93,21 @@ pub(crate) const TYPING_FOR: Duration = Duration::from_secs(6);
 /// reached by a burst — it is a ceiling on memory rather than a schedule.
 pub(crate) const ACTION_QUEUE: usize = 4;
 
+/// The cells a status sentence has after the mode label, its space and the
+/// connection dot.
+///
+/// The global-search artifact measures its sentences against these 70 cells,
+/// after ` NORMAL `; the rendered requirement is an 80-cell row, which
+/// `no_status_row_exceeds_eighty_cells` asserts.
+const LABEL_CELLS: usize = 70;
+
+/// The filter tokens a global search accepts, named while its prompt is open.
+///
+/// The artifact's sentence, 66 cells. It is the one thing a frame cannot draw
+/// while the reader is typing and the thing they need at that moment.
+const GLOBAL_SEARCH_FILTERS: &str =
+    "Filters: photo_video, document, music, voice, url — since:, until:";
+
 /// The prompt the status line shows when a deletion of the reader's own message
 /// is waiting to be confirmed.
 pub const DELETE_OUTGOING_PROMPT: &str = "Delete your message from both sides? (y/n)";
@@ -3135,6 +3150,12 @@ impl App {
             return PASS_CHECKING.to_owned();
         }
         if self.ui.focus == Focus::Input {
+            // A global search's prompt is the box's own last interior row in
+            // the artifact, so the status line is where its vocabulary goes:
+            // the frame cannot show the tokens the reader may type.
+            if self.input.line.purpose() == PromptKind::GlobalSearch {
+                return GLOBAL_SEARCH_FILTERS.to_owned();
+            }
             return widgets::input_bar::hint(self).to_owned();
         }
         match &self.conversation.confirm {
@@ -3167,7 +3188,7 @@ impl App {
         // Directly below the person search: the other question the reader can
         // ask from the chat list, and the one whose answer is not a person.
         if self.conversation.global_search.is_active() {
-            return self.conversation.global_search.label();
+            return fit_label(self.conversation.global_search.label());
         }
         if self.conversation.search.is_active() {
             return self.conversation.search.label();
@@ -3196,6 +3217,28 @@ impl App {
 
         widgets::input_bar::hint(self).to_owned()
     }
+}
+
+/// Fits a global-search label to [`LABEL_CELLS`], yielding on the echo alone.
+///
+/// Split once at `" — "`: the left is `?` and the echo, the right is every
+/// clause. A clause never yields, because it is the answer; the echo loses its
+/// tail with `…`. A label with no clause is cut as a whole.
+fn fit_label(label: String) -> String {
+    if crate::wrap::columns(&label) <= LABEL_CELLS {
+        return label;
+    }
+
+    let Some((echo, clauses)) = label.split_once(" — ") else {
+        return rows::truncate(&label, LABEL_CELLS);
+    };
+    let room = LABEL_CELLS.saturating_sub(3 + crate::wrap::columns(clauses));
+
+    // `?…` rather than a bare `…`: the query marker says what was cut.
+    if room < 2 {
+        return format!("?… — {clauses}");
+    }
+    format!("{} — {clauses}", rows::truncate(echo, room))
 }
 
 // ---- helpers -----------------------------------------------------------
