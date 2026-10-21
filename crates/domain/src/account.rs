@@ -27,6 +27,17 @@ pub struct Birthday {
     pub year: Option<i32>,
 }
 
+/// A person's profile as a card reads it.
+///
+/// The block flag belongs to the reader's relationship with the person, not to
+/// the person's own account, so it wraps [`Account`] rather than joining its
+/// fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserProfile {
+    pub account: Account,
+    pub blocked: bool,
+}
+
 /// What the account's own profile says.
 ///
 /// Read-only. Two of the fields can never be edited by the person they describe

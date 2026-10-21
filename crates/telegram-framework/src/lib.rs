@@ -82,6 +82,8 @@ pub mod auth;
 #[cfg(feature = "live")]
 pub mod client;
 #[cfg(feature = "live")]
+pub mod contacts;
+#[cfg(feature = "live")]
 pub mod dialogs;
 #[cfg(feature = "live")]
 pub mod history;
@@ -110,7 +112,7 @@ pub use session::{
 };
 
 #[cfg(feature = "live")]
-pub use account::{Account, Birthday};
+pub use account::{Account, Birthday, ReportReason};
 #[cfg(feature = "live")]
 pub use auth::{
     LoginToken, PASSWORD_ATTEMPTS, PasswordToken, Refusal, SignInResult, SignedInUser, classify,

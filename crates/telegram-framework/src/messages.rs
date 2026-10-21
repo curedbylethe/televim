@@ -75,6 +75,7 @@ use grammers_client::message::InputMessage;
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::media::classify_typed;
+use crate::tl;
 use crate::updates::{MessageInfo, message_info};
 
 /// The most characters Telegram accepts in one message.
@@ -381,6 +382,40 @@ impl Client {
         self.flush_session();
 
         tracing::debug!(peer_id, deleted, "deleted messages");
+
+        Ok(())
+    }
+
+    /// Deletes a conversation's history.
+    ///
+    /// `revoke` is the whole difference: `false` clears this account's copy and
+    /// leaves the other side alone, `true` asks Telegram to delete the history
+    /// for both participants. The request carries the peer, unlike
+    /// `messages.deleteMessages`, so it can only name one conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] when the conversation is not in
+    /// the session's peer cache, and [`FrameworkError::Request`] when Telegram
+    /// refuses or the connection fails.
+    pub async fn delete_conversation(
+        &self,
+        peer_id: i64,
+        revoke: bool,
+    ) -> Result<(), FrameworkError> {
+        let Some(peer) = self.peer_ref(peer_id) else {
+            return Err(FrameworkError::UnknownPeer(peer_id));
+        };
+
+        self.invoke(&tl::functions::messages::DeleteHistory {
+            just_clear: false,
+            revoke,
+            peer: peer.into(),
+            max_id: 0,
+            min_date: None,
+            max_date: None,
+        })
+        .await?;
 
         Ok(())
     }

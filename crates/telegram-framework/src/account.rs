@@ -48,6 +48,41 @@ pub struct Birthday {
     pub year: Option<i32>,
 }
 
+/// Why an account is being reported.
+///
+/// The framework cannot depend on `domain`, so it keeps the ten variants the
+/// wire accepts and maps them at the one request that needs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportReason {
+    Spam,
+    Violence,
+    Pornography,
+    ChildAbuse,
+    Other,
+    Copyright,
+    GeoIrrelevant,
+    Fake,
+    IllegalDrugs,
+    PersonalDetails,
+}
+
+impl ReportReason {
+    fn to_tl(self) -> tl::enums::ReportReason {
+        match self {
+            Self::Spam => tl::enums::ReportReason::InputReportReasonSpam,
+            Self::Violence => tl::enums::ReportReason::InputReportReasonViolence,
+            Self::Pornography => tl::enums::ReportReason::InputReportReasonPornography,
+            Self::ChildAbuse => tl::enums::ReportReason::InputReportReasonChildAbuse,
+            Self::Other => tl::enums::ReportReason::InputReportReasonOther,
+            Self::Copyright => tl::enums::ReportReason::InputReportReasonCopyright,
+            Self::GeoIrrelevant => tl::enums::ReportReason::InputReportReasonGeoIrrelevant,
+            Self::Fake => tl::enums::ReportReason::InputReportReasonFake,
+            Self::IllegalDrugs => tl::enums::ReportReason::InputReportReasonIllegalDrugs,
+            Self::PersonalDetails => tl::enums::ReportReason::InputReportReasonPersonalDetails,
+        }
+    }
+}
+
 /// What the account's own profile says.
 ///
 /// The fields are primitives and strings so that a `grammers` type never escapes
@@ -76,6 +111,9 @@ pub struct Account {
 
     /// The account's own online state. `None` when Telegram sent no status.
     pub presence: Option<UserPresence>,
+
+    /// Whether the current account has blocked this person.
+    pub blocked: bool,
 }
 
 impl Client {
@@ -179,6 +217,40 @@ impl Client {
         self.full_user(id, "a contact's").await
     }
 
+    /// Reports a person to Telegram.
+    ///
+    /// The reason is one of the ten the wire accepts. A group or a channel is
+    /// refused before the request: only a person can be reported here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] when the person is not in the
+    /// session's cache, [`FrameworkError::NotAUser`] for a peer that is not a
+    /// person, and the request's error when Telegram refuses.
+    pub async fn report_peer(
+        &self,
+        peer_id: i64,
+        reason: ReportReason,
+        message: &str,
+    ) -> Result<(), FrameworkError> {
+        let peer = self
+            .peer_ref(peer_id)
+            .ok_or(FrameworkError::UnknownPeer(peer_id))?;
+        let input: tl::enums::InputPeer = peer.into();
+        if !matches!(input, tl::enums::InputPeer::User(_)) {
+            return Err(FrameworkError::NotAUser(peer_id));
+        }
+
+        self.invoke(&tl::functions::account::ReportPeer {
+            peer: input,
+            reason: reason.to_tl(),
+            message: message.to_owned(),
+        })
+        .await?;
+
+        Ok(())
+    }
+
     /// The request both profile calls make, with the subject named for the log.
     ///
     /// One body rather than two, because the whole of `users.getFullUser` is the
@@ -260,6 +332,7 @@ fn account_from(response: tl::enums::users::UserFull) -> Option<Account> {
         birthday: birthday(full.birthday.as_ref()),
         bio: text(full.about.as_deref().unwrap_or_default()),
         presence: presence_of(user),
+        blocked: full.blocked,
     })
 }
 

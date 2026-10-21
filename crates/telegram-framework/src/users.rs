@@ -374,7 +374,7 @@ fn top_peers_from(
 /// Telegram answers with `userEmpty` for an account it has nothing to say about,
 /// and one of those is not a person a list can show: it has an identifier and no
 /// name, no username and no `access_hash`. `None` is what keeps it out.
-fn user_from_tl(user: &tl::enums::User) -> Option<ResolvedUser> {
+pub(crate) fn user_from_tl(user: &tl::enums::User) -> Option<ResolvedUser> {
     let tl::enums::User::User(user) = user else {
         return None;
     };
