@@ -83,8 +83,13 @@ pub(crate) struct ViewerDone {
 /// `initial_chat` is the `--chat` id, carried as launch state for STAGE-02 to
 /// select on. Cli-only: it never enters `Config`, the file, or the environment.
 pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Result<()> {
+    // Before anything is opened: which account's bytes this launch uses is the
+    // index's one question, and with no index the answer is the legacy slot —
+    // the layout every install already has, byte for byte.
+    let account = accounts::AccountsIndex::load(&accounts::index_path(config_path))
+        .and_then(|index| index.active_account());
     init_tracing(cfg, config_path);
-    let paths = accounts::slot_paths(config_path, cfg, None);
+    let paths = accounts::slot_paths(config_path, cfg, account);
     build_runtime()?.block_on(run_async(cfg, config_path, &paths, initial_chat))
 }
 
@@ -833,6 +838,9 @@ async fn event_loop(
     // Holds the configuration and this channel, because a sign-out has to rebuild
     // the client and `apply` cannot be handed either.
     let mut network = net::State::new(cfg.clone(), config_path.to_path_buf(), tx.clone());
+    // The slot this launch resolved, and where the index that names it goes:
+    // the loop owns both, and `apply` is handed them from here.
+    network.set_account(paths.slot, accounts::index_path(config_path));
     // And the drafts file, so signing out can remove it.
     network.set_draft_file(draft_file.clone());
     // Opened beside the history file. A directory written for another account,
@@ -857,7 +865,7 @@ async fn event_loop(
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an
     // event, like everything else.
-    net::spawn_bring_up(cfg.clone(), config_path.to_path_buf(), tx.clone());
+    net::spawn_bring_up(cfg.clone(), config_path, paths.slot, tx.clone());
 
     let mut held: VecDeque<AppEvent> = VecDeque::new();
 
