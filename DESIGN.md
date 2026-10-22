@@ -1281,7 +1281,7 @@ prompt still outranks everything. `contacts — {n}` and `archived — {n}` are 
 list labels; a failure is the same line with its reason, so the reader never
 loses the place they were in.
 
-Scenes: `manage` in the engine, twenty-two frames, each reached by the keys a
+Scenes: `manage` in the engine, twenty-one frames, each reached by the keys a
 reader presses: archive and unarchive, the block and unblock questions, a contact
 card with the three action rows, rename from the card and from the command line,
 both delete questions, a report naming its reason, an unknown-reason refusal, and

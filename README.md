@@ -413,7 +413,9 @@ Working today:
   card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
   `:date <ISO>`, `:settings`, `:signin`, `:retry`, `:unlock`, `:passphrase`,
-  `:export-session <path>` and `:import-session <path>`.
+  `:export-session <path>`, `:import-session <path>`, and the eight chat and
+  contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,
+  `:rename [name]`, `:delete-chat [both]`, `:report [reason]`, `:contacts`).
   `:date <ISO>` takes `YYYY-MM-DD` in the reader's own zone and jumps to the
   first message of that day, loading a page when the window does not hold it;
   anything else is refused with `not a date: <argument>`.

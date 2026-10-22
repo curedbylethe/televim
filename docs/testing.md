@@ -136,13 +136,24 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   the subject and direction captured, `y` queues exactly that action and `n`
   changes nothing, bare `:rename` clears while a name queues
   `SetLocalName`, and an unknown report reason is refused before any question.
-  The contact card's three action rows and `d` dispatch are covered in
-  `tui/src/card.rs` with the same `App::mock` and `TestBackend` harness the
-  other card rows use. The app side — archive moving a chat out of the visible
-  list, a local name surviving a refetch and a save/load, a deletion removing
-  the row, cache, draft, alias and per-chat media keys, and the block/report
-  status sentences — is in `app/src/net.rs` and `app/src/history_store.rs`
-  over `State` with no client.
+  A command typed on a contact's card acts on that person, not on the
+  highlighted chat (`a_command_typed_on_a_card_…`), and the card's `rename` row
+  prefills the name. The contact card's three action rows and `d` dispatch are
+  covered in `tui/src/card.rs` with the same `App::mock` and `TestBackend`
+  harness the other card rows use, and the two overlays draw in
+  `tui/src/widgets/{contact_list,archived_list}.rs`. Local names, the
+  archive moving a chat, and a deletion forgetting the row, draft, alias and
+  card — the alias refetch, the archived double-apply, the unarchive highlight
+  — are `App` tests in `tui/src/app/tests.rs` and `tui/src/state/chat_list.rs`.
+  The app side — the block, report and delete status sentences, a refused
+  action changing nothing, a rename the file cannot hold reaching the reader
+  as `rename: could not save — …`, and the per-chat media keys going with a
+  deleted conversation — is in `app/src/net.rs` and `app/src/media_cache.rs`
+  over `State` with no client, and the alias save/load is in
+  `app/src/history_store.rs`. The wire is held in
+  `telegram-framework`: `delete_history_request` (`revoke` true and false),
+  `archived_from` (a user, a group, a message, the seeded peers and the pinned
+  order) and the ten report reasons.
 
 - **History cache:** two layers, both on every job and neither needing a
   client. The **store** (`app/src/history_store.rs`) is pure functions over
