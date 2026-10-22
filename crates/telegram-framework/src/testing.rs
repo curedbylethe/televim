@@ -232,9 +232,9 @@ pub(crate) fn attribute_sticker() -> tl::enums::DocumentAttribute {
 
 /// Builds a document's media whose record carries `mime`.
 ///
-/// The classification reads attributes rather than the mime, but the wire says
-/// what the file is, and a fixture that names the format is the one a later
-/// reader of these tests will recognise.
+/// The mime is what splits an animated sticker from a static one; every other
+/// kind is read from attributes, but the wire says what the file is, and a
+/// fixture that names the format is the one a later reader will recognise.
 pub(crate) fn media_document_with_mime(
     attributes: Vec<tl::enums::DocumentAttribute>,
     voice: bool,
@@ -249,11 +249,11 @@ pub(crate) fn media_document_with_mime(
     media
 }
 
-/// Builds an animated sticker: the sticker attribute and the animation, which
-/// is what makes it one rather than a GIF. Telegram sends a TGS in this mime.
+/// Builds an animated sticker as Telegram sends a TGS: the sticker attribute and
+/// the TGS mime, with no animation attribute — the mime is what makes it one.
 pub(crate) fn media_animated_sticker() -> tl::enums::MessageMedia {
     media_document_with_mime(
-        vec![attribute_sticker(), tl::enums::DocumentAttribute::Animated],
+        vec![attribute_sticker()],
         false,
         "application/x-tgsticker",
     )

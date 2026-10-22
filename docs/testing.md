@@ -274,7 +274,8 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   counting test double stands in for `download_media`, so inline drains and
   settles while `off` performs zero traffic. An animated sticker is pinned on
   both sides of the seam: `classify_raw` and `classify_typed` agree on
-  `AnimatedSticker` for a TGS and for a WebM, the widget table draws
+  `AnimatedSticker` for a TGS (sticker attribute and mime, no animation bit, as
+  Telegram sends it) and for a WebM, the widget table draws
   `[animated sticker]` with no block and no pending fetch, `o` queues its open,
   `viewer_spec` gives it the generic viewer rather than the image or video key,
   and the media cache names its file `.tgs`, `.webm` or `.bin` from the magic
