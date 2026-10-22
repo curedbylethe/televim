@@ -237,6 +237,29 @@ mod tests {
     }
 
     #[test]
+    fn reinstall_keeps_the_highlight_on_the_chat_not_on_its_row() {
+        let mut state = ChatListState::new();
+        state.install(vec![chat(20, false), chat(30, false), chat(10, false)]);
+        state.select(0);
+
+        assert!(
+            state.reinstall(vec![chat(30, false), chat(10, false), chat(20, false)], 20),
+            "the wanted chat is still in the list"
+        );
+        assert_eq!(
+            state.selected_chat, 2,
+            "the same chat moved from row 0 to row 2, and its id, not its old row, selects"
+        );
+        assert_eq!(state.list.chats[state.selected_chat].id, 20);
+
+        assert!(
+            !state.reinstall(vec![chat(30, false), chat(50, false)], 20),
+            "an absent chat says so, so the caller can say where the reader landed"
+        );
+        assert_eq!(state.selected_chat, 0, "and the highlight falls to the top");
+    }
+
+    #[test]
     fn unarchiving_keeps_the_highlight_on_the_chat_it_was_on() {
         let mut state = ChatListState::new();
         let dated = |id: i64, at: i64| Chat {
