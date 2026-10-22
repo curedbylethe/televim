@@ -3,9 +3,9 @@
 - `rustfmt.toml` and `clippy.toml` are canonical in themselves; this file does
   not reproduce them.
 - `Makefile` — `make ci` is the local gate. CI's `lint` job runs the first
-  five targets on every push and pull request; its `release` job runs
-  `build-release` and the memory budget, on the paths the CI Pipeline section
-  names.
+  five targets on every push and pull request that changes code; a docs-only
+  change runs only `design-check`. Its `release` job runs `build-release` and
+  the memory budget, on the paths the CI Pipeline section names.
 
 ## The `Makefile`
 
@@ -31,10 +31,29 @@
 
 ## CI Pipeline
 
-`.github/workflows/ci.yml` runs two jobs on `ubuntu-latest`. The `lint` job runs
-on every push and pull request. The `release` job is gated at the job level to a
-push to `main`, the nightly schedule, and a pull request labelled `memory`; an
-ordinary pull request does not start it.
+`.github/workflows/ci.yml` runs three jobs on `ubuntu-latest`. `changes`
+classifies the diff and is what the other two wait on. `lint` runs on every push
+and pull request. `release` is gated at the job level to a push to `main`, the
+nightly schedule, and a pull request labelled `memory`; an ordinary pull request
+does not start it.
+
+Two trigger rules sit above the jobs:
+
+- **Concurrency.** The workflow's `concurrency` group is
+  `${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true`, so
+  a second push to a branch — or a new commit on an open pull request — cancels
+  the run before it rather than paying for two cold caches. Runs on different
+  refs never cancel each other. The nightly run shares `refs/heads/main` with a
+  push to `main`, so either can cancel the other.
+- **Docs-only.** `changes` diffs the pushed commits, or a pull request's base
+  against its merge commit, and answers `rust=false` when every changed path
+  ends `.md` or starts `docs/`. `lint` then skips everything that needs Rust —
+  toolchain, system packages, cache, `fmt`, `clippy`, `boundary`, `test` and the
+  PTY upload — and runs only `make design-check`; the `release` job does not
+  start. The job still reports, so a docs-only pull request leaves no required
+  status pending. A diff that cannot be computed — a new branch's first push, a
+  force-push that outran the clone, a scheduled run — is classified as code, so
+  a tree nobody inspected still gets the full gate.
 
 The `lint` job, in the order the workflow runs it:
 
@@ -66,9 +85,9 @@ dependencies and the cache — then runs:
    with `if: always()` and `if-no-files-found: warn`, so a failed comparison
    still carries the numbers that explain it.
 
-One `if:` expression sits at the job level, which is why the `release` job runs
-on exactly three paths — a push to `main`, the nightly `17 3 * * *` schedule,
-and a pull request labelled `memory`. A scheduled run runs both jobs.
+The `release` job carries the second job-level `if:`: on top of the path
+condition it requires `changes` to have answered `rust=true`, so a docs-only
+push to `main` does not spend a release build. A scheduled run runs every job.
 
 The PTY upload is step 5 because `termlens` writes a screen only when an error
 carries one (a failed wait, EOF, emulator or write error); a green run produces
@@ -89,8 +108,8 @@ for the host `check.py` prints "not enforced" and exits zero. The `release`
 job is a recording run today, and enforcement begins when a `linux-x86_64`
 baseline is committed.
 
-An ordinary pull request runs the `lint` job's steps and nothing else; the
-`release` job carries the release build and the budget.
+An ordinary pull request runs `changes` and the `lint` job's steps, and nothing
+else; the `release` job carries the release build and the budget.
 
 `libdbus-1-dev` and `pkg-config` are installed first in both jobs, because
 `keyring`'s Linux backend links against DBus at build time.
