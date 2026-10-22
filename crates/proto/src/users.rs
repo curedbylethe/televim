@@ -101,16 +101,15 @@ impl crate::ProtoClient {
         Ok(users.into_iter().map(to_candidate).collect())
     }
 
-    /// Lists the people the account talks to most, highest-rated first.
+    /// Lists the account's contacts, in the order Telegram keeps them.
     ///
-    /// The list is one page of [`TOP_PEERS_LIMIT`] people, and Telegram's rating
-    /// is the order: a caller does not sort it.
+    /// The whole list in one call, not a page: `contacts.getContacts` is
+    /// unpaginated, and a caller does not sort it.
     ///
     /// # Errors
     ///
-    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) on the
-    /// same failures as `resolve_user`, and when the account has top peers
-    /// switched off.
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) when
+    /// Telegram refuses or the answer cannot be decoded.
     pub async fn fetch_contacts(
         &self,
     ) -> Result<Vec<domain::user::UserCandidate>, crate::ProtoError> {
@@ -131,6 +130,16 @@ impl crate::ProtoClient {
         Ok(())
     }
 
+    /// Lists the people the account talks to most, highest-rated first.
+    ///
+    /// The list is one page of [`TOP_PEERS_LIMIT`] people, and Telegram's rating
+    /// is the order: a caller does not sort it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) on the
+    /// same failures as `resolve_user`, and when the account has top peers
+    /// switched off.
     pub async fn top_peers(&self) -> Result<Vec<domain::user::UserCandidate>, crate::ProtoError> {
         let users = self
             .inner()
