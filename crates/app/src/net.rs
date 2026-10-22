@@ -331,6 +331,13 @@ pub enum Event {
         result: Result<(), ProtoError>,
     },
 
+    /// The history file took the local names renamed since its last write, or
+    /// could not hold them.
+    ///
+    /// Only the outcome: the name is already on screen, and only a failure has
+    /// anything to say.
+    LocalNameSaved { result: Result<(), String> },
+
     /// A conversation deletion came back, or the request failed.
     ConversationDeleted {
         chat_id: i64,
@@ -1024,6 +1031,9 @@ impl State {
         }
 
         self.cached.dirty = false;
+        let report = std::mem::take(&mut self.cached.rename_pending)
+            .then(|| self.tx.clone())
+            .flatten();
         let mut tag = self.cached.tag.clone();
         if tag.account_id.is_none() && tag.phone.is_none() {
             tag.phone = self.cfg.as_ref().and_then(|cfg| cfg.phone.clone());
@@ -1031,7 +1041,14 @@ impl State {
         let Some(bytes) = HistoryFile::encode(&self.cached.messages, &tag) else {
             return;
         };
-        self.cached.write = Some(tokio::task::spawn_blocking(move || file.write(&bytes)));
+        self.cached.write = Some(tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || file.try_write(&bytes))
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()));
+            if let Some(tx) = report {
+                let _ = tx.send(AppEvent::Net(Event::LocalNameSaved { result }));
+            }
+        }));
         self.cached.last_write = now.or(self.cached.last_write);
     }
 
@@ -1059,6 +1076,7 @@ impl State {
         self.cached.messages = HistoryCache::default();
         self.cached.tag = HistoryTag::default();
         self.cached.dirty = false;
+        self.cached.rename_pending = false;
         let Some(file) = self.history_file.clone() else {
             return;
         };
@@ -1131,6 +1149,10 @@ struct CachedHistory {
     /// sign-out's removal waits behind it too — or the write would put back
     /// the file the sign-out had just removed.
     write: Option<tokio::task::JoinHandle<()>>,
+
+    /// Whether a rename is waiting for the next write, whose outcome is owed
+    /// to the reader as [`Event::LocalNameSaved`].
+    rename_pending: bool,
 
     /// When the last write was started, for [`HISTORY_CACHE_WRITE_INTERVAL`].
     /// `None` until the first, which therefore starts at once.
@@ -1588,8 +1610,17 @@ fn run_local_name_actions(app: &mut App, state: &mut State) {
         app.set_local_name(peer_id, name.as_deref());
         if state.cached.messages.set_alias(peer_id, name.as_deref()) {
             state.cached.dirty = true;
+            state.cached.rename_pending = true;
+            if state.history_file.is_none() {
+                app.flash(rename_not_saved("no history file"));
+            }
         }
     }
+}
+
+/// The sentence for a rename the file did not take.
+fn rename_not_saved(reason: &str) -> String {
+    format!("rename: could not save — {reason}")
 }
 
 /// Holds a typed passphrase for this process and brings the client up again on it.
@@ -1985,7 +2016,8 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // after the reader backs out of it asks again.
     let arrived = !card_covers_conversation(app) && state.read_owed.take().is_some();
     // Before the client is looked up, like the retry: these touch the stored
-    // session and nothing else, and no client is the state a reader needs them in.
+    // session and the history file, and no client is the state a reader needs
+    // them in.
     run_session_actions(app, state);
     run_local_name_actions(app, state);
     let Some(client) = state.client.clone() else {
@@ -3137,6 +3169,13 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             }
             Err(error) => app.flash(format!("block: {}", failure_reason(&error))),
         },
+
+        // A successful save is silent: the title is already changed on screen.
+        Event::LocalNameSaved { result } => {
+            if let Err(reason) = result {
+                app.flash(rename_not_saved(&reason));
+            }
+        }
 
         Event::ConversationDeleted {
             chat_id,
@@ -12449,6 +12488,68 @@ mod action_status_tests {
 
         assert_eq!(app.ui.status, "reported chat-7 as spam");
     }
+    #[test]
+    fn a_rename_the_file_cannot_hold_is_said_and_a_saved_one_is_silent() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::LocalNameSaved { result: Ok(()) },
+        );
+        assert_eq!(app.ui.status, "televim");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::LocalNameSaved {
+                result: Err("disk full".to_owned()),
+            },
+        );
+        assert_eq!(app.ui.status, "rename: could not save — disk full");
+    }
+
+    #[test]
+    fn a_rename_with_no_history_file_says_so_at_once() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        let mut state = State::default();
+        for key in ":rename Ada".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(key)));
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+
+        run_local_name_actions(&mut app, &mut state);
+
+        assert_eq!(app.ui.status, "rename: could not save — no history file");
+    }
+
+    #[tokio::test]
+    async fn a_rename_the_write_refuses_comes_back_as_an_event() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").expect("a plain file");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            tx: Some(tx),
+            ..State::default()
+        };
+        state.set_history_file(HistoryFile::for_test(blocker.join("televim.history.json")));
+        assert!(state.cached.messages.set_alias(CHAT, Some("Ada")));
+        state.cached.dirty = true;
+        state.cached.rename_pending = true;
+
+        state.finish_history(&[]).await;
+
+        let Some(AppEvent::Net(Event::LocalNameSaved { result })) = rx.recv().await else {
+            panic!("the refused write reports the rename");
+        };
+        assert!(result.is_err(), "{result:?}");
+    }
+
     #[test]
     fn the_contacts_answer_teaches_an_alias_the_name_a_clear_brings_back() {
         let mut app = App::new();
