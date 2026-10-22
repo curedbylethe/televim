@@ -9552,3 +9552,44 @@ fn deleting_the_last_archived_chat_closes_the_archive() {
     assert!(!app.list.archived_is_open());
 }
 
+#[test]
+fn an_archived_alias_is_not_taken_for_the_server_title_on_a_second_pass() {
+    let mut app = App::mock();
+    let mut archived = vec![app.chats()[1].clone()];
+    let id = archived[0].id;
+    let server = archived[0].title.clone();
+    app.local_names.insert(
+        id,
+        LocalName {
+            text: "Ada".to_owned(),
+            server: server.clone(),
+        },
+    );
+
+    app.apply_local_names(&mut archived);
+    app.set_archived_chats(archived);
+
+    assert_eq!(app.local_names[&id].server, server);
+    assert_eq!(app.list.archived[0].title, "Ada");
+}
+
+#[test]
+fn clearing_the_alias_of_a_person_with_no_server_name_does_not_blank_the_card() {
+    let mut app = App::mock();
+    card_of_a_stranger(&mut app);
+    "Countess".clone_into(&mut app.profile.contact.as_mut().expect("a card is open").name);
+    app.local_names.insert(
+        99,
+        LocalName {
+            text: "Countess".to_owned(),
+            server: String::new(),
+        },
+    );
+
+    app.set_local_name(99, None);
+
+    assert_eq!(
+        app.profile.contact.as_ref().map(|c| c.name.as_str()),
+        Some("Countess")
+    );
+}
