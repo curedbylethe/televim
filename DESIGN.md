@@ -296,11 +296,11 @@ Notes, because they are the answers to questions a reader will have:
   reconcile it with the first, so both are named deliberately and neither is
   renamed to match. The list's row is 66 of 71 with `A:card` and `S:you` in it.
 - **The two card rows differ because their rows differ.** The self card names
-  `d`, because it has two rows that act, and names `y` but not `yy`. A contact's
-  card names `y/yy`, because that card is read and `yy` is the verb worth
-  teaching, and it does not name `d` at all. Each names only keys its own card
-  answers: a key named on a card that does not answer it tells the reader the key
-  is wrong rather than that it is not shown.
+  `d`, because rows on it act — the accounts this machine knows, `add account` and
+  `logout` — and names `y` but not `yy`. A contact's card names `y/yy`, because that
+  card is read and `yy` is the verb worth teaching, and it does not name `d` at all.
+  Each names only keys its own card answers: a key named on a card that does not
+  answer it tells the reader the key is wrong rather than that it is not shown.
 - **`gg` and `G` are in the line's hint because the editor has neither.** A key
   the line answers with nothing else on screen naming it is a key the hint exists
   for.
@@ -568,6 +568,8 @@ code.
 | `renamed {name}` `local name cleared` | a local name was set, or cleared back to the peer's name | `:rename` |
 | `deleted {name}` `deleted {name} for both sides` | the conversation is gone | `delete-chat` |
 | `reported {name} as {reason}` | the report was accepted | `:report` |
+| `newest` | a switch landed at the newest message, because message ids are the account's own sequence and no cursor crosses | the switch's status |
+| `that account has no chat with this person` | a switch landed where the new account has no such chat: the conversation closes and the first row is selected | ditto |
 | `contacts — {n}` `archived — {n}` | an open list and how many it holds | `contacts`, `archived` |
 | `contacts — searching…` | the contacts fetch is in flight; the previous list stays on show | `ContactListState::label` |
 | `contacts: {reason}` | the contacts fetch failed; the previous list stays on show | ditto |
@@ -593,6 +595,9 @@ code.
 | `Profile · you` `Profile · Ada Lovelace` | a card's title; the `(n/m)` is the row the cursor is on, counting drawn rows (the reserved colour slot is not one) and appearing only when rows exist | `cardTitle` |
 | `Profile · you` | the account's two shells too, signed out and nothing read yet: the subject is named in every state, with no count | `cardTitle` |
 | `· name        Noor Haddad` | a card row: the cue, the label, the value | `CUE` |
+| `· active      +44 7700 900142` | an account this machine knows, and the one signed in: the state in the label column, the account in the value column, and no ink carries the meaning | `card.rs` |
+| `· switch      account 99318847` | another account on this machine, which `d` switches to; the value is the phone the index kept, or `account <id>` when it kept none | ditto |
+| `already signed in as +44 7700 900142` | `d` on the active account's row: it says where the reader already is, and asks nothing | the card |
 | `not signed in` | the shell card's first line, then the reason, wrapped | `NOT_SIGNED_IN` |
 | `reading the account…` | the account's shell **before anything has been read**: one dim line, and nothing more; it does not borrow the other one's wording | `READING` |
 | `reading their profile…` | the contact card **before their profile has been read**: one dim line, and no rows | `CONTACT_READING` |
@@ -1223,8 +1228,9 @@ person with no conversation is refused with `nothing to act on: highlight a
 chat, open a conversation, or open a card`. The line opens over the card, so
 the card stays the subject until the command has run. On a contact's card `d`
 acts only on `rename`, `block`/`unblock` and `report`; on the self card only on
-`add account` and `logout`. On a value row of either card it is dropped without a
-sentence.
+the accounts this machine knows (`switch` switches, `active` says where the
+reader already is), `add account` and `logout`. On a value row of either card it
+is dropped without a sentence.
 
 **Archive is a place, not a deletion.** The chat leaves the visible column and
 is kept in the archive folder. `:archived` draws a small bordered list over the
@@ -1287,13 +1293,13 @@ the contacts list with a person who has no chat.
 the model's `archiveChat` leaves the conversation open where the build closes it;
 its unarchive splices the chat back at the index it remembered where the build
 puts it in the list's own order; an empty `:archived` opens in the model where
-the build refuses it with `archived — 0`; and while a list is up the model
+the build refuses it with `archived — 0`; while a list is up the model
 draws its key help (`j/k: contact  ⏎: card  Esc: close`, and the archive's
 equivalent) on the status row where the build draws the label, `contacts — {n}`
-or `archived — {n}`, because an open list owns that row; and `d` on a value row
-of the self card, which the model refuses with `Not a row that acts: add account
-and logout are the two.` and the build drops. The frames show the model's
-behaviour in those five, and the build's is the one this document
+or `archived — {n}`, because an open list owns that row; and a switch in the
+model finds the carried chat by the correspondent's name where the build finds
+it by peer id, because the model's chats have no ids. The frames show the
+model's behaviour in those five, and the build's is the one this document
 describes.
 
 ## Components
@@ -1383,8 +1389,9 @@ regressing.
    States: the self card, a contact's card, the selection row, the inline position,
    a charwise selection, a selection of rows, a value wrapped over rows, a row
    the peer did not give (absent, not empty), a dim action row, a reserved slot
-   drawn as nothing, and the four shell states (not signed in, nothing read yet, and
-   the contact's not-read-yet and read-failed).
+   drawn as nothing, the accounts this machine knows (the `active` row, a `switch`
+   row, an account the index kept no number for), and the four shell states (not
+   signed in, nothing read yet, and the contact's not-read-yet and read-failed).
    What would catch it regressing: the selection row is reverse video and the
    normal caret *on it* is the ground colour, so the reader can always see where
    the cursor is; and the title's `(n/m)` counts the rows the peer gave, so a
@@ -1468,11 +1475,11 @@ person.
 
 What differs between "my profile" and "someone else's profile" is then a
 **capability** question, not a layout question: *does this row have a home on this
-card?* The self card has two rows that act; a contact's card has the three
-actions that have no home in a conversation or a chat-list key — rename, block
-and report. Reply, search and delete stay in the conversation, so the card does
-not repeat them. Nothing else about the two cards differs, and neither is a new
-widget.
+card?* The self card acts on the accounts this machine knows, on `add account`
+and on `logout`; a contact's card has the three actions that have no home in a
+conversation or a chat-list key — rename, block and report. Reply, search and
+delete stay in the conversation, so the card does not repeat them. Nothing else
+about the two cards differs, and neither is a new widget.
 
 ### The row
 
@@ -1485,14 +1492,16 @@ columns. The conversation writes a word; a card writes one cell.
 | Kind | Draws | Answers |
 | :--- | :---- | :------ |
 | value | the label in `text-dim`, the value in `text`, wrapped at the value column | `h`/`l` inline, `v`, `y`, `yy` |
-| action | the label alone, dim | `d` on either card; the contact rows are `rename`, `block`/`unblock` and `report` |
+| action | the label, then its value where the row has one — an account row's number — dim | `d` on either card; the self card's are its account rows, `add account` and `logout`, a contact's are `rename`, `block`/`unblock` and `report` |
 | reserved | nothing | nothing: the colour slot, held and not drawn |
 
-**A row exists only when the peer says something.** An empty bio, a missing
-username and a birthday their privacy hides are all one case: the row is absent,
-not empty. That is why a contact's birthday row is usually missing, and why the
-panel must never draw a label with nothing beside it — an empty field and an
-absent field would look the same, and only one of them is true.
+**A row exists only when there is something to say.** A value row exists when the
+peer says something: an empty bio, a missing username and a birthday their privacy
+hides are all one case, and the row is absent, not empty. That is why a contact's
+birthday row is usually missing, and why the panel must never draw a label with
+nothing beside it — an empty field and an absent field would look the same, and
+only one of them is true. An account row is the same rule with another source: it
+exists because the index holds that account.
 
 **The bio wraps and is never truncated with an ellipsis.** A value that does not
 fit the panel is the panel's problem, and an ellipsis on a value the reader came
@@ -1506,9 +1515,9 @@ inside a row and cannot be seen is one nobody knows.
 
 ### The self card
 
-Rows, in order: `name`; `username`; `bio`; `birthday`; `id`; `session`; then
-`add account`, which puts the sign-in back at the phone step, and `logout`, which
-signs out.
+Rows, in order: `name`; `username`; `bio`; `birthday`; `id`; `session`; then one
+row per account this machine knows; then `add account`, which puts the sign-in
+back at the phone step, and `logout`, which signs out.
 
 - `username` is the row's label, as in the binary's card; its value is the joined
   identity, `@username` and the phone number with ` · `
@@ -1533,12 +1542,58 @@ signs out.
   the list empties, and the sign-in field comes back for the phone. The
   confirmation outranks a transient status and both are the same row.
 
+**The account rows are the picker, and there is one row per account.** Not one
+`accounts` row that expands: the card does not scroll (`zz`, `zt` and `zb` are
+no-ops) and its body is twenty-two lines, which holds a handful of accounts above
+the profile rows without dropping one — so the flat list costs no state, no
+opening key and no second shape. An expanding row would be the only row on either
+card that `⏎` opened: a new kind of row bought for a list that already fits. A
+machine with one account draws none of these rows at all — its number is already
+in `username`, and a list of one is not a picker.
+
+- **The state is the label and the account is the value.** `active` on the
+  signed-in one, `switch` on the others, named by what `d` does as `block`,
+  `unblock` and `report` are. The account is in the value column because the label
+  column is eleven cells and `+44 7700 900142` is fifteen: a number cut to eleven
+  cannot tell two accounts apart. **The marker is a word, not an ink** — the card's
+  only colour is the selection row's reverse video, so `active` has to read in a
+  terminal that draws one colour and in a plain copy of the frame. It is not a
+  prefix inside the value either: the value is what `yy` puts in the register, and
+  a marker in it would be yanked along with the number.
+- **The row carries its account.** The id travels with the drawn row and not
+  with its position, so `d` acts on the account the reader pressed and a card
+  built from a list that changed underneath it cannot switch to the row beside
+  that one. This is the chat list's rule — by id, never by index — applied to a
+  row.
+- **The value is the phone the index kept, else `account <id>`.** Never a name and
+  never a profile read: the listing is offline by construction, and a name here
+  would be a read of another account's session. An older entry with no number
+  still appears, because the id is what the index does hold.
+- **`d` on `switch` switches; `d` on `active` says so and asks nothing.** A switch
+  is reversible and destroys nothing, so it raises no question: the client
+  detaches, the target's slot comes up, and the reader lands in the same
+  conversation under the new account, at its newest message — no cursor crosses,
+  because message ids are the account's own sequence, and the status says `newest`
+  once. The active row answers with `already signed in as {value}`, naming the row
+  that was pressed, and nothing else happens.
+- **`add account` stays, and is the last of the account rows.** It is the way to an
+  account this machine does not know yet, so it must not be reachable only through
+  a picker that cannot list it; `logout` stays last of all, below it.
+- **A row carries no sign of whether its session still loads.** The card cannot
+  know without opening the very store it is offering to switch to, and the listing
+  is offline by construction; a marker that is sometimes wrong is worse than no
+  marker. `d` on such a row lands on the sign-in view for that account — the
+  account is known, its session is not — and `Esc` brings the previous account
+  back.
+
 ### A contact's card
 
 Rows, in order: `name`; the reserved colour slot; `username`; `bio`; `birthday`,
 each only when the peer gives one; then the three action rows `rename`,
 `block`/`unblock` and `report`. **No phone**: a client cannot ask a contact
-for their number. No `add account`, no `logout`, no birthday-forcing. The colour
+for their number. No `add account`, no `logout`, and no account rows — the
+accounts this machine knows are the self card's, and a person is not one of them.
+No birthday-forcing. The colour
 slot sits immediately after `name` and not lower, because it is the name's own
 property — the thing that backs the name in the chat list and inks `[them]` in a
 conversation — so it belongs beside the row it qualifies, not under the rows that
@@ -1626,7 +1681,7 @@ Every key, with the reason beside it, judged against what Vim itself does.
 | `h` `l` | **inline**, within the row's text | exactly as a message moves within its text. The value is one logical line, so these are single-cell motions and the wrap is only how it is drawn. |
 | `v` | charwise selection, extended by `j`/`k` to become a selection of *rows* | a set, not a range of characters: the same distinction the conversation makes |
 | `y` / `yy` | the selection, or the row's whole value | `y` is an operator and `yy` is linewise, which is what Vim means by them. With a selection up, `y` acts at once, as it does in Visual. |
-| `d` | acts on an action row: the self card's two, or a contact's `rename`, `block`/`unblock` and `report` | `d` is the conversation's act; here it acts on the row the cursor is on, and a value row is not an action |
+| `d` | acts on an action row: the self card's account rows (`switch` switches, `active` says where the reader already is), `add account` and `logout`, or a contact's `rename`, `block`/`unblock` and `report` | `d` is the conversation's act; here it acts on the row the cursor is on, and a value row is not an action |
 | `e` | refuses | the editable profile is a separate screen, and the refusal names it: `:settings` |
 | `p` | **unbound, and says why in the hint area** | there is no buffer in a card to paste into, and a bound key that cannot work is worse than an absent one. The reason is written to the status row, which is the row the hint is on. |
 | `zz` `zt` `zb` | no-ops | a card cannot scroll, and pretending it can is a lie about state. The key is dropped rather than answered with motion that moves nothing. |
@@ -1645,8 +1700,8 @@ shape under it:
   `Ctrl-w` mean what it always meant.
 - **`/` on a card hands the search to the conversation.** A search whose scope
   depends on which pane the reader happens to be standing in is a search the
-  reader has to stop and think about, and a card is a handful of rows — seven at
-  its longest — with nothing in it worth a second scope. So `/` is the
+  reader has to stop and think about, and a card is a handful of rows, with
+  nothing in it worth a second scope. So `/` is the
   conversation's key wherever it is pressed: a card borrows the conversation's
   search rather than growing one of its own, and the hits are drawn where the
   search lives.

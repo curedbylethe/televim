@@ -23,9 +23,9 @@
     lvisual: ' y: yank  d: cut  Esc: back',
     settings: ' e/Enter: edit  j/k: field  Esc/Tab/Ctrl+w: leave',
     /* the two cards differ because their rows differ: both act now — the self card on its
-       two rows, a contact's on its three — and only the contact's has a yy worth teaching.
-       A key named on a card that does not answer it tells the reader the key is wrong, so
-       neither names the other's. */
+       account rows, `add account` and `logout`, a contact's on its three — and only the
+       contact's has a yy worth teaching. A key named on a card that does not answer it tells
+       the reader the key is wrong, so neither names the other's. */
     cardSelf: ' j/k: row  h/l: within  v: vis  y: yank  d: act  Esc: back',
     cardContact: ' j/k: row  h/l: within  v: vis  y/yy: yank  d: act  Esc: back',
     cardSignedOut: ' ::signin  q:quit',
@@ -637,6 +637,21 @@
     ];
   }
 
+  /* The second account's list: one correspondent it shares with the first, and its own
+     messages. Two accounts never share a message — the whole point of a switch is that what
+     is drawn afterwards belongs to the new account — so this is its own list and not a slice
+     of the first one's. The shared name is what a carried place has to find by peer, which is
+     why it is Ada and not a fourth person. */
+  function makeSecondChats() {
+    const t = (text, o) => Object.assign({ from: 'them', text }, o || {});
+    const y = (text, o) => Object.assign({ from: 'you', text }, o || {});
+    return [{ name: 'Ada Lovelace', unread: 1, top: 0, cur: 2, msgs: [
+      t('You sent that to my other account.', { at: at(0, '21:20') }),
+      y('No harm. I have it here now.', { at: at(0, '21:22'), rcpt: 'read' }),
+      t('Then the tickets are yours on Friday.', { at: at(0, '21:24') })
+    ] }];
+  }
+
   /* MediaKind::label. A media message with no caption has this as its whole `text` (so search, yank
      and reply read it like any text) and `ph` marks it as the program's wording rather than the
      sender's; a caption replaces it and clears `ph`. */
@@ -710,6 +725,12 @@
          key is the name the peer gave rather than the one the reader sees. */
       local: {}, blocked: {},
       contacts: null, archived: { items: [], sel: 0 },
+      /* The accounts this machine knows, as the index holds them: an id, the phone the
+         index kept (an older entry may have none), which one is signed in, and — for the
+         model only — that account's own profile and list, since a switch draws the new
+         account's screen and never the old account's. Empty means one account, and one
+         account is not a picker: the card then draws no account rows at all. */
+      accounts: [],
       bidi: BIDI_MODES.includes(bidi) ? bidi : 'terminal',
       profile: { name: 'Noor Haddad', id: '1480276305', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
     };
@@ -723,6 +744,18 @@
     else if (view === 'signedout' || view === 'reading') beginShell(s, view);
     else if (view === 'contactReading') beginContactShell(s, 'personReading');
     else if (view === 'contactFailed') beginContactShell(s, 'personFailed');
+    /* two accounts on this machine: the one signed in, and an older entry the index kept
+       without its number. The older one's session is live, so `d` on it switches; the
+       fallback label is the case the index's own data decides (see accountLabel). */
+    else if (view === 'accounts') {
+      s.accounts = [
+        { id: s.profile.id, phone: s.profile.phone, active: true, chats: s.chats, profile: s.profile },
+        { id: '99318847', phone: '', active: false, chats: makeSecondChats(), profile: {
+          name: 'Yusuf Adeyemi', id: '99318847', username: 'yusufa', bio: 'Cats, canals, and the early shift.',
+          phone: '+90 532 000 0000', birthday: 'Mar 4, 1990 (36 years old)'
+        } }
+      ];
+    }
     /* no read tracking in the model: the start names Ada's first unread message, outside the window
        (93, a page away) or inside it (104) */
     else if (view === 'unreadFar') s.chats[0].firstUnread = 93;
@@ -2155,6 +2188,10 @@
   }
 
   /* ---------- the profile card: one widget, two subjects ---------- */
+  /* what an account row says in its value column: the phone the index kept, else the id it
+     kept. Never a name, and never a profile read: the list is offline by construction, and a
+     name here would be a read of another account's session. */
+  const accountLabel = (a) => a.phone || 'account ' + a.id;
   function cardRows(s) {
     const C = s.card;
     if (!C) return [];
@@ -2167,6 +2204,19 @@
       if (P.birthday) rows.push({ kind: 'value', label: 'birthday', value: P.birthday });
       /* the session sits in the OS keyring; the encrypted file is the passphrase scenes' fallback */
       rows.push({ kind: 'value', label: 'id', value: P.id }, { kind: 'value', label: 'session', value: 'OS keyring' });
+      /* The accounts this machine knows, one row each, and only when there is more than one:
+         a list of one is not a picker, and the signed-in account's number is already in the
+         `username` row. The label column is eleven cells and a number is fifteen, so what the
+         row is for goes in the label and the account itself in the value, where every value
+         on either card goes. `active`/`switch` is a word and not an ink: the card's only
+         colour is the selection row's reverse video, and a mark carried by colour alone is a
+         mark half the terminals cannot show. */
+      if (s.accounts.length > 1) {
+        s.accounts.forEach((a) => rows.push({
+          kind: 'action', label: a.active ? 'active' : 'switch', value: accountLabel(a),
+          act: a.active ? 'active' : 'switch', acct: a.id
+        }));
+      }
       rows.push({ kind: 'action', label: 'add account', act: 'add' }, { kind: 'action', label: 'logout', act: 'logout' });
       return rows;
     }
@@ -2243,7 +2293,9 @@
     const lines = [];
     rows.forEach((r, i) => {
       if (r.kind === 'colour') return;   /* the reserved slot draws nothing */
-      const segs = r.kind === 'value' ? wrap(r.value, VAL_W, VAL_W, true) : [null];
+      /* a value row always has its value; an action row has one only when the row carries
+         something to read — an account row's number — and draws it in the row's own ink. */
+      const segs = (r.kind === 'value' || r.value) ? wrap(r.value || '', VAL_W, VAL_W, true) : [null];
       segs.forEach((seg, li) => lines.push({ r, i, seg, li }));
     });
     lines.slice(0, h - 2).forEach((ln, k) => {
@@ -2260,9 +2312,11 @@
         put(g, x0 + LAB_X, y, trunc(ln.r.label, LAB_W), ink);
       }
       if (!ln.seg) return;
+      /* a value is body ink and an action is dim, whether or not the cursor is on it */
+      const vink = ln.r.kind === 'value' ? 't' + mod : (cur && !charSel ? 't' : 'd') + mod;
       for (let j = ln.seg.s; j < ln.seg.e; j++) {
         const inSel = charSel && j >= vis.cols[0] && j <= vis.cols[1];
-        put(g, x0 + VAL_X + (j - ln.seg.s), y, ln.r.value[j], inSel ? 'ts' : 't' + mod);
+        put(g, x0 + VAL_X + (j - ln.seg.s), y, ln.r.value[j], inSel ? 'ts' : vink);
       }
       if (cur && ln.r.kind === 'value') {
         const [li, col] = cardCaret(ln.r.value, C.col);
@@ -2279,17 +2333,49 @@
     s.card.vis = null;
     s.flash = n + ' ' + unit + ' yanked — register filled, OSC 52 offered';
   }
+  /* A switch between accounts already on this machine. The client detaches, the target's
+     slot comes up, and the reader lands on the same chat under the account they picked: the
+     place is carried by peer, so the same correspondent opens at its newest message with the
+     new account's messages in it. Nothing of the old account's screen survives the detach.
+     A target whose stored session loads nothing is not modelled here: it falls through to
+     the sign-in surface for that account, which is the sign-in view's own state. */
+  function switchAccount(s, id) {
+    const acc = s.accounts.find((a) => a.id === id);
+    if (!acc) return;
+    s.accounts.forEach((a) => { a.active = a.id === id; });
+    const was = s.chats[s.chat] ? s.chats[s.chat].name : '';
+    s.profile = acc.profile;
+    s.chats = acc.chats;
+    const at = s.chats.findIndex((c) => c.name === was);
+    s.chat = at < 0 ? 0 : at;
+    s.right = 'conv'; s.focus = 'conv'; s.card = null; s.vis = null; s.search = null; s.line = null;
+    /* the detach clears what belonged to the account that was open: its draft, the register,
+       and the local names and blocks, which are account-scoped and would otherwise be drawn
+       over the new account's people. */
+    s.draft = null; s.reg = ''; s.local = {}; s.blocked = {};
+    /* no message cursor is carried: message ids are the account's own sequence, so the window
+       opens at the newest message and the status says so once (stage 03's rule). */
+    if (at < 0) s.flash = 'that account has no chat with this person';
+    else s.flash = 'newest';
+  }
   function cardAct(s, r) {
     if (s.card.sub === 'self' && r.kind === 'action') {
       /* add account detaches the client and puts the sign-in back at its first step. The
          signed-in account is left where it is, so there is nothing to confirm. */
       if (r.act === 'add') beginSignin(s);
+      /* the active account's row has nothing to do, and says so rather than doing nothing
+         silently: the reader pressed a key on a row and is owed the reason. */
+      else if (r.act === 'active') refuse(s, 'already signed in as ' + r.value);
+      else if (r.act === 'switch') switchAccount(s, r.acct);
       /* a confirmation outranks a flash: the sign-out asks before it throws away the only
          secret the program holds, and y signs out. */
       else ask(s, 'Sign out and forget this session? (y/n)', beginLoggedOut);
       return;
     }
-    if (s.card.sub === 'self') { refuse(s, 'Not a row that acts: add account and logout are the two.'); return; }
+    /* a self-card value row has no action of its own: `d` is dropped without a sentence, the
+       same way the program drops it. A sentence here would be the card claiming a rule that
+       only the model has. */
+    if (s.card.sub === 'self') return;
     /* a contact's card: d acts on the three rows that act, and a value row does nothing — a
        row's answer is its own, and reading a name is not an action. */
     if (r.kind !== 'action') return;
@@ -2315,11 +2401,10 @@
     }
     if (k === 'Escape' || k === 'v') { C.vis = null; return; }
     if (k === 'd' || k === 'e') {
-      if (s.card.sub === 'self' && k === 'd') refuse(s, 'Not a row that acts: add account and logout are the two.');
-      else if (s.card.sub === 'self') refuse(s, 'Not editable here: :settings opens the editable profile.');
-      /* a selection is up, and these two are the card's own keys only without one: e refuses
-         because nothing here is editable, and d is dropped rather than asking about a row the
+      /* a selection is up, and these two are the card's own keys only without one: `e` refuses
+         because nothing here is editable, and `d` is dropped rather than asking about a row the
          reader has already gathered into a selection. */
+      if (s.card.sub === 'self' && k === 'e') refuse(s, 'Not editable here: :settings opens the editable profile.');
       else if (k === 'e') refuse(s, 'Not yours: nothing on a contact card is editable.');
       return;
     }
@@ -2328,7 +2413,7 @@
         const rows = cardRows(s), nav = navRows(rows);
         const lo = Math.min(C.vis.anchorRow, C.row), hi = Math.max(C.vis.anchorRow, C.row);
         const vals = [];
-        for (let i = lo; i <= hi; i++) { const v = rows[nav[i]]; vals.push(v.kind === 'value' ? v.value : v.label); }
+        for (let i = lo; i <= hi; i++) { const v = rows[nav[i]]; vals.push(v.value || v.label); }
         yankCard(s, vals.join('\n'), hi - lo + 1, 'row(s)');
       } else {
         const lo = Math.min(C.vis.anchorCol, C.col), hi = Math.max(C.vis.anchorCol, C.col);
@@ -2344,7 +2429,9 @@
        only : and q answer, which is what their hint names. */
     if (C.sub === 'signedout' || C.sub === 'reading' || C.sub === 'personReading' || C.sub === 'personFailed') return;
     const { nav, r } = cardAt(s), n = nav.length;
-    const val = r.kind === 'value' ? r.value : '';
+    /* a row's value where it has one: an account row carries the account, so `yy` on it
+       yanks the number and not the word in front of it. */
+    const val = r.value || '';
     /* a count is a motion's multiplier and nothing else here; it costs one line because the
        digits are otherwise unbound on a card. */
     if (/^[1-9]$/.test(k)) { s.count = Math.min(99, (s.count || 0) * 10 + Number(k)); return; }
@@ -2363,7 +2450,7 @@
       /* h is inline motion and the way back at once: a card is one column of values, so at the
          row's first cell there is nowhere left to move and h takes its other meaning. */
       case 'h': case 'Left': if (C.col > 0) C.col--; else leaveCard(s); break;
-      case 'l': case 'Right': if (val) C.col = Math.min(Math.max(0, val.length - 1), C.col + 1); break;
+      case 'l': case 'Right': if (r.kind === 'value' && val) C.col = Math.min(Math.max(0, val.length - 1), C.col + 1); break;
       case 'v': C.vis = r.kind === 'value'
         ? { mode: 'char', row: C.row, anchorCol: C.col }
         : { mode: 'rows', anchorRow: C.row }; break;
@@ -2755,6 +2842,13 @@
     { id: 'profile', name: 'Profile', variants: [
       /* one widget, two subjects. Every frame here is fed through the real handler. */
       { name: 'Profile · you', keys: 'S' },
+      /* The accounts this machine knows, on the card that has them: one row each with the
+         state in the label column and the account in the value column, `add account` last of
+         the account rows, and `d` switching without a sign-in. The third frame is the switch
+         landing: Ada's chat under the other account, at its newest message, no login surface. */
+      { name: 'accounts: every account on this machine, the active one marked', start: 'accounts', keys: 'S' },
+      { name: 'd on the active account: it says where you are', start: 'accounts', keys: 'Sjjjjjjd' },
+      { name: 'd on another account: the switch lands where the reader was', start: 'accounts', keys: 'Sjjjjjjjd' },
       { name: 'add account: the sign-in that follows', keys: 'SGkd' },
       { name: 'logout raises the confirmation', keys: 'SGd' },
       { name: 'y signs out: the sign-in field comes back', keys: 'SGdy' },
