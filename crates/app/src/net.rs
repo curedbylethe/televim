@@ -657,6 +657,25 @@ pub struct FeedRetry {
     attempts: u8,
 }
 
+/// Where the reader was when an account was detached, for the `Ready` that
+/// signs the next one in to put them back.
+///
+/// **A peer id and one boolean, and nothing else.** Message ids are a
+/// per-account sequence, so no cursor can be mapped across accounts; the
+/// window, the words in the input line, the register and the selection belong
+/// to the account that is leaving. The id is enough because Telegram user ids
+/// are global and the chat list is private users only, so the same id names
+/// the same person under either account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarriedPlace {
+    /// The open conversation's peer id, or `None` when nothing was open.
+    pub chat_id: Option<i64>,
+
+    /// Whether the reader was at the newest message, which is the only thing
+    /// the place can still say about where in the conversation they were.
+    pub followed: bool,
+}
+
 /// What the loop knows about the network between events.
 #[derive(Default)]
 pub struct State {
@@ -717,6 +736,11 @@ pub struct State {
     /// the loop and the cancel path read. Cleared by the [`Event::Ready`] that
     /// signs the new account in, or by the cancel that gives up on it.
     switching: Option<AccountSlot>,
+
+    /// The reader's place under the account that was detached, held for the
+    /// first [`Event::Ready`] after it and taken then whatever that `Ready`
+    /// says: a second one must not move the reader again.
+    carried_place: Option<CarriedPlace>,
 
     /// Actions taken off the screen while there was no client to answer them.
     ///
@@ -963,6 +987,14 @@ impl State {
             return;
         }
         let from = self.slot;
+        // Taken before anything on the screen is cleared, because the screen is
+        // the only place this fact lives — and the peer id rather than a row
+        // index, because the next list is ordered by recency and the same index
+        // names a different conversation on either side of the switch.
+        self.carried_place = Some(CarriedPlace {
+            chat_id: Some(app.conversation.conversation.window.chat_id).filter(|id| *id != 0),
+            followed: app.conversation.conversation.auto_follow(),
+        });
         self.flush_drafts(app);
 
         self.client = None;
@@ -4623,6 +4655,12 @@ fn apply_ready_to_screen_with_archive(
     // before the list lands, so the open view and the record agree on it.
     app.record_read_positions(&chats);
     let conversation_open = app.conversation.conversation.window.chat_id != 0 && !other_account;
+    // **The reader's place survives the switch.** The first `Ready` after a
+    // detach carries the conversation they were reading, by peer id, and it is
+    // taken here whatever happens, so the next `Ready` — a reconnect's — lands
+    // as the ordinary refresh it is rather than moving the reader again.
+    let carried = state.carried_place.take();
+    let mut carried_line: Option<&str> = None;
     let restored = if conversation_open && !no_session {
         state.history.cursor = None;
         state.history.jump = None;
@@ -4630,6 +4668,10 @@ fn apply_ready_to_screen_with_archive(
         state.history.retry_peer = None;
         app.set_archived_chats(archived);
         app.refresh_chats(chats)
+    } else if let Some(place) = carried.as_ref().filter(|place| place.chat_id.is_some()) {
+        // The list first, so the id is looked up in *this* account's order.
+        carried_line = land_switch(app, chats, archived, place);
+        true
     } else {
         open_first_chat(app, chats);
         app.set_archived_chats(archived);
@@ -4690,6 +4732,37 @@ fn apply_ready_to_screen_with_archive(
     if let Some(id) = unknown_initial_chat {
         app.ui.status = format!("no chat with id {id}");
     }
+    // Said last, so it outlives `login_complete`'s resting sentence.
+    if let Some(line) = carried_line {
+        line.clone_into(&mut app.ui.status);
+    }
+}
+
+/// Puts the reader back in the conversation they were in before the switch.
+///
+/// The list is installed first, so an id finds *this* account's position for
+/// the peer: the list is ordered by recency, and an index means a different
+/// conversation on either side of the switch. The window is opened empty —
+/// nothing of the other account's is carried — and the loop's next pass asks
+/// for this account's newest page, because no cursor was carried either.
+///
+/// Answers the line the reader is owed, if any: `newest` when they had scrolled
+/// away from the end, because there is no cursor to map and the newest message
+/// is where they land; the absent sentence when this account has no such chat,
+/// which leaves the highlight on the first row and nothing open.
+fn land_switch(
+    app: &mut App,
+    chats: Vec<Chat>,
+    archived: Vec<Chat>,
+    place: &CarriedPlace,
+) -> Option<&'static str> {
+    app.set_chats(chats);
+    app.set_archived_chats(archived);
+    let id = place.chat_id?;
+    if app.select_chat_by_id(id) {
+        return (!place.followed).then_some("newest");
+    }
+    Some("that account has no chat with this person")
 }
 
 /// Folds a sign-in answer into the flow, whatever step it came from.
@@ -13338,6 +13411,168 @@ mod switch_tests {
         assert_eq!(
             bring_ups, 2,
             "one for the switch, one for the return: a cancel is a bring-up"
+        );
+    }
+
+    fn chat(id: i64) -> Chat {
+        Chat {
+            read_outbox_max_id: None,
+            id,
+            title: format!("chat-{id}"),
+            kind: domain::chat::ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            presence: None,
+            deleted: false,
+        }
+    }
+
+    /// The other account: who the switch signs in to.
+    fn other_account() -> domain::account::Account {
+        domain::account::Account {
+            user_id: 2,
+            ..domain::account::Account::default()
+        }
+    }
+
+    /// The reader's place is the peer id, not the row: the new account's list
+    /// orders the same chat differently, and the conversation reopens empty
+    /// because only the new account's newest page may fill it.
+    #[test]
+    fn a_switch_keeps_the_open_conversation_by_id_not_by_row() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(10), chat(20), chat(30)]);
+        assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
+        let mut state = State::default();
+
+        state.detach_account(&mut app);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(30), chat(20), chat(50)],
+            Ok(other_account()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.list.selected_chat, 1,
+            "the highlight followed the id to its row in the new list"
+        );
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, 20,
+            "and the conversation is the one that was open"
+        );
+        assert!(
+            app.conversation.conversation.window.is_empty(),
+            "with none of the first account's messages: the newest page has not answered"
+        );
+    }
+
+    /// An account that does not hold the chat is stated, not faked: nothing is
+    /// open, the top row is highlighted, and one line says why.
+    #[test]
+    fn a_switch_to_an_account_without_that_chat_opens_nothing_and_says_so() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(10), chat(20), chat(30)]);
+        assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
+        let mut state = State::default();
+
+        state.detach_account(&mut app);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(30), chat(50)],
+            Ok(other_account()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.list.selected_chat, 0,
+            "the highlight is on the first row"
+        );
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, 0,
+            "and no conversation is open"
+        );
+        assert!(
+            app.conversation.conversation.window.is_empty(),
+            "nothing of the first account's survived"
+        );
+        assert_eq!(
+            app.ui.status, "that account has no chat with this person",
+            "the reader is told where they landed"
+        );
+    }
+
+    /// A reader who had scrolled away from the end cannot be put back where they
+    /// were — message ids are per-account — so they land at the newest message
+    /// and the line says that, without a number or a position claim.
+    #[test]
+    fn a_reader_who_had_scrolled_away_lands_at_the_newest_message() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(10), chat(20), chat(30)]);
+        assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
+        app.conversation.conversation.unfollow();
+        let mut state = State::default();
+
+        state.detach_account(&mut app);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(30), chat(20), chat(50)],
+            Ok(other_account()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, 20,
+            "the same conversation is open"
+        );
+        assert_eq!(app.ui.status, "newest", "and the line says where they are");
+    }
+
+    /// The place is spent by the first `Ready`: a later one lands the way any
+    /// list without a place does, on its first row.
+    #[test]
+    fn the_carried_place_is_spent_by_the_first_ready() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(10), chat(20), chat(30)]);
+        assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
+        let mut state = State::default();
+
+        state.detach_account(&mut app);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(30), chat(20), chat(50)],
+            Ok(other_account()),
+            tui::SessionStore::Keyring,
+        );
+        // The account loses its list, so the second `Ready` finds nothing open:
+        // the place it was given has been spent.
+        app.set_chats(Vec::new());
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(30), chat(20), chat(50)],
+            Ok(other_account()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.list.selected_chat, 0,
+            "the second landing is the top row"
+        );
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, 30,
+            "and the first row's chat, not the chat the switch carried"
+        );
+        assert!(
+            state.carried_place.is_none(),
+            "nothing was left to re-apply"
         );
     }
 }
