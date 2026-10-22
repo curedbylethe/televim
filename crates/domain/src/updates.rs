@@ -459,7 +459,7 @@ impl ChatList {
 /// Mirrors the framework's fetch order. Two pinned chats compare equal, so a
 /// stable placement keeps their existing order. A chat with no messages sorts
 /// last among the unpinned, as it does there.
-fn sorts_before(chat: &Chat, other: &Chat) -> bool {
+pub fn sorts_before(chat: &Chat, other: &Chat) -> bool {
     if chat.pinned != other.pinned {
         return chat.pinned;
     }
