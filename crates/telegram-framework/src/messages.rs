@@ -35,15 +35,20 @@
 //! identifier and a deletion is whatever the caller decides to put there. In
 //! the interface that is the `y/n` confirmation, which is the only guard.
 //!
-//! # Deletions are always for both sides
+//! # Deletions of messages are always for both sides
 //!
-//! There is no way to ask for deletion on this account alone. `grammers`'
-//! `delete_messages` hard-codes `revoke: true`, and asking for the other scope
-//! would mean the crate's first raw `tl` call — which the typed-API rule above
+//! There is no way to ask for deletion of messages on this account alone.
+//! `grammers`' `delete_messages` hard-codes `revoke: true`, and asking for the
+//! other scope would mean a raw `tl` call — which the typed-API rule above
 //! exists to avoid — together with a way to ask the reader which scope they
 //! meant. The capability is deliberately absent rather than half-present: a
 //! `revoke: false` hidden under the same confirmation every delete already uses
 //! would make each one silently "for both".
+//!
+//! Deleting a whole conversation is the exception, and the crate's one raw `tl`
+//! call of this kind ([`Client::delete_conversation`]): there `revoke` is the
+//! choice the reader is asked for, and the request is built by a pure function
+//! so a test holds the flags.
 //!
 //! # A deletion of many messages is several requests
 //!
@@ -71,6 +76,7 @@
 //! not been acknowledged rather than pretending to.
 
 use grammers_client::message::InputMessage;
+use grammers_client::session::types::PeerRef;
 
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
@@ -407,15 +413,7 @@ impl Client {
             return Err(FrameworkError::UnknownPeer(peer_id));
         };
 
-        self.invoke(&tl::functions::messages::DeleteHistory {
-            just_clear: false,
-            revoke,
-            peer: peer.into(),
-            max_id: 0,
-            min_date: None,
-            max_date: None,
-        })
-        .await?;
+        self.invoke(&delete_history_request(peer, revoke)).await?;
 
         Ok(())
     }
@@ -499,8 +497,27 @@ impl Client {
     }
 }
 
+/// The request that deletes a whole conversation: all of it, and for both
+/// sides only when `revoke` says so.
+///
+/// A free function over values so the one irreversible request in the crate can
+/// be tested without a datacenter: swapping `just_clear` and `revoke` would turn
+/// "delete locally" into a clear and "both sides" into a no-op.
+fn delete_history_request(peer: PeerRef, revoke: bool) -> tl::functions::messages::DeleteHistory {
+    tl::functions::messages::DeleteHistory {
+        just_clear: false,
+        revoke,
+        peer: peer.into(),
+        max_id: 0,
+        min_date: None,
+        max_date: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use grammers_client::session::types::{PeerAuth, PeerId};
+
     use super::*;
 
     /// `ids` from `0` up to but not including `up_to`, as Telegram would number
@@ -511,6 +528,30 @@ mod tests {
             all.push(i32::try_from(n).expect("a test's count fits telegram's range"));
         }
         all
+    }
+
+    // ---- deleting a conversation -----------------------------------------
+
+    #[test]
+    fn a_conversation_is_deleted_whole_and_revoked_only_when_asked() {
+        for revoke in [false, true] {
+            let request = delete_history_request(
+                PeerRef {
+                    id: PeerId::user(42).expect("42 is in the user range"),
+                    auth: PeerAuth::from_hash(7),
+                },
+                revoke,
+            );
+
+            assert!(!request.just_clear, "a clear is not a deletion");
+            assert_eq!(request.revoke, revoke);
+            assert_eq!(request.max_id, 0, "no ceiling: the whole history");
+            let tl::enums::InputPeer::User(user) = request.peer else {
+                panic!("a person addresses as an input user peer");
+            };
+            assert_eq!(user.user_id, 42);
+            assert_eq!(user.access_hash, 7);
+        }
     }
 
     // ---- batching --------------------------------------------------------
