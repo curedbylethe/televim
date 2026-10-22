@@ -69,6 +69,7 @@ use telegram_framework::{
 use tokio::sync::mpsc::UnboundedSender;
 use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, JumpKind, LoginField};
 
+use crate::accounts::{self, SessionTarget};
 use crate::config::Config;
 use crate::draft_store::DraftFile;
 use crate::history_store::{HistoryCache, HistoryFile, HistoryTag, PageKind};
@@ -704,6 +705,14 @@ pub struct State {
     /// `None` wherever no loop set one, which is every test.
     draft_file: Option<DraftFile>,
 
+    /// The path the configuration was read from.
+    ///
+    /// The base every account-scoped path is derived from, and the base name of
+    /// a configured session file. Kept beside [`State::cfg`] for the same
+    /// reason: a re-bring-up inside `apply` has to resolve the same paths the
+    /// launch did.
+    config_path: PathBuf,
+
     /// Where read messages and the chat list live on disk: written behind
     /// every page, feed event or list change that changes [`State::cached`],
     /// and removed on sign-out.
@@ -816,9 +825,10 @@ impl State {
     /// bring-up that reported on a channel nobody is listening to is a bring-up
     /// that hangs rather than fails.
     #[must_use]
-    pub fn new(cfg: Config, tx: UnboundedSender<AppEvent>) -> Self {
+    pub fn new(cfg: Config, config_path: PathBuf, tx: UnboundedSender<AppEvent>) -> Self {
         Self {
             cfg: Some(cfg),
+            config_path,
             tx: Some(tx),
             // The launch bring-up is issued immediately after this is built, and
             // it has to be counted as in flight before the reader can ask for a
@@ -1237,7 +1247,7 @@ enum Wanted {
 /// frame is worth drawing before a round trip has finished. Every failure
 /// arrives as [`Event::Offline`] with the reason, so the screen can say what
 /// went wrong instead of staying silently empty.
-pub fn spawn_bring_up(cfg: Config, tx: UnboundedSender<AppEvent>) {
+pub fn spawn_bring_up(cfg: Config, config_path: PathBuf, tx: UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         // Half a pair of application credentials is the same as having none, and
         // neither can build a client — so nothing is built. The screen's answer
@@ -1248,7 +1258,7 @@ pub fn spawn_bring_up(cfg: Config, tx: UnboundedSender<AppEvent>) {
             return;
         }
 
-        if let Err(reason) = bring_up(&cfg, &tx).await {
+        if let Err(reason) = bring_up(&cfg, &config_path, &tx).await {
             let key = reason.downcast_ref::<KeyRequired>().map(|key| key.rejected);
             // The `offline:` sentence first and the question after it, so the
             // sentence is what stands when the reader leaves the question.
@@ -1269,16 +1279,17 @@ pub fn spawn_bring_up(cfg: Config, tx: UnboundedSender<AppEvent>) {
 /// as a *value*, and everything that needs a session is skipped when it is false
 /// — the conversations, the account's own profile and the update feed are all
 /// requests an unauthorised client cannot answer.
-async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
+async fn bring_up(cfg: &Config, config_path: &Path, tx: &UnboundedSender<AppEvent>) -> Result<()> {
     let (api_id, api_hash) = cfg.credentials().context(
         "no telegram application credentials configured; set TELEVIM_API_ID and TELEVIM_API_HASH",
     )?;
 
     // Resolved once, probed, and then handed on as the same value: the session
-    // is described to the reader out of `session_store(cfg)`, and a store
-    // resolved a second time could be a second store — so a reader could be told
-    // where their session is while a different file is the one being cleared.
-    let Session { store, keys } = session_store(cfg);
+    // is described to the reader out of `session_description(config_path, cfg)`,
+    // and a store resolved a second time could be a second store — so a reader
+    // could be told where their session is while a different file is the one
+    // being cleared.
+    let Session { store, keys } = session_store(config_path, cfg);
     let was_plaintext = holds_plaintext_session(cfg);
     let discarded = discard_corrupt_session(&*store);
     let resealed = (was_plaintext && !holds_plaintext_session(cfg)).then(|| RESEALED.to_owned());
@@ -1309,7 +1320,7 @@ async fn bring_up(cfg: &Config, tx: &UnboundedSender<AppEvent>) -> Result<()> {
         .context("checking whether the stored session is signed in")?;
 
     let client = Arc::new(ProtoClient::new(client));
-    let session_store = session_description(cfg);
+    let session_store = session_description(config_path, cfg);
 
     if !authorized {
         // A drawable state rather than a failure: the signed-out card is what a
@@ -1485,11 +1496,12 @@ fn is_the_configured_file(cfg: &Config, path: &Path) -> Result<(), String> {
 /// under the current key.
 fn export_session(
     cfg: &Config,
+    config_path: &Path,
     path: &Path,
     keyring: impl Fn() -> Arc<dyn KeyProvider>,
 ) -> Result<String, String> {
     is_the_configured_file(cfg, path)?;
-    let Session { store, .. } = session_store_with(cfg, &keyring);
+    let Session { store, .. } = session_store_with(config_path, cfg, &keyring);
     let dest = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
     export_snapshot(&*store, cfg.session_path.is_some(), &dest, path)
 }
@@ -1549,25 +1561,27 @@ fn import_snapshot(
 /// into the configured store.
 fn import_session(
     cfg: &Config,
+    config_path: &Path,
     path: &Path,
     known: Option<i64>,
     keyring: impl Fn() -> Arc<dyn KeyProvider>,
 ) -> Result<String, String> {
     is_the_configured_file(cfg, path)?;
     let source = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
-    let Session { store, .. } = session_store_with(cfg, &keyring);
+    let Session { store, .. } = session_store_with(config_path, cfg, &keyring);
     import_snapshot(&source, &*store, cfg.session_path.is_some(), known, path)
 }
 
 /// Runs an import off the loop, for the reason an export is.
 fn spawn_import_session(
     cfg: Config,
+    config_path: PathBuf,
     path: PathBuf,
     known: Option<i64>,
     tx: UnboundedSender<AppEvent>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let event = match import_session(&cfg, &path, known, || {
+        let event = match import_session(&cfg, &config_path, &path, known, || {
             Arc::new(KeyringKeyProvider::default())
         }) {
             Ok(sentence) => Event::SessionImported(sentence),
@@ -1590,13 +1604,15 @@ fn run_session_actions(app: &mut App, state: &mut State) {
             Action::ChangeSessionPassphrase { new } => {
                 spawn_change_passphrase(cfg, state.history_file.clone(), new, tx);
             }
-            Action::ExportSession { path } => spawn_export_session(cfg, path, tx),
+            Action::ExportSession { path } => {
+                spawn_export_session(cfg, state.config_path.clone(), path, tx);
+            }
             Action::ImportSession { path } => {
                 let known = match &app.session.account {
                     tui::app::AccountState::Known(account) => Some(account.user_id),
                     _ => None,
                 };
-                spawn_import_session(cfg, path, known, tx);
+                spawn_import_session(cfg, state.config_path.clone(), path, known, tx);
             }
             _ => {}
         }
@@ -1643,7 +1659,7 @@ fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEve
     }
     if !state.bringing_up {
         state.bringing_up = true;
-        spawn_bring_up(cfg, tx.clone());
+        spawn_bring_up(cfg, state.config_path.clone(), tx.clone());
     }
 }
 
@@ -1703,10 +1719,17 @@ fn spawn_change_passphrase(
 }
 
 /// Runs an export off the loop: the key derivation and the keyring both block.
-fn spawn_export_session(cfg: Config, path: PathBuf, tx: UnboundedSender<AppEvent>) {
+fn spawn_export_session(
+    cfg: Config,
+    config_path: PathBuf,
+    path: PathBuf,
+    tx: UnboundedSender<AppEvent>,
+) {
     tokio::task::spawn_blocking(move || {
-        let sentence = export_session(&cfg, &path, || Arc::new(KeyringKeyProvider::default()))
-            .unwrap_or_else(|sentence| sentence);
+        let sentence = export_session(&cfg, &config_path, &path, || {
+            Arc::new(KeyringKeyProvider::default())
+        })
+        .unwrap_or_else(|sentence| sentence);
         let _ = tx.send(AppEvent::Net(Event::SessionMoved(sentence)));
     });
 }
@@ -1745,14 +1768,10 @@ async fn read_archived(client: &ProtoClient) -> Vec<Chat> {
 /// Where the session is kept, in the words the profile panel says it in.
 ///
 /// The decision, and the only one: [`session_store`] builds the store out of
-/// what this returns, so the panel cannot describe a store the session is not
-/// in. Reading the same field twice would leave that to a test, and a test
-/// cannot see a field read two ways.
-fn session_description(cfg: &Config) -> tui::SessionStore {
-    match &cfg.session_path {
-        Some(path) => tui::SessionStore::EncryptedFile(path.clone()),
-        None => tui::SessionStore::Keyring,
-    }
+/// the resolver's target, and this is the resolver's description of the same
+/// call, so the panel cannot describe a store the session is not in.
+fn session_description(config_path: &Path, cfg: &Config) -> tui::SessionStore {
+    accounts::slot_paths(config_path, cfg, None).description
 }
 
 /// The store the session goes in, and the key behind it when that is a file.
@@ -1770,21 +1789,25 @@ struct Session {
 /// Resolved afresh by every bring-up and never kept: a cached key would be a
 /// longer-lived secret, and a passphrase changed in the environment is read on
 /// the next `:retry`.
-fn session_store(cfg: &Config) -> Session {
-    session_store_with(cfg, || Arc::new(KeyringKeyProvider::default()))
+fn session_store(config_path: &Path, cfg: &Config) -> Session {
+    session_store_with(config_path, cfg, || Arc::new(KeyringKeyProvider::default()))
 }
 
 /// [`session_store`], with the OS-keyring key source passed in.
 ///
 /// A seam for the tests only: it is what lets them resolve a store without
 /// reaching the real credential store.
-fn session_store_with(cfg: &Config, keyring: impl FnOnce() -> Arc<dyn KeyProvider>) -> Session {
-    match session_description(cfg) {
-        tui::SessionStore::Keyring => Session {
-            store: Box::new(KeyringStore::default()),
+fn session_store_with(
+    config_path: &Path,
+    cfg: &Config,
+    keyring: impl FnOnce() -> Arc<dyn KeyProvider>,
+) -> Session {
+    match accounts::slot_paths(config_path, cfg, None).session {
+        SessionTarget::Keyring(account) => Session {
+            store: Box::new(KeyringStore::new(KeyringStore::DEFAULT_SERVICE, account)),
             keys: None,
         },
-        tui::SessionStore::EncryptedFile(path) => {
+        SessionTarget::File(path) => {
             let keys = key_provider(cfg, keyring);
             Session {
                 store: Box::new(FileStore::with_key_provider(path, Arc::clone(&keys))),
@@ -1991,7 +2014,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             app.flash("already trying to connect");
         } else if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
             state.bringing_up = true;
-            spawn_bring_up(cfg, tx);
+            spawn_bring_up(cfg, state.config_path.clone(), tx);
         }
     }
 
@@ -2006,7 +2029,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             state.auto_reconnect_used = true;
             if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
                 state.bringing_up = true;
-                spawn_bring_up(cfg, tx);
+                spawn_bring_up(cfg, state.config_path.clone(), tx);
             }
         } else if !state.bringing_up {
             apply_offline(app, state, &anyhow::anyhow!("the update feed ended again"));
@@ -3024,7 +3047,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             app.ui.status = match (state.bringing_up, state.cfg_now(), state.tx.clone()) {
                 (false, Some(cfg), Some(tx)) => {
                     state.bringing_up = true;
-                    spawn_bring_up(cfg, tx);
+                    spawn_bring_up(cfg, state.config_path.clone(), tx);
                     format!("{sentence}; reconnecting")
                 }
                 _ => format!("{sentence}; :retry reconnects with it"),
@@ -3939,7 +3962,7 @@ fn apply_logged_out_and_reconnect(app: &mut App, state: &mut State, result: Resu
         // will send, so a `:retry` typed while it is on its way is refused
         // rather than answered with a second client.
         state.bringing_up = true;
-        spawn_bring_up(cfg, tx);
+        spawn_bring_up(cfg, state.config_path.clone(), tx);
     }
 }
 
@@ -6848,7 +6871,11 @@ mod tests {
     fn a_state_that_can_bring_the_client_up_starts_with_one_in_flight() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let state = State::new(Config::default(), tx);
+        let state = State::new(
+            Config::default(),
+            std::path::PathBuf::from("televim.toml"),
+            tx,
+        );
 
         assert!(
             state.bringing_up,
@@ -11088,6 +11115,12 @@ mod session_store_tests {
     use super::*;
     use crate::config::Secret;
 
+    /// The configuration path the store is resolved from. Every test here
+    /// names its own session file, so this base is never touched.
+    fn config_path() -> &'static std::path::Path {
+        std::path::Path::new("televim.toml")
+    }
+
     /// A key that never touches the OS credential store.
     #[derive(Debug)]
     pub(super) struct Fixed;
@@ -11146,10 +11179,11 @@ mod session_store_tests {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let (from, to) = (dir.path().join("a.bin"), dir.path().join("b.bin"));
         let cfg = file_config(&from, Some("right"));
-        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let Session { store, .. } = session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
         store.save(&snapshot(7, 0xAB)).expect("a session is stored");
 
-        let sentence = export_session(&cfg, &to, || Arc::new(NoKeyring)).expect("it exports");
+        let sentence =
+            export_session(&cfg, config_path(), &to, || Arc::new(NoKeyring)).expect("it exports");
         assert!(sentence.contains("b.bin"), "{sentence}");
 
         let bytes = std::fs::read(&to).expect("the export is a file");
@@ -11182,11 +11216,13 @@ mod session_store_tests {
         let (from, to) = (dir.path().join("a.bin"), dir.path().join("b.bin"));
         let cfg = file_config(&from, Some("right"));
 
-        let none = export_session(&cfg, &to, || Arc::new(NoKeyring)).expect_err("nothing");
+        let none =
+            export_session(&cfg, config_path(), &to, || Arc::new(NoKeyring)).expect_err("nothing");
         assert!(none.contains("no stored session"), "{none}");
         assert!(!to.exists(), "nothing was written");
 
-        let same = export_session(&cfg, &from, || Arc::new(NoKeyring)).expect_err("same file");
+        let same = export_session(&cfg, config_path(), &from, || Arc::new(NoKeyring))
+            .expect_err("same file");
         assert!(same.contains("configured session file"), "{same}");
     }
 
@@ -11244,11 +11280,13 @@ mod session_store_tests {
         let path = dir.path().join("in.bin");
         let cfg = file_config(&dir.path().join("session.bin"), Some("right"));
 
-        let missing = import_session(&cfg, &path, None, || Arc::new(NoKeyring)).expect_err("none");
+        let missing = import_session(&cfg, config_path(), &path, None, || Arc::new(NoKeyring))
+            .expect_err("none");
         assert!(missing.contains("in.bin"), "{missing}");
 
         sealed_file(&path, &snapshot(7, 1));
-        let wrong = import_session(&cfg, &path, None, || Arc::new(NoKeyring)).expect_err("key");
+        let wrong = import_session(&cfg, config_path(), &path, None, || Arc::new(NoKeyring))
+            .expect_err("key");
         assert!(wrong.contains("TELEVIM_SESSION_PASSPHRASE"), "{wrong}");
         assert!(wrong.contains("left as it was"), "{wrong}");
         assert!(!dir.path().join("session.bin").exists(), "nothing written");
@@ -11264,14 +11302,15 @@ mod session_store_tests {
             .save(&snapshot(7, 0xEE))
             .expect("a session is written");
 
-        import_session(&cfg, &path, Some(7), keys).expect("it imports");
+        import_session(&cfg, config_path(), &path, Some(7), keys).expect("it imports");
         let bytes = std::fs::read(&session).expect("the file exists");
         assert!(telegram_framework::sealed::is_sealed(&bytes));
-        let Session { store, .. } = session_store_with(&cfg, keys);
+        let Session { store, .. } = session_store_with(config_path(), &cfg, keys);
         let copy = store.load().expect("loads").expect("some");
         assert_eq!(auth_key_bytes(&copy), [0xEE; 256]);
 
-        let same = import_session(&cfg, &session, None, keys).expect_err("the file itself");
+        let same =
+            import_session(&cfg, config_path(), &session, None, keys).expect_err("the file itself");
         assert!(same.contains("configured session file"), "{same}");
     }
 
@@ -11305,14 +11344,17 @@ mod session_store_tests {
             cfg.session_path, None,
             "nothing named, so nothing asked for"
         );
-        assert_eq!(session_description(&cfg), tui::SessionStore::Keyring);
+        assert_eq!(
+            session_description(config_path(), &cfg),
+            tui::SessionStore::Keyring
+        );
 
         let cfg = Config {
             session_path: Some("/tmp/televim.session".into()),
             ..Config::default()
         };
         assert_eq!(
-            session_description(&cfg),
+            session_description(config_path(), &cfg),
             tui::SessionStore::EncryptedFile("/tmp/televim.session".into()),
             "a file is named, and named as the encrypted thing it is"
         );
@@ -11321,7 +11363,7 @@ mod session_store_tests {
         // from and nothing the reader is told about where the session is.
         let cfg = file_config("/tmp/televim.session".as_ref(), Some("hunter2"));
         assert_eq!(
-            session_description(&cfg),
+            session_description(config_path(), &cfg),
             tui::SessionStore::EncryptedFile("/tmp/televim.session".into())
         );
     }
@@ -11335,7 +11377,7 @@ mod session_store_tests {
         let cfg = file_config(&path, Some("test"));
 
         let Session { store, keys } =
-            session_store_with(&cfg, || panic!("the keyring is not asked"));
+            session_store_with(config_path(), &cfg, || panic!("the keyring is not asked"));
         keys.expect("a file has a key source")
             .sealing_key()
             .expect("a passphrase is a key");
@@ -11364,7 +11406,8 @@ mod session_store_tests {
             let path = dir.path().join("session.bin");
             let cfg = file_config(&path, passphrase);
 
-            let Session { store, keys } = session_store_with(&cfg, || Arc::new(Fixed));
+            let Session { store, keys } =
+                session_store_with(config_path(), &cfg, || Arc::new(Fixed));
             keys.expect("a file has a key source")
                 .sealing_key()
                 .expect("the keyring has a key");
@@ -11386,7 +11429,8 @@ mod session_store_tests {
     #[test]
     fn no_file_configured_means_no_key_source() {
         let cfg = Config::default();
-        let session = session_store_with(&cfg, || panic!("the keyring is not asked"));
+        let session =
+            session_store_with(config_path(), &cfg, || panic!("the keyring is not asked"));
         assert!(session.keys.is_none());
     }
 
@@ -11406,7 +11450,8 @@ mod session_store_tests {
         };
         let cfg = file_config(&path, None);
 
-        let Session { store, keys } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let Session { store, keys } =
+            session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
         assert_eq!(
             discard_corrupt_session(&*store),
             None,
@@ -11440,7 +11485,7 @@ mod session_store_tests {
         std::fs::create_dir(&path).expect("a stand-in that cannot be read as a file");
 
         let cfg = file_config(&path, Some("any"));
-        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let Session { store, .. } = session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
 
         assert_eq!(discard_corrupt_session(&*store), None, "not discarded");
         let error = store.load().expect_err("the file cannot be read");
@@ -11465,15 +11510,16 @@ mod session_store_tests {
         cfg.session_kdf_memory_kib = Some(8_192);
         cfg.session_kdf_passes = Some(1);
 
-        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let Session { store, .. } = session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
         store
             .save(&SessionData::default())
             .expect("a session is written");
-        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let Session { store, .. } = session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
         assert!(store.load().expect("opens with the same cost").is_some());
 
         let defaults = file_config(&path, Some("right"));
-        let Session { store, .. } = session_store_with(&defaults, || Arc::new(NoKeyring));
+        let Session { store, .. } =
+            session_store_with(config_path(), &defaults, || Arc::new(NoKeyring));
         let error = store
             .load()
             .expect_err("the default cost derives another key");
@@ -11492,7 +11538,8 @@ mod session_store_tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         for round in 0..2 {
-            let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+            let Session { store, .. } =
+                session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
             let was_plaintext = holds_plaintext_session(&cfg);
             assert_eq!(was_plaintext, round == 0);
             store.load().expect("the file loads");
@@ -11533,7 +11580,7 @@ mod session_store_tests {
         let sealed = std::fs::read(&path).expect("the file exists");
 
         let cfg = file_config(&path, Some("wrong"));
-        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let Session { store, .. } = session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
 
         assert_eq!(discard_corrupt_session(&*store), None, "not discarded");
         let error = store.load().expect_err("the wrong key does not open it");
@@ -11604,7 +11651,11 @@ mod session_store_tests {
         let sealed = std::fs::read(&path).expect("the file exists");
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::new(file_config(&path, Some("wrong")), tx.clone());
+        let mut state = State::new(
+            file_config(&path, Some("wrong")),
+            std::path::PathBuf::from("televim.toml"),
+            tx.clone(),
+        );
         // A bring-up is in flight already, so none is spawned here.
         submit_passphrase(&mut state, "right", &tx);
 
@@ -11615,7 +11666,7 @@ mod session_store_tests {
             Some("wrong"),
             "the configured value is untouched, so nothing typed is persisted"
         );
-        let Session { store, .. } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let Session { store, .. } = session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
         assert!(store.load().expect("it opens").is_some());
         assert_eq!(std::fs::read(&path).expect("still there"), sealed);
     }
@@ -11632,11 +11683,16 @@ mod session_store_tests {
         let sealed = std::fs::read(&path).expect("the file exists");
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::new(file_config(&path, None), tx.clone());
+        let mut state = State::new(
+            file_config(&path, None),
+            std::path::PathBuf::from("televim.toml"),
+            tx.clone(),
+        );
         submit_passphrase(&mut state, "nope", &tx);
 
         let cfg = state.cfg_now().expect("a configuration");
-        let Session { store, keys } = session_store_with(&cfg, || Arc::new(NoKeyring));
+        let Session { store, keys } =
+            session_store_with(config_path(), &cfg, || Arc::new(NoKeyring));
         let error = store.load().expect_err("the wrong key does not open it");
         let required = key_trouble(&error);
         assert_eq!(
@@ -11661,7 +11717,11 @@ mod session_store_tests {
     #[test]
     fn the_typed_passphrase_is_held_only_in_the_state() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::new(Config::default(), tx.clone());
+        let mut state = State::new(
+            Config::default(),
+            std::path::PathBuf::from("televim.toml"),
+            tx.clone(),
+        );
         submit_passphrase(&mut state, "first", &tx);
         submit_passphrase(&mut state, "second", &tx);
 
@@ -11760,7 +11820,11 @@ mod session_store_tests {
     #[test]
     fn a_finished_change_is_held_for_the_rest_of_the_process() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::new(file_config(std::path::Path::new("/x"), Some("old")), tx);
+        let mut state = State::new(
+            file_config(std::path::Path::new("/x"), Some("old")),
+            std::path::PathBuf::from("televim.toml"),
+            tx,
+        );
         let mut app = App::new();
         apply(
             &mut app,
@@ -12280,7 +12344,11 @@ mod media_tests {
     #[test]
     fn a_cancel_sets_only_its_own_download_and_settling_forgets_it() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::new(Config::default(), tx);
+        let mut state = State::new(
+            Config::default(),
+            std::path::PathBuf::from("televim.toml"),
+            tx,
+        );
         let mut app = App::new();
         let ours = Arc::new(AtomicBool::new(false));
         let other = Arc::new(AtomicBool::new(false));
@@ -12357,7 +12425,11 @@ mod media_tests {
     #[test]
     fn apply_queues_a_saved_media_path_and_flashes_a_failure() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::new(Config::default(), tx);
+        let mut state = State::new(
+            Config::default(),
+            std::path::PathBuf::from("televim.toml"),
+            tx,
+        );
         let mut app = App::new();
 
         apply(

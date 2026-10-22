@@ -5,6 +5,7 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::module_name_repetitions)]
 
+mod accounts;
 mod config;
 mod draft_store;
 mod history_store;

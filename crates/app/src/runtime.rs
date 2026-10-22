@@ -30,6 +30,7 @@ use ratatui::backend::CrosstermBackend;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::sync::mpsc;
 
+use crate::accounts;
 use crate::config::Config;
 use crate::draft_store::{DraftFile, drafts_acceptable};
 use crate::history_store::{
@@ -83,19 +84,8 @@ pub(crate) struct ViewerDone {
 /// select on. Cli-only: it never enters `Config`, the file, or the environment.
 pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Result<()> {
     init_tracing(cfg, config_path);
-    let drafts_path = config_path.with_extension("drafts.json");
-    let history_path = config_path.with_extension("history.json");
-    let media_path = cfg
-        .media_cache_dir
-        .clone()
-        .unwrap_or_else(|| config_path.with_extension("media"));
-    build_runtime()?.block_on(run_async(
-        cfg,
-        &drafts_path,
-        &history_path,
-        &media_path,
-        initial_chat,
-    ))
+    let paths = accounts::slot_paths(config_path, cfg, None);
+    build_runtime()?.block_on(run_async(cfg, config_path, &paths, initial_chat))
 }
 
 /// Records the instant the program was asked to start.
@@ -222,9 +212,8 @@ fn init_tracing(cfg: &Config, config_path: &Path) {
 
 async fn run_async(
     cfg: &Config,
-    drafts_path: &Path,
-    history_path: &Path,
-    media_path: &Path,
+    config_path: &Path,
+    paths: &accounts::SlotPaths,
     initial_chat: Option<i64>,
 ) -> Result<()> {
     enable_raw_mode().context("enabling raw mode")?;
@@ -242,11 +231,10 @@ async fn run_async(
 
     let result = event_loop(
         cfg,
+        config_path,
         &mut terminal,
         &mut keys,
-        drafts_path,
-        history_path,
-        media_path,
+        paths,
         initial_chat,
     )
     .await;
@@ -762,19 +750,17 @@ fn load_history(file: &HistoryFile, configured: Option<&str>) -> (HistoryCache, 
 /// otherwise once the first fetched list lands (see
 /// `net::apply_ready_to_screen`).
 ///
-/// `drafts_path` is the drafts file beside the configuration: loaded here
-/// once, re-synced every pass, and cleared on sign-out.
-///
-/// `history_path` is the history file beside it: loaded here once, handed to
-/// the network state with what it held, written behind every page that
-/// changes it, and removed on sign-out.
+/// `paths` is the account-scoped set the resolver produced: its drafts file is
+/// loaded here once, re-synced every pass, and cleared on sign-out; its history
+/// file is loaded here once, handed to the network state with what it held,
+/// written behind every page that changes it, and removed on sign-out; its
+/// media path is the cache's directory.
 async fn event_loop(
     cfg: &Config,
+    config_path: &Path,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     keys: &mut EnhancedKeys<Stdout>,
-    drafts_path: &Path,
-    history_path: &Path,
-    media_path: &Path,
+    paths: &accounts::SlotPaths,
     initial_chat: Option<i64>,
 ) -> Result<()> {
     // When a key was taken on the previous pass, so the next frame can be timed
@@ -803,7 +789,7 @@ async fn event_loop(
     // reused across accounts, and inheriting a stranger's words is worse
     // than losing one's own. Either side unnamed accepts the file — a false
     // clear loses words, a false accept is corrected by park/resume.
-    let draft_file = DraftFile::new(drafts_path.to_path_buf());
+    let draft_file = DraftFile::new(paths.drafts.clone());
     let loaded = draft_file.load();
     if drafts_acceptable(loaded.account.as_deref(), cfg.phone.as_deref()) {
         app.drafts.restore(loaded.drafts);
@@ -823,7 +809,7 @@ async fn event_loop(
     // conversation and a false clear costs one fetch. A file that may not seed is removed rather
     // than left for the first write to overwrite, so another account's
     // messages do not wait on disk for a page that may never come.
-    let history_file = HistoryFile::new(history_path.to_path_buf(), net::file_key_provider(cfg));
+    let history_file = HistoryFile::new(paths.history.clone(), net::file_key_provider(cfg));
     let (history, history_tag) = load_history(&history_file, cfg.phone.as_deref());
 
     // What the configuration carries goes into the sign-in flow as pre-fills,
@@ -846,13 +832,13 @@ async fn event_loop(
 
     // Holds the configuration and this channel, because a sign-out has to rebuild
     // the client and `apply` cannot be handed either.
-    let mut network = net::State::new(cfg.clone(), tx.clone());
+    let mut network = net::State::new(cfg.clone(), config_path.to_path_buf(), tx.clone());
     // And the drafts file, so signing out can remove it.
     network.set_draft_file(draft_file.clone());
     // Opened beside the history file. A directory written for another account,
     // or for none, is cleared on the way in: the history's strict rule.
     network.set_media_cache(MediaCache::open(
-        media_path.to_path_buf(),
+        paths.media.clone(),
         cfg.phone.as_deref(),
         cfg.media_cache_max_bytes,
     ));
@@ -871,7 +857,7 @@ async fn event_loop(
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an
     // event, like everything else.
-    net::spawn_bring_up(cfg.clone(), tx.clone());
+    net::spawn_bring_up(cfg.clone(), config_path.to_path_buf(), tx.clone());
 
     let mut held: VecDeque<AppEvent> = VecDeque::new();
 
@@ -2245,7 +2231,8 @@ mod tests {
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut app = App::new();
-        let mut network = net::State::new(Config::default(), tx.clone());
+        let mut network =
+            net::State::new(Config::default(), PathBuf::from("televim.toml"), tx.clone());
         let mut viewers = Viewers::default();
         let gate = viewers.gate.clone();
         let mut viewer = FakeViewer::default();
