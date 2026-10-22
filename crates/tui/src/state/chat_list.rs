@@ -138,16 +138,12 @@ impl ChatListState {
         self.archived_selected
     }
 
-    /// Moves the archived cursor by `delta`, wrapping at either end.
+    /// Moves the archived cursor by `delta`, stopping at either end.
     pub(crate) fn move_archived(&mut self, delta: isize) {
-        if self.archived.is_empty() {
-            return;
-        }
-        let len = i64::try_from(self.archived.len()).unwrap_or(i64::MAX);
-        let next = (i64::try_from(self.archived_selected).unwrap_or(0)
-            + i64::try_from(delta).unwrap_or(0))
-        .rem_euclid(len);
-        self.archived_selected = usize::try_from(next).unwrap_or(0);
+        self.archived_selected = self
+            .archived_selected
+            .saturating_add_signed(delta)
+            .min(self.archived.len().saturating_sub(1));
     }
 
     /// Keeps the archived cursor on a row, and closes an empty list.
@@ -251,4 +247,14 @@ mod tests {
         assert_eq!(state.list.chats[state.selected_chat].id, 3);
     }
 
+    #[test]
+    fn the_archived_cursor_stops_at_either_end() {
+        let mut state = ChatListState::new();
+        state.install_archived(vec![chat(1, false), chat(2, false)]);
+        state.move_archived(-1);
+        assert_eq!(state.archived_cursor(), 0);
+        state.move_archived(1);
+        state.move_archived(1);
+        assert_eq!(state.archived_cursor(), 1);
+    }
 }

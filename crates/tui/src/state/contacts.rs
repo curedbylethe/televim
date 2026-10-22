@@ -27,11 +27,12 @@ pub struct ContactListState {
 }
 
 impl ContactListState {
-    /// Opens the list and marks a fetch in flight, dropping the last answer.
+    /// Opens the list and marks a fetch in flight.
+    ///
+    /// The last answer stays: a fetch that fails must not take a directory the
+    /// reader already had.
     pub fn begin(&mut self) {
         self.open = true;
-        self.items.clear();
-        self.selected = 0;
         self.in_flight = true;
         self.failure = None;
     }
@@ -50,11 +51,9 @@ impl ContactListState {
         self.failure = Some(reason);
     }
 
-    /// Puts the list away.
+    /// Puts the list away, keeping the last answer for the next open.
     pub fn close(&mut self) {
         self.open = false;
-        self.items.clear();
-        self.selected = 0;
         self.in_flight = false;
         self.failure = None;
     }
@@ -83,15 +82,12 @@ impl ContactListState {
         self.items.get(self.selected)
     }
 
-    /// Moves the cursor by `delta`, wrapping at either end.
+    /// Moves the cursor by `delta`, stopping at either end.
     pub fn move_selection(&mut self, delta: isize) {
-        if self.items.is_empty() {
-            return;
-        }
-        let len = i64::try_from(self.items.len()).unwrap_or(i64::MAX);
-        let next = (i64::try_from(self.selected).unwrap_or(0) + i64::try_from(delta).unwrap_or(0))
-            .rem_euclid(len);
-        self.selected = usize::try_from(next).unwrap_or(0);
+        self.selected = self
+            .selected
+            .saturating_add_signed(delta)
+            .min(self.items.len().saturating_sub(1));
     }
 
     /// The sentence the status line shows while the list is up.
@@ -101,7 +97,7 @@ impl ContactListState {
             return format!("contacts: {reason}");
         }
         if self.in_flight {
-            return "contacts — loading…".to_owned();
+            return "contacts — searching…".to_owned();
         }
         format!("contacts — {}", self.items.len())
     }
@@ -124,7 +120,7 @@ mod tests {
         let mut list = ContactListState::default();
         list.begin();
         assert!(list.is_active());
-        assert_eq!(list.label(), "contacts — loading…");
+        assert_eq!(list.label(), "contacts — searching…");
 
         list.adopt(vec![candidate(1), candidate(2)]);
         assert_eq!(list.label(), "contacts — 2");
@@ -140,23 +136,27 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_wraps_over_the_people() {
+    fn the_cursor_stops_at_either_end() {
         let mut list = ContactListState::default();
         list.begin();
         list.adopt(vec![candidate(1), candidate(2)]);
         list.move_selection(-1);
-        assert_eq!(list.selected(), 1);
-        list.move_selection(1);
         assert_eq!(list.selected(), 0);
+        list.move_selection(5);
+        assert_eq!(list.selected(), 1);
     }
 
     #[test]
-    fn closing_puts_everything_away() {
+    fn a_failed_refetch_leaves_the_previous_directory() {
         let mut list = ContactListState::default();
         list.begin();
         list.adopt(vec![candidate(1)]);
         list.close();
         assert!(!list.is_active());
-        assert!(list.items().is_empty());
+
+        list.begin();
+        list.fail("flood wait, retry in 20s".to_owned());
+        assert_eq!(list.items().len(), 1);
+        assert_eq!(list.label(), "contacts: flood wait, retry in 20s");
     }
 }

@@ -3019,7 +3019,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                 }
                 app.conversation.contacts.adopt(people);
             }
-            Err(error) => app.conversation.contacts.fail(format!("{error:#}")),
+            Err(error) => app.conversation.contacts.fail(failure_reason(&error)),
         },
 
         Event::Offline(reason) => apply_offline(app, state, &reason),
