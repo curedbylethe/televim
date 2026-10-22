@@ -9,13 +9,13 @@ on:
 
 # A second push to the same branch supersedes the first run: the older tree is
 # not the one that will merge, and finishing it costs a cold cache. The group is
-# per workflow and ref, so a pull request's runs cancel each other and never
-# another branch's. The nightly run shares `refs/heads/main` with a push to
-# `main` and can be cancelled by one; it is a recording run, so losing it to a
-# fresher tree is the cheaper mistake.
+# per workflow, event and ref, so a branch's pushes cancel each other, a push and
+# the nightly never cancel each other, and another branch is untouched. A
+# `labeled` event only asks for the memory budget, so it queues behind the run
+# in flight instead of cancelling it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +24,8 @@ env:
 jobs:
   # A docs-only change does not need eight minutes of Rust. This job is what
   # says so, from the diff itself: every path ends `.md` or sits under `docs/`,
-  # or the answer is "run everything".
+  # or the answer is "run everything". The rule lives in
+  # scripts/ci/classify-changes.sh, with its table test run first.
   #
   # When the base commit cannot be diffed — a new branch's first push, a
   # force-push naming a commit this clone does not hold, a scheduled run — it
@@ -41,6 +42,9 @@ jobs:
           # `github.event.before` is not in a single-commit clone.
           fetch-depth: 0
 
+      - name: check the classifier
+        run: scripts/ci/classify-changes.test.sh
+
       - name: classify the changed paths
         id: classify
         env:
@@ -48,31 +52,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          case "$EVENT" in
-            pull_request) base=$BASE ;;
-            push) base=$BEFORE ;;
-            *)
-              echo "rust=true" >> "$GITHUB_OUTPUT"
-              exit 0
-              ;;
-          esac
-
-          # An all-zero `before` is a new branch; a missing object is a
-          # force-push past this clone. Neither can be diffed.
-          if [ -z "$base" ] || [ -z "${base//0/}" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            echo "no base commit to diff against" >&2
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          changed=$(git diff --name-only "$base" HEAD)
-          if [ -z "$changed" ]; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-          elif printf '%s\n' "$changed" | grep -qvE '(\.md$|^docs/)'; then
-            echo "rust=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "rust=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "rust=$(scripts/ci/classify-changes.sh git)" >> "$GITHUB_OUTPUT"
 
   lint:
     name: lint
