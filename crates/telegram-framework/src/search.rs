@@ -476,9 +476,11 @@ fn request_of(args: GlobalSearchArgs) -> tl::functions::messages::SearchGlobal {
 /// Narrows unix seconds into the wire's signed 32-bit date.
 ///
 /// The wire cannot express a date past 2038; a bound past it is clamped to the
-/// last representable second rather than silently dropped to "no bound".
+/// last representable second rather than silently dropped to "no bound". A date
+/// before 1970 is zero, which the wire reads as "no bound": that is the right
+/// answer for an earliest date, and the caller refuses it for a latest one.
 fn date_of(seconds: i64) -> i32 {
-    i32::try_from(seconds).unwrap_or(if seconds < 0 { 0 } else { i32::MAX })
+    i32::try_from(seconds.max(0)).unwrap_or(i32::MAX)
 }
 
 /// Reads the messages and the total off a search response.
@@ -954,6 +956,28 @@ mod tests {
         assert_eq!(request.offset_peer, tl::enums::InputPeer::Empty);
         assert_eq!(request.offset_id, 0);
         assert!(request.users_only, "only one-to-one chats are searched");
+    }
+
+    /// The filter and both date bounds ride the wire, whatever page it is.
+    #[test]
+    fn the_filter_and_dates_reach_the_request() {
+        let request = request_of(global_args(None));
+
+        assert_eq!(
+            request.filter,
+            tl::enums::MessagesFilter::InputMessagesFilterPhotoVideo
+        );
+        assert_eq!(request.min_date, 1_600_000_000);
+        assert_eq!(request.max_date, 1_700_000_000);
+        assert_eq!(request.q, "hello");
+    }
+
+    #[test]
+    fn a_date_narrows_to_the_wires_signed_32_bits() {
+        assert_eq!(date_of(0), 0);
+        assert_eq!(date_of(1_700_000_000), 1_700_000_000);
+        assert_eq!(date_of(-1), 0, "before 1970 is no bound");
+        assert_eq!(date_of(i64::MAX), i32::MAX, "past 2038 is the last second");
     }
 
     /// A later page is anchored on the message the cursor names, including the

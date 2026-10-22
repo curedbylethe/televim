@@ -6673,12 +6673,28 @@ fn accepting_a_candidate_that_is_already_a_chat_focuses_it() {
 #[test]
 fn accepting_a_candidate_that_is_not_a_chat_lists_and_opens_them() {
     let mut app = App::mock();
+    // A pinned chat leads the list, so the first unpinned row is the second.
+    app.set_pinned(MOCK_CHAT, true);
     let before = app.chats().len();
+    let first_unpinned = app
+        .chats()
+        .iter()
+        .position(|chat| !chat.pinned)
+        .expect("the list has an unpinned chat");
     let person = candidate(MOCK_CHAT + 99);
     start_user_search(&mut app, "ada");
     assert!(app.apply_users("ada", vec![person.clone()]));
 
     app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.chats()
+            .iter()
+            .position(|chat| chat.id == person.user_id),
+        Some(first_unpinned),
+        "the new chat takes the first unpinned row, under the pins"
+    );
+    assert!(app.chats()[0].pinned, "and the pin stays on top");
 
     assert_eq!(app.ui.focus, Focus::Conversation);
     assert_eq!(app.current_chat_id(), person.user_id, "their chat is open");
@@ -7827,12 +7843,80 @@ fn a_long_query_yields_before_the_count() {
     );
 }
 
+/// The cells the mode label, its space and the connection dot take before the
+/// status sentence: ` NORMAL ` and a space, then `● `.
+const STATUS_PREFIX_CELLS: usize = 11;
+
+/// A query that itself holds `" — "` is cut in the echo, not at its own dash, so
+/// the count behind it survives.
+#[test]
+fn a_query_with_a_dash_yields_before_the_count() {
+    let mut app = App::mock();
+    let query = format!("{} — {}", "a".repeat(40), "b".repeat(40));
+    answer_global(&mut app, &query, nine_in_three_chats());
+
+    let status = app.status_text();
+
+    assert!(
+        status.ends_with("… — 9 results in 3 chats"),
+        "the echo is cut and the count kept: {status:?}"
+    );
+    assert!(crate::wrap::columns(&status) + STATUS_PREFIX_CELLS <= 80);
+}
+
+/// Filters, count, drops and a pause together outrun the bar: the pause goes,
+/// and the filter and the count stay.
+#[test]
+fn a_filtered_paused_label_keeps_the_filter_and_the_count() {
+    let mut app = App::mock();
+    let spec = SearchSpec {
+        media: domain::global_search::MediaFilter::PhotoVideo,
+        since: Some(1_767_225_600),
+        until: Some(1_769_904_000),
+        ..SearchSpec::plain("tickets")
+    };
+    app.begin_global_search(&spec);
+    assert!(app.adopt_global_search(&spec, nine_in_three_chats(), 9, 12, false));
+    assert!(app.pause_global_search(&spec, Duration::from_secs(42)));
+
+    let status = app.status_text();
+
+    assert!(
+        status.contains("photo_video, 2026-01-01 to 2026-02-01 — 9 results"),
+        "{status:?}"
+    );
+    assert!(
+        !status.contains("paused"),
+        "the pause yields first: {status:?}"
+    );
+    assert!(
+        crate::wrap::columns(&status) + STATUS_PREFIX_CELLS <= 80,
+        "{status:?}"
+    );
+}
+
+/// A persistent status (`:nope`) is not about the typed words, so the prompt
+/// still names the filters.
+#[test]
+fn a_persistent_status_does_not_hide_the_filter_vocabulary() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "nope");
+    assert_eq!(app.status_text(), "unknown command: :nope");
+
+    app.handle_key(press(KeyCode::Char('?')));
+
+    assert_eq!(
+        app.status_text(),
+        "Filters: photo_video, document, music, voice, url — since:, until:"
+    );
+}
+
 /// The line the artifact draws, mode label included, never runs past 80 cells.
 #[test]
 fn no_status_row_exceeds_eighty_cells() {
     let mut app = App::mock();
     answer_global(&mut app, &"x".repeat(90), nine_in_three_chats());
-    assert!(crate::wrap::columns(&app.status_text()) <= LABEL_CELLS);
+    assert!(crate::wrap::columns(&app.status_text()) + STATUS_PREFIX_CELLS <= 80);
 
     let rows = frame_rows(&app);
     for (y, row) in rows.iter().enumerate() {
@@ -8511,6 +8595,29 @@ fn reaching_the_last_hit_asks_for_the_next_page() {
     assert!(
         app.global_search().is_paging(),
         "the rows stay while the next page is on its way"
+    );
+}
+
+/// The rows and the full foot stay drawn while the next page is on its way.
+#[test]
+fn the_overlay_keeps_its_rows_and_foot_while_the_next_page_is_out() {
+    let mut app = App::mock();
+    answer_global_with_more(&mut app, "hit", two_chat_hits());
+    key_press(&mut app, KeyCode::Char('j'));
+    key_press(&mut app, KeyCode::Char('j'));
+    assert!(app.global_search().is_paging());
+
+    let rows = frame_rows(&app);
+
+    assert!(row_of(&rows, "hit one").is_some(), "{rows:#?}");
+    assert!(row_of(&rows, "hit three").is_some(), "{rows:#?}");
+    assert!(
+        row_of(
+            &rows,
+            "j/k: move  ⏎: open  { }: chat  gg/G: ends  Esc: close"
+        )
+        .is_some(),
+        "the foot is unchanged: {rows:#?}"
     );
 }
 

@@ -773,9 +773,9 @@ pub(crate) fn leave_line(
 /// half of "already-existing chats focus rather than duplicate": the match is
 /// by identifier, because a private chat's identifier *is* the peer's, and
 /// [`domain::updates::ChatList::ensure_private_chat`] returns that existing index untouched.
-/// **Someone it does not hold is listed and opened**: the helper appends a
-/// private chat in the candidate's name without disturbing the order, and
-/// returns the new index.
+/// **Someone it does not hold is listed and opened**: the helper inserts a
+/// private chat in the candidate's name at the first unpinned row, and returns
+/// the new index.
 ///
 /// From there the open mirrors every other one — [`App::select_chat`] sets
 /// the view and the read watermark up, the focus moves to the conversation,

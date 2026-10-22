@@ -437,8 +437,7 @@ pub enum Event {
         spec: SearchSpec,
 
         /// The matches on this page, newest first, or why there are none. Hits
-        /// in chats that are not correspondents are dropped when this is
-        /// applied, not here.
+        /// outside the chat list are dropped when this is applied, not here.
         result: Result<proto::search::GlobalSearchResults, ProtoError>,
 
         /// Whether this page follows the ones already shown.
@@ -4333,7 +4332,7 @@ fn global_request(
 ///
 /// A first page replaces the list: the server's answer is the whole search, and
 /// a local list would be a partial one. A continuation appends, keeping what the
-/// reader has already read. Hits outside the correspondents are dropped here and
+/// reader has already read. Hits outside the chat list are dropped here and
 /// counted in [`App::global_dropped`], because search results do not seed the
 /// peer cache. A stale spec is refused by the state itself.
 ///
@@ -4355,7 +4354,7 @@ fn apply_global_searched(
         Ok(results) => {
             let total = results.total;
             let next = results.next;
-            let (hits, dropped) = correspondent_hits(app.chats(), results.hits);
+            let (hits, dropped) = listed_hits(app.chats(), results.hits);
             let shown = if append {
                 app.global_search().len() + hits.len()
             } else {
@@ -4389,31 +4388,31 @@ fn apply_global_searched(
                 app.flash(reason);
             } else {
                 let reason = failure_reason(&error);
-                app.fail_global_search(spec, reason);
-                state.global_next = None;
+                // A stale failure must leave the newer search's cursor alone.
+                if app.fail_global_search(spec, reason) {
+                    state.global_next = None;
+                }
             }
         }
     }
 }
 
-/// The hits whose chat is a correspondent, and how many were dropped for being
-/// anything else, including a chat the list does not hold.
+/// The hits whose chat the list holds, and how many were dropped for being
+/// anything else.
 ///
-/// A private conversation and a bot conversation are both one-to-one
-/// correspondents, so both are kept; a group and a channel are not.
-fn correspondent_hits(
-    chats: &[Chat],
-    hits: Vec<proto::search::GlobalHit>,
-) -> (Vec<GlobalHit>, usize) {
-    let correspondents: HashSet<i64> = chats
+/// The list holds people only, so a hit in a bot's direct messages, a group, a
+/// channel or a chat the client never listed is dropped and counted: it could
+/// not be opened from the overlay.
+fn listed_hits(chats: &[Chat], hits: Vec<proto::search::GlobalHit>) -> (Vec<GlobalHit>, usize) {
+    let listed: HashSet<i64> = chats
         .iter()
-        .filter(|chat| chat.is_correspondent())
+        .filter(|chat| chat.is_private())
         .map(|chat| chat.id)
         .collect();
     let total = hits.len();
     let kept: Vec<GlobalHit> = hits
         .into_iter()
-        .filter(|hit| correspondents.contains(&hit.chat_id))
+        .filter(|hit| listed.contains(&hit.chat_id))
         .map(|hit| GlobalHit {
             chat_id: hit.chat_id,
             message_id: hit.message_id,
@@ -9559,6 +9558,47 @@ mod tests {
         );
     }
 
+    /// A first page that fails for a search the reader has replaced must not take
+    /// the newer search's cursor with it: the newer search still has to page.
+    #[test]
+    fn a_late_failed_first_page_keeps_the_newer_searchs_cursor() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+        let slow = SearchSpec::plain("slow");
+        let newer = SearchSpec::plain("newer");
+        app.begin_global_search(&slow);
+        app.begin_global_search(&newer);
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec: newer.clone(),
+                result: Ok(global_page(&page_of(1, 100), 250, Some(cursor(100)))),
+                append: false,
+            },
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::GlobalSearched {
+                spec: slow,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+                append: false,
+            },
+        );
+
+        assert_eq!(app.global_search().len(), 100, "the newer rows stand");
+        assert_eq!(
+            state
+                .global_next
+                .as_ref()
+                .map(|(spec, cursor)| (spec, *cursor)),
+            Some((&newer, cursor(100))),
+            "and the newer search can still ask for its next page"
+        );
+    }
+
     /// A failed first page leaves nothing to show, so the rows and the cursor go.
     #[test]
     fn a_failed_first_page_clears_the_rows() {
@@ -9578,7 +9618,7 @@ mod tests {
         );
 
         assert!(app.global_search().hits().is_empty());
-        assert!(app.global_search().label().contains("search failed"));
+        assert!(app.global_search().label(0).contains("search failed"));
         assert!(state.global_next.is_none());
     }
 
@@ -9613,7 +9653,7 @@ mod tests {
             Some(gate),
             "the paging gate is not moved"
         );
-        assert!(app.global_search().label().contains("search failed"));
+        assert!(app.global_search().label(0).contains("search failed"));
     }
 
     /// A flood wait is a pause, not a failure: the rows already fetched stay, the
@@ -9656,9 +9696,11 @@ mod tests {
             "the cursor is kept so the resume asks for the same page"
         );
         assert!(
-            app.global_search().label().contains("paused: retry in 42s"),
+            app.global_search()
+                .label(0)
+                .contains("paused: retry in 42s"),
             "got {:?}",
-            app.global_search().label()
+            app.global_search().label(0)
         );
     }
 
@@ -9740,26 +9782,42 @@ mod tests {
             },
         );
         assert_eq!(
-            app.global_search().label(),
+            app.global_search().label(0),
             "?hello — 100 results in 1 chat"
         );
+        for _ in 0..5 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        assert_eq!(app.global_search().selected(), 5);
 
+        let mut second = page_of(101, 100);
+        second.push((CHAT + 9, 999, "unheld"));
         app.begin_global_search(&spec);
         apply(
             &mut app,
             &mut state,
             Event::GlobalSearched {
                 spec: spec.clone(),
-                result: Ok(global_page(&page_of(101, 100), 250, Some(cursor(200)))),
+                result: Ok(global_page(&second, 250, Some(cursor(200)))),
                 append: true,
             },
         );
 
+        assert_eq!(
+            app.global_search().selected(),
+            5,
+            "appending moves nothing under the reader"
+        );
+        assert_eq!(
+            app.global_dropped(),
+            1,
+            "a page's drops join the running count"
+        );
         assert_eq!(app.global_search().hits().len(), 200);
         assert_eq!(app.global_search().hits()[199].message_id, 200);
         assert_eq!(
-            app.global_search().label(),
-            "?hello — 200 results in 1 chat",
+            app.global_search().label(0),
+            "?hello — 200 results in 1 chat, 1 dropped",
             "the label counts what is held, not the server's total"
         );
         assert!(app.global_search().has_more());
@@ -9841,11 +9899,11 @@ mod tests {
         );
     }
 
-    /// Hits in chats that are not correspondents are dropped at the seam, and the
-    /// drop is counted: a group, and a chat the list does not hold. A bot is a
-    /// correspondent, so its hits stay.
+    /// Hits in chats the list does not show as a person are dropped at the seam,
+    /// and the drop is counted: a group, a bot, and a chat the list does not hold.
+    /// A bot's hit could not be opened from the overlay, so it is not kept.
     #[test]
-    fn hits_outside_private_and_bot_chats_are_dropped_and_counted() {
+    fn hits_outside_the_chat_list_are_dropped_and_counted() {
         let mut app = App::new();
         let mut group = chat(CHAT + 2);
         group.kind = ChatKind::Group;
@@ -9881,15 +9939,11 @@ mod tests {
             .iter()
             .map(|hit| hit.message_id)
             .collect();
-        assert_eq!(
-            kept,
-            vec![5, 4, 1],
-            "the private and bot chats' hits remain"
-        );
+        assert_eq!(kept, vec![5, 1], "only the private chat's hits remain");
         assert_eq!(
             app.global_dropped(),
-            2,
-            "and the group and the unknown chat are counted"
+            3,
+            "and the bot, the group and the unknown chat are counted"
         );
     }
 

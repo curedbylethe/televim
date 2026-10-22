@@ -6,7 +6,7 @@
 //! while the list is up, and `Esc: close` while it is not (searching, no matches,
 //! failed), because no key but `Esc` does anything then.
 //!
-//! One rule per chat, the chat's name set into it, then one or two rows per
+//! One rule per run of one chat's hits, the chat's name set into it, then one or two rows per
 //! message: two columns of indent, the time, the sender tag, and a snippet cut
 //! around the first match. A body that fits one line draws one row; a longer one
 //! draws two, the second indented to the snippet column because the body column
@@ -66,7 +66,9 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     frame.render_widget(Clear, body);
 
     let theme = app.ui.theme;
-    let list_up = !search.in_flight() && !search.is_empty();
+    // Rows already held stay up while the next page is out: only an empty list
+    // has nothing to draw, whatever it is waiting on.
+    let list_up = !search.is_empty();
     let hint = if list_up { HINT } else { HINT_IDLE };
 
     let block = Block::default()
