@@ -656,6 +656,9 @@ could not say, the ink, and the constraints the row vocabulary already implies.
 | `AnimatedSticker` | `[animated sticker]` | a TGS or WebM sticker | `text-dim` |
 | `File` | `[file]` | a document, contact, or any kind the build does not model | `text-dim` |
 
+The binary has six `MediaKind`s: it does not yet separate `AnimatedSticker`, and an
+animated sticker draws `[file]` there. The row is the model's, ahead of the code.
+
 **The ink is `text-dim`, not body `text`.** One role for all seven, no new token, and
 no bold, italic or underline (there is no second weight or slant in this surface).
 
@@ -1023,10 +1026,9 @@ one comma clause after the count:
 | Case | Status line, as drawn |
 | :--- | :-------------------- |
 | 9 kept, 3 dropped of 12 | `?tickets — 9 results in 3 chats, 3 dropped` |
-| 100 held of 412, 2 dropped | `?tickets — 100 of 412 results in 3 chats, 2 dropped` |
 | nothing kept, 4 dropped | `?tickets — no matches, 4 dropped` |
 
-- **One clause, one place.** `, N dropped` is the same clause in all three, so a
+- **One clause, one place.** `, N dropped` is the same clause in both, so a
   reader learns it once. `no matches` is the overlay's existing sentence for an
   empty answer, unaltered; the clause after it explains an emptiness the reader
   did not expect.
@@ -1047,7 +1049,10 @@ tokens in the prompt: `media:photo_video`, `since:2026-01-01`,
   interior row and keeps `Esc: close` on its bottom edge. The mode label reads
   `INSERT`, as it does for every line being typed. (Chosen here: the existing
   section says the prompt is the bar at the foot, and the geometry rules the
-  screen's bar out.)
+  screen's bar out.) The binary does not follow this: its prompt stays on the
+  input bar, the row beside the body rather than a line inside the box, so the
+  box needs no second line editor (`docs/decisions.md`, "Why the global-search
+  prompt stays on the input bar"). The frames below draw the box's placement.
 - **While typing, the status names the vocabulary.** The vocabulary is the one
   thing the frame cannot show and the one thing the reader needs at that moment:
   `Filters: photo_video, document, music, voice, url — since:, until:`
@@ -1057,15 +1062,17 @@ tokens in the prompt: `media:photo_video`, `since:2026-01-01`,
   are the prompt's: `?tickets — photo_video, 2026-01-01 to 2026-02-01 — 9
   results`. A one-sided range reads `from 2026-01-01` or `to 2026-02-01`.
 - **With filters active the count loses `in N chats`.** The clause costs 37 of
-  the line's 70 cells, and a date range makes the chat count the least
+  the line's 69 cells, and a date range makes the chat count the least
   interesting half of the count. (Chosen here; without filters the count keeps
   both numbers.)
 - **A malformed token refuses the search without a request.** The prompt keeps
   the query so it can be fixed, and the flash names the token and one legal
-  value: `media:photo is not a media filter: try photo_video.` An unknown value,
-  an unknown token name and an unparseable date take the same shape. (Chosen
+  value: `media:photo is not a media filter: try photo_video.` An unknown value
+  and an unparseable date take the same shape; a date before 1970 and a
+  `from:`, `sender:` or `by:` token are refused too. A word with a colon that is
+  not a filter name (`12:30`, a URL) stays free text. (Chosen
   here: one legal value is named, not five, because five do not fit beside the
-  token in 70 cells.)
+  token in 69 cells.)
 
 **`FLOOD_WAIT` is a pause, not a failure.** It is the only limit
 `messages.searchGlobal` has, there is no daily quota, and what the server
@@ -1101,10 +1108,11 @@ does not move and the list grows under it.
 - **`100 of 412` is gone.** That state described a cap the reader had to live
   with; the cap is a page size now, and the list grows by itself.
 
-**The status line's budget.** Every sentence above is measured against the 70
-cells the line has after ` NORMAL  ` and its space. When one does not fit, the
+**The status line's budget.** Every sentence above is measured against the 69
+cells the line has after ` NORMAL `, its space and the connection dot. When one does not fit, the
 query's free text yields first and is cut with `…`; the filters and the count
-never yield, because they are the answer. No hint string changes: the foot's
+never yield, because they are the answer; when the clauses alone are too long,
+their tail goes instead, so the pause is cut before the count. No hint string changes: the foot's
 hint is the existing 53-cell row and `Esc: close` is its existing short form.
 
 **What this replaces.** Two rows of the existing status table.
@@ -1116,8 +1124,8 @@ meets. No other row changes.
 is, the cursor row is reverse video on both of its rows, the prompt is body ink
 with the insert caret, and the flash is body ink on the status line.
 
-Frames: twelve in `global-search-states.html`, their rows in
-`global-search-states-frames.js`: two for the two-line hit, three for the
+Frames: eleven in `global-search-states.html`, their rows in
+`global-search-states-frames.js`: two for the two-line hit, two for the
 dropped count, three for filters (the prompt, the filtered answer, a refused
 token), two for the wait (with results and without), two for the page boundary
 (in flight, and the last page in). They are drawn from these rules, not from
