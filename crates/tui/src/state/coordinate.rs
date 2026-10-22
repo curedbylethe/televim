@@ -2789,17 +2789,24 @@ pub(crate) fn activate_profile_row(
     // a second enumeration of it. A key that acted on its own list could act
     // on a row the panel is not showing, and that failure is silent: no
     // message, no wrong frame, just a key that did the wrong thing.
-    let Some(label) = rows
-        .get(cursor)
-        .filter(|row| row.is_action())
-        .map(|row| row.label)
-    else {
+    let Some(row) = rows.get(cursor).filter(|row| row.is_action()) else {
         return;
     };
-    match label {
+    match row.label {
         // The row and `:add-account` ask for the same thing: a second sign-in
         // with the signed-in account untouched, so there is nothing to confirm.
         crate::card::ADD_ACCOUNT => queue_action(&mut *outbox, &mut *ui, Action::AddAccount),
+        // The id travels on the row, not in its position: a card built from a
+        // list that changed underneath it must not switch to the row beside the
+        // one the reader pressed.
+        crate::card::SWITCH => {
+            if let Some(id) = row.account_id {
+                queue_action(&mut *outbox, &mut *ui, Action::SwitchAccount { id });
+            }
+        }
+        // A switch is reversible and destroys nothing, so the row that is
+        // already the signed-in account only says so and asks nothing.
+        crate::card::ACTIVE => ui.set_status(format!("already signed in as {}", row.value)),
         // Confirm first and refuse inside the confirmation. A panel that
         // flashes instead of confirming has taught the reader the wrong
         // thing about a key that will eventually discard the one secret this
@@ -2825,7 +2832,7 @@ pub(crate) fn activate_profile_row(
             let Some(contact) = profile.contact.as_ref() else {
                 return;
             };
-            let blocked = label == crate::card::BLOCK;
+            let blocked = row.label == crate::card::BLOCK;
             ui.set_mode(Mode::Confirm);
             conversation.set_confirm(Some(ConfirmKind::Block {
                 peer_id: contact.peer_id,

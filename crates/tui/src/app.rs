@@ -504,6 +504,25 @@ pub enum AccountState {
     Known(domain::account::Account),
 }
 
+/// One account this machine knows, as the picker draws it.
+///
+/// A plain value rather than the index's own entry: `tui` may not read the index,
+/// name a path or open a session, so the listing arrives from `app` already
+/// resolved. The label is the phone the index kept, or `account <id>` when the
+/// entry has none — never a name, because a name would be a read of another
+/// account's session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownAccount {
+    /// The account's numeric id, which is what a switch names.
+    pub id: i64,
+
+    /// How the row's value column names the account.
+    pub label: String,
+
+    /// Whether this is the account that is signed in.
+    pub active: bool,
+}
+
 /// Somebody the reader is talking to, and what is known about them.
 ///
 /// The same three states as the account's own and for the same reason: a card
@@ -1196,6 +1215,18 @@ pub enum Action {
     /// so there is no confirmation to give.
     AddAccount,
 
+    /// Switch to the account with `id`, which this machine already knows.
+    ///
+    /// Asked for rather than performed, like everything else here: the slots, the
+    /// detach and the bring-up are the side holding the client. A switch is
+    /// reversible and destroys nothing, so it raises no confirmation — the id is
+    /// the row's own, never a position, so a list that changed under the card
+    /// cannot send the reader to the account beside the one they pressed.
+    SwitchAccount {
+        /// The account to sign in to, as the index names it.
+        id: i64,
+    },
+
     /// Sign out, and forget the session this program holds.
     ///
     /// Asked for rather than performed, like everything else here: the session
@@ -1440,6 +1471,12 @@ pub struct App {
     /// before the write lands, and so clearing it can restore the server's name
     /// without a fetch.
     pub local_names: BTreeMap<i64, LocalName>,
+
+    /// The accounts this machine knows, as the self card's picker lists them.
+    ///
+    /// Pushed, never read: the index and the slots are `app`'s, and this side
+    /// only draws the list it was handed.
+    pub known_accounts: Vec<KnownAccount>,
 }
 
 impl Default for App {
@@ -1468,6 +1505,7 @@ impl App {
             drafts: DraftStore::new(),
             global_origin: Focus::ChatList,
             local_names: BTreeMap::new(),
+            known_accounts: Vec::new(),
         }
     }
 
@@ -1971,6 +2009,22 @@ impl App {
     /// Delegates to [`SessionState::set_account`].
     pub fn set_account(&mut self, account: Result<Account, String>) {
         self.session.set_account(account);
+    }
+
+    /// Installs the accounts this machine knows, in the order they are drawn.
+    ///
+    /// The list is already resolved: its labels are the numbers the index holds,
+    /// and `active` is the index's answer rather than a comparison this side could
+    /// make. Shape follows [`Self::set_account`] — a push from the caller that
+    /// owns the source, so the card never reads a path or a session of its own.
+    pub fn set_known_accounts(&mut self, accounts: Vec<KnownAccount>) {
+        self.known_accounts = accounts;
+        // The picker's row count just changed under the highlight. The same
+        // re-clamp `set_contact` does, and for the same reason: a highlight
+        // bounded over the rows of a card that no longer exists can never be
+        // moved onto the ones that do.
+        self.profile
+            .retotal(crate::card::navigable(&crate::card::rows(self)));
     }
 
     /// The contact the card on show is about, if it is about one.

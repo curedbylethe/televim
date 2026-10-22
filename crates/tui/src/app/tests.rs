@@ -2878,6 +2878,82 @@ fn add_account_asks_for_a_second_sign_in() {
     assert_eq!(app.take_action(), Some(Action::AddAccount));
 }
 
+/// Moves the card's highlight onto the picker row carrying `id`.
+fn card_row_for_account(app: &mut App, id: i64) {
+    let total = crate::card::rows(app).len();
+    for _ in 0..total {
+        if crate::card::rows(app)[app.profile_cursor()].account_id == Some(id) {
+            return;
+        }
+        app.handle_key(press(KeyCode::Char('j')));
+    }
+    panic!("no row carries account {id}");
+}
+
+/// `d` names the account the row carries, not the row next to it: with two
+/// inactive rows below the active one, a by-position switch would pick the
+/// first of them.
+#[test]
+fn d_on_a_switch_row_switches_to_that_rows_account() {
+    let mut app = profile();
+    app.set_known_accounts(vec![
+        KnownAccount {
+            id: 7,
+            label: "+44 7700 900142".to_owned(),
+            active: true,
+        },
+        KnownAccount {
+            id: 8,
+            label: "account 8".to_owned(),
+            active: false,
+        },
+        KnownAccount {
+            id: 9,
+            label: "account 9".to_owned(),
+            active: false,
+        },
+    ]);
+    card_row_for_account(&mut app, 9);
+
+    app.handle_key(press(KeyCode::Char('d')));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::SwitchAccount { id: 9 }),
+        "the pressed row's id, not the row beside it"
+    );
+}
+
+/// A switch is reversible and destroys nothing, so the row that is already the
+/// signed-in account asks nothing and only says which one it is.
+#[test]
+fn d_on_the_active_row_says_so_and_asks_nothing() {
+    let mut app = profile();
+    app.set_known_accounts(vec![
+        KnownAccount {
+            id: 7,
+            label: "+44 7700 900142".to_owned(),
+            active: true,
+        },
+        KnownAccount {
+            id: 8,
+            label: "account 8".to_owned(),
+            active: false,
+        },
+    ]);
+    card_row_for_account(&mut app, 7);
+
+    app.handle_key(press(KeyCode::Char('d')));
+
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert_eq!(
+        app.status_text(),
+        "already signed in as +44 7700 900142",
+        "it names the row that was pressed"
+    );
+    assert!(app.take_action().is_none(), "and asks for nothing");
+}
+
 /// The command and the row are the same ask: a second sign-in, with the account
 /// already signed in left where it is and nothing to confirm.
 #[test]

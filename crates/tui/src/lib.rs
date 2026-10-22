@@ -31,7 +31,7 @@ pub mod widgets;
 pub mod wrap;
 
 pub use app::{
-    AccountState, Action, App, ConfirmKind, FetchDirection, Focus, Jump, LoginField, Mode, Pane,
-    ProfileId, PromptKind, Register, SessionStore, SignIn, SignInFlow,
+    AccountState, Action, App, ConfirmKind, FetchDirection, Focus, Jump, KnownAccount, LoginField,
+    Mode, Pane, ProfileId, PromptKind, Register, SessionStore, SignIn, SignInFlow,
 };
 pub use state::connection::ConnectionState;

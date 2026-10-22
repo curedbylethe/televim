@@ -3230,13 +3230,18 @@ fn request_plain(
             // which have to reach the state before this function exists.
             // `Logout` is asked for there too: it needs the client. Adding an
             // account is answered in `drive` before the client gate, because a
-            // client is exactly what a switch does not have.
+            // client is exactly what a switch does not have. A switch to a known
+            // account will be answered there too; until it is, the ask is said
+            // aloud here rather than dropped in silence.
             // Unreachable rather than wrong: a value is one of the three, never
             // two.
             // The cancel is answered by `request_action`, which holds the flag;
             // nothing is asked of the network for it either.
             Action::AddAccount => {
                 tracing::debug!("an add-account request reached the network task");
+            }
+            Action::SwitchAccount { .. } => {
+                tracing::debug!("a switch-account request reached the network task");
             }
             Action::Login { .. }
             | Action::LoginCancelled
