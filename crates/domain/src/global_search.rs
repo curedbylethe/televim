@@ -11,8 +11,9 @@
 //! Hits arrive newest first, as the server sends global matches (unlike
 //! [`crate::search`], which keeps oldest first). Grouping keeps that order and
 //! splits it into contiguous runs of one chat: a chat that the
-//! server interleaves with another appears as two groups, not one. There is
-//! deliberately no per-chat cap.
+//! server interleaves with another appears as two groups, not one. The status
+//! line counts chats, not groups, so it still says how many conversations the
+//! hits span. There is deliberately no per-chat cap.
 //!
 //! # Paging
 //!
@@ -23,10 +24,12 @@
 //!
 //! # Coverage and pauses
 //!
-//! The loop keeps only correspondents ([`crate::chat::Chat::is_correspondent`])
-//! and hands this state the count of hits it dropped, which the label reports. A
-//! flood wait becomes a pause that keeps the rows already fetched.
+//! The loop keeps only the chats the list holds, which are people
+//! ([`crate::chat::Chat::is_private`]), and hands this state the count of hits it
+//! dropped, which the label reports. A flood wait becomes a pause that keeps the
+//! rows already fetched.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::message::MediaKind;
@@ -179,8 +182,11 @@ pub struct GlobalSearchState {
     /// How many matches the server holds in all, which may exceed `hits`.
     total: usize,
 
-    /// How many hits the loop dropped for being outside a correspondent.
+    /// How many hits the loop dropped for being outside the chat list.
     dropped: usize,
+
+    /// How many distinct chats the held hits span; the status line's count.
+    chats: usize,
 
     /// Whether the server said another page exists.
     has_more: bool,
@@ -214,6 +220,7 @@ impl GlobalSearchState {
             self.selected = 0;
             self.total = 0;
             self.dropped = 0;
+            self.chats = 0;
             self.has_more = false;
         }
 
@@ -225,8 +232,9 @@ impl GlobalSearchState {
 
     /// Replaces the hits with the server's first answer to `spec`, if still wanted.
     ///
-    /// Returns `false` when `spec` is not the one being searched for, so an
-    /// answer to a replaced search cannot overwrite the current one. Nothing is
+    /// Returns `false` when `spec` is not the one being searched for, or when no
+    /// answer is awaited, so an answer to a replaced search cannot overwrite the
+    /// current one and a page that outlived its sequence cannot land. Nothing is
     /// truncated; `has_more` is the server's word on whether another page
     /// exists, and the total is never less than what is held.
     pub fn adopt(
@@ -237,13 +245,14 @@ impl GlobalSearchState {
         dropped: usize,
         has_more: bool,
     ) -> bool {
-        if !self.is_for(spec) {
+        if !self.awaits(spec) {
             return false;
         }
 
         self.hits = hits;
         self.total = total.max(self.hits.len());
         self.dropped = dropped;
+        self.chats = self.distinct_chats();
         self.has_more = has_more;
         self.selected = self.selected.min(self.hits.len().saturating_sub(1));
         self.in_flight = false;
@@ -255,9 +264,9 @@ impl GlobalSearchState {
 
     /// Adds the server's next page for `spec`, if still wanted.
     ///
-    /// Returns `false` when `spec` is stale, as [`GlobalSearchState::adopt`]
-    /// does. The rows already held and the selection survive; `dropped` is this
-    /// page's count and is added to the running one.
+    /// Returns `false` when `spec` is stale or no page is awaited, as
+    /// [`GlobalSearchState::adopt`] does. The rows already held and the selection
+    /// survive; `dropped` is this page's count and is added to the running one.
     pub fn append(
         &mut self,
         spec: &SearchSpec,
@@ -266,13 +275,14 @@ impl GlobalSearchState {
         dropped: usize,
         has_more: bool,
     ) -> bool {
-        if !self.is_for(spec) {
+        if !self.awaits(spec) {
             return false;
         }
 
         self.hits.extend(hits);
         self.total = total.max(self.hits.len());
         self.dropped += dropped;
+        self.chats = self.distinct_chats();
         self.has_more = has_more;
         self.in_flight = false;
         self.paused_until = None;
@@ -327,6 +337,7 @@ impl GlobalSearchState {
         self.hits.clear();
         self.total = 0;
         self.dropped = 0;
+        self.chats = 0;
         self.has_more = false;
         self.selected = 0;
         self.in_flight = false;
@@ -383,7 +394,7 @@ impl GlobalSearchState {
         self.total
     }
 
-    /// How many hits the loop dropped for being outside a correspondent.
+    /// How many hits the loop dropped for being outside the chat list.
     #[must_use]
     pub fn dropped(&self) -> usize {
         self.dropped
@@ -478,16 +489,18 @@ impl GlobalSearchState {
     /// What the status line says about the search, as of now.
     ///
     /// One function owns every wording: `?{echo} — …`, the query echoed with the
-    /// `?` that asked for it, as the conversation's search echoes `/`.
+    /// `?` that asked for it, as the conversation's search echoes `/`. `offset`
+    /// is the reader's UTC offset in seconds: a date filter is named as the day
+    /// the reader typed, which is their zone's, not UTC's.
     #[must_use]
-    pub fn label(&self) -> String {
-        self.label_at(Instant::now())
+    pub fn label(&self, offset: i64) -> String {
+        self.label_at(Instant::now(), offset)
     }
 
     /// [`GlobalSearchState::label`] at a stated instant, so a countdown can be
     /// tested without waiting for it.
     #[must_use]
-    pub fn label_at(&self, now: Instant) -> String {
+    pub fn label_at(&self, now: Instant, offset: i64) -> String {
         let Some(spec) = &self.spec else {
             return String::new();
         };
@@ -496,7 +509,7 @@ impl GlobalSearchState {
             if self.hits.is_empty() {
                 "searching…".to_owned()
             } else {
-                format!("{}, loading more…", self.count_clause(spec))
+                format!("{}, loading more…", self.count_clause(spec, offset))
             }
         } else if let Some(reason) = &self.failure {
             format!("search failed ({reason})")
@@ -504,10 +517,10 @@ impl GlobalSearchState {
             if self.hits.is_empty() {
                 pause
             } else {
-                format!("{}, {pause}", self.count_clause(spec))
+                format!("{}, {pause}", self.count_clause(spec, offset))
             }
         } else {
-            self.count_clause(spec)
+            self.count_clause(spec, offset)
         };
 
         format!("?{} — {description}", spec.echo)
@@ -515,7 +528,7 @@ impl GlobalSearchState {
 
     /// The results clause: a count, the chats it spans or the filters that
     /// narrowed it, and how many hits were dropped.
-    fn count_clause(&self, spec: &SearchSpec) -> String {
+    fn count_clause(&self, spec: &SearchSpec, offset: i64) -> String {
         let mut clause = if self.hits.is_empty() {
             "no matches".to_owned()
         } else {
@@ -523,10 +536,10 @@ impl GlobalSearchState {
             let noun = if held == 1 { "result" } else { "results" };
 
             // A filtered count is pooled, so naming chats would overstate it.
-            if let Some(filters) = Self::filter_clause(spec) {
+            if let Some(filters) = Self::filter_clause(spec, offset) {
                 format!("{filters} — {held} {noun}")
             } else {
-                let chats = self.groups().len();
+                let chats = self.chats;
                 let chat_noun = if chats == 1 { "chat" } else { "chats" };
                 format!("{held} {noun} in {chats} {chat_noun}")
             }
@@ -541,7 +554,7 @@ impl GlobalSearchState {
     }
 
     /// The reader's filters in reading order, or `None` when nothing is narrowed.
-    fn filter_clause(spec: &SearchSpec) -> Option<String> {
+    fn filter_clause(spec: &SearchSpec, offset: i64) -> Option<String> {
         let mut parts: Vec<String> = Vec::new();
 
         if let Some(media) = spec.media.label() {
@@ -550,10 +563,14 @@ impl GlobalSearchState {
 
         match (spec.since, spec.until) {
             (Some(since), Some(until)) => {
-                parts.push(format!("{} to {}", date(since), date(until)));
+                parts.push(format!(
+                    "{} to {}",
+                    date(since, offset),
+                    date(until, offset)
+                ));
             }
-            (Some(since), None) => parts.push(format!("from {}", date(since))),
-            (None, Some(until)) => parts.push(format!("to {}", date(until))),
+            (Some(since), None) => parts.push(format!("from {}", date(since, offset))),
+            (None, Some(until)) => parts.push(format!("to {}", date(until, offset))),
             (None, None) => {}
         }
 
@@ -573,15 +590,29 @@ impl GlobalSearchState {
         Some(format!("paused: retry in {seconds}s"))
     }
 
+    /// Whether `spec` is the search and an answer to it is still awaited.
+    fn awaits(&self, spec: &SearchSpec) -> bool {
+        self.in_flight && self.is_for(spec)
+    }
+
+    /// How many distinct chats the held hits span.
+    fn distinct_chats(&self) -> usize {
+        self.hits
+            .iter()
+            .map(|hit| hit.chat_id)
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
     /// Whether `spec` is the search being waited on or shown.
     fn is_for(&self, spec: &SearchSpec) -> bool {
         self.spec.as_ref() == Some(spec)
     }
 }
 
-/// The `YYYY-MM-DD` a unix timestamp names, in UTC.
-fn date(seconds: i64) -> String {
-    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+/// The `YYYY-MM-DD` a unix timestamp names on a clock `offset` seconds from UTC.
+fn date(seconds: i64, offset: i64) -> String {
+    let (year, month, day) = civil_from_days(seconds.saturating_add(offset).div_euclid(86_400));
     format!("{year:04}-{month:02}-{day:02}")
 }
 
@@ -708,6 +739,7 @@ mod tests {
         let spec = SearchSpec::plain("q");
         let mut state = answered(&spec, vec![hit(1, 1)], 1);
 
+        state.begin(&spec);
         assert!(state.adopt(&spec, vec![hit(2, 5), hit(2, 6)], 2, 0, false));
 
         assert_eq!(state.hits().len(), 2);
@@ -731,7 +763,7 @@ mod tests {
         );
         assert_eq!(state.hits()[count - 1].message_id, 1);
         assert_eq!(state.total(), count);
-        assert_eq!(state.label(), "?q — 150 results in 1 chat");
+        assert_eq!(state.label(0), "?q — 150 results in 1 chat");
     }
 
     #[test]
@@ -742,6 +774,7 @@ mod tests {
         assert!(state.adopt(&spec, one_chat(3), 9, 0, true));
         state.move_selection(1);
 
+        state.begin(&spec);
         assert!(state.append(&spec, one_chat(3), 9, 0, true));
         assert_eq!(state.len(), 6, "the second page is added, not swapped in");
         assert_eq!(state.total(), 9);
@@ -752,12 +785,13 @@ mod tests {
         );
         assert_eq!(state.hits()[3].message_id, 1, "page two follows page one");
 
+        state.begin(&spec);
         assert!(state.append(&spec, one_chat(3), 9, 0, false));
         assert_eq!(state.len(), 9, "three pages, all kept");
         assert_eq!(state.hits()[8].message_id, 3);
         assert!(!state.has_more());
         assert!(!state.needs_more());
-        assert_eq!(state.label(), "?q — 9 results in 1 chat");
+        assert_eq!(state.label(0), "?q — 9 results in 1 chat");
     }
 
     #[test]
@@ -776,7 +810,7 @@ mod tests {
         assert!(state.in_flight());
         assert!(state.hits().is_empty());
         assert_eq!(state.spec(), Some(&new));
-        assert_eq!(state.label(), "?b — searching…");
+        assert_eq!(state.label(0), "?b — searching…");
     }
 
     #[test]
@@ -794,17 +828,17 @@ mod tests {
             .expect("the test clock is after the epoch");
 
         assert_eq!(
-            state.label_at(start),
+            state.label_at(start, 0),
             "?q — 2 results in 2 chats, paused: retry in 30s",
             "the count clause stays in front of the pause"
         );
         assert_eq!(
-            state.label_at(start + Duration::from_secs(30)),
+            state.label_at(start + Duration::from_secs(30), 0),
             "?q — 2 results in 2 chats",
             "the wait has run out, and the rows are still named"
         );
         assert_eq!(
-            state.label_at(start + Duration::from_secs(31)),
+            state.label_at(start + Duration::from_secs(31), 0),
             "?q — 2 results in 2 chats"
         );
 
@@ -816,7 +850,7 @@ mod tests {
             .checked_sub(Duration::from_secs(30))
             .expect("the test clock is after the epoch");
         assert_eq!(
-            empty.label_at(start),
+            empty.label_at(start, 0),
             "?q — paused: retry in 30s",
             "with no rows there is no count clause"
         );
@@ -844,15 +878,15 @@ mod tests {
             false,
         );
         assert_eq!(
-            nine_in_three.label(),
+            nine_in_three.label(0),
             "?q — 9 results in 3 chats, 3 dropped"
         );
 
         let nothing_kept = answered_with(&spec, Vec::new(), 0, 4, false);
-        assert_eq!(nothing_kept.label(), "?q — no matches, 4 dropped");
+        assert_eq!(nothing_kept.label(0), "?q — no matches, 4 dropped");
 
         let one_kept = answered_with(&spec, vec![hit(1, 1)], 2, 1, false);
-        assert_eq!(one_kept.label(), "?q — 1 result in 1 chat, 1 dropped");
+        assert_eq!(one_kept.label(0), "?q — 1 result in 1 chat, 1 dropped");
     }
 
     #[test]
@@ -862,7 +896,7 @@ mod tests {
             ..SearchSpec::plain("q")
         };
         let state = answered(&media, one_chat(9), 9);
-        assert_eq!(state.label(), "?q — photo_video — 9 results");
+        assert_eq!(state.label(0), "?q — photo_video — 9 results");
 
         let both_dates = SearchSpec {
             media: MediaFilter::PhotoVideo,
@@ -872,7 +906,7 @@ mod tests {
         };
         let state = answered(&both_dates, one_chat(9), 9);
         assert_eq!(
-            state.label(),
+            state.label(0),
             "?q — photo_video, 2026-01-01 to 2026-02-01 — 9 results"
         );
 
@@ -881,7 +915,7 @@ mod tests {
             ..SearchSpec::plain("q")
         };
         assert_eq!(
-            answered(&since_only, one_chat(9), 9).label(),
+            answered(&since_only, one_chat(9), 9).label(0),
             "?q — from 2026-01-01 — 9 results"
         );
 
@@ -890,8 +924,68 @@ mod tests {
             ..SearchSpec::plain("q")
         };
         assert_eq!(
-            answered(&until_only, one_chat(9), 9).label(),
+            answered(&until_only, one_chat(9), 9).label(0),
             "?q — to 2026-02-01 — 9 results"
+        );
+    }
+
+    #[test]
+    fn a_page_nobody_asked_for_is_refused() {
+        let spec = SearchSpec::plain("q");
+        let mut state = answered_with(&spec, one_chat(2), 5, 0, true);
+
+        // The answer settled the sequence: a straggler from an earlier one
+        // carries a cursor that is not this list's, so it must not land.
+        assert!(!state.append(&spec, one_chat(2), 5, 0, true));
+        assert!(!state.adopt(&spec, vec![hit(9, 9)], 1, 0, false));
+        assert_eq!(state.len(), 2);
+        assert_eq!(state.hits()[0].chat_id, 1);
+    }
+
+    #[test]
+    fn a_dropped_count_accumulates_across_pages() {
+        let spec = SearchSpec::plain("q");
+        let mut state = answered_with(&spec, one_chat(2), 6, 1, true);
+
+        state.begin(&spec);
+        assert!(state.append(&spec, one_chat(2), 6, 2, true));
+
+        assert_eq!(state.dropped(), 3);
+        assert_eq!(state.label(0), "?q — 4 results in 1 chat, 3 dropped");
+    }
+
+    #[test]
+    fn the_chat_count_counts_chats_not_runs() {
+        let spec = SearchSpec::plain("hi");
+        let state = answered(&spec, vec![hit(1, 3), hit(2, 2), hit(1, 1)], 3);
+
+        assert_eq!(state.groups().len(), 3, "three runs are drawn");
+        assert_eq!(state.label(0), "?hi — 3 results in 2 chats");
+    }
+
+    #[test]
+    fn a_date_filter_names_the_day_in_the_readers_zone() {
+        const TEHRAN: i64 = 3 * 3_600 + 30 * 60;
+        const NEW_YORK: i64 = -5 * 3_600;
+
+        // `since:2026-03-01` in Tehran starts at 2026-02-28T20:30Z.
+        let since = SearchSpec {
+            since: Some(1_772_310_600),
+            ..SearchSpec::plain("q")
+        };
+        assert_eq!(
+            answered(&since, one_chat(2), 2).label(TEHRAN),
+            "?q — from 2026-03-01 — 2 results"
+        );
+
+        // `until:2026-03-02` in New York ends at 2026-03-03T04:59:59Z.
+        let until = SearchSpec {
+            until: Some(1_772_513_999),
+            ..SearchSpec::plain("q")
+        };
+        assert_eq!(
+            answered(&until, one_chat(2), 2).label(NEW_YORK),
+            "?q — to 2026-03-02 — 2 results"
         );
     }
 
@@ -928,7 +1022,7 @@ mod tests {
         assert_eq!(state.total(), 5);
         assert_eq!(state.selected(), 0);
         assert!(!state.in_flight());
-        assert_eq!(state.label(), "?q — 2 results in 1 chat");
+        assert_eq!(state.label(0), "?q — 2 results in 1 chat");
         assert!(
             state.needs_more(),
             "a later j at the end of the list asks again"
@@ -944,7 +1038,7 @@ mod tests {
         assert!(!state.is_active());
         assert_eq!(state.spec(), None);
         assert!(state.hits().is_empty());
-        assert_eq!(state.label(), "");
+        assert_eq!(state.label(0), "");
     }
 
     #[test]
@@ -954,7 +1048,7 @@ mod tests {
         state.begin(&SearchSpec::plain(""));
 
         assert!(!state.is_active());
-        assert_eq!(state.label(), "");
+        assert_eq!(state.label(0), "");
     }
 
     #[test]
@@ -965,35 +1059,35 @@ mod tests {
         assert!(state.fail(&spec, "flood wait"));
 
         assert!(!state.in_flight());
-        assert_eq!(state.label(), "?q — search failed (flood wait)");
+        assert_eq!(state.label(0), "?q — search failed (flood wait)");
     }
 
     #[test]
     fn label_while_searching() {
         let mut state = GlobalSearchState::default();
         state.begin(&SearchSpec::plain("hi"));
-        assert_eq!(state.label(), "?hi — searching…");
+        assert_eq!(state.label(0), "?hi — searching…");
     }
 
     #[test]
     fn label_with_no_matches() {
         let spec = SearchSpec::plain("hi");
         let state = answered(&spec, Vec::new(), 0);
-        assert_eq!(state.label(), "?hi — no matches");
+        assert_eq!(state.label(0), "?hi — no matches");
     }
 
     #[test]
     fn label_with_one_result_in_one_chat() {
         let spec = SearchSpec::plain("hi");
         let state = answered(&spec, vec![hit(1, 1)], 1);
-        assert_eq!(state.label(), "?hi — 1 result in 1 chat");
+        assert_eq!(state.label(0), "?hi — 1 result in 1 chat");
     }
 
     #[test]
     fn label_with_several_results_across_chats() {
         let spec = SearchSpec::plain("hi");
         let state = answered(&spec, vec![hit(1, 1), hit(1, 2), hit(2, 3)], 3);
-        assert_eq!(state.label(), "?hi — 3 results in 2 chats");
+        assert_eq!(state.label(0), "?hi — 3 results in 2 chats");
     }
 
     #[test]

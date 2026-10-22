@@ -608,20 +608,6 @@ mod live_tests {
     }
 
     #[test]
-    fn an_empty_page_has_no_cursor() {
-        let results = to_global_results(framework::GlobalSearchPage {
-            hits: Vec::new(),
-            total: 0,
-            next: None,
-        });
-
-        assert_eq!(
-            results.next, None,
-            "a page with nothing on it has nowhere to continue from"
-        );
-    }
-
-    #[test]
     fn the_date_bounds_are_passed_through() {
         let bounded = GlobalSearchRequest {
             since: Some(1_600_000_000),

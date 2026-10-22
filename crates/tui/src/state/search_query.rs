@@ -18,13 +18,6 @@ use crate::date;
 /// Why a typed line is not a search, and the word that caused it.
 #[derive(Debug)]
 pub(crate) struct Refusal {
-    /// The offending word as typed; empty when the refusal is about the line.
-    ///
-    /// Nothing reads it yet: it is kept so a caller can point at the word
-    /// without parsing the sentence.
-    #[allow(dead_code)]
-    pub token: String,
-
     /// The sentence the status line shows.
     pub message: String,
 }
@@ -44,7 +37,6 @@ pub(crate) fn parse(query: &str, offset: i64) -> Result<SearchSpec, Refusal> {
 
         if let Some(value) = value_after(word, &lower, "media:") {
             media = media_filter(value).ok_or_else(|| Refusal {
-                token: word.to_owned(),
                 message: format!("{word} is not a media filter: try photo_video."),
             })?;
         } else if let Some(value) = value_after(word, &lower, "since:") {
@@ -56,7 +48,6 @@ pub(crate) fn parse(query: &str, offset: i64) -> Result<SearchSpec, Refusal> {
             until_word = Some(word);
         } else if is_sender_token(&lower) {
             return Err(Refusal {
-                token: word.to_owned(),
                 message: format!(
                     "{word} is not a filter here: global search has no sender filter."
                 ),
@@ -70,14 +61,12 @@ pub(crate) fn parse(query: &str, offset: i64) -> Result<SearchSpec, Refusal> {
         && start > end
     {
         return Err(Refusal {
-            token: from.to_owned(),
             message: format!("{from} is after {to}."),
         });
     }
 
     if words.is_empty() {
         return Err(Refusal {
-            token: String::new(),
             message: "a filter needs a word to search for.".to_owned(),
         });
     }
@@ -114,11 +103,19 @@ fn is_sender_token(lower: &str) -> bool {
 /// The day key a `since:`/`until:` value names, or the refusal naming it.
 fn day(value: &str, word: &str) -> Result<i64, Refusal> {
     let date = date::parse_iso_date(value).ok_or_else(|| Refusal {
-        token: word.to_owned(),
         message: format!("{word} is not a date: try 2026-01-01."),
     })?;
+    let days = date::days_from_civil(date);
 
-    Ok(date::days_from_civil(date))
+    // The wire counts from 1970 and reads a negative bound as none, so an
+    // `until:` before it would return the whole archive instead of nothing.
+    if days < 0 {
+        return Err(Refusal {
+            message: format!("{word} is before 1970: try 2026-01-01."),
+        });
+    }
+
+    Ok(days)
 }
 
 /// The filter a `media:` value names, or `None` when it is not one of them.
@@ -194,7 +191,6 @@ mod tests {
             let refusal = refusal(query);
 
             assert_eq!(refusal.message, message);
-            assert_eq!(refusal.token, query, "the token is the word as typed");
         }
     }
 
@@ -226,7 +222,6 @@ mod tests {
             refusal.message,
             "since:2026-03-01 is after until:2026-02-01."
         );
-        assert_eq!(refusal.token, "since:2026-03-01");
     }
 
     #[test]
@@ -239,7 +234,6 @@ mod tests {
                 refusal.message,
                 format!("{prefix}:ada is not a filter here: global search has no sender filter.")
             );
-            assert_eq!(refusal.token, format!("{prefix}:ada"));
         }
     }
 
@@ -248,7 +242,6 @@ mod tests {
         let refusal = refusal("media:voice");
 
         assert_eq!(refusal.message, "a filter needs a word to search for.");
-        assert_eq!(refusal.token, "");
     }
 
     #[test]
@@ -282,6 +275,22 @@ mod tests {
     }
 
     #[test]
+    fn a_day_before_1970_is_refused_by_name() {
+        for query in ["x until:1969-12-31", "x since:1900-01-01"] {
+            let word = query.split(' ').nth(1).expect("the query has a token");
+
+            assert_eq!(
+                refusal(query).message,
+                format!("{word} is before 1970: try 2026-01-01.")
+            );
+        }
+        assert!(
+            parse("x until:1970-01-01", 0).is_ok(),
+            "the epoch day is fine"
+        );
+    }
+
+    #[test]
     fn an_unparseable_date_is_refused_by_name() {
         let refusal = refusal("x since:2026-13-01");
 
@@ -289,6 +298,5 @@ mod tests {
             refusal.message,
             "since:2026-13-01 is not a date: try 2026-01-01."
         );
-        assert_eq!(refusal.token, "since:2026-13-01");
     }
 }

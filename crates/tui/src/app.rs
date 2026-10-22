@@ -94,12 +94,11 @@ pub(crate) const TYPING_FOR: Duration = Duration::from_secs(6);
 pub(crate) const ACTION_QUEUE: usize = 4;
 
 /// The cells a status sentence has after the mode label, its space and the
-/// connection dot.
+/// connection dot: 80, less ` NORMAL ` and a space (9) and `● ` (2).
 ///
-/// The global-search artifact measures its sentences against these 70 cells,
-/// after ` NORMAL `; the rendered requirement is an 80-cell row, which
-/// `no_status_row_exceeds_eighty_cells` asserts.
-const LABEL_CELLS: usize = 70;
+/// `no_status_row_exceeds_eighty_cells` asserts the rendered row, not just the
+/// sentence.
+const LABEL_CELLS: usize = 69;
 
 /// The filter tokens a global search accepts, named while its prompt is open.
 ///
@@ -3156,8 +3155,10 @@ impl App {
             if self.input.line.purpose() == PromptKind::GlobalSearch {
                 // A refusal outranks the vocabulary: the reader just learned
                 // something about the words they typed, and the vocabulary is
-                // only a reminder of what they may type next.
-                if self.ui.status != IDLE_STATUS {
+                // only a reminder of what they may type next. A refusal is a
+                // flash; a persistent status (`:nope`, `reconnecting`) is not
+                // about these words and must not hide the vocabulary.
+                if self.ui.status_until.is_some() {
                     return self.ui.status.clone();
                 }
                 return GLOBAL_SEARCH_FILTERS.to_owned();
@@ -3194,7 +3195,9 @@ impl App {
         // Directly below the person search: the other question the reader can
         // ask from the chat list, and the one whose answer is not a person.
         if self.conversation.global_search.is_active() {
-            return fit_label(self.conversation.global_search.label());
+            let search = &self.conversation.global_search;
+            let echo = search.spec().map_or("", |spec| spec.echo.as_str());
+            return fit_label(echo, search.label(self.offset()));
         }
         if self.conversation.search.is_active() {
             return self.conversation.search.label();
@@ -3225,26 +3228,31 @@ impl App {
     }
 }
 
-/// Fits a global-search label to [`LABEL_CELLS`], yielding on the echo alone.
+/// Fits a global-search label (`?{echo} — {clauses}`) to [`LABEL_CELLS`].
 ///
-/// Split once at `" — "`: the left is `?` and the echo, the right is every
-/// clause. A clause never yields, because it is the answer; the echo loses its
-/// tail with `…`. A label with no clause is cut as a whole.
-fn fit_label(label: String) -> String {
+/// The echo is passed in because a query may itself contain `" — "`, and only the
+/// caller knows where it ends. The clauses are the answer, so the echo yields
+/// first, losing its tail to `…`. When the clauses alone do not fit, their tail
+/// goes instead: the count and the filters come first, the pause last.
+fn fit_label(echo: &str, label: String) -> String {
     if crate::wrap::columns(&label) <= LABEL_CELLS {
         return label;
     }
 
-    let Some((echo, clauses)) = label.split_once(" — ") else {
+    let Some(clauses) = label
+        .strip_prefix('?')
+        .and_then(|rest| rest.strip_prefix(echo))
+        .and_then(|rest| rest.strip_prefix(" — "))
+    else {
         return rows::truncate(&label, LABEL_CELLS);
     };
     let room = LABEL_CELLS.saturating_sub(3 + crate::wrap::columns(clauses));
 
     // `?…` rather than a bare `…`: the query marker says what was cut.
     if room < 2 {
-        return format!("?… — {clauses}");
+        return format!("?… — {}", rows::truncate(clauses, LABEL_CELLS - 5));
     }
-    format!("{} — {clauses}", rows::truncate(echo, room))
+    format!("{} — {clauses}", rows::truncate(&format!("?{echo}"), room))
 }
 
 // ---- helpers -----------------------------------------------------------

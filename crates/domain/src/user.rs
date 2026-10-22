@@ -130,7 +130,7 @@ pub struct UserSearchState {
     /// The query, or `None` when no search has been run.
     query: Option<String>,
 
-    /// The people the search offered, best first as the server ranked them.
+    /// The people the search offered, best first as the client ranks them.
     candidates: Vec<UserCandidate>,
 
     /// Which candidate the reader is on, always inside `candidates` or zero on

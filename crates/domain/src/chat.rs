@@ -64,16 +64,6 @@ impl Chat {
         self.kind.is_private()
     }
 
-    /// Whether a global search may show this chat's messages.
-    ///
-    /// Private conversations and bot conversations are one-to-one
-    /// correspondents, so both belong in a global search. A group or a channel
-    /// has an audience rather than a correspondent, so neither does.
-    #[must_use]
-    pub fn is_correspondent(&self) -> bool {
-        matches!(self.kind, ChatKind::Private | ChatKind::Bot)
-    }
-
     #[must_use]
     pub fn has_unread(&self) -> bool {
         self.unread_count > 0
@@ -126,14 +116,6 @@ mod tests {
         ] {
             assert_eq!(chat(1, kind).is_private(), kind.is_private(), "{kind:?}");
         }
-    }
-
-    #[test]
-    fn a_bot_conversation_is_a_correspondent() {
-        assert!(chat(1, ChatKind::Private).is_correspondent());
-        assert!(chat(2, ChatKind::Bot).is_correspondent());
-        assert!(!chat(3, ChatKind::Group).is_correspondent());
-        assert!(!chat(4, ChatKind::Channel).is_correspondent());
     }
 
     #[test]
