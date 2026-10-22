@@ -5,6 +5,30 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.8.0] - 2026-10-22
+
+### Added
+
+- **telegram-framework:** Name the account in a stored session
+- **app:** Keep an accounts index beside the configuration
+- **app:** Tag caches with the slot that owns them
+- **tui:** Ask for a second account instead of refusing
+- **app:** Add a second account without signing the first one out
+- **app:** Keep the reader's place across an account switch
+- **tui:** List the known accounts on the self card
+- **app:** Switch to a listed account from the self card
+
+### Fixed
+
+- **tui:** Tell the network when a sign-in is abandoned at the phone step
+- **app:** Keep the picker truthful and the reader's place on a failed switch
+
+### ci
+
+- Run the memory budget off ordinary pull requests
+- Split the workflow into a fast job and a single-build release job
+- Drop --locked from the release build
+
 ## [0.6.0] - 2026-10-17
 
 ### Added
