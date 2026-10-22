@@ -1289,20 +1289,19 @@ are in [`../AGENTS.md`](../AGENTS.md).
   trusting `limit` to be honoured exactly. An answer that fits arrives unsliced
   with no `next_rate` at all, and a slice can come back short, so neither a page
   count nor a full page is a safe end-of-list signal.
-- **Why a bot conversation is a correspondent:** the request already asks for
+- **Why a bot's hits are dropped, for now:** the request asks for
   `users_only: true`, Telegram's "one-to-one chats", which includes a bot's direct
-  messages in the answer; this client then dropped them, because `ChatKind::Bot`
-  is not `Private` and the global filter used `is_private`. The server's total and
-  the drawn rows therefore disagreed, with nothing on screen to explain it. So the
-  search has a predicate of its own, `Chat::is_correspondent()` = `Private | Bot`,
-  and keeps every hit whose chat the list holds as one; a group, a channel and a
-  chat the list does not hold at all are dropped and counted. `is_private` is not
-  changed: it is the chat list's rule, the list still displays people only, so the
-  two predicates mean different things and both keep their tests. The fetched list
-  carries people only, so a bot's hit is dropped as an unheld chat until the client
-  lists that bot; the predicate is the half the search owns. Rejected: leaving bots
-  outside, which would make `users_only` a lie in the request and the count a lie
-  in the status.
+  messages in the answer, and the chat list is people only
+  (`ChatKind::is_private`), so a bot's hit is dropped as a chat the list does not
+  hold and counted in `, N dropped`. Opening a hit selects its chat in the list;
+  a bot is not there, so keeping the hit would draw a row that answers `Enter`
+  with `that chat is not in the list`. Deciding that bots *belong* in a global
+  search means deciding they belong in the list, which is a product change across
+  the chat pane, the update filter and the history cache, and no acceptance
+  criterion asks for it. Rejected: a predicate that keeps bot hits while the list
+  omits bots, which counts them as results the reader cannot open; and a side set
+  of bot ids, for the same reason. The decision to revisit is the list's, not the
+  search's.
 - **Why a flood wait pauses instead of failing:** message search has no daily
   quota — the `search_flood` field a slice can carry belongs to
   `channels.searchPosts`, and TDLib treats it as an error on every other method —
