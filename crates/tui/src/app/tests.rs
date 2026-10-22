@@ -9496,3 +9496,29 @@ fn the_rename_row_prefills_the_card_name_and_renames_the_card_peer() {
     ));
 }
 
+#[test]
+fn archiving_or_deleting_the_chat_of_the_card_closes_the_card() {
+    let mut app = App::mock();
+    for gone in [true, false] {
+        app.ui.set_pane(Pane::Profile(ProfileId::User(2)));
+        if gone {
+            app.set_archived(2, true);
+        } else {
+            app.remove_conversation(2);
+        }
+        assert_eq!(app.ui.pane, Pane::Conversation);
+    }
+}
+
+#[test]
+fn deleting_the_last_archived_chat_closes_the_archive() {
+    let mut app = App::mock();
+    app.set_archived(2, true);
+    run_command_line(&mut app, "archived");
+    assert!(app.list.archived_is_open());
+
+    app.remove_conversation(2);
+
+    assert!(!app.list.archived_is_open());
+}
+
