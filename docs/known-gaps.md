@@ -105,21 +105,28 @@ Real, and named so they are not mistaken for oversights:
   would be a 58-field literal that breaks on every schema bump and reads as noise.
   The `live` integration test in `app/tests/proto_integration.rs` is the other end
   of it, and it needs a datacenter.
-- **`add account` is a row that refuses.** It flashes
-  `not yet: this build cannot add an account`, one word long because a deliberate
-  refusal is not a `[failed: …]` — that form is for something that tried and did
-  not come back, and a reader who reads it as a bug will go looking for one that
-  does not exist. `logout` used to refuse the same way; it signs out now.
-- **Account storage is partitioned, and one account is still all a launch
-  opens.** The session, drafts file, history file and media directory resolve
+- **A second account can be added, but the process holds one account at a time.**
+  `add account` on the self card and `:add-account` detach the signed-in account
+  without signing it out — the client goes, the files stay — and open the sign-in
+  at the phone step for a new one; the new account's first `Ready` adopts it, and
+  `Esc` at the phone step cancels and restores the first. Four limits remain. Only
+  one account is open per process: the detached account receives no updates while
+  the new one signs in. Switching is add-account-only until the picker lands, so
+  reaching an account already stored means signing in to it again. Nothing is
+  revoked on the server, so the detached session remains valid. And with a
+  configured session *file*, the panel names the configured path behind the
+  sign-in until the first `Ready` names the new account and its suffixed path is
+  known.
+- **Account storage is partitioned, and one account is open per process.** The
+  session, drafts file, history file and media directory resolve
   through `accounts::slot_paths`, so an account added later writes
   `<stem>.<id>.*` and `session-<id>` and cannot read, overwrite or delete the
   first account's bytes; the first account keeps the legacy names and the
-  legacy slot's tag, so an upgrade moves nothing and clears nothing. What is
-  still single-account is the runtime: a launch opens only the slot the
-  accounts index names, a slot is chosen once at launch, and there is no
-  switching between accounts while the program runs. `add account` still
-  refuses — see the entry above.
+  legacy slot's tag, so an upgrade moves nothing and clears nothing. A launch
+  opens the slot the accounts index names, and `add account` writes a second one
+  while the program runs, but there is still one client and one account's state
+  at a time, and no picker to move between the slots already stored. `add
+  account` is the only switch — see the entry above.
 - **`Config::code` and `Config::password` are pre-fills, not a way in.** They
   fill the code and the password fields when a flow reaches them; the flow is the
   only path that writes a session, and the phone has to reach the bar once.

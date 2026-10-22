@@ -153,6 +153,32 @@ are in [`../AGENTS.md`](../AGENTS.md).
   rather than an account's bytes; a reader who relied on it is asked at the
   next launch after `:passphrase`, as [`known-gaps.md`](./known-gaps.md)
   records.
+- **Why adding an account detaches locally instead of logging out:** the update
+  relay is single-shot, so a second account cannot share the client the first one
+  is on — it needs a bring-up of its own — and `auth.logOut` would revoke the
+  session the reader asked to keep. Detaching is therefore delete-nothing and
+  re-point, not the destructive `Ready { account: Err(String::new()) }` path:
+  `State::detach_account` flushes the drafts once, while the file still names the
+  account, drops the client `Arc` and its relay, clears the screen's per-account
+  state, keeps the typed passphrase, and sets `switching`. Every one of the first
+  account's files stays where it is, and the forgetting a signed-out `Ready` does
+  — the same forgetting `apply_logged_out` does — is guarded while `switching`,
+  because the session that is missing is the new one that was never there and
+  the files it would clear are the first account's. A history write already in
+  flight when the detach happened finishes into the first account's own file,
+  because the write holds its own `HistoryFile`. The new slot is minted from the
+  snapshot's own account id, which is why a completed sign-in has to record the
+  account in the session it stores: `Target::Fresh` writes that session at
+  `Id(id)`'s target, then writes the accounts index with `active = id`, and an
+  index write that fails takes the session back out, because a session no launch
+  can find is a reader signed in to nothing. The index is a hint and the tags
+  stay authoritative, so a slot with no session still opens the sign-in surface
+  like any other. Cancel is the same store and paths restored rather than a
+  recovery: `Action::LoginCancelled` hands the first slot back to `adopt_slot`
+  and brings it up, and that is why `Esc` at the phone step now queues the cancel
+  — before, only the code and password steps did, and a second sign-in abandoned
+  at the phone left the side holding the client waiting for an answer that never
+  came.
 - **Why the file key comes from the environment first, the keyring second, and
   nowhere else:** the order is `TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase`
   in the configuration, which the environment wins over), then a random 256-bit key
