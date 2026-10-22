@@ -601,7 +601,6 @@ code.
 | `Set the credentials again with :signin.` | where to put the credentials back | `SET_CREDENTIALS` |
 | `signed out` | the status the screen rests on after the reader signs out, until the sign-in field arrives | `apply_logged_out` |
 | `Sign out and forget this session? (y/n)` | a screen-wide confirmation, raised by the `logout` row; `y` signs out | the card |
-| `not yet: this build cannot add an account` | the `add account` row's refusal | ditto |
 | `Not editable here: :settings opens the editable profile.` | `e` on the self card: the one route to the editable screen | ditto |
 | `p: a card has no buffer to paste into` | why `p` is unbound, written to the hint's own row | ditto |
 | `1 row(s) yanked — register filled, OSC 52 offered` | `yy`: the register first, then the offer to the terminal | ditto |
@@ -1508,7 +1507,8 @@ inside a row and cannot be seen is one nobody knows.
 ### The self card
 
 Rows, in order: `name`; `username`; `bio`; `birthday`; `id`; `session`; then
-`add account`, dim, which refuses, and `logout`, which signs out.
+`add account`, which puts the sign-in back at the phone step, and `logout`, which
+signs out.
 
 - `username` is the row's label, as in the binary's card; its value is the joined
   identity, `@username` and the phone number with ` · `
@@ -1523,7 +1523,9 @@ Rows, in order: `name`; `username`; `bio`; `birthday`; `id`; `session`; then
   parentheses: `Oct 19, 2001 (24 years old)`. **Without the year when there is
   no year** — `10 December` — because a year is a disclosure the account was
   not required to make, and a birthday with no year has no age to state.
-- `add account` refuses with `not yet: this build cannot add an account`.
+- `add account` closes the card and opens the sign-in at the phone step, exactly
+  as a first launch does. The signed-in account is left where it is, so there is
+  nothing to confirm: nothing is discarded.
 - `logout` raises a screen-wide confirmation, `Sign out and forget this
   session? (y/n)`, and **confirms before it throws away the only secret the
   program holds** — a panel that only flashed would have taught the reader the

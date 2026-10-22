@@ -2281,9 +2281,11 @@
   }
   function cardAct(s, r) {
     if (s.card.sub === 'self' && r.kind === 'action') {
-      if (r.act === 'add') refuse(s, 'not yet: this build cannot add an account');
-      /* a confirmation outranks a flash: it asks before it throws away the only secret the
-         program holds, and y signs out. */
+      /* add account detaches the client and puts the sign-in back at its first step. The
+         signed-in account is left where it is, so there is nothing to confirm. */
+      if (r.act === 'add') beginSignin(s);
+      /* a confirmation outranks a flash: the sign-out asks before it throws away the only
+         secret the program holds, and y signs out. */
       else ask(s, 'Sign out and forget this session? (y/n)', beginLoggedOut);
       return;
     }
@@ -2753,7 +2755,7 @@
     { id: 'profile', name: 'Profile', variants: [
       /* one widget, two subjects. Every frame here is fed through the real handler. */
       { name: 'Profile · you', keys: 'S' },
-      { name: 'add account refuses', keys: 'SGkd' },
+      { name: 'add account: the sign-in that follows', keys: 'SGkd' },
       { name: 'logout raises the confirmation', keys: 'SGd' },
       { name: 'y signs out: the sign-in field comes back', keys: 'SGdy' },
       { name: 'Esc: the line\'s Normal, card behind', keys: 'S:<Esc>' },
