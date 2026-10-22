@@ -43,8 +43,8 @@ televim/
     │                           #   grapheme, jumplist, line, rows, state,
     │                           #   text_row, theme, widgets, wrap
     └── app/                    # Composition root & CLI binary
-        ├── src/                # main, config, draft_store, history_store,
-        │                       #   media_cache, net, runtime
+        ├── src/                # main, accounts, config, draft_store,
+        │                       #   history_store, media_cache, net, runtime
         └── tests/              # proto_integration.rs, tui_e2e.rs
 ```
 
@@ -481,6 +481,8 @@ no library target.
 crates/app/
 ├── src/
 │   ├── main.rs         # Entry point, CLI parsing (clap: --config, --chat)
+│   ├── accounts.rs     # One resolver for an account's four paths, the
+│   │                   #   accounts index, and the session store over a slot
 │   ├── config.rs       # Load TOML + env
 │   ├── draft_store.rs  # The drafts file beside the config
 │   ├── history_store.rs # The history file beside the config: cached
@@ -495,6 +497,37 @@ crates/app/
 │   └── tui_e2e.rs            # PTY tests; arrivals/fetches via a debug seam
 └── Cargo.toml
 ```
+
+`accounts.rs` is the one resolver for the four artefacts that belong to an
+account: `slot_paths` derives the drafts file, the history file, the media
+directory and the session target from the configuration and its own path, so a
+run's files, its credential-store entry and the profile panel's description
+cannot disagree about whose they are. `AccountSlot::Legacy` is the slot every
+install has, and reproduces today's bytes exactly: `televim.drafts.json`,
+`televim.history.json`, `televim.media` (or `media_cache_dir`), and the `session`
+entry or the configured `session_path`. `AccountSlot::Id(id)` is an account added
+later, and its four paths are the same names with `.<id>` — the files and the
+media directory as `<stem>.<id>.*`, a configured session file with `.<id>` before
+its extension — and the credential-store entry `session-<id>`. `SlotPaths` is
+that set, `SessionTarget` is either `Keyring(name)` or `File(path)`, and
+`SlotStore` is the `SessionStore` over one slot's target, so a session can only
+be read, written or cleared where the resolver put it.
+
+`AccountsIndex`, at `<config>.accounts.json`, is a **launch hint** and not a
+record of who is signed in. Its `active` field names the account whose slot the
+next launch opens; a missing, corrupt or unknown-version index is no hint at all,
+and the launch then uses the legacy slot rather than failing on a file that is
+only a convenience. It is written only after a `Ready` names an account —
+`accounts::note_signed_in` from `net::apply_ready` — and only when a field
+changes, so a launch writes it at most once. The session's own tag stays
+authoritative, which is why a slot with no session opens onto the sign-in
+surface like any other.
+
+What is still single-account: the launch opens only the slot the index names, and
+nothing in the program writes an id slot — `note_signed_in` records every `Ready`
+at the legacy slot, a slot is chosen once at launch, and there is no switching
+between accounts while the program runs. `add account` remains a row that
+refuses.
 
 `app` asks for `proto/live` and `telegram-framework/live` unconditionally, and
 has no feature of its own. It is a Telegram client: the two crates that talk to
@@ -552,7 +585,7 @@ verifies and serves it, and it is removed with the message key it belongs to —
 kept while a parent another message shares still names the blob it previews. An
 edit removes its message's pointer; a deletion removes the pointer for
 each deleted id in any chat. Writes are atomic at `0600`, as the history file does. `runtime.rs` opens it at launch
-with the configured account, which clears the directory on a mismatch. If the configured
+with the slot's label, which clears the directory on a mismatch. If the configured
 directory cannot be created or written (a probe file), `open` roots the fallback at
 `dirs::cache_dir()/televim/televim.media-<account>` so cached media survives a
 restart, with a `tracing::warn!`; the system temp directory is the root only when

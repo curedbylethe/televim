@@ -110,6 +110,16 @@ Real, and named so they are not mistaken for oversights:
   refusal is not a `[failed: …]` — that form is for something that tried and did
   not come back, and a reader who reads it as a bug will go looking for one that
   does not exist. `logout` used to refuse the same way; it signs out now.
+- **Account storage is partitioned, and one account is still all a launch
+  opens.** The session, drafts file, history file and media directory resolve
+  through `accounts::slot_paths`, so an account added later writes
+  `<stem>.<id>.*` and `session-<id>` and cannot read, overwrite or delete the
+  first account's bytes; the first account keeps the legacy names and the
+  legacy slot's tag, so an upgrade moves nothing and clears nothing. What is
+  still single-account is the runtime: a launch opens only the slot the
+  accounts index names, a slot is chosen once at launch, and there is no
+  switching between accounts while the program runs. `add account` still
+  refuses — see the entry above.
 - **`Config::code` and `Config::password` are pre-fills, not a way in.** They
   fill the code and the password fields when a flow reaches them; the flow is the
   only path that writes a session, and the phone has to reach the bar once.
