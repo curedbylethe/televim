@@ -789,6 +789,12 @@ async fn event_loop(
     }
     "connecting…".clone_into(&mut app.ui.status);
 
+    // What this slot's files are tagged with: the configured phone for the
+    // legacy layout, the id for an account added later. One label for drafts,
+    // history and media, so the upgrade cannot mistake the first account's
+    // bytes for a stranger's — and the second account cannot read them.
+    let label = paths.label(cfg);
+
     // The drafts file beside the configuration, loaded once at launch. A file
     // tagged for another account never seeds this one: a peer id can be
     // reused across accounts, and inheriting a stranger's words is worse
@@ -796,7 +802,7 @@ async fn event_loop(
     // clear loses words, a false accept is corrected by park/resume.
     let draft_file = DraftFile::new(paths.drafts.clone());
     let loaded = draft_file.load();
-    if drafts_acceptable(loaded.account.as_deref(), cfg.phone.as_deref()) {
+    if drafts_acceptable(loaded.account.as_deref(), label.as_deref()) {
         app.drafts.restore(loaded.drafts);
         app.drafts.restore_read_marks(loaded.reads);
     } else {
@@ -815,7 +821,7 @@ async fn event_loop(
     // than left for the first write to overwrite, so another account's
     // messages do not wait on disk for a page that may never come.
     let history_file = HistoryFile::new(paths.history.clone(), net::file_key_provider(cfg));
-    let (history, history_tag) = load_history(&history_file, cfg.phone.as_deref());
+    let (history, history_tag) = load_history(&history_file, label.as_deref());
 
     // What the configuration carries goes into the sign-in flow as pre-fills,
     // and nothing more: the flow is where a phone number, a code and a password
@@ -847,7 +853,7 @@ async fn event_loop(
     // or for none, is cleared on the way in: the history's strict rule.
     network.set_media_cache(MediaCache::open(
         paths.media.clone(),
-        cfg.phone.as_deref(),
+        label.as_deref(),
         cfg.media_cache_max_bytes,
     ));
     viewers.cache = network.media_cache();
@@ -943,7 +949,7 @@ async fn event_loop(
         // it reports (see `Viewers::start_next` and `Viewers::finish`).
         viewers.queue(network.take_media());
         viewers.start_next(&mut TuiViewer { terminal, keys }, &mut app, &tx, cfg)?;
-        sync_drafts(&app, &draft_file, &mut last_synced, cfg.phone.as_deref());
+        sync_drafts(&app, &draft_file, &mut last_synced, label.as_deref());
         // Unlike the drafts, written off the loop's thread: the file is up to
         // a window per conversation, and it is a write behind the pages that
         // already reached the screen, so nothing waits on it. The chat list

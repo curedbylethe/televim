@@ -51,6 +51,19 @@ impl AccountSlot {
             Self::Id(id) => Some(id),
         }
     }
+
+    /// The tag every artefact of this slot is written under: the legacy slot
+    /// keeps the configured phone, an id slot is its decimal id.
+    ///
+    /// One rule for drafts, history and media, so an upgrade does not read the
+    /// first account's bytes as another account's, and a later account cannot
+    /// read or clear them.
+    pub(crate) fn label(self, cfg: &Config) -> Option<String> {
+        match self {
+            Self::Legacy => cfg.phone.clone(),
+            Self::Id(id) => Some(id.to_string()),
+        }
+    }
 }
 
 /// Every path one account owns.
@@ -66,6 +79,14 @@ pub(crate) struct SlotPaths {
     /// What the profile panel says the session is. Derived here, beside the
     /// target, so the panel and the store cannot name different things.
     pub(crate) description: tui::SessionStore,
+}
+
+impl SlotPaths {
+    /// The tag this slot's drafts, history and media are written under:
+    /// [`AccountSlot::label`], asked once by the launch and handed down.
+    pub(crate) fn label(&self, cfg: &Config) -> Option<String> {
+        self.slot.label(cfg)
+    }
 }
 
 /// Where the session goes.
@@ -510,6 +531,37 @@ mod tests {
             panic!("no configured file means the keyring");
         };
         assert_eq!(account, "session-7");
+    }
+
+    /// The tag rule in one place: the legacy slot keeps the configured phone,
+    /// an id slot is its decimal id — the difference that stops an upgrade
+    /// reading the first account's bytes as a stranger's.
+    #[test]
+    fn the_slot_label_is_the_configured_phone_or_the_id() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let cfg = Config {
+            phone: Some("+15551234567".to_owned()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            slot_paths(&config_path, &cfg, None).label(&cfg).as_deref(),
+            Some("+15551234567"),
+            "the legacy slot's tag is what the install already writes"
+        );
+        assert_eq!(
+            slot_paths(&config_path, &cfg, Some(7))
+                .label(&cfg)
+                .as_deref(),
+            Some("7"),
+            "an added account is its id, never the phone"
+        );
+        assert_eq!(
+            slot_paths(&config_path, &Config::default(), None).label(&Config::default()),
+            None,
+            "no configured phone leaves the legacy slot untagged"
+        );
     }
 
     #[test]

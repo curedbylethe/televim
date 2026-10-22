@@ -1078,7 +1078,9 @@ impl State {
             .flatten();
         let mut tag = self.cached.tag.clone();
         if tag.account_id.is_none() && tag.phone.is_none() {
-            tag.phone = self.cfg.as_ref().and_then(|cfg| cfg.phone.clone());
+            // The slot's label, not the configured phone: a file written before
+            // `Ready` names the account still belongs to this slot.
+            tag.phone = self.cfg.as_ref().and_then(|cfg| self.slot.label(cfg));
         }
         let Some(bytes) = HistoryFile::encode(&self.cached.messages, &tag) else {
             return;
@@ -4281,7 +4283,10 @@ fn apply_ready_to_screen_with_archive(
         }
         let live = HistoryTag {
             account_id: Some(account.user_id),
-            phone: None,
+            // The slot's label, so the file says which slot it belongs to the
+            // same way drafts and media do. The id stays the tag the check
+            // above reads.
+            phone: state.cfg.as_ref().and_then(|cfg| state.slot.label(cfg)),
         };
         // A legacy or untagged file is re-tagged by the next write, which
         // this does not ask for: a quiet `Ready` owes the file nothing.

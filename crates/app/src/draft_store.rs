@@ -401,6 +401,83 @@ mod tests {
         assert!(drafts_acceptable(None, None), "neither: accept");
     }
 
+    /// The slot's label is what the launch accepts: the configured phone keeps
+    /// the first account's file after the upgrade, while an id slot's `"7"`
+    /// shares nothing with the legacy phone or with `"8"`.
+    #[test]
+    fn the_slot_label_keeps_the_legacy_drafts_and_separates_an_id_slot() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let cfg = crate::config::Config {
+            phone: Some("+15551234567".to_owned()),
+            ..crate::config::Config::default()
+        };
+        let legacy = crate::accounts::slot_paths(&config_path, &cfg, None);
+        let seven = crate::accounts::slot_paths(&config_path, &cfg, Some(7));
+
+        // The layout an install already has, written before the upgrade.
+        let legacy_file = DraftFile::new(legacy.drafts.clone());
+        legacy_file.save(
+            &[(7, "first account's".to_owned())],
+            &[(7, 9)],
+            legacy.label(&cfg).as_deref(),
+        );
+        let legacy_loaded = legacy_file.load();
+
+        assert!(
+            drafts_acceptable(
+                legacy_loaded.account.as_deref(),
+                legacy.label(&cfg).as_deref()
+            ),
+            "the upgrade does not discard the first account's words"
+        );
+        assert_eq!(
+            legacy_loaded.drafts,
+            vec![(7, "first account's".to_owned())]
+        );
+
+        // An account added later, on its own file.
+        let seven_file = DraftFile::new(seven.drafts.clone());
+        seven_file.save(
+            &[(7, "seven's".to_owned())],
+            &[(7, 4)],
+            seven.label(&cfg).as_deref(),
+        );
+        let seven_loaded = seven_file.load();
+
+        assert_eq!(
+            seven_file.path,
+            config_path.with_extension("7.drafts.json"),
+            "the slot's own file, not the legacy one"
+        );
+        assert_eq!(seven_loaded.account.as_deref(), Some("7"));
+        assert!(
+            drafts_acceptable(
+                seven_loaded.account.as_deref(),
+                seven.label(&cfg).as_deref()
+            ),
+            "7 seeds 7"
+        );
+        assert!(
+            !drafts_acceptable(
+                seven_loaded.account.as_deref(),
+                legacy.label(&cfg).as_deref()
+            ),
+            "7's words are not the legacy phone's"
+        );
+        assert!(
+            !drafts_acceptable(seven_loaded.account.as_deref(), Some("8")),
+            "nor 8's"
+        );
+        assert!(
+            !drafts_acceptable(
+                legacy_loaded.account.as_deref(),
+                seven.label(&cfg).as_deref()
+            ),
+            "and the legacy file does not seed 7"
+        );
+    }
+
     // ---- the seam: STAGE-01 snapshot plus this store, no terminal ---------
 
     use std::borrow::Cow;
