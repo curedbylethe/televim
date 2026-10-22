@@ -2,10 +2,25 @@
 //! out.
 
 use domain::chat::Chat;
+use telegram_framework::DialogInfo;
 
 use crate::error::ProtoError;
 use crate::stream::UpdateStream;
 use crate::types::{ProtoChat, chat_kind};
+
+/// The conversations televim displays, built from the dialogs Telegram returned.
+///
+/// Every dialog is filtered here before anything is built for it: only a
+/// private user becomes a [`Chat`]. [`chat_kind`] is the same mapping
+/// [`ProtoChat`] applies, so what the list keeps and the kind a chat claims
+/// cannot drift apart.
+fn private_chats(dialogs: Vec<DialogInfo>) -> Vec<Chat> {
+    dialogs
+        .into_iter()
+        .filter(|dialog| chat_kind(dialog.kind).is_private())
+        .map(|dialog| Chat::from(ProtoChat::from(dialog)))
+        .collect()
+}
 
 /// A Telegram client, as the rest of the workspace sees one.
 ///
@@ -60,11 +75,7 @@ impl ProtoClient {
     pub async fn fetch_private_chats(&self) -> Result<Vec<Chat>, ProtoError> {
         let dialogs = self.inner.fetch_dialogs().await?;
 
-        Ok(dialogs
-            .into_iter()
-            .filter(|dialog| chat_kind(dialog.kind).is_private())
-            .map(|dialog| Chat::from(ProtoChat::from(dialog)))
-            .collect())
+        Ok(private_chats(dialogs))
     }
 
     /// Pins or unpins a chat on the account's own list.
@@ -88,11 +99,7 @@ impl ProtoClient {
     pub async fn fetch_archived_chats(&self) -> Result<Vec<Chat>, ProtoError> {
         let dialogs = self.inner.fetch_archived_dialogs().await?;
 
-        Ok(dialogs
-            .into_iter()
-            .filter(|dialog| chat_kind(dialog.kind).is_private())
-            .map(|dialog| Chat::from(ProtoChat::from(dialog)))
-            .collect())
+        Ok(private_chats(dialogs))
     }
 
     /// Moves a chat into or out of the archive folder.
@@ -154,5 +161,58 @@ impl ProtoClient {
         self.inner.logout().await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::chat::ChatKind;
+    use telegram_framework::DialogKind;
+
+    /// A dialog with everything but the fields under test filled in.
+    fn dialog(peer_id: i64, kind: DialogKind) -> DialogInfo {
+        DialogInfo {
+            peer_id,
+            title: format!("dialog {peer_id}"),
+            kind,
+            deleted: false,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            last_text: None,
+            pinned: false,
+            read_outbox_max_id: 0,
+        }
+    }
+
+    /// Protects the history ADR's explicit-switch exception — the history cache
+    /// tag still governs *content*, but a peer id may be carried across accounts
+    /// (`docs/decisions.md`, "Why the history cache is tagged with the signed-in
+    /// account and checked after `Ready`"). That is only safe while the chat
+    /// list holds nobody but private users, because a Telegram user id is
+    /// global: a group or channel id is not, so a carried one could name a
+    /// different account's conversation. If this test fails, the exception is
+    /// no longer sound.
+    #[test]
+    fn a_group_or_a_channel_never_becomes_a_chat() {
+        let chats = private_chats(vec![
+            dialog(10, DialogKind::PrivateUser),
+            dialog(-20, DialogKind::Group),
+            dialog(-30, DialogKind::Channel),
+            dialog(40, DialogKind::Bot),
+        ]);
+
+        let ids: Vec<i64> = chats.iter().map(|chat| chat.id).collect();
+        assert_eq!(ids, vec![10], "only the person survives the fetch");
+        assert!(
+            chats.iter().all(|chat| chat.kind.is_private()),
+            "the list holds private users and nothing else"
+        );
+
+        // The DTO maps a peer's kind faithfully, so nothing downstream drops a
+        // group: `private_chats` is the only thing keeping it out.
+        let group: Chat = ProtoChat::from(dialog(-20, DialogKind::Group)).into();
+        assert_eq!(group.kind, ChatKind::Group);
     }
 }
