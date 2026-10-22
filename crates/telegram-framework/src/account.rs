@@ -419,6 +419,41 @@ mod tests {
         tl::enums::Birthday::Birthday(tl::types::Birthday { day, month, year })
     }
 
+    /// Each reason is filed under its own wire name: copying one arm onto
+    /// another would file the wrong, irrevocable report.
+    #[test]
+    fn each_report_reason_is_filed_under_its_own_wire_reason() {
+        use tl::enums::ReportReason as Wire;
+
+        let pairs = [
+            (ReportReason::Spam, Wire::InputReportReasonSpam),
+            (ReportReason::Violence, Wire::InputReportReasonViolence),
+            (
+                ReportReason::Pornography,
+                Wire::InputReportReasonPornography,
+            ),
+            (ReportReason::ChildAbuse, Wire::InputReportReasonChildAbuse),
+            (ReportReason::Other, Wire::InputReportReasonOther),
+            (ReportReason::Copyright, Wire::InputReportReasonCopyright),
+            (
+                ReportReason::GeoIrrelevant,
+                Wire::InputReportReasonGeoIrrelevant,
+            ),
+            (ReportReason::Fake, Wire::InputReportReasonFake),
+            (
+                ReportReason::IllegalDrugs,
+                Wire::InputReportReasonIllegalDrugs,
+            ),
+            (
+                ReportReason::PersonalDetails,
+                Wire::InputReportReasonPersonalDetails,
+            ),
+        ];
+        for (reason, wire) in pairs {
+            assert_eq!(reason.to_tl(), wire, "{reason:?}");
+        }
+    }
+
     #[test]
     fn a_username_telegram_left_blank_is_not_one() {
         assert_eq!(username(""), None, "an empty string is not a username");

@@ -443,76 +443,11 @@ fn join_title(
 #[cfg(all(test, feature = "live"))]
 mod tests {
     use super::*;
+    use crate::testing::user;
 
     /// A user Telegram has nothing to say about, which still has an identifier.
     fn empty(id: i64) -> tl::enums::User {
         tl::enums::User::Empty(tl::types::UserEmpty { id })
-    }
-
-    /// A full user with the given name, handle and bot flag.
-    ///
-    /// The field list is `tl`'s and it is long because the type is generated
-    /// with no `Default` to lean on; only the fields a test reads are worth
-    /// setting.
-    fn user(
-        id: i64,
-        first: Option<&str>,
-        last: Option<&str>,
-        username: Option<&str>,
-        bot: bool,
-    ) -> tl::enums::User {
-        tl::enums::User::User(tl::types::User {
-            is_self: false,
-            contact: false,
-            mutual_contact: false,
-            deleted: false,
-            bot,
-            bot_chat_history: false,
-            bot_nochats: false,
-            verified: false,
-            restricted: false,
-            min: false,
-            bot_inline_geo: false,
-            support: false,
-            scam: false,
-            apply_min_photo: false,
-            fake: false,
-            bot_attach_menu: false,
-            premium: false,
-            attach_menu_enabled: false,
-            bot_can_edit: false,
-            close_friend: false,
-            stories_hidden: false,
-            stories_unavailable: false,
-            contact_require_premium: false,
-            bot_business: false,
-            bot_has_main_app: false,
-            bot_forum_view: false,
-            bot_forum_can_manage_topics: false,
-            bot_can_manage_bots: false,
-            bot_guestchat: false,
-            bot_guard: false,
-            id,
-            access_hash: Some(7),
-            first_name: first.map(str::to_owned),
-            last_name: last.map(str::to_owned),
-            username: username.map(str::to_owned),
-            phone: None,
-            photo: None,
-            status: None,
-            bot_info_version: None,
-            restriction_reason: None,
-            bot_inline_placeholder: None,
-            lang_code: None,
-            emoji_status: None,
-            usernames: None,
-            stories_max_id: None,
-            color: None,
-            profile_color: None,
-            bot_active_users: None,
-            bot_verification_icon: None,
-            send_paid_messages_stars: None,
-        })
     }
 
     /// A search answer carrying the given users and no chats.

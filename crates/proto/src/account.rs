@@ -76,21 +76,17 @@ impl crate::ProtoClient {
     /// The same as [`ProtoClient::fetch_user`](crate::ProtoClient::fetch_user).
     pub async fn fetch_user_profile(&self, peer_id: i64) -> Result<UserProfile, ProtoError> {
         let account = self.inner().fetch_user(peer_id).await?;
-        let blocked = account.blocked;
 
         tracing::debug!(
             peer_id,
             user_id = account.user_id,
-            blocked,
+            blocked = account.blocked,
             has_username = account.username.is_some(),
             has_bio = account.bio.is_some(),
             "read a contact's profile"
         );
 
-        Ok(UserProfile {
-            account: translate(account),
-            blocked,
-        })
+        Ok(profile_of(account))
     }
 
     /// Reports a person to Telegram.
@@ -148,6 +144,20 @@ fn translate(account: telegram_framework::Account) -> Account {
     }
 }
 
+/// Joins a framework account and the block flag it carries into a profile.
+///
+/// A free function so the one place the flag is read is testable without a
+/// datacenter: reading it as `false` would leave a blocked person's card
+/// offering `block`.
+#[cfg(feature = "live")]
+fn profile_of(account: telegram_framework::Account) -> UserProfile {
+    let blocked = account.blocked;
+    UserProfile {
+        account: translate(account),
+        blocked,
+    }
+}
+
 /// Translates one birthday.
 #[cfg(feature = "live")]
 fn birthday(birthday: telegram_framework::Birthday) -> Birthday {
@@ -175,6 +185,16 @@ mod tests {
             presence: None,
             blocked: false,
         }
+    }
+
+    #[test]
+    fn a_blocked_person_is_a_blocked_profile() {
+        let blocked = profile_of(telegram_framework::Account {
+            blocked: true,
+            ..framework(7)
+        });
+        assert!(blocked.blocked);
+        assert!(!profile_of(framework(7)).blocked);
     }
 
     /// Presence is the one field the framework may leave absent, and absent has
