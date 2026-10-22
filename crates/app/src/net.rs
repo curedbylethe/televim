@@ -327,6 +327,7 @@ pub enum Event {
     /// A block change came back, or the request failed.
     Blocked {
         peer_id: i64,
+        name: String,
         blocked: bool,
         result: Result<(), ProtoError>,
     },
@@ -341,13 +342,14 @@ pub enum Event {
     /// A conversation deletion came back, or the request failed.
     ConversationDeleted {
         chat_id: i64,
+        name: String,
         both: bool,
         result: Result<(), ProtoError>,
     },
 
     /// A report came back, or the request failed.
     Reported {
-        peer_id: i64,
+        name: String,
         reason: domain::report::ReportReason,
         result: Result<(), ProtoError>,
     },
@@ -2788,28 +2790,42 @@ fn request_plain(
                 }));
             }
 
-            Action::SetBlocked { peer_id, blocked } => {
+            Action::SetBlocked {
+                peer_id,
+                name,
+                blocked,
+            } => {
                 let result = client.set_blocked(peer_id, blocked).await;
                 let _ = tx.send(AppEvent::Net(Event::Blocked {
                     peer_id,
+                    name,
                     blocked,
                     result,
                 }));
             }
 
-            Action::DeleteConversation { chat_id, both } => {
+            Action::DeleteConversation {
+                chat_id,
+                name,
+                both,
+            } => {
                 let result = client.delete_conversation(chat_id, both).await;
                 let _ = tx.send(AppEvent::Net(Event::ConversationDeleted {
                     chat_id,
+                    name,
                     both,
                     result,
                 }));
             }
 
-            Action::ReportPeer { peer_id, reason } => {
+            Action::ReportPeer {
+                peer_id,
+                name,
+                reason,
+            } => {
                 let result = client.report_peer(peer_id, reason).await;
                 let _ = tx.send(AppEvent::Net(Event::Reported {
-                    peer_id,
+                    name,
                     reason,
                     result,
                 }));
@@ -3156,15 +3172,15 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::Blocked {
             peer_id,
+            name,
             blocked,
             result,
         } => match result {
             Ok(()) => {
                 app.set_blocked(peer_id, blocked);
                 app.flash(format!(
-                    "{}{}",
+                    "{}{name}",
                     if blocked { "blocked " } else { "unblocked " },
-                    chat_name(app, peer_id)
                 ));
             }
             Err(error) => app.flash(format!("block: {}", failure_reason(&error))),
@@ -3179,14 +3195,13 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::ConversationDeleted {
             chat_id,
+            name,
             both,
             result,
         } => match result {
             Ok(()) => {
-                let name = chat_name(app, chat_id);
                 app.remove_conversation(chat_id);
                 state.cached.messages.remove(chat_id);
-                state.cached.messages.set_chats(app.chats());
                 state.cached.dirty = true;
                 if let Some(cache) = state.media_cache.as_ref()
                     && let Ok(mut cache) = cache.lock()
@@ -3202,15 +3217,11 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         },
 
         Event::Reported {
-            peer_id,
+            name,
             reason,
             result,
         } => match result {
-            Ok(()) => app.flash(format!(
-                "reported {} as {}",
-                chat_name(app, peer_id),
-                reason.label()
-            )),
+            Ok(()) => app.flash(format!("reported {name} as {}", reason.label())),
             Err(error) => app.flash(format!("report: {}", failure_reason(&error))),
         },
 
@@ -4421,14 +4432,6 @@ fn apply_edited(app: &mut App, chat_id: i64, message_id: i64, result: Result<(),
 
 /// Folds a pin's answer in. The list moves and the status says so when Telegram
 /// agreed; the status says why not when it did not.
-/// The title a person or chat is known by on screen, falling back to the id.
-fn chat_name(app: &App, chat_id: i64) -> String {
-    app.chats()
-        .iter()
-        .find(|chat| chat.id == chat_id)
-        .map_or_else(|| chat_id.to_string(), |chat| chat.title.clone())
-}
-
 fn apply_pin_toggled(app: &mut App, chat_id: i64, pinned: bool, result: Result<(), ProtoError>) {
     match result {
         Ok(()) => {
@@ -12440,12 +12443,15 @@ mod action_status_tests {
             &mut state,
             Event::ConversationDeleted {
                 chat_id: CHAT,
+                name: "chat-7".to_owned(),
                 both: false,
                 result: Ok(()),
             },
         );
 
         assert!(app.chats().is_empty());
+        // The pass that follows takes the screen's list into the cache.
+        state.persist_history(app.chats(), Instant::now());
         assert!(state.cached.messages.chats().is_empty());
         assert!(state.cached.dirty, "the next save forgets it on disk");
         assert_eq!(app.ui.status, "deleted chat-7");
@@ -12462,6 +12468,7 @@ mod action_status_tests {
             &mut state,
             Event::Blocked {
                 peer_id: CHAT,
+                name: "chat-7".to_owned(),
                 blocked: true,
                 result: Ok(()),
             },
@@ -12480,7 +12487,7 @@ mod action_status_tests {
             &mut app,
             &mut state,
             Event::Reported {
-                peer_id: CHAT,
+                name: "chat-7".to_owned(),
                 reason: domain::report::ReportReason::Spam,
                 result: Ok(()),
             },
@@ -12488,6 +12495,26 @@ mod action_status_tests {
 
         assert_eq!(app.ui.status, "reported chat-7 as spam");
     }
+
+    #[test]
+    fn a_block_answer_names_a_person_who_has_no_chat() {
+        let mut app = App::new();
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Blocked {
+                peer_id: 987_654_321,
+                name: "Grace".to_owned(),
+                blocked: true,
+                result: Ok(()),
+            },
+        );
+
+        assert_eq!(app.ui.status, "blocked Grace");
+    }
+
     #[test]
     fn a_rename_the_file_cannot_hold_is_said_and_a_saved_one_is_silent() {
         let mut app = App::new();
@@ -12548,6 +12575,64 @@ mod action_status_tests {
             panic!("the refused write reports the rename");
         };
         assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
+    fn a_refused_action_says_why_and_changes_nothing() {
+        let refusal = || {
+            Err(ProtoError::Framework(
+                telegram_framework::FrameworkError::UnknownPeer(CHAT),
+            ))
+        };
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        let mut state = State::default();
+        state.cached.messages.set_chats(&[chat(CHAT)]);
+        state.cached.dirty = false;
+
+        for (event, prefix) in [
+            (
+                Event::Archived {
+                    chat_id: CHAT,
+                    archived: true,
+                    result: refusal(),
+                },
+                "archive: ",
+            ),
+            (
+                Event::Blocked {
+                    peer_id: CHAT,
+                    name: "chat-7".to_owned(),
+                    blocked: true,
+                    result: refusal(),
+                },
+                "block: ",
+            ),
+            (
+                Event::ConversationDeleted {
+                    chat_id: CHAT,
+                    name: "chat-7".to_owned(),
+                    both: true,
+                    result: refusal(),
+                },
+                "delete chat: ",
+            ),
+            (
+                Event::Reported {
+                    name: "chat-7".to_owned(),
+                    reason: domain::report::ReportReason::Spam,
+                    result: refusal(),
+                },
+                "report: ",
+            ),
+        ] {
+            apply(&mut app, &mut state, event);
+
+            assert!(app.ui.status.starts_with(prefix), "{}", app.ui.status);
+            assert_eq!(app.chats().len(), 1, "{prefix}the chat is still listed");
+            assert_eq!(state.cached.messages.chats().len(), 1);
+            assert!(!state.cached.dirty, "{prefix}nothing to write");
+        }
     }
 
     #[test]
