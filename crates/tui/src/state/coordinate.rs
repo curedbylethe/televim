@@ -4292,7 +4292,7 @@ fn toggle_pin_highlighted(
 /// of those is the conversation's, and taking it is what stops a reader who
 /// pressed `i` by reflex from having to press it twice.
 ///
-/// `rows`, `lines`, `is_contact` and `cursor` are the card's drawn state,
+/// `rows`, `lines` and `cursor` are the card's drawn state,
 /// precomputed by the caller from `&App`: the rows render from the whole
 /// application and cannot move here. `layout` is the conversation's
 /// precomputed frame geometry, for the same reason.
@@ -4310,7 +4310,6 @@ pub(crate) fn handle_profile(
     drafts: &mut DraftStore,
     rows: &[CardRow],
     lines: Vec<String>,
-    _is_contact: bool,
     cursor: usize,
     layout: &[RowSpan],
     key: KeyEvent,
@@ -4999,7 +4998,6 @@ fn handle_conversation_key(
     drafts: &mut DraftStore,
     rows: &[CardRow],
     lines: Vec<String>,
-    is_contact: bool,
     cursor: usize,
     layout: &[RowSpan],
     key: KeyEvent,
@@ -5016,7 +5014,6 @@ fn handle_conversation_key(
             &mut *drafts,
             rows,
             lines,
-            is_contact,
             cursor,
             layout,
             key,
@@ -5061,7 +5058,7 @@ fn handle_conversation_key(
 /// `BackTab`, `Ctrl-w`) is read here; then the focus match. That order is
 /// load-bearing and unchanged.
 ///
-/// `rows`, `lines`, `is_contact` and `cursor` are the card's drawn state and
+/// `rows`, `lines` and `cursor` are the card's drawn state and
 /// `layout` the conversation's frame geometry, all precomputed by the caller
 /// from `&App` for the arms that need them.
 ///
@@ -5078,7 +5075,6 @@ pub(crate) fn handle_key(
     drafts: &mut DraftStore,
     rows: &[CardRow],
     lines: Vec<String>,
-    is_contact: bool,
     cursor: usize,
     layout: &[RowSpan],
     origin: Focus,
@@ -5147,7 +5143,6 @@ pub(crate) fn handle_key(
             &mut *drafts,
             rows,
             lines,
-            is_contact,
             cursor,
             layout,
             key,

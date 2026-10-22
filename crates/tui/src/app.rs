@@ -176,11 +176,6 @@ fn import_prompt(path: &std::path::Path) -> String {
 /// The prompt for `:passphrase`.
 pub const CHANGE_PASSPHRASE_PROMPT: &str = "Change the session passphrase? (y/n)";
 
-/// What `:export-session` and `:import-session` say when no path was given.
-///
-/// Required rather than defaulted to the configured session file: that file is
-/// where the session already is, so copying it onto itself is never what was
-/// meant.
 /// The prompt for blocking or unblocking one person.
 #[must_use]
 pub fn block_prompt(name: &str, blocked: bool) -> String {
@@ -212,6 +207,11 @@ pub fn report_prompt(name: &str, reason: domain::report::ReportReason) -> String
     format!("Report {name} to Telegram as {}? (y/n)", reason.label())
 }
 
+/// What `:export-session` and `:import-session` say when no path was given.
+///
+/// Required rather than defaulted to the configured session file: that file is
+/// where the session already is, so copying it onto itself is never what was
+/// meant.
 pub const SESSION_PATH_USAGE: &str = "usage: :export-session <path> or :import-session <path>";
 
 /// What the profile panel says when `add account` is pressed.
@@ -220,13 +220,6 @@ pub const SESSION_PATH_USAGE: &str = "usage: :export-session <path> or :import-s
 /// for something that tried and did not come back; nothing was sent here, and a
 /// reader who reads a failure as a bug would be chasing one that does not exist.
 pub const ADD_ACCOUNT_REFUSAL: &str = "not yet: this build cannot add an account";
-
-/// What a card says when `d` lands on a value rather than an action.
-///
-/// A deliberate refusal, and a *different* refusal from [`ADD_ACCOUNT_REFUSAL`]:
-/// a contact's card has no row the reader can act on at all, and one word is too
-/// long to tell a reader which of the two reasons applies.
-pub const NOT_YOURS_REFUSAL: &str = "Not yours: a contact card has no row you can act on.";
 
 /// What a command says when there is no chat or card to act on.
 pub const NOTHING_TO_ACT_ON: &str =
@@ -2158,7 +2151,6 @@ impl App {
     fn handle_profile(&mut self, key: KeyEvent) {
         let rows = crate::card::rows(self);
         let lines = self.card_yanked();
-        let is_contact = matches!(self.card_subject(), crate::card::CardSubject::Contact(_));
         let cursor = self.profile_cursor();
         let layout = self.row_layout();
         let opened = coordinate::handle_profile(
@@ -2172,7 +2164,6 @@ impl App {
             &mut self.drafts,
             &rows,
             lines,
-            is_contact,
             cursor,
             &layout,
             key,
@@ -2760,7 +2751,6 @@ impl App {
         }
         let rows = crate::card::rows(self);
         let lines = self.card_yanked();
-        let is_contact = matches!(self.card_subject(), crate::card::CardSubject::Contact(_));
         let cursor = self.profile_cursor();
         let layout = self.row_layout();
         if !self.conversation.global_search.is_active() && self.ui.focus != Focus::Input {
@@ -2778,7 +2768,6 @@ impl App {
             &mut self.drafts,
             &rows,
             lines,
-            is_contact,
             cursor,
             &layout,
             self.global_origin,

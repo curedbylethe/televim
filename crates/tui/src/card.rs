@@ -207,9 +207,7 @@ impl CardRow {
 
     /// Whether `d` can act on this row.
     ///
-    /// Only an action, which is the entire difference in what the two subjects
-    /// can do: a contact's card has no action, so `d` there refuses rather than
-    /// doing nothing.
+    /// Only an action: on a value row `d` is dropped, on either subject's card.
     #[must_use]
     pub const fn is_action(&self) -> bool {
         matches!(self.kind, RowKind::Action)
