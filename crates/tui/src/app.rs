@@ -1860,10 +1860,20 @@ impl App {
         } else {
             self.list.unarchive(chat_id)
         }?;
-        if archived && self.conversation.conversation.window.chat_id == chat_id {
-            self.remove_open_conversation();
+        if archived {
+            if self.conversation.conversation.window.chat_id == chat_id {
+                self.remove_open_conversation();
+            }
+            self.close_card_of(chat_id);
         }
         Some(name)
+    }
+
+    /// Closes the card when it is about `peer_id`, whose chat just left the list.
+    fn close_card_of(&mut self, peer_id: i64) {
+        if self.ui.pane == Pane::Profile(ProfileId::User(peer_id)) {
+            coordinate::close_profile(&mut self.ui, &mut self.profile);
+        }
     }
 
     /// Records the block flag on the card that is on show.
@@ -1893,8 +1903,10 @@ impl App {
         if self.conversation.conversation.window.chat_id == chat_id {
             self.remove_open_conversation();
         }
+        self.close_card_of(chat_id);
         self.list.list.remove(chat_id);
         self.list.archived.retain(|chat| chat.id != chat_id);
+        self.list.clamp_archived();
         self.local_names.remove(&chat_id);
         self.drafts.forget(chat_id);
         self.list.selected_chat = self

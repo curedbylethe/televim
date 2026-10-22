@@ -151,7 +151,7 @@ impl ChatListState {
     }
 
     /// Keeps the archived cursor on a row, and closes an empty list.
-    fn clamp_archived(&mut self) {
+    pub(crate) fn clamp_archived(&mut self) {
         if self.archived.is_empty() {
             self.archived_open = false;
             self.archived_selected = 0;
@@ -179,7 +179,15 @@ impl ChatListState {
         let at = self.archived.iter().position(|chat| chat.id == chat_id)?;
         let chat = self.archived.remove(at);
         let name = chat.title.clone();
+        let highlighted = self.list.chats.get(self.selected_chat).map(|chat| chat.id);
         self.list.insert(chat);
+        // The insert can land above the highlight, which would leave the same
+        // index naming another conversation.
+        if let Some(index) =
+            highlighted.and_then(|id| self.list.chats.iter().position(|chat| chat.id == id))
+        {
+            self.selected_chat = index;
+        }
         self.clamp_archived();
         Some(name)
     }
@@ -224,4 +232,23 @@ mod tests {
         assert_eq!(ids, vec![1, 3]);
         assert_eq!(state.list.chats.len(), 3, "the chat list still shows it");
     }
+
+    #[test]
+    fn unarchiving_keeps_the_highlight_on_the_chat_it_was_on() {
+        let mut state = ChatListState::new();
+        let dated = |id: i64, at: i64| Chat {
+            last_timestamp: Some(at),
+            ..chat(id, false)
+        };
+        state.install(vec![dated(1, 300), dated(2, 200), dated(3, 100)]);
+        state.select(2);
+        state.archived.push(dated(4, 250));
+
+        state.unarchive(4);
+
+        let ids: Vec<i64> = state.list.chats.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![1, 4, 2, 3]);
+        assert_eq!(state.list.chats[state.selected_chat].id, 3);
+    }
+
 }
