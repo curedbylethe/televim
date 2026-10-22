@@ -50,7 +50,8 @@ The fast half, in the order the workflow runs it:
 Then the regression budget, described in
 [`docs/memory.md`](./memory.md): `scripts/memory/measure.py` writes
 `target/memory-report.json`, then `scripts/memory/check.py` compares it against
-the stored baseline and the thresholds, and exits non-zero past a band. The
+the stored baseline and the thresholds, and exits non-zero past a band where a
+baseline for the host exists. The
 report is uploaded as the `memory-report` artifact with `if: always()`, so a
 failed comparison still carries the numbers that explain it. Both steps carry
 one `if:` expression, which is why they run on exactly three paths — a push to
