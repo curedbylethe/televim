@@ -1269,18 +1269,28 @@ pub enum Action {
     /// Move the chat with `chat_id` into or out of the archive.
     SetArchived { chat_id: i64, archived: bool },
 
-    /// Block or unblock the person with `peer_id`.
-    SetBlocked { peer_id: i64, blocked: bool },
+    /// Block or unblock the person with `peer_id`, known on screen as `name`.
+    SetBlocked {
+        peer_id: i64,
+        name: String,
+        blocked: bool,
+    },
 
     /// Keep `name` as the reader's local name for `peer_id`; `None` clears it.
     SetLocalName { peer_id: i64, name: Option<String> },
 
-    /// Delete the conversation with `chat_id`, locally or for both sides.
-    DeleteConversation { chat_id: i64, both: bool },
+    /// Delete the conversation with `chat_id`, known on screen as `name`,
+    /// locally or for both sides.
+    DeleteConversation {
+        chat_id: i64,
+        name: String,
+        both: bool,
+    },
 
-    /// Report the person with `peer_id` for `reason`.
+    /// Report the person with `peer_id`, known on screen as `name`, for `reason`.
     ReportPeer {
         peer_id: i64,
+        name: String,
         reason: domain::report::ReportReason,
     },
 }

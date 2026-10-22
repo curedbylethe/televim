@@ -1257,30 +1257,41 @@ pub(crate) fn handle_confirm(
                     );
                 }
                 Some(ConfirmKind::Block {
-                    peer_id, blocked, ..
+                    peer_id,
+                    name,
+                    blocked,
                 }) => queue_action(
                     &mut *outbox,
                     &mut *ui,
                     Action::SetBlocked {
                         peer_id: *peer_id,
+                        name: name.clone(),
                         blocked: *blocked,
                     },
                 ),
-                Some(ConfirmKind::DeleteConversation { chat_id, both, .. }) => queue_action(
+                Some(ConfirmKind::DeleteConversation {
+                    chat_id,
+                    name,
+                    both,
+                }) => queue_action(
                     &mut *outbox,
                     &mut *ui,
                     Action::DeleteConversation {
                         chat_id: *chat_id,
+                        name: name.clone(),
                         both: *both,
                     },
                 ),
                 Some(ConfirmKind::Report {
-                    peer_id, reason, ..
+                    peer_id,
+                    name,
+                    reason,
                 }) => queue_action(
                     &mut *outbox,
                     &mut *ui,
                     Action::ReportPeer {
                         peer_id: *peer_id,
+                        name: name.clone(),
                         reason: *reason,
                     },
                 ),

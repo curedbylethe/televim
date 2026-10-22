@@ -9317,7 +9317,8 @@ fn delete_chat_carries_the_side_into_the_confirmation() {
         app.take_action(),
         Some(Action::DeleteConversation {
             chat_id: MOCK_CHAT,
-            both: true
+            both: true,
+            ..
         })
     ));
 }
