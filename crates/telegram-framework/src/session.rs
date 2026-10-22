@@ -885,6 +885,15 @@ mod bridge {
             }
         }
 
+        /// Records who this session is for.
+        ///
+        /// Called by the login flow once Telegram has said which account signed
+        /// in. The next [`StoreSession::snapshot`] then names it; the login path
+        /// persists explicitly, so this does not raise the dirty flag.
+        pub(crate) fn set_account(&self, account: AccountIdentity) {
+            *self.account.lock().unwrap_or_else(PoisonError::into_inner) = Some(account);
+        }
+
         /// The cached peer with this bare identifier, if there is one.
         ///
         /// `grammers` keys its cache by [`PeerId`], which packs the peer's kind
@@ -1875,6 +1884,35 @@ mod tests {
             );
             store.clear().expect("clear succeeds");
         }
+    }
+
+    /// The login path names the account before it persists, so the snapshot a
+    /// fresh sign-in writes carries the identity rather than looking anonymous.
+    #[cfg(feature = "live")]
+    #[test]
+    fn a_session_written_after_a_sign_in_names_the_account() {
+        let store = Arc::new(MemoryStore::new());
+        let session = StoreSession::new(store.clone() as Arc<dyn SessionStore>)
+            .expect("an empty store loads");
+
+        session.set_account(AccountIdentity {
+            user_id: 42,
+            phone: Some("+15551234567".to_owned()),
+        });
+        session.persist().expect("the session saves");
+
+        let written = store
+            .load()
+            .expect("load succeeds")
+            .expect("the login path wrote a snapshot");
+        assert_eq!(
+            written.account(),
+            Some(AccountIdentity {
+                user_id: 42,
+                phone: Some("+15551234567".to_owned()),
+            }),
+            "the snapshot does not name the account that signed in"
+        );
     }
 
     /// The credential store is not available on a headless CI machine, so this
