@@ -275,7 +275,7 @@ Working today:
   `[animated sticker]`, and `o` opens the cached file in the viewer.
   `stickers = "off"` (or `TELEVIM_STICKERS=off`) draws the token for
   every sticker message and fetches nothing. Sending a sticker and a sticker
-  picker are not built; both wait on send-media. `graphics = "auto"` (or
+  picker are not built; both wait on send-media (CUR-11). `graphics = "auto"` (or
   `TELEVIM_GRAPHICS`) places the picture with the kitty graphics protocol where
   the environment names kitty, ghostty or WezTerm; `kitty` forces it and `off`
   keeps the half-block cells everywhere. Sixel is not yet supported. Fetching the bytes is a client-level operation today

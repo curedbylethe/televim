@@ -791,15 +791,16 @@ are in [`../AGENTS.md`](../AGENTS.md).
   is Telegram's word that the message is a voice note, and it stays first. The
   sticker attribute is asked next, because it is the most specific answer a
   document carries: it says what the document *is*, while animation and video say
-  how it moves or what container it is in. A TGS carries the animation, a WebM
-  carries the video attribute its container needs, and both are stickers — asked
-  after those two, every animated sticker was answered as a GIF and every WebM
-  sticker as a video. So the sticker attribute decides the kind and the animation
-  bit decides which sticker: `AnimatedSticker` when `is_animated()`, `Sticker`
-  otherwise. A document with the animation and no sticker attribute is still a
-  `Gif`, as any animation is. The typed path states the same rule in one clause:
-  `grammers` reads the sticker off the document for us, and `is_animated()` splits
-  the two kinds, so both paths agree on the same document — the defect this
+  how it moves or what container it is in. A WebM carries the video attribute its
+  container needs, and asked after it a WebM sticker would be answered as a
+  video. So the sticker attribute decides the kind and the mime decides which
+  sticker: Telegram names the format by it, `application/x-tgsticker` or
+  `video/webm` is `AnimatedSticker`, anything else is `Sticker`. The animation
+  bit is not that signal: Telegram's own client drops it from every sticker but a
+  WebM, so a real TGS arrives with `Sticker` and an image size and no animation.
+  A document with the animation and no sticker attribute is still a `Gif`. The
+  typed path asks the same document classifier, so both paths agree on the same
+  document — the defect this
   replaces was one path calling an animated sticker a GIF while the other called
   it a file. The order is stated in a code comment at the arm, because an arm
   order that silently changed would silently reclassify.

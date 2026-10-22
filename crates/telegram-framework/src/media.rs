@@ -122,21 +122,16 @@ pub(crate) fn classify_typed(media: Option<&Media>) -> Option<(MediaKind, Option
         Media::Photo(photo) => (MediaKind::Photo, photo_id(&photo.raw)),
         Media::Document(document) => (classify_document(&document.raw), document_id(&document.raw)),
         // `grammers` reads a document with a sticker attribute as a sticker, so
-        // this is where a sticker arrives: an animated one is its own kind, and
-        // a static one is the other. The same split is asked of the raw path by
-        // the shared document classifier, so the two agree. Everything
+        // this is where a sticker arrives: the shared document classifier splits
+        // it by mime, the same way the raw path does, so the two agree. Everything
         // `grammers` flattens away or builds that this crate does not read — a
         // contact, a poll, a location, a web page, and any kind added after
         // this build — is one arm, deliberately: all of them carry something,
         // and none of them is nothing.
-        Media::Sticker(sticker) => {
-            let kind = if sticker.is_animated() {
-                MediaKind::AnimatedSticker
-            } else {
-                MediaKind::Sticker
-            };
-            (kind, document_id(&sticker.document.raw))
-        }
+        Media::Sticker(sticker) => (
+            classify_document(&sticker.document.raw),
+            document_id(&sticker.document.raw),
+        ),
         _ => (MediaKind::File, None),
     })
 }
@@ -176,9 +171,11 @@ fn document_id(document: &tl::types::MessageMediaDocument) -> Option<i64> {
 /// one too, and is a file.
 ///
 /// An animated sticker is [`MediaKind::AnimatedSticker`] rather than a GIF: the
-/// sticker attribute is what makes it a sticker, and animation is only how the
-/// sticker moves. A document with [`DocumentAttribute::Animated`] and no sticker
-/// attribute stays [`MediaKind::Gif`].
+/// sticker attribute is what makes it a sticker, and the mime says how it moves.
+/// Telegram names a sticker's format by the document's mime, `application/x-tgsticker`
+/// for a TGS and `video/webm` for a video sticker; the animation bit is not
+/// that signal, because Telegram does not send it on a TGS. A document with
+/// [`DocumentAttribute::Animated`] and no sticker attribute stays [`MediaKind::Gif`].
 ///
 /// Everything else is [`MediaKind::File`], including a document with no
 /// attributes at all: it still carries bytes.
@@ -187,9 +184,11 @@ fn classify_document(document: &tl::types::MessageMediaDocument) -> MediaKind {
         return MediaKind::Voice;
     }
 
-    let attributes = match &document.document {
-        Some(tl::enums::Document::Document(document)) => document.attributes.as_slice(),
-        Some(tl::enums::Document::Empty(_)) | None => &[],
+    let (attributes, mime) = match &document.document {
+        Some(tl::enums::Document::Document(document)) => {
+            (document.attributes.as_slice(), document.mime_type.as_str())
+        }
+        Some(tl::enums::Document::Empty(_)) | None => (&[][..], ""),
     };
 
     // First, so that a sticker carrying a video or an animation keeps the more
@@ -198,10 +197,7 @@ fn classify_document(document: &tl::types::MessageMediaDocument) -> MediaKind {
         .iter()
         .any(|a| matches!(a, tl::enums::DocumentAttribute::Sticker(_)))
     {
-        let animated = attributes
-            .iter()
-            .any(|a| matches!(a, tl::enums::DocumentAttribute::Animated));
-        return if animated {
+        return if matches!(mime, "application/x-tgsticker" | "video/webm") {
             MediaKind::AnimatedSticker
         } else {
             MediaKind::Sticker

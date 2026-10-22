@@ -76,8 +76,9 @@ fn download_temp_pid(name: &str) -> Option<u32> {
     pid.parse().ok()
 }
 
-/// Every extension a cached file can carry, one per [`suffix`]. A name with any
-/// other extension is not ours and is left alone.
+/// Every extension a cached file can carry: one per kind in [`suffix`], plus the
+/// two formats an animated sticker is named by its bytes (`tgs`, `webm`), plus
+/// `bin`. A name with any other extension is not ours and is left alone.
 const SUFFIXES: [&str; 8] = ["jpg", "mp4", "gif", "ogg", "webp", "tgs", "webm", "bin"];
 
 /// The extension a kind of media is stored under.
