@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "17 3 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -77,18 +80,22 @@ jobs:
       # It is not part of `make ci` because it needs a release build and a pty,
       # and neither belongs in a per-commit gate.
       #
+      # It runs on a push to `main`, on the nightly schedule, and on a pull
+      # request labelled `memory`; an ordinary pull request does not pay for it.
+      #
       # On a host with no stored baseline it reports and does not enforce: a
       # threshold cannot be calibrated on a machine it was never measured on.
       # The first run on a new host therefore writes its report and exits zero,
       # and a maintainer reviews that report and records it.
       - name: memory-budget
+        if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'memory'))
         run: |
           scripts/memory/measure.py
           scripts/memory/check.py
 
       # Uploaded even when the comparison failed: the report is what says why.
       - name: upload memory report
-        if: always()
+        if: always() && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'memory')))
         uses: actions/upload-artifact@v7
         with:
           name: memory-report
