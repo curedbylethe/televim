@@ -9378,7 +9378,7 @@ fn contacts_opens_the_directory_and_asks_for_it() {
     run_command_line(&mut app, "contacts");
 
     assert!(app.conversation.contacts.is_active());
-    assert_eq!(app.status_text(), "contacts — loading…");
+    assert_eq!(app.status_text(), "contacts — searching…");
     assert!(matches!(app.take_action(), Some(Action::FetchContacts)));
 }
 
@@ -9494,6 +9494,36 @@ fn the_rename_row_prefills_the_card_name_and_renames_the_card_peer() {
         app.take_action(),
         Some(Action::SetLocalName { peer_id: 99, name: Some(ref name) }) if name == "Adax"
     ));
+}
+
+#[test]
+fn an_open_contacts_list_lets_the_colon_through_and_archived_closes_it() {
+    let mut app = App::mock();
+    let archived = app.chats()[1].clone();
+    app.list.install_archived(vec![archived]);
+    run_command_line(&mut app, "contacts");
+    let _ = app.take_action();
+    assert!(app.conversation.contacts.is_active());
+
+    run_command_line(&mut app, "archived");
+
+    assert!(!app.conversation.contacts.is_active());
+    assert!(app.list.archived_is_open());
+}
+
+#[test]
+fn an_open_archive_ranks_above_a_search_on_the_status_line() {
+    let mut app = App::mock();
+    let archived = app.chats()[1].clone();
+    app.list.install_archived(vec![archived]);
+    app.handle_key(press(KeyCode::Char('/')));
+    type_text(&mut app, "ada");
+    app.handle_key(press(KeyCode::Enter));
+    assert!(app.conversation.search.is_active());
+
+    run_command_line(&mut app, "archived");
+
+    assert_eq!(app.status_text(), "archived — 1");
 }
 
 #[test]

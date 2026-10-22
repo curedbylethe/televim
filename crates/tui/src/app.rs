@@ -3470,6 +3470,14 @@ impl App {
         if self.conversation.picking().is_some() {
             return widgets::input_bar::FORWARD_PICKER_HINT.to_owned();
         }
+        // An open overlay owns the line, above the selection and every search: it is what the next key will act on,
+        // and a flash from before it was opened would be about another surface.
+        if self.conversation.contacts.is_active() {
+            return self.conversation.contacts.label();
+        }
+        if self.list.archived_is_open() {
+            return format!("archived — {}", self.list.archived().len());
+        }
         if let Some(selection) = &self.conversation.selection {
             return selection_note(selection, self.selection_len().unwrap_or(0));
         }
@@ -3497,14 +3505,6 @@ impl App {
             && let Some(reason) = self.conversation.conversation.failure(message.id)
         {
             return reason.to_owned();
-        }
-        // An open overlay owns the line: it is what the next key will act on,
-        // and a flash from before it was opened would be about another surface.
-        if self.conversation.contacts.is_active() {
-            return self.conversation.contacts.label();
-        }
-        if self.list.archived_is_open() {
-            return format!("archived — {}", self.list.archived().len());
         }
         // A status worth reading — a refusal, a failure — outranks the hint. The
         // resting state is the hint rather than the program's name, because the

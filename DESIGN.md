@@ -569,6 +569,9 @@ code.
 | `deleted {name}` `deleted {name} for both sides` | the conversation is gone | `delete-chat` |
 | `reported {name} as {reason}` | the report was accepted | `:report` |
 | `contacts — {n}` `archived — {n}` | an open list and how many it holds | `contacts`, `archived` |
+| `contacts — searching…` | the contacts fetch is in flight; the previous list stays on show | `ContactListState::label` |
+| `contacts: {reason}` | the contacts fetch failed; the previous list stays on show | ditto |
+| `unknown report reason: {token} — use spam, violence, …` | `:report` with a token that is not one of the ten, refused before any question | `:report` |
 | `archive: {reason}` `block: {reason}` `delete chat: {reason}` `report: {reason}` `rename: could not save — {reason}` | a failed action, in its own sentence | the answer path |
 | `NORMAL` `INSERT` `VISUAL` `CONFIRM` | upper case, in a filled label | `status_bar.rs` |
 | ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the nineteen rows above |
@@ -1267,8 +1270,11 @@ when there is one, and `chat`/`new` only when the fact is already in hand. The
 server's order is kept; there is no sort, no query and no second cache. `⏎`
 opens the person's card even when no conversation exists, which is the reason
 the list is separate from the chat list; the card's own `⏎` opens a conversation.
-`Esc` closes the list. A failed fetch leaves the previous list and says
-`contacts: {reason}`.
+`Esc` closes the list. The cursor stops at either end. A failed fetch leaves the
+previous list and says `contacts: {reason}`; one in flight says
+`contacts — searching…`. Every key the list does not use passes through, so `:`
+still opens the line and `Tab` still moves the focus; `:archived` closes the
+contacts list, and `:contacts` closes the archive.
 
 **The status line ranks the open list above selection and search.** The confirm
 prompt still outranks everything. `contacts — {n}` and `archived — {n}` are the

@@ -3186,6 +3186,7 @@ pub(crate) fn run_command(
             false
         }
         "archived" => {
+            conversation.contacts.close();
             list.open_archived();
             if !list.archived_is_open() {
                 ui.flash("archived — 0");
@@ -4783,8 +4784,10 @@ fn intercept_key(
     // The contacts directory owns its keys while it is up: `j`/`k` walk the
     // people, `Enter` opens the one under the cursor and puts the list away, and
     // `Esc` closes it. Like the new-chat overlay it is skipped while the line has
-    // the focus, so the same letters still type.
+    // the focus, so the same letters still type. Every other key passes through,
+    // so `:` can still open the line and `Tab` still moves the focus.
     if ui.focus != Focus::Input && conversation.contacts.is_active() {
+        let mut handled = true;
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => conversation.contacts.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => conversation.contacts.move_selection(-1),
@@ -4803,15 +4806,18 @@ fn intercept_key(
                 }
             }
             KeyCode::Esc => conversation.contacts.close(),
-            _ => {}
+            _ => handled = false,
         }
-        return true;
+        if handled {
+            return true;
+        }
     }
 
     // The archived list owns the same keys, and `Enter` brings a chat back.
     // The row leaves when the answer lands, not when the key is pressed, so the
     // list does not move under a request that may be refused.
     if ui.focus != Focus::Input && list.archived_is_open() {
+        let mut handled = true;
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => list.move_archived(1),
             KeyCode::Char('k') | KeyCode::Up => list.move_archived(-1),
@@ -4829,9 +4835,11 @@ fn intercept_key(
                 }
             }
             KeyCode::Esc => list.close_archived(),
-            _ => {}
+            _ => handled = false,
         }
-        return true;
+        if handled {
+            return true;
+        }
     }
 
     // The new-conversation overlay owns the keys that would otherwise move
