@@ -6263,6 +6263,11 @@ fn escape_at_the_phone_step_takes_the_flow_down() {
 
     assert!(app.signin().is_none(), "cancelled, not paused");
     assert_eq!(
+        app.take_action(),
+        Some(Action::LoginCancelled),
+        "and the side holding the client is told, so a second-account flow can put the first back"
+    );
+    assert_eq!(
         app.ui.focus,
         Focus::Conversation,
         "and the keys are ours again"
