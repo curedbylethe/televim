@@ -523,6 +523,20 @@ changes, so a run that adds no account writes it at most once. The session's own
 tag stays authoritative, which is why a slot with no session opens onto the
 sign-in surface like any other.
 
+The index is also the self card's picker. `AccountsIndex::slot_of(id)` resolves
+an id to the slot the index holds, and `Action::SwitchAccount { id }` — the row's
+own id, never its position — is answered in `net::drive` before the client gate,
+exactly where `Action::AddAccount` is: `State::switch_account` refuses an id the
+index does not hold with a status line, and otherwise calls the same
+`detach_account` the add-account path calls, passing `Opening::Slot(slot)`
+instead of `Opening::Fresh`. The `Ready` that comes back adopts the slot the
+index holds for the account *it* names (falling back to `Id(id)` only when the
+index has no entry), `note_signed_in` records that slot, and `net` pushes the
+card's rows — `tui::KnownAccount { id, label = phone or "account <id>", active }`
+— with `App::set_known_accounts`: once at launch from the index the launch
+already read, and once per accepted switch. `tui` reads no index and names no
+path.
+
 `SlotStore`'s target is either the session already where the resolver put it or
 `Target::Fresh`, the account being added: a fresh `load` answers `None` — there
 is no session until the sign-in writes one — and its `save` takes the account id
@@ -532,8 +546,8 @@ because a session no launch can find is a reader signed in to nothing. A stored
 slot's bytes are read and written only where the resolver put them, and export
 and import use the same resolver for the slot in use rather than the legacy one.
 What is still single-account is the process, not the disk: one client and one
-account's state at a time, and switching is add-account-only until a picker can
-choose a slot already stored.
+account's state at a time, and the self card's picker moves between the slots
+already stored by reusing that one detach.
 
 `app` asks for `proto/live` and `telegram-framework/live` unconditionally, and
 has no feature of its own. It is a Telegram client: the two crates that talk to

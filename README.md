@@ -83,7 +83,12 @@ Working today:
   design's per-peer **colour slot is held and not built** — see [`docs/known-gaps.md`](./docs/known-gaps.md).
   `add account` opens the sign-in at the phone step for a second account without
   signing the first one out: its client goes and its files stay where they are, so
-  `Esc` at the phone step cancels and brings it back. `logout`
+  `Esc` at the phone step cancels and brings it back. The card also lists the
+  accounts this machine already knows, one row each and the signed-in one marked
+  `active`; `d` on another switches to it through the same detach rather than
+  signing in again — its files stay where they are, and an account whose stored
+  session is gone lands on the sign-in view for it, where `Esc` returns to the
+  account left. `logout`
   confirms on the same screen-wide row and then signs out — the session is
   discarded, the list empties, and the sign-in field comes back for the phone; on a
   contact's card `d` acts on its `rename`, `block`/`unblock` and `report` rows, and
@@ -456,7 +461,8 @@ Working today:
   arrives, the status line says `offline:` and `:retry` asks again. A `●` beside
   the sentence always shows which holds: green while the feed delivers, yellow
   while a bring-up or rebuild is under way, red once the budget is spent.
-  A switch of account carries far less: `:add-account` keeps the peer id of the
+  A switch of account carries far less: `:add-account` and picking a listed
+  account on the self card keep the peer id of the
   open conversation, so the new account lands in that chat when its own list holds
   the person and on the top row with `that account has no chat with this person`
   when it does not; the cursor, the draft, the register and the scroll position

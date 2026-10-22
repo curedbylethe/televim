@@ -245,6 +245,18 @@ impl AccountsIndex {
             .slot
             .account()
     }
+
+    /// The slot the index holds for `id`, if it holds one.
+    ///
+    /// The picker's switch resolves its target through this rather than
+    /// inventing a slot from the id: an account the index has never recorded
+    /// has no bytes to open.
+    pub(crate) fn slot_of(&self, id: i64) -> Option<AccountSlot> {
+        self.accounts
+            .iter()
+            .find(|known| known.id == id)
+            .map(|known| known.slot)
+    }
 }
 
 /// Records the account a `Ready` named, in `slot`, as the active one.
