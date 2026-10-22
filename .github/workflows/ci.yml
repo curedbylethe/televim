@@ -12,8 +12,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  check:
-    name: fmt / lint / test / design / build-release
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -70,8 +70,29 @@ jobs:
       - name: design
         run: make design-check
 
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'memory'))
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      # `keyring`'s Linux backend talks to the Secret Service over DBus, which
+      # `libdbus-sys` links against at build time.
+      - name: system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--bins --examples`: `--examples` alone does not produce
+      # `target/release/televim`, which the measurement driver launches.
       - name: build-release
-        run: cargo build --release
+        run: cargo build --release --locked --bins --examples
 
       # The memory regression budget: measure, then compare against the stored
       # baseline and fail past it. This is a guard on *change*, not on the
@@ -80,22 +101,24 @@ jobs:
       # It is not part of `make ci` because it needs a release build and a pty,
       # and neither belongs in a per-commit gate.
       #
-      # It runs on a push to `main`, on the nightly schedule, and on a pull
-      # request labelled `memory`; an ordinary pull request does not pay for it.
+      # This job is the gate: it runs on a push to `main`, on the nightly
+      # schedule, and on a pull request labelled `memory`; an ordinary pull
+      # request does not pay for it. The build above is the only one it makes.
       #
       # On a host with no stored baseline it reports and does not enforce: a
       # threshold cannot be calibrated on a machine it was never measured on.
       # The first run on a new host therefore writes its report and exits zero,
       # and a maintainer reviews that report and records it.
       - name: memory-budget
-        if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'memory'))
+        env:
+          TELEVIM_MEASURE_SKIP_BUILD: "1"
         run: |
           scripts/memory/measure.py
           scripts/memory/check.py
 
       # Uploaded even when the comparison failed: the report is what says why.
       - name: upload memory report
-        if: always() && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'memory')))
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: memory-report
