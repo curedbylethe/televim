@@ -1083,6 +1083,30 @@ are in [`../AGENTS.md`](../AGENTS.md).
   is no session forgets the cache and removes the file too: the sign-in form it
   opens accepts any number, so the cache cannot know the account that signs in next
   is its own.
+  The one exception is the explicit switch, and it carries an id, not a place:
+  `:add-account` (or the self card's `add account`) fills `CarriedPlace` at the top
+  of `detach_account` with the open conversation's peer id and whether the reader
+  was at the newest message, and the first `Ready` after it spends that value
+  whatever that `Ready` says, so a second one cannot move the reader again.
+  If the new account's list holds the id, the conversation is reopened by id —
+  the same lookup `:chat` does, never a row index, because the list is ordered by
+  recency and a row names a different conversation on either side — with an
+  empty window, and the loop asks for this account's newest page; if it does
+  not, nothing is opened, the highlight falls to the first row, and the status
+  line says `that account has no chat with this person`. The tag still governs
+  *content*, which is why a mismatched cache is still forgotten at `Ready`:
+  nothing but an id crosses, so the reopened window can only hold the new
+  account's messages. The exception is sound only because the chat list holds
+  private users and nothing else — `private_chats` in `crates/proto/src/client.rs`
+  filters on `chat_kind(dialog.kind).is_private()` — and a Telegram user id is
+  global, so the same id names the same person under either account, which a
+  group or channel id would not promise.
+  `client::tests::a_group_or_a_channel_never_becomes_a_chat` is the test that
+  keeps that premise true; if it ever fails, this exception is no longer safe.
+  The message cursor is deliberately not carried: message ids are a per-account
+  sequence, so a cursor from one account names an unrelated message under the
+  other. A reader who had scrolled away lands at the newest message, and the line
+  says `newest` with no number and no position claim.
 - **Why the chat list is in the history file:** "startup renders from cache
   before network" cannot be met by messages alone, because a conversation is
   opened from the list and the list came from the wire. So the head of the list

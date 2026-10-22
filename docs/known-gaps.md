@@ -109,14 +109,21 @@ Real, and named so they are not mistaken for oversights:
   `add account` on the self card and `:add-account` detach the signed-in account
   without signing it out — the client goes, the files stay — and open the sign-in
   at the phone step for a new one; the new account's first `Ready` adopts it, and
-  `Esc` at the phone step cancels and restores the first. Four limits remain. Only
-  one account is open per process: the detached account receives no updates while
-  the new one signs in. Switching is add-account-only until the picker lands, so
-  reaching an account already stored means signing in to it again. Nothing is
-  revoked on the server, so the detached session remains valid. And with a
-  configured session *file*, the panel names the configured path behind the
-  sign-in until the first `Ready` names the new account and its suffixed path is
-  known.
+  `Esc` at the phone step cancels and restores the first. That `Ready` also puts
+  the reader back: the conversation open at detach is reopened by peer id — never
+  by row, and never by name — with the new account's newest page, so a reader who
+  had scrolled away lands at the newest message and the line says `newest`. When
+  the new account has no chat with that person, nothing is opened, the highlight
+  goes to the top row and the status line says `that account has no chat with
+  this person`. Nothing else crosses the switch — no message cursor, draft,
+  register or scroll position, because message ids are per account. Four limits
+  remain. Only one account is open per process: the detached account receives no
+  updates while the new one signs in. Switching is add-account-only until the
+  picker lands, so reaching an account already stored means signing in to it
+  again. Nothing is revoked on the server, so the detached session remains
+  valid. And with a configured session *file*, the panel names the configured
+  path behind the sign-in until the first `Ready` names the new account and its
+  suffixed path is known.
 - **Account storage is partitioned, and one account is open per process.** The
   session, drafts file, history file and media directory resolve
   through `accounts::slot_paths`, so an account added later writes

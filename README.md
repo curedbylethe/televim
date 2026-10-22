@@ -456,6 +456,12 @@ Working today:
   arrives, the status line says `offline:` and `:retry` asks again. A `●` beside
   the sentence always shows which holds: green while the feed delivers, yellow
   while a bring-up or rebuild is under way, red once the budget is spent.
+  A switch of account carries far less: `:add-account` keeps the peer id of the
+  open conversation, so the new account lands in that chat when its own list holds
+  the person and on the top row with `that account has no chat with this person`
+  when it does not; the cursor, the draft, the register and the scroll position
+  stay with the account that left, because a message id is that account's sequence
+  and means nothing in another's.
 - **History cache:** media bytes are not in this file; they are in the media cache
   (see **Media** above). The newest 200 messages of each of the 32 most recently
   touched private conversations (at most 8 MiB of JSON-encoded message text in all; the least
