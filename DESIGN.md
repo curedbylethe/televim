@@ -230,12 +230,14 @@ has one cell height and the reader chose the cell.
   caret in here right now* — the reason the dot exists is that a caret is
   standing on a blank cell, and that is true of a search query too.
 
-### The nineteen hint rows
+### The hint rows
 
-`ALL_HINTS` is the array a test iterates. These are the nineteen, verbatim, with
-the width each one measures. The width is
-`chars().count()`, the same count the test makes, and the array is the authority:
-the numbers below were re-measured from it.
+`ALL_HINTS` is the array a test iterates: eighteen entries, the sign-in and
+passphrase rows among them. The model's `HINT` draws nineteen, among them the
+contacts and archived lists' key help, which the build does not draw (below). These are the rows the screens
+above reach, verbatim, with the width each one measures. The width is
+`chars().count()`, the same count the test makes, and the array is the
+authority: the numbers below were re-measured from it.
 
 | Shown when | Text | Columns |
 | :--------- | :--- | ------: |
@@ -251,9 +253,7 @@ the numbers below were re-measured from it.
 | a selection inside the line | ` y: yank  d: cut  Esc: back` | 27 |
 | the editable profile has the focus | ` e/Enter: edit  j/k: field  Esc/Tab/Ctrl+w: leave` | 49 |
 | the self card has the focus | ` j/k: row  h/l: within  v: vis  y: yank  d: act  Esc: back` | 58 |
-| a contact's card has the focus | ` j/k: row  h/l: within  v: vis  y/yy: yank  d: act  Esc: back` | 60 |
-| the contacts list is up | ` j/k: contact  ⏎: card  Esc: close` | 39 |
-| the archived list is up | ` j/k: chat  ⏎: unarchive  Esc: close` | 44 |
+| a contact's card has the focus | ` j/k: row  h/l: within  v: vis  y/yy: yank  d: act  Esc: back` | 61 |
 | the session is not signed in | ` ::signin  q:quit` | 17 |
 | nothing has been read yet | ` q:quit` | 7 |
 
@@ -574,7 +574,7 @@ code.
 | `unknown report reason: {token} — use spam, violence, …` | `:report` with a token that is not one of the ten, refused before any question | `:report` |
 | `archive: {reason}` `block: {reason}` `delete chat: {reason}` `report: {reason}` `rename: could not save — {reason}` | a failed action, in its own sentence | the answer path |
 | `NORMAL` `INSERT` `VISUAL` `CONFIRM` | upper case, in a filled label | `status_bar.rs` |
-| ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the nineteen rows above |
+| ` i:ins  r:rep  e:edit ` | hints: `key:word`, two spaces between pairs | the hint rows above |
 | `: ` `/ ` | a prompt's prefix, on its first row only; `/ ` is shared by the find line and the new-chat line | `App::prompt_prefix` |
 | `3 message(s) selected — Esc clears` | the status line's sentence for a selection, **stating the unit** | `selection_note` |
 | `3 character(s) selected — Esc clears` | ditto for a selection inside one message | ditto |
@@ -1286,6 +1286,17 @@ reader presses: archive and unarchive, the block and unblock questions, a contac
 card with the three action rows, rename from the card and from the command line,
 both delete questions, a report naming its reason, an unknown-reason refusal, and
 the contacts list with a person who has no chat.
+
+**The model is behind the build in four places**, recorded rather than hidden:
+the model's `archiveChat` leaves the conversation open where the build closes it;
+its unarchive splices the chat back at the index it remembered where the build
+puts it in the list's own order; an empty `:archived` opens in the model where
+the build refuses it with `archived — 0`; and while a list is up the model
+draws its key help (`j/k: contact  ⏎: card  Esc: close`, and the archive's
+equivalent) on the status row where the build draws the label, `contacts — {n}`
+or `archived — {n}`, because an open list owns that row. The frames show the
+model's behaviour in those four, and the build's is the one this document
+describes.
 
 ## Components
 
