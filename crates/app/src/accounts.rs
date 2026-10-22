@@ -247,13 +247,23 @@ impl AccountsIndex {
     }
 }
 
-/// Records the account a `Ready` named, at the legacy slot, as the active one.
+/// Records the account a `Ready` named, in `slot`, as the active one.
 ///
 /// Called after `Ready` and never before: the index is a hint, and a launch
 /// with no account named yet has nothing to hint at. Writes only when a field
 /// changes — never per pass, and not on a repeat `Ready` for the same account —
 /// so the file is written at most once per launch.
-pub(crate) fn note_signed_in(path: &Path, id: i64, phone: Option<&str>) {
+///
+/// The error is returned rather than warned about here because one caller
+/// cannot go on without the write: [`SlotStore`]'s fresh target has just put a
+/// session where only this hint can find it. The legacy caller warns, as it
+/// always has.
+pub(crate) fn note_signed_in(
+    path: &Path,
+    id: i64,
+    phone: Option<&str>,
+    slot: AccountSlot,
+) -> Result<(), String> {
     let mut index = AccountsIndex::load(path).unwrap_or_else(|| AccountsIndex {
         version: AccountsIndex::VERSION,
         active: None,
@@ -264,16 +274,16 @@ pub(crate) fn note_signed_in(path: &Path, id: i64, phone: Option<&str>) {
     let unchanged = index.active == Some(id)
         && at.is_some_and(|at| {
             let known = &index.accounts[at];
-            known.slot == AccountSlot::Legacy && known.phone.as_deref() == phone
+            known.slot == slot && known.phone.as_deref() == phone
         });
     if unchanged {
-        return;
+        return Ok(());
     }
 
     let known = KnownAccount {
         id,
         phone: phone.map(str::to_owned),
-        slot: AccountSlot::Legacy,
+        slot,
         last_used: now(),
     };
     index.active = Some(id);
@@ -282,9 +292,7 @@ pub(crate) fn note_signed_in(path: &Path, id: i64, phone: Option<&str>) {
         None => index.accounts.push(known),
     }
 
-    if let Err(error) = index.save(path) {
-        tracing::warn!(%error, "the accounts index could not be written");
-    }
+    index.save(path)
 }
 
 /// Epoch seconds, or zero for a clock before it — an index needs an order, not
@@ -336,20 +344,35 @@ fn restrict_permissions(_path: &Path) {}
 
 /// Where a slot's session is kept.
 ///
-/// Only [`Target::Existing`] in this stage: bytes that are already where the
-/// resolver put them, so the target *is* the session target. Stage 02 adds a
-/// `Fresh` target — an account being added, whose slot has to be minted and
-/// whose bytes do not exist — which is why the store takes a target at all
-/// rather than a slot.
+/// [`Target::Existing`] is bytes that are already where the resolver put them,
+/// so the target *is* the session target. [`Target::Fresh`] is an account being
+/// added: its slot is minted by the save, out of the identity in the snapshot
+/// the sign-in wrote, which is why the store takes a target rather than a slot.
 pub(crate) enum Target {
     Existing(SessionTarget),
+
+    /// A session that has no slot yet.
+    ///
+    /// Holds what the mint needs rather than a [`SessionTarget`], because there
+    /// is nothing to point at until the snapshot says whose it is. Boxed so the
+    /// two targets are the same size: this one is carried once per client.
+    Fresh(Box<FreshTarget>),
+}
+
+/// What a [`Target::Fresh`] save needs: where the account's bytes go, and where
+/// the index that finds them lives.
+pub(crate) struct FreshTarget {
+    config_path: PathBuf,
+    cfg: Config,
+    index: PathBuf,
 }
 
 /// The session store of one slot.
 ///
 /// One type in front of the two backends, so a slot's session can only be read,
-/// written or cleared where [`slot_paths`] put it. It exists so stage 02 can add
-/// a target without the client learning a second way to store a session.
+/// written or cleared where [`slot_paths`] put it. It exists so an account
+/// being added can be stored without the client learning a second way to store
+/// a session.
 pub(crate) struct SlotStore {
     target: Target,
 
@@ -367,6 +390,24 @@ impl SlotStore {
         Self { target, keys }
     }
 
+    /// The store an account being added writes through: no slot, and `keys` for
+    /// the file the new slot will have when the configured session is a file.
+    pub(crate) fn fresh(
+        config_path: PathBuf,
+        cfg: Config,
+        index: PathBuf,
+        keys: Option<Arc<dyn KeyProvider>>,
+    ) -> Self {
+        Self {
+            target: Target::Fresh(Box::new(FreshTarget {
+                config_path,
+                cfg,
+                index,
+            })),
+            keys,
+        }
+    }
+
     /// The file store for `path`, under the slot's key source.
     fn file(&self, path: &Path) -> FileStore {
         FileStore::with_key_provider(
@@ -378,6 +419,50 @@ impl SlotStore {
             ),
         )
     }
+
+    /// [`SessionStore::save`] for a slot that does not exist yet.
+    ///
+    /// The account comes from the snapshot, which is the only place a sign-in
+    /// puts the identifier. The session is written first and the index after
+    /// it: a session no launch can find is a reader signed in to nothing, so an
+    /// index that cannot be written takes the session back out — best-effort,
+    /// because the error being reported is the index's.
+    fn save_fresh(
+        &self,
+        config_path: &Path,
+        cfg: &Config,
+        index: &Path,
+        session: &SessionData,
+    ) -> Result<(), SessionError> {
+        let Some(account) = session.account() else {
+            return Err(SessionError::Save(
+                "the stored session does not name its account, so it has no slot to go in"
+                    .to_owned(),
+            ));
+        };
+
+        let paths = slot_paths(config_path, cfg, Some(account.user_id));
+        let store = Self {
+            target: Target::Existing(paths.session.clone()),
+            keys: self.keys.clone(),
+        };
+        store.save(session)?;
+
+        match note_signed_in(
+            index,
+            account.user_id,
+            account.phone.as_deref(),
+            AccountSlot::Id(account.user_id),
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = store.clear();
+                Err(SessionError::Save(format!(
+                    "the accounts index could not be written, so the new session was removed again: {error}"
+                )))
+            }
+        }
+    }
 }
 
 impl SessionStore for SlotStore {
@@ -387,6 +472,9 @@ impl SessionStore for SlotStore {
                 KeyringStore::new(KeyringStore::DEFAULT_SERVICE, account.clone()).load()
             }
             Target::Existing(SessionTarget::File(path)) => self.file(path).load(),
+            // Nothing has been stored for an account being added: no session is
+            // the answer, and the sign-in form is what follows from it.
+            Target::Fresh(_) => Ok(None),
         }
     }
 
@@ -396,6 +484,9 @@ impl SessionStore for SlotStore {
                 KeyringStore::new(KeyringStore::DEFAULT_SERVICE, account.clone()).save(session)
             }
             Target::Existing(SessionTarget::File(path)) => self.file(path).save(session),
+            Target::Fresh(fresh) => {
+                self.save_fresh(&fresh.config_path, &fresh.cfg, &fresh.index, session)
+            }
         }
     }
 
@@ -405,6 +496,8 @@ impl SessionStore for SlotStore {
                 KeyringStore::new(KeyringStore::DEFAULT_SERVICE, account.clone()).clear()
             }
             Target::Existing(SessionTarget::File(path)) => self.file(path).clear(),
+            // No slot was ever minted, so there is nothing to clear.
+            Target::Fresh(_) => Ok(()),
         }
     }
 }
@@ -595,7 +688,8 @@ mod tests {
 
         assert_eq!(AccountsIndex::load(&index), None);
 
-        note_signed_in(&index, 7, Some("+1555"));
+        note_signed_in(&index, 7, Some("+1555"), AccountSlot::Legacy)
+            .expect("the index is written");
 
         let stored = AccountsIndex::load(&index).expect("the next write replaces it");
         assert_eq!(stored.active, Some(7));
@@ -712,7 +806,8 @@ mod tests {
         .save(&index)
         .expect("the index is written");
 
-        note_signed_in(&index, 7, Some("+1555"));
+        note_signed_in(&index, 7, Some("+1555"), AccountSlot::Legacy)
+            .expect("the index is written");
 
         let stored = AccountsIndex::load(&index).expect("the index reads");
         assert_eq!(
@@ -771,7 +866,8 @@ mod tests {
         assert_eq!(session_name_of(&config_path, None), "session");
 
         // The first `Ready` naming an account, account 42.
-        note_signed_in(&index, 42, Some("+1555"));
+        note_signed_in(&index, 42, Some("+1555"), AccountSlot::Legacy)
+            .expect("the index is written");
 
         let stored: serde_json::Value =
             serde_json::from_slice(&fs::read(&index).expect("the index is written"))
@@ -797,5 +893,144 @@ mod tests {
             user_id: Some(user_id),
             ..SessionData::default()
         }
+    }
+
+    /// Every file under `dir`, by name, with its bytes: the assertion that a
+    /// change touched nothing it did not have to.
+    fn listing(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut entries: Vec<(String, Vec<u8>)> = fs::read_dir(dir)
+            .expect("the directory reads")
+            .flatten()
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).expect("the file reads"),
+                )
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    /// The account being added gets a slot minted from its snapshot, and the
+    /// first account's files are not opened, moved or changed on the way.
+    #[test]
+    fn a_fresh_store_writes_the_new_slot_and_leaves_the_first_accounts_bytes_alone() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let index = index_path(&config_path);
+        let cfg = Config {
+            session_path: Some(dir.path().join("televim.session")),
+            ..Config::default()
+        };
+        // The first account's bytes, as a signed-in launch leaves them.
+        for path in [
+            dir.path().join("televim.session"),
+            config_path.with_extension("drafts.json"),
+            config_path.with_extension("history.json"),
+        ] {
+            fs::write(&path, b"the first account's bytes").expect("the fixture is written");
+        }
+        let before = listing(dir.path());
+
+        let keys: Arc<dyn KeyProvider> =
+            Arc::new(telegram_framework::PassphraseProvider::new("fixture"));
+        let fresh = SlotStore::fresh(
+            config_path.clone(),
+            cfg.clone(),
+            index.clone(),
+            Some(Arc::clone(&keys)),
+        );
+
+        assert_eq!(
+            fresh.load().expect("a fresh store opens"),
+            None,
+            "nothing is stored for an account that is not signed in yet"
+        );
+        fresh.save(&snapshot(7)).expect("the new account stores");
+
+        let stored = SlotStore::existing(
+            Target::Existing(slot_paths(&config_path, &cfg, Some(7)).session),
+            Some(keys),
+        );
+        assert_eq!(
+            stored
+                .load()
+                .expect("the new slot reads")
+                .and_then(|it| it.user_id),
+            Some(7),
+            "the session went to the suffixed file"
+        );
+
+        let index = AccountsIndex::load(&index).expect("the index is written");
+        assert_eq!(index.active, Some(7), "the next launch opens account 7");
+        assert_eq!(index.accounts.len(), 1);
+        assert_eq!(index.accounts[0].id, 7);
+        assert_eq!(index.accounts[0].slot, AccountSlot::Id(7));
+        assert!(index.accounts[0].last_used > 0, "and its write is dated");
+
+        let after = listing(dir.path());
+        for entry in &before {
+            assert!(
+                after.contains(entry),
+                "{} was opened, changed or removed",
+                entry.0
+            );
+        }
+        let added: Vec<&str> = after
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|name| !before.iter().any(|(old, _)| old == name))
+            .collect();
+        assert_eq!(
+            added,
+            vec!["televim.7.session", "televim.accounts.json"],
+            "the new slot, and the hint that finds it, and nothing else"
+        );
+    }
+
+    /// A session nothing can find is worse than a sign-in that failed: an index
+    /// that cannot be written takes the session back out again.
+    #[test]
+    fn a_fresh_save_that_cannot_write_the_index_takes_the_session_back_out() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let index = index_path(&config_path);
+        let cfg = Config {
+            session_path: Some(dir.path().join("televim.session")),
+            ..Config::default()
+        };
+        // A directory where the index goes: the rename over it cannot succeed.
+        fs::create_dir(&index).expect("the fixture is written");
+        let keys: Arc<dyn KeyProvider> =
+            Arc::new(telegram_framework::PassphraseProvider::new("fixture"));
+        let fresh = SlotStore::fresh(config_path.clone(), cfg, index, Some(keys));
+
+        let error = fresh.save(&snapshot(7)).expect_err("the save fails");
+
+        assert!(
+            matches!(error, SessionError::Save(_)),
+            "the failure is the save's, not a discard: {error:?}"
+        );
+        assert!(
+            !dir.path().join("televim.7.session").exists(),
+            "the session was taken back out, so no launch is left without a hint"
+        );
+    }
+
+    /// The slot a `Ready` names is the slot the index records: the legacy one
+    /// for the first account, the minted id for one added later.
+    #[test]
+    fn a_ready_records_the_slot_it_is_given() {
+        let (_dir, _config_path, index) = scratch();
+
+        note_signed_in(&index, 7, Some("+1555"), AccountSlot::Id(7)).expect("the index is written");
+
+        let stored = AccountsIndex::load(&index).expect("the index reads");
+        assert_eq!(stored.active, Some(7));
+        assert_eq!(stored.accounts[0].id, 7);
+        assert_eq!(stored.accounts[0].slot, AccountSlot::Id(7));
+        assert_eq!(stored.accounts[0].phone.as_deref(), Some("+1555"));
     }
 }
