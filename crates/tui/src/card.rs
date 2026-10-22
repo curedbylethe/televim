@@ -65,6 +65,17 @@ const CUE: &str = "·";
 /// is what the enum these replace was guarding against.
 pub const ADD_ACCOUNT: &str = "add account";
 
+/// The label of the row for the account that is already signed in.
+///
+/// A word rather than an ink: the card's only colour is the selection row's
+/// reverse video, and a marker in the value would be yanked along with the
+/// number the reader came for.
+pub const ACTIVE: &str = "active";
+
+/// The label of the row for another account this machine knows. Named by what
+/// `d` does on it, as `block` and `report` are.
+pub const SWITCH: &str = "switch";
+
 /// The label of the row that signs out. Confirms, then asks the side holding the
 /// client to discard the session.
 pub const LOGOUT: &str = "logout";
@@ -134,6 +145,14 @@ pub struct CardRow {
     /// it lands where the design put it rather than wherever it was appended. See
     /// [`CardRow::reserved`].
     pub reserved: bool,
+
+    /// The account this row acts on, when it is one of the self card's picker
+    /// rows.
+    ///
+    /// **On the row rather than at its position**, so `d` acts on the account the
+    /// reader pressed even if the list changed under the card: the chat list's
+    /// rule, by id and never by index, applied to a row.
+    pub account_id: Option<i64>,
 }
 
 impl CardRow {
@@ -145,6 +164,7 @@ impl CardRow {
             label,
             value: value.into(),
             reserved: false,
+            account_id: None,
         }
     }
 
@@ -157,6 +177,23 @@ impl CardRow {
             label,
             value: label.to_owned(),
             reserved: false,
+            account_id: None,
+        }
+    }
+
+    /// An account row: an action on `id`, whose value is how the account is
+    /// named — its phone number, or `account <id>`.
+    ///
+    /// The value is not the action's name here, because the number is what tells
+    /// two accounts apart: a label column eleven cells wide cannot.
+    #[must_use]
+    pub fn account(label: &'static str, value: impl Into<String>, id: i64) -> Self {
+        Self {
+            kind: RowKind::Action,
+            label,
+            value: value.into(),
+            reserved: false,
+            account_id: Some(id),
         }
     }
 
@@ -181,6 +218,7 @@ impl CardRow {
             label,
             value: String::new(),
             reserved: true,
+            account_id: None,
         }
     }
 
@@ -299,6 +337,15 @@ fn self_rows(app: &App) -> Vec<CardRow> {
         "session",
         session(&app.session.session_store),
     ));
+    // One row per account, in the order the list arrived, and **none at all on a
+    // machine with one**: that row is the account already on show, its number is
+    // in `username`, and a list of one is not a picker.
+    if app.known_accounts.len() > 1 {
+        for known in &app.known_accounts {
+            let label = if known.active { ACTIVE } else { SWITCH };
+            rows.push(CardRow::account(label, known.label.clone(), known.id));
+        }
+    }
     rows.push(CardRow::action(ADD_ACCOUNT));
     rows.push(CardRow::action(LOGOUT));
     rows
@@ -629,6 +676,7 @@ fn fit(label: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::KnownAccount;
     use domain::vim::{CharMotion, char_motion};
 
     /// The label column is fixed, so a label that overruns it is cut rather than
@@ -744,12 +792,12 @@ mod tests {
         assert!(!CardRow::value("name", "Ada").is_action());
     }
 
-    /// The only rows `d` can act on are the two named actions, and they are named
-    /// by the constants the key handler matches on.
+    /// The only rows `d` can act on here are the two named actions, because the
+    /// sample machine knows one account and a list of one is not a picker.
     ///
-    /// The two subjects differ by exactly this much, so it is the one thing about
-    /// the rows that must not grow quietly: a third action is a key that needs a
-    /// hint, a confirmation or a refusal, and this is where it would show up.
+    /// The picker's rows are the third acting family, and they exist only above
+    /// that count: `d` on them carries the account id on the row rather than
+    /// finding it by position.
     #[test]
     fn the_only_rows_d_can_act_on_are_the_two_named_actions() {
         let app = App::mock();
@@ -833,6 +881,112 @@ mod tests {
         }
         let after = rows(&app).len();
         assert_eq!(after, before - 1, "one row went, and the count says so");
+    }
+
+    /// The picker rows are the accounts in the order the index listed them, and
+    /// the signed-in one is marked with a word rather than an ink. The number is
+    /// the value, because eleven cells of label cannot tell two accounts apart.
+    #[test]
+    fn a_known_account_is_one_row_and_the_signed_in_one_says_active() {
+        let mut app = App::mock();
+        app.set_known_accounts(vec![
+            KnownAccount {
+                id: 7,
+                label: "+44 7700 900142".to_owned(),
+                active: true,
+            },
+            KnownAccount {
+                id: 9,
+                label: "account 9".to_owned(),
+                active: false,
+            },
+        ]);
+
+        let picker: Vec<(&str, String, Option<i64>)> = rows(&app)
+            .iter()
+            .filter(|row| row.account_id.is_some())
+            .map(|row| (row.label, row.value.clone(), row.account_id))
+            .collect();
+        assert_eq!(
+            picker,
+            [
+                (ACTIVE, "+44 7700 900142".to_owned(), Some(7)),
+                (SWITCH, "account 9".to_owned(), Some(9)),
+            ]
+        );
+        // And they sit between `session` and `add account`, which stays the last
+        // of the account-related rows.
+        let labels: Vec<&str> = rows(&app).iter().map(|row| row.label).collect();
+        let session = labels
+            .iter()
+            .position(|label| *label == "session")
+            .expect("the account has a session row");
+        let add_account = labels
+            .iter()
+            .position(|label| *label == ADD_ACCOUNT)
+            .expect("the card keeps its add-account row");
+        assert_eq!(labels[session + 1..add_account], [ACTIVE, SWITCH]);
+    }
+
+    /// A list of one is not a picker: that row is the account already on show,
+    /// and its number is in `username`. The card is the one it was before the
+    /// listing existed.
+    #[test]
+    fn a_machine_with_one_account_draws_no_picker() {
+        let mut app = App::mock();
+        let before: Vec<(&str, String)> = rows(&app)
+            .iter()
+            .map(|row| (row.label, row.value.clone()))
+            .collect();
+
+        app.set_known_accounts(vec![KnownAccount {
+            id: 7,
+            label: "+44 7700 900142".to_owned(),
+            active: true,
+        }]);
+
+        let after: Vec<(&str, String)> = rows(&app)
+            .iter()
+            .map(|row| (row.label, row.value.clone()))
+            .collect();
+        assert_eq!(before, after);
+        assert!(
+            rows(&app).iter().all(|row| row.account_id.is_none()),
+            "and none of them is an account row"
+        );
+    }
+
+    /// A draw must not reorder the picker: the list is the index's order, not
+    /// whatever the panel happened to lay out.
+    #[test]
+    fn the_picker_rows_keep_their_order_across_two_draws() {
+        let mut app = App::mock();
+        app.set_known_accounts(vec![
+            KnownAccount {
+                id: 3,
+                label: "account 3".to_owned(),
+                active: false,
+            },
+            KnownAccount {
+                id: 7,
+                label: "+44 7700 900142".to_owned(),
+                active: true,
+            },
+            KnownAccount {
+                id: 9,
+                label: "account 9".to_owned(),
+                active: false,
+            },
+        ]);
+
+        let picker = || -> Vec<(&'static str, String, Option<i64>)> {
+            rows(&app)
+                .iter()
+                .filter(|row| row.account_id.is_some())
+                .map(|row| (row.label, row.value.clone(), row.account_id))
+                .collect()
+        };
+        assert_eq!(picker(), picker());
     }
 }
 
