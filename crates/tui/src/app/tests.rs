@@ -9450,3 +9450,49 @@ fn a_failed_profile_read_keeps_what_the_card_knew_about_blocking() {
     );
 }
 
+#[test]
+fn a_command_typed_on_a_card_acts_on_the_card_not_the_highlighted_chat() {
+    let mut app = App::mock();
+    card_of_a_stranger(&mut app);
+
+    run_command_line(&mut app, "block");
+    assert_eq!(app.ui.mode, Mode::Confirm);
+    app.handle_key(press(KeyCode::Char('y')));
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::SetBlocked {
+            peer_id: 99,
+            blocked: true,
+            ..
+        })
+    ));
+
+    card_of_a_stranger(&mut app);
+    run_command_line(&mut app, "archive");
+    assert!(
+        app.take_action().is_none(),
+        "a person with no chat has none to archive"
+    );
+}
+
+#[test]
+fn the_rename_row_prefills_the_card_name_and_renames_the_card_peer() {
+    let mut app = App::mock();
+    card_of_a_stranger(&mut app);
+    let rows = crate::card::rows(&app);
+    let rename = rows
+        .iter()
+        .position(|row| row.label == crate::card::RENAME)
+        .expect("a contact card has a rename row");
+    app.profile.handle_card_row(rename);
+    app.handle_key(press(KeyCode::Char('d')));
+
+    assert_eq!(app.input.line.text(), "rename Ada");
+    type_text(&mut app, "x");
+    app.handle_key(press(KeyCode::Enter));
+    assert!(matches!(
+        app.take_action(),
+        Some(Action::SetLocalName { peer_id: 99, name: Some(ref name) }) if name == "Adax"
+    ));
+}
+

@@ -1222,7 +1222,10 @@ label is `CONFIRM` in the one red role. The archive and rename results are
 chat-list highlight is the subject, and opening a conversation moves that
 highlight to it. `:archive` and `:delete-chat` need a chat, so a card over a
 person with no conversation is refused with `nothing to act on: highlight a
-chat, open a conversation, or open a card`.
+chat, open a conversation, or open a card`. The line opens over the card, so
+the card stays the subject until the command has run. On a contact's card `d`
+acts only on `rename`, `block`/`unblock` and `report`; on a value row it is
+dropped without a sentence.
 
 **Archive is a place, not a deletion.** The chat leaves the visible column and
 is kept in the archive folder. `:archived` draws a small bordered list over the
