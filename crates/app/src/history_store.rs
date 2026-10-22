@@ -1332,6 +1332,61 @@ mod tests {
         assert_eq!(ids(&loaded.cache.get(30)), vec![9]);
     }
 
+    /// The slot's label keys the tag: an id slot's file carries the id, the
+    /// legacy slot still accepts the configured phone, and a phone-only file
+    /// from the legacy slot is another account's at the id slot.
+    #[test]
+    fn a_history_file_for_an_id_slot_carries_its_id_and_discards_another_account() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let cfg = crate::config::Config {
+            phone: Some("+15551234567".to_owned()),
+            ..crate::config::Config::default()
+        };
+        let legacy = crate::accounts::slot_paths(&config_path, &cfg, None);
+        let seven = crate::accounts::slot_paths(&config_path, &cfg, Some(7));
+        let seven_label = seven.label(&cfg);
+        let legacy_label = legacy.label(&cfg);
+
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "seven's")]);
+
+        // What `Ready` stamps, and the next write lays down.
+        let tag = HistoryTag {
+            account_id: Some(7),
+            phone: seven_label.clone(),
+        };
+        let file = HistoryFile::for_test(seven.history.clone());
+        file.write(&HistoryFile::encode(&cache, &tag).expect("the cache serialises"));
+
+        let loaded = file.load();
+        assert_eq!(loaded.account_id, Some(7), "the id is the tag");
+        assert_eq!(
+            loaded.account.as_deref(),
+            Some("7"),
+            "and the slot's label rides beside it"
+        );
+        assert!(history_acceptable(
+            loaded.account.as_deref(),
+            loaded.account_id,
+            seven_label.as_deref()
+        ));
+        assert!(tag.holds_for(7, None), "the id holds for its own account");
+        assert!(
+            !tag.holds_for(8, None),
+            "another account's id is still discarded"
+        );
+
+        assert!(
+            history_acceptable(Some("+15551234567"), None, legacy_label.as_deref()),
+            "the legacy slot keeps accepting its configured phone"
+        );
+        assert!(
+            !history_acceptable(Some("+15551234567"), None, seven_label.as_deref()),
+            "a phone-only file is another account's at the id slot"
+        );
+    }
+
     /// A row writes the media id only when it has one: a file from before the
     /// id was kept carries no key, and reads back with none.
     #[test]

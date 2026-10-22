@@ -2152,6 +2152,81 @@ mod tests {
         assert!(path.exists());
     }
 
+    /// The slot's label is the directory's tag: the first account's media
+    /// survives the upgrade, and an account added later never reads it.
+    #[test]
+    fn the_slot_label_keeps_the_legacy_media_and_separates_an_id_slot() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        let config_path = root.path().join("televim.toml");
+        let cfg = crate::config::Config {
+            phone: Some("+15551234567".to_owned()),
+            ..crate::config::Config::default()
+        };
+        let legacy = crate::accounts::slot_paths(&config_path, &cfg, None);
+        let seven = crate::accounts::slot_paths(&config_path, &cfg, Some(7));
+
+        let mut cache = MediaCache::open(legacy.media.clone(), legacy.label(&cfg).as_deref(), None);
+        let path = cache
+            .store(7, 9, MediaKind::Photo, b"picture")
+            .expect("the first account's media is cached");
+        drop(cache);
+
+        // The upgrade: the same slot, resolved to the same label.
+        let mut reopened =
+            MediaCache::open(legacy.media.clone(), legacy.label(&cfg).as_deref(), None);
+        assert_eq!(
+            reopened.lookup(7, 9),
+            Some(path.clone()),
+            "the upgrade does not wipe the first account's media"
+        );
+        drop(reopened);
+
+        // An account added later clears the legacy directory on the way in and
+        // writes only its own.
+        let mut later = MediaCache::open(legacy.media.clone(), seven.label(&cfg).as_deref(), None);
+        assert_eq!(
+            later.lookup(7, 9),
+            None,
+            "another slot's bytes are not read"
+        );
+        assert!(!path.exists(), "and are not left behind");
+        let seven_path = later
+            .store(1, 2, MediaKind::File, b"seven's")
+            .expect("7's media is cached in the slot it cleared");
+        assert_eq!(later.lookup(1, 2), Some(seven_path));
+    }
+
+    /// The fallback directory takes the same label, so two accounts cannot
+    /// share one when the configured directory is unwritable.
+    #[test]
+    fn the_media_fallback_is_tagged_with_the_slot_label() {
+        let root = tempfile::tempdir().expect("a scratch directory");
+        let config_path = root.path().join("televim.toml");
+        let fallback_root = root.path().join("cache");
+        fs::create_dir(&fallback_root).expect("the fallback root is made");
+        let cfg = crate::config::Config {
+            phone: Some("+15551234567".to_owned()),
+            ..crate::config::Config::default()
+        };
+        let legacy = crate::accounts::slot_paths(&config_path, &cfg, None);
+        let seven = crate::accounts::slot_paths(&config_path, &cfg, Some(7));
+
+        let legacy_dir = usable_dir(
+            unwritable_dir(root.path()),
+            &fallback_root,
+            legacy.label(&cfg).as_deref(),
+        );
+        let seven_dir = usable_dir(
+            unwritable_dir(root.path()),
+            &fallback_root,
+            seven.label(&cfg).as_deref(),
+        );
+
+        assert_ne!(legacy_dir, seven_dir, "two slots cannot share one fallback");
+        assert!(legacy_dir.ends_with("televim.media-15551234567"));
+        assert!(seven_dir.ends_with("televim.media-7"));
+    }
+
     /// A configured directory that cannot exist: its parent is a regular file.
     fn unwritable_dir(root: &Path) -> PathBuf {
         let blocker = root.join("blocker");
