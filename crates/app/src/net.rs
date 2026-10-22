@@ -3003,8 +3003,8 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         // fills it in — and an answer for a card the reader has left is dropped by
         // `set_contact`, which is the only place that knows which card is on show.
         Event::Contact { peer_id, result } => match result {
-            Ok(profile) => app.set_contact(peer_id, profile.blocked, Ok(profile.account)),
-            Err(error) => app.set_contact(peer_id, false, Err(format!("{error:#}"))),
+            Ok(profile) => app.set_contact(peer_id, Some(profile.blocked), Ok(profile.account)),
+            Err(error) => app.set_contact(peer_id, None, Err(failure_reason(&error))),
         },
 
         // The directory, with any local name the reader has given one of its

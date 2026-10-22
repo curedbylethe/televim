@@ -1960,7 +1960,15 @@ impl App {
     /// An answer about somebody the card is not on show for is dropped. The
     /// reader may open a second card while the first read is in flight, and the
     /// second card's fields are not the first one's.
-    pub fn set_contact(&mut self, peer_id: i64, blocked: bool, profile: Result<Account, String>) {
+    ///
+    /// `blocked` is `None` when the read failed: the card then keeps whatever it
+    /// knew, and claims no state it was not told.
+    pub fn set_contact(
+        &mut self,
+        peer_id: i64,
+        blocked: Option<bool>,
+        profile: Result<Account, String>,
+    ) {
         if !self.profile.adopt_contact(peer_id, blocked, profile) {
             return;
         }
