@@ -729,9 +729,31 @@ fn apply_scenario(app: &mut App, network: &mut net::State, event: scenario::Even
     }
 }
 
+/// Seeds `app`'s drafts and read marks from `file`, if the file belongs to the
+/// account `label` names.
+///
+/// The launch calls it once, and so does a run that has just moved onto another
+/// account's slot (`net::State::adopt_slot`): the rule is the same either way,
+/// and two copies of it would be two ways to accept a stranger's words.
+pub(crate) fn restore_drafts(app: &mut App, file: &DraftFile, label: Option<&str>) {
+    let loaded = file.load();
+    if drafts_acceptable(loaded.account.as_deref(), label) {
+        app.drafts.restore(loaded.drafts);
+        app.drafts.restore_read_marks(loaded.reads);
+    } else {
+        tracing::warn!("drafts stored for another account were discarded");
+    }
+}
+
 /// Reads the history file at launch: the cache it may seed and the tag it was
 /// saved under, both empty when the file may not seed this launch.
-fn load_history(file: &HistoryFile, configured: Option<&str>) -> (HistoryCache, HistoryTag) {
+///
+/// The launch calls it once, and so does a run returning to an account it
+/// detached (`net::State::adopt_slot`).
+pub(crate) fn load_history(
+    file: &HistoryFile,
+    configured: Option<&str>,
+) -> (HistoryCache, HistoryTag) {
     let loaded = file.load();
     let tag = HistoryTag {
         account_id: loaded.account_id,
@@ -801,17 +823,11 @@ async fn event_loop(
     // than losing one's own. Either side unnamed accepts the file — a false
     // clear loses words, a false accept is corrected by park/resume.
     let draft_file = DraftFile::new(paths.drafts.clone());
-    let loaded = draft_file.load();
-    if drafts_acceptable(loaded.account.as_deref(), label.as_deref()) {
-        app.drafts.restore(loaded.drafts);
-        app.drafts.restore_read_marks(loaded.reads);
-    } else {
-        tracing::warn!("drafts stored for another account were discarded");
-    }
+    restore_drafts(&mut app, &draft_file, label.as_deref());
     // Nothing synced yet, so the first pass always writes: a discarded file
     // is overwritten rather than left behind, and a launch with nothing
     // stored settles the file (or its absence) at once.
-    let mut last_synced: Option<SyncedDrafts> = None;
+    let mut loop_slot = LoopSlot::new(paths.slot);
 
     // The history file beside it, loaded once at launch too, under the
     // stricter rule: a file tagged with a user id seeds the cache and is
@@ -949,13 +965,8 @@ async fn event_loop(
         // it reports (see `Viewers::start_next` and `Viewers::finish`).
         viewers.queue(network.take_media());
         viewers.start_next(&mut TuiViewer { terminal, keys }, &mut app, &tx, cfg)?;
-        sync_drafts(&app, &draft_file, &mut last_synced, label.as_deref());
-        // Unlike the drafts, written off the loop's thread: the file is up to
-        // a window per conversation, and it is a write behind the pages that
-        // already reached the screen, so nothing waits on it. The chat list
-        // goes with it, read off the screen, where every change to it has
-        // already landed.
-        network.persist_history(app.chats(), Instant::now());
+
+        persist_for_slot(&app, &mut network, &mut viewers, &mut loop_slot);
     }
 
     network.finish_history(app.chats()).await;
@@ -1157,6 +1168,58 @@ fn sync_drafts(
 
 /// What [`sync_drafts`] last wrote: the parked words and the read marks.
 type SyncedDrafts = (Vec<(i64, String)>, Vec<(i64, i64)>);
+
+/// What the loop remembers between passes about the slot it is writing for.
+struct LoopSlot {
+    /// The slot the drafts file and the media cache belong to.
+    slot: accounts::AccountSlot,
+
+    /// What the last sync wrote.
+    synced: Option<SyncedDrafts>,
+}
+
+impl LoopSlot {
+    fn new(slot: accounts::AccountSlot) -> Self {
+        Self { slot, synced: None }
+    }
+}
+
+/// Writes what belongs to the slot the reader is on: the drafts file, and the
+/// history cache behind it.
+///
+/// **Nothing of an account is written while the reader is between two.** The
+/// file the sync would reach for is the one that was just detached, and the
+/// words on screen are no longer its to keep; what it held was flushed before
+/// the screen was emptied (`net::State::detach_account`).
+///
+/// A switch moves the slot under the loop, and with it the drafts file and the
+/// media cache the viewer hand-off holds: the first pass on the new one starts
+/// with nothing to compare against, so it writes the new file's absence or
+/// presence rather than leaving the last slot's answer standing.
+fn persist_for_slot(
+    app: &App,
+    network: &mut net::State,
+    viewers: &mut Viewers,
+    loop_slot: &mut LoopSlot,
+) {
+    if network.slot() != loop_slot.slot {
+        loop_slot.slot = network.slot();
+        loop_slot.synced = None;
+        viewers.cache = network.media_cache();
+    }
+    if network.is_switching() {
+        return;
+    }
+    if let Some(file) = network.draft_file() {
+        let label = network.slot_label();
+        sync_drafts(app, file, &mut loop_slot.synced, label.as_deref());
+    }
+    // Unlike the drafts, written off the loop's thread: the file is up to a
+    // window per conversation, and it is a write behind the pages that already
+    // reached the screen, so nothing waits on it. The chat list goes with it,
+    // read off the screen, where every change to it has already landed.
+    network.persist_history(app.chats(), Instant::now());
+}
 
 /// The most bytes of escape sequence this will write for a clipboard.
 ///

@@ -41,7 +41,7 @@
 //! the store the session went into. [`State`] holds them, so the one module that
 //! may see both halves sees them in one place.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -72,7 +72,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, JumpKind, Log
 use crate::accounts::{self, AccountSlot, SessionTarget, SlotPaths, SlotStore};
 use crate::config::Config;
 use crate::draft_store::DraftFile;
-use crate::history_store::{HistoryCache, HistoryFile, HistoryTag, PageKind};
+use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
 use crate::runtime::AppEvent;
 
@@ -700,13 +700,30 @@ pub struct State {
 
     /// Which account's bytes this run uses.
     ///
-    /// Fixed for the life of the process: a launch resolves it from the index
-    /// once, and every bring-up — the launch's, a `:retry`'s, a reconnect's —
-    /// has to resolve the same store or a reader would be signed in under one
-    /// account and stored under another. Set by the loop beside
-    /// [`State::set_draft_file`]; `Legacy` is both a test's state and the state
-    /// of an install with no index, which is the same layout.
+    /// A launch resolves it from the index once, and every bring-up — the
+    /// launch's, a `:retry`'s, a reconnect's — resolves the same store, or a
+    /// reader would be signed in under one account and stored under another.
+    /// It changes in exactly one way: when a second account's sign-in is
+    /// stored, [`State::adopt_slot`] moves this run onto its paths. Set by the
+    /// loop beside [`State::set_draft_file`]; `Legacy` is both a test's state
+    /// and the state of an install with no index, which is the same layout.
     slot: AccountSlot,
+
+    /// The account the reader is between: the slot whose client was detached
+    /// while a second account signs in.
+    ///
+    /// `Some` *is* the add-account state — no client of this account's, none of
+    /// its caches in memory, and nothing of it written to disk — and it is what
+    /// the loop and the cancel path read. Cleared by the [`Event::Ready`] that
+    /// signs the new account in, or by the cancel that gives up on it.
+    switching: Option<AccountSlot>,
+
+    /// Actions taken off the screen while there was no client to answer them.
+    ///
+    /// Kept in order for the pass that has one, so a message typed with no
+    /// client is not thrown away. At most the one that stopped the drain: a
+    /// pass with no client takes the oldest action and holds it there.
+    held: VecDeque<Action>,
 
     /// Where the accounts index goes, when this run keeps one.
     ///
@@ -896,6 +913,158 @@ impl State {
         self.accounts_index = Some(accounts_index);
     }
 
+    /// Whether the reader is between accounts: the first one detached, the
+    /// second not signed in yet.
+    ///
+    /// The loop reads it to stop the per-account writes, and the cancel path
+    /// restores the first account out of it.
+    pub(crate) fn is_switching(&self) -> bool {
+        self.switching.is_some()
+    }
+
+    /// The slot this run's files belong to.
+    pub(crate) fn slot(&self) -> AccountSlot {
+        self.slot
+    }
+
+    /// A read-only move off the screen, so the loop can write it.
+    fn next_action(&mut self, app: &mut App) -> Option<Action> {
+        self.held.pop_front().or_else(|| app.take_action())
+    }
+
+    /// Keeps `action` for the pass that has a client to answer it.
+    fn hold(&mut self, action: Action) {
+        self.held.push_back(action);
+    }
+
+    /// The bring-up this state should run: the slot it is on, or a fresh one
+    /// while a second account is being added.
+    fn opening(&self) -> Opening {
+        if self.is_switching() {
+            Opening::Fresh
+        } else {
+            Opening::Slot(self.slot)
+        }
+    }
+
+    /// Detaches the account that is signed in, without touching one byte of it.
+    ///
+    /// **Not a sign-out.** Nothing is revoked, deleted or cleared on disk: the
+    /// client goes (and its update relay with it), the screen forgets what
+    /// belongs to the account being left, and the sign-in flow starts on a
+    /// store that has no slot yet. Every cache stays exactly where it is, which
+    /// is what makes the cancel path a return rather than a recovery.
+    ///
+    /// The drafts are the one thing written, and they are written *first*:
+    /// emptying the list empties the screen's drafts with it, so the file has
+    /// to hold the reader's words before that happens.
+    fn detach_account(&mut self, app: &mut App) {
+        if self.is_switching() {
+            return;
+        }
+        let from = self.slot;
+        self.flush_drafts(app);
+
+        self.client = None;
+        // Downloads still running belong to the account that is leaving: their
+        // flags are set so they stop, and nothing they hold is deleted.
+        for cancel in &self.media_cancel {
+            cancel.flag.store(true, Ordering::Relaxed);
+        }
+        self.media_cancel.clear();
+        self.media = tui::state::pending::MediaQueue::default();
+        app.set_chats(Vec::new());
+
+        self.cached = CachedHistory::default();
+        self.history = History::default();
+        self.global_next = None;
+        self.cached_landing = None;
+        self.read_acked = None;
+        self.read_owed = None;
+        self.login = Login::default();
+        // The account's files, not this program's to open until it knows which
+        // account the new session belongs to. `adopt_slot` puts them back.
+        self.history_file = None;
+        self.media_cache = None;
+        self.draft_file = None;
+        self.session_store = None;
+
+        self.switching = Some(from);
+        self.bringing_up = true;
+        if let (Some(cfg), Some(tx)) = (self.cfg_now(), self.tx.clone()) {
+            spawn_opening(cfg, &self.config_path, Opening::Fresh, tx);
+        }
+    }
+
+    /// Gives up on the second account, and puts the first one's bytes back.
+    ///
+    /// The client the fresh bring-up installed is not the first account's, so
+    /// it goes; the first account's paths, history, drafts and media are
+    /// reopened exactly as a launch would, and a bring-up signs it in again.
+    /// Nothing was deleted while the switch was on, so there is nothing to
+    /// restore — only to reopen.
+    fn cancel_switch(&mut self, app: &mut App) {
+        let Some(from) = self.switching.take() else {
+            return;
+        };
+        self.client = None;
+        self.login.code = None;
+        self.login.challenge = None;
+        self.adopt_slot(app, from);
+        if let (Some(cfg), Some(tx)) = (self.cfg_now(), self.tx.clone()) {
+            self.bringing_up = true;
+            spawn_opening(cfg, &self.config_path, Opening::Slot(from), tx);
+        }
+        app.flash("sign-in cancelled; back to the account you were signed in as");
+    }
+
+    /// Moves this run onto `slot`'s paths: its drafts, its history, its media
+    /// and the description the panel shows.
+    ///
+    /// Resolved afresh rather than carried, because a slot *is* its paths in
+    /// [`slot_paths`]'s rule — and the cache files are reopened, not deleted, so
+    /// a return to a slot finds what it left.
+    fn adopt_slot(&mut self, app: &mut App, slot: AccountSlot) {
+        let Some(cfg) = self.cfg_now() else {
+            self.slot = slot;
+            return;
+        };
+        let paths = accounts::slot_paths(&self.config_path, &cfg, slot.account());
+        let label = slot.label(&cfg);
+
+        self.slot = slot;
+        self.session_store = Some(paths.description.clone());
+        let draft_file = DraftFile::new(paths.drafts.clone());
+        crate::runtime::restore_drafts(app, &draft_file, label.as_deref());
+        self.draft_file = Some(draft_file);
+
+        let history = HistoryFile::new(paths.history, file_key_provider(&cfg));
+        let (cache, tag) = crate::runtime::load_history(&history, label.as_deref());
+        self.restore_history(cache);
+        self.restore_history_tag(tag);
+        self.history_file = Some(history);
+
+        self.media_cache = Some(Arc::new(Mutex::new(MediaCache::open(
+            paths.media,
+            label.as_deref(),
+            cfg.media_cache_max_bytes,
+        ))));
+    }
+
+    /// Writes this slot's drafts, the live input line included, without ever
+    /// clearing the file: a save is the only write a leaving account is owed.
+    fn flush_drafts(&self, app: &App) {
+        let (Some(file), Some(cfg)) = (&self.draft_file, &self.cfg) else {
+            return;
+        };
+        let chat_id = app.conversation.conversation.window.chat_id;
+        let drafts = app.drafts.snapshot(Some((chat_id, &app.input.line)));
+        let reads = app.drafts.recent_read_marks(HISTORY_CACHE_PEERS);
+        if !drafts.is_empty() || !reads.is_empty() {
+            file.save(&drafts, &reads, self.slot.label(cfg).as_deref());
+        }
+    }
+
     /// Points sign-out at the history file, so it can remove it.
     ///
     /// A setter for [`State::set_draft_file`]'s reason.
@@ -911,6 +1080,21 @@ impl State {
     /// The launch's media cache, shared, for the viewer hand-off to hold a path.
     pub(crate) fn media_cache(&self) -> Option<Arc<Mutex<MediaCache>>> {
         self.media_cache.clone()
+    }
+
+    /// The drafts file of the slot in use, for the loop's sync.
+    ///
+    /// `None` while a switch is in progress: the new account has no slot yet,
+    /// so there is no file of it to write.
+    pub(crate) fn draft_file(&self) -> Option<&DraftFile> {
+        self.draft_file.as_ref()
+    }
+
+    /// The tag this slot's drafts are written under: the configured phone for
+    /// the first account, the account id for one added later.
+    pub(crate) fn slot_label(&self) -> Option<String> {
+        let cfg = self.cfg.as_ref()?;
+        self.slot.label(cfg)
     }
 
     /// Empties the media cache: its files are the account's, and sign-out ends
@@ -1273,6 +1457,16 @@ enum Wanted {
     Jump(Jump),
 }
 
+/// What a bring-up opens: an account's slot, or an account not yet minted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Opening {
+    /// The slot this run resolved.
+    Slot(AccountSlot),
+
+    /// An account being added: no slot until the sign-in names one.
+    Fresh,
+}
+
 /// Starts the client, and reports to the loop once the screen can be filled.
 ///
 /// Nothing is awaited by the caller: the terminal is already up, and the first
@@ -1285,6 +1479,11 @@ pub fn spawn_bring_up(
     slot: AccountSlot,
     tx: UnboundedSender<AppEvent>,
 ) {
+    spawn_opening(cfg, config_path, Opening::Slot(slot), tx);
+}
+
+/// [`spawn_bring_up`] for either kind of opening.
+fn spawn_opening(cfg: Config, config_path: &Path, opening: Opening, tx: UnboundedSender<AppEvent>) {
     let config_path = config_path.to_path_buf();
     tokio::spawn(async move {
         // Half a pair of application credentials is the same as having none, and
@@ -1296,7 +1495,7 @@ pub fn spawn_bring_up(
             return;
         }
 
-        if let Err(reason) = bring_up(&cfg, &config_path, slot, &tx).await {
+        if let Err(reason) = bring_up(&cfg, &config_path, opening, &tx).await {
             let key = reason.downcast_ref::<KeyRequired>().map(|key| key.rejected);
             // The `offline:` sentence first and the question after it, so the
             // sentence is what stands when the reader leaves the question.
@@ -1320,7 +1519,7 @@ pub fn spawn_bring_up(
 async fn bring_up(
     cfg: &Config,
     config_path: &Path,
-    slot: AccountSlot,
+    opening: Opening,
     tx: &UnboundedSender<AppEvent>,
 ) -> Result<()> {
     let (api_id, api_hash) = cfg.credentials().context(
@@ -1331,8 +1530,28 @@ async fn bring_up(
     // is described to the reader out of these paths, and a store resolved a
     // second time could be a second store — so a reader could be told where
     // their session is while a different file is the one being cleared.
-    let paths = accounts::slot_paths(config_path, cfg, slot.account());
-    let Session { store, keys } = session_store(&paths, cfg);
+    //
+    // A fresh opening has no paths: its slot is minted by whatever the sign-in
+    // stores, and the store is what puts the session there.
+    let (store, keys, session_store) = match opening {
+        Opening::Slot(slot) => {
+            let paths = accounts::slot_paths(config_path, cfg, slot.account());
+            let Session { store, keys } = session_store(&paths, cfg);
+            (store, keys, session_description(&paths))
+        }
+        Opening::Fresh => {
+            // Only when the session will be a file: the key is checked below,
+            // before a login code that would have nowhere to be kept.
+            let keys = cfg.session_path.is_some().then(|| file_key_provider(cfg));
+            let store: Box<dyn SessionStore> = Box::new(SlotStore::fresh(
+                config_path.to_path_buf(),
+                cfg.clone(),
+                accounts::index_path(config_path),
+                keys.clone(),
+            ));
+            (store, keys, fresh_description(cfg))
+        }
+    };
     let was_plaintext = holds_plaintext_session(cfg);
     let discarded = discard_corrupt_session(&*store);
     let resealed = (was_plaintext && !holds_plaintext_session(cfg)).then(|| RESEALED.to_owned());
@@ -1363,7 +1582,6 @@ async fn bring_up(
         .context("checking whether the stored session is signed in")?;
 
     let client = Arc::new(ProtoClient::new(client));
-    let session_store = session_description(&paths);
 
     if !authorized {
         // A drawable state rather than a failure: the signed-out card is what a
@@ -1540,12 +1758,16 @@ fn is_the_configured_file(cfg: &Config, path: &Path) -> Result<(), String> {
 fn export_session(
     cfg: &Config,
     config_path: &Path,
+    slot: AccountSlot,
     path: &Path,
     keyring: impl Fn() -> Arc<dyn KeyProvider>,
 ) -> Result<String, String> {
     is_the_configured_file(cfg, path)?;
-    let Session { store, .. } =
-        session_store_with(&accounts::slot_paths(config_path, cfg, None), cfg, &keyring);
+    let Session { store, .. } = session_store_with(
+        &accounts::slot_paths(config_path, cfg, slot.account()),
+        cfg,
+        &keyring,
+    );
     let dest = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
     export_snapshot(&*store, cfg.session_path.is_some(), &dest, path)
 }
@@ -1606,14 +1828,18 @@ fn import_snapshot(
 fn import_session(
     cfg: &Config,
     config_path: &Path,
+    slot: AccountSlot,
     path: &Path,
     known: Option<i64>,
     keyring: impl Fn() -> Arc<dyn KeyProvider>,
 ) -> Result<String, String> {
     is_the_configured_file(cfg, path)?;
     let source = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
-    let Session { store, .. } =
-        session_store_with(&accounts::slot_paths(config_path, cfg, None), cfg, &keyring);
+    let Session { store, .. } = session_store_with(
+        &accounts::slot_paths(config_path, cfg, slot.account()),
+        cfg,
+        &keyring,
+    );
     import_snapshot(&source, &*store, cfg.session_path.is_some(), known, path)
 }
 
@@ -1621,12 +1847,13 @@ fn import_session(
 fn spawn_import_session(
     cfg: Config,
     config_path: PathBuf,
+    slot: AccountSlot,
     path: PathBuf,
     known: Option<i64>,
     tx: UnboundedSender<AppEvent>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let event = match import_session(&cfg, &config_path, &path, known, || {
+        let event = match import_session(&cfg, &config_path, slot, &path, known, || {
             Arc::new(KeyringKeyProvider::default())
         }) {
             Ok(sentence) => Event::SessionImported(sentence),
@@ -1650,14 +1877,14 @@ fn run_session_actions(app: &mut App, state: &mut State) {
                 spawn_change_passphrase(cfg, state.history_file.clone(), new, tx);
             }
             Action::ExportSession { path } => {
-                spawn_export_session(cfg, state.config_path.clone(), path, tx);
+                spawn_export_session(cfg, state.config_path.clone(), state.slot, path, tx);
             }
             Action::ImportSession { path } => {
                 let known = match &app.session.account {
                     tui::app::AccountState::Known(account) => Some(account.user_id),
                     _ => None,
                 };
-                spawn_import_session(cfg, state.config_path.clone(), path, known, tx);
+                spawn_import_session(cfg, state.config_path.clone(), state.slot, path, known, tx);
             }
             _ => {}
         }
@@ -1704,7 +1931,7 @@ fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEve
     }
     if !state.bringing_up {
         state.bringing_up = true;
-        spawn_bring_up(cfg, &state.config_path, state.slot, tx.clone());
+        spawn_opening(cfg, &state.config_path, state.opening(), tx.clone());
     }
 }
 
@@ -1767,11 +1994,12 @@ fn spawn_change_passphrase(
 fn spawn_export_session(
     cfg: Config,
     config_path: PathBuf,
+    slot: AccountSlot,
     path: PathBuf,
     tx: UnboundedSender<AppEvent>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let sentence = export_session(&cfg, &config_path, &path, || {
+        let sentence = export_session(&cfg, &config_path, slot, &path, || {
             Arc::new(KeyringKeyProvider::default())
         })
         .unwrap_or_else(|sentence| sentence);
@@ -1817,6 +2045,20 @@ async fn read_archived(client: &ProtoClient) -> Vec<Chat> {
 /// cannot describe a store the session is not in.
 fn session_description(paths: &SlotPaths) -> tui::SessionStore {
     paths.description.clone()
+}
+
+/// The description of a session an account being added will write, before its
+/// id is known.
+///
+/// The keyring entry is the same for every id, so that case is certain. A
+/// configured file gains the account's id as a suffix, which cannot be known
+/// here — the [`SlotStore::fresh`] save mints it — so the configured spelling is
+/// named until [`Event::Ready`] for the signed-in account corrects it.
+fn fresh_description(cfg: &Config) -> tui::SessionStore {
+    match &cfg.session_path {
+        Some(path) => tui::SessionStore::EncryptedFile(path.clone()),
+        None => tui::SessionStore::Keyring,
+    }
 }
 
 /// The store the session goes in, and the key behind it when that is a file.
@@ -2057,7 +2299,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             app.flash("already trying to connect");
         } else if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
             state.bringing_up = true;
-            spawn_bring_up(cfg, &state.config_path, state.slot, tx);
+            spawn_opening(cfg, &state.config_path, state.opening(), tx);
         }
     }
 
@@ -2072,7 +2314,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             state.auto_reconnect_used = true;
             if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
                 state.bringing_up = true;
-                spawn_bring_up(cfg, &state.config_path, state.slot, tx);
+                spawn_opening(cfg, &state.config_path, state.opening(), tx);
             }
         } else if !state.bringing_up {
             apply_offline(app, state, &anyhow::anyhow!("the update feed ended again"));
@@ -2088,6 +2330,38 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // them in.
     run_session_actions(app, state);
     run_local_name_actions(app, state);
+
+    // The reader's outbound requests are drained before `wanted`, which returns
+    // early while a history page backs off and while nothing is open: a send
+    // must not be held up by either. An action taken with no client to answer it
+    // is held, in order, for the pass that has one, because a message typed
+    // offline must not be thrown away.
+    //
+    // Two of them need no client at all, and are answered before that gate:
+    // asking for a second account, and giving up on it. A client is exactly what
+    // a switch does not have, and the cancel has to work with none.
+    while let Some(action) = state.next_action(app) {
+        match &action {
+            Action::AddAccount => {
+                state.detach_account(app);
+                continue;
+            }
+            Action::LoginCancelled if state.is_switching() => {
+                state.cancel_switch(app);
+                continue;
+            }
+            _ => {}
+        }
+        let Some(client) = state.client.clone() else {
+            // Nothing to answer with: the action waits, in order, for the client
+            // that comes up.
+            state.hold(action);
+            break;
+        };
+        let media = media_job(&action, app, state);
+        request_action(&client, state, action, media, tx);
+    }
+
     let Some(client) = state.client.clone() else {
         // No client, so nothing is asked for — but a conversation opened
         // while there is none is still owed what the cache holds for it, or
@@ -2097,42 +2371,6 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         seed_opened(app, state);
         return;
     };
-
-    // The reader's outbound requests are drained before `wanted`, which returns
-    // early while a history page backs off and while nothing is open: a send
-    // must not be held up by either. An action is left in place while there is
-    // no client, because a message typed offline must not be thrown away.
-    while let Some(action) = app.take_action() {
-        // A media open is resolved here, where the conversation on show is: the
-        // download task has no state to ask, and a message that is not on show
-        // has no kind to name its file by.
-        let media = match &action {
-            Action::OpenMedia {
-                chat_id,
-                message_id,
-            } => {
-                let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
-                let media_id = open_media_id(&app.conversation.conversation, *chat_id, *message_id);
-                kind.zip(state.media_cache.clone()).map(|(kind, cache)| {
-                    begin_media_download(app, *chat_id, *message_id);
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    state.media_cancel.push(MediaCancel {
-                        chat_id: *chat_id,
-                        message_id: *message_id,
-                        flag: Arc::clone(&cancel),
-                    });
-                    MediaJob {
-                        kind,
-                        media_id,
-                        cancel,
-                        cache,
-                    }
-                })
-            }
-            _ => None,
-        };
-        request_action(&client, state, action, media, tx);
-    }
 
     // A flood wait is the one failure with a time on it, and the reader is not
     // asked for a key once it has passed: the withheld page is asked for again.
@@ -2189,6 +2427,38 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             request_jump(&client, jump, cursor, tx);
         }
     }
+}
+
+/// The download a media open asks for, if it can be asked for at all.
+///
+/// Resolved in `drive`, where the conversation on show is: the download task has
+/// no state to ask, and a message that is not on show has no kind to name its
+/// file by.
+fn media_job(action: &Action, app: &mut App, state: &mut State) -> Option<MediaJob> {
+    let Action::OpenMedia {
+        chat_id,
+        message_id,
+    } = action
+    else {
+        return None;
+    };
+    let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
+    let media_id = open_media_id(&app.conversation.conversation, *chat_id, *message_id);
+    kind.zip(state.media_cache.clone()).map(|(kind, cache)| {
+        begin_media_download(app, *chat_id, *message_id);
+        let cancel = Arc::new(AtomicBool::new(false));
+        state.media_cancel.push(MediaCancel {
+            chat_id: *chat_id,
+            message_id: *message_id,
+            flag: Arc::clone(&cancel),
+        });
+        MediaJob {
+            kind,
+            media_id,
+            cancel,
+            cache,
+        }
+    })
 }
 
 /// Starts on a conversation's newest page: puts what the cache holds for it on
@@ -2924,16 +3194,20 @@ fn request_plain(
                 }));
             }
 
-            // The sign-in actions are handled by `request_action`, which has to
-            // reach the state before this function exists. `Logout` is there too:
-            // it needs the client, so it is asked for there rather than here.
+            // The sign-in actions are answered by `drive` and `request_action`,
+            // which have to reach the state before this function exists.
+            // `Logout` is asked for there too: it needs the client. Adding an
+            // account is answered in `drive` before the client gate, because a
+            // client is exactly what a switch does not have.
             // Unreachable rather than wrong: a value is one of the three, never
             // two.
             // The cancel is answered by `request_action`, which holds the flag;
             // nothing is asked of the network for it either.
+            Action::AddAccount => {
+                tracing::debug!("an add-account request reached the network task");
+            }
             Action::Login { .. }
             | Action::LoginCancelled
-            | Action::AddAccount
             | Action::Logout
             | Action::MoreGlobal { .. }
             | Action::SetLocalName { .. }
@@ -3091,7 +3365,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             app.ui.status = match (state.bringing_up, state.cfg_now(), state.tx.clone()) {
                 (false, Some(cfg), Some(tx)) => {
                     state.bringing_up = true;
-                    spawn_bring_up(cfg, &state.config_path, state.slot, tx);
+                    spawn_opening(cfg, &state.config_path, state.opening(), tx);
                     format!("{sentence}; reconnecting")
                 }
                 _ => format!("{sentence}; :retry reconnects with it"),
@@ -3987,10 +4261,34 @@ fn apply_ready(
     // named the account — never at open time, because a slot with no session is
     // an unknown account, not a signed-in one (Q7). A signed-out `Ready` names
     // nobody and writes nothing.
-    if let (Ok(account), Some(index)) = (&account, &state.accounts_index) {
-        accounts::note_signed_in(index, account.user_id, account.phone.as_deref());
+    let mut switched = false;
+    if let Ok(account) = &account {
+        // A `Ready` that names an account while a second one is being added is
+        // the switch arriving: the slot is the account's id, and its paths,
+        // history, drafts and media are what this run uses from here on.
+        if state.switching.take().is_some() {
+            state.adopt_slot(app, AccountSlot::Id(account.user_id));
+            switched = true;
+        }
+        if let Some(index) = &state.accounts_index
+            && let Err(error) = accounts::note_signed_in(
+                index,
+                account.user_id,
+                account.phone.as_deref(),
+                state.slot,
+            )
+        {
+            tracing::warn!(%error, "the accounts index could not be written");
+        }
     }
     apply_ready_to_screen_with_archive(app, state, chats, archived, account, session_store);
+    if switched {
+        // The event carried the description the sign-in started with, which is
+        // the new slot's only once its id is known.
+        if let Some(store) = state.session_store.clone() {
+            app.set_session_store(store);
+        }
+    }
     state.client = Some(client);
     state.bringing_up = false;
     // The client is there, so the sign-in flow's `waiting` flag means
@@ -4013,7 +4311,7 @@ fn apply_logged_out_and_reconnect(app: &mut App, state: &mut State, result: Resu
         // will send, so a `:retry` typed while it is on its way is refused
         // rather than answered with a second client.
         state.bringing_up = true;
-        spawn_bring_up(cfg, &state.config_path, state.slot, tx);
+        spawn_opening(cfg, &state.config_path, state.opening(), tx);
     }
 }
 
@@ -4264,7 +4562,12 @@ fn apply_ready_to_screen_with_archive(
     // a sign-out sends it, from memory and from disk, and the landing below
     // closes whatever conversation the cache had open rather than leaving its
     // rows behind the form. Whoever signs in next fetches their own.
-    if no_session {
+    //
+    // Except while a second account is being added: the session that is gone is
+    // the *new* one that was never there, and the cache named no account of its
+    // own any more — but the files it belonged to are the first account's, and a
+    // switch deletes nothing of theirs.
+    if no_session && !state.is_switching() {
         state.forget_history();
     }
     // **The signed-in account is the cache's tag.** The launch accepted a file
@@ -4278,6 +4581,7 @@ fn apply_ready_to_screen_with_archive(
             .cached
             .tag
             .holds_for(account.user_id, account.phone.as_deref())
+            && !state.is_switching()
         {
             state.forget_history();
             other_account = true;
@@ -11242,8 +11546,10 @@ mod session_store_tests {
             session_store_with(&legacy_paths(&cfg), &cfg, || Arc::new(NoKeyring));
         store.save(&snapshot(7, 0xAB)).expect("a session is stored");
 
-        let sentence =
-            export_session(&cfg, config_path(), &to, || Arc::new(NoKeyring)).expect("it exports");
+        let sentence = export_session(&cfg, config_path(), AccountSlot::Legacy, &to, || {
+            Arc::new(NoKeyring)
+        })
+        .expect("it exports");
         assert!(sentence.contains("b.bin"), "{sentence}");
 
         let bytes = std::fs::read(&to).expect("the export is a file");
@@ -11276,13 +11582,17 @@ mod session_store_tests {
         let (from, to) = (dir.path().join("a.bin"), dir.path().join("b.bin"));
         let cfg = file_config(&from, Some("right"));
 
-        let none =
-            export_session(&cfg, config_path(), &to, || Arc::new(NoKeyring)).expect_err("nothing");
+        let none = export_session(&cfg, config_path(), AccountSlot::Legacy, &to, || {
+            Arc::new(NoKeyring)
+        })
+        .expect_err("nothing");
         assert!(none.contains("no stored session"), "{none}");
         assert!(!to.exists(), "nothing was written");
 
-        let same = export_session(&cfg, config_path(), &from, || Arc::new(NoKeyring))
-            .expect_err("same file");
+        let same = export_session(&cfg, config_path(), AccountSlot::Legacy, &from, || {
+            Arc::new(NoKeyring)
+        })
+        .expect_err("same file");
         assert!(same.contains("configured session file"), "{same}");
     }
 
@@ -11340,13 +11650,27 @@ mod session_store_tests {
         let path = dir.path().join("in.bin");
         let cfg = file_config(&dir.path().join("session.bin"), Some("right"));
 
-        let missing = import_session(&cfg, config_path(), &path, None, || Arc::new(NoKeyring))
-            .expect_err("none");
+        let missing = import_session(
+            &cfg,
+            config_path(),
+            AccountSlot::Legacy,
+            &path,
+            None,
+            || Arc::new(NoKeyring),
+        )
+        .expect_err("none");
         assert!(missing.contains("in.bin"), "{missing}");
 
         sealed_file(&path, &snapshot(7, 1));
-        let wrong = import_session(&cfg, config_path(), &path, None, || Arc::new(NoKeyring))
-            .expect_err("key");
+        let wrong = import_session(
+            &cfg,
+            config_path(),
+            AccountSlot::Legacy,
+            &path,
+            None,
+            || Arc::new(NoKeyring),
+        )
+        .expect_err("key");
         assert!(wrong.contains("TELEVIM_SESSION_PASSPHRASE"), "{wrong}");
         assert!(wrong.contains("left as it was"), "{wrong}");
         assert!(!dir.path().join("session.bin").exists(), "nothing written");
@@ -11362,15 +11686,30 @@ mod session_store_tests {
             .save(&snapshot(7, 0xEE))
             .expect("a session is written");
 
-        import_session(&cfg, config_path(), &path, Some(7), keys).expect("it imports");
+        import_session(
+            &cfg,
+            config_path(),
+            AccountSlot::Legacy,
+            &path,
+            Some(7),
+            keys,
+        )
+        .expect("it imports");
         let bytes = std::fs::read(&session).expect("the file exists");
         assert!(telegram_framework::sealed::is_sealed(&bytes));
         let Session { store, .. } = session_store_with(&legacy_paths(&cfg), &cfg, keys);
         let copy = store.load().expect("loads").expect("some");
         assert_eq!(auth_key_bytes(&copy), [0xEE; 256]);
 
-        let same =
-            import_session(&cfg, config_path(), &session, None, keys).expect_err("the file itself");
+        let same = import_session(
+            &cfg,
+            config_path(),
+            AccountSlot::Legacy,
+            &session,
+            None,
+            keys,
+        )
+        .expect_err("the file itself");
         assert!(same.contains("configured session file"), "{same}");
     }
 
@@ -12837,6 +13176,168 @@ mod action_status_tests {
         assert_eq!(
             app.conversation.contacts.items()[0].display_name,
             "Countess"
+        );
+    }
+}
+
+/// The add-account flow: what a switch leaves behind, and what a cancel puts
+/// back.
+#[cfg(test)]
+mod switch_tests {
+    use super::*;
+
+    /// The conversation account A's draft was written in.
+    const CHAT: i64 = 7;
+
+    /// Account A's two files, with contents the test can compare byte for byte.
+    ///
+    /// The history file is real bytes rather than a cache the test could rebuild:
+    /// the assertion is about the file, not about what it holds.
+    fn account_a(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let config_path = dir.join("televim.toml");
+        let drafts = config_path.with_extension("drafts.json");
+        let history = config_path.with_extension("history.json");
+        DraftFile::new(drafts.clone()).save(
+            &[(CHAT, "half a sentence".to_owned())],
+            &[(CHAT, 3)],
+            Some("+1555"),
+        );
+        fs::write(&history, b"account A's own bytes").expect("the fixture is written");
+        (config_path, drafts, history)
+    }
+
+    /// A state that was signed in as account A, holding its two files.
+    fn holding_account_a(config_path: &Path, drafts: &Path, history: &Path) -> State {
+        let cfg = Config::default();
+        let mut state = State::default();
+        state.set_account(AccountSlot::Legacy, accounts::index_path(config_path));
+        state.set_draft_file(DraftFile::new(drafts.to_path_buf()));
+        state.set_history_file(HistoryFile::new(
+            history.to_path_buf(),
+            file_key_provider(&cfg),
+        ));
+        state.switching = Some(AccountSlot::Legacy);
+        state
+    }
+
+    fn bytes_of(drafts: &Path, history: &Path) -> (Vec<u8>, Vec<u8>) {
+        (
+            fs::read(drafts).expect("the drafts file reads"),
+            fs::read(history).expect("the history file reads"),
+        )
+    }
+
+    /// The regression that matters: the signed-out `Ready` a switch brings up
+    /// must not take the account it left with it.
+    #[test]
+    fn a_signed_out_ready_while_switching_deletes_none_of_the_account_it_left() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (config_path, drafts, history) = account_a(dir.path());
+        let before = bytes_of(&drafts, &history);
+        let mut state = holding_account_a(&config_path, &drafts, &history);
+        let mut app = App::new();
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            bytes_of(&drafts, &history),
+            before,
+            "both of account A's files were left exactly as they were"
+        );
+        assert!(state.is_switching(), "and the switch is still waiting");
+        assert!(
+            app.signin().is_some(),
+            "the phone prompt is what the reader sees"
+        );
+    }
+
+    /// Cancelling is a return, not a recovery: the first account's files are
+    /// untouched, its paths are back, and a bring-up is asked for.
+    #[tokio::test]
+    async fn cancelling_a_switch_restores_the_first_account_and_touches_no_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (config_path, drafts, history) = account_a(dir.path());
+        let before = bytes_of(&drafts, &history);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let mut state = State::new(Config::default(), config_path.clone(), tx.clone());
+        state.set_account(AccountSlot::Legacy, accounts::index_path(&config_path));
+        state.set_draft_file(DraftFile::new(drafts.clone()));
+        state.set_history_file(HistoryFile::new(
+            history.clone(),
+            file_key_provider(&Config::default()),
+        ));
+        let mut app = App::new();
+
+        // The reader asks for a second account, then gives up at the code step
+        // — which is where `Esc` queues the cancel. The sign-in surface is the
+        // one the switch's own `Ready { Err }` opens.
+        app.session.credentials_configured = true;
+        state.detach_account(&mut app);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+        app.login_advanced(
+            domain::session::SessionState::AwaitingCode {
+                phone: "+1555".to_owned(),
+            },
+            None,
+        );
+        for character in "42424".chars() {
+            app.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(character),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(
+            bytes_of(&drafts, &history),
+            before,
+            "account A's files were never opened for writing, moved or removed"
+        );
+        assert!(!state.is_switching(), "the switch is over");
+        assert_eq!(state.slot(), AccountSlot::Legacy, "and points at account A");
+        assert!(
+            state.draft_file().is_some(),
+            "its drafts file is the one the loop syncs again"
+        );
+        assert!(
+            state.history_file.is_some(),
+            "and its history cache is open again"
+        );
+        assert!(
+            matches!(state.session_store, Some(tui::SessionStore::Keyring)),
+            "the panel names the store account A is in"
+        );
+
+        // A bring-up was asked for: with no credentials configured it says so
+        // instead of building a client, which is the task running.
+        tokio::task::yield_now().await;
+        let mut bring_ups = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AppEvent::Net(Event::NoCredentials)) {
+                bring_ups += 1;
+            }
+        }
+        assert_eq!(
+            bring_ups, 2,
+            "one for the switch, one for the return: a cancel is a bring-up"
         );
     }
 }
