@@ -62,8 +62,10 @@ match the compiler edition — both are `2024`.
     ```console
     $ cargo update -p glass_pumpkin --precise 2.0.0-rc0
     ```
-11. **`make ci` before every commit.** It is the same gate CI runs, and it
-    catches the `boundary` violation that nothing else does.
+11. **`make ci` before every commit.** It catches the `boundary` violation that
+    nothing else does, and it is the gate CI's ordinary pull-request job runs
+    less `build-release` — the release build and the memory budget run only on
+    `main`, nightly, and pull requests labelled for the budget.
 12. **These files describe what exists.** If a change makes one of them wrong —
     a new dependency, a moved module, a feature that now works — update it in
     the same commit.
@@ -73,7 +75,7 @@ match the compiler edition — both are `2024`.
 
 ## Commands
 
-`make ci` is the gate: `fmt-check lint boundary test design-check build-release`.
+`make ci` is the local gate: `fmt-check lint boundary test design-check build-release`.
 Individual targets, and what each one proves, are in
 [`docs/testing.md`](./docs/testing.md). The ones that catch the most:
 

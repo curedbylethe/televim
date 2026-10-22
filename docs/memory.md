@@ -338,7 +338,16 @@ difference is the point:
 
 CI runs the budget only where the feedback loop is not the constraint: on a push
 to `main`, on the nightly `17 3 * * *` schedule, and on a pull request labelled
-`memory`. An ordinary pull request runs neither `measure.py` nor `check.py`.
+`memory`. Those three paths are the trigger of the `release` job in
+`.github/workflows/ci.yml`, set by a single job-level `if:`. An ordinary pull
+request starts no such job and runs neither `measure.py` nor `check.py`.
+
+Both scripts run in that job's single `memory-budget` step, after the job's own
+release build. `TELEVIM_MEASURE_SKIP_BUILD=1` sits in the step's `env:`, so
+`measure.py` builds nothing, and that skip path requires
+`target/release/televim` and the harness and seeder examples to exist already.
+`check.py` stays a separate script from `measure.py`, so a report survives a
+failed comparison and is uploaded either way.
 
 `TELEVIM_MEASURE_LAUNCHES` is the variable that sets how many times the real
 binary is launched per measurement (`scripts/memory/measure.py:19,67`). Its
@@ -347,8 +356,9 @@ default is 5, and CI holds the default rather than overriding it in the step's
 
 Five launches run twice over — once unseeded, once against the seeded cache —
 and each launch carries a fixed 6 s settle plus a 2 s read, so the two
-scenarios cost ~90 s of the run. That is now paid on `main` and nightly runs,
-where a slower job delays no one's review.
+scenarios cost ~90 s of the run. That cost sits in the `release` job, on a push
+to `main`, on the nightly schedule and on a pull request labelled `memory`,
+where it delays no one's review.
 
 Three launches per binary was considered, and refused. The checked first-frame
 figure is the median of the *warm* launches, so three leaves two warm samples
