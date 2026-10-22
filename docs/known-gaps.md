@@ -73,14 +73,20 @@ Real, and named so they are not mistaken for oversights:
     the `OPENER` doc comment in `crates/app/src/runtime.rs`. A target that detaches
     itself can still return early; a configured viewer command is the escape hatch.
 - **The global search has no sender filter.** `from:`, `sender:` and `by:` are
-  refused by the prompt's parser, each with `from:ada is not a filter here: global
-  search has no sender filter.`, and the prompt reopens with the line still in it
+  refused by the prompt's parser, each naming the word as typed (`from:ada is not
+  a filter here: global search has no sender filter.`), and the prompt reopens with the line still in it
   so the token can be removed. Only `messages.search` with `peer = inputPeerEmpty`
   takes a `from_id`, and it is a different method: its own paging, no chat
   grouping, and it does not carry the `users_only` scope. So a sender filter is a
   second request shape and a page model for it, not another token in the parser.
   Closing it means building that path, or Telegram adding `from_id` to
   `messages.searchGlobal`.
+- **A bot's direct messages are searched but not shown.** The global request asks
+  for `users_only`, so the server answers with a bot's messages too, and the
+  client drops them and counts them in `, N dropped`, because the chat list holds
+  people only and a hit is opened by selecting its chat there. Closing it means
+  listing bots, which touches the chat pane, the update filter and the history
+  cache; see "Why a bot's hits are dropped, for now" in `decisions.md`.
 - **The per-peer colour slot is held, not built.** `CardRow::reserved` is emitted
   between a contact's `name` and `username`, draws nothing, is not selectable, is
   not something `d` can act on, is skipped by a yank, and is neither counted nor

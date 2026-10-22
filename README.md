@@ -201,12 +201,13 @@ Working today:
   both in its answer, a hundred at a time. The
   list pages itself: when the cursor reaches the last hit and the server has more,
   the next page is asked for and appended under the rows already read, and an empty
-  page ends the list. A hit in a group, a channel or a chat the client does not
-  hold is dropped from the list and counted. The answer is drawn as an overlay
-  over the whole body: one rule per chat with the chat's name and its count, then
-  one row per message with the time, the
-  sender as `[them]` or `[you]`, and a snippet cut around the first match, with
-  every match inked `match`. `j`/`k` or the arrows move between messages, `{` and
+  page ends the list. A hit in a bot's direct messages, a group, a channel or a
+  chat the client does not hold is dropped from the list and counted: the chat
+  list shows people only, so such a hit could not be opened. The answer is drawn as an overlay
+  over the whole body: one rule per run of one chat's hits, with the chat's name
+  and the run's count, then one or two rows per message with the time, the
+  sender as `[them]` or `[you]`, and up to two lines of context cut around the
+  first match, with every match inked `match`. `j`/`k` or the arrows move between messages, `{` and
   `}` between chat headers, and `gg`/`G` to the first and last message. `Enter`
   opens the message's chat with the cursor on that message: a message already on
   screen, or in the local history cache, is a cursor move, and one that is neither is

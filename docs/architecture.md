@@ -238,10 +238,10 @@ for — the words sent, the words the status echoes, the media kind and the two 
 bounds — and `GlobalSearchState` holds every page the server answered, newest
 first, with the selection, the server's total, the count of hits the loop dropped
 and whether another page exists. Paging is a round-trip bound, not a memory one:
-`adopt` and `append` keep every page, `needs_more` guards the next request, and a
+`adopt` and `append` keep every page and take only one that was asked for, `needs_more` guards the next request, and a
 flood wait becomes `paused_until` rather than a failure. `label` owns the whole
-status sentence, so the count, the filters, the dropped clause and the pause
-countdown are written in one place.
+status sentence, so the count (of distinct chats), the filters (as days in the
+reader's zone), the dropped clause and the pause countdown are written in one place.
 
 `domain::presence::Presence` is a peer's standing as reported: `Online`, `Offline`
 with the raw Unix seconds it was last online, the three restricted buckets, or
