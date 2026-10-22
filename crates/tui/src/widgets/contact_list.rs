@@ -17,7 +17,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
 use crate::app::{App, Focus};
+use crate::rows::truncate;
 use crate::wrap::columns;
+
+use super::chat_list::drawn;
 
 /// Where the overlay draws, or `None` when there is nothing to draw into.
 fn overlay_area(app: &App, chat_list: Rect) -> Option<Rect> {
@@ -75,9 +78,11 @@ pub fn render(app: &App, chat_list: Rect, frame: &mut Frame<'_>) {
                 "new"
             };
             let budget = width.saturating_sub(columns(standing) + 1);
+            // Cut on the stored text, then drawn in the order the terminal
+            // reads it: a reordering moves cells, never changes how many.
             let name = truncate(&candidate.display_name, budget);
             let mut used = columns(&name);
-            let mut spans = vec![Span::raw(name)];
+            let mut spans = drawn(app, &name, app.ui.theme.text);
             // The handle only when it fits whole: a cut `@name` is one the
             // reader cannot search for.
             if let Some(username) = candidate.username.as_deref() {
@@ -107,21 +112,6 @@ pub fn render(app: &App, chat_list: Rect, frame: &mut Frame<'_>) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// Cuts a label to `width` columns, counting a wide character as two.
-pub(super) fn truncate(label: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in label.chars() {
-        let cells = columns(&ch.to_string());
-        if used + cells > width {
-            break;
-        }
-        out.push(ch);
-        used += cells;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use domain::user::UserCandidate;
@@ -129,6 +119,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::App;
+    use crate::bidi::BidiMode;
 
     fn candidate(user_id: i64, display_name: &str, username: Option<&str>) -> UserCandidate {
         UserCandidate {
@@ -193,6 +184,45 @@ mod tests {
 
         assert!(row("Zed Zeta").contains("@zed") && row("Zed Zeta").contains("chat"));
         assert!(row("Yan Yoon").contains("new"));
+    }
+
+    /// A right-to-left name is reordered when the program does the reordering,
+    /// as in the chat list, and left alone when the terminal does.
+    #[test]
+    fn a_right_to_left_name_follows_the_bidi_mode() {
+        const NAME: &str = "سلام";
+        let reversed: String = NAME.chars().rev().collect();
+        for (mode, expected, absent) in [
+            (BidiMode::Visual, reversed.as_str(), NAME),
+            (BidiMode::Terminal, NAME, reversed.as_str()),
+        ] {
+            let mut app = App::mock().with_bidi(mode);
+            app.conversation.contacts.begin();
+            app.conversation
+                .contacts
+                .adopt(vec![candidate(1, NAME, None)]);
+
+            let shown = screen(&app);
+
+            assert!(shown.contains(expected), "{mode:?}:\n{shown}");
+            assert!(!shown.contains(absent), "{mode:?}:\n{shown}");
+        }
+    }
+
+    /// A name too long for the overlay says it was cut.
+    #[test]
+    fn a_name_that_does_not_fit_ends_in_an_ellipsis() {
+        let mut app = App::mock();
+        app.conversation.contacts.begin();
+        app.conversation.contacts.adopt(vec![candidate(
+            1,
+            "Zed Zeta Zephyr Zimmermann Zucchini",
+            None,
+        )]);
+
+        let shown = screen(&app);
+
+        assert!(shown.contains("Zed Zeta Zephyr …"), "{shown}");
     }
 
     #[test]
