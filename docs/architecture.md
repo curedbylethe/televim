@@ -21,7 +21,8 @@ televim/
 │   └── config.toml             # Aliases (`cargo t`, `l`, `f`); no build flags set
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml              # Hosted runner: fmt, clippy, boundary, test, release
+│       ├── ci.yml              # Hosted: lint on every push/PR
+│       │                       #   release build + memory on main/nightly/labelled PR
 │       └── desktop.yml         # Self-hosted: keyring round trip, real datacenter
 │
 └── crates/
