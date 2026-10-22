@@ -171,6 +171,10 @@ fn i_on_the_draft_row_resumes_the_draft() {
         .expect("back in NORMAL mode");
     t.send(Key::Esc)
         .expect("leave the line for the conversation");
+    // Wait for the line to be parked: an `Esc` sent straight before `j` can be
+    // read as one Alt+`j` chord, and `j` could land before the focus moved.
+    t.wait_until(|s| s.contains("┌ draft"))
+        .expect("the line is parked as a draft");
 
     // `j` from the newest message rests the cursor on the draft's row.
     t.send(Key::Char('j')).expect("move onto the draft row");
