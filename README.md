@@ -84,8 +84,8 @@ Working today:
   `add account` refuses with `not yet: this build cannot add an account`; `logout`
   confirms on the same screen-wide row and then signs out — the session is
   discarded, the list empties, and the sign-in field comes back for the phone; on a
-  contact's card `d` refuses, because that card has no row to act on. Read once at
-  start-up, not on open: a panel that blanked and refilled every time would be one
+  contact's card `d` acts on its `rename`, `block`/`unblock` and `report` rows, and
+  on a value row it is dropped. Read once at start-up, not on open: a panel that blanked and refilled every time would be one
   the reader could not trust. With no credentials it says so, and says why.
 - **A contact's card reads their profile, and says so until it arrives.** `A`
   queues a `users.getFullUser` for the person the highlight is on, and the card

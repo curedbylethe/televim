@@ -602,7 +602,6 @@ code.
 | `signed out` | the status the screen rests on after the reader signs out, until the sign-in field arrives | `apply_logged_out` |
 | `Sign out and forget this session? (y/n)` | a screen-wide confirmation, raised by the `logout` row; `y` signs out | the card |
 | `not yet: this build cannot add an account` | the `add account` row's refusal | ditto |
-| `Not a row that acts: add account and logout are the two.` | `d` on a value row of the self card | ditto |
 | `Not editable here: :settings opens the editable profile.` | `e` on the self card: the one route to the editable screen | ditto |
 | `p: a card has no buffer to paste into` | why `p` is unbound, written to the hint's own row | ditto |
 | `1 row(s) yanked — register filled, OSC 52 offered` | `yy`: the register first, then the offer to the terminal | ditto |
@@ -1227,8 +1226,9 @@ highlight to it. `:archive` and `:delete-chat` need a chat, so a card over a
 person with no conversation is refused with `nothing to act on: highlight a
 chat, open a conversation, or open a card`. The line opens over the card, so
 the card stays the subject until the command has run. On a contact's card `d`
-acts only on `rename`, `block`/`unblock` and `report`; on a value row it is
-dropped without a sentence.
+acts only on `rename`, `block`/`unblock` and `report`; on the self card only on
+`add account` and `logout`. On a value row of either card it is dropped without a
+sentence.
 
 **Archive is a place, not a deletion.** The chat leaves the visible column and
 is kept in the archive folder. `:archived` draws a small bordered list over the
@@ -1287,15 +1287,17 @@ card with the three action rows, rename from the card and from the command line,
 both delete questions, a report naming its reason, an unknown-reason refusal, and
 the contacts list with a person who has no chat.
 
-**The model is behind the build in four places**, recorded rather than hidden:
+**The model is behind the build in five places**, recorded rather than hidden:
 the model's `archiveChat` leaves the conversation open where the build closes it;
 its unarchive splices the chat back at the index it remembered where the build
 puts it in the list's own order; an empty `:archived` opens in the model where
 the build refuses it with `archived — 0`; and while a list is up the model
 draws its key help (`j/k: contact  ⏎: card  Esc: close`, and the archive's
 equivalent) on the status row where the build draws the label, `contacts — {n}`
-or `archived — {n}`, because an open list owns that row. The frames show the
-model's behaviour in those four, and the build's is the one this document
+or `archived — {n}`, because an open list owns that row; and `d` on a value row
+of the self card, which the model refuses with `Not a row that acts: add account
+and logout are the two.` and the build drops. The frames show the model's
+behaviour in those five, and the build's is the one this document
 describes.
 
 ## Components
