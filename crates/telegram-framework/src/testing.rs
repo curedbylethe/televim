@@ -252,11 +252,7 @@ pub(crate) fn media_document_with_mime(
 /// Builds an animated sticker as Telegram sends a TGS: the sticker attribute and
 /// the TGS mime, with no animation attribute — the mime is what makes it one.
 pub(crate) fn media_animated_sticker() -> tl::enums::MessageMedia {
-    media_document_with_mime(
-        vec![attribute_sticker()],
-        false,
-        "application/x-tgsticker",
-    )
+    media_document_with_mime(vec![attribute_sticker()], false, "application/x-tgsticker")
 }
 
 /// Builds an animated sticker in the other format Telegram sends: a `WebM`, which
