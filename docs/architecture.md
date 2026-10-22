@@ -22,7 +22,8 @@ televim/
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml              # Hosted: lint on every push/PR
-│       │                       #   release build + memory on main/nightly/labelled PR
+│       │                       #   release build + memory when code changes, on
+│       │                       #   main, nightly, or a PR labelled `memory`
 │       └── desktop.yml         # Self-hosted: keyring round trip, real datacenter
 │
 └── crates/

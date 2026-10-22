@@ -337,10 +337,11 @@ difference is the point:
 ### The CI invocation
 
 CI runs the budget only where the feedback loop is not the constraint: on a push
-to `main`, on the nightly `17 3 * * *` schedule, and on a pull request labelled
-`memory`. Those three paths are the trigger of the `release` job in
-`.github/workflows/ci.yml`, set by a single job-level `if:`. An ordinary pull
-request starts no such job and runs neither `measure.py` nor `check.py`.
+to `main` that changes code, on the nightly `17 3 * * *` schedule, and on a pull
+request labelled `memory`. Those three paths, narrowed to a diff that is not
+docs-only, are the trigger of the `release` job in `.github/workflows/ci.yml`,
+set by its job-level `if:`. An ordinary pull request starts no such job and runs
+neither `measure.py` nor `check.py`.
 
 Both scripts run in that job's single `memory-budget` step, after the job's own
 release build. `TELEVIM_MEASURE_SKIP_BUILD=1` sits in the step's `env:`, so
@@ -357,8 +358,8 @@ default is 5, and CI holds the default rather than overriding it in the step's
 Five launches run twice over — once unseeded, once against the seeded cache —
 and each launch carries a fixed 6 s settle plus a 2 s read, so the two
 scenarios cost ~90 s of the run. That cost sits in the `release` job, on a push
-to `main`, on the nightly schedule and on a pull request labelled `memory`,
-where it delays no one's review.
+to `main` that changes code, on the nightly schedule and on a pull request
+labelled `memory`, where it delays no one's review.
 
 Three launches per binary was considered, and refused. The checked first-frame
 figure is the median of the *warm* launches, so three leaves two warm samples

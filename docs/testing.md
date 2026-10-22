@@ -33,27 +33,33 @@
 
 `.github/workflows/ci.yml` runs three jobs on `ubuntu-latest`. `changes`
 classifies the diff and is what the other two wait on. `lint` runs on every push
-and pull request. `release` is gated at the job level to a push to `main`, the
-nightly schedule, and a pull request labelled `memory`; an ordinary pull request
-does not start it.
+and pull request. `release` is gated at the job level to a push to `main` that
+changes code, the nightly schedule, and a pull request labelled `memory`; an
+ordinary pull request does not start it.
 
 Two trigger rules sit above the jobs:
 
 - **Concurrency.** The workflow's `concurrency` group is
-  `${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true`, so
-  a second push to a branch — or a new commit on an open pull request — cancels
-  the run before it rather than paying for two cold caches. Runs on different
-  refs never cancel each other. The nightly run shares `refs/heads/main` with a
-  push to `main`, so either can cancel the other.
+  `${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}` with
+  `cancel-in-progress: true`, so a second push to a branch — or a new commit on
+  an open pull request — cancels the run before it rather than paying for two
+  cold caches. Runs on different refs, and a push and the nightly run, never
+  cancel each other. A `labeled` event sets `cancel-in-progress` false
+  (`${{ github.event.action != 'labeled' }}`): the label only asks for the
+  memory budget, so its run queues behind the one in flight instead of killing
+  it.
 - **Docs-only.** `changes` diffs the pushed commits, or a pull request's base
   against its merge commit, and answers `rust=false` when every changed path
-  ends `.md` or starts `docs/`. `lint` then skips everything that needs Rust —
-  toolchain, system packages, cache, `fmt`, `clippy`, `boundary`, `test` and the
-  PTY upload — and runs only `make design-check`; the `release` job does not
-  start. The job still reports, so a docs-only pull request leaves no required
-  status pending. A diff that cannot be computed — a new branch's first push, a
-  force-push that outran the clone, a scheduled run — is classified as code, so
-  a tree nobody inspected still gets the full gate.
+  ends `.md` or starts `docs/`. The rule lives in
+  `scripts/ci/classify-changes.sh`; `changes` runs its table test,
+  `scripts/ci/classify-changes.test.sh`, before classifying. `lint` then skips
+  everything that needs Rust — toolchain, system packages, cache, `fmt`,
+  `clippy`, `boundary`, `test` and the PTY upload — and runs only
+  `make design-check`; the `release` job does not start. The job still reports,
+  so a docs-only pull request leaves no required status pending. A diff that
+  cannot be computed — a new branch's first push, a force-push that outran the
+  clone, a scheduled run — is classified as code, so a tree nobody inspected
+  still gets the full gate.
 
 The `lint` job, in the order the workflow runs it:
 
@@ -63,7 +69,8 @@ The `lint` job, in the order the workflow runs it:
 4. `cargo test --all --all-features`, with
    `TERMLENS_ARTIFACT_DIR=${{ github.workspace }}/target/termlens-artifacts` for
    the pty tests
-5. `actions/upload-artifact` for that directory, with `if: always()` and
+5. `actions/upload-artifact` for that directory, with
+   `if: always() && needs.changes.outputs.rust == 'true'` and
    `if-no-files-found: warn`
 6. `make design-check`
 

@@ -63,9 +63,10 @@ match the compiler edition — both are `2024`.
     $ cargo update -p glass_pumpkin --precise 2.0.0-rc0
     ```
 11. **`make ci` before every commit.** It catches the `boundary` violation that
-    nothing else does, and it is the gate CI's ordinary pull-request job runs
-    less `build-release` — the release build and the memory budget run only on
-    `main`, nightly, and pull requests labelled for the budget.
+    nothing else does, and it is the gate CI runs on a pull request that changes
+    code, less `build-release` — the release build and the memory budget run
+    only on a push to `main` that changes code, nightly, and pull requests
+    labelled for the budget.
 12. **These files describe what exists.** If a change makes one of them wrong —
     a new dependency, a moved module, a feature that now works — update it in
     the same commit.
