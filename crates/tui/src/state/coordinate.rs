@@ -3479,7 +3479,13 @@ pub(crate) fn handle_signin_field(
         // `Esc` at the phone step: the flow is done with, and so is the
         // surface. A pause would be a trap here, so the shape is
         // `login_complete`'s rather than a second copy of it.
+        //
+        // The cancel is asked for even here, where there is no code to
+        // discard: when the flow is a second account rather than a first
+        // launch, the side holding the client is waiting for the answer to
+        // put the first account back. With no answer it would wait forever.
         KeyCode::Esc => {
+            queue_action(&mut *outbox, &mut *ui, Action::LoginCancelled);
             login_complete(
                 &mut *session,
                 &mut *input,
