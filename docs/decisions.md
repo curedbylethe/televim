@@ -125,6 +125,34 @@ are in [`../AGENTS.md`](../AGENTS.md).
   then re-runs bring-up as `:retry` does. Neither command deletes anything — the
   keyring is delete-only — and the path is required, since the configured file is
   where the session already is.
+- **Why accounts get slots and why the legacy names stay canonical:** a second
+  account on the same machine would otherwise read, overwrite or delete the
+  first's session, drafts, history and media — the four artefacts whose names
+  took no account argument. So `accounts::slot_paths` resolves all four from one
+  `AccountSlot`: `Legacy` is the layout every install already has, and `Id(id)`
+  is an account added after the index existed. The split is the migration, and
+  it moves nothing: **the first account never gets a `session-<id>` fork or a
+  suffixed file** — its bytes stay under `session`,
+  `televim.drafts.json`, `televim.history.json` and `televim.media`, which is
+  what lets an existing install upgrade with no prompt, no rename and no
+  sign-in. The tag is the other half of that: reading the existing
+  `televim.media` directory under a new account's label would clear it, because
+  `MediaCache::open` wipes a directory written for a different account, so the
+  legacy slot keeps the phone the install already writes. An id slot's
+  four names take the id — `<stem>.<id>.*` for the files and the media
+  directory, `.<id>` before a configured session file's extension, and
+  `session-<id>` in the credential store — and that is the only place the id
+  enters a name. The tag rule is one sentence, in `AccountSlot::label`: the
+  legacy slot keeps the configured phone, an id slot is its decimal id. The
+  tags stay authoritative and the index does not: a missing, corrupt or
+  unknown-version `accounts.json` means "no hint" and opens the legacy slot,
+  and the index is written only after a `Ready` names an account, and only
+  when a field changes — a hint is not proof of who is signed in, so a slot
+  with no session still opens the sign-in surface. The keyring's `file-key`
+  entry stays one entry shared by every slot, because it is the key source
+  rather than an account's bytes; a reader who relied on it is asked at the
+  next launch after `:passphrase`, as [`known-gaps.md`](./known-gaps.md)
+  records.
 - **Why the file key comes from the environment first, the keyring second, and
   nowhere else:** the order is `TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase`
   in the configuration, which the environment wins over), then a random 256-bit key
