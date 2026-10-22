@@ -214,13 +214,6 @@ pub fn report_prompt(name: &str, reason: domain::report::ReportReason) -> String
 /// meant.
 pub const SESSION_PATH_USAGE: &str = "usage: :export-session <path> or :import-session <path>";
 
-/// What the profile panel says when `add account` is pressed.
-///
-/// A deliberate refusal, and named as one. The bracketed `[failed: …]` form is
-/// for something that tried and did not come back; nothing was sent here, and a
-/// reader who reads a failure as a bug would be chasing one that does not exist.
-pub const ADD_ACCOUNT_REFUSAL: &str = "not yet: this build cannot add an account";
-
 /// What a command says when there is no chat or card to act on.
 pub const NOTHING_TO_ACT_ON: &str =
     "nothing to act on: highlight a chat, open a conversation, or open a card";
@@ -1193,6 +1186,15 @@ pub enum Action {
     /// left a code pending would earn another one the reader is no longer there
     /// to answer.
     LoginCancelled,
+
+    /// Add a second account, leaving the one that is signed in where it is.
+    ///
+    /// Asked for rather than performed, like everything else here: the sign-in
+    /// flow and the store it writes to are the side holding the client, and all
+    /// `tui` knows is that the reader asked. Nothing is revoked or deleted — the
+    /// first account's session, drafts, history and media stay where they are —
+    /// so there is no confirmation to give.
+    AddAccount,
 
     /// Sign out, and forget the session this program holds.
     ///

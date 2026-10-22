@@ -35,12 +35,11 @@ use domain::user::UserCandidate;
 use domain::vim::{CharMotion, Motion, VimState};
 
 use crate::app::{
-    ACTION_QUEUE, ADD_ACCOUNT_REFUSAL, AccountState, Action, ChatChoice, ConfirmKind,
-    ContactProfile, Find, Focus, JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_DATE,
-    NOT_A_REPLY, NOTHING_TO_ACT_ON, PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED,
-    PASS_OPEN_ALREADY, PASS_STILL_CHECKING, PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode,
-    PassPrompt, ProfileId, PromptKind, Register, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow,
-    TYPING_FOR,
+    ACTION_QUEUE, AccountState, Action, ChatChoice, ConfirmKind, ContactProfile, Find, Focus,
+    JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_DATE, NOT_A_REPLY, NOTHING_TO_ACT_ON,
+    PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED, PASS_OPEN_ALREADY, PASS_STILL_CHECKING,
+    PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode, PassPrompt, ProfileId, PromptKind, Register,
+    SESSION_PATH_USAGE, Secret, SignIn, SignInFlow, TYPING_FOR,
 };
 use crate::bidi::BidiMode;
 use crate::card::CardRow;
@@ -2779,6 +2778,7 @@ pub(crate) fn yank_card(
 /// Acts on the profile row under `cursor` in already-drawn rows.
 pub(crate) fn activate_profile_row(
     ui: &mut UiState,
+    outbox: &mut Outbox,
     conversation: &mut ConversationState,
     profile: &mut ProfileCard,
     input: &mut InputState,
@@ -2797,10 +2797,9 @@ pub(crate) fn activate_profile_row(
         return;
     };
     match label {
-        // A deliberate refusal rather than a failure. The bracketed
-        // `[failed: …]` form is for something that tried and did not come
-        // back, and nothing was sent.
-        crate::card::ADD_ACCOUNT => ui.flash(ADD_ACCOUNT_REFUSAL),
+        // The row and `:add-account` ask for the same thing: a second sign-in
+        // with the signed-in account untouched, so there is nothing to confirm.
+        crate::card::ADD_ACCOUNT => queue_action(&mut *outbox, &mut *ui, Action::AddAccount),
         // Confirm first and refuse inside the confirmation. A panel that
         // flashes instead of confirming has taught the reader the wrong
         // thing about a key that will eventually discard the one secret this
@@ -3110,6 +3109,14 @@ pub(crate) fn run_command(
         }
         "retry" => {
             request_retry(&mut *ui, &mut *session);
+            false
+        }
+        // The self card's `add account` row asks for the same thing. No client
+        // gate: the point of the command is that the account already signed in
+        // stays signed in, and nothing is asked of the network until the
+        // sign-in flow reaches the side that can.
+        "add-account" => {
+            queue_action(&mut *outbox, &mut *ui, Action::AddAccount);
             false
         }
         // The explicit route to the same prompt `/` opens from the chat
@@ -4414,6 +4421,7 @@ pub(crate) fn handle_profile(
         KeyCode::Char('d') => {
             activate_profile_row(
                 &mut *ui,
+                &mut *outbox,
                 &mut *conversation,
                 &mut *profile,
                 &mut *input,

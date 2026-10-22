@@ -2868,19 +2868,24 @@ fn a_conversation_key_from_the_profile_does_its_own_thing() {
 }
 
 #[test]
-fn add_account_refuses_and_says_what_it_cannot_do() {
+fn add_account_asks_for_a_second_sign_in() {
     let mut app = profile();
     while !app.on_card_row(crate::card::ADD_ACCOUNT) {
         app.handle_key(press(KeyCode::Char('j')));
     }
     app.handle_key(press(KeyCode::Char('d')));
 
-    assert_eq!(app.ui.status, ADD_ACCOUNT_REFUSAL);
-    assert_eq!(
-        app.ui.mode,
-        Mode::Normal,
-        "and nothing was asked to be confirmed"
-    );
+    assert_eq!(app.take_action(), Some(Action::AddAccount));
+}
+
+/// The command and the row are the same ask: a second sign-in, with the account
+/// already signed in left where it is and nothing to confirm.
+#[test]
+fn the_add_account_command_asks_for_a_second_sign_in() {
+    let mut app = profile();
+    run_command_line(&mut app, "add-account");
+
+    assert_eq!(app.take_action(), Some(Action::AddAccount));
 }
 
 /// A `logout` row that flashed a refusal instead of confirming would have

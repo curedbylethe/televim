@@ -57,8 +57,8 @@ use crate::wrap;
 /// value moves as the value changes, so the cue is what holds the column.
 const CUE: &str = "·";
 
-/// The label of the row that would add another account. Refuses: there is nowhere
-/// to sign in from.
+/// The label of the row that adds another account. Acts: the row asks for a
+/// second sign-in, and the account already signed in is left where it is.
 ///
 /// Named rather than written where it is needed because the key handler matches on
 /// it, and a literal in two places is a way to spell the same row two ways — which
