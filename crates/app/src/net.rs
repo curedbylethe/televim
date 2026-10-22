@@ -2933,6 +2933,7 @@ fn request_plain(
             // nothing is asked of the network for it either.
             Action::Login { .. }
             | Action::LoginCancelled
+            | Action::AddAccount
             | Action::Logout
             | Action::MoreGlobal { .. }
             | Action::SetLocalName { .. }
