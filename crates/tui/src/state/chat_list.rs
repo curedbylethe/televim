@@ -1,7 +1,7 @@
 //! The chat list and the selection cursor.
 
 use domain::chat::Chat;
-use domain::updates::ChatList;
+use domain::updates::{ChatList, sorts_before};
 
 /// The chat list and the selection cursor.
 pub struct ChatListState {
@@ -163,7 +163,14 @@ impl ChatListState {
         let chat = self.list.remove(chat_id)?;
         let name = chat.title.clone();
         self.archived.retain(|present| present.id != chat_id);
-        self.archived.push(chat);
+        // The place the fetch would give it, so the list reads the same before
+        // and after a relaunch.
+        let at = self
+            .archived
+            .iter()
+            .position(|other| sorts_before(&chat, other))
+            .unwrap_or(self.archived.len());
+        self.archived.insert(at, chat);
         self.selected_chat = self
             .selected_chat
             .min(self.list.chats.len().saturating_sub(1));
@@ -256,5 +263,28 @@ mod tests {
         state.move_archived(1);
         state.move_archived(1);
         assert_eq!(state.archived_cursor(), 1);
+    }
+
+    #[test]
+    fn a_chat_archived_here_takes_the_place_a_fetch_would_give_it() {
+        let mut state = ChatListState::new();
+        let dated = |id: i64, at: i64, pinned: bool| Chat {
+            last_timestamp: Some(at),
+            pinned,
+            ..chat(id, false)
+        };
+        state.install(vec![
+            dated(1, 300, false),
+            dated(2, 100, false),
+            dated(3, 50, true),
+        ]);
+        state.install_archived(vec![dated(9, 10, false)]);
+
+        state.archive(2);
+        state.archive(1);
+        state.archive(3);
+
+        let ids: Vec<i64> = state.archived().iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![3, 1, 2, 9], "pinned first, then newest");
     }
 }
