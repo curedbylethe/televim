@@ -91,8 +91,13 @@ jobs:
 
       # `--bins --examples`: `--examples` alone does not produce
       # `target/release/televim`, which the measurement driver launches.
+      #
+      # Deliberately not `--locked`: a release bumps `Cargo.toml` and leaves
+      # `Cargo.lock` behind, so a locked build would fail every push to `main`
+      # after a release until someone synced the lock. A plain build does that
+      # on the runner.
       - name: build-release
-        run: cargo build --release --locked --bins --examples
+        run: cargo build --release --bins --examples
 
       # The memory regression budget: measure, then compare against the stored
       # baseline and fail past it. This is a guard on *change*, not on the

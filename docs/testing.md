@@ -51,9 +51,11 @@ The `lint` job, in the order the workflow runs it:
 The `release` job repeats the same setup — checkout, toolchain, the system
 dependencies and the cache — then runs:
 
-1. `cargo build --release --locked --bins --examples` — `--bins` is what puts
+1. `cargo build --release --bins --examples` — `--bins` is what puts
    `target/release/televim` where the driver launches it, and `--examples` the
-   harness and seeder examples.
+   harness and seeder examples. Deliberately not `--locked`: a release bumps
+   `Cargo.toml` and leaves `Cargo.lock` to the next cargo run, so a locked build
+   would fail every push to `main` after a release.
 2. the `memory-budget` step, described in
    [`docs/memory.md`](./memory.md): `scripts/memory/measure.py` writes
    `target/memory-report.json`, then `scripts/memory/check.py` compares it
