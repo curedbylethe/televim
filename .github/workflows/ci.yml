@@ -7,18 +7,86 @@ on:
   schedule:
     - cron: "17 3 * * *"
 
+# A second push to the same branch supersedes the first run: the older tree is
+# not the one that will merge, and finishing it costs a cold cache. The group is
+# per workflow and ref, so a pull request's runs cancel each other and never
+# another branch's. The nightly run shares `refs/heads/main` with a push to
+# `main` and can be cancelled by one; it is a recording run, so losing it to a
+# fresher tree is the cheaper mistake.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # A docs-only change does not need eight minutes of Rust. This job is what
+  # says so, from the diff itself: every path ends `.md` or sits under `docs/`,
+  # or the answer is "run everything".
+  #
+  # When the base commit cannot be diffed — a new branch's first push, a
+  # force-push naming a commit this clone does not hold, a scheduled run — it
+  # answers "run everything". A skipped gate is a lie about a tree nobody
+  # inspected; an extra full run is only slow.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `github.event.before` is not in a single-commit clone.
+          fetch-depth: 0
+
+      - name: classify the changed paths
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          case "$EVENT" in
+            pull_request) base=$BASE ;;
+            push) base=$BEFORE ;;
+            *)
+              echo "rust=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          # An all-zero `before` is a new branch; a missing object is a
+          # force-push past this clone. Neither can be diffed.
+          if [ -z "$base" ] || [ -z "${base//0/}" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "no base commit to diff against" >&2
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed=$(git diff --name-only "$base" HEAD)
+          if [ -z "$changed" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s\n' "$changed" | grep -qvE '(\.md$|^docs/)'; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
   lint:
     name: lint
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
+      # A docs-only diff has no Rust to compile. The job keeps the one check a
+      # document can still break — the vendored design model — and skips the
+      # rest, so `lint` goes green and can serve as a required status instead of
+      # leaving a docs-only pull request waiting on a check that never reports.
       - uses: dtolnay/rust-toolchain@master
+        if: needs.changes.outputs.rust == 'true'
         with:
           toolchain: "1.98.1"
           components: rustfmt, clippy
@@ -26,26 +94,32 @@ jobs:
       # `keyring`'s Linux backend talks to the Secret Service over DBus, which
       # `libdbus-sys` links against at build time.
       - name: system dependencies
+        if: needs.changes.outputs.rust == 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.rust == 'true'
 
       - name: fmt
+        if: needs.changes.outputs.rust == 'true'
         run: cargo fmt --all -- --check
 
       - name: clippy
+        if: needs.changes.outputs.rust == 'true'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       # The `live` feature is what turns "only telegram-framework touches
       # grammers" into something a machine can check, so the rule is asserted
       # rather than assumed. See crates/proto/src/lib.rs for what may name `tl`.
       - name: boundary
+        if: needs.changes.outputs.rust == 'true'
         run: make boundary
 
       # `--all-features` enables `telegram-framework/live`; without it the
       # grammers-backed client is not even compiled. The tests that need a real
       # datacenter skip themselves unless `TELEVIM_TEST_DC` is set.
       - name: test
+        if: needs.changes.outputs.rust == 'true'
         env:
           # termlens resolves this against the test process's cwd, which for an
           # integration test is the crate directory; pin it to the workspace.
@@ -55,7 +129,7 @@ jobs:
       # termlens writes only when an error carries a screen, so a green run
       # uploads nothing; `warn` is the honest setting, not `error`.
       - name: upload PTY screens
-        if: always()
+        if: always() && needs.changes.outputs.rust == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: termlens-screens
@@ -73,7 +147,8 @@ jobs:
   release:
     name: release
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'memory'))
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'memory')))
     steps:
       - uses: actions/checkout@v7
 
