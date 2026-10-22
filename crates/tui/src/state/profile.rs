@@ -130,7 +130,7 @@ impl ProfileCard {
     pub(crate) fn adopt_contact(
         &mut self,
         peer_id: i64,
-        blocked: bool,
+        blocked: Option<bool>,
         profile: Result<Account, String>,
     ) -> bool {
         let Some(open) = self.contact.as_ref().filter(|open| open.peer_id == peer_id) else {
@@ -139,7 +139,7 @@ impl ProfileCard {
         self.contact = Some(ContactProfile {
             peer_id: open.peer_id,
             name: open.name.clone(),
-            blocked: Some(blocked),
+            blocked: blocked.or(open.blocked),
             state: match profile {
                 Ok(account) => AccountState::Known(account),
                 Err(reason) => AccountState::Unavailable(reason),

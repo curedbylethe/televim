@@ -9414,3 +9414,39 @@ fn archived_says_how_many_it_holds_and_esc_closes_it() {
     assert!(!app.list.archived_is_open());
     assert!(app.take_action().is_none());
 }
+
+/// A card for somebody with no chat, opened from the contacts list.
+fn card_of_a_stranger(app: &mut App) {
+    run_command_line(app, "contacts");
+    let _ = app.take_action();
+    app.conversation
+        .contacts
+        .adopt(vec![domain::user::UserCandidate {
+            user_id: 99,
+            display_name: "Ada".to_owned(),
+            username: Some("ada".to_owned()),
+        }]);
+    app.handle_key(press(KeyCode::Enter));
+    let _ = app.take_action();
+    app.set_contact(99, Some(false), Ok(crate::app::mock_account()));
+}
+
+#[test]
+fn a_failed_profile_read_keeps_what_the_card_knew_about_blocking() {
+    let mut app = App::mock();
+    card_of_a_stranger(&mut app);
+    app.set_contact(99, Some(true), Ok(crate::app::mock_account()));
+    app.set_contact(99, None, Err("flood wait".to_owned()));
+
+    assert!(
+        crate::card::rows(&app)
+            .iter()
+            .all(|row| row.label != crate::card::BLOCK),
+        "the unblock row is still on offer"
+    );
+    assert_eq!(
+        app.profile.contact.as_ref().map(|c| c.blocked),
+        Some(Some(true))
+    );
+}
+
