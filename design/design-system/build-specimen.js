@@ -135,6 +135,9 @@ const variantIndex = (id, name) => {
 };
 const CARD_FRAMES = [
   ['profile-self-card-frame', 'self card', 'S', 'profile card, self card', 'Profile · you'],
+  ['profile-accounts-frame', 'accounts: every account on this machine, the active one marked', 'S', 'profile card, two accounts on this machine, the active one marked', 'accounts: every account on this machine, the active one marked'],
+  ['profile-account-active-frame', 'd on the active account: it says where you are', 'Sjjjjjjd', 'profile card, d on the active account, the sentence on the status row', 'd on the active account: it says where you are'],
+  ['profile-account-switch-frame', 'd on another account: the switch lands where the reader was', 'Sjjjjjjjd', 'conversation, a switch landed on the same chat under the other account, its own messages', 'd on another account: the switch lands where the reader was'],
   ['profile-add-account-frame', 'add account: the sign-in that follows', 'SGkd', 'profile card, add account: the sign-in that follows', 'add account: the sign-in that follows'],
   ['profile-logout-the-confirmation-frame', 'logout: the confirmation', 'SGd', 'profile card, logout: the confirmation', 'logout raises the confirmation'],
   ['profile-logged-out-frame', 'logout: signed out', 'SGdy', 'profile card, logout: signed out', 'y signs out: the sign-in field comes back'],
