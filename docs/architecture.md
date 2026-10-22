@@ -533,9 +533,9 @@ instead of `Opening::Fresh`. The `Ready` that comes back adopts the slot the
 index holds for the account *it* names (falling back to `Id(id)` only when the
 index has no entry), `note_signed_in` records that slot, and `net` pushes the
 card's rows — `tui::KnownAccount { id, label = phone or "account <id>", active }`
-— with `App::set_known_accounts`: once at launch from the index the launch
-already read, and once per accepted switch. `tui` reads no index and names no
-path.
+— with `App::set_known_accounts`: at launch from the index the launch already
+read, and after any successful `Ready` that names an account. `tui` reads no
+index and names no path.
 
 `SlotStore`'s target is either the session already where the resolver put it or
 `Target::Fresh`, the account being added: a fresh `load` answers `None` — there
