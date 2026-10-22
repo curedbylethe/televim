@@ -179,6 +179,22 @@ are in [`../AGENTS.md`](../AGENTS.md).
   — before, only the code and password steps did, and a second sign-in abandoned
   at the phone left the side holding the client waiting for an answer that never
   came.
+- **Why the picker reuses the detach instead of signing out, and why a row carries
+  its id:** a switch has exactly the shape of adding an account — nothing is
+  revoked or deleted, the client and its single-shot relay go, the screen forgets
+  what belonged to the account, and the next `Ready` re-points — so signing out
+  would revoke the session the reader asked to keep and delete the local one to
+  reach an account that is already on disk. Keeping one `detach_account` over an
+  `Opening` means the draft flush, the place capture, the `is_switching` guards
+  against the signed-out `Ready`'s forgetting, and the cancel path exist once;
+  `add account` passes `Fresh` and the picker passes the slot
+  `AccountsIndex::slot_of(id)` resolved, refusing an id the index does not hold
+  rather than inventing a slot from it. The row travels with its id rather than
+  its position because the card is rebuilt from an index that can change underneath
+  it, and the chat list's by-id rule applies to a row too. What is stored is the
+  account the `Ready` names, resolved through the index (falling back to `Id(id)`
+  only when the index has no entry), never the id the row requested, so a stale
+  row cannot move the run onto an account it did not open.
 - **Why the file key comes from the environment first, the keyring second, and
   nowhere else:** the order is `TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase`
   in the configuration, which the environment wins over), then a random 256-bit key

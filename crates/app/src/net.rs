@@ -676,6 +676,15 @@ pub struct CarriedPlace {
     pub followed: bool,
 }
 
+/// The switch in progress: the slot being left, and what the bring-up opens.
+///
+/// One value rather than two fields, so a switch cannot carry a target without
+/// the account it will return to — the cancel path reads both together.
+struct Switch {
+    from: AccountSlot,
+    target: Opening,
+}
+
 /// What the loop knows about the network between events.
 #[derive(Default)]
 pub struct State {
@@ -729,13 +738,14 @@ pub struct State {
     slot: AccountSlot,
 
     /// The account the reader is between: the slot whose client was detached
-    /// while a second account signs in.
+    /// while a second account signs in, and the opening that account is being
+    /// brought up on.
     ///
-    /// `Some` *is* the add-account state — no client of this account's, none of
+    /// `Some` *is* the switch state — no client of this account's, none of
     /// its caches in memory, and nothing of it written to disk — and it is what
     /// the loop and the cancel path read. Cleared by the [`Event::Ready`] that
     /// signs the new account in, or by the cancel that gives up on it.
-    switching: Option<AccountSlot>,
+    switching: Option<Switch>,
 
     /// The reader's place under the account that was detached, held for the
     /// first [`Event::Ready`] after it and taken then whatever that `Ready`
@@ -961,28 +971,45 @@ impl State {
         self.held.push_back(action);
     }
 
-    /// The bring-up this state should run: the slot it is on, or a fresh one
-    /// while a second account is being added.
+    /// The bring-up this state should run: the slot it is on, or the opening
+    /// the switch in progress named.
     fn opening(&self) -> Opening {
-        if self.is_switching() {
-            Opening::Fresh
-        } else {
-            Opening::Slot(self.slot)
-        }
+        self.switching
+            .as_ref()
+            .map_or(Opening::Slot(self.slot), |switch| switch.target)
+    }
+
+    /// Begins a switch to the account the picker named, if the index holds it.
+    ///
+    /// An id the index does not hold is refused rather than guessed at: a slot
+    /// invented from an id is a slot no launch would ever open.
+    fn switch_account(&mut self, app: &mut App, id: i64) {
+        let slot = self
+            .accounts_index
+            .as_deref()
+            .and_then(accounts::AccountsIndex::load)
+            .and_then(|index| index.slot_of(id));
+        let Some(slot) = slot else {
+            app.flash("that account is not in the index");
+            return;
+        };
+        self.detach_account(app, Opening::Slot(slot));
     }
 
     /// Detaches the account that is signed in, without touching one byte of it.
     ///
     /// **Not a sign-out.** Nothing is revoked, deleted or cleared on disk: the
     /// client goes (and its update relay with it), the screen forgets what
-    /// belongs to the account being left, and the sign-in flow starts on a
-    /// store that has no slot yet. Every cache stays exactly where it is, which
-    /// is what makes the cancel path a return rather than a recovery.
+    /// belongs to the account being left, and `target` is brought up. For
+    /// `add account` that target is a store with no slot yet; for the picker it
+    /// is the slot the index holds, already signed in. Every cache stays exactly
+    /// where it is, which is what makes the cancel path a return rather than a
+    /// recovery.
     ///
     /// The drafts are the one thing written, and they are written *first*:
     /// emptying the list empties the screen's drafts with it, so the file has
     /// to hold the reader's words before that happens.
-    fn detach_account(&mut self, app: &mut App) {
+    fn detach_account(&mut self, app: &mut App, target: Opening) {
         if self.is_switching() {
             return;
         }
@@ -1021,10 +1048,10 @@ impl State {
         self.draft_file = None;
         self.session_store = None;
 
-        self.switching = Some(from);
+        self.switching = Some(Switch { from, target });
         self.bringing_up = true;
         if let (Some(cfg), Some(tx)) = (self.cfg_now(), self.tx.clone()) {
-            spawn_opening(cfg, &self.config_path, Opening::Fresh, tx);
+            spawn_opening(cfg, &self.config_path, target, tx);
         }
     }
 
@@ -1036,16 +1063,16 @@ impl State {
     /// Nothing was deleted while the switch was on, so there is nothing to
     /// restore — only to reopen.
     fn cancel_switch(&mut self, app: &mut App) {
-        let Some(from) = self.switching.take() else {
+        let Some(switch) = self.switching.take() else {
             return;
         };
         self.client = None;
         self.login.code = None;
         self.login.challenge = None;
-        self.adopt_slot(app, from);
+        self.adopt_slot(app, switch.from);
         if let (Some(cfg), Some(tx)) = (self.cfg_now(), self.tx.clone()) {
             self.bringing_up = true;
-            spawn_opening(cfg, &self.config_path, Opening::Slot(from), tx);
+            spawn_opening(cfg, &self.config_path, Opening::Slot(switch.from), tx);
         }
         app.flash("sign-in cancelled; back to the account you were signed in as");
     }
@@ -2370,12 +2397,17 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // offline must not be thrown away.
     //
     // Two of them need no client at all, and are answered before that gate:
-    // asking for a second account, and giving up on it. A client is exactly what
-    // a switch does not have, and the cancel has to work with none.
+    // asking for a second account, and switching to one the picker listed. A
+    // client is exactly what a switch does not have, and the cancel has to work
+    // with none.
     while let Some(action) = state.next_action(app) {
         match &action {
             Action::AddAccount => {
-                state.detach_account(app);
+                state.detach_account(app, Opening::Fresh);
+                continue;
+            }
+            Action::SwitchAccount { id } => {
+                state.switch_account(app, *id);
                 continue;
             }
             Action::LoginCancelled if state.is_switching() => {
@@ -3229,21 +3261,16 @@ fn request_plain(
             // The sign-in actions are answered by `drive` and `request_action`,
             // which have to reach the state before this function exists.
             // `Logout` is asked for there too: it needs the client. Adding an
-            // account is answered in `drive` before the client gate, because a
-            // client is exactly what a switch does not have. A switch to a known
-            // account will be answered there too; until it is, the ask is said
-            // aloud here rather than dropped in silence.
+            // account and switching to one the picker named are answered in
+            // `drive` before the client gate, because a client is exactly what
+            // a switch does not have.
             // Unreachable rather than wrong: a value is one of the three, never
             // two.
             // The cancel is answered by `request_action`, which holds the flag;
             // nothing is asked of the network for it either.
-            Action::AddAccount => {
-                tracing::debug!("an add-account request reached the network task");
-            }
-            Action::SwitchAccount { .. } => {
-                tracing::debug!("a switch-account request reached the network task");
-            }
-            Action::Login { .. }
+            Action::AddAccount
+            | Action::SwitchAccount { .. }
+            | Action::Login { .. }
             | Action::LoginCancelled
             | Action::Logout
             | Action::MoreGlobal { .. }
@@ -4285,6 +4312,67 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
     }
 }
 
+/// Pushes the picker's rows from the index.
+///
+/// `index` is `None` when there is no index; the card then lists nothing, which
+/// is what an install with one account draws anyway. Called at launch, after the
+/// index is first read, and after an accepted switch — never on a pass, so the
+/// index is not read twice for one landing.
+pub(crate) fn push_known_accounts(app: &mut App, index: Option<&accounts::AccountsIndex>) {
+    let accounts = index.map_or_else(Vec::new, |index| {
+        index
+            .accounts
+            .iter()
+            .map(|known| tui::KnownAccount {
+                id: known.id,
+                label: known
+                    .phone
+                    .clone()
+                    .unwrap_or_else(|| format!("account {}", known.id)),
+                active: index.active == Some(known.id),
+            })
+            .collect()
+    });
+    app.set_known_accounts(accounts);
+}
+
+/// Lands the account a `Ready` names, and says whether it was the switch.
+///
+/// The slot is the one the index holds for the id that came back, never the id
+/// the picker asked for and never an assumed `Id(id)`: a switch to a stored
+/// account keeps that account's slot, and only a genuinely new one — no entry
+/// in the index — is minted from its own snapshot id. The index write then
+/// records the adopted slot, so `active` and `last_used` move with the reader.
+fn adopt_arrival(app: &mut App, state: &mut State, account: &domain::account::Account) -> bool {
+    let switched = if state.switching.take().is_some() {
+        let slot = state
+            .accounts_index
+            .as_deref()
+            .and_then(accounts::AccountsIndex::load)
+            .and_then(|index| index.slot_of(account.user_id))
+            .unwrap_or(AccountSlot::Id(account.user_id));
+        state.adopt_slot(app, slot);
+        true
+    } else {
+        false
+    };
+
+    if let Some(index) = &state.accounts_index {
+        if let Err(error) =
+            accounts::note_signed_in(index, account.user_id, account.phone.as_deref(), state.slot)
+        {
+            tracing::warn!(%error, "the accounts index could not be written");
+        }
+        // The picker is one push from the index, after the write that may have
+        // moved `active`: the card lists an account's own id, so a switch is
+        // the only moment its rows change.
+        if switched {
+            push_known_accounts(app, accounts::AccountsIndex::load(index).as_ref());
+        }
+    }
+    switched
+}
+
 fn apply_ready(
     app: &mut App,
     state: &mut State,
@@ -4298,26 +4386,9 @@ fn apply_ready(
     // named the account — never at open time, because a slot with no session is
     // an unknown account, not a signed-in one (Q7). A signed-out `Ready` names
     // nobody and writes nothing.
-    let mut switched = false;
-    if let Ok(account) = &account {
-        // A `Ready` that names an account while a second one is being added is
-        // the switch arriving: the slot is the account's id, and its paths,
-        // history, drafts and media are what this run uses from here on.
-        if state.switching.take().is_some() {
-            state.adopt_slot(app, AccountSlot::Id(account.user_id));
-            switched = true;
-        }
-        if let Some(index) = &state.accounts_index
-            && let Err(error) = accounts::note_signed_in(
-                index,
-                account.user_id,
-                account.phone.as_deref(),
-                state.slot,
-            )
-        {
-            tracing::warn!(%error, "the accounts index could not be written");
-        }
-    }
+    let switched = account
+        .as_ref()
+        .is_ok_and(|account| adopt_arrival(app, state, account));
     apply_ready_to_screen_with_archive(app, state, chats, archived, account, session_store);
     if switched {
         // The event carried the description the sign-in started with, which is
@@ -4328,8 +4399,8 @@ fn apply_ready(
     }
     state.client = Some(client);
     state.bringing_up = false;
-    // The client is there, so the sign-in flow's `waiting` flag means
-    // what it says: a request a client is carrying.
+    // The client is there, so the sign-in flow's `waiting` flag means what
+    // it says: a request a client is carrying.
     app.set_client_available(true);
 }
 
@@ -13294,7 +13365,10 @@ mod switch_tests {
             history.to_path_buf(),
             file_key_provider(&cfg),
         ));
-        state.switching = Some(AccountSlot::Legacy);
+        state.switching = Some(Switch {
+            from: AccountSlot::Legacy,
+            target: Opening::Fresh,
+        });
         state
     }
 
@@ -13357,7 +13431,7 @@ mod switch_tests {
         // — which is where `Esc` queues the cancel. The sign-in surface is the
         // one the switch's own `Ready { Err }` opens.
         app.session.credentials_configured = true;
-        state.detach_account(&mut app);
+        state.detach_account(&mut app, Opening::Fresh);
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13453,7 +13527,7 @@ mod switch_tests {
         assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
         let mut state = State::default();
 
-        state.detach_account(&mut app);
+        state.detach_account(&mut app, Opening::Fresh);
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13485,7 +13559,7 @@ mod switch_tests {
         assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
         let mut state = State::default();
 
-        state.detach_account(&mut app);
+        state.detach_account(&mut app, Opening::Fresh);
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13523,7 +13597,7 @@ mod switch_tests {
         app.conversation.conversation.unfollow();
         let mut state = State::default();
 
-        state.detach_account(&mut app);
+        state.detach_account(&mut app, Opening::Fresh);
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13548,7 +13622,7 @@ mod switch_tests {
         assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
         let mut state = State::default();
 
-        state.detach_account(&mut app);
+        state.detach_account(&mut app, Opening::Fresh);
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13578,6 +13652,336 @@ mod switch_tests {
         assert!(
             state.carried_place.is_none(),
             "nothing was left to re-apply"
+        );
+    }
+
+    /// Writes the index with two known accounts: the first in the legacy slot
+    /// and the other added later, with the first active.
+    fn two_account_index(path: &Path) {
+        let index = accounts::AccountsIndex {
+            version: 1,
+            active: Some(42),
+            accounts: vec![
+                accounts::KnownAccount {
+                    id: 42,
+                    phone: Some("+1555".to_owned()),
+                    slot: AccountSlot::Legacy,
+                    last_used: 100,
+                },
+                accounts::KnownAccount {
+                    id: 7,
+                    phone: Some("+1777".to_owned()),
+                    slot: AccountSlot::Id(7),
+                    last_used: 200,
+                },
+            ],
+        };
+        fs::write(
+            path,
+            serde_json::to_vec(&index).expect("the index serialises"),
+        )
+        .expect("the index fixture is written");
+    }
+
+    /// Account A's bytes, as a signed-in launch leaves them, and the configured
+    /// file each of the two slots' sessions goes in.
+    fn two_slots(dir: &Path, config_path: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let drafts = config_path.with_extension("drafts.json");
+        let history = config_path.with_extension("history.json");
+        let session = dir.join("televim.session");
+        DraftFile::new(drafts.clone()).save(
+            &[(CHAT, "half a sentence".to_owned())],
+            &[(CHAT, 3)],
+            Some("+1555"),
+        );
+        fs::write(&history, b"account A's own bytes").expect("the fixture is written");
+        fs::write(&session, b"account A's session").expect("the fixture is written");
+        let media = config_path.with_extension("media");
+        fs::create_dir_all(&media).expect("the media directory is created");
+        fs::write(media.join("a-file"), b"account A's media").expect("the fixture is written");
+        (drafts, history, session, media)
+    }
+
+    /// The picker's whole point: `d` on a listed account moves this run onto
+    /// that account's slot, keeps the reader's place, and changes nothing of the
+    /// account it left.
+    #[tokio::test]
+    async fn switching_to_a_listed_account_lands_it_and_leaves_the_first_untouched() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let index = accounts::index_path(&config_path);
+        two_account_index(&index);
+        let cfg = Config {
+            session_path: Some(dir.path().join("televim.session")),
+            ..Config::default()
+        };
+        let (a_drafts, a_history, a_session, a_media) = two_slots(dir.path(), &config_path);
+        let a_bytes = (
+            fs::read(&a_drafts).expect("the drafts file reads"),
+            fs::read(&a_history).expect("the history file reads"),
+            fs::read(&a_session).expect("the session file reads"),
+            fs::read(a_media.join("a-file")).expect("the media file reads"),
+        );
+        let b_session = dir.path().join("televim.7.session");
+        fs::write(&b_session, b"account B's session").expect("the fixture is written");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let mut state = State::new(cfg.clone(), config_path.clone(), tx.clone());
+        state.set_account(AccountSlot::Legacy, index.clone());
+        state.set_draft_file(DraftFile::new(a_drafts.clone()));
+        state.set_history_file(HistoryFile::new(a_history.clone(), file_key_provider(&cfg)));
+        let mut app = App::new();
+        app.set_chats(vec![chat(10), chat(20), chat(30)]);
+        assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
+
+        // The reader presses `d` on the other account's row.
+        state.held.push_back(Action::SwitchAccount { id: 7 });
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(
+            (
+                fs::read(&a_drafts).expect("the drafts file reads"),
+                fs::read(&a_history).expect("the history file reads"),
+                fs::read(&a_session).expect("the session file reads"),
+                fs::read(a_media.join("a-file")).expect("the media file reads"),
+            ),
+            a_bytes,
+            "the account that was left kept every byte"
+        );
+
+        // Its `Ready`: the account that came back names the index's slot, not
+        // the id the row asked for.
+        let account = domain::account::Account {
+            user_id: 7,
+            ..domain::account::Account::default()
+        };
+        assert!(
+            adopt_arrival(&mut app, &mut state, &account),
+            "this is the switch arriving"
+        );
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(30), chat(20), chat(50)],
+            Ok(account),
+            tui::SessionStore::EncryptedFile(b_session),
+        );
+
+        assert_eq!(state.slot(), AccountSlot::Id(7), "the store is account B's");
+        assert_eq!(
+            app.list.selected_chat, 1,
+            "the highlight followed the carried peer id into B's order"
+        );
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, 20,
+            "and the same conversation is open under B"
+        );
+
+        let stored = accounts::AccountsIndex::load(&index).expect("the index reads");
+        assert_eq!(
+            stored.active,
+            Some(7),
+            "the index moved to the account used"
+        );
+        let b = stored
+            .accounts
+            .iter()
+            .find(|known| known.id == 7)
+            .expect("account B is still known");
+        assert!(
+            b.last_used >= 200,
+            "the switch is newer than B's own last use"
+        );
+        let a = stored
+            .accounts
+            .iter()
+            .find(|known| known.id == 42)
+            .expect("account A is still known");
+        assert_eq!(a.last_used, 100, "and the account left is untouched");
+
+        assert!(
+            app.known_accounts
+                .iter()
+                .any(|known| known.id == 7 && known.active),
+            "the picker marks the account now signed in"
+        );
+        assert!(
+            app.known_accounts
+                .iter()
+                .any(|known| known.id == 42 && !known.active),
+            "and no longer marks the one left"
+        );
+    }
+
+    /// A stored session that loads nothing lands on that account's sign-in
+    /// surface, and `Esc` is still the way back: the previous account's files are
+    /// never opened for writing.
+    #[tokio::test]
+    async fn a_switch_to_a_slot_with_no_session_signs_in_and_esc_returns() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let index = accounts::index_path(&config_path);
+        two_account_index(&index);
+        let cfg = Config {
+            session_path: Some(dir.path().join("televim.session")),
+            ..Config::default()
+        };
+        let (a_drafts, a_history, a_session, a_media) = two_slots(dir.path(), &config_path);
+        let a_bytes = (
+            fs::read(&a_drafts).expect("the drafts file reads"),
+            fs::read(&a_history).expect("the history file reads"),
+            fs::read(&a_session).expect("the session file reads"),
+            fs::read(a_media.join("a-file")).expect("the media file reads"),
+        );
+        let b_session = dir.path().join("televim.7.session");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let mut state = State::new(cfg.clone(), config_path.clone(), tx.clone());
+        state.set_account(AccountSlot::Legacy, index.clone());
+        state.set_draft_file(DraftFile::new(a_drafts.clone()));
+        state.set_history_file(HistoryFile::new(a_history.clone(), file_key_provider(&cfg)));
+        let mut app = App::new();
+
+        state.held.push_back(Action::SwitchAccount { id: 7 });
+        drive(&mut app, &mut state, &tx);
+
+        // B's store held no session: the bring-up's `Ready` says exactly that.
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::EncryptedFile(b_session),
+        );
+        assert!(state.is_switching(), "the switch waits on the sign-in");
+        assert!(
+            app.signin().is_some(),
+            "the phone prompt is the account's own sign-in"
+        );
+        assert!(
+            !dir.path().join("televim.7.session").exists(),
+            "nothing was written for the account that is not signed in"
+        );
+
+        // `Esc` at the phone step.
+        state.held.push_back(Action::LoginCancelled);
+        drive(&mut app, &mut state, &tx);
+
+        assert!(!state.is_switching(), "the switch is over");
+        assert_eq!(state.slot(), AccountSlot::Legacy, "back on account A");
+        assert!(
+            state.draft_file().is_some() && state.history_file.is_some(),
+            "A's files are open again for the loop"
+        );
+        assert_eq!(
+            (
+                fs::read(&a_drafts).expect("the drafts file reads"),
+                fs::read(&a_history).expect("the history file reads"),
+                fs::read(&a_session).expect("the session file reads"),
+                fs::read(a_media.join("a-file")).expect("the media file reads"),
+            ),
+            a_bytes,
+            "and none of them changed on the way there and back"
+        );
+    }
+
+    /// An id no index entry holds is refused rather than guessed at: no detach,
+    /// no bring-up, no file touched, and one line saying so.
+    #[tokio::test]
+    async fn switching_to_an_id_the_index_does_not_hold_is_refused() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let index = accounts::index_path(&config_path);
+        let index_fixture = accounts::AccountsIndex {
+            version: 1,
+            active: Some(42),
+            accounts: vec![accounts::KnownAccount {
+                id: 42,
+                phone: Some("+1555".to_owned()),
+                slot: AccountSlot::Legacy,
+                last_used: 100,
+            }],
+        };
+        fs::write(
+            &index,
+            serde_json::to_vec(&index_fixture).expect("the index serialises"),
+        )
+        .expect("the index fixture is written");
+        let index_before = fs::read(&index).expect("the index reads");
+        let cfg = Config {
+            session_path: Some(dir.path().join("televim.session")),
+            ..Config::default()
+        };
+        let (a_drafts, a_history, a_session, _media) = two_slots(dir.path(), &config_path);
+        let a_bytes = (
+            fs::read(&a_drafts).expect("the drafts file reads"),
+            fs::read(&a_history).expect("the history file reads"),
+            fs::read(&a_session).expect("the session file reads"),
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let mut state = State::new(cfg.clone(), config_path.clone(), tx.clone());
+        state.set_account(AccountSlot::Legacy, index.clone());
+        state.set_draft_file(DraftFile::new(a_drafts.clone()));
+        state.set_history_file(HistoryFile::new(a_history.clone(), file_key_provider(&cfg)));
+        // A settled launch: the bring-up in flight is over.
+        state.bringing_up = false;
+        let mut app = App::new();
+
+        state.held.push_back(Action::SwitchAccount { id: 99 });
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(
+            app.ui.status, "that account is not in the index",
+            "the reader is told why nothing happened"
+        );
+        assert!(!state.is_switching(), "no switch was begun");
+        assert_eq!(state.slot(), AccountSlot::Legacy, "still on account A");
+        assert!(!state.bringing_up, "and no bring-up was asked for");
+        assert_eq!(
+            (
+                fs::read(&a_drafts).expect("the drafts file reads"),
+                fs::read(&a_history).expect("the history file reads"),
+                fs::read(&a_session).expect("the session file reads"),
+            ),
+            a_bytes,
+            "nothing of account A was opened or changed"
+        );
+        assert_eq!(
+            fs::read(&index).expect("the index reads"),
+            index_before,
+            "and the index was not rewritten"
+        );
+    }
+
+    /// The launch pushes the picker before any `Ready` names an account, so the
+    /// card can draw a switch on the first frame the sign-in surface does.
+    #[test]
+    fn the_launch_pushes_the_picker_from_the_index_it_read() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let config_path = dir.path().join("televim.toml");
+        let index_path = accounts::index_path(&config_path);
+        two_account_index(&index_path);
+        let index = accounts::AccountsIndex::load(&index_path).expect("the index reads");
+        let mut app = App::new();
+
+        push_known_accounts(&mut app, Some(&index));
+
+        assert_eq!(
+            app.known_accounts,
+            vec![
+                tui::KnownAccount {
+                    id: 42,
+                    label: "+1555".to_owned(),
+                    active: true,
+                },
+                tui::KnownAccount {
+                    id: 7,
+                    label: "+1777".to_owned(),
+                    active: false,
+                },
+            ],
+            "one row per known account, the active one marked"
         );
     }
 }

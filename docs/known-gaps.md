@@ -105,25 +105,28 @@ Real, and named so they are not mistaken for oversights:
   would be a 58-field literal that breaks on every schema bump and reads as noise.
   The `live` integration test in `app/tests/proto_integration.rs` is the other end
   of it, and it needs a datacenter.
-- **A second account can be added, but the process holds one account at a time.**
-  `add account` on the self card and `:add-account` detach the signed-in account
-  without signing it out — the client goes, the files stay — and open the sign-in
-  at the phone step for a new one; the new account's first `Ready` adopts it, and
-  `Esc` at the phone step cancels and restores the first. That `Ready` also puts
-  the reader back: the conversation open at detach is reopened by peer id — never
-  by row, and never by name — with the new account's newest page, so a reader who
-  had scrolled away lands at the newest message and the line says `newest`. When
-  the new account has no chat with that person, nothing is opened, the highlight
-  goes to the top row and the status line says `that account has no chat with
-  this person`. Nothing else crosses the switch — no message cursor, draft,
-  register or scroll position, because message ids are per account. Four limits
-  remain. Only one account is open per process: the detached account receives no
-  updates while the new one signs in. Switching is add-account-only until the
-  picker lands, so reaching an account already stored means signing in to it
-  again. Nothing is revoked on the server, so the detached session remains
-  valid. And with a configured session *file*, the panel names the configured
-  path behind the sign-in until the first `Ready` names the new account and its
-  suffixed path is known.
+- **A second account can be added, and a stored one switched to, but the process
+  holds one account at a time.** `add account` on the self card and `:add-account`
+  detach the signed-in account without signing it out — the client goes, the files
+  stay — and open the sign-in at the phone step for a new one; the new account's
+  first `Ready` adopts it, and `Esc` at the phone step cancels and restores the
+  first. The self card also lists the accounts this machine knows, one row each,
+  and `d` on another switches to its stored slot through the same detach — a row
+  whose session turns out to be gone lands on the sign-in view for that account,
+  where `Esc` still returns. Either `Ready` also puts the reader back: the
+  conversation open at detach is reopened by peer id — never by row, and never by
+  name — with the new account's newest page, so a reader who had scrolled away
+  lands at the newest message and the line says `newest`. When the new account
+  has no chat with that person, nothing is opened, the highlight goes to the top
+  row and the status line says `that account has no chat with this person`.
+  Nothing else crosses the switch — no message cursor, draft, register or scroll
+  position, because message ids are per account. Four limits remain. Only one
+  account is open per process: a listed account that is not signed in is offline,
+  receiving no updates, and the picker reads no session or profile of it. There is
+  no account removal and no per-account configuration — every slot shares this
+  configuration file's settings. And `add account` is still the only way to reach
+  an account this machine does not know yet. Nothing is revoked on the server, so
+  a detached session remains valid.
 - **Account storage is partitioned, and one account is open per process.** The
   session, drafts file, history file and media directory resolve
   through `accounts::slot_paths`, so an account added later writes
@@ -131,9 +134,9 @@ Real, and named so they are not mistaken for oversights:
   first account's bytes; the first account keeps the legacy names and the
   legacy slot's tag, so an upgrade moves nothing and clears nothing. A launch
   opens the slot the accounts index names, and `add account` writes a second one
-  while the program runs, but there is still one client and one account's state
-  at a time, and no picker to move between the slots already stored. `add
-  account` is the only switch — see the entry above.
+  while the program runs, and the self card's picker moves between the slots
+  already stored, but there is still one client and one account's state
+  at a time — see the entry above.
 - **`Config::code` and `Config::password` are pre-fills, not a way in.** They
   fill the code and the password fields when a flow reaches them; the flow is the
   only path that writes a session, and the phone has to reach the bar once.

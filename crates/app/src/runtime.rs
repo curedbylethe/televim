@@ -86,11 +86,13 @@ pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Resul
     // Before anything is opened: which account's bytes this launch uses is the
     // index's one question, and with no index the answer is the legacy slot —
     // the layout every install already has, byte for byte.
-    let account = accounts::AccountsIndex::load(&accounts::index_path(config_path))
-        .and_then(|index| index.active_account());
+    let index = accounts::AccountsIndex::load(&accounts::index_path(config_path));
+    let account = index
+        .as_ref()
+        .and_then(accounts::AccountsIndex::active_account);
     init_tracing(cfg, config_path);
     let paths = accounts::slot_paths(config_path, cfg, account);
-    build_runtime()?.block_on(run_async(cfg, config_path, &paths, initial_chat))
+    build_runtime()?.block_on(run_async(cfg, config_path, &paths, initial_chat, index))
 }
 
 /// Records the instant the program was asked to start.
@@ -220,6 +222,7 @@ async fn run_async(
     config_path: &Path,
     paths: &accounts::SlotPaths,
     initial_chat: Option<i64>,
+    index: Option<accounts::AccountsIndex>,
 ) -> Result<()> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut screen = stdout();
@@ -241,6 +244,7 @@ async fn run_async(
         &mut keys,
         paths,
         initial_chat,
+        index.as_ref(),
     )
     .await;
 
@@ -789,6 +793,7 @@ async fn event_loop(
     keys: &mut EnhancedKeys<Stdout>,
     paths: &accounts::SlotPaths,
     initial_chat: Option<i64>,
+    index: Option<&accounts::AccountsIndex>,
 ) -> Result<()> {
     // When a key was taken on the previous pass, so the next frame can be timed
     // against it. Nothing to report in an ordinary run, hence the `Option`.
@@ -863,6 +868,10 @@ async fn event_loop(
     // The slot this launch resolved, and where the index that names it goes:
     // the loop owns both, and `apply` is handed them from here.
     network.set_account(paths.slot, accounts::index_path(config_path));
+    // The picker's rows, from the index this launch already read: the card is
+    // populated before any `Ready` names an account, so a switch is possible on
+    // the first frame the sign-in surface draws.
+    net::push_known_accounts(&mut app, index);
     // And the drafts file, so signing out can remove it.
     network.set_draft_file(draft_file.clone());
     // Opened beside the history file. A directory written for another account,

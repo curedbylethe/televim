@@ -482,6 +482,10 @@ while calibrating this one.
   one fetch's answer, at most `contacts.GetContacts`'s own response, and it is
   kept after the overlay closes so that a failed refetch leaves the previous
   directory on show.
+- An accounts index (`<config>.accounts.json`, one small entry per account) and
+  the self card's picker DTO (`Vec<KnownAccount>`: id, label, active). The index
+  is read once at launch and once per accepted switch, never per pass; the DTO is
+  one small vec rebuilt from it, and nothing of an inactive account is loaded.
 - Measurement-only `Instant` probes in the event loop, gated on
   `TELEVIM_MEASURE` and written to the log rather than the screen, so a launch's
   first frame and a keypress's latency have numbers behind them.
