@@ -599,7 +599,6 @@ code.
 | `signed out` | the status the screen rests on after the reader signs out, until the sign-in field arrives | `apply_logged_out` |
 | `Sign out and forget this session? (y/n)` | a screen-wide confirmation, raised by the `logout` row; `y` signs out | the card |
 | `not yet: this build cannot add an account` | the `add account` row's refusal | ditto |
-| `Not a row that acts: rename, block and report are the three.` | `d` on a value row of a contact's card | the card |
 | `Not a row that acts: add account and logout are the two.` | `d` on a value row of the self card | ditto |
 | `Not editable here: :settings opens the editable profile.` | `e` on the self card: the one route to the editable screen | ditto |
 | `p: a card has no buffer to paste into` | why `p` is unbound, written to the hint's own row | ditto |
