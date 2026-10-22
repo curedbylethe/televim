@@ -1772,7 +1772,12 @@ impl App {
             let Some(entry) = self.local_names.get_mut(&chat.id) else {
                 continue;
             };
-            entry.server.clone_from(&chat.title);
+            // A title that is already the alias has been through here once
+            // (the archive is applied by the caller and again on install), and
+            // is not the server's to record.
+            if chat.title != entry.text {
+                entry.server.clone_from(&chat.title);
+            }
             chat.title = entry.text.clone();
         }
     }
@@ -1841,7 +1846,9 @@ impl App {
         {
             if let Some(text) = text {
                 text.clone_into(&mut contact.name);
-            } else if let Some(server) = old_server {
+            } else if let Some(server) = old_server.filter(|server| !server.is_empty()) {
+                // An alias loaded for a person with no chat has no server name
+                // yet; the card keeps the name it has rather than going blank.
                 contact.name = server;
             }
         }

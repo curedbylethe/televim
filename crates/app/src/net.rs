@@ -3013,7 +3013,13 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         Event::Contacts { result } => match result {
             Ok(mut people) => {
                 for person in &mut people {
-                    if let Some(local) = app.local_names.get(&person.user_id) {
+                    if let Some(local) = app.local_names.get_mut(&person.user_id) {
+                        // The only place a person with no chat is named by the
+                        // server, so it is where their alias learns the name a
+                        // bare `:rename` should bring back.
+                        if person.display_name != local.text {
+                            local.server.clone_from(&person.display_name);
+                        }
                         person.display_name.clone_from(&local.text);
                     }
                 }
@@ -12442,5 +12448,35 @@ mod action_status_tests {
         );
 
         assert_eq!(app.ui.status, "reported chat-7 as spam");
+    }
+    #[test]
+    fn the_contacts_answer_teaches_an_alias_the_name_a_clear_brings_back() {
+        let mut app = App::new();
+        let mut state = State::default();
+        app.local_names.insert(
+            99,
+            tui::app::LocalName {
+                text: "Countess".to_owned(),
+                server: String::new(),
+            },
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Contacts {
+                result: Ok(vec![domain::user::UserCandidate {
+                    user_id: 99,
+                    display_name: "Ada Lovelace".to_owned(),
+                    username: None,
+                }]),
+            },
+        );
+
+        assert_eq!(app.local_names[&99].server, "Ada Lovelace");
+        assert_eq!(
+            app.conversation.contacts.items()[0].display_name,
+            "Countess"
+        );
     }
 }
