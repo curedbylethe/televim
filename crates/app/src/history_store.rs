@@ -1037,38 +1037,43 @@ impl HistoryFile {
     /// its own envelope fails here, before any file is touched. A plaintext
     /// file being replaced is zeroed once the envelope is in place.
     pub(crate) fn write(&self, bytes: &[u8]) {
-        let envelope = match sealed::seal(bytes, self.keys.as_ref()) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                tracing::warn!(%error, "history could not be sealed");
-                return;
-            }
-        };
+        let _ = self.try_write(bytes);
+    }
+
+    /// [`HistoryFile::write`], saying why when the file was not written.
+    ///
+    /// For the one caller that owes the reader an answer: a rename is text they
+    /// typed, and a file that cannot hold it must not look as though it did.
+    pub(crate) fn try_write(&self, bytes: &[u8]) -> Result<(), String> {
+        let envelope = sealed::seal(bytes, self.keys.as_ref()).map_err(|error| {
+            tracing::warn!(%error, "history could not be sealed");
+            error.to_string()
+        })?;
         let reopens = matches!(
             sealed::open(&envelope, self.keys.as_ref()),
             Ok(Some(plain)) if plain.as_slice() == bytes
         );
         if !reopens {
             tracing::warn!("the sealed history did not open again; not written");
-            return;
+            return Err("the sealed history did not open again".to_owned());
         }
         if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty())
             && let Err(error) = fs::create_dir_all(parent)
         {
             tracing::warn!(%error, "history directory could not be created");
-            return;
+            return Err(error.to_string());
         }
         // Opened before the replace, which unlinks the old inode: the handle
         // is what lets the old bytes be zeroed afterwards.
         let legacy = open_unsealed(&self.path);
-        if write_atomically(&self.path, &envelope)
-            && let Some(mut old) = legacy
-        {
+        write_atomically(&self.path, &envelope)?;
+        if let Some(mut old) = legacy {
             if let Err(error) = wipe(&mut old) {
                 tracing::warn!(%error, "could not wipe the pre-migration history file");
             }
             remove_stale_temps(&self.path);
         }
+        Ok(())
     }
 
     /// Removes the file; a missing file is success.
@@ -1109,7 +1114,7 @@ pub(crate) fn history_acceptable(
 /// temp in the same directory, restricted before a byte is in it, renamed over
 /// the target — so an interrupted write leaves the previous history intact
 /// rather than a truncated file, and the target inherits the temp's `0600`.
-fn write_atomically(path: &Path, bytes: &[u8]) -> bool {
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temp = temp_sibling(path);
 
     let result = (|| -> Result<()> {
@@ -1120,13 +1125,13 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> bool {
         Ok(())
     })();
 
-    if let Err(error) = &result {
+    result.map_err(|error| {
         // A half-written temp is not a history file, and nothing would ever
         // clean it up.
         let _ = fs::remove_file(&temp);
         tracing::warn!(%error, "history file could not be written");
-    }
-    result.is_ok()
+        format!("{error:#}")
+    })
 }
 
 /// The existing file at `path`, opened for writing, if it is not an envelope.
