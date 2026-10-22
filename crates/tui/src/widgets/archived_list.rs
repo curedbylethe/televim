@@ -15,9 +15,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
 
 use crate::app::{App, Focus};
+use crate::rows::truncate;
 use crate::wrap::columns;
 
-use super::contact_list::truncate;
+use super::chat_list::drawn;
 
 /// Where the overlay draws, or `None` when there is nothing to draw into.
 fn overlay_area(app: &App, chat_list: Rect) -> Option<Rect> {
@@ -66,7 +67,7 @@ pub fn render(app: &App, chat_list: Rect, frame: &mut Frame<'_>) {
             let unread = (chat.unread_count > 0).then(|| chat.unread_count.to_string());
             let reserved = unread.as_ref().map_or(0, |count| columns(count) + 1);
             let title = truncate(&chat.title, width.saturating_sub(reserved));
-            let mut spans = vec![Span::raw(title.clone())];
+            let mut spans = drawn(app, &title, app.ui.theme.text);
             if let Some(count) = unread {
                 let gap = width.saturating_sub(columns(&title) + columns(&count));
                 spans.push(Span::raw(" ".repeat(gap)));
@@ -96,6 +97,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::app::App;
+    use crate::bidi::BidiMode;
 
     fn screen(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("the backend builds");
@@ -128,6 +130,28 @@ mod tests {
         assert!(shown.contains("Archived · 1"), "{shown}");
         assert!(shown.contains("Old Friend"), "{shown}");
         assert_eq!(app.status_text(), "archived — 1");
+    }
+
+    #[test]
+    fn a_right_to_left_title_follows_the_bidi_mode() {
+        const TITLE: &str = "سلام";
+        let reversed: String = TITLE.chars().rev().collect();
+        for (mode, expected, absent) in [
+            (BidiMode::Visual, reversed.as_str(), TITLE),
+            (BidiMode::Terminal, TITLE, reversed.as_str()),
+        ] {
+            let mut app = App::mock().with_bidi(mode);
+            let mut chat = app.chats()[0].clone();
+            chat.id = 99;
+            TITLE.clone_into(&mut chat.title);
+            app.list.install_archived(vec![chat]);
+            app.list.open_archived();
+
+            let shown = screen(&app);
+
+            assert!(shown.contains(expected), "{mode:?}:\n{shown}");
+            assert!(!shown.contains(absent), "{mode:?}:\n{shown}");
+        }
     }
 
     #[test]
