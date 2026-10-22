@@ -13,7 +13,7 @@ use crate::auth::{
     LoginToken, PasswordAttempts, PasswordToken, SignInResult, SignedInUser, signed_in_from,
 };
 use crate::error::{AuthError, FrameworkError, RequestError};
-use crate::session::{KeyringStore, SessionStore, StoreSession};
+use crate::session::{AccountIdentity, KeyringStore, SessionStore, StoreSession};
 use crate::updates::UpdateRelay;
 
 /// How long after a login-code request a second one starts looking suspicious.
@@ -381,6 +381,10 @@ impl Client {
     /// signs in twice as two people does not keep answering for the first.
     fn remember_signed_in(&self, user: &grammers_client::peer::User) {
         if let Some(user) = signed_in_from(&user.raw) {
+            self.session.set_account(AccountIdentity {
+                user_id: user.user_id,
+                phone: user.phone.clone(),
+            });
             *self
                 .signed_in
                 .lock()
