@@ -2799,16 +2799,17 @@ pub(crate) fn activate_profile_row(
             conversation.set_confirm(Some(ConfirmKind::Logout));
         }
         crate::card::RENAME => {
-            set_focus(
-                &mut *ui,
-                &mut *conversation,
-                &mut *input,
-                &mut *profile,
-                Focus::Input,
-            );
+            let name = profile
+                .contact
+                .as_ref()
+                .map_or("", |contact| contact.name.as_str());
+            // `set_focus` would close the card, and the line then names the
+            // highlighted chat; the card stays until the command has run.
+            ui.set_mode(Mode::Normal);
+            ui.set_focus(Focus::Input);
             input
                 .line
-                .open_with(PromptKind::Command, "rename ".to_owned());
+                .open_with(PromptKind::Command, format!("rename {name}"));
         }
         crate::card::BLOCK | crate::card::UNBLOCK => {
             let Some(contact) = profile.contact.as_ref() else {
@@ -2923,7 +2924,8 @@ pub(crate) fn submit(
         }
         PromptKind::Command => {
             let cmd = input.line.take();
-            run_command(
+            let card = ui.pane;
+            let opened = run_command(
                 &mut *ui,
                 &mut *list,
                 &mut *outbox,
@@ -2934,7 +2936,14 @@ pub(crate) fn submit(
                 &mut *profile,
                 session,
                 cmd.trim(),
-            )
+            );
+            // The line opened over a card so that the command could name its
+            // person; a command that did not open another pane leaves the
+            // conversation on show, as a command always has.
+            if matches!(card, Pane::Profile(ProfileId::User(_))) && ui.pane == card {
+                close_profile(&mut *ui, &mut *profile);
+            }
+            opened
         }
         PromptKind::Search => {
             let query = input.line.take();
@@ -4421,6 +4430,15 @@ pub(crate) fn handle_profile(
                     chat_id,
                 );
             }
+            false
+        }
+        // The line opens over the card, not after closing it: the card is
+        // what `command_subject` reads, and `leave_line` closes it once the
+        // command has run.
+        KeyCode::Char(':') if matches!(ui.pane, Pane::Profile(ProfileId::User(_))) => {
+            ui.set_mode(Mode::Normal);
+            ui.set_focus(Focus::Input);
+            input.line.open(PromptKind::Command);
             false
         }
         _ => {
