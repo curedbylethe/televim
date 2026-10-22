@@ -581,3 +581,4 @@ $ make watch   # the same, under cargo-watch
 ```
 
 The planned shape of what is left here is worked out in `~/.opencode/plan/`.
+
