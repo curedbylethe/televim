@@ -334,6 +334,29 @@ difference is the point:
   half happened to hold resident; the unauthorised binary is steadier, but the
   band was not tightened on the strength of five runs, so it stays loose.
 
+### The CI invocation
+
+CI runs the budget only where the feedback loop is not the constraint: on a push
+to `main`, on the nightly `17 3 * * *` schedule, and on a pull request labelled
+`memory`. An ordinary pull request runs neither `measure.py` nor `check.py`.
+
+`TELEVIM_MEASURE_LAUNCHES` is the variable that sets how many times the real
+binary is launched per measurement (`scripts/memory/measure.py:19,67`). Its
+default is 5, and CI holds the default rather than overriding it in the step's
+`env:`.
+
+Five launches run twice over — once unseeded, once against the seeded cache —
+and each launch carries a fixed 6 s settle plus a 2 s read, so the two
+scenarios cost ~90 s of the run. That is now paid on `main` and nightly runs,
+where a slower job delays no one's review.
+
+Three launches per binary was considered, and refused. The checked first-frame
+figure is the median of the *warm* launches, so three leaves two warm samples
+instead of four, and the band was calibrated on the five-launch spread (the
+cold/warm paragraph and *The noise floor*, above). The saving would be ~36 s, on
+runs where PR feedback is not the constraint; the alternative —
+`TELEVIM_MEASURE_LAUNCHES: 3` in the step's `env:` — is named here and rejected.
+
 ### Calibration
 
 The bands were not asserted; each was checked by injecting a real regression,
@@ -393,14 +416,16 @@ here — and it only measures on the platform it was recorded on: see below.
 
 ### One baseline per host
 
-A baseline is only comparable to a run on the platform it was taken on, and CI
-runs `ubuntu-latest` while this baseline was recorded on `darwin-arm64`. The
+A baseline is only comparable to a run on the platform it was taken on. The
 stored baseline names its `platform`, and the check enforces only when that
-matches the running host. On a host with no stored baseline it **reports and
-does not fail**, because a threshold cannot be calibrated on a machine it was
-never measured on; the run still writes its report, which a maintainer reads and
-records with `check.py --record-baseline`. So CI's first run on a new host is a
-recording run, and enforcement begins once that baseline is committed.
+matches the running host. The only committed baseline is
+`docs/memory-baseline.json`, and it is `darwin-arm64`; CI runs `ubuntu-latest`,
+so the check has had no baseline to enforce against there and has been
+reporting, not failing. On a host with no stored baseline it **reports and does
+not fail**, because a threshold cannot be calibrated on a machine it was never
+measured on; the run still writes its report, which a maintainer reads and
+records with `check.py --record-baseline`. Enforcement on the CI host therefore
+begins when a `linux-x86_64` baseline is committed, and not before.
 
 Each baseline is the **median across several `make measure` runs** (five in
 `docs/memory-baseline.json`), not one. Since the budget only fails on an

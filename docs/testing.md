@@ -2,7 +2,8 @@
 
 - `rustfmt.toml` and `clippy.toml` are canonical in themselves; this file does
   not reproduce them.
-- `Makefile` — `make ci` is the gate, and is what CI runs.
+- `Makefile` — `make ci` is the local gate. CI runs the same six targets, and
+  the memory budget as well on the paths the CI Pipeline section names.
 
 ## The `Makefile`
 
@@ -28,7 +29,12 @@
 
 ## CI Pipeline
 
-`.github/workflows/ci.yml`, on every push and pull request, on `ubuntu-latest`:
+`.github/workflows/ci.yml` runs one job on `ubuntu-latest`, on every push and
+pull request. The memory steps inside that job run only on a push to `main`, on
+the nightly schedule, and on a pull request labelled `memory`; an ordinary pull
+request skips them.
+
+The fast half, in the order the workflow runs it:
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --all-targets --all-features -- -D warnings`
@@ -40,10 +46,17 @@
    `if-no-files-found: warn`
 6. `make design-check`
 7. `cargo build --release`
-8. `scripts/memory/measure.py` then `scripts/memory/check.py` — the regression
-   budget, described above
-9. `actions/upload-artifact` for `target/memory-report.json`, with `if: always()`
-   so the report survives a failed comparison
+
+Then the regression budget, described in
+[`docs/memory.md`](./memory.md): `scripts/memory/measure.py` writes
+`target/memory-report.json`, then `scripts/memory/check.py` compares it against
+the stored baseline and the thresholds, and exits non-zero past a band. The
+report is uploaded as the `memory-report` artifact with `if: always()`, so a
+failed comparison still carries the numbers that explain it. Both steps carry
+one `if:` expression, which is why they run on exactly three paths — a push to
+`main`, the nightly `17 3 * * *` schedule, and a pull request labelled
+`memory` — and an ordinary pull request runs neither. Gating is per step inside
+the one job, so a scheduled run repeats the fast half above too.
 
 The PTY upload is step 5 because `termlens` writes a screen only when an error
 carries one (a failed wait, EOF, emulator or write error); a green run produces
@@ -53,10 +66,20 @@ scope; the test process reads it, not the spawned binary, which is also why it
 is pinned to the workspace — an integration test's working directory is the
 crate directory.
 
-Steps 8 and 9 are **not** in `make ci`: they need a release build and a pty, so
-they run in CI on the artifact rather than on every commit. Step 8 exits zero on
-a host with no stored baseline, which is why CI is green on its first run on a
-new machine and enforcing from the second.
+The memory steps are **not** in `make ci`: they need a release build and a pty,
+and neither belongs in a per-commit gate. They left ordinary pull requests for
+two reasons. They are a large share of the run — 119 s of a 4.8 min median
+across six recent successful runs — and their latency bands are calibrated per
+host, so a shared runner says as much about the runner as about the program. On
+`ubuntu-latest` the check has in fact never enforced anything: the only committed
+baseline is `darwin-arm64`, and with no baseline for the host `check.py` prints
+"not enforced" and exits zero. That job is a recording run today, and
+enforcement begins when a `linux-x86_64` baseline is committed.
+
+`cargo build --release` still runs on every pull request, so an ordinary PR now
+costs the fast half plus the release build — ~2.8 min against the ~4.8 min
+before. Moving the release build off the PR path is the release-job split, not
+this change.
 
 `libdbus-1-dev` and `pkg-config` are installed first, because `keyring`'s Linux
 backend links against DBus at build time.
