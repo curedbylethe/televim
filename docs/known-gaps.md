@@ -557,8 +557,12 @@ Real, and named so they are not mistaken for oversights:
   it. A local name lives only in this process and its history file.
 - **The archived list is fetched once per launch, not followed.** `:archived`
   draws what the last `messages.getDialogs { folder_id: 1 }` returned; an
-  archive made on another device is not pulled in until the next launch or
-  sign-in.
+  archive made on another device is not pulled in until the next launch,
+  sign-in or `:retry`.
+- **The archive is one page of 100.** The request has no offset, so an archive
+  of more than 100 conversations shows the newest 100 (pinned first) and the
+  rest cannot be reached, or unarchived, from `:archived`. Paging needs an
+  offset peer built from the last row.
 
 ## v2 Hooks
 

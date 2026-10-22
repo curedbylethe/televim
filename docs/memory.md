@@ -438,11 +438,15 @@ while calibrating this one.
   (8 MiB) of JSON-encoded message text over all of them, and `HISTORY_CACHE_CHATS` (500)
   chat-list rows, in memory and in the file beside the configuration — see
   [The history cache](#the-history-cache).
-- A bounded local-name map: one alias for each of at most `HISTORY_CACHE_CHATS`
-  (500) chat rows, in the same account-tagged history file and written with the
-  same coalesced save as the cache. The contacts list is transient — one fetch's
-  answer, at most `contacts.GetContacts`'s own response — and is dropped when
-  the overlay closes.
+- A local-name map with no cap of its own: one alias for each person the reader
+  has renamed, in the same account-tagged history file and written with the
+  same coalesced save as the cache. It is bounded by the reader's typing, one
+  `:rename` per entry, not by `HISTORY_CACHE_CHATS`: a chat-less contact is
+  never a chat row, and an eviction would drop words the reader wrote. An entry
+  goes with `:delete-chat`, a bare `:rename`, or sign-out. The contacts list is
+  one fetch's answer, at most `contacts.GetContacts`'s own response, and it is
+  kept after the overlay closes so that a failed refetch leaves the previous
+  directory on show.
 - Measurement-only `Instant` probes in the event loop, gated on
   `TELEVIM_MEASURE` and written to the log rather than the screen, so a launch's
   first frame and a keypress's latency have numbers behind them.
