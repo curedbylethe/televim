@@ -40,7 +40,7 @@ Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 - `tokio` enables the `full` feature set for flexibility across crates, but the application runtime is chosen explicitly at startup (see [`memory.md`](./memory.md)).
 - `vim-line` is pinned to `7.7` and used by `tui` for the input line, behind the
   `tui::line` wrapper. Its API differs substantially from older major versions, so consult the current docs when writing motion logic — and consult the wrapper's module docs first, because four of its behaviours are defects this workspace routes around rather than depends on: `EditResult::edits` must be applied in reverse, the word motions index bytes rather than characters, a visual selection is `cursor + 1` — so a range can run past the end of a buffer, or inside a character, and every index an edit carries is snapped on its way into the string — and a delete removes one code point, so the wrapper widens it to the cluster it touched.
-- `keyring` needs `libdbus-1-dev` and `pkg-config` on Linux to build the Secret Service backend; CI installs them before the first `cargo` step.
+- `keyring` needs `libdbus-1-dev` and `pkg-config` on Linux to build the Secret Service backend; every CI job that builds installs them first.
 
 ### The rest of them
 

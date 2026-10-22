@@ -2,8 +2,10 @@
 
 - `rustfmt.toml` and `clippy.toml` are canonical in themselves; this file does
   not reproduce them.
-- `Makefile` — `make ci` is the local gate. CI runs the same six targets, and
-  the memory budget as well on the paths the CI Pipeline section names.
+- `Makefile` — `make ci` is the local gate. CI's `lint` job runs the first
+  five targets on every push and pull request; its `release` job runs
+  `build-release` and the memory budget, on the paths the CI Pipeline section
+  names.
 
 ## The `Makefile`
 
@@ -29,12 +31,12 @@
 
 ## CI Pipeline
 
-`.github/workflows/ci.yml` runs one job on `ubuntu-latest`, on every push and
-pull request. The memory steps inside that job run only on a push to `main`, on
-the nightly schedule, and on a pull request labelled `memory`; an ordinary pull
-request skips them.
+`.github/workflows/ci.yml` runs two jobs on `ubuntu-latest`. The `lint` job runs
+on every push and pull request. The `release` job is gated at the job level to a
+push to `main`, the nightly schedule, and a pull request labelled `memory`; an
+ordinary pull request does not start it.
 
-The fast half, in the order the workflow runs it:
+The `lint` job, in the order the workflow runs it:
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --all-targets --all-features -- -D warnings`
@@ -45,19 +47,26 @@ The fast half, in the order the workflow runs it:
 5. `actions/upload-artifact` for that directory, with `if: always()` and
    `if-no-files-found: warn`
 6. `make design-check`
-7. `cargo build --release`
 
-Then the regression budget, described in
-[`docs/memory.md`](./memory.md): `scripts/memory/measure.py` writes
-`target/memory-report.json`, then `scripts/memory/check.py` compares it against
-the stored baseline and the thresholds, and exits non-zero past a band where a
-baseline for the host exists. The
-report is uploaded as the `memory-report` artifact with `if: always()`, so a
-failed comparison still carries the numbers that explain it. Both steps carry
-one `if:` expression, which is why they run on exactly three paths — a push to
-`main`, the nightly `17 3 * * *` schedule, and a pull request labelled
-`memory` — and an ordinary pull request runs neither. Gating is per step inside
-the one job, so a scheduled run repeats the fast half above too.
+The `release` job repeats the same setup — checkout, toolchain, the system
+dependencies and the cache — then runs:
+
+1. `cargo build --release --locked --bins --examples` — `--bins` is what puts
+   `target/release/televim` where the driver launches it, and `--examples` the
+   harness and seeder examples.
+2. the `memory-budget` step, described in
+   [`docs/memory.md`](./memory.md): `scripts/memory/measure.py` writes
+   `target/memory-report.json`, then `scripts/memory/check.py` compares it
+   against the stored baseline and the thresholds, and exits non-zero past a
+   band where a baseline for the host exists. The step sets
+   `TELEVIM_MEASURE_SKIP_BUILD=1`, so the driver builds nothing.
+3. `actions/upload-artifact` for the report as the `memory-report` artifact,
+   with `if: always()` and `if-no-files-found: warn`, so a failed comparison
+   still carries the numbers that explain it.
+
+One `if:` expression sits at the job level, which is why the `release` job runs
+on exactly three paths — a push to `main`, the nightly `17 3 * * *` schedule,
+and a pull request labelled `memory`. A scheduled run runs both jobs.
 
 The PTY upload is step 5 because `termlens` writes a screen only when an error
 carries one (a failed wait, EOF, emulator or write error); a green run produces
@@ -67,23 +76,22 @@ scope; the test process reads it, not the spawned binary, which is also why it
 is pinned to the workspace — an integration test's working directory is the
 crate directory.
 
-The memory steps are **not** in `make ci`: they need a release build and a pty,
-and neither belongs in a per-commit gate. They left ordinary pull requests for
-two reasons. They are a large share of the run — 119 s of a 4.8 min median
-across six recent successful runs — and their latency bands are calibrated per
-host, so a shared runner says as much about the runner as about the program. On
-`ubuntu-latest` the check has in fact never enforced anything: the only committed
-baseline is `darwin-arm64`, and with no baseline for the host `check.py` prints
-"not enforced" and exits zero. That job is a recording run today, and
-enforcement begins when a `linux-x86_64` baseline is committed.
+The memory budget is **not** in `make ci`: it needs a release build and a pty,
+and neither belongs in a per-commit gate. It lives in the `release` job. It
+left ordinary pull requests for two reasons. It was a large share of that single
+job — 119 s of a 4.8 min median across six recent successful runs — and its latency
+bands are calibrated per host, so a shared runner says as much about the runner
+as about the program. On `ubuntu-latest` the check has in fact never enforced
+anything: the only committed baseline is `darwin-arm64`, and with no baseline
+for the host `check.py` prints "not enforced" and exits zero. The `release`
+job is a recording run today, and enforcement begins when a `linux-x86_64`
+baseline is committed.
 
-`cargo build --release` still runs on every pull request, so an ordinary PR now
-costs the fast half plus the release build — ~2.8 min against the ~4.8 min
-before. Moving the release build off the PR path is the release-job split, not
-this change.
+An ordinary pull request runs the `lint` job's steps and nothing else; the
+`release` job carries the release build and the budget.
 
-`libdbus-1-dev` and `pkg-config` are installed first, because `keyring`'s Linux
-backend links against DBus at build time.
+`libdbus-1-dev` and `pkg-config` are installed first in both jobs, because
+`keyring`'s Linux backend links against DBus at build time.
 
 `.github/workflows/release.yml`, on every push to `main`, is not a gate. It keeps
 a release PR open (release-please), writes that PR's `CHANGELOG.md` section
@@ -179,7 +187,7 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   `archived_from` (a user, a group, a message, the seeded peers and the pinned
   order) and the ten report reasons.
 
-- **History cache:** two layers, both on every job and neither needing a
+- **History cache:** two layers, both on every run and neither needing a
   client. The **store** (`app/src/history_store.rs`) is pure functions over
   `HistoryCache` and one file in a temp directory: the file's round trip as an
   envelope on disk (through a passphrase provider, never the keyring), its
@@ -287,7 +295,7 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   anything. The parts of the media path that *can* be provoked without an account
   are not left to it: `classify_raw`/`classify_typed`, the chunk-count and abort
   rules of the streaming seam, the streamed store and its disk-space refusal, and
-  the `proto` mapping are all ordinary unit tests that run on every job, and
+  the `proto` mapping are all ordinary unit tests that run on every CI run, and
   the placeholder body is asserted in `tui`'s `TestBackend` tests. What only a
   datacenter can answer is whether Telegram hands over the bytes, which is why
   that one assertion is here and not in CI. The sticker path is covered the same
@@ -303,7 +311,7 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   `[animated sticker]` with no block and no pending fetch, `o` queues its open,
   `viewer_spec` gives it the generic viewer rather than the image or video key,
   and the media cache names its file `.tgs`, `.webm` or `.bin` from the magic
-  bytes. All of those run on every job.
+  bytes. All of those run on every CI run.
 - **TUI E2E Tests:** `app/tests/tui_e2e.rs` runs the `televim` binary in a pty
   through `termlens` and asserts on the screen. Nine tests: the chat list after
   launch, a seeded cache drawn before the first frame, typing in INSERT, resuming
@@ -311,7 +319,7 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   an arrival moving a pinned view, an arrival leaving a scrolled-back view alone,
   and a fetch in flight shown at the edge it is coming from. **Run policy:** none
   is `#[ignore]`d in a debug build; `make test` and CI's `cargo test --all
-  --all-features` run them on every job. They need a pty, not a network or
+  --all-features` run them on every run. They need a pty, not a network or
   credentials. **File map:** the tests are in `tui_e2e.rs`; the helpers
   (`sandbox`, `seed_history`, `spawn_offline`, `spawn_offline_with_scenario`) are
   in `app/tests/common/mod.rs`. The last three use that last helper: it writes
@@ -339,7 +347,9 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   baseline is [`memory-baseline.json`](./memory-baseline.json) and the numbers
   are quoted in [`memory.md`](./memory.md). It is not in `ci` because it needs a
   release build (`lto = "fat"`, `codegen-units = 1`) and a pty, and neither
-  belongs in a per-commit gate.
+  belongs in a per-commit gate. In CI the `release` job builds first and runs the
+  driver with `TELEVIM_MEASURE_SKIP_BUILD=1`, so the driver builds nothing; its
+  skip path requires those artifacts to exist.
   - **The measured binary runs isolated.** It is launched in a temporary sandbox
     *outside* the repository, with its own `HOME`, `TMPDIR`, session path and an
     empty config, inheriting only `PATH`/`TERM`/`LANG`-class variables. Without
