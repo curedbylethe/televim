@@ -519,15 +519,21 @@ next launch opens; a missing, corrupt or unknown-version index is no hint at all
 and the launch then uses the legacy slot rather than failing on a file that is
 only a convenience. It is written only after a `Ready` names an account —
 `accounts::note_signed_in` from `net::apply_ready` — and only when a field
-changes, so a launch writes it at most once. The session's own tag stays
-authoritative, which is why a slot with no session opens onto the sign-in
-surface like any other.
+changes, so a run that adds no account writes it at most once. The session's own
+tag stays authoritative, which is why a slot with no session opens onto the
+sign-in surface like any other.
 
-What is still single-account: the launch opens only the slot the index names, and
-nothing in the program writes an id slot — `note_signed_in` records every `Ready`
-at the legacy slot, a slot is chosen once at launch, and there is no switching
-between accounts while the program runs. `add account` remains a row that
-refuses.
+`SlotStore`'s target is either the session already where the resolver put it or
+`Target::Fresh`, the account being added: a fresh `load` answers `None` — there
+is no session until the sign-in writes one — and its `save` takes the account id
+from the snapshot, writes the session at `Id(id)`'s paths, then writes the index
+with `active = id`; an index write that fails removes the session it just wrote,
+because a session no launch can find is a reader signed in to nothing. A stored
+slot's bytes are read and written only where the resolver put them, and export
+and import use the same resolver for the slot in use rather than the legacy one.
+What is still single-account is the process, not the disk: one client and one
+account's state at a time, and switching is add-account-only until a picker can
+choose a slot already stored.
 
 `app` asks for `proto/live` and `telegram-framework/live` unconditionally, and
 has no feature of its own. It is a Telegram client: the two crates that talk to
@@ -569,6 +575,27 @@ Everything with a rule in it is a function over the state — `wanted`,
 that can be wrong is tested without a client or a datacenter; the rest is the
 calls. A `HistoryCursor`
 lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
+
+Adding an account is the one path that changes the slot under a running loop.
+`Action::AddAccount` — the self card's `add account` row and `:add-account` — is
+answered in `drive` before the client gate, because a switch is exactly when
+there is no client. `State::detach_account` returns at once if one is already
+switching; otherwise it flushes the drafts file while the file still names the
+account, drops the client `Arc` and with it the single-shot update relay, stops
+in-flight downloads, empties the screen's chats and history bookkeeping, and sets
+`switching`. Nothing is deleted: the first account's drafts, history, media,
+session and paths stay where the resolver put them, and
+`runtime::persist_for_slot` writes nothing for either file while `switching` is
+set — the file the sync would reach for is the account that just left, and the
+words on screen are no longer its to keep. A history write already in flight at
+the detach finishes into the first account's own file, because it holds its own
+`HistoryFile`. The fresh bring-up opens through `Opening::Fresh`, whose
+`Target::Fresh` has no slot until the sign-in stores one; `adopt_slot` at the
+`Ready` that names the new account reopens that slot's drafts, history and media
+and points the panel at its store. `Action::LoginCancelled` while switching is
+answered before the client gate too: `cancel_switch` drops the fresh client and
+login tokens, adopts the first slot again and brings it up, which is why `Esc` at
+the phone step queues the cancel as the code and password steps already did.
 
 `media_cache.rs` owns the media directory (`televim.media` beside the config, or
 `media_cache_dir`). Each distinct content is one blob named `<sha256>.<suffix>`; a

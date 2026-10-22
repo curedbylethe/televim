@@ -81,7 +81,9 @@ Working today:
   `yy`: there is no pending-yank latch on a card, so the second press yanks the same
   row again, and the hint naming `y/yy` is naming one key rather than two. The
   design's per-peer **colour slot is held and not built** — see [`docs/known-gaps.md`](./docs/known-gaps.md).
-  `add account` refuses with `not yet: this build cannot add an account`; `logout`
+  `add account` opens the sign-in at the phone step for a second account without
+  signing the first one out: its client goes and its files stay where they are, so
+  `Esc` at the phone step cancels and brings it back. `logout`
   confirms on the same screen-wide row and then signs out — the session is
   discarded, the list empties, and the sign-in field comes back for the phone; on a
   contact's card `d` acts on its `rename`, `block`/`unblock` and `report` rows, and
@@ -248,7 +250,8 @@ Working today:
   a return to a message the window no longer holds is fetched the same way, and
   says `Jumping back…` or `Jumping forward…`. The marks are kept per
   conversation, so leaving a chat and returning walks back to where the reader
-  stood before the switch; an empty chat list — a sign-out — forgets them. Each
+  stood before the switch; an empty chat list — a sign-out, or the detach before a
+  second account signs in — forgets them. Each
   conversation keeps up to `jumplist_depth` marks on **either** stack (default
   100, `TELEVIM_JUMPLIST_DEPTH`, 1 to 1000). While a page is in flight only
   `Esc` answers, and it leaves the reader where they were. `gd` on a message
@@ -416,9 +419,9 @@ Working today:
   block, delete and report ask `y/n` first; the contacts list opens a person's
   card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
-  `:date <ISO>`, `:settings`, `:signin`, `:retry`, `:unlock`, `:passphrase`,
-  `:export-session <path>`, `:import-session <path>`, and the eight chat and
-  contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,
+  `:date <ISO>`, `:settings`, `:signin`, `:add-account`, `:retry`, `:unlock`,
+  `:passphrase`, `:export-session <path>`, `:import-session <path>`, and the
+  eight chat and contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,
   `:rename [name]`, `:delete-chat [both]`, `:report [reason]`, `:contacts`).
   `:date <ISO>` takes `YYYY-MM-DD` in the reader's own zone and jumps to the
   first message of that day, loading a page when the window does not hold it;
@@ -432,8 +435,8 @@ Working today:
   the file changes nothing; the command is refused while the session is locked.
   The last two copy the stored session between backends: `:export-session` writes
   it, sealed under the current key, to a file; `:import-session` reads such a file
-  into the configured store (the file at `session_path`, or the OS keyring when none
-  is set) after a `y/n`, refuses a session that belongs to another account than the
+  into the signed-in account's store (its slot's session file, or the OS keyring when
+  none is set) after a `y/n`, refuses a session that belongs to another account than the
   one signed in, and reconnects with it. The auth key travels inside the snapshot;
   the live session and the source are left as they were. The path is required.
   `:retry` re-runs the bring-up — the client, the chat list, the feed — and is how
@@ -489,8 +492,7 @@ Not built, and named here so nobody reads the roadmap below as current:
   `d` with no second press to distinguish. `p` is unbound in Visual — replacing a
   selection with the reader's own text is a destructive reading of a key that
   looks additive.
-- **`:w`** — not a command. The commands are `q`/`quit`, `chat <id>`,
-  `new <query>`, `settings`, `signin` and `retry`.
+- **`:w`** — not a command. The commands are the ones listed above.
 - **Word motions *behind an operator* on non-ASCII text in the input** — refused
   with a message. `vim-line`'s word motions index bytes rather than characters,
   and behind `d`/`c`/`y` the motion and the slice to apply it happen inside one
