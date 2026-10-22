@@ -1733,6 +1733,34 @@ mod tests {
     }
 
     #[test]
+    fn a_deleted_conversation_drops_its_per_chat_keys_and_keeps_shared_media() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cache = cache_in(dir.path(), None);
+        cache.store(1, 5, MediaKind::File, b"gone").expect("cached");
+        let other = cache
+            .store(2, 5, MediaKind::File, b"other chat")
+            .expect("cached");
+        let shared = cache
+            .store_keys(
+                &[Key::Message(1, 6), Key::Media(77)],
+                MediaKind::Video,
+                b"clip",
+            )
+            .expect("cached");
+
+        cache.remove_chat(1);
+
+        assert_eq!(cache.lookup(1, 5), None);
+        assert_eq!(cache.lookup(1, 6), None);
+        assert_eq!(cache.lookup(2, 5), Some(other), "another chat's file stays");
+        assert_eq!(
+            cache.lookup_media(77),
+            Some(shared),
+            "forwarded copies share the content-addressed entry"
+        );
+    }
+
+    #[test]
     fn the_production_caps_are_a_gibibyte_and_256_files() {
         assert_eq!(MEDIA_CACHE_MAX_BYTES, 1024 * 1024 * 1024);
         assert_eq!(MEDIA_CACHE_MAX_ENTRIES, 256);

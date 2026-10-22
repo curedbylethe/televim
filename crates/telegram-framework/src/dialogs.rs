@@ -15,6 +15,10 @@
 //! function over primitives: `classify_user`, `join_title`, `unread_count`,
 //! `message_timestamp`, `last_text` and `newest_first`. Those are the parts that
 //! can be wrong, and they run on every CI job.
+//!
+//! The archive is the exception that proves the rule: it is read from the raw
+//! `tl` response, which can be built by hand, so `archived_from` and the `raw_*`
+//! readers under it are tested as a whole rather than decision by decision.
 
 use std::cmp::Ordering;
 
@@ -263,7 +267,11 @@ impl Client {
 /// Telegram's archive folder. A convention, not a TL constant.
 const ARCHIVE_FOLDER_ID: i32 = 1;
 
-/// The full archive page, with no exclusions.
+/// The first archive page, with no exclusions.
+///
+/// One page of 100 and no more: an archive beyond that is not reachable from
+/// `:archived`, which `docs/known-gaps.md` records. Paging needs an offset peer
+/// built from the last row, which no test here could hold.
 fn archived_dialogs_request() -> tl::functions::messages::GetDialogs {
     tl::functions::messages::GetDialogs {
         exclude_pinned: false,
@@ -332,7 +340,7 @@ fn archived_from(
         })
         .collect();
 
-    conversations.sort_by(newest_first);
+    conversations.sort_by(pinned_then_newest);
 
     let peers = users
         .iter()
@@ -874,5 +882,121 @@ mod tests {
         dialogs.sort_by(pinned_then_newest);
 
         assert_eq!(peer_ids(&dialogs), vec![1, 2, 3, 4]);
+    }
+
+    /// A raw dialog row for `peer`, as the archive page lists it.
+    fn raw_dialog(peer: tl::enums::Peer, top_message: i32, pinned: bool) -> tl::enums::Dialog {
+        tl::enums::Dialog::Dialog(tl::types::Dialog {
+            pinned,
+            unread_mark: false,
+            view_forum_as_messages: false,
+            peer,
+            top_message,
+            read_inbox_max_id: 0,
+            read_outbox_max_id: 6,
+            unread_count: 3,
+            unread_mentions_count: 0,
+            unread_reactions_count: 0,
+            unread_poll_votes_count: 0,
+            notify_settings: tl::enums::PeerNotifySettings::Settings(
+                tl::types::PeerNotifySettings {
+                    show_previews: None,
+                    silent: None,
+                    mute_until: None,
+                    ios_sound: None,
+                    android_sound: None,
+                    other_sound: None,
+                    stories_muted: None,
+                    stories_hide_sender: None,
+                    stories_ios_sound: None,
+                    stories_android_sound: None,
+                    stories_other_sound: None,
+                },
+            ),
+            pts: None,
+            draft: None,
+            folder_id: Some(ARCHIVE_FOLDER_ID),
+            ttl_period: None,
+        })
+    }
+
+    #[test]
+    fn an_archive_page_maps_to_conversations_and_the_peers_that_unarchive_them() {
+        let mut message = crate::testing::raw_message(None);
+        let tl::enums::Message::Message(inner) = &mut message else {
+            panic!("the fixture is a full message");
+        };
+        inner.id = 11;
+        inner.date = 1_700_000_100;
+        inner.message = "see you".to_owned();
+
+        let page = tl::enums::messages::Dialogs::Dialogs(tl::types::messages::Dialogs {
+            dialogs: vec![
+                raw_dialog(
+                    tl::enums::Peer::User(tl::types::PeerUser { user_id: 42 }),
+                    0,
+                    false,
+                ),
+                raw_dialog(
+                    tl::enums::Peer::User(tl::types::PeerUser { user_id: 43 }),
+                    11,
+                    false,
+                ),
+                raw_dialog(
+                    tl::enums::Peer::Chat(tl::types::PeerChat { chat_id: 7 }),
+                    0,
+                    true,
+                ),
+            ],
+            messages: vec![message],
+            chats: vec![tl::enums::Chat::Chat(tl::types::Chat {
+                creator: false,
+                left: false,
+                deactivated: false,
+                call_active: false,
+                call_not_empty: false,
+                noforwards: false,
+                id: 7,
+                title: "Book club".to_owned(),
+                photo: tl::enums::ChatPhoto::Empty,
+                participants_count: 3,
+                date: 0,
+                version: 1,
+                migrated_to: None,
+                admin_rights: None,
+                default_banned_rights: None,
+            })],
+            users: vec![
+                crate::testing::user(42, Some("Ada"), Some("Lovelace"), None, false),
+                crate::testing::user(43, Some("Grace"), None, Some("grace"), false),
+            ],
+        });
+
+        let (conversations, peers) = archived_from(page);
+
+        // Pinned first, then newest: the dated 43, then the dateless 42.
+        assert_eq!(peer_ids(&conversations), vec![7, 43, 42]);
+        let group = &conversations[0];
+        assert_eq!(group.title, "Book club");
+        assert_eq!(group.kind, DialogKind::Group);
+        assert!(group.pinned);
+        let grace = &conversations[1];
+        assert_eq!(grace.title, "Grace");
+        assert_eq!(grace.kind, DialogKind::PrivateUser);
+        assert_eq!(grace.last_message_id, Some(11));
+        assert_eq!(grace.last_text.as_deref(), Some("see you"));
+        assert_eq!(grace.last_timestamp, Some(1_700_000_100));
+        assert_eq!(grace.unread_count, 3);
+        assert_eq!(grace.read_outbox_max_id, 6);
+        assert_eq!(conversations[2].title, "Ada Lovelace");
+        assert_eq!(peers.len(), 3, "both users and the chat can be unarchived");
+    }
+
+    #[test]
+    fn an_unmodified_archive_page_is_empty() {
+        let (conversations, peers) = archived_from(tl::enums::messages::Dialogs::NotModified(
+            tl::types::messages::DialogsNotModified { count: 0 },
+        ));
+        assert!(conversations.is_empty() && peers.is_empty());
     }
 }
