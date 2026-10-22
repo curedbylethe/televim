@@ -73,6 +73,8 @@ for it.
 | `logo/favicon.svg` | `logo/favicon.svg` |
 | `logo/favicon.ico` | `logo/favicon.ico` |
 | `logo/televim-social.png` | `logo/televim-social.png` |
+| `global-search-states.html` | `global-search-states.html` |
+| `global-search-states-frames.js` | `global-search-states-frames.js` |
 
 `build-specimen.js` resolves the engine as `../televim-engine.js`, which is why the
 layout is mirrored rather than flattened. Editing a vendored file here and not

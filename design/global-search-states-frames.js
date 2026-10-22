@@ -5,7 +5,7 @@
    Rows carry one or two snippet lines: `s` is an array, 1 or 2 entries, each at most 62 cells. */
 (function () {
   'use strict';
-  const W = 80, IW = 78, LIST_ROWS = 21, GUT = 16, SNIP = 62, STATUS_MAX = 70;
+  const W = 80, IW = 78, LIST_ROWS = 21, GUT = 16, SNIP = 62, STATUS_MAX = 69;
   const HINT = 'j/k: move  ⏎: open  { }: chat  gg/G: ends  Esc: close';
   const HINT_IDLE = 'Esc: close';
   const LABEL = { NORMAL: [' NORMAL  ', 'fN'], INSERT: [' INSERT  ', 'fI'] };
@@ -147,9 +147,6 @@
     /* 2. dropped count */
     { id: 'dropped-nine', state: 'dropped', label: 'Nine kept, three dropped: the same nine hits, the same cursor, one clause more.',
       mode: 'NORMAL', status: '?tickets — 9 results in 3 chats, 3 dropped', cursor: 0, hint: HINT, groups: SAME() },
-    { id: 'dropped-hundred', state: 'dropped', label: 'A hundred held of 412, two of them dropped.',
-      mode: 'NORMAL', status: '?tickets — 100 of 412 results in 3 chats, 2 dropped', cursor: 0, hint: HINT,
-      groups: [G('Ada Lovelace', 40, ADA), G('Grace Hopper', 35, GRACE), G('Margaret Hamilton', 25, MARGARET)] },
     { id: 'dropped-none', state: 'dropped', label: 'Nothing kept, four dropped: no list, and the sentence says why.',
       mode: 'NORMAL', status: '?tickets — no matches, 4 dropped', cursor: -1, hint: HINT_IDLE, groups: [] },
 
