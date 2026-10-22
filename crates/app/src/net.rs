@@ -990,7 +990,7 @@ impl State {
             .and_then(accounts::AccountsIndex::load)
             .and_then(|index| index.slot_of(id));
         let Some(slot) = slot else {
-            app.flash("that account is not in the index");
+            app.flash("that account has no stored session on this machine");
             return;
         };
         self.detach_account(app, Opening::Slot(slot));
@@ -4315,9 +4315,9 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
 /// Pushes the picker's rows from the index.
 ///
 /// `index` is `None` when there is no index; the card then lists nothing, which
-/// is what an install with one account draws anyway. Called at launch, after the
-/// index is first read, and after an accepted switch — never on a pass, so the
-/// index is not read twice for one landing.
+/// is what an install with one account draws anyway. Called at launch and after
+/// any `Ready` that names an account — never on a pass, so the index is not read
+/// twice for one landing.
 pub(crate) fn push_known_accounts(app: &mut App, index: Option<&accounts::AccountsIndex>) {
     let accounts = index.map_or_else(Vec::new, |index| {
         index
@@ -4363,12 +4363,10 @@ fn adopt_arrival(app: &mut App, state: &mut State, account: &domain::account::Ac
         {
             tracing::warn!(%error, "the accounts index could not be written");
         }
-        // The picker is one push from the index, after the write that may have
-        // moved `active`: the card lists an account's own id, so a switch is
-        // the only moment its rows change.
-        if switched {
-            push_known_accounts(app, accounts::AccountsIndex::load(index).as_ref());
-        }
+        // The picker is one push from the index, after the write that moved
+        // `active`. A `Ready` that names an account is the moment its rows
+        // change, whether or not this run was switching.
+        push_known_accounts(app, accounts::AccountsIndex::load(index).as_ref());
     }
     switched
 }
@@ -4732,10 +4730,11 @@ fn apply_ready_to_screen_with_archive(
     app.record_read_positions(&chats);
     let conversation_open = app.conversation.conversation.window.chat_id != 0 && !other_account;
     // **The reader's place survives the switch.** The first `Ready` after a
-    // detach carries the conversation they were reading, by peer id, and it is
-    // taken here whatever happens, so the next `Ready` — a reconnect's — lands
-    // as the ordinary refresh it is rather than moving the reader again.
-    let carried = state.carried_place.take();
+    // detach carries the conversation they were reading, and the first `Ready`
+    // that names an account spends it; a switch's signed-out `Ready` names
+    // nobody, so it keeps the place for the cancel's return.
+    let switching = state.is_switching();
+    let carried = state.carried_place.take_if(|_| !switching);
     let mut carried_line: Option<&str> = None;
     let restored = if conversation_open && !no_session {
         state.history.cursor = None;
@@ -13528,6 +13527,12 @@ mod switch_tests {
         let mut state = State::default();
 
         state.detach_account(&mut app, Opening::Fresh);
+        // The order `apply_ready` runs in: the arrival is adopted, ending the
+        // switch, and the screen call lands the place after it.
+        assert!(
+            adopt_arrival(&mut app, &mut state, &other_account()),
+            "this is the switch arriving"
+        );
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13560,6 +13565,12 @@ mod switch_tests {
         let mut state = State::default();
 
         state.detach_account(&mut app, Opening::Fresh);
+        // The order `apply_ready` runs in: the arrival is adopted, ending the
+        // switch, and the screen call lands the place after it.
+        assert!(
+            adopt_arrival(&mut app, &mut state, &other_account()),
+            "this is the switch arriving"
+        );
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13598,6 +13609,12 @@ mod switch_tests {
         let mut state = State::default();
 
         state.detach_account(&mut app, Opening::Fresh);
+        // The order `apply_ready` runs in: the arrival is adopted, ending the
+        // switch, and the screen call lands the place after it.
+        assert!(
+            adopt_arrival(&mut app, &mut state, &other_account()),
+            "this is the switch arriving"
+        );
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13623,6 +13640,12 @@ mod switch_tests {
         let mut state = State::default();
 
         state.detach_account(&mut app, Opening::Fresh);
+        // The order `apply_ready` runs in: the arrival is adopted, ending the
+        // switch, and the screen call lands the place after it.
+        assert!(
+            adopt_arrival(&mut app, &mut state, &other_account()),
+            "this is the switch arriving"
+        );
         apply_ready_to_screen(
             &mut app,
             &mut state,
@@ -13652,6 +13675,49 @@ mod switch_tests {
         assert!(
             state.carried_place.is_none(),
             "nothing was left to re-apply"
+        );
+    }
+
+    /// A switch whose target store holds no session keeps the reader's place:
+    /// the `Err` `Ready` opens the sign-in surface, and the cancel's return
+    /// lands the conversation they left rather than the newest one.
+    #[test]
+    fn a_failed_switch_keeps_the_place_for_the_cancel() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(10), chat(20), chat(30)]);
+        assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
+        let mut state = State::default();
+
+        state.detach_account(&mut app, Opening::Slot(AccountSlot::Id(7)));
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            Vec::new(),
+            Err(String::new()),
+            tui::SessionStore::Keyring,
+        );
+        assert!(state.is_switching(), "the switch waits on the sign-in");
+        assert!(
+            state.carried_place.is_some(),
+            "the place is kept for the return"
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        state.held.push_back(Action::LoginCancelled);
+        drive(&mut app, &mut state, &tx);
+        assert!(!state.is_switching(), "the switch is over");
+
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(30), chat(20), chat(50)],
+            Ok(other_account()),
+            tui::SessionStore::Keyring,
+        );
+
+        assert_eq!(
+            app.conversation.conversation.window.chat_id, 20,
+            "the reader is back in the conversation they left, not the top row"
         );
     }
 
@@ -13932,7 +13998,7 @@ mod switch_tests {
         drive(&mut app, &mut state, &tx);
 
         assert_eq!(
-            app.ui.status, "that account is not in the index",
+            app.ui.status, "that account has no stored session on this machine",
             "the reader is told why nothing happened"
         );
         assert!(!state.is_switching(), "no switch was begun");
