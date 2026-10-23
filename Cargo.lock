@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "domain",
  "telegram-framework",
@@ -3595,7 +3595,7 @@ dependencies = [
 
 [[package]]
 name = "telegram-framework"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm-siv",
@@ -3618,7 +3618,7 @@ dependencies = [
 
 [[package]]
 name = "televim"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3979,7 +3979,7 @@ dependencies = [
 
 [[package]]
 name = "tui"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "crossterm 0.28.1",
