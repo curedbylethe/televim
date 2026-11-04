@@ -336,6 +336,20 @@ pub enum FrameworkError {
         /// Identifier of the message.
         message_id: i64,
     },
+
+    /// The caller stopped reading an attachment before its upload completed.
+    #[error("the attachment upload was cancelled")]
+    UploadAborted,
+
+    /// The local attachment could not be opened or read.
+    #[error("could not read attachment {path}: {reason}")]
+    AttachmentUnreadable {
+        /// Path supplied by the caller.
+        path: String,
+
+        /// Operating-system reason.
+        reason: String,
+    },
 }
 
 #[cfg(feature = "live")]
