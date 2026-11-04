@@ -22,6 +22,16 @@
 
 #[cfg(feature = "live")]
 use crate::ProtoError;
+#[cfg(feature = "live")]
+use crate::types::{ProtoMessage, framework_media_kind};
+#[cfg(feature = "live")]
+use domain::message::{MediaKind, Message};
+#[cfg(feature = "live")]
+use std::path::Path;
+#[cfg(feature = "live")]
+use std::sync::Arc;
+#[cfg(feature = "live")]
+use std::sync::atomic::AtomicBool;
 
 /// Narrows a message identifier to the range Telegram numbers messages in.
 ///
@@ -48,6 +58,32 @@ fn narrow(chat_id: i64, message_id: i64) -> Result<i32, ProtoError> {
 
 #[cfg(feature = "live")]
 impl crate::ProtoClient {
+    /// Uploads and sends a local photo or document to a conversation.
+    ///
+    /// Progress counts bytes read by the upload stream, not bytes acknowledged
+    /// by Telegram. Cancellation is cooperative: a part already in flight can
+    /// still reach Telegram.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] when the file cannot be read, upload
+    /// fails, or Telegram refuses to send the message.
+    pub async fn send_attachment(
+        &self,
+        chat_id: i64,
+        path: &Path,
+        kind: MediaKind,
+        progress: impl Fn(u64, u64) + Send,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Message, ProtoError> {
+        let sent = self
+            .inner()
+            .send_attachment(chat_id, path, framework_media_kind(kind), progress, cancel)
+            .await?;
+
+        Ok(Message::from(ProtoMessage::from(sent)))
+    }
+
     /// Streams the media a message carries to `sink`, one chunk at a time.
     ///
     /// `chat_id` is the bare identifier of the conversation, the same number the

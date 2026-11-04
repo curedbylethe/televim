@@ -25,7 +25,9 @@ use std::borrow::Cow;
 
 use domain::chat::{Chat, ChatKind};
 use domain::message::{MediaKind, Message, MessageStatus};
+#[cfg(feature = "live")]
 use domain::presence::Presence;
+#[cfg(feature = "live")]
 use telegram_framework::UserPresence;
 
 #[cfg(feature = "live")]
@@ -238,6 +240,20 @@ pub(crate) fn media_kind(kind: telegram_framework::media::MediaKind) -> MediaKin
     }
 }
 
+/// Maps the domain's media taxonomy onto the framework's upload vocabulary.
+#[cfg(feature = "live")]
+pub(crate) fn framework_media_kind(kind: MediaKind) -> telegram_framework::media::MediaKind {
+    match kind {
+        MediaKind::Photo => telegram_framework::media::MediaKind::Photo,
+        MediaKind::Video => telegram_framework::media::MediaKind::Video,
+        MediaKind::Gif => telegram_framework::media::MediaKind::Gif,
+        MediaKind::Voice => telegram_framework::media::MediaKind::Voice,
+        MediaKind::Sticker => telegram_framework::media::MediaKind::Sticker,
+        MediaKind::AnimatedSticker => telegram_framework::media::MediaKind::AnimatedSticker,
+        MediaKind::File => telegram_framework::media::MediaKind::File,
+    }
+}
+
 /// Maps the framework's peer taxonomy onto the domain's.
 ///
 /// The two line up one for one and the match says so: a kind added to the
@@ -264,6 +280,7 @@ pub(crate) fn chat_kind(kind: DialogKind) -> ChatKind {
 /// Total and exhaustive on purpose: a new framework variant stops the build
 /// here rather than arriving in `domain` as a silent default. `was_online` is
 /// carried through unchanged.
+#[cfg(feature = "live")]
 pub(crate) fn to_presence(presence: UserPresence) -> Presence {
     match presence {
         UserPresence::Online => Presence::Online,
@@ -280,6 +297,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "live")]
     fn every_framework_presence_maps_to_its_domain_twin_keeping_the_timestamp() {
         assert_eq!(to_presence(UserPresence::Online), Presence::Online);
         assert_eq!(
@@ -675,6 +693,11 @@ mod live_tests {
 
         for (source, expected) in cases {
             assert_eq!(media_kind(source), expected, "{source:?} was mistranslated");
+            assert_eq!(
+                media_kind(framework_media_kind(expected)),
+                expected,
+                "{expected:?} did not round-trip through the framework"
+            );
         }
     }
 
