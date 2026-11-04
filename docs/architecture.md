@@ -126,7 +126,10 @@ A **first-party crate** that wraps `grammers-client` and provides:
   itself, so a client that has not made it cannot name its own user.
 - Chat actions: archive/unarchive, block/unblock, delete a conversation's history
   (locally or for both sides), report a person, and list the account's contacts.
-- Message send/edit/delete builders.
+- Message send/edit/delete builders, plus `Client::send_attachment` for streaming
+  an image or document upload with byte progress and cooperative cancellation.
+- Live media classification reads the raw message envelope. Unmodelled media is
+  retained as `File`, including variants the typed `grammers` decoder declines.
 - An **escape hatch**: `Client::invoke()` that forwards directly to `grammers`.
 
 `sealed` is the session file's encryption, and it needs no `grammers`. `seal`
@@ -143,7 +146,8 @@ migrates a plaintext file on its first load. An envelope that will not open is
 [`decisions.md`](./decisions.md).
 
 The modules beyond the three above are the ones with a rule in them: `dialogs`,
-`account`, `contacts`, `history`, `messages`, `search`, `users` and `updates`. Each keeps every decision that can
+`account`, `contacts`, `history`, `messages`, `search`, `upload`, `users` and
+`updates`. Each keeps every decision that can
 be wrong in a free function over primitives, so it is testable on CI without a
 datacenter, and keeps the `grammers`-reading code as thin as it can be made. That
 is the same rule `app/src/net.rs` follows.
@@ -171,11 +175,18 @@ build and test with `--all-features` whenever you touch this crate. Session
 storage needs no `grammers` at all and is always compiled; the client half is
 what `live` gates.
 
+`media.rs` classifies both fetched history and live updates from the raw
+`tl::enums::Message` envelope. Present-but-unmodelled media is `File`; the live
+path shares that classifier, so `None` means Telegram sent no media. `upload.rs`
+opens local files with `tokio::fs`, wraps each reader with byte progress and a
+cooperative cancellation flag, then calls `Client::upload_stream`. The framework
+sends the result as a photo or document and returns the ordinary `MessageInfo`.
+
 ### `proto`
 
 A **thin translation layer**. Consumes `telegram-framework` and maps its types into `domain` types. It must not expose any `grammers` or `telegram-framework` types to `domain` or `tui`.
 
-`to_presence` (`types.rs`) maps each `UserPresence` to its `domain::presence::Presence` twin. `account.rs` also maps a reported person's block flag into `domain::account::UserProfile`, and `domain::report::ReportReason` into the framework's own reason enum; the contact and archive calls stay typed through `telegram-framework::contacts` and `dialogs`. The `Offline` timestamp passes through unchanged, so what the time means and how it reads stays in `tui`. `account.rs` carries the presence into the domain `Account`, and `stream.rs` maps `UpdateKind::PeerStatus` to `UpdateEvent::PeerStatus`.
+`to_presence` (`types.rs`) maps each `UserPresence` to its `domain::presence::Presence` twin. `account.rs` also maps a reported person's block flag into `domain::account::UserProfile`, and `domain::report::ReportReason` into the framework's own reason enum; the contact and archive calls stay typed through `telegram-framework::contacts` and `dialogs`. `media.rs` calls the `types.rs` mapping from `domain::MediaKind` to the framework upload kind, then passes path, progress callback and cancellation flag to `Client::send_attachment`; the returned `MessageInfo` follows the existing message conversion. The `Offline` timestamp passes through unchanged, so what the time means and how it reads stays in `tui`. `account.rs` carries the presence into the domain `Account`, and `stream.rs` maps `UpdateKind::PeerStatus` to `UpdateEvent::PeerStatus`.
 
 ```
 crates/proto/
@@ -188,7 +199,8 @@ crates/proto/
 │   ├── types.rs        # Internal DTOs (never expose grammers types); to_presence
 │   ├── stream.rs       # Update subscription & event mapping
 │   ├── history.rs      # History page -> domain window
-│   ├── messages.rs     # Send/edit/delete, and identifier widening
+│   ├── messages.rs     # Text send/edit/delete, and identifier widening
+│   ├── media.rs        # Attachment upload passthrough
 │   ├── search.rs       # Per-conversation search, and the global DTOs:
 │   │                   #   GlobalSearchRequest/Results, GlobalCursor, GlobalPeer
 │   └── users.rs        # Resolve a @username, or search people -> candidates
@@ -368,6 +380,17 @@ the snapshot beside the configuration (`televim.drafts.json`: atomic rename,
 account-tagged, removed on sign-out); `tui` itself names no file. `event.rs` is the
 context-free key map: `App::handle_key` answers its `Quit` (`Ctrl-C`) before the
 precompute, and `coordinate::handle_key` keeps the focus and mode dispatch.
+
+The media commands use the same outbox seam. `:attach <path>` checks the design's
+image and document extension allowlist, raises a confirmation, and captures the
+chat, path and media kind. Confirming queues a negative-id media placeholder
+before `Action::SendAttachment`; its row shows `[sending…]`, then upload progress
+beside it. `Esc` sets the upload's cancellation flag. A failed row keeps its path
+in app state so `o` or `:open` can retry it; dismissing the row releases that
+path. `:open` otherwise opens the highlighted message's cached or downloaded
+attachment. `:save <path>` reuses that download path, then copies the cache file
+to the reader's destination off the event loop. `tui` owns neither upload I/O nor
+filesystem access.
 
 The new-conversation search is the second prompt-driven surface. `/` on the chat
 list opens it (the conversation's `/` still searches messages), `:new <query>`
@@ -646,6 +669,16 @@ stored. `clear` bumps a generation, so a store that reserved before a clear remo
 its late file instead of indexing it, unless a newer reservation or entry holds its
 name; a reservation holds its name until it commits or its write fails. Sign-out
 never waits out a write.
+
+Uploads and exports are orchestrated in `net::State`. A pending upload map holds
+each negative placeholder's local path, kind and cancellation flag. Upload tasks
+send `UploadProgress` events; `apply` folds those into the conversation's
+download-status table and settles the existing `Sent` event on success, failure
+or cancellation. The path remains available for retry until success or
+dismissal. `SaveMedia` uses `media_job` and `save_media`, so a cache miss downloads
+through the existing pipeline. After `MediaSaved`, `spawn_blocking` copies the
+cached file to the requested path; tilde expansion happens in `app`, before the
+copy. Neither upload reads nor file copies block the current-thread event loop.
 
 `history_store.rs` owns the history file (`televim.toml` → `televim.history.json`)
 and the cache it holds: the newest `HISTORY_CACHE_DEPTH` (200, asserted equal to

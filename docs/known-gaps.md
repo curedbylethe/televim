@@ -2,19 +2,6 @@
 
 Real, and named so they are not mistaken for oversights:
 
-- **The typed update path cannot say "media `grammers` did not decode".** Every
-  message description carries `media: Option<MediaKind>`, and the classification
-  is tested on both paths as free functions (`classify_raw` for the raw
-  `GetHistory` fetch, `classify_typed` for the `grammers` feed). On the typed
-  path there is still one hole: `grammers`' `Media::from_raw` returns `None` for
-  a handful of variants, and this build reads no wire type behind that `None`. So
-  a message whose media `grammers` declines to build arrives as *no media at all*,
-  where the raw history path would have said `File`. The two answers are the same
-  for everything modelled and disagree only for media `grammers` itself does not
-  carry. Closing it means classifying the raw field on the feed path as well,
-  which the crate's two-path split exists to avoid — the update feed arrives as a
-  built `grammers` `Message`, and there is no raw variant to match on there
-  without re-deriving one.
 - **The media cache has five known limits.**
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on
@@ -542,10 +529,21 @@ Real, and named so they are not mistaken for oversights:
   The first four bytes decide `.tgs` (`1f 8b`), `.webm` (`1a 45 df a3`) or `.bin`; an
   unreadable temp also falls back to `.bin`. The file is still opened by the viewer
   key, but a platform opener that dispatches on the extension cannot know the format.
-- **Sticker sending and the sticker picker are not built.** The send half needs
-  upload and `messages.sendMedia`, which CUR-11 covers; no wrapper for either exists
-  in this tree. The two lists are scoped under `## v2 Hooks` below, and no Normal-mode
-  key is bound until the picker can send. `:stickers` is not a command in this build.
+- **Sticker sending and the sticker picker are not built.** `:attach` sends only
+  the listed image and document formats; it has no sticker path. The picker still
+  needs account sticker lists, and no Normal-mode key is bound until it can send.
+  `:stickers` is not a command in this build.
+- **Attachment upload does not resume after relaunch.** The retry path lives in
+  app memory beside the failed placeholder. Restarting loses both; run `:attach`
+  again. Cancellation stops the next local read, but a part already in flight can
+  still reach Telegram.
+- **The attach surface sends no captions, albums or voice recordings.** It accepts
+  images and documents only. A caption can be added by editing the sent message;
+  albums and voice recording have no command here.
+- **Two attachment refusal sentences are not in the design sheet.** With no open
+  conversation, `:attach` says `Open a conversation first: :attach sends to the
+  chat on screen.` A failed `:save` copy says `save: could not write {path} —
+  {reason}`. The design artifact does not model either state.
 - **Forwarding has no live proof in CI.** The batching and the error mapping are
   unit-tested, and the key path is driven through the `tui` app tests with
   action assertions. No test sends a forward to Telegram: the live round
@@ -613,10 +611,10 @@ Real, and named so they are not mistaken for oversights:
 
 ## v2 Hooks
 
-The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`), file upload/download (using `tokio::fs` and `reqwest`), or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, adding these features won't require touching the protocol or UI layers. Media download is the half that arrived first: the fetch path exists, `o` streams the bytes into the media cache, and the platform viewer opens it.
+The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`) or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, those features won't require coupling protocol types to the UI. Media upload and download exist: `:attach` streams a local file to Telegram, while `o` fetches received media into the cache for the platform viewer.
 
-**The sticker lists, scoped.** Sending a sticker arrives with upload and
-`messages.sendMedia` (CUR-11); both lists are deferred until then, and this is what
+**The sticker lists, scoped.** Sticker sending and its picker are deferred until
+the client can load and send sticker sets; this is what
 they will mean when it lands.
 
 - **Sendable list.** The stickers in the account's installed sets, grouped by set.

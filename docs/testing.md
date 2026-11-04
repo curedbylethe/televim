@@ -313,27 +313,27 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   Each test requests its own login code and Telegram throttles that hard, so run
   them sparingly.
 
-  One of them, `a_media_message_downloads_through_the_client`, is the only
-  assertion anywhere that a message's bytes can actually be fetched: it drives
+  `a_media_message_downloads_through_the_client` drives
   `ProtoClient::download_media` against a live conversation and checks the
-  attachment comes back. It **cannot provision its own media** — it cannot send
-  itself a photo, and the account it signs in with has no conversation carrying a
-  known attachment — so it reads the newest messages of a conversation it is
-  pointed at and skips, with its reason printed, when none of them carries
-  anything. The parts of the media path that *can* be provoked without an account
-  are not left to it: `classify_raw`/`classify_typed`, the chunk-count and abort
-  rules of the streaming seam, the streamed store and its disk-space refusal, and
-  the `proto` mapping are all ordinary unit tests that run on every CI run, and
-  the placeholder body is asserted in `tui`'s `TestBackend` tests. What only a
-  datacenter can answer is whether Telegram hands over the bytes, which is why
-  that one assertion is here and not in CI. The sticker path is covered the same
+  attachment comes back. `an_attachment_round_trip_through_saved_messages`
+  writes a one-pixel PNG, uploads it only to Saved Messages, checks its `Photo`
+  kind, media id and final progress count, then deletes the sent message. Both
+  tests self-skip without the datacenter and account credentials; the upload
+  test also skips when Saved Messages is absent from the private chat list. The
+  media path's account-free parts are covered by ordinary
+  unit tests on every CI run: `classify_raw`/`classify_message`, progress and
+  cancellation in the upload reader, the streamed store and its disk-space
+  refusal, and the `proto` mapping. The placeholder body is asserted in `tui`'s
+  `TestBackend` tests. The live round trip checks whether Telegram accepts the
+  upload; the download test checks whether it hands over bytes. The sticker path
+  is covered the same
   way, one layer up: the WEBP decode (fixture pixels, garbage-in-`Err`, the
   pre-allocation clamp), the bounded cache (eviction, replace, clear on switch),
   the eight-row block geometry and its half-block cells, the `[sticker]`
   fallbacks (miss, corrupt bytes, caption, flag off), and the fetch drain — a
   counting test double stands in for `download_media`, so inline drains and
   settles while `off` performs zero traffic. An animated sticker is pinned on
-  both sides of the seam: `classify_raw` and `classify_typed` agree on
+  both sides of the seam: `classify_raw` and `classify_message` agree on
   `AnimatedSticker` for a TGS (sticker attribute and mime, no animation bit, as
   Telegram sends it) and for a WebM, the widget table draws
   `[animated sticker]` with no block and no pending fetch, `o` queues its open,
@@ -341,23 +341,29 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   and the media cache names its file `.tgs`, `.webm` or `.bin` from the magic
   bytes. All of those run on every CI run.
 - **TUI E2E Tests:** `app/tests/tui_e2e.rs` runs the `televim` binary in a pty
-  through `termlens` and asserts on the screen. Nine tests: the chat list after
+  through `termlens` and asserts on the screen. Thirteen tests: the chat list after
   launch, a seeded cache drawn before the first frame, typing in INSERT, resuming
-  a draft, `:q` quitting, Ctrl-u/Ctrl-d moving the conversation's visible slice,
+  a draft, `:q` quitting, refusing contacts while offline, Ctrl-u/Ctrl-d moving
+  the conversation's visible slice,
   an arrival moving a pinned view, an arrival leaving a scrolled-back view alone,
-  and a fetch in flight shown at the edge it is coming from. **Run policy:** none
+  a fetch in flight shown at the edge it is coming from, and three attachment
+  scenarios: `attachment_progress_is_shown_beside_sending`,
+  `cancelled_attachment_can_be_dismissed`, and
+  `attachment_success_settles_and_open_save_commands_refuse_invalid_subjects`.
+  **Run policy:** none
   is `#[ignore]`d in a debug build; `make test` and CI's `cargo test --all
   --all-features` run them on every run. They need a pty, not a network or
   credentials. **File map:** the tests are in `tui_e2e.rs`; the helpers
   (`sandbox`, `seed_history`, `spawn_offline`, `spawn_offline_with_scenario`) are
-  in `app/tests/common/mod.rs`. The last three use that last helper: it writes
+  in `app/tests/common/mod.rs`. Scenario tests use the last helper: it writes
   `scenario.txt` into the sandbox and passes its path in `TELEVIM_SCENARIO`; the
   binary waits for the sibling `<path>.fire`, which `Scenario::fire` writes, and
   then replays each directive through its event channel as an
-  `AppEvent::Scenario`, an arrival through `net::apply` as a real
-  `UpdateEvent::NewMessage` and a fetch through `App::begin_fetch`. The seam is
+  `AppEvent::Scenario`: arrivals go through `net::apply` as real
+  `UpdateEvent::NewMessage`s, fetches through `App::begin_fetch`, and upload
+  progress/success/failure through `net::apply`. The seam is
   `#[cfg(debug_assertions)]`, so a release build has neither it nor the string
-  and those three are ignored with that reason. Rendering of other keystroke
+  and scenario tests are ignored with that reason. Rendering of other keystroke
   flows is still covered by `tui`'s `TestBackend` tests.
 - **RTL Screenshots:** `make rtl-shots` (`scripts/rtl/kitty_shots.py`) launches the
   debug binary in kitty, types into it through `kitty @`, and crops a screenshot of the
