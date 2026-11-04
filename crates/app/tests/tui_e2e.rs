@@ -75,6 +75,8 @@ fn cursor_row(screen: &Screen) -> u16 {
 fn open_conversation(t: &mut termlens::Terminal) {
     t.wait_until(|s| s.contains("NORMAL"))
         .expect("ready in NORMAL mode");
+    t.wait_until(|s| s.contains("no application credentials"))
+        .expect("offline sign-in card settles");
     t.send_str(":").expect("open command line");
     t.send(Key::Esc).expect("close command line");
     t.wait_until(|s| !s.contains("Sign in to Telegram"))
@@ -369,4 +371,122 @@ fn a_fetch_in_flight_is_shown_at_the_edge_it_is_coming_from() {
         "the newer page is announced at the bottom: {}",
         after.full_text()
     );
+}
+
+/// Upload byte progress shares the placeholder's status row with `[sending…]`.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the scenario seam is debug-only")]
+fn attachment_progress_is_shown_beside_sending() {
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline_with_scenario(&sandbox, "upload-progress 1 -1 42 100");
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("Conversation (40/40)"))
+        .expect("the conversation opens pinned to the newest message");
+
+    t.send_str(":attach vacation.jpg")
+        .expect("type the attach command");
+    t.send(Key::Enter).expect("submit the attach command");
+    t.wait_until(|s| s.contains("attach image vacation.jpg? (y/n)"))
+        .expect("the image confirmation names the file");
+    t.send(Key::Char('y')).expect("confirm the attachment");
+    t.wait_until(|s| s.contains("[sending…]"))
+        .expect("the optimistic row appears");
+
+    t.fire();
+
+    let after = t
+        .snapshot_after(|s| s.contains("[image… 42%]") && s.contains("[sending…]"))
+        .expect("upload progress appears beside the sending token");
+    let body = conversation(&after);
+    assert!(
+        body.contains("[image… 42%]  [sending…]"),
+        "progress and sending share one row: {}",
+        after.full_text()
+    );
+}
+
+/// Esc requests cancellation, then the network's cancellation result leaves a
+/// retryable failed row that D can dismiss.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the scenario seam is debug-only")]
+fn cancelled_attachment_can_be_dismissed() {
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline_with_scenario(&sandbox, "upload-failed 1 -1 cancelled");
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("Conversation (40/40)"))
+        .expect("the conversation opens pinned to the newest message");
+
+    t.send_str(":attach vacation.jpg")
+        .expect("type the attach command");
+    t.send(Key::Enter).expect("submit the attach command");
+    t.wait_until(|s| s.contains("attach image vacation.jpg? (y/n)"))
+        .expect("the image confirmation names the file");
+    t.send(Key::Char('y')).expect("confirm the attachment");
+    t.wait_until(|s| s.contains("[sending…]"))
+        .expect("the optimistic row appears");
+    t.send(Key::Esc).expect("cancel the attachment upload");
+
+    t.fire();
+
+    let failed = t
+        .snapshot_after(|s| s.contains("[failed: cancelled] (o retries)"))
+        .expect("the cancelled upload is retryable");
+    assert!(
+        conversation(&failed).contains("[failed: cancelled] (o retries)"),
+        "the failed upload token is on its row: {}",
+        failed.full_text()
+    );
+
+    t.send(Key::Char('D')).expect("dismiss the failed upload");
+    let dismissed = t
+        .snapshot_after(|s| !conversation(s).contains("[image]"))
+        .expect("the dismissed placeholder leaves the conversation");
+    assert!(
+        !conversation(&dismissed).contains("[failed: cancelled]"),
+        "the dismissed failure is gone: {}",
+        dismissed.full_text()
+    );
+}
+
+/// A successful upload settles as a media row, and command refusals name a text
+/// message and a missing destination path.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "the scenario seam is debug-only")]
+fn attachment_success_settles_and_open_save_commands_refuse_invalid_subjects() {
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline_with_scenario(&sandbox, "upload-sent 1 -1 41 image");
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("Conversation (40/40)"))
+        .expect("the conversation opens pinned to the newest message");
+
+    t.send_str(":attach vacation.jpg")
+        .expect("type the attach command");
+    t.send(Key::Enter).expect("submit the attach command");
+    t.wait_until(|s| s.contains("attach image vacation.jpg? (y/n)"))
+        .expect("the image confirmation names the file");
+    t.send(Key::Char('y')).expect("confirm the attachment");
+    t.wait_until(|s| s.contains("[sending…]"))
+        .expect("the optimistic row appears");
+
+    t.fire();
+
+    let settled = t
+        .snapshot_after(|s| conversation(s).contains("[image]") && !s.contains("[sending…]"))
+        .expect("the successful upload settles as an image row");
+    assert!(conversation(&settled).contains("[image]"));
+    assert!(!conversation(&settled).contains("[image…"));
+
+    t.send_str("gg").expect("move to a seeded text message");
+    t.send_str(":open").expect("type the open command");
+    t.send(Key::Enter).expect("submit the open command");
+    t.wait_until(|s| s.contains("Nothing to open: this message carries no media."))
+        .expect("open refuses a text message");
+
+    t.send_str(":save").expect("type save with no destination");
+    t.send(Key::Enter).expect("submit save");
+    t.wait_until(|s| s.contains("Save where? :save <path> copies the media to that path."))
+        .expect("save explains its required destination path");
 }
