@@ -1582,3 +1582,43 @@ are in [`../AGENTS.md`](../AGENTS.md).
   one `:stickers` picker once CUR-11's send-media work lands. No Normal-mode key is
   bound before that, and no list is cached locally: the server's answer is the
   account's, across devices.
+
+- **Why the live media classifier reads the raw message:** the typed
+  `Media::from_raw` decoder returns `None` for both empty media and variants this
+  grammers build does not model. That erased an attachment before `domain` could
+  render its `[file]` fallback. `classify_message` now delegates the raw envelope
+  to `classify_raw`, where only absent or `Empty` media becomes `None`. The old
+  typed classifier is removed; fetch and live paths now share one rule.
+- **Why upload progress counts bytes read, and cancellation is cooperative:**
+  `Client::upload_stream` accepts an `AsyncRead` but has no acknowledgement or
+  abort callback. A wrapper reports each successful read, which gives useful
+  byte progress without rebuilding grammers' part protocol. The count is not
+  server-confirmed, and cancellation stops the next read but cannot recall a
+  part already in flight.
+- **Why attachment sending uses the design's extension allowlist:** `:attach`
+  accepts the listed image and document suffixes before asking for confirmation.
+  Images use `InputMessage::photo` so Telegram returns image media; documents use
+  `InputMessage::file`. Voice recording, video and animated GIF remain outside
+  this command. The earlier sticker-send decision's wait for a send path is now
+  resolved for these supported kinds; sticker sending and its picker remain
+  deferred because they need sticker-specific APIs and lists.
+- **Why `:save` downloads through the cache and then copies:** a highlighted
+  message may not be cached yet, so requiring `o` first would make the command
+  fail in the ordinary case. `SaveMedia` reuses the existing download path,
+  then copies over the exact destination the reader typed. The copy runs through
+  `spawn_blocking`. `:attach` and `:save` expand a leading `~` or `~/`.
+- **Why retry data stays in app session state:** the domain `Message` remains
+  payload-free and carries no local path. `net::State` keeps the upload path and
+  kind by negative placeholder id until success or dismissal, then `o` and
+  `:open` can retry a failed upload. Failed placeholders are not persisted, so a
+  relaunch requires the reader to run `:attach` again.
+- **Why media sends are optimistic:** text sends already add a negative-id
+  placeholder before the network answer. Attachment sends use the same contract:
+  the placeholder appears as `[sending…]`, progress joins its row, and the
+  existing `Sent` event confirms or fails it. The earlier “no optimistic update”
+  decision applies to the six chat and contact management actions, not message
+  sends.
+- **Why upload buffers are declared but not measured:** grammers runs four upload
+  workers, each with a 512 KiB part buffer. Peak upload storage is therefore
+  about 2 MiB plus the reader and file handle. The idle memory measurement does
+  not run an upload, so this is a declaration, not a measured budget.

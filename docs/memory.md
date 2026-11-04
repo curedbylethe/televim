@@ -547,6 +547,11 @@ verifies a blob by reading it in 16 KiB chunks, so it never holds a whole file i
 memory. A download streams chunk by chunk to a temp file in the cache directory and
 is hashed as it arrives, so a download's resident cost is one chunk-sized buffer
 (grammers yields 4 KiB–512 KiB) plus its index entry, never the whole attachment.
+An upload uses four grammers part buffers of 512 KiB each, plus a `ProgressReader`
+and an open file handle: about 2 MiB in part buffers, with the reader and handle
+on top. This peak is declared, not measured. `make measure` measures idle launches
+and performs no upload, so the upload peak is outside every RSS figure and the
+idle memory budget.
 The disk worst case is the byte cap plus one partial temp file in flight; the temp
 goes on cancel or failure and is swept on the next open if the process died, and at
 the 1 GiB default the cap is what bounds it.

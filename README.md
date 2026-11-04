@@ -282,8 +282,8 @@ Working today:
   missing. An animated sticker is never decoded: a TGS or a WebM draws
   `[animated sticker]`, and `o` opens the cached file in the viewer.
   `stickers = "off"` (or `TELEVIM_STICKERS=off`) draws the token for
-  every sticker message and fetches nothing. Sending a sticker and a sticker
-  picker are not built; both wait on send-media (CUR-11). `graphics = "auto"` (or
+  every sticker message and fetches nothing. `:attach` sends images and documents;
+  sticker sending and the sticker picker are not built. `graphics = "auto"` (or
   `TELEVIM_GRAPHICS`) places the picture with the kitty graphics protocol where
   the environment names kitty, ghostty or WezTerm; `kitty` forces it and `off`
   keeps the half-block cells everywhere. Sixel is not yet supported. Fetching the bytes is a client-level operation today
@@ -331,6 +331,20 @@ Working today:
   disk. While a download runs, its row shows `[image… 42%]` beside
   the placeholder (the megabytes so far when Telegram declared no size); `Esc` on that
   message stops it, and a failed download shows `[failed: …] (o retries)`, `o` on it trying again.
+  `:attach <path>` asks `attach image <name>? (y/n)` or
+  `attach file <name>? (y/n)` before sending. It accepts `jpg`,
+  `jpeg`, `png` and `webp` images, plus `pdf`, `doc`, `docx`, `odt`, `rtf`,
+  `txt`, `md`, `csv`, `xls`, `xlsx`, `ppt` and `pptx` documents. Images go as
+  photos; documents go as files. The optimistic row shows `[sending…]`, and
+  upload progress shows bytes read beside it, not server-confirmed parts. `Esc`
+  cancels at the next read; a failed row shows `[failed: …] (o retries)`, and
+  `o` or `:open` retries while the path remains in this run's memory. A relaunch
+  loses that path, so run `:attach` again. `:open` also opens the media on the
+  highlighted message. `:save <path>` downloads a cache miss, then copies the
+  attachment to that path and overwrites an existing destination. `:attach` and
+  `:save` expand a leading `~` or `~/`.
+  `:attach` has no caption argument; edit the sent message to add a caption.
+  Albums and voice recordings have no send command.
   The viewer is set per kind of media: `viewer_image` (photos and stickers),
   `viewer_video` (videos and GIFs) and `viewer_audio` (voice messages), each also read
   from `TELEVIM_VIEWER_IMAGE`, `TELEVIM_VIEWER_VIDEO` and `TELEVIM_VIEWER_AUDIO`.
@@ -363,6 +377,8 @@ Working today:
   `Ctrl-o` brings the reader back. `j` from the newest message rests the cursor
   on the draft's row below it, and `i` there resumes the draft in Insert with the
   caret at its end.
+  `:attach <path>` asks for confirmation and adds an optimistic media row before
+  the upload starts.
 - **Text direction:** the draft in the bar is drawn by the same rules as an
   incoming message. In the default mode the row is emitted as it is stored and the
   terminal's shaper reverses a right-to-left run; in the opt-in `BidiMode::Visual`
@@ -424,6 +440,7 @@ Working today:
   block, delete and report ask `y/n` first; the contacts list opens a person's
   card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
+  `:attach <path>`, `:open`, `:save <path>`,
   `:date <ISO>`, `:settings`, `:signin`, `:add-account`, `:retry`, `:unlock`,
   `:passphrase`, `:export-session <path>`, `:import-session <path>`, and the
   eight chat and contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,
