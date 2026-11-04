@@ -5195,7 +5195,14 @@ fn apply_sent(
     temp_id: i64,
     result: Result<Message, ProtoError>,
 ) {
-    let is_upload = state.pending_uploads.contains_key(&temp_id);
+    let is_upload = state.pending_uploads.contains_key(&temp_id)
+        || (temp_id < 0
+            && app.conversation.conversation.window.chat_id == chat_id
+            && app
+                .conversation
+                .conversation
+                .message(temp_id)
+                .is_some_and(|message| message.media.is_some()));
     if result.is_ok() {
         state.pending_uploads.remove(&temp_id);
     }
@@ -13498,6 +13505,37 @@ mod media_tests {
             Some(&tui::download::Outcome::Failed("cancelled".to_owned()))
         );
         assert_eq!(app.ui.status, "cancelled");
+    }
+
+    #[test]
+    fn a_synthetic_upload_failure_marks_its_media_placeholder_failed() {
+        let mut app = app_for_chat(CHAT);
+        let mut state = State::default();
+        let temp_id = app
+            .conversation
+            .conversation
+            .queue_media_send(MediaKind::Photo, None);
+        app.conversation.downloads.start(CHAT, temp_id);
+        app.conversation
+            .downloads
+            .progress(CHAT, temp_id, 4, Some(8));
+        let error = missing_upload_error();
+        let reason = failure_reason(&error);
+
+        assert!(!state.pending_uploads.contains_key(&temp_id));
+        apply_sent(&mut app, &mut state, CHAT, temp_id, Err(error));
+
+        assert_eq!(
+            app.conversation.downloads.get(CHAT, temp_id),
+            Some(&tui::download::Outcome::Failed(reason))
+        );
+        assert_eq!(
+            app.conversation
+                .conversation
+                .message(temp_id)
+                .map(|message| message.status),
+            Some(MessageStatus::Failed)
+        );
     }
 
     #[test]
