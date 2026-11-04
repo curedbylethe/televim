@@ -51,6 +51,7 @@ __pycache__/
 # The local OpenCode skills the workflow runs from: tooling that ships with the
 # development workflow, not with the client.
 .agents/
+.claude/
 
 .projectmem/**
 !.projectmem/PROJECT_MAP.md
