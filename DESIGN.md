@@ -434,6 +434,14 @@ file is the answer.
 - **Titles are space-padded.** ` Chats (12) `, ` Conversation (3/48) `, ` Input `,
   ` draft `, ` Message to Ada Lovelace `, ` Reply `, ` Edit `, ` Command `,
   ` Find `.
+- **A chat row says what the chat is carrying in glyphs, so a monochrome terminal reads
+  what a colour one does.** The reader scans the list for the one chat they muted or
+  flagged, and a colour standing for either would be gone on a stale monitor. A row is
+  the pin (`📌` and a space) when the chat is pinned, the title, and at the right edge
+  `⊘` for mute (`text-dim`), `●` for the unread mark (`text`) and the count (`text-dim`),
+  in that order, one space between, each only when it applies. The glyphs sit at the
+  right so the title never moves for them: only the pin moves it, by its three cells.
+  When they leave too little room the title is cut with `…`, never the glyphs.
 - **The scrollbar is a column the body gives up**, and only above
   `MIN_BODY_WIDTH = 8`. A narrow panel has no room to give: the bar would cost
   more than it tells the reader.
@@ -477,6 +485,10 @@ A reply starts a group and may be followed into it.
 - **A message's own status is never hidden by grouping.** `[sending…]` and
   `[failed: …]` stay on the last row of the message that carries them, mid-group
   or not. Only the read state and the time are the group's.
+- **An attachment is sent like a typed message.** It appears at once, with
+  `[sending…]` on its last row, because a reader who pressed `y` should see the
+  program has the file; it keeps that status until the upload settles, and a
+  failure replaces the status in the same place, as it does for text.
 
 **Read state (outgoing only).** An outgoing message carries what the peer has said
 about it: nothing yet, `delivered` (acknowledged, not read) or `read`. It is drawn
@@ -537,6 +549,8 @@ code.
 | `[image… 42%]` | a download in flight: the kind's own placeholder with the percentage inside, drawn beside the placeholder and never replacing the body | `rows::download_token` |
 | `[image… 2.0 MB]` | ditto when Telegram declared no size: the megabytes so far stand in for the percentage | ditto |
 | `[failed: reason] (o retries)` | a download that failed: the reason, then the hint that `o` tries again; the reason wins truncation, so a narrow row clips the hint first | ditto |
+| `[image… 42%]` `[file… 42%]` | an **upload** in flight: the download's own token, beside the placeholder on the message's last row, with `[sending…]` and the time still at the right edge | `convRows` (`tok`) |
+| `[failed: cancelled] (o retries)` | `Esc` on an upload in flight; any failed transfer draws the same token, so `o` is one verb for both | `cancelUpload` |
 | `[delivered]` | an outgoing group the peer's client has acknowledged and not read; the group's **last** row, beside any time | `rows::receipt_word` |
 | `[read]` | an outgoing group the peer has read; same row, same place | ditto |
 | `21:04` | a group's time, `HH:MM`, once, on the group's **last** row, right-aligned after any state | `rows::trailing_note` |
@@ -555,6 +569,16 @@ code.
 | `Jumping to the match…` | an `n`/`N` search jump whose match is outside the loaded window (criterion 3): own label, not the first-unread one | `JUMP_MATCH_LABEL` |
 | `Not a reply: gd jumps to the message a reply quotes.` | `gd` on a message with no quote: a refusal, a `flash` | `NOT_A_REPLY` |
 | `That message is no longer available.` | `gd` on a reply whose target the client does not hold at all | `JUMP_UNAVAILABLE` |
+| `attach image vacation.jpg? (y/n)` | `:attach <path>` on an image: a screen-wide confirmation naming the kind and the file's name, not its path | `attachCmd` |
+| `attach file report.pdf? (y/n)` | ditto on a document, which is the kind `[file]` stands for | `attachCmd` |
+| `Only images and documents can be sent: jpg, png, webp, pdf, docx, txt.` | `:attach` on anything else: a refusal that names the supported kinds, before any question | `ATTACH_KINDS` |
+| `Attach what? :attach <path> sends an image or a document.` | `:attach` with no path | `ATTACH_USAGE` |
+| `opening image in the viewer…` | `o` or `:open` on media on hand; the `…` is the hand-off to the viewer, as everywhere else | `openMedia` |
+| `saved image to ~/Pictures/scan.png` | `:save <path>` on media on hand, echoing the path as typed | `saveMedia` |
+| `Save where? :save <path> copies the media to that path.` | `:save` with no path | `SAVE_USAGE` |
+| `Nothing to open: this message carries no media.` | `o` or `:open` on a text message; `:save` says `Nothing to save:` in the same words | `noMedia` |
+| `Nothing to open yet: the upload is still running.` | ditto on an upload in flight, where the file is not settled | `noMedia` |
+| `Nothing to open: the file is not here.` | ditto on a message whose transfer failed and has no file on hand | `noMedia` |
 | `televim` | the resting status line, when there is nothing to say | `IDLE_STATUS` |
 | `Quit televim? (y/n)` | a screen-wide confirmation | `QUIT_PROMPT` |
 | `Delete your message from both sides? (y/n)` | ditto, naming **which side** | `DELETE_OUTGOING_PROMPT` |
@@ -743,6 +767,38 @@ is capped at 100. The failure token's reason is truncated to the room and wins o
 hint: a row too narrow for both is clipped at its right edge, which takes `(o retries)`
 and leaves the reason. The status line carries no percentage; see rank 8 under the
 status ranking.
+
+**An upload draws the same token.** `:attach` sends an image or a document, and the
+message that appears is the kind's own placeholder, `[image]` or `[file]`: the
+placeholder is the message's whole text, so a settled upload is an ordinary media
+message and needs no second path for search, yank or reply. While the file moves,
+the last row carries the download's token beside the placeholder, in `text-dim`:
+
+| State | The last row |
+| :---- | :----------- |
+| asked, not yet sent | no row; the confirmation is the status line |
+| sent, no progress yet | `[image… 0%]  [sending…] 21:40` |
+| in flight | `[image… 42%]  [sending…] 21:40` (`[file… 42%]` for a document) |
+| settled | `[image]  21:40`, no token and no status |
+| cancelled with `Esc` | `[failed: cancelled] (o retries) 21:40` |
+| failed | `[failed: no route] (o retries) 21:40` |
+
+The reason for reusing the token rather than inventing an upload one is that the
+reader has one thing to learn: a bracket with `…` and a percentage is a file
+moving, in either direction. The reason for keeping `[sending…]` beside it is that
+the two say different things: `[sending…]` is the message's status, which an upload
+shares with every text message, and the token is the transfer's progress, which
+only a file has. The token is not text, so it is never in a yank, a reply's quote
+or a search; the bare placeholder is. It joins the trailing note's width before the
+text is broken, as the note itself does, so a row too narrow for both puts the token
+and the note on a row of their own, below the placeholder, and the placeholder never
+moves. A settled upload shows no receipt until the peer answers, so its row is the
+bare time, like any outgoing message nobody has answered. While an upload is in
+flight `Esc` cancels it and does nothing else, the way `Esc` drops a jump in
+flight, and no hint row changes: the conversation's hint is 67 of 71 columns and
+has no room to name a key that is only live for a few seconds. The status line
+carries no percentage for an upload either; the row is where the reader is
+already looking.
 
 **A static sticker draws as a bounded block, not a token.** The decoded image is
 scaled to fit a box 24 columns wide and 8 rows high, keeping its shape and never
@@ -1199,7 +1255,7 @@ conversation, with its header, a pinned chat, and a preview.
 
 ## Chat and contact actions
 
-Six actions share one surface: the `:` line. They add no key to the chat list,
+These actions share one surface: the `:` line. They add no key to the chat list,
 whose hint is already 69 of 71 columns. The contact card is the one place that
 gains a key, `d`, because three actions have no other home.
 
@@ -1207,11 +1263,17 @@ gains a key, `d`, because three actions have no other home.
 | :------ | :------ | :---------- | :------- |
 | `:archive` | the highlighted chat | no — `:archived` undoes it | `archived {name}` |
 | `:archived` | — | no | lists the archived chats; `⏎` unarchives |
+| `:mute` / `:unmute` | the highlighted chat | no — `:unmute` undoes it | `muted {name}` / `unmuted {name}` |
+| `:mark-unread` | the highlighted chat | no — opening the chat clears it | `marked {name} unread` |
+| `:mark-all-read` | every chat carrying a count | no | `marked {n} chats read` / `marked {n} chats read, {m} failed` |
 | `:block` / `:unblock` | the card's person, else the highlighted chat | yes | `Block {name}? (y/n)` / `Unblock {name}? (y/n)` |
 | `:rename [name]` | the card's person, else the highlighted chat | no — bare `:rename` clears | `renamed {name}` / `local name cleared` |
 | `:delete-chat [both]` | the highlighted chat | yes | `Delete this conversation? (y/n)` or `… for both sides?` |
 | `:report [reason]` | the card's person, else the highlighted chat | yes, naming the reason | `Report {name} to Telegram as {reason}? (y/n)` |
 | `:contacts` | — | no | lists the account's contacts; `⏎` opens the card |
+| `:attach <path>` | the open conversation | yes, naming the kind and the file | `attach image vacation.jpg? (y/n)` / `attach file report.pdf? (y/n)` |
+| `:open` | the highlighted message | no | `opening image in the viewer…` |
+| `:save <path>` | the highlighted message | no | `saved image to {path}` |
 
 **Confirmation is for what cannot be undone from the screen.** Block, unblock,
 delete and report ask; archive and rename do not, because `:archived` brings the
@@ -1239,6 +1301,32 @@ walk it, `⏎` unarchives and puts the chat back in the list's own order, and `E
 closes it. When the last row leaves, the overlay closes with it. If the open
 conversation is archived, the conversation closes, because it is no longer in
 the list that owns it.
+
+**Mute stops the notification and nothing on this screen.** `:mute` mutes the
+highlighted chat on Telegram, for good, and `:unmute` undoes it. The chat keeps its
+place in the list and keeps its unread count: the count is the reader's record of what
+they have not read, and mute is a decision about being interrupted, not about what they
+owe the chat. What stops is the desktop notification. The row says so with `⊘` left of
+the count, because a muted chat that looked like any other would be found again only by
+remembering. None of the three commands asks first: each is undone from the screen it
+acts on, and none is visible to anybody else. They act on the chat-list highlight even
+when a card is on show, since a person with no conversation has nothing to mute.
+
+**The manual unread mark is a flag, not a count.** `:mark-unread` flags the highlighted
+chat unread on Telegram and draws `●` on the row: in the count's place when the chat has
+none, left of it when it has one. It invents no number and changes no real one. A flag
+with no count says "come back to this", a count says how much is waiting, and the two
+coexist. Opening the chat clears the flag, and opening is the move from the list into the
+conversation (`⏎`, `Tab`, `h`, `l`, `i`, `a`), not the highlight passing over the row: the highlight
+only previews a chat, and a flag cleared by scrolling past it could not be found again.
+
+**`:mark-all-read` is a bulk action, so its sentence can report a failure.** It sends one
+request per chat that carries a count, and one can fail while the rest land. The sentence
+is `marked {n} chats read` when every request landed and `marked {n} chats read, {m}
+failed` when not, `n` counting the chats that were read (with one it says `chat`). A chat
+read this way loses its count and its mark; a chat whose request failed keeps both, which
+is how the reader finds it. A chat carrying only a manual mark has no count, so the
+command leaves it: the flag is the reader's own.
 
 **A local name is a name over the peer's, not a replacement of it.** The chat
 row, the message bar, the card and the contacts list all draw the local name;
@@ -1282,6 +1370,46 @@ contacts list, and `:contacts` closes the archive.
 prompt still outranks everything. `contacts — {n}` and `archived — {n}` are the
 list labels; a failure is the same line with its reason, so the reader never
 loses the place they were in.
+
+**Attach, open and save act on a message, not on a chat.** The subject rule above is
+for the chat and contact actions; these three take the open conversation (`:attach`)
+or the message under the cursor (`:open`, `:save`), because a file belongs to a
+message. `:attach` asks first for the reason delete does: a sent file is seen by
+somebody else and cannot be taken back from this screen. The question names the kind
+and the file's name, not its path: the path is what the reader just typed, and the
+kind is the one fact they could not see from it. A kind other than an image or a
+document is refused before any question, with the supported kinds named in the
+sentence, because a refusal that only said no would leave the reader to guess which
+extensions work; an animated GIF, a video or a voice note is not sent from here. The
+extension decides the kind, and the question captures its conversation, so `y` cannot
+send into a different one. `n` or `Esc` sends nothing.
+
+`:open` is the command form of `o` and behaves as `o` does: media on hand opens in
+the viewer, and a failed upload is tried again, which is what `(o retries)` on its
+row promises. `:save <path>` copies the message's media to the path the reader
+chose; there is no file picker, because the reader already has a path in mind and a
+picker would be a second place to type it. Both are refused on a message with
+nothing to open, and the sentence says why: no media at all, an upload still
+running, or a file that is not here. A refusal is a `flash`, so it ranks below the
+reason a failed message failed: with the cursor on a failed message the reader sees
+the failure, not the refusal, which is the ranking working and not a defect.
+
+Scenes: `attach` in the engine, thirteen frames at 80×24 on Ken Thompson's chat, each
+reached by the keys a reader presses: the image question, the document question, an
+unsupported kind refused, the row sent with no progress, an image and a file at 42%,
+the settled `[image]`, an upload cancelled with `Esc`, one that failed, `o` starting
+it again, `:open` refused on a text message, `:open` on a photo, and `:save` with its
+path echoed. A path opening with `!` stands in for an upload that fails, as it does
+for a failed search, so the failure sentence has a frame to be seen in. Where the
+build and this model disagree, the build is the authority.
+
+Scenes: `unread` in the engine, twelve frames, each reached by the keys a reader
+presses from the list: mute and its sentence, the muted row with its count kept after the
+highlight has moved on, unmute, a mark with no count, a mark beside a count, pinned and
+muted, all four on one row at 24 columns (with a two-digit count, the widest the list
+holds) and the same row under the highlight, walking past a marked row, opening it, and
+`:mark-all-read` with and without a failed request. `readFails` makes one chat's request
+fail, as a path opening with `!` does for a failed upload.
 
 Scenes: `manage` in the engine, twenty-one frames, each reached by the keys a
 reader presses: archive and unarchive, the block and unblock questions, a contact
@@ -1462,6 +1590,15 @@ regressing.
     `run_command` dispatches them to `run_passphrase` and `run_unlock`. What would
     catch it regressing: the change is never reached without the y/n row, and no
     failure path writes the file.
+
+13. **Chat row** — a pinned chat's `📌`, the title, and at the right edge `⊘` for a
+    muted chat, `●` for a manual unread mark and the count. States: muted with a
+    count, marked with no count, marked beside a count, pinned and muted, and all
+    four at once at 24 columns, each plain and under the highlight. No state is
+    carried by colour alone: the mute glyph and the count are `text-dim`, the mark
+    is `text`, and the highlighted row inverts the ground and nothing else. What
+    would catch it regressing: the title starts where it did, the count's last cell
+    stays in column 21, and the glyphs keep their order, mute then mark then count.
 
 ## Profile
 

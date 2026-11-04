@@ -75,6 +75,11 @@
       const st = app.s;
       st.newchatTimer = setTimeout(() => { st.newchatTimer = null; if (app.s === st) { TV.answer(st); draw(); } }, 1200);
     }
+    /* an upload moves one step per network turn; the reader's keys never hurry it */
+    if (app.s.chats.some((c) => c.msgs.some((m) => m.up && m.up.on)) && !app.s.uploadTimer) {
+      const st = app.s;
+      st.uploadTimer = setTimeout(() => { st.uploadTimer = null; if (app.s === st) { TV.answer(st); draw(); } }, 900);
+    }
     if (app.s.view !== 'chat') return;
     app.s.chats.forEach((c) => c.msgs.forEach((m) => {
       if (m.live && m.status && !m.t) m.t = setTimeout(() => { m.status = null; m.live = false; draw(); }, 1400);
