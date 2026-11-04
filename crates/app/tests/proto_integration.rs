@@ -107,13 +107,16 @@
 
 use std::collections::HashSet;
 use std::env;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use domain::chat::Chat;
 use domain::history::{ConversationWindow, unread_target};
-use domain::message::Message;
+use domain::message::{MediaKind, Message};
 use domain::presence::Presence;
 use domain::updates::{ChatList, UpdateEvent};
 use proto::{HistoryCursor, ProtoClient, ProtoError, UpdateStream};
@@ -135,6 +138,13 @@ const FEED_WINDOW: Duration = Duration::from_secs(10);
 /// conversation running out rather than the request being small — which is the
 /// whole of what settles a direction.
 const PAGE: usize = 100;
+
+/// A one-pixel PNG used by the opt-in attachment upload round trip.
+const TINY_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2, 0, 0, 5, 0, 1,
+    165, 246, 69, 64, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
 
 /// How many pages of one conversation a run walks through.
 ///
@@ -1409,6 +1419,86 @@ async fn a_send_edit_and_delete_round_trip_through_saved_messages() {
     assert!(
         window.position_of(sent.id).is_none(),
         "the deletion has to take the message out of the window"
+    );
+}
+
+/// Uploads a small image into Saved Messages and checks the sent media and read progress.
+#[tokio::test]
+async fn an_attachment_round_trip_through_saved_messages() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+    let Some(self_id) = self_user_id(&client).await else {
+        eprintln!("skipped: telegram did not report the account's own identifier");
+        return;
+    };
+
+    let proto = ProtoClient::new(client);
+    let chats = proto
+        .fetch_private_chats()
+        .await
+        .expect("the chat list is fetched");
+    let Some(chat) = chats.iter().find(|chat| chat.id == self_id) else {
+        eprintln!(
+            "skipped: Saved Messages is not among the {} private conversation(s)",
+            chats.len()
+        );
+        return;
+    };
+
+    let mut file = tempfile::Builder::new()
+        .prefix("televim-upload-")
+        .suffix(".png")
+        .tempfile()
+        .expect("a temporary PNG is created");
+    file.write_all(TINY_PNG).expect("the PNG is written");
+    let file_path = file.path().to_path_buf();
+
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&progress);
+    let sent = proto
+        .send_attachment(
+            chat.id,
+            &file_path,
+            MediaKind::Photo,
+            move |sent, total| {
+                captured.lock().expect("progress lock").push((sent, total));
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("the image is sent to Saved Messages");
+    let sent_id = sent.id;
+
+    proto
+        .delete_messages(chat.id, &[sent_id])
+        .await
+        .expect("the uploaded message is deleted from Saved Messages");
+    drop(file);
+
+    assert_eq!(sent.media, Some(MediaKind::Photo));
+    assert!(
+        sent.media_id.is_some(),
+        "the raw sent message has a photo id"
+    );
+    let progress = progress.lock().expect("progress lock");
+    assert!(!progress.is_empty(), "the reader reports upload progress");
+    assert!(progress.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    assert_eq!(
+        progress.last(),
+        Some(&(TINY_PNG.len() as u64, TINY_PNG.len() as u64)),
+        "progress reaches the complete local file"
     );
 }
 

@@ -15,16 +15,22 @@
 //! ```text
 //! arrival <chat_id> <message_id> <text...>
 //! fetch older|newer
+//! upload-progress <chat_id> <temp_id> <sent> <total>
+//! upload-sent <chat_id> <temp_id> <real_id> image|file
+//! upload-failed <chat_id> <temp_id> <reason...>
 //! ```
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use domain::message::{Message, MessageStatus};
+use domain::message::{MediaKind, Message, MessageStatus};
 use tokio::sync::mpsc;
 use tui::FetchDirection;
 
+use crate::net::Event as NetEvent;
 use crate::runtime::AppEvent;
+use proto::ProtoError;
+use telegram_framework::{FrameworkError, RequestError};
 
 /// One directive from the script.
 pub enum Event {
@@ -33,6 +39,9 @@ pub enum Event {
 
     /// A page was asked for, and is now in flight.
     Fetch(FetchDirection),
+
+    /// A synthetic answer from the network path.
+    Net(NetEvent),
 }
 
 /// How long the feeder waits before looking for the trigger file again.
@@ -107,6 +116,61 @@ fn parse(line: &str) -> Option<Event> {
             "newer" => Some(Event::Fetch(FetchDirection::Newer)),
             _ => None,
         },
+        "upload-progress" => {
+            let chat_id = words.next()?.parse().ok()?;
+            let temp_id = words.next()?.parse().ok()?;
+            let sent = words.next()?.parse().ok()?;
+            let total = words.next()?.parse().ok()?;
+            Some(Event::Net(NetEvent::UploadProgress {
+                chat_id,
+                temp_id,
+                sent,
+                total,
+            }))
+        }
+        "upload-sent" => {
+            let chat_id = words.next()?.parse().ok()?;
+            let temp_id = words.next()?.parse().ok()?;
+            let real_id = words.next()?.parse().ok()?;
+            let media = match words.next()? {
+                "image" => MediaKind::Photo,
+                "file" => MediaKind::File,
+                _ => return None,
+            };
+            Some(Event::Net(NetEvent::Sent {
+                chat_id,
+                temp_id,
+                result: Ok(Message {
+                    id: real_id,
+                    chat_id,
+                    text: "".into(),
+                    timestamp: real_id,
+                    status: MessageStatus::Sent,
+                    is_outgoing: true,
+                    reply_to: None,
+                    media: Some(media),
+                    media_id: None,
+                }),
+            }))
+        }
+        "upload-failed" => {
+            let chat_id = words.next()?.parse().ok()?;
+            let temp_id = words.next()?.parse().ok()?;
+            let reason = words.collect::<Vec<_>>().join(" ");
+            if reason.is_empty() {
+                return None;
+            }
+            let error = if reason == "cancelled" {
+                FrameworkError::UploadAborted
+            } else {
+                FrameworkError::Request(RequestError::Network(reason))
+            };
+            Some(Event::Net(NetEvent::Sent {
+                chat_id,
+                temp_id,
+                result: Err(ProtoError::Framework(error)),
+            }))
+        }
         _ => None,
     }
 }
@@ -141,10 +205,73 @@ mod tests {
     }
 
     #[test]
+    fn upload_progress_line_builds_the_progress_event() {
+        assert!(matches!(
+            parse("upload-progress 1 -1 42 100"),
+            Some(Event::Net(NetEvent::UploadProgress {
+                chat_id: 1,
+                temp_id: -1,
+                sent: 42,
+                total: 100,
+            }))
+        ));
+    }
+
+    #[test]
+    fn upload_sent_line_builds_the_confirmed_photo_or_file() {
+        let Some(Event::Net(NetEvent::Sent {
+            chat_id,
+            temp_id,
+            result: Ok(message),
+        })) = parse("upload-sent 1 -1 9 image")
+        else {
+            panic!("the line is an upload success");
+        };
+        assert_eq!((chat_id, temp_id), (1, -1));
+        assert_eq!(message.id, 9);
+        assert_eq!(message.media, Some(MediaKind::Photo));
+        assert!(message.is_outgoing);
+
+        assert!(matches!(
+            parse("upload-sent 1 -1 9 file"),
+            Some(Event::Net(NetEvent::Sent {
+                result: Ok(Message {
+                    media: Some(MediaKind::File),
+                    ..
+                }),
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn upload_failed_line_preserves_reason_and_maps_cancel_exactly() {
+        assert!(matches!(
+            parse("upload-failed 1 -1 cancelled"),
+            Some(Event::Net(NetEvent::Sent {
+                result: Err(ProtoError::Framework(FrameworkError::UploadAborted)),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            parse("upload-failed 1 -1 server failed"),
+            Some(Event::Net(NetEvent::Sent {
+                result: Err(ProtoError::Framework(FrameworkError::Request(
+                    RequestError::Network(reason)
+                ))),
+                ..
+            })) if reason == "server failed"
+        ));
+    }
+
+    #[test]
     fn lines_that_are_not_directives_are_ignored() {
         assert!(parse("").is_none());
         assert!(parse("fetch sideways").is_none());
         assert!(parse("arrival 1 not-a-number text").is_none());
         assert!(parse("depart 1 2").is_none());
+        assert!(parse("upload-progress 1 -1 bad 100").is_none());
+        assert!(parse("upload-sent 1 -1 9 video").is_none());
+        assert!(parse("upload-failed 1 -1").is_none());
     }
 }

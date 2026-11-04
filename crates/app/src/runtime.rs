@@ -730,6 +730,7 @@ fn apply_scenario(app: &mut App, network: &mut net::State, event: scenario::Even
             net::Event::Update(domain::updates::UpdateEvent::NewMessage(message)),
         ),
         scenario::Event::Fetch(direction) => app.begin_fetch(direction),
+        scenario::Event::Net(event) => net::apply(app, network, event),
     }
 }
 
