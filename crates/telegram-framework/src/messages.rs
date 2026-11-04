@@ -80,7 +80,7 @@ use grammers_client::session::types::PeerRef;
 
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
-use crate::media::classify_typed;
+use crate::media::classify_message;
 use crate::tl;
 use crate::updates::{MessageInfo, message_info};
 
@@ -277,7 +277,7 @@ impl Client {
             message.date().timestamp(),
             message.outgoing(),
             message.reply_to_message_id(),
-            classify_typed(message.media().as_ref()),
+            classify_message(&message.raw),
         ))
     }
 
