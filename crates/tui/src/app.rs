@@ -108,6 +108,22 @@ const LABEL_CELLS: usize = 69;
 const GLOBAL_SEARCH_FILTERS: &str =
     "Filters: photo_video, document, music, voice, url — since:, until:";
 
+/// Accepted extensions for the initial attachment-send surface.
+pub const ATTACH_KINDS: &str = "Images and documents only: jpg, png, webp, pdf, docx, txt.";
+
+/// What `:attach` says when no path was given.
+pub const ATTACH_USAGE: &str = "Attach what? :attach <path> sends an image or a document.";
+
+/// What `:save` says when no destination path was given.
+pub const SAVE_USAGE: &str = "Save where? :save <path> copies the media to that path.";
+
+pub(crate) const NOTHING_TO_OPEN: &str = "Nothing to open: this message carries no media.";
+pub(crate) const NOTHING_TO_SAVE: &str = "Nothing to save: this message carries no media.";
+pub(crate) const UPLOAD_NOT_READY: &str = "Nothing to open yet: the upload is still running.";
+pub(crate) const SAVE_FILE_NOT_HERE: &str = "Nothing to save: the file is not here.";
+pub(crate) const ATTACH_NEEDS_CONVERSATION: &str =
+    "Open a conversation first: :attach sends to the chat on screen.";
+
 /// The prompt the status line shows when a deletion of the reader's own message
 /// is waiting to be confirmed.
 pub const DELETE_OUTGOING_PROMPT: &str = "Delete your message from both sides? (y/n)";
@@ -171,6 +187,19 @@ fn import_prompt(path: &std::path::Path) -> String {
         "Replace the stored session with the one in {}? (y/n)",
         path.display()
     )
+}
+
+fn attach_prompt(path: &std::path::Path, kind: MediaKind) -> String {
+    let kind = if kind == MediaKind::Photo {
+        "image"
+    } else {
+        "file"
+    };
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    format!("attach {kind} {name}? (y/n)")
 }
 
 /// The prompt for `:passphrase`.
@@ -963,6 +992,13 @@ pub enum ConfirmKind {
     /// Asked first because a new passphrase that is mistyped, or forgotten,
     /// locks the file for good. `y` opens the two entries.
     ChangePassphrase,
+
+    /// Send this local photo or document to the open conversation.
+    Attach {
+        chat_id: i64,
+        path: PathBuf,
+        kind: MediaKind,
+    },
 
     /// Delete these messages, for both sides.
     DeleteMessages {
@@ -3546,6 +3582,7 @@ impl App {
             Some(ConfirmKind::Quit) => return QUIT_PROMPT.to_owned(),
             Some(ConfirmKind::Logout) => return LOGOUT_PROMPT.to_owned(),
             Some(ConfirmKind::ImportSession { path }) => return import_prompt(path),
+            Some(ConfirmKind::Attach { path, kind, .. }) => return attach_prompt(path, *kind),
             Some(ConfirmKind::ChangePassphrase) => return CHANGE_PASSPHRASE_PROMPT.to_owned(),
             Some(ConfirmKind::DeleteMessages {
                 ids,

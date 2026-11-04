@@ -786,7 +786,16 @@ pub(crate) fn status_suffix(app: &App, message: &Message) -> Option<String> {
     // or after it has failed. A send's status is never in the table: a message
     // is one or the other.
     if let Some(outcome) = app.conversation.downloads.get(message.chat_id, message.id) {
-        return Some(download_token(message, outcome));
+        let token = download_token(message, outcome);
+        return Some(
+            if message.status == MessageStatus::Sending
+                && matches!(outcome, Outcome::InFlight { .. })
+            {
+                format!("{token}  [sending…]")
+            } else {
+                token
+            },
+        );
     }
 
     match message.status {

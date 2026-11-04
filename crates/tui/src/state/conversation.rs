@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use domain::global_search::GlobalSearchState;
 use domain::history::ConversationView;
-use domain::message::{Message, MessageStatus};
+use domain::message::{MediaKind, Message, MessageStatus};
 use domain::search::SearchState;
 use domain::selection::{Mark, Selection};
 use domain::user::{UserCandidate, UserSearchState};
@@ -514,6 +514,18 @@ impl ConversationState {
         self.sending = Some(temp_id);
     }
 
+    /// Adds an optimistic attachment placeholder to the open conversation.
+    pub(crate) fn queue_media_send(&mut self, media: MediaKind, reply_to: Option<i64>) -> i64 {
+        let id = self.conversation.queue_media_send(media, reply_to);
+        self.after_window_change(Some(id));
+        id
+    }
+
+    /// Retries one failed local send and clears its old reason.
+    pub(crate) fn retry_send(&mut self, temp_id: i64) -> bool {
+        self.conversation.retry_send(temp_id)
+    }
+
     /// Releases the in-flight gate, if it is still held for `temp_id`.
     ///
     /// A no-op for a send that has already been released, so a duplicate result
@@ -557,22 +569,22 @@ impl ConversationState {
     }
 
     /// Dismisses the failed message under the cursor, if that is what it is.
-    pub(crate) fn dismiss_failed_at_cursor(&mut self) {
-        let Some((id, status)) = self
+    pub(crate) fn dismiss_failed_at_cursor(&mut self) -> Option<i64> {
+        let (id, chat_id, status, media) = self
             .cursor_message()
-            .map(|message| (message.id, message.status))
-        else {
-            return;
-        };
+            .map(|message| (message.id, message.chat_id, message.status, message.media))?;
 
         if !matches!(status, MessageStatus::Failed) {
-            return;
+            return None;
         }
 
         let anchor = self.cursor_message_id();
         if self.conversation.dismiss_failed(id) {
+            self.downloads.forget(chat_id, id);
             self.after_window_change(anchor);
+            return (id < 0 && media.is_some()).then_some(id);
         }
+        None
     }
 
     /// Applies a character motion to the focus's position within its message.

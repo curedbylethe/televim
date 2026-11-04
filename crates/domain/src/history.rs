@@ -38,7 +38,7 @@
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 
-use crate::message::{Message, MessageStatus};
+use crate::message::{MediaKind, Message, MessageStatus};
 use crate::updates::UpdateEvent;
 
 /// How many messages the conversation on show holds before the far end is
@@ -507,8 +507,7 @@ impl ConversationView {
     /// time could suppress the real message's preview when it arrives. `domain`
     /// has no clock, and this is not the place to grow one.
     pub fn queue_send(&mut self, text: &str, reply_to: Option<i64>) -> i64 {
-        let id = self.next_temp_id;
-        self.next_temp_id -= 1;
+        let id = self.take_temp_id();
 
         let message = Message {
             id,
@@ -523,6 +522,30 @@ impl ConversationView {
         };
         self.window.push_back(std::iter::once(message));
 
+        id
+    }
+
+    /// Records the reader's outgoing attachment before the server acknowledges it.
+    pub fn queue_media_send(&mut self, media: MediaKind, reply_to: Option<i64>) -> i64 {
+        let id = self.take_temp_id();
+        let message = Message {
+            id,
+            chat_id: self.window.chat_id,
+            text: Cow::Borrowed(""),
+            timestamp: 0,
+            status: MessageStatus::Sending,
+            is_outgoing: true,
+            reply_to,
+            media: Some(media),
+            media_id: None,
+        };
+        self.window.push_back(std::iter::once(message));
+        id
+    }
+
+    fn take_temp_id(&mut self) -> i64 {
+        let id = self.next_temp_id;
+        self.next_temp_id -= 1;
         id
     }
 
@@ -557,6 +580,19 @@ impl ConversationView {
         self.failures.push((temp_id, reason));
         self.trim_failures();
 
+        true
+    }
+
+    /// Retries a failed local send without changing its placeholder identifier.
+    pub fn retry_send(&mut self, temp_id: i64) -> bool {
+        if is_numbered(temp_id)
+            || self.message(temp_id).map(|message| message.status) != Some(MessageStatus::Failed)
+        {
+            return false;
+        }
+
+        self.window.set_status(temp_id, MessageStatus::Sending);
+        self.forget_failure(temp_id);
         true
     }
 
@@ -1341,6 +1377,44 @@ mod tests {
         assert!(!view.set_read_watermark(0));
         assert!(!view.set_read_watermark(-1));
         assert_eq!(view.read_watermark(), None);
+    }
+
+    #[test]
+    fn a_queued_media_send_is_a_negative_placeholder_with_its_kind() {
+        let mut view = ConversationView::new(42);
+
+        let id = view.queue_media_send(MediaKind::Photo, Some(5));
+        let message = view.message(id).expect("media placeholder");
+
+        assert_eq!(id, -1);
+        assert_eq!(message.chat_id, 42);
+        assert!(message.text.is_empty());
+        assert_eq!(message.media, Some(MediaKind::Photo));
+        assert_eq!(message.media_id, None);
+        assert_eq!(message.status, MessageStatus::Sending);
+        assert!(message.is_outgoing);
+        assert_eq!(message.reply_to, Some(5));
+        assert_eq!(view.queue_send("next", None), -2);
+    }
+
+    #[test]
+    fn retrying_a_failed_send_clears_its_reason_and_rejects_other_rows() {
+        let mut view = view_with_a_message();
+        let id = view.queue_media_send(MediaKind::File, None);
+        assert!(view.fail_send(id, "cancelled".to_owned()));
+
+        assert!(view.retry_send(id));
+        assert_eq!(
+            view.message(id).map(|message| message.status),
+            Some(MessageStatus::Sending)
+        );
+        assert_eq!(view.failure(id), None);
+        assert!(
+            !view.retry_send(id),
+            "a send already in progress cannot retry"
+        );
+        assert!(!view.retry_send(5), "a numbered message cannot retry");
+        assert!(!view.retry_send(-77), "a missing placeholder cannot retry");
     }
 
     /// The watermark is a fact about the conversation rather than about the
