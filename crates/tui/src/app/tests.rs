@@ -7566,7 +7566,10 @@ fn attach_refuses_unsupported_extensions_and_missing_paths() {
     assert_eq!(app.status_text(), crate::app::ATTACH_USAGE);
 
     run_command_line(&mut app, "attach archive.zip");
-    assert_eq!(app.status_text(), crate::app::ATTACH_KINDS);
+    assert_eq!(
+        app.status_text(),
+        "Only images and documents can be sent: jpg, png, webp, pdf, docx, txt."
+    );
     assert_eq!(app.ui.mode, Mode::Normal);
     assert_eq!(app.take_action(), None);
 }
@@ -7637,6 +7640,26 @@ fn save_requires_a_destination_and_media_on_disk() {
 }
 
 #[test]
+fn saving_an_upload_uses_copy_for_its_status() {
+    let mut app = App::mock();
+    let sending = app
+        .conversation
+        .queue_media_send(domain::message::MediaKind::Photo, None);
+
+    run_command_line(&mut app, "save /tmp/copy.jpg");
+    assert_eq!(
+        app.status_text(),
+        "Nothing to save yet: the upload is still running."
+    );
+    assert_eq!(app.take_action(), None);
+
+    assert!(app.fail_send(sending, "cancelled".to_owned()));
+    run_command_line(&mut app, "save /tmp/copy.jpg");
+    assert_eq!(app.ui.status, "Nothing to save: the file is not here.");
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
 fn esc_cancels_an_upload_and_dismiss_drops_failed_upload() {
     let mut app = App::mock();
     let id = app
@@ -7674,12 +7697,12 @@ fn attachment_prompts_and_refusals_fit_status_row() {
     assert!(crate::wrap::columns(&prompt) + STATUS_PREFIX_CELLS <= 80);
 
     for refusal in [
-        crate::app::ATTACH_KINDS,
         crate::app::ATTACH_USAGE,
         crate::app::SAVE_USAGE,
         crate::app::NOTHING_TO_OPEN,
         crate::app::NOTHING_TO_SAVE,
         crate::app::UPLOAD_NOT_READY,
+        crate::app::SAVE_UPLOAD_NOT_READY,
         crate::app::SAVE_FILE_NOT_HERE,
         crate::app::ATTACH_NEEDS_CONVERSATION,
     ] {
@@ -7688,6 +7711,10 @@ fn attachment_prompts_and_refusals_fit_status_row() {
             "{refusal:?} exceeds the status row"
         );
     }
+    assert!(
+        crate::wrap::columns(crate::app::ATTACH_KINDS) <= 80,
+        "attachment kinds copy exceeds the status row"
+    );
 }
 
 #[test]

@@ -142,7 +142,7 @@ struct ProgressReader<S, F> {
     inner: S,
     total: u64,
     sent: u64,
-    progress: Pin<Box<F>>,
+    progress: Box<F>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -152,7 +152,7 @@ impl<S, F> ProgressReader<S, F> {
             inner,
             total,
             sent: 0,
-            progress: Box::pin(progress),
+            progress: Box::new(progress),
             cancel,
         }
     }
@@ -182,7 +182,7 @@ where
                 let read = buffer.filled().len() - before;
                 if read > 0 {
                     this.sent += read as u64;
-                    (this.progress.as_ref().get_ref())(this.sent, this.total);
+                    (this.progress)(this.sent, this.total);
                 }
                 Poll::Ready(Ok(()))
             }

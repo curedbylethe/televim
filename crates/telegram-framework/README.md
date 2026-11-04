@@ -50,6 +50,7 @@ crates/telegram-framework/
 │   ├── raw.rs        # Client::invoke                              (`live`)
 │   ├── search.rs     # Client::search_messages                     (`live`)
 │   ├── media.rs      # MediaKind, and Client::download_media        (`live`)
+│   ├── upload.rs     # Client::send_attachment                       (`live`)
 │   └── testing.rs    # Fixtures shared by the unit tests   (`test` + `live`)
 └── tests/
     └── auth_integration.rs   # Opt-in tests against a real datacenter
@@ -390,10 +391,9 @@ Every message description carries **what** the message holds, if anything:
 answers a sticker that moves as a `Gif` by attribute order — and `File` is the
 catch-all, so a contact, a poll, and any kind a newer
 Telegram invents all arrive as *something this message carries* rather than as
-nothing. Two classifiers produce it — `classify_raw` for the hand-built
-`GetHistory` path and `classify_typed` for the `grammers` update feed — and they
-are tested on every job because the decision can be, unlike the paths that reach
-it.
+nothing. Fetched history uses `classify_raw`; the live feed and send results use
+`classify_message`. Both paths are tested because the decision can be, unlike
+the paths that reach it.
 
 The kind names a thing; it does not locate one. `Client::download_media_to(peer_id,
 message_id, sink)` is the locator: it re-fetches the message by identifier through
