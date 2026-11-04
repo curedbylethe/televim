@@ -6,7 +6,7 @@
 //! `grammers` update feed in [`updates`] — reach a message through a different
 //! type, and neither path can be exercised without a datacenter. What *can* be
 //! is the decision: given what the wire says, which kind is it? That is
-//! [`classify_raw`] and [`classify_typed`], and they run on every CI job.
+//! [`classify_raw`] and [`classify_message`], and they run on every CI job.
 //!
 //! # Why the answer is never "some media I did not recognise"
 //!
@@ -103,37 +103,15 @@ pub(crate) fn classify_raw(
     })
 }
 
-/// Classifies the media of a `grammers` message.
+/// Classifies media from the raw message envelope used by live traffic.
 ///
-/// Agrees with [`classify_raw`] by construction: a document is decided by one
-/// shared function, and the sticker `grammers` reads off a document's
-/// attributes is answered here — a static sticker is [`MediaKind::Sticker`],
-/// and an animated one is [`MediaKind::AnimatedSticker`]. Everything else
-/// `grammers` flattens away or builds that this crate does not read — a
-/// contact, a poll, a location, a web page — all land on [`MediaKind::File`],
-/// the same answer the raw path gives them.
-///
-/// The one residue is a kind `grammers` itself declines to build: its
-/// `Media::from_raw` returns `None` for a handful of variants, so on this path
-/// such a message arrives here as `None`. The raw history path does not have
-/// that gap.
-pub(crate) fn classify_typed(media: Option<&Media>) -> Option<(MediaKind, Option<i64>)> {
-    Some(match media? {
-        Media::Photo(photo) => (MediaKind::Photo, photo_id(&photo.raw)),
-        Media::Document(document) => (classify_document(&document.raw), document_id(&document.raw)),
-        // `grammers` reads a document with a sticker attribute as a sticker, so
-        // this is where a sticker arrives: the shared document classifier splits
-        // it by mime, the same way the raw path does, so the two agree. Everything
-        // `grammers` flattens away or builds that this crate does not read — a
-        // contact, a poll, a location, a web page, and any kind added after
-        // this build — is one arm, deliberately: all of them carry something,
-        // and none of them is nothing.
-        Media::Sticker(sticker) => (
-            classify_document(&sticker.document.raw),
-            document_id(&sticker.document.raw),
-        ),
-        _ => (MediaKind::File, None),
-    })
+/// The raw message preserves variants `grammers` does not decode into [`Media`],
+/// so only Telegram's empty-media variants become `None`.
+pub(crate) fn classify_message(raw: &tl::enums::Message) -> Option<(MediaKind, Option<i64>)> {
+    match raw {
+        tl::enums::Message::Message(message) => classify_raw(message.media.as_ref()),
+        tl::enums::Message::Empty(_) | tl::enums::Message::Service(_) => None,
+    }
 }
 
 /// The stable id of a photo, read off its record.
@@ -586,8 +564,8 @@ mod tests {
         classify_raw(Some(media)).map(|(kind, _)| kind)
     }
 
-    fn typed(raw: tl::enums::MessageMedia) -> Option<MediaKind> {
-        classify_typed(media_typed(raw).as_ref()).map(|(kind, _)| kind)
+    fn envelope(media: tl::enums::MessageMedia) -> Option<MediaKind> {
+        classify_message(&raw_message(Some(media))).map(|(kind, _)| kind)
     }
 
     /// A document named `notes.txt` whose record carries `id`.
@@ -614,7 +592,7 @@ mod tests {
             Some((MediaKind::File, Some(77)))
         );
         assert_eq!(
-            classify_typed(media_typed(document.clone()).as_ref()),
+            classify_message(&raw_message(Some(document.clone()))),
             Some((MediaKind::File, Some(77)))
         );
 
@@ -637,6 +615,10 @@ mod tests {
 
         assert_eq!(
             classify_raw(Some(&photo)),
+            Some((MediaKind::Photo, Some(88)))
+        );
+        assert_eq!(
+            classify_message(&raw_message(Some(photo))),
             Some((MediaKind::Photo, Some(88)))
         );
     }
@@ -664,7 +646,7 @@ mod tests {
         let expected = Some(MediaKind::Photo);
 
         assert_eq!(raw(&media_photo()), expected);
-        assert_eq!(typed(media_photo()), expected);
+        assert_eq!(envelope(media_photo()), expected);
     }
 
     #[test]
@@ -673,7 +655,7 @@ mod tests {
         let expected = Some(MediaKind::Gif);
 
         assert_eq!(raw(&gif.clone()), expected);
-        assert_eq!(typed(gif), expected);
+        assert_eq!(envelope(gif), expected);
     }
 
     /// An animated GIF is also a video on the wire, and the animation has to
@@ -691,7 +673,7 @@ mod tests {
             Some(MediaKind::Gif)
         );
         assert_eq!(
-            typed(media_document(attributes, false)),
+            envelope(media_document(attributes, false)),
             Some(MediaKind::Gif)
         );
     }
@@ -702,7 +684,7 @@ mod tests {
         let expected = Some(MediaKind::Video);
 
         assert_eq!(raw(&video.clone()), expected);
-        assert_eq!(typed(video), expected);
+        assert_eq!(envelope(video), expected);
     }
 
     #[test]
@@ -711,7 +693,7 @@ mod tests {
         let expected = Some(MediaKind::Voice);
 
         assert_eq!(raw(&note.clone()), expected);
-        assert_eq!(typed(note), expected);
+        assert_eq!(envelope(note), expected);
     }
 
     #[test]
@@ -722,7 +704,7 @@ mod tests {
         let expected = Some(MediaKind::Voice);
 
         assert_eq!(raw(&note.clone()), expected);
-        assert_eq!(typed(note), expected);
+        assert_eq!(envelope(note), expected);
     }
 
     #[test]
@@ -733,7 +715,7 @@ mod tests {
         let expected = Some(MediaKind::File);
 
         assert_eq!(raw(&music.clone()), expected);
-        assert_eq!(typed(music), expected);
+        assert_eq!(envelope(music), expected);
     }
 
     #[test]
@@ -742,7 +724,7 @@ mod tests {
         let expected = Some(MediaKind::File);
 
         assert_eq!(raw(&named.clone()), expected);
-        assert_eq!(typed(named), expected);
+        assert_eq!(envelope(named), expected);
     }
 
     #[test]
@@ -751,7 +733,7 @@ mod tests {
         let expected = Some(MediaKind::File);
 
         assert_eq!(raw(&bare.clone()), expected);
-        assert_eq!(typed(bare), expected);
+        assert_eq!(envelope(bare), expected);
     }
 
     /// A sticker is its own kind on both paths — and `grammers` reads it off the
@@ -763,7 +745,7 @@ mod tests {
         let expected = Some(MediaKind::Sticker);
 
         assert_eq!(raw(&sticker.clone()), expected);
-        assert_eq!(typed(sticker), expected);
+        assert_eq!(envelope(sticker), expected);
     }
 
     /// An animated sticker is its own kind on both paths. The two classifiers
@@ -775,7 +757,7 @@ mod tests {
         let expected = Some(MediaKind::AnimatedSticker);
 
         assert_eq!(raw(&sticker), expected);
-        assert_eq!(typed(sticker), expected);
+        assert_eq!(envelope(sticker), expected);
     }
 
     /// A `WebM` sticker names the video attribute its container needs, and it is
@@ -787,7 +769,7 @@ mod tests {
         let expected = Some(MediaKind::AnimatedSticker);
 
         assert_eq!(raw(&sticker), expected);
-        assert_eq!(typed(sticker), expected);
+        assert_eq!(envelope(sticker), expected);
     }
 
     /// The whole reason the classification has a catch-all. A kind this build
@@ -798,29 +780,32 @@ mod tests {
         let unknown = media_unmodelled();
 
         assert_eq!(raw(&unknown.clone()), Some(MediaKind::File));
-        assert_eq!(typed(unknown), Some(MediaKind::File));
+        assert_eq!(envelope(unknown), Some(MediaKind::File));
     }
 
     #[test]
     fn an_empty_media_is_no_media_at_all() {
         assert_eq!(raw(&media_empty()), None);
         assert_eq!(classify_raw(None), None);
-        assert_eq!(typed(media_empty()), None);
-        assert_eq!(classify_typed(None), None);
+        assert_eq!(envelope(media_empty()), None);
+        assert_eq!(classify_message(&raw_message(None)), None);
     }
 
-    /// The one gap between the two paths, pinned down rather than left as a
-    /// surprise: `grammers` will not build some raw media at all, so the feed
-    /// path cannot see a kind the history path reports as a file.
+    /// A media kind `grammers` refuses to build still reaches the live path as a
+    /// file, because classification reads the raw message envelope.
     #[test]
-    fn a_kind_grammers_refuses_to_build_reaches_the_raw_path_as_a_file() {
+    fn a_kind_grammers_refuses_to_build_is_a_file_on_the_live_path() {
         let refused = media_refused_by_grammers();
 
         assert_eq!(raw(&refused.clone()), Some(MediaKind::File));
         assert_eq!(
+            classify_message(&raw_message(Some(refused.clone()))),
+            Some((MediaKind::File, None))
+        );
+        assert_eq!(
             media_typed(refused),
             None,
-            "this is the residue the raw path does not have"
+            "the typed decoder refuses this media variant"
         );
     }
 

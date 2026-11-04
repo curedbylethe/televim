@@ -54,7 +54,7 @@ use tokio::task::JoinHandle;
 use crate::client::Client;
 use crate::dialogs::DialogKind;
 use crate::error::{FrameworkError, RequestError};
-use crate::media::{MediaKind, classify_typed};
+use crate::media::{MediaKind, classify_message};
 use crate::session::StoreSession;
 use crate::tl;
 
@@ -743,7 +743,7 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
         message.date().timestamp(),
         message.outgoing(),
         message.reply_to_message_id(),
-        classify_typed(message.media().as_ref()),
+        classify_message(&(**message).raw),
     ))
 }
 
