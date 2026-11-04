@@ -55,4 +55,3 @@ __pycache__/
 
 .projectmem/**
 !.projectmem/PROJECT_MAP.md
-!.projectmem/plan.md
