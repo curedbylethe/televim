@@ -760,6 +760,10 @@
        (93, a page away) or inside it (104) */
     else if (view === 'unreadFar') s.chats[0].firstUnread = 93;
     else if (view === 'unreadNear') s.chats[0].firstUnread = 104;
+    /* the chat-list row scenes: a count wide enough to crowd the title, and a bulk read in which one
+       chat's request fails */
+    else if (view === 'rowStress') s.chats[0].unread = 12;
+    else if (view === 'readFails') s.chats.find((c) => c.name === 'Donald Knuth').readFail = true;
     else if (view === 'media') s.chats.unshift(makeMediaChat());
     else if (view === 'sticker') s.chats.unshift(makeStickerChat(true));
     else if (view === 'stickerFallback') s.chats.unshift(makeStickerChat(false));
@@ -904,7 +908,12 @@
   function togglePane(s) {
     if (s.focus !== 'list') { s.focus = 'list'; return; }
     s.focus = s.right === 'settings' ? 'settings' : s.right === 'profile' ? 'profile' : 'conv';
+    if (s.focus === 'conv') openedFromList(s);
   }
+  /* Opening is the move from the list into the conversation, not the highlight passing over a row:
+     the highlight previews a chat, and a flag that went when a row was walked past could not be found
+     again. The manual unread mark is the one thing opening clears; the count and mute are not its. */
+  function openedFromList(s) { const c = chat(s); if (c) c.marked = false; }
   function openSettings(s) { s.right = 'settings'; s.card = null; s.focus = 'settings'; s.sset = 0; }
   /* the card: the same widget as the conversation over different items. It starts at the top
      every time and remembers nothing, where the conversation keeps the reader's place. A
@@ -969,6 +978,36 @@
     if (s.card && s.focus === 'profile') leaveCard(s);
     s.chat = clamp(s.chat, 0, Math.max(0, s.chats.length - 1));
     s.flash = 'archived ' + localName(s, c.name);
+  }
+  /* Mute, the manual unread mark and the bulk read act on the chat-list highlight, never on a card's
+     person: all three are properties of a conversation, and a person with none has nothing to mute.
+     None asks first. Each is undone from the screen it acts on — `:unmute`, and opening the chat — and
+     none is visible to anybody else, which is the line the confirmations in this section draw.
+     `muted` stops Telegram's notification and nothing on this screen: the count stays. `marked` is a
+     flag, not a count: it stands alone or beside a real count. */
+  function muteChat(s, on) {
+    const c = s.chats[s.chat];
+    if (!c) return refuse(s, NOTHING_TO_ACT_ON);
+    c.muted = on;
+    s.flash = (on ? 'muted ' : 'unmuted ') + localName(s, c.name);
+  }
+  function markUnread(s) {
+    const c = s.chats[s.chat];
+    if (!c) return refuse(s, NOTHING_TO_ACT_ON);
+    c.marked = true;
+    s.flash = 'marked ' + localName(s, c.name) + ' unread';
+  }
+  /* A bulk action reports what it did and what it could not: one request per chat, so one can fail
+     while the rest land. A chat that fails keeps its count (and its mark), which is how the reader
+     finds the rest. In the model a chat carrying `readFail` stands in for the request that failed. */
+  function markAllRead(s) {
+    let done = 0, failed = 0;
+    s.chats.forEach((c) => {
+      if (!c.unread) return;
+      if (c.readFail) { failed++; return; }
+      c.unread = 0; c.marked = false; done++;
+    });
+    s.flash = 'marked ' + done + ' chat' + (done === 1 ? '' : 's') + ' read' + (failed ? ', ' + failed + ' failed' : '');
   }
   function openArchived(s) {
     const A = s.archived;
@@ -1086,7 +1125,7 @@
       case 'G': s.chat = s.chats.length - 1; break;
       case 'Enter': s.card = null; s.right = 'conv'; togglePane(s); break;
       case 'l': case 'h': case 'Tab': togglePane(s); break;
-      case 'i': case 'a': s.focus = 'conv'; convKey(s, k, ''); break;
+      case 'i': case 'a': s.focus = 'conv'; openedFromList(s); convKey(s, k, ''); break;
       case '/': openNewChat(s, ''); break;
       case 'A': openCard(s, 'person'); break;
       case 'S': openCard(s, 'self'); break;
@@ -1198,7 +1237,8 @@
       case 'D': if (m) { c.msgs.splice(c.cur, 1); c.cur = clamp(c.cur, 0, c.msgs.length - 1); s.flash = 'Dismissed on this side only.'; } break;
       case '/': openLine(s, { kind: 'find' }); break;
       case 'n': case 'N': stepSearch(s, k === 'n' ? 1 : -1); break;
-      case 'Escape': s.search = null; break;
+      case 'o': openMedia(s); break;
+      case 'Escape': { const u = liveUpload(s); if (u) cancelUpload(u); else s.search = null; break; }
       case 'Enter': case 'C-j': if (s.draft && s.draft.ctx === ctx(s)) s.draft = null; break;
       case 'Tab': case 'h': togglePane(s); break;
       case 'l': openCard(s, 'person'); break;
@@ -1246,6 +1286,69 @@
       for (let i = idxs.length - 1; i >= 0; i--) c.msgs.splice(idxs[i], 1);
       c.cur = clamp(idxs[0], 0, c.msgs.length - 1); x.vis = null;
     });
+  }
+
+  /* ---------- sending an attachment, then opening or saving one ----------
+     `:attach <path>` asks first, because a sent file is seen by somebody else and cannot be taken back
+     from this screen, and then sends the way a typed message does: the row appears at once with
+     `[sending…]` on its last row. The transfer's progress sits beside the placeholder in the token a
+     download uses, `[image… 42%]`, never in place of the body. Only images and documents are sent; the
+     message is the kind's placeholder, so a settled upload is an ordinary `[image]` or `[file]`.
+     A path opening with `!` stands in for an upload that fails, as it does for a failed search; the
+     `!` is not part of the name. The tick that moves an upload is `answer`, one step per network turn.
+     `o` and `:open` are one action. `Esc` cancels an upload in flight. */
+  const ATTACH_IMAGE = ['jpg', 'jpeg', 'png', 'webp'];
+  const ATTACH_DOC = ['pdf', 'doc', 'docx', 'odt', 'rtf', 'txt', 'md', 'csv', 'xls', 'xlsx', 'ppt', 'pptx'];
+  const ATTACH_KINDS = 'Only images and documents can be sent: jpg, png, webp, pdf, docx, txt.';
+  const ATTACH_USAGE = 'Attach what? :attach <path> sends an image or a document.';
+  const SAVE_USAGE = 'Save where? :save <path> copies the media to that path.';
+  const UPLOAD_STEPS = [42, 87];   /* the percentages the first two ticks reach; the third settles */
+  const kindWord = (m) => MEDIA_LABEL[m.kind].slice(1, -1);
+  const liveUpload = (s) => {
+    for (const c of s.chats || []) for (const m of c.msgs) if (m.up && m.up.on) return m;
+    return null;
+  };
+  const failedUpload = (m) => !!(m && m.up && !m.up.on && m.status && m.status.startsWith('failed'));
+  function attachCmd(s, arg) {
+    if (!arg) return refuse(s, ATTACH_USAGE);
+    const fail = arg[0] === '!', name = (fail ? arg.slice(1) : arg).split('/').pop();
+    const ext = ((name.match(/\.([A-Za-z0-9]+)$/) || [])[1] || '').toLowerCase();
+    const kind = ATTACH_IMAGE.includes(ext) ? 'Photo' : ATTACH_DOC.includes(ext) ? 'File' : '';
+    if (!kind) return refuse(s, ATTACH_KINDS);
+    const c = chat(s);   /* the question keeps its conversation, so `y` cannot send into another */
+    ask(s, 'attach ' + kindWord({ kind }) + ' ' + name + '? (y/n)', (x) => {
+      const last = c.msgs[c.msgs.length - 1];
+      const m = media('you', kind, { status: 'sending…', up: { on: true, pct: 0, step: 0, fail } });
+      if (last && last.at != null) m.at = Math.max(NOW, last.at);
+      c.msgs.push(m); c.cur = c.msgs.length - 1; x.vis = null;
+    });
+  }
+  function uploadStep(m) {
+    const u = m.up;
+    u.step++;
+    if (u.fail && u.step === 2) { u.on = false; m.status = 'failed: no route'; }
+    else if (u.step <= UPLOAD_STEPS.length) u.pct = UPLOAD_STEPS[u.step - 1];
+    else { m.status = null; delete m.up; }
+  }
+  function cancelUpload(m) { m.up.on = false; m.status = 'failed: cancelled'; }
+  const mediaOnHand = (m) => !!(m && m.kind && !(m.up && m.up.on) && !(m.status && m.status.startsWith('failed')));
+  function noMedia(s, verb, m) {
+    refuse(s, 'Nothing to ' + verb + (!m || !m.kind ? ': this message carries no media.'
+      : m.up && m.up.on ? ' yet: the upload is still running.' : ': the file is not here.'));
+  }
+  /* `o` and `:open`: a failed upload is tried again, which is what `(o retries)` promises; media on
+     hand opens in the viewer; anything else is refused with the reason it cannot. */
+  function openMedia(s) {
+    const c = chat(s), m = c && c.msgs[c.cur];
+    if (failedUpload(m)) { m.status = 'sending…'; m.up = { on: true, pct: 0, step: 0, fail: false }; return; }
+    if (!mediaOnHand(m)) return noMedia(s, 'open', m);
+    s.flash = 'opening ' + kindWord(m) + ' in the viewer…';
+  }
+  function saveMedia(s, path) {
+    const c = chat(s), m = c && c.msgs[c.cur];
+    if (!mediaOnHand(m)) return noMedia(s, 'save', m);
+    if (!path) return refuse(s, SAVE_USAGE);
+    s.flash = 'saved ' + kindWord(m) + ' to ' + path;
   }
 
   /* ---------- forwarding: the selection, then the destination ---------- */
@@ -1533,6 +1636,10 @@
         if (c === 'settings') openSettings(s);
         else if (c === 'new' || c.startsWith('new ')) openNewChat(s, c.replace(/^new\s*/, ''));
         else if (c === 'archive') archiveChat(s);
+        else if (c === 'mute') muteChat(s, true);
+        else if (c === 'unmute') muteChat(s, false);
+        else if (c === 'mark-unread') markUnread(s);
+        else if (c === 'mark-all-read') markAllRead(s);
         else if (c === 'archived') openArchived(s);
         else if (c === 'block') blockPerson(s, true);
         else if (c === 'unblock') blockPerson(s, false);
@@ -1546,6 +1653,9 @@
         else if (c === 'signin') beginSignin(s);
         else if (c === 'passphrase') beginChange(s);
         else if (c === 'unlock') { if (s.locked) beginUnlock(s); else refuse(s, 'the session is open already'); }
+        else if (c === 'attach' || c.startsWith('attach ')) attachCmd(s, c.replace(/^attach\s*/, '').trim());
+        else if (c === 'open') openMedia(s);
+        else if (c === 'save' || c.startsWith('save ')) saveMedia(s, c.replace(/^save\s*/, '').trim());
         else if (c === 'q' || c === 'quit') common(s, 'q');
         else if (c) refuse(s, 'Not a command: ' + c);
         return;
@@ -1646,6 +1756,8 @@
     if (open && open.revalidating) { open.revalidating = false; return s; }
     if (s.newchat && s.newchat.pending) { s.newchat.pending = false; return s; }
     if (s.jump) return landJump(s);
+    const up = liveUpload(s);
+    if (up) { uploadStep(up); return s; }
     if (s.pass && s.pass.checking) return passAnswer(s);
     const A = s.signin, p = A && A.pending;
     if (!A || !A.checking || !p) return s;
@@ -2004,7 +2116,14 @@
     put(g, LABEL, H - 1, trunc(st.t, HINT_W), st.a);
   }
 
-  /* ---------- chat list ---------- */
+  /* ---------- chat list ----------
+     A row is, in order: the pin (`📌` and a space) when the chat is pinned, the title, and at the right
+     edge the mute glyph, the unread-mark glyph and the count, each only when it applies, one space
+     between. The glyphs are the whole message: a monochrome terminal and a colour one read the same
+     row. Mute is a circled slash because it says "off" in one cell and is hollow; the mark is a solid
+     dot because it is the unread dot every list uses, and it is the one glyph in `text` where the
+     rest are `text-dim`. The title is cut to the room the glyphs leave, never the glyphs to the title. */
+  const ROW_PIN = '📌', ROW_MUTED = '⊘', ROW_MARKED = '●';
   function drawList(g, s, h) {
     /* locked: the list is the local cache, and the title says so with a title note, as a cached conversation is named */
     const cached = s.locked && s.chats.length ? ' · cached' : '';
@@ -2012,8 +2131,18 @@
     s.chats.slice(0, h - 2).forEach((c, i) => {
       const cur = i === s.chat, a = cur ? 'tr' : 't', y = 1 + i;
       fill(g, 1, y, LW - 2, a);
-      put(g, 2, y, trunc(localName(s, c.name), 17), a);
-      if (c.unread) { const u = String(c.unread); put(g, LW - 3 - u.length + 1, y, u, cur ? 'tr' : 'd'); }
+      /* pin prefix, then the title; what a chat is carrying sits at the right edge, in the order
+         mute, mark, count, so the glyphs line up down the list and the title never moves for them */
+      const lead = c.pin ? cells(ROW_PIN) + 1 : 0;
+      if (c.pin) put(g, 2, y, ROW_PIN, a);
+      const tail = [];
+      if (c.muted) tail.push([ROW_MUTED, cur ? 'tr' : 'd']);
+      if (c.marked) tail.push([ROW_MARKED, a]);
+      if (c.unread) tail.push([String(c.unread), cur ? 'tr' : 'd']);
+      const width = tail.reduce((n, [t]) => n + cells(t), 0) + Math.max(0, tail.length - 1);
+      put(g, 2 + lead, y, trunc(localName(s, c.name), Math.min(17 - lead, tail.length ? 22 - width - 3 - lead : 17 - lead)), a);
+      let x = 22 - width;
+      tail.forEach(([t, ink]) => { x += put(g, x, y, t, ink) + 1; });
     });
   }
 
@@ -2038,9 +2167,13 @@
          the peer's read state (outgoing only, never beside a status) and the group's time. The
          note's width is known before the text is broken, because the text is broken around it. */
       const rcpt = tail && m.from === 'you' && !m.status && m.rcpt ? m.rcpt : '';
-      const suf = m.status ? '[' + m.status + ']' : rcpt ? '[' + rcpt + ']' : '';
+      const suf = m.status ? '[' + m.status + ']' + (failedUpload(m) ? ' (o retries)' : '') : rcpt ? '[' + rcpt + ']' : '';
       const tm = tail && m.at != null ? clock(m.at) : '';
-      const need = cells(suf) + (suf && tm ? 1 : 0) + cells(tm);
+      /* an upload in flight draws its progress beside the placeholder, on the last row, in the
+         download's token; it is not text, so search, yank and reply never see it */
+      const tok = m.up && m.up.on ? '[' + kindWord(m) + '… ' + Math.min(100, m.up.pct) + '%]' : '';
+      const note = cells(suf) + (suf && tm ? 1 : 0) + cells(tm);
+      const need = note + (tok ? 1 + cells(tok) + (note ? 1 : 0) : 0);   /* a space before the token, one after */
       /* Which way this message reads is one answer for the whole message, asked
          across every paragraph of it: a message that opens with `---` and then
          says `שלום` is right-to-left, and the neutrals at the top cannot outvote
@@ -2061,8 +2194,8 @@
            measured in cells. The breaking above already left the note's width room on every
            row after the first, so the last of those fits by construction; the first row, and
            an inline sticker's rows, are checked here. Exactly as `wrap_decorated` does it. */
-        if (cells(last.full.slice(last.s, last.e)) + need <= CW) Object.assign(last, { suf, sufA, tm });
-        else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, suf, sufA, tm });
+        if (cells(last.full.slice(last.s, last.e)) + need <= CW) Object.assign(last, { suf, sufA, tm, tok });
+        else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, suf, sufA, tm, tok });
       }
       rows[first].hasStart = true;
     });
@@ -2133,6 +2266,11 @@
           put(g, x0 + 9 + cells(r.full.slice(r.s, j)), y, cl, ink(j));
           j += cl.length;
         }
+      }
+      if (r.tok) {
+        /* beside the placeholder, one space after it (or at the body column on a row of its own), in the dim ink every note takes */
+        const bw = cells(r.full.slice(r.s, r.e));
+        put(g, x0 + 9 + bw + (bw ? 1 : 0), y, r.tok, (cur ? 't' : 'd') + mod);
       }
       const tmw = r.tm ? cells(r.tm) : 0;
       if (r.tm) put(g, x0 + 2 + 52 - tmw, y, r.tm, (cur ? 't' : 'd') + mod);
@@ -2973,7 +3111,42 @@
       { name: 'Report: an unknown reason is refused before the question', keys: ':report nonsense<CR>' },
       { name: 'Contacts: the account\'s people, over the chat column', keys: ':contacts<CR>' },
       { name: 'A contact with no chat: ⏎ opens their card, not yours', keys: ':contacts<CR>' + 'j'.repeat(13) + '<CR>' },
-      { name: 'Contacts: Esc puts the list back', keys: ':contacts<CR><Esc>' }] }
+      { name: 'Contacts: Esc puts the list back', keys: ':contacts<CR><Esc>' }] },
+    /* Sending an attachment, and opening or saving one. Ken Thompson's chat is put first by the
+       `media` start, so the new message lands under the media the other scenes read. Every frame is
+       reached with the keys a reader presses; <wait> is one network turn of the upload. A path that
+       opens with `!` stands in for an upload that fails. */
+    { id: 'attach', name: 'Send an attachment', start: 'media', variants: [
+      { name: 'Confirm: the question names the kind and the file', keys: ':attach ~/Pictures/vacation.jpg<CR>' },
+      { name: 'Confirm: a document is a file', keys: ':attach ~/Documents/report.pdf<CR>' },
+      { name: 'Refused: not an image or a document', keys: 'k:attach ~/Movies/clip.mp4<CR>' },
+      { name: 'Sent: the row is there at once, sending, no progress yet', keys: ':attach ~/Pictures/vacation.jpg<CR>y' },
+      { name: 'Uploading an image at a percentage', keys: ':attach ~/Pictures/vacation.jpg<CR>y<wait>' },
+      { name: 'Uploading a file at a percentage', keys: ':attach ~/Documents/report.pdf<CR>y<wait>' },
+      { name: 'Uploaded: the ordinary placeholder, with its time', keys: ':attach ~/Pictures/vacation.jpg<CR>y<wait><wait><wait>' },
+      { name: 'Esc cancels: failed, and o retries', keys: ':attach ~/Pictures/vacation.jpg<CR>y<wait><Esc>' },
+      { name: 'Failed: the reason, and o retries', keys: ':attach !report.pdf<CR>y<wait><wait>' },
+      { name: 'o retries: the upload starts again', keys: ':attach !report.pdf<CR>y<wait><wait>o' },
+      { name: ':open on a text message is refused', keys: 'kkkkkkk:open<CR>' },
+      { name: ':open on a photo says where it is going', keys: 'kkkkkkkk:open<CR>' },
+      { name: ':save copies the photo to the reader\'s path', keys: 'kkkkkkkk:save ~/Pictures/scan.png<CR>' }] },
+    /* The chat-list row's two new states, and the three commands that set them. Every frame is reached
+       with the keys a reader presses, from the list (`<Tab>`), one `j` per row: Ada 0, Grace 1, Alan 2,
+       Katherine 3, Donald 9. Ada and Grace are pinned. `rowStress` gives Ada a two-digit count, the
+       widest row the list has to hold; `readFails` makes one chat's read request fail. */
+    { id: 'unread', name: 'Chat row: muted, marked unread', variants: [
+      { name: 'Mute: the sentence, and the row says so', keys: '<Tab>jj:mute<CR>' },
+      { name: 'Muted: the count is still there', keys: '<Tab>jj:mute<CR>j' },
+      { name: 'Unmute: the glyph goes', keys: '<Tab>jj:mute<CR>:unmute<CR>' },
+      { name: 'Marked unread: a flag, and no count', keys: '<Tab>jjj:mark-unread<CR>j' },
+      { name: 'Marked unread beside a count', keys: '<Tab>jjjjjjjjj:mark-unread<CR>k' },
+      { name: 'Pinned and muted', keys: '<Tab>:mute<CR>jj' },
+      { name: 'Pinned, muted, marked and counted, on one row', start: 'rowStress', keys: '<Tab>:mute<CR>:mark-unread<CR>jj' },
+      { name: 'The same row under the highlight', start: 'rowStress', keys: '<Tab>:mute<CR>:mark-unread<CR>' },
+      { name: 'Walking past a marked row does not clear it', keys: '<Tab>jjj:mark-unread<CR>jk' },
+      { name: 'Opening the marked chat clears the mark', keys: '<Tab>jjj:mark-unread<CR><CR>' },
+      { name: ':mark-all-read: every count goes', keys: '<Tab>:mark-all-read<CR>' },
+      { name: ':mark-all-read: one request failed, its count stays', start: 'readFails', keys: '<Tab>:mark-all-read<CR>' }] }
   ];
   function scene(si, vi) {
     const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start, v.bidi);

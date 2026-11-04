@@ -228,5 +228,50 @@ const PASS_SCREENS = [
 ];
 PASS_SCREENS.forEach(([id, scene, vi]) => { html = replaceFrame(html, id, TV.render(TV.scene(sceneIndex(scene), vi))); });
 
+/* ---------- section 13 · the chat row: muted, marked unread, pinned, counted ----------
+   One montage of six crops of the chats panel at its own 24 columns, so the worst row is shown at the
+   width it has to fit, and four whole screens for the commands that set the states. Both come from
+   the `unread` scene by variant name, and the keys in each caption are read back off the scene. */
+const putw = (g, x, y, str, a) => {
+  let i = 0;
+  for (const c of TV.clusters(str)) { const w = TV.cells(c); g[y][x + i] = [c, a]; for (let k = 1; k < w; k++) g[y][x + i + k] = ['', a]; i += w; }
+};
+const ROW_CROPS = [
+  ['muted, count kept', 'Muted: the count is still there', [1, 2, 3, 4]],
+  ['marked, no count', 'Marked unread: a flag, and no count', [2, 3, 4, 5]],
+  ['marked, with a count', 'Marked unread beside a count', [9, 10, 11, 12]],
+  ['pinned and muted', 'Pinned and muted', [1, 2, 3, 4]],
+  ['all four, plain', 'Pinned, muted, marked and counted, on one row', [1, 2, 3, 4]],
+  ['all four, highlighted', 'The same row under the highlight', [1, 2, 3, 4]]
+];
+function chatRowFrame() {
+  const g = blank();
+  ROW_CROPS.forEach(([label, variant, rows], i) => {
+    const [si, vi] = variantIndex('unread', variant);
+    const src = TV.render(TV.scene(si, vi)), dx = (i % 3) * 28, dy = Math.floor(i / 3) * 8;
+    [0, ...rows, 19].forEach((sy, k) => { for (let x = 0; x < LW; x++) g[dy + k][dx + x] = src[sy][x].slice(); });
+    putw(g, dx, dy + 6, label, 'd');
+  });
+  putw(g, 0, 17, '📌 pinned     ⊘ muted     ● marked unread     12 the unread count', 'd');
+  putw(g, 0, 19, 'the title starts at column 2, or 5 under a pin, in every crop', 'd');
+  putw(g, 0, 20, 'the count ends in column 21 in every crop', 'd');
+  putw(g, 0, 21, 'no state is carried by colour: the glyph is the message', 'd');
+  return g;
+}
+html = replaceFrame(html, 'chat-row-frame', chatRowFrame());
+const ROW_SCREENS = [
+  ['chat-row-mute-frame', 'mute: the sentence, and the row says so', 'chat list, a muted chat under the highlight, the sentence on the status row', 'Mute: the sentence, and the row says so'],
+  ['chat-row-highlight-frame', 'all four on one row, under the highlight', 'chat list, a pinned, muted, marked and counted row under the highlight', 'The same row under the highlight'],
+  ['chat-row-opened-frame', 'opening the marked chat clears the mark', 'chat list, the marked chat opened, the mark gone', 'Opening the marked chat clears the mark'],
+  ['chat-row-read-failed-frame', ':mark-all-read, one request failed', 'chat list, mark all read with one request failed, its count kept', ':mark-all-read: one request failed, its count stays']
+].map(([id, caption, aria, variant]) => {
+  const [si, vi] = variantIndex('unread', variant);
+  return [id, caption, TV.SCENES[si].variants[vi].keys, aria, si, vi];
+});
+ROW_SCREENS.forEach(([id]) => { html = removeBlock(html, id); });
+const rowAnchor = '<ol class="notes" data-od-id="chat-row-notes">';
+if (!html.includes(rowAnchor)) throw new Error('no section-13 notes anchor');
+html = html.replace(rowAnchor, ROW_SCREENS.map((f) => frameBlock(...f)).join('\n  ') + '\n  ' + rowAnchor);
+
 fs.writeFileSync(FILE, html);
 console.log('regenerated every frame in components.html from the engine');
