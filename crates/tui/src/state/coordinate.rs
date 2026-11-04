@@ -27,7 +27,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
 use domain::global_search::GlobalSearchState;
 use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
-use domain::message::Message;
+use domain::message::{MediaKind, Message, MessageStatus};
 use domain::search::word_prefix_match;
 use domain::selection::Selection;
 use domain::updates::UpdateEvent;
@@ -35,11 +35,13 @@ use domain::user::UserCandidate;
 use domain::vim::{CharMotion, Motion, VimState};
 
 use crate::app::{
-    ACTION_QUEUE, AccountState, Action, ChatChoice, ConfirmKind, ContactProfile, Find, Focus,
-    JUMP_UNAVAILABLE, Jump, JumpKind, LoginField, Mode, NOT_A_DATE, NOT_A_REPLY, NOTHING_TO_ACT_ON,
+    ACTION_QUEUE, ATTACH_KINDS, ATTACH_NEEDS_CONVERSATION, ATTACH_USAGE, AccountState, Action,
+    ChatChoice, ConfirmKind, ContactProfile, Find, Focus, JUMP_UNAVAILABLE, Jump, JumpKind,
+    LoginField, Mode, NOT_A_DATE, NOT_A_REPLY, NOTHING_TO_ACT_ON, NOTHING_TO_OPEN, NOTHING_TO_SAVE,
     PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED, PASS_OPEN_ALREADY, PASS_STILL_CHECKING,
     PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode, PassPrompt, ProfileId, PromptKind, Register,
-    SESSION_PATH_USAGE, Secret, SignIn, SignInFlow, TYPING_FOR,
+    SAVE_FILE_NOT_HERE, SAVE_USAGE, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow, TYPING_FOR,
+    UPLOAD_NOT_READY,
 };
 use crate::bidi::BidiMode;
 use crate::card::CardRow;
@@ -1230,6 +1232,7 @@ pub(crate) fn handle_forward_pick(
 pub(crate) fn handle_confirm(
     ui: &mut UiState,
     conversation: &mut ConversationState,
+    input: &mut InputState,
     outbox: &mut Outbox,
     key: KeyEvent,
 ) -> bool {
@@ -1244,6 +1247,30 @@ pub(crate) fn handle_confirm(
                     &mut *ui,
                     Action::ImportSession { path: path.clone() },
                 ),
+                Some(ConfirmKind::Attach {
+                    chat_id,
+                    path,
+                    kind,
+                }) => {
+                    let (chat_id, path, kind) = (*chat_id, path.clone(), *kind);
+                    if conversation.sending.is_some() {
+                        ui.flash("a message is already on its way");
+                    } else {
+                        let temp_id = conversation.queue_media_send(kind, None);
+                        conversation.begin_send(temp_id);
+                        queue_action(
+                            &mut *outbox,
+                            &mut *ui,
+                            Action::SendAttachment {
+                                chat_id,
+                                temp_id,
+                                path,
+                                kind,
+                            },
+                        );
+                    }
+                    input.line.clear();
+                }
                 Some(ConfirmKind::DeleteMessages { ids, .. }) => {
                     let chat_id = conversation.conversation.window.chat_id;
                     queue_action(
@@ -3181,6 +3208,37 @@ pub(crate) fn run_command(
             }
             false
         }
+        "open" => {
+            request_open_media(&mut *ui, &mut *conversation, &mut *outbox);
+            false
+        }
+        _ if cmd == "attach" || cmd.starts_with("attach ") => {
+            let path = cmd["attach".len()..].trim();
+            if path.is_empty() {
+                ui.set_status(ATTACH_USAGE.to_owned());
+            } else if !conversation.has_conversation() {
+                ui.flash(ATTACH_NEEDS_CONVERSATION);
+            } else if let Some(kind) = attach_kind(path) {
+                ui.set_mode(Mode::Confirm);
+                conversation.set_confirm(Some(ConfirmKind::Attach {
+                    chat_id: conversation.conversation.window.chat_id,
+                    path: path.into(),
+                    kind,
+                }));
+            } else {
+                ui.flash(ATTACH_KINDS);
+            }
+            false
+        }
+        _ if cmd == "save" || cmd.starts_with("save ") => {
+            let path = cmd["save".len()..].trim();
+            if path.is_empty() {
+                ui.set_status(SAVE_USAGE.to_owned());
+            } else {
+                request_save_media(&mut *ui, &mut *conversation, &mut *outbox, path);
+            }
+            false
+        }
         _ if cmd.starts_with("chat ") => {
             if let Ok(id) = cmd[5..].trim().parse::<i64>() {
                 // Unknown ids stay a silent no-op here: only the launch
@@ -3905,6 +3963,19 @@ pub(crate) fn handle_normal(
         pending.set_count(None);
     }
 
+    // An upload is keyed by the pending message, even if the cursor moved away
+    // while it was sending. Cancel the network task before considering downloads.
+    if key.code == KeyCode::Esc
+        && let Some(temp_id) = conversation.sending
+        && conversation
+            .conversation
+            .message(temp_id)
+            .is_some_and(|message| message.media.is_some())
+    {
+        queue_action(&mut *outbox, &mut *ui, Action::CancelUpload { temp_id });
+        return false;
+    }
+
     // `Esc` stops the download of the message under the cursor when one is in
     // flight. With none in flight it does nothing here, as it always has.
     if key.code == KeyCode::Esc
@@ -4061,7 +4132,9 @@ pub(crate) fn handle_normal(
             false
         }
         'D' => {
-            conversation.dismiss_failed_at_cursor();
+            if let Some(temp_id) = conversation.dismiss_failed_at_cursor() {
+                queue_action(&mut *outbox, &mut *ui, Action::DismissUpload { temp_id });
+            }
             false
         }
         'o' => {
@@ -4127,10 +4200,25 @@ pub(crate) fn handle_normal(
     }
 }
 
-/// Refusal for `o` on a message with no media. Names the key that would have
-/// opened something, as [`NOT_A_REPLY`] does for `gd`.
-pub(crate) const NO_ATTACHMENT: &str =
-    "No attachment here: o opens the media on the message under the cursor.";
+/// Classifies the attachment extensions this command can send.
+pub(crate) fn attach_kind(path: &str) -> Option<MediaKind> {
+    let extension = std::path::Path::new(path).extension()?.to_str()?;
+    if ["jpg", "jpeg", "png", "webp"]
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    {
+        return Some(MediaKind::Photo);
+    }
+    if [
+        "pdf", "doc", "docx", "odt", "rtf", "txt", "md", "csv", "xls", "xlsx", "ppt", "pptx",
+    ]
+    .iter()
+    .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    {
+        return Some(MediaKind::File);
+    }
+    None
+}
 
 /// Queues the open of the media on the cursor message, or flashes why not.
 ///
@@ -4142,19 +4230,99 @@ pub(crate) fn request_open_media(
     conversation: &mut ConversationState,
     outbox: &mut Outbox,
 ) {
-    let Some(message) = conversation
+    let Some((chat_id, message_id, media, status)) = conversation
         .cursor_message()
-        .filter(|message| message.media.is_some())
+        .map(|message| (message.chat_id, message.id, message.media, message.status))
     else {
-        ui.flash(NO_ATTACHMENT);
+        ui.flash(NOTHING_TO_OPEN);
         return;
     };
 
+    if message_id < 0 && media.is_some() {
+        match status {
+            MessageStatus::Sending => {
+                ui.flash(UPLOAD_NOT_READY);
+                return;
+            }
+            MessageStatus::Failed => {
+                if conversation.sending.is_some() {
+                    ui.flash("a message is already on its way");
+                    return;
+                }
+                if conversation.retry_send(message_id) {
+                    conversation.downloads.forget(chat_id, message_id);
+                    conversation.begin_send(message_id);
+                    queue_action(
+                        &mut *outbox,
+                        &mut *ui,
+                        Action::RetryUpload {
+                            chat_id,
+                            temp_id: message_id,
+                        },
+                    );
+                }
+                return;
+            }
+            MessageStatus::Sent | MessageStatus::Received => {}
+        }
+    }
+
+    if media.is_none() {
+        ui.flash(NOTHING_TO_OPEN);
+        return;
+    }
+
     let action = Action::OpenMedia {
-        chat_id: message.chat_id,
-        message_id: message.id,
+        chat_id,
+        message_id,
     };
     queue_action(&mut *outbox, &mut *ui, action);
+}
+
+fn request_save_media(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    outbox: &mut Outbox,
+    typed: &str,
+) {
+    let Some((chat_id, message_id, media, status)) = conversation
+        .cursor_message()
+        .map(|message| (message.chat_id, message.id, message.media, message.status))
+    else {
+        ui.flash(NOTHING_TO_SAVE);
+        return;
+    };
+
+    if message_id < 0 && media.is_some() && status == MessageStatus::Sending {
+        ui.flash(SAVE_FILE_NOT_HERE);
+        return;
+    }
+    if message_id < 0 && media.is_some() && status == MessageStatus::Failed {
+        ui.flash(SAVE_FILE_NOT_HERE);
+        return;
+    }
+    if matches!(
+        conversation.downloads.get(chat_id, message_id),
+        Some(crate::download::Outcome::Failed(_))
+    ) {
+        ui.flash(SAVE_FILE_NOT_HERE);
+        return;
+    }
+    if media.is_none() {
+        ui.flash(NOTHING_TO_SAVE);
+        return;
+    }
+
+    queue_action(
+        &mut *outbox,
+        &mut *ui,
+        Action::SaveMedia {
+            chat_id,
+            message_id,
+            path: typed.into(),
+            typed: typed.to_owned(),
+        },
+    );
 }
 
 /// Handles a key while the chat list has the focus.
@@ -4996,7 +5164,7 @@ fn preempt_key(
     // a pane, so it outranks the focus: it has to be answered before another
     // key is addressed anywhere.
     if ui.mode == Mode::Confirm {
-        if handle_confirm(&mut *ui, &mut *conversation, &mut *outbox, key) {
+        if handle_confirm(&mut *ui, &mut *conversation, &mut *input, &mut *outbox, key) {
             begin_change(&mut *ui, &mut *session, &mut *input);
         }
         return Some(false);
@@ -5101,7 +5269,7 @@ fn handle_conversation_key(
         (Mode::Confirm, _) => {
             // Unreachable: `preempt_key` answers a confirmation first, and it is
             // the one that holds the session a change opens its entries on.
-            let _ = handle_confirm(&mut *ui, &mut *conversation, &mut *outbox, key);
+            let _ = handle_confirm(&mut *ui, &mut *conversation, &mut *input, &mut *outbox, key);
             false
         }
     }

@@ -7505,9 +7505,189 @@ fn o_on_a_message_without_media_refuses() {
 
     key(&mut app, 'o');
 
-    assert_eq!(app.status_text(), crate::state::coordinate::NO_ATTACHMENT);
+    assert_eq!(app.status_text(), crate::app::NOTHING_TO_OPEN);
     assert_eq!(app.take_action(), None, "nothing is queued");
     assert_eq!(reading(&app), Some(2), "and the reader stays put");
+}
+
+#[test]
+fn attach_confirms_supported_media_then_queues_an_optimistic_upload() {
+    let mut app = App::mock();
+
+    run_command_line(&mut app, "attach /tmp/weekend.JPG");
+
+    assert_eq!(app.ui.mode, Mode::Confirm);
+    assert_eq!(app.status_text(), "attach image weekend.JPG? (y/n)");
+    key(&mut app, 'y');
+
+    let placeholder = app
+        .conversation
+        .conversation
+        .window
+        .iter()
+        .last()
+        .expect("upload placeholder is in the conversation");
+    let temp_id = placeholder.id;
+    assert!(temp_id < 0);
+    assert_eq!(placeholder.text, "");
+    assert_eq!(placeholder.media, Some(domain::message::MediaKind::Photo));
+    assert_eq!(placeholder.status, MessageStatus::Sending);
+    app.conversation.downloads.start(MOCK_CHAT, temp_id);
+    app.conversation
+        .downloads
+        .progress(MOCK_CHAT, temp_id, 42, Some(100));
+    assert_eq!(
+        crate::rows::status_suffix(
+            &app,
+            app.conversation
+                .conversation
+                .message(temp_id)
+                .expect("upload placeholder remains visible")
+        )
+        .as_deref(),
+        Some("[image… 42%]  [sending…]")
+    );
+    assert_eq!(
+        app.take_action(),
+        Some(Action::SendAttachment {
+            chat_id: MOCK_CHAT,
+            temp_id,
+            path: "/tmp/weekend.JPG".into(),
+            kind: domain::message::MediaKind::Photo,
+        })
+    );
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn attach_refuses_unsupported_extensions_and_missing_paths() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "attach");
+    assert_eq!(app.status_text(), crate::app::ATTACH_USAGE);
+
+    run_command_line(&mut app, "attach archive.zip");
+    assert_eq!(app.status_text(), crate::app::ATTACH_KINDS);
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn opening_a_failed_upload_retries_the_same_placeholder() {
+    let mut app = App::mock();
+    let id = app
+        .conversation
+        .queue_media_send(domain::message::MediaKind::Photo, None);
+    assert!(app.fail_send(id, "cancelled".to_owned()));
+
+    key(&mut app, 'o');
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::RetryUpload {
+            chat_id: MOCK_CHAT,
+            temp_id: id,
+        })
+    );
+    assert_eq!(
+        app.conversation
+            .conversation
+            .message(id)
+            .map(|message| message.status),
+        Some(MessageStatus::Sending)
+    );
+    assert_eq!(app.conversation.sending, Some(id));
+}
+
+#[test]
+fn opening_an_upload_that_is_still_sending_refuses() {
+    let mut app = App::mock();
+    let id = app
+        .conversation
+        .queue_media_send(domain::message::MediaKind::Photo, None);
+    app.begin_send(id);
+
+    key(&mut app, 'o');
+
+    assert_eq!(app.status_text(), crate::app::UPLOAD_NOT_READY);
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn save_requires_a_destination_and_media_on_disk() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "save");
+    assert_eq!(app.status_text(), crate::app::SAVE_USAGE);
+
+    app.apply_latest(vec![
+        message(1, "text"),
+        with_media(2, "", domain::message::MediaKind::Photo),
+        message(3, "text"),
+    ]);
+    app.handle_key(press(KeyCode::Char('k')));
+    run_command_line(&mut app, "save /tmp/copy.jpg");
+    assert_eq!(
+        app.take_action(),
+        Some(Action::SaveMedia {
+            chat_id: MOCK_CHAT,
+            message_id: 2,
+            path: "/tmp/copy.jpg".into(),
+            typed: "/tmp/copy.jpg".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn esc_cancels_an_upload_and_dismiss_drops_failed_upload() {
+    let mut app = App::mock();
+    let id = app
+        .conversation
+        .queue_media_send(domain::message::MediaKind::File, None);
+    app.begin_send(id);
+    key(&mut app, 'k');
+    app.handle_key(press(KeyCode::Esc));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::CancelUpload { temp_id: id })
+    );
+
+    app.end_send(id);
+    assert!(app.fail_send(id, "cancelled".to_owned()));
+    key(&mut app, 'j');
+    key(&mut app, 'D');
+    assert_eq!(
+        app.take_action(),
+        Some(Action::DismissUpload { temp_id: id })
+    );
+    assert!(app.conversation.conversation.message(id).is_none());
+}
+
+#[test]
+fn attachment_prompts_and_refusals_fit_status_row() {
+    let mut app = App::mock();
+    run_command_line(
+        &mut app,
+        "attach /tmp/a-very-long-name-that-is-still-short-enough.pdf",
+    );
+
+    let prompt = app.status_text();
+    assert!(prompt.starts_with("attach file a-very-long-name"));
+    assert!(crate::wrap::columns(&prompt) + STATUS_PREFIX_CELLS <= 80);
+
+    for refusal in [
+        crate::app::ATTACH_KINDS,
+        crate::app::ATTACH_USAGE,
+        crate::app::SAVE_USAGE,
+        crate::app::NOTHING_TO_OPEN,
+        crate::app::NOTHING_TO_SAVE,
+        crate::app::UPLOAD_NOT_READY,
+        crate::app::SAVE_FILE_NOT_HERE,
+        crate::app::ATTACH_NEEDS_CONVERSATION,
+    ] {
+        assert!(
+            crate::wrap::columns(refusal) + STATUS_PREFIX_CELLS <= 80,
+            "{refusal:?} exceeds the status row"
+        );
+    }
 }
 
 #[test]
