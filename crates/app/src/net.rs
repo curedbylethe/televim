@@ -41,7 +41,7 @@
 //! the store the session went into. [`State`] holds them, so the one module that
 //! may see both halves sees them in one place.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -366,6 +366,23 @@ pub enum Event {
 
         /// The message the server accepted, or why there is not one.
         result: Result<Message, ProtoError>,
+    },
+
+    /// An attachment upload has read another chunk.
+    UploadProgress {
+        chat_id: i64,
+        temp_id: i64,
+        sent: u64,
+        total: u64,
+    },
+
+    /// A media export finished copying to the reader's path.
+    MediaExported {
+        chat_id: i64,
+        message_id: i64,
+        kind: MediaKind,
+        typed: String,
+        result: Result<(), String>,
     },
 
     /// An edit came back, or the request failed.
@@ -809,6 +826,10 @@ pub struct State {
     /// The media downloads started and not yet settled, each with the flag its
     /// cancel sets. Settling a download removes its entry.
     media_cancel: Vec<MediaCancel>,
+
+    /// Local paths kept for pending and failed attachment sends, keyed by their
+    /// negative placeholder ids so a failed upload can be retried.
+    pending_uploads: HashMap<i64, PendingAttachment>,
 
     /// The configuration, and the channel to answer on — the pair bring-up needs
     /// to be run again.
@@ -2499,21 +2520,26 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
 /// no state to ask, and a message that is not on show has no kind to name its
 /// file by.
 fn media_job(action: &Action, app: &mut App, state: &mut State) -> Option<MediaJob> {
-    let Action::OpenMedia {
-        chat_id,
-        message_id,
-    } = action
-    else {
-        return None;
+    let (chat_id, message_id) = match action {
+        Action::OpenMedia {
+            chat_id,
+            message_id,
+        }
+        | Action::SaveMedia {
+            chat_id,
+            message_id,
+            ..
+        } => (*chat_id, *message_id),
+        _ => return None,
     };
-    let kind = open_media_kind(&app.conversation.conversation, *chat_id, *message_id);
-    let media_id = open_media_id(&app.conversation.conversation, *chat_id, *message_id);
+    let kind = open_media_kind(&app.conversation.conversation, chat_id, message_id);
+    let media_id = open_media_id(&app.conversation.conversation, chat_id, message_id);
     kind.zip(state.media_cache.clone()).map(|(kind, cache)| {
-        begin_media_download(app, *chat_id, *message_id);
+        begin_media_download(app, chat_id, message_id);
         let cancel = Arc::new(AtomicBool::new(false));
         state.media_cancel.push(MediaCancel {
-            chat_id: *chat_id,
-            message_id: *message_id,
+            chat_id,
+            message_id,
             flag: Arc::clone(&cancel),
         });
         MediaJob {
@@ -2917,6 +2943,10 @@ fn request_action(
         return;
     }
 
+    if handle_upload_action(client, state, &action, tx) {
+        return;
+    }
+
     // The reader's cancel sets a flag the transfer reads, so it is answered from
     // the state the flags live in and never reaches the network.
     if let Action::CancelMediaDownload {
@@ -3093,6 +3123,111 @@ async fn report_sign_in(
             let _ = tx.send(AppEvent::Net(as_event(other)));
         }
     }
+}
+
+fn handle_upload_action(
+    client: &Arc<ProtoClient>,
+    state: &mut State,
+    action: &Action,
+    tx: &UnboundedSender<AppEvent>,
+) -> bool {
+    match action {
+        Action::SendAttachment {
+            chat_id,
+            temp_id,
+            path,
+            kind,
+        } => start_upload(client, state, *chat_id, *temp_id, path.clone(), *kind, tx),
+        Action::RetryUpload { chat_id, temp_id } => {
+            let pending = state
+                .pending_uploads
+                .get(temp_id)
+                .map(|pending| (pending.path.clone(), pending.kind));
+            if let Some((path, kind)) = pending {
+                start_upload(client, state, *chat_id, *temp_id, path, kind, tx);
+            } else {
+                let _ = tx.send(AppEvent::Net(Event::Sent {
+                    chat_id: *chat_id,
+                    temp_id: *temp_id,
+                    result: Err(missing_upload_error()),
+                }));
+            }
+        }
+        Action::CancelUpload { temp_id } => cancel_upload(state, *temp_id),
+        Action::DismissUpload { temp_id } => dismiss_upload(state, *temp_id),
+        _ => return false,
+    }
+    true
+}
+
+/// Starts a streamed attachment upload and keeps its source available for retry.
+fn start_upload(
+    client: &Arc<ProtoClient>,
+    state: &mut State,
+    chat_id: i64,
+    temp_id: i64,
+    path: PathBuf,
+    kind: MediaKind,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    let cancel = store_pending_upload(state, temp_id, path.clone(), kind);
+
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let progress_tx = tx.clone();
+        let progress = move |sent, total| {
+            let _ = progress_tx.send(AppEvent::Net(Event::UploadProgress {
+                chat_id,
+                temp_id,
+                sent,
+                total,
+            }));
+        };
+        let result = client
+            .send_attachment(chat_id, &path, kind, progress, cancel)
+            .await;
+        let _ = tx.send(AppEvent::Net(Event::Sent {
+            chat_id,
+            temp_id,
+            result,
+        }));
+    });
+}
+
+fn store_pending_upload(
+    state: &mut State,
+    temp_id: i64,
+    path: PathBuf,
+    kind: MediaKind,
+) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    state.pending_uploads.insert(
+        temp_id,
+        PendingAttachment {
+            path,
+            kind,
+            cancel: Arc::clone(&cancel),
+        },
+    );
+    cancel
+}
+
+fn cancel_upload(state: &State, temp_id: i64) {
+    if let Some(pending) = state.pending_uploads.get(&temp_id) {
+        pending.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+fn dismiss_upload(state: &mut State, temp_id: i64) {
+    state.pending_uploads.remove(&temp_id);
+}
+
+fn missing_upload_error() -> ProtoError {
+    ProtoError::Framework(FrameworkError::AttachmentUnreadable {
+        path: "<unknown>".to_owned(),
+        reason: "the upload path is no longer available; attach the file again".to_owned(),
+    })
 }
 
 /// Everything a sign-in step is *not*: an operation on a conversation, or a
@@ -3279,6 +3414,10 @@ fn request_plain(
             | Action::ImportSession { .. }
             | Action::SubmitSessionPassphrase { .. }
             | Action::ChangeSessionPassphrase { .. }
+            | Action::SendAttachment { .. }
+            | Action::CancelUpload { .. }
+            | Action::RetryUpload { .. }
+            | Action::DismissUpload { .. }
             | Action::CancelMediaDownload { .. } => {}
 
             // The download is the network's and the file it leaves is the
@@ -3290,6 +3429,25 @@ fn request_plain(
                 message_id,
             } => {
                 let event = save_media(client.as_ref(), &tx, chat_id, message_id, media).await;
+                let _ = tx.send(AppEvent::Net(event));
+            }
+
+            Action::SaveMedia {
+                chat_id,
+                message_id,
+                path,
+                typed,
+            } => {
+                let event = export_media(
+                    client.as_ref(),
+                    &tx,
+                    chat_id,
+                    message_id,
+                    path,
+                    &typed,
+                    media,
+                )
+                .await;
                 let _ = tx.send(AppEvent::Net(event));
             }
 
@@ -3544,8 +3702,33 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             if let Ok(message) = &result {
                 state.remember_sent(message);
             }
-            apply_sent(app, chat_id, temp_id, result);
+            apply_sent(app, state, chat_id, temp_id, result);
         }
+
+        Event::UploadProgress {
+            chat_id,
+            temp_id,
+            sent,
+            total,
+        } => {
+            if !app.conversation.downloads.is_in_flight(chat_id, temp_id) {
+                app.conversation.downloads.start(chat_id, temp_id);
+            }
+            app.conversation.downloads.progress(
+                chat_id,
+                temp_id,
+                usize::try_from(sent).unwrap_or(usize::MAX),
+                Some(usize::try_from(total).unwrap_or(usize::MAX)),
+            );
+        }
+
+        Event::MediaExported {
+            chat_id,
+            message_id,
+            kind,
+            typed,
+            result,
+        } => apply_media_exported(app, state, chat_id, message_id, kind, &typed, result),
 
         Event::Edited {
             chat_id,
@@ -3695,6 +3878,14 @@ struct MediaCancel {
     chat_id: i64,
     message_id: i64,
     flag: Arc<AtomicBool>,
+}
+
+/// An attachment upload the reader may retry, with the path kept only in this
+/// process and the flag shared with the transfer task.
+struct PendingAttachment {
+    path: PathBuf,
+    kind: MediaKind,
+    cancel: Arc<AtomicBool>,
 }
 
 /// What one media download needs to run: the kind its file is stored under, the
@@ -4142,6 +4333,62 @@ fn thumbnail_is_cached(cache: &Mutex<MediaCache>, chat_id: i64, message_id: i64)
 /// The media id is asked first, when the message carries one: a copy forwarded
 /// from another chat is cached under the id, not under this message. Only then
 /// the message's own key, which is all a message without an id has.
+/// Downloads media through the normal cache path, then copies it to the reader's
+/// destination off the loop thread.
+async fn export_media(
+    client: &ProtoClient,
+    tx: &UnboundedSender<AppEvent>,
+    chat_id: i64,
+    message_id: i64,
+    path: PathBuf,
+    typed: &str,
+    media: Option<MediaJob>,
+) -> Event {
+    match save_media(client, tx, chat_id, message_id, media).await {
+        Event::MediaSaved {
+            kind, path: source, ..
+        } => {
+            let destination = expand_tilde(&path);
+            let result =
+                tokio::task::spawn_blocking(move || copy_exported_media(&source, &destination))
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result);
+            Event::MediaExported {
+                chat_id,
+                message_id,
+                kind,
+                typed: typed.to_owned(),
+                result,
+            }
+        }
+        event => event,
+    }
+}
+
+fn copy_exported_media(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::copy(source, destination)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn expand_tilde(path: &Path) -> PathBuf {
+    expand_tilde_with_home(path, dirs::home_dir().as_deref())
+}
+
+fn expand_tilde_with_home(path: &Path, home: Option<&Path>) -> PathBuf {
+    let Some(typed) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if typed == "~" {
+        return home.map_or_else(|| path.to_path_buf(), Path::to_path_buf);
+    }
+    if let Some(suffix) = typed.strip_prefix("~/") {
+        return home.map_or_else(|| path.to_path_buf(), |home| home.join(suffix));
+    }
+    path.to_path_buf()
+}
+
 fn cached_media(
     cache: &Mutex<MediaCache>,
     chat_id: i64,
@@ -4242,6 +4489,28 @@ fn keep_download(
 
 /// Settles a media download: a saved file is queued for the viewer and said on
 /// the status line, and a failed one is said there and queues nothing.
+fn apply_media_exported(
+    app: &mut App,
+    state: &mut State,
+    chat_id: i64,
+    message_id: i64,
+    kind: MediaKind,
+    typed: &str,
+    result: Result<(), String>,
+) {
+    state
+        .media_cancel
+        .retain(|cancel| cancel.chat_id != chat_id || cancel.message_id != message_id);
+    app.conversation.downloads.forget(chat_id, message_id);
+    match result {
+        Ok(()) => {
+            let noun = kind.label().trim_start_matches('[').trim_end_matches(']');
+            app.flash(format!("saved {noun} to {typed}"));
+        }
+        Err(reason) => app.flash(format!("save: could not write {typed} — {reason}")),
+    }
+}
+
 fn apply_media(app: &mut App, state: &mut State, event: Event) {
     // Every settled download leaves the in-flight list, so a cancel that arrives
     // after it has finished finds no flag and does nothing.
@@ -4919,11 +5188,25 @@ fn apply_login_refusal(app: &mut App, error: &ProtoError, used: u8) {
 /// a conversation the reader has left still has to free the send key, or it
 /// would stay wedged for every conversation they open after, with no visible
 /// symptom to explain it.
-fn apply_sent(app: &mut App, chat_id: i64, temp_id: i64, result: Result<Message, ProtoError>) {
+fn apply_sent(
+    app: &mut App,
+    state: &mut State,
+    chat_id: i64,
+    temp_id: i64,
+    result: Result<Message, ProtoError>,
+) {
+    let is_upload = state.pending_uploads.contains_key(&temp_id);
+    if result.is_ok() {
+        state.pending_uploads.remove(&temp_id);
+    }
     app.end_send(temp_id);
 
     if app.conversation.conversation.window.chat_id != chat_id {
         return;
+    }
+
+    if is_upload && result.is_ok() {
+        app.conversation.downloads.forget(chat_id, temp_id);
     }
 
     match result {
@@ -4931,8 +5214,17 @@ fn apply_sent(app: &mut App, chat_id: i64, temp_id: i64, result: Result<Message,
             app.confirm_sent(temp_id, message);
         }
         Err(error) => {
-            let reason = failure_reason(&error);
+            let reason = if matches!(&error, ProtoError::Framework(FrameworkError::UploadAborted)) {
+                "cancelled".to_owned()
+            } else {
+                failure_reason(&error)
+            };
             tracing::debug!(chat_id, temp_id, %error, "a send failed");
+            if is_upload {
+                app.conversation
+                    .downloads
+                    .fail(chat_id, temp_id, reason.clone());
+            }
             app.fail_send(temp_id, reason.clone());
             app.flash(reason);
         }
@@ -12421,6 +12713,26 @@ mod media_tests {
 
     /// The conversation the sample messages belong to.
     const CHAT: i64 = 7;
+
+    fn app_for_chat(chat_id: i64) -> App {
+        let mut app = App::new();
+        app.set_chats(vec![Chat {
+            read_outbox_max_id: None,
+            id: chat_id,
+            title: format!("chat-{chat_id}"),
+            kind: domain::chat::ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            presence: None,
+            deleted: false,
+        }]);
+        app.select_chat(0);
+        app
+    }
+
     /// A media message of `kind` in `chat_id`, for the view the open looks in.
     fn media_message(chat_id: i64, id: i64, kind: Option<MediaKind>) -> Message {
         Message {
@@ -13020,6 +13332,210 @@ mod media_tests {
             "media is over the 16 MiB limit; nothing was saved"
         );
         assert!(state.media.take_pending().is_empty());
+    }
+
+    #[test]
+    fn export_path_expands_only_tilde_and_leaves_unknown_home_unchanged() {
+        let home = Path::new("/home/reader");
+        assert_eq!(
+            expand_tilde_with_home(Path::new("~"), Some(home)),
+            home.to_path_buf()
+        );
+        assert_eq!(
+            expand_tilde_with_home(Path::new("~/Pictures/a.png"), Some(home)),
+            home.join("Pictures/a.png")
+        );
+        assert_eq!(
+            expand_tilde_with_home(Path::new("/tmp/a.png"), Some(home)),
+            PathBuf::from("/tmp/a.png")
+        );
+        assert_eq!(
+            expand_tilde_with_home(Path::new("~/a.png"), None),
+            PathBuf::from("~/a.png")
+        );
+        assert_eq!(
+            expand_tilde_with_home(Path::new("~other/a.png"), Some(home)),
+            PathBuf::from("~other/a.png")
+        );
+    }
+
+    #[test]
+    fn exported_media_copy_overwrites_the_named_destination() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let source = dir.path().join("cached.png");
+        let destination = dir.path().join("out.png");
+        fs::write(&source, b"media bytes").expect("source exists");
+        fs::write(&destination, b"old bytes").expect("destination exists");
+
+        copy_exported_media(&source, &destination).expect("copy succeeds");
+
+        assert_eq!(
+            fs::read(destination).expect("destination exists"),
+            b"media bytes"
+        );
+    }
+
+    #[test]
+    fn media_export_fold_reports_success_and_copy_failure() {
+        let mut app = app_for_chat(CHAT);
+        let mut state = State::default();
+        let flag = Arc::new(AtomicBool::new(false));
+        state.media_cancel.push(MediaCancel {
+            chat_id: CHAT,
+            message_id: 9,
+            flag,
+        });
+        app.conversation.downloads.start(CHAT, 9);
+
+        apply_media_exported(
+            &mut app,
+            &mut state,
+            CHAT,
+            9,
+            MediaKind::Photo,
+            "~/Pictures/a.png",
+            Ok(()),
+        );
+
+        assert_eq!(app.ui.status, "saved image to ~/Pictures/a.png");
+        assert!(app.conversation.downloads.get(CHAT, 9).is_none());
+        assert!(state.media_cancel.is_empty());
+
+        apply_media_exported(
+            &mut app,
+            &mut state,
+            CHAT,
+            10,
+            MediaKind::File,
+            "/read-only/report.pdf",
+            Err("permission denied".to_owned()),
+        );
+
+        assert_eq!(
+            app.ui.status,
+            "save: could not write /read-only/report.pdf — permission denied"
+        );
+    }
+
+    #[test]
+    fn upload_progress_creates_and_updates_the_row_state() {
+        let mut app = app_for_chat(CHAT);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::UploadProgress {
+                chat_id: CHAT,
+                temp_id: -1,
+                sent: 42,
+                total: 100,
+            },
+        );
+
+        assert_eq!(
+            app.conversation.downloads.get(CHAT, -1),
+            Some(&tui::download::Outcome::InFlight {
+                downloaded: 42,
+                total: Some(100),
+            })
+        );
+    }
+
+    #[test]
+    fn successful_upload_frees_progress_and_local_path_but_failure_keeps_them() {
+        let mut app = app_for_chat(CHAT);
+        let mut state = State::default();
+        let cancel = store_pending_upload(
+            &mut state,
+            -1,
+            PathBuf::from("picture.png"),
+            MediaKind::Photo,
+        );
+        app.begin_send(-1);
+        app.conversation.downloads.start(CHAT, -1);
+        app.conversation.downloads.progress(CHAT, -1, 10, Some(20));
+        let sent = Message {
+            id: 5,
+            chat_id: CHAT,
+            text: Cow::Borrowed(""),
+            timestamp: 5,
+            status: MessageStatus::Sent,
+            is_outgoing: true,
+            reply_to: None,
+            media: Some(MediaKind::Photo),
+            media_id: Some(8),
+        };
+
+        apply_sent(&mut app, &mut state, CHAT, -1, Ok(sent));
+
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert!(!state.pending_uploads.contains_key(&-1));
+        assert!(app.conversation.downloads.get(CHAT, -1).is_none());
+
+        let cancel = store_pending_upload(
+            &mut state,
+            -2,
+            PathBuf::from("document.pdf"),
+            MediaKind::File,
+        );
+        app.begin_send(-2);
+        app.conversation.downloads.start(CHAT, -2);
+        cancel_upload(&state, -2);
+
+        apply_sent(
+            &mut app,
+            &mut state,
+            CHAT,
+            -2,
+            Err(ProtoError::Framework(FrameworkError::UploadAborted)),
+        );
+
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(state.pending_uploads.contains_key(&-2));
+        assert_eq!(
+            app.conversation.downloads.get(CHAT, -2),
+            Some(&tui::download::Outcome::Failed("cancelled".to_owned()))
+        );
+        assert_eq!(app.ui.status, "cancelled");
+    }
+
+    #[test]
+    fn upload_cancel_dismiss_and_retry_state_use_the_same_path_and_fresh_flag() {
+        let mut state = State::default();
+        let first = store_pending_upload(
+            &mut state,
+            -1,
+            PathBuf::from("picture.png"),
+            MediaKind::Photo,
+        );
+        cancel_upload(&state, -1);
+        cancel_upload(&state, -2);
+        assert!(first.load(Ordering::Relaxed));
+
+        let retry = store_pending_upload(
+            &mut state,
+            -1,
+            PathBuf::from("picture.png"),
+            MediaKind::Photo,
+        );
+        let pending = state.pending_uploads.get(&-1).expect("retry is stored");
+        assert_eq!(pending.path, PathBuf::from("picture.png"));
+        assert_eq!(pending.kind, MediaKind::Photo);
+        assert!(!retry.load(Ordering::Relaxed));
+        assert!(!Arc::ptr_eq(&first, &retry));
+
+        dismiss_upload(&mut state, -1);
+        dismiss_upload(&mut state, -2);
+        assert!(!state.pending_uploads.contains_key(&-1));
+    }
+
+    #[test]
+    fn a_missing_upload_path_returns_a_retry_failure() {
+        assert_eq!(
+            failure_reason(&missing_upload_error()),
+            "could not read attachment <unknown>: the upload path is no longer available; attach the file again"
+        );
     }
 
     /// A thumbnail already on disk is served from the cache: the gate

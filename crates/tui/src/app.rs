@@ -16,9 +16,9 @@ use domain::chat::Chat;
 use domain::global_search::{GlobalHit, GlobalSearchState, SearchSpec};
 #[cfg(test)]
 use domain::history::{CONVERSATION_WINDOW, ConversationWindow};
-use domain::message::Message;
 #[cfg(test)]
 use domain::message::MessageStatus;
+use domain::message::{MediaKind, Message};
 use domain::presence::Presence;
 use domain::search::SearchState;
 use domain::selection::{Mark, Selection};
@@ -1073,6 +1073,23 @@ pub enum Action {
         reply_to: Option<i64>,
     },
 
+    /// Upload and send a local photo or document.
+    SendAttachment {
+        chat_id: i64,
+        temp_id: i64,
+        path: PathBuf,
+        kind: MediaKind,
+    },
+
+    /// Stop the upload for a pending media message.
+    CancelUpload { temp_id: i64 },
+
+    /// Retry the failed upload for a pending media message.
+    RetryUpload { chat_id: i64, temp_id: i64 },
+
+    /// Forget the local path for a dismissed failed media message.
+    DismissUpload { temp_id: i64 },
+
     /// Replace the text of `message_id` in `chat_id`.
     Edit {
         /// The conversation the message belongs to.
@@ -1284,6 +1301,14 @@ pub enum Action {
 
         /// The message whose media to open.
         message_id: i64,
+    },
+
+    /// Save the media on `message_id` to the reader's chosen path.
+    SaveMedia {
+        chat_id: i64,
+        message_id: i64,
+        path: PathBuf,
+        typed: String,
     },
 
     /// Stop the download of `message_id` in `chat_id`, if one is in flight.
