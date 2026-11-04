@@ -109,7 +109,8 @@ const GLOBAL_SEARCH_FILTERS: &str =
     "Filters: photo_video, document, music, voice, url — since:, until:";
 
 /// Accepted extensions for the initial attachment-send surface.
-pub const ATTACH_KINDS: &str = "Images and documents only: jpg, png, webp, pdf, docx, txt.";
+pub const ATTACH_KINDS: &str =
+    "Only images and documents can be sent: jpg, png, webp, pdf, docx, txt.";
 
 /// What `:attach` says when no path was given.
 pub const ATTACH_USAGE: &str = "Attach what? :attach <path> sends an image or a document.";
@@ -120,6 +121,7 @@ pub const SAVE_USAGE: &str = "Save where? :save <path> copies the media to that 
 pub(crate) const NOTHING_TO_OPEN: &str = "Nothing to open: this message carries no media.";
 pub(crate) const NOTHING_TO_SAVE: &str = "Nothing to save: this message carries no media.";
 pub(crate) const UPLOAD_NOT_READY: &str = "Nothing to open yet: the upload is still running.";
+pub(crate) const SAVE_UPLOAD_NOT_READY: &str = "Nothing to save yet: the upload is still running.";
 pub(crate) const SAVE_FILE_NOT_HERE: &str = "Nothing to save: the file is not here.";
 pub(crate) const ATTACH_NEEDS_CONVERSATION: &str =
     "Open a conversation first: :attach sends to the chat on screen.";

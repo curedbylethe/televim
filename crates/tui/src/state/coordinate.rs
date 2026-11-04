@@ -40,8 +40,8 @@ use crate::app::{
     LoginField, Mode, NOT_A_DATE, NOT_A_REPLY, NOTHING_TO_ACT_ON, NOTHING_TO_OPEN, NOTHING_TO_SAVE,
     PASS_BAD_FILE, PASS_DIFFER, PASS_EMPTY, PASS_LOCKED, PASS_OPEN_ALREADY, PASS_STILL_CHECKING,
     PASS_STILL_LOCKED, PASS_UNLOCKED, Pane, PassMode, PassPrompt, ProfileId, PromptKind, Register,
-    SAVE_FILE_NOT_HERE, SAVE_USAGE, SESSION_PATH_USAGE, Secret, SignIn, SignInFlow, TYPING_FOR,
-    UPLOAD_NOT_READY,
+    SAVE_FILE_NOT_HERE, SAVE_UPLOAD_NOT_READY, SAVE_USAGE, SESSION_PATH_USAGE, Secret, SignIn,
+    SignInFlow, TYPING_FOR, UPLOAD_NOT_READY,
 };
 use crate::bidi::BidiMode;
 use crate::card::CardRow;
@@ -4293,12 +4293,15 @@ fn request_save_media(
         return;
     };
 
-    if message_id < 0 && media.is_some() && status == MessageStatus::Sending {
-        ui.flash(SAVE_FILE_NOT_HERE);
-        return;
-    }
-    if message_id < 0 && media.is_some() && status == MessageStatus::Failed {
-        ui.flash(SAVE_FILE_NOT_HERE);
+    if message_id < 0
+        && media.is_some()
+        && matches!(status, MessageStatus::Sending | MessageStatus::Failed)
+    {
+        ui.flash(if status == MessageStatus::Sending {
+            SAVE_UPLOAD_NOT_READY
+        } else {
+            SAVE_FILE_NOT_HERE
+        });
         return;
     }
     if matches!(
