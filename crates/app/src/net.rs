@@ -7725,6 +7725,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn signing_out_keeps_a_foreign_drafts_file() {
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let path = dir.path().join("televim.drafts.json");
+        let raw = br#"{"version":2,"drafts":{"7":"future"}}"#;
+        std::fs::write(&path, raw).expect("future file");
+        let file = DraftFile::new(path.clone());
+        assert!(file.load().newer);
+        let mut state = State::default();
+        state.set_draft_file(file);
+        let mut app = app_with_a_conversation(CHAT, 2);
+        apply_logged_out(&mut app, &mut state, Ok(()));
+        assert_eq!(std::fs::read(path).expect("future file remains"), raw);
+        assert_eq!(app.ui.status, "signed out");
+    }
+
     /// Signing out removes the history file too: the cached messages belong
     /// to the account that is leaving.
     #[test]

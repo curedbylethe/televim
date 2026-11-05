@@ -525,7 +525,9 @@ are in [`../AGENTS.md`](../AGENTS.md).
   rename at `0600`, so a kill loses at most one 250 ms tick (and a kill in
   the pass after a send resurrects the sent line, accepted). The file carries
   `cfg.phone` as its account tag and a launch for another account discards
-  it; signing out removes it. The same file carries the outbox read marks under
+  it; signing out removes it. The file carries a version: older files load and
+  receive the current version on their next save, while newer files are not
+  loaded, overwritten or removed. The same file carries the outbox read marks under
   a `read` key (omitted when empty): the 32 most recently moved peers, as an ordered
   array of pairs oldest first so a restart keeps their recency, restored
   only monotone (a stored figure never lowers one held), and forgotten in memory

@@ -742,6 +742,9 @@ fn apply_scenario(app: &mut App, network: &mut net::State, event: scenario::Even
 /// and two copies of it would be two ways to accept a stranger's words.
 pub(crate) fn restore_drafts(app: &mut App, file: &DraftFile, label: Option<&str>) {
     let loaded = file.load();
+    if loaded.newer {
+        return;
+    }
     if drafts_acceptable(loaded.account.as_deref(), label) {
         app.drafts.restore(loaded.drafts, loaded.subjects);
         app.drafts.restore_read_marks(loaded.reads);
@@ -1159,6 +1162,9 @@ fn sync_drafts(
     last: &mut Option<SyncedDrafts>,
     account: Option<&str>,
 ) {
+    if file.foreign() {
+        return;
+    }
     let chat_id = app.conversation.conversation.window.chat_id;
     let drafts = app.drafts.snapshot(Some((chat_id, &app.input.line)));
     let reads = app.drafts.recent_read_marks(HISTORY_CACHE_PEERS);
@@ -1473,6 +1479,25 @@ mod tests {
             !dir.path().join("televim.drafts.json").exists(),
             "no words means no file, so logout's clear survives later passes"
         );
+    }
+
+    #[test]
+    fn the_sync_leaves_a_foreign_file_alone() {
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let path = dir.path().join("televim.drafts.json");
+        let raw = br#"{"version":2,"drafts":{"7":"future"}}"#;
+        std::fs::write(&path, raw).expect("future file");
+        let file = DraftFile::new(path.clone());
+        let mut app = App::new();
+        restore_drafts(&mut app, &file, None);
+        assert!(app.drafts.snapshot(None).is_empty());
+        app.drafts
+            .restore(vec![(7, "changed".to_owned())], Vec::new());
+        let mut last = None;
+        sync_drafts(&app, &file, &mut last, None);
+        assert!(last.is_none());
+        sync_drafts(&App::new(), &file, &mut last, None);
+        assert_eq!(std::fs::read(path).expect("file remains"), raw);
     }
 
     /// The read marks ride the same file: a restored mark is written by the

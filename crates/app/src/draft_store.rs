@@ -11,8 +11,10 @@
 //! launch, an unreadable one is warned about and forgotten (the next sync
 //! overwrites it), and nothing here aborts the run or fails a logout —
 //! diagnostics go to `tracing`, never the terminal, which this program is
-//! drawing on.
+//! drawing on. The versioned file keeps subjects in an additive key. A file
+//! from a newer version is never seeded, overwritten or removed.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -21,6 +23,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+const VERSION: u32 = 1;
 
 /// The drafts file beside the configuration.
 ///
@@ -32,6 +36,7 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub(crate) struct DraftFile {
     path: PathBuf,
+    foreign: Cell<bool>,
 }
 
 /// What [`DraftFile::load`] found: the stored account tag, the drafts and the
@@ -42,6 +47,7 @@ pub(crate) struct DraftFile {
 /// phone configured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedDrafts {
+    pub newer: bool,
     pub account: Option<String>,
     pub drafts: Vec<(i64, String)>,
     pub subjects: Vec<(i64, bool, i64)>,
@@ -56,6 +62,7 @@ impl LoadedDrafts {
     /// unreadable one, or any other read failure.
     fn empty() -> Self {
         Self {
+            newer: false,
             account: None,
             drafts: Vec::new(),
             subjects: Vec::new(),
@@ -82,6 +89,8 @@ impl LoadedDrafts {
 /// nothing writes nothing different.
 #[derive(Debug, Serialize, Deserialize)]
 struct Payload {
+    #[serde(default)]
+    version: u32,
     #[serde(default)]
     account: Option<String>,
     #[serde(default)]
@@ -158,7 +167,14 @@ impl DraftFile {
     /// A handle on the drafts file at `path`.
     #[must_use]
     pub(crate) fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            foreign: Cell::new(false),
+        }
+    }
+
+    pub(crate) fn foreign(&self) -> bool {
+        self.foreign.get()
     }
 
     /// Reads the stored drafts and the account tag they were saved under.
@@ -169,6 +185,7 @@ impl DraftFile {
     /// sessions. Any other read failure is warned about and empty too: a
     /// launch that cannot read drafts still launches.
     pub(crate) fn load(&self) -> LoadedDrafts {
+        self.foreign.set(false);
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return LoadedDrafts::empty(),
@@ -178,8 +195,22 @@ impl DraftFile {
             }
         };
 
+        // Inspect the version before decoding fields whose shape may have changed.
+        if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+            && let Some(version) = value.get("version").and_then(Value::as_u64)
+            && version > u64::from(VERSION)
+        {
+            self.foreign.set(true);
+            tracing::warn!(version, "drafts file was written by a newer version");
+            return LoadedDrafts {
+                newer: true,
+                ..LoadedDrafts::empty()
+            };
+        }
+
         match serde_json::from_slice::<Payload>(&bytes) {
             Ok(payload) => LoadedDrafts {
+                newer: false,
                 account: payload.account,
                 drafts: payload.drafts.into_iter().collect(),
                 subjects: payload
@@ -208,7 +239,11 @@ impl DraftFile {
         account: Option<&str>,
         subjects: &[(i64, bool, i64)],
     ) {
+        if self.foreign() {
+            return;
+        }
         let payload = Payload {
+            version: VERSION,
             account: account.map(str::to_owned),
             drafts: drafts
                 .iter()
@@ -256,6 +291,9 @@ impl DraftFile {
     /// delete must not fail the logout, so the failure is a warning and the
     /// return is nothing.
     pub(crate) fn clear(&self) {
+        if self.foreign() {
+            return;
+        }
         match fs::remove_file(&self.path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -380,6 +418,54 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_file_loads_and_is_stamped_on_the_next_save() {
+        let (_dir, file) = scratch("drafts.json");
+        fs::write(&file.path, r#"{"account":"+1555","drafts":{"7":"seven"}}"#)
+            .expect("legacy file");
+        let loaded = file.load();
+        assert_eq!(loaded.drafts, vec![(7, "seven".to_owned())]);
+        file.save(
+            &loaded.drafts,
+            &loaded.reads,
+            loaded.account.as_deref(),
+            &loaded.subjects,
+        );
+        let saved: Value =
+            serde_json::from_slice(&fs::read(&file.path).expect("saved file")).expect("valid JSON");
+        assert_eq!(saved["version"], VERSION);
+    }
+
+    #[test]
+    fn a_version_one_file_round_trips() {
+        let (_dir, file) = scratch("drafts.json");
+        file.save(
+            &[(7, "seven".to_owned())],
+            &[(7, 3)],
+            Some("+1555"),
+            &[(7, true, 9)],
+        );
+        let loaded = file.load();
+        assert!(!loaded.newer);
+        assert_eq!(loaded.drafts, vec![(7, "seven".to_owned())]);
+        assert_eq!(loaded.reads, vec![(7, 3)]);
+        assert_eq!(loaded.subjects, vec![(7, true, 9)]);
+    }
+
+    #[test]
+    fn a_future_file_with_a_changed_shape_is_never_seeded_or_modified() {
+        let (_dir, file) = scratch("drafts.json");
+        let raw = br#"{"version":2,"drafts":["new shape"],"read":"new shape"}"#;
+        fs::write(&file.path, raw).expect("future file");
+        let loaded = file.load();
+        assert!(loaded.newer);
+        assert!(loaded.drafts.is_empty() && loaded.reads.is_empty() && loaded.subjects.is_empty());
+        assert!(file.foreign());
+        file.save(&[(7, "seven".to_owned())], &[], None, &[]);
+        file.clear();
+        assert_eq!(fs::read(&file.path).expect("future file remains"), raw);
+    }
+
+    #[test]
     fn a_corrupt_file_is_forgotten_and_the_next_save_overwrites_it() {
         let (_dir, file) = scratch("drafts.json");
         fs::write(&file.path, "{ not json").expect("the corrupt file");
@@ -407,9 +493,10 @@ mod tests {
         let raw = fs::read_to_string(&file.path).expect("the file the save wrote");
         let parsed: serde_json::Value =
             serde_json::from_str(&raw).expect("the target is only ever the finished file");
-        let expected: serde_json::Value =
-            serde_json::from_str(r#"{"account": "+15551234567", "drafts": {"7": "seven"}}"#)
-                .expect("the expected payload is JSON");
+        let expected: serde_json::Value = serde_json::from_str(
+            r#"{"version": 1, "account": "+15551234567", "drafts": {"7": "seven"}}"#,
+        )
+        .expect("the expected payload is JSON");
         assert_eq!(parsed, expected, "the payload shape STAGE-02 promises");
         assert!(
             temp_gone(&file),
