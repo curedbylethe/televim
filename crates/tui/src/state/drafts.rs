@@ -17,9 +17,7 @@ pub struct DraftStore {
     /// [`DraftStore::read_receipts`]: the view is replaced on every switch, and what
     /// belongs to the conversation rather than to the page on show is kept here.
     ///
-    /// Only a plain message draft is stored — [`App::park_draft`] forgets the
-    /// reply or edit subject on the way in — and a peer's entry is dropped when
-    /// its draft is empty, so the map holds only peers with words in them.
+    /// Each parked line retains its reply or edit subject alongside its words.
     ///
     /// Persisted by `app` beside the configuration (`televim.drafts.json`):
     /// the loop loads the file at launch and re-saves the snapshot whenever
@@ -119,21 +117,56 @@ impl DraftStore {
         out
     }
 
-    /// Imports `snapshot` pairs back into the parked map.
-    ///
-    /// Each pair is rebuilt through [`LineEditor::open_with`] as a plain
-    /// message — the same shape [`park_draft`](super::coordinate::park_draft)
-    /// stores — so restored words come back the way a resumed draft does:
-    /// text back in, editing state default. Empty strings are skipped, and
-    /// nothing already present is overwritten: the store starts empty at
-    /// launch, so the guard is against loading twice, not a merge policy.
-    pub fn restore(&mut self, drafts: Vec<(i64, String)>) {
+    /// Exports reply and edit targets for drafts with words.
+    pub fn snapshot_subjects(&self, open: Option<(i64, &LineEditor)>) -> Vec<(i64, bool, i64)> {
+        let live = open.filter(|(chat_id, line)| {
+            *chat_id != 0 && line.purpose().is_buffer() && !line.is_empty()
+        });
+        let mut out: Vec<_> = self
+            .drafts
+            .iter()
+            .filter(|(chat_id, line)| {
+                !line.is_empty() && live.is_none_or(|(id, _)| **chat_id != id)
+            })
+            .filter_map(|(chat_id, line)| Self::subject_entry(*chat_id, line))
+            .collect();
+        if let Some((chat_id, line)) = live
+            && let Some(entry) = Self::subject_entry(chat_id, line)
+        {
+            out.push(entry);
+        }
+        out.sort_by_key(|(chat_id, _, _)| *chat_id);
+        out
+    }
+
+    fn subject_entry(chat_id: i64, line: &LineEditor) -> Option<(i64, bool, i64)> {
+        let editing = match line.purpose() {
+            PromptKind::Reply => false,
+            PromptKind::Edit => true,
+            _ => return None,
+        };
+        Some((chat_id, editing, line.subject()?))
+    }
+
+    /// Imports words and their optional reply or edit targets into the parked map.
+    pub fn restore(&mut self, drafts: Vec<(i64, String)>, subjects: Vec<(i64, bool, i64)>) {
+        let subjects: HashMap<_, _> = subjects
+            .into_iter()
+            .map(|(peer, editing, id)| (peer, (editing, id)))
+            .collect();
         for (chat_id, text) in drafts {
             if text.is_empty() || self.drafts.contains_key(&chat_id) {
                 continue;
             }
             let mut line = LineEditor::new();
-            line.open_with(PromptKind::Message, text);
+            let subject = subjects.get(&chat_id).copied();
+            let purpose = match subject {
+                Some((true, _)) => PromptKind::Edit,
+                Some((false, _)) => PromptKind::Reply,
+                None => PromptKind::Message,
+            };
+            line.open_with(purpose, text);
+            line.set_subject(subject.map(|(_, id)| id));
             self.drafts.insert(chat_id, line);
         }
     }
@@ -317,13 +350,41 @@ mod tests {
     }
 
     #[test]
+    fn restore_rebuilds_reply_and_edit_subjects() {
+        let mut store = DraftStore::new();
+        store.restore(
+            vec![
+                (7, "reply".to_owned()),
+                (8, "edit".to_owned()),
+                (9, "plain".to_owned()),
+            ],
+            vec![(7, false, 42), (8, true, 43)],
+        );
+        let mut conversation = crate::state::conversation::ConversationState::new();
+        let mut input = InputState::new();
+        resume_draft(&mut store, &mut conversation, &mut input, 7);
+        assert_eq!(input.line.purpose(), PromptKind::Reply);
+        assert_eq!(conversation.reply_to, Some(42));
+        resume_draft(&mut store, &mut conversation, &mut input, 8);
+        assert_eq!(input.line.purpose(), PromptKind::Edit);
+        assert_eq!(conversation.editing, Some(43));
+        assert_eq!(conversation.reply_to, None);
+        resume_draft(&mut store, &mut conversation, &mut input, 9);
+        assert_eq!(input.line.purpose(), PromptKind::Message);
+        assert_eq!(conversation.editing, None);
+    }
+
+    #[test]
     fn restore_round_trips_text_and_skips_empties_without_overwriting() {
         let mut store = DraftStore::new();
-        store.restore(vec![
-            (2, "second".to_owned()),
-            (1, String::new()),
-            (1, "first".to_owned()),
-        ]);
+        store.restore(
+            vec![
+                (2, "second".to_owned()),
+                (1, String::new()),
+                (1, "first".to_owned()),
+            ],
+            Vec::new(),
+        );
 
         assert_eq!(
             store.snapshot(None),
@@ -331,7 +392,10 @@ mod tests {
             "empty strings are skipped and pairs land sorted"
         );
 
-        store.restore(vec![(1, "overwrite".to_owned()), (3, "third".to_owned())]);
+        store.restore(
+            vec![(1, "overwrite".to_owned()), (3, "third".to_owned())],
+            Vec::new(),
+        );
         assert_eq!(
             store.snapshot(None),
             vec![
@@ -343,7 +407,8 @@ mod tests {
         );
 
         let mut input = InputState::new();
-        resume_draft(&mut store, &mut input, 2);
+        let mut conversation = crate::state::conversation::ConversationState::new();
+        resume_draft(&mut store, &mut conversation, &mut input, 2);
         assert_eq!(input.line.text(), "second", "text comes back on the line");
         assert_eq!(
             input.line.purpose(),
@@ -366,7 +431,12 @@ mod tests {
             "leaving parks the draft under its peer"
         );
 
-        resume_draft(&mut app.drafts, &mut app.input, chat_id);
+        resume_draft(
+            &mut app.drafts,
+            &mut app.conversation,
+            &mut app.input,
+            chat_id,
+        );
         assert_eq!(app.input.line.text(), "mid-sentence");
 
         assert_eq!(
@@ -380,10 +450,13 @@ mod tests {
     fn submit_message_clears_the_open_chat_parked_entry() {
         let mut app = App::mock();
         let chat_id = app.conversation.conversation.window.chat_id;
-        app.drafts.restore(vec![
-            (chat_id, "parked".to_owned()),
-            (4242, "someone else's".to_owned()),
-        ]);
+        app.drafts.restore(
+            vec![
+                (chat_id, "parked".to_owned()),
+                (4242, "someone else's".to_owned()),
+            ],
+            Vec::new(),
+        );
         app.input
             .set_line(line(PromptKind::Message, "sending this"));
 
@@ -409,7 +482,8 @@ mod tests {
     fn submit_edit_clears_the_open_chat_parked_entry() {
         let mut app = App::mock();
         let chat_id = app.conversation.conversation.window.chat_id;
-        app.drafts.restore(vec![(chat_id, "parked".to_owned())]);
+        app.drafts
+            .restore(vec![(chat_id, "parked".to_owned())], Vec::new());
         app.conversation.editing = Some(77);
         app.input.set_line(line(PromptKind::Edit, "edited"));
 

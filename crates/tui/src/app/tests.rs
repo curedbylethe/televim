@@ -359,33 +359,44 @@ fn another_conversation_starts_with_its_own_draft() {
     );
 }
 
-/// The draft's *subject* does not survive, though, because it names something
-/// in the conversation that has been closed. The words stay; what they were
-/// written against does not.
+/// Reply drafts retain their target across a conversation switch.
 #[test]
-fn a_reply_that_outlives_its_conversation_becomes_a_message() {
+fn a_reply_survives_a_conversation_switch() {
     let mut app = App::mock();
     app.handle_key(press(KeyCode::Char('r')));
-    let replied_to = app
-        .conversation
-        .reply_to
-        .expect("a reply answers the message on the cursor");
-    assert_eq!(app.input.line.purpose(), PromptKind::Reply);
+    let replied_to = app.conversation.reply_to.expect("reply target");
     type_text(&mut app, "sure");
-
+    app.handle_key(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Esc));
     app.select_chat(1);
     app.select_chat(0);
+    assert_eq!(app.input.line.text(), "sure");
+    assert_eq!(app.input.line.purpose(), PromptKind::Reply);
+    assert_eq!(app.conversation.reply_to, Some(replied_to));
+    app.handle_key(press(KeyCode::Char('i')));
+    assert_eq!(app.input.line.purpose(), PromptKind::Reply);
+    assert_eq!(app.conversation.reply_to, Some(replied_to));
+}
 
-    assert_eq!(app.input.line.text(), "sure", "the words");
-    assert_eq!(
-        app.input.line.purpose(),
-        PromptKind::Message,
-        "but not the subject"
-    );
-    assert_eq!(
-        app.conversation.reply_to, None,
-        "and nothing to reply to any more: {replied_to} was in the other chat"
-    );
+#[test]
+fn an_edit_survives_a_conversation_switch() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('k')));
+    app.handle_key(press(KeyCode::Char('e')));
+    let edited = app.conversation.editing.expect("edit target");
+    type_text(&mut app, " changed");
+    let text = app.input.line.text().to_owned();
+    app.handle_key(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Esc));
+    app.select_chat(1);
+    app.select_chat(0);
+    assert_eq!(app.input.line.text(), text);
+    assert_eq!(app.input.line.purpose(), PromptKind::Edit);
+    assert_eq!(app.conversation.editing, Some(edited));
+    assert_eq!(app.conversation.reply_to, None);
+    app.handle_key(press(KeyCode::Char('i')));
+    assert_eq!(app.input.line.text(), text);
+    assert_eq!(app.input.line.purpose(), PromptKind::Edit);
 }
 
 /// The rule for what a draft is: the bar is always a draft, so switching away
@@ -9562,7 +9573,8 @@ fn archiving_the_open_chat_closes_the_conversation() {
 fn deleting_a_conversation_forgets_its_name_draft_and_archived_row() {
     let mut app = App::mock();
     app.set_local_name(2, Some("Grace"));
-    app.drafts.restore(vec![(2, "half a thought".to_owned())]);
+    app.drafts
+        .restore(vec![(2, "half a thought".to_owned())], Vec::new());
     assert_eq!(app.drafts.snapshot(None).len(), 1);
     app.set_archived(2, true);
 

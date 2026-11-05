@@ -196,7 +196,7 @@ pub(crate) fn select_chat(
     restore_read_watermark(&mut *drafts, &mut *conversation, chat_id);
     // And with it the draft the reader left in this conversation, for the
     // same reason: the words are not a fact about the page on show.
-    resume_draft(&mut *drafts, &mut *input, chat_id);
+    resume_draft(&mut *drafts, &mut *conversation, &mut *input, chat_id);
 }
 
 /// Opens the conversation whose chat id is `id`.
@@ -284,8 +284,23 @@ pub(crate) fn record_read_positions(
 /// The mirror of [`park_draft`]: the value is moved out of the map, so
 /// the map never holds the open conversation's draft, and a peer with no
 /// entry gets a fresh line.
-pub(crate) fn resume_draft(drafts: &mut DraftStore, input: &mut InputState, chat_id: i64) {
+pub(crate) fn resume_draft(
+    drafts: &mut DraftStore,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    chat_id: i64,
+) {
     let draft = drafts.take_draft(chat_id);
+    conversation.set_reply_to(if draft.purpose() == PromptKind::Reply {
+        draft.subject()
+    } else {
+        None
+    });
+    conversation.set_editing(if draft.purpose() == PromptKind::Edit {
+        draft.subject()
+    } else {
+        None
+    });
     input.set_line(draft);
 }
 
@@ -293,9 +308,7 @@ pub(crate) fn resume_draft(drafts: &mut DraftStore, input: &mut InputState, chat
 ///
 /// Called while [`ConversationState`] still names the peer the words belong
 /// to, before a prompt opens or [`select_chat_none`] zeroes it. The draft is moved out
-/// rather than copied, and its purpose is forgotten on the way into the map,
-/// so the stored copy is always a plain message: the reply or edit subject
-/// names a message in the conversation being left. An empty buffer drops the
+/// rather than copied, preserving its purpose and subject. An empty buffer leaves the
 /// peer's existing entry intact rather than storing a blank, so a prompt
 /// submitted before a conversation switch does not lose its parked draft.
 ///
@@ -317,7 +330,14 @@ pub(crate) fn park_draft(
     }
 
     let mut draft = std::mem::take(&mut input.line);
-    draft.forget_purpose();
+    if draft.subject().is_none() {
+        let subject = match draft.purpose() {
+            PromptKind::Reply => conversation.reply_to,
+            PromptKind::Edit => conversation.editing,
+            _ => None,
+        };
+        draft.set_subject(subject);
+    }
     drafts.drafts.insert(chat_id, draft);
 }
 
@@ -342,12 +362,8 @@ fn open_line_prompt(
 /// to the conversation being left. It does not reset the jumplist: a mark is
 /// keyed by conversation, so it outlives the switch and is what `Ctrl-o`
 /// returns through. A list that comes back empty forgets it in [`set_chats`],
-/// where there is no conversation left to return into. What is *not* kept is
-/// the draft's subject: the reply it answers and the message it edits are
-/// dropped here, because they name something in the conversation that has just
-/// closed, and a reply sent into a different chat to a message that is not in it
-/// is not a reply at all. The words survive per conversation; what they were for
-/// does not, and the draft becomes a message when it comes back.
+/// where there is no conversation left to return into. The parked line retains
+/// its subject while the active conversation's subject is reset.
 pub(crate) fn select_chat_none(
     ui: &mut UiState,
     outbox: &mut Outbox,
@@ -1045,6 +1061,10 @@ pub(crate) fn start_compose(
     input: &mut InputState,
 ) {
     ui.set_focus(Focus::Input);
+    if !input.line.is_empty() && input.line.subject().is_some() {
+        input.line.start_inserting();
+        return;
+    }
     input.line.open(PromptKind::Message);
     conversation.set_reply_to(None);
     conversation.set_editing(None);
@@ -1065,6 +1085,7 @@ pub(crate) fn start_reply(
 
     ui.set_focus(Focus::Input);
     input.line.open(PromptKind::Reply);
+    input.line.set_subject(Some(id));
     conversation.set_reply_to(Some(id));
     conversation.set_editing(None);
 }
@@ -1102,6 +1123,7 @@ pub(crate) fn start_edit(
 
     ui.set_focus(Focus::Input);
     input.line.open_with(PromptKind::Edit, text);
+    input.line.set_subject(Some(id));
     conversation.set_editing(Some(id));
     conversation.set_reply_to(None);
 }
@@ -3479,7 +3501,8 @@ pub(crate) fn handle_line(
                     .contains_key(&conversation.conversation.window.chat_id);
             leave_line(&mut *ui, &mut *conversation, &mut *input, &mut *profile);
             if restore_draft {
-                resume_draft(drafts, input, conversation.conversation.window.chat_id);
+                let chat_id = conversation.conversation.window.chat_id;
+                resume_draft(drafts, conversation, input, chat_id);
             }
             false
         }
@@ -4128,7 +4151,7 @@ pub(crate) fn handle_normal(
         'i' | 'a' => {
             let chat_id = conversation.conversation.window.chat_id;
             if drafts.drafts.contains_key(&chat_id) {
-                resume_draft(drafts, input, chat_id);
+                resume_draft(drafts, conversation, input, chat_id);
             }
             start_compose(&mut *ui, &mut *conversation, &mut *input);
             false

@@ -743,7 +743,7 @@ fn apply_scenario(app: &mut App, network: &mut net::State, event: scenario::Even
 pub(crate) fn restore_drafts(app: &mut App, file: &DraftFile, label: Option<&str>) {
     let loaded = file.load();
     if drafts_acceptable(loaded.account.as_deref(), label) {
-        app.drafts.restore(loaded.drafts);
+        app.drafts.restore(loaded.drafts, loaded.subjects);
         app.drafts.restore_read_marks(loaded.reads);
     } else {
         tracing::warn!("drafts stored for another account were discarded");
@@ -1162,22 +1162,26 @@ fn sync_drafts(
     let chat_id = app.conversation.conversation.window.chat_id;
     let drafts = app.drafts.snapshot(Some((chat_id, &app.input.line)));
     let reads = app.drafts.recent_read_marks(HISTORY_CACHE_PEERS);
-    if let Some((last_drafts, last_reads)) = last.as_ref()
+    let subjects = app
+        .drafts
+        .snapshot_subjects(Some((chat_id, &app.input.line)));
+    if let Some((last_drafts, last_reads, last_subjects)) = last.as_ref()
         && *last_drafts == drafts
         && *last_reads == reads
+        && *last_subjects == subjects
     {
         return;
     }
     if drafts.is_empty() && reads.is_empty() {
         file.clear();
     } else {
-        file.save(&drafts, &reads, account);
+        file.save(&drafts, &reads, account, &subjects);
     }
-    *last = Some((drafts, reads));
+    *last = Some((drafts, reads, subjects));
 }
 
 /// What [`sync_drafts`] last wrote: the parked words and the read marks.
-type SyncedDrafts = (Vec<(i64, String)>, Vec<(i64, i64)>);
+type SyncedDrafts = (Vec<(i64, String)>, Vec<(i64, i64)>, Vec<(i64, bool, i64)>);
 
 /// What the loop remembers between passes about the slot it is writing for.
 struct LoopSlot {
@@ -1429,7 +1433,8 @@ mod tests {
             media: None,
             media_id: None,
         }]);
-        app.drafts.restore(vec![(7, "unsent".to_owned())]);
+        app.drafts
+            .restore(vec![(7, "unsent".to_owned())], Vec::new());
 
         let mut last: Option<SyncedDrafts> = None;
         sync_drafts(&app, &file, &mut last, Some("+1555"));
