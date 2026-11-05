@@ -341,7 +341,7 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   and the media cache names its file `.tgs`, `.webm` or `.bin` from the magic
   bytes. All of those run on every CI run.
 - **TUI E2E Tests:** `app/tests/tui_e2e.rs` runs the `televim` binary in a pty
-  through `termlens` and asserts on the screen. Thirteen tests: the chat list after
+  through `termlens` and asserts on the screen. Fifteen tests: confirmed draft discard and cancellation, the chat list after
   launch, a seeded cache drawn before the first frame, typing in INSERT, resuming
   a draft, `:q` quitting, refusing contacts while offline, Ctrl-u/Ctrl-d moving
   the conversation's visible slice,

@@ -1468,7 +1468,7 @@ are in [`../AGENTS.md`](../AGENTS.md).
   already the card's action key for the account's own card, so the key is
   learned once.
 
-- **Why only block, unblock, delete and report ask:** a confirmation is for an
+- **Why destructive actions ask:** a confirmation is for an
   action the screen cannot undo. Block and report are visible to another
   account; a deletion removes local data and, for both sides, the peer's copy
   too. Archive is undone by `:archived`, and bare `:rename` restores the peer's
@@ -1619,3 +1619,7 @@ are in [`../AGENTS.md`](../AGENTS.md).
   workers, each with a 512 KiB part buffer. Peak upload storage is therefore
   about 2 MiB plus the reader and file handle. The idle memory measurement does
   not run an upload, so this is a declaration, not a measured budget.
+
+- **Why draft discard is a confirmed command:** `:discard` removes the open
+  conversation draft and its subject. Confirmation prevents accidental loss,
+  and Enter remains unbound to discard.

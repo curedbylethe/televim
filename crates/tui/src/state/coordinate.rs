@@ -1262,10 +1262,12 @@ pub(crate) fn handle_forward_pick(
 ///
 /// Returns true when the answer was `y` to [`ConfirmKind::ChangePassphrase`]:
 /// the two entries are opened by the caller, which holds the session.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn handle_confirm(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
+    drafts: &mut DraftStore,
     outbox: &mut Outbox,
     key: KeyEvent,
 ) -> bool {
@@ -1274,6 +1276,13 @@ pub(crate) fn handle_confirm(
             let change = conversation.confirm == Some(ConfirmKind::ChangePassphrase);
             match &conversation.confirm {
                 Some(ConfirmKind::Quit) => ui.quit(),
+                Some(ConfirmKind::DiscardDraft) => {
+                    drafts.forget(conversation.conversation.window.chat_id);
+                    input.line.clear();
+                    conversation.reply_to = None;
+                    conversation.editing = None;
+                    ui.flash("draft discarded");
+                }
                 Some(ConfirmKind::Logout) => queue_action(&mut *outbox, &mut *ui, Action::Logout),
                 Some(ConfirmKind::ImportSession { path }) => queue_action(
                     &mut *outbox,
@@ -1362,6 +1371,10 @@ pub(crate) fn handle_confirm(
             return change;
         }
         KeyCode::Char('n') | KeyCode::Esc => {
+            if conversation.confirm == Some(ConfirmKind::DiscardDraft) {
+                let chat_id = conversation.conversation.window.chat_id;
+                resume_draft(drafts, conversation, input, chat_id);
+            }
             conversation.set_confirm(None);
             conversation.clear_selection();
             ui.set_mode(Mode::Normal);
@@ -3158,6 +3171,16 @@ pub(crate) fn run_command(
     match cmd {
         "q" | "quit" => {
             request_quit(&mut *ui, &mut *conversation);
+            false
+        }
+        "discard" => {
+            let chat_id = conversation.conversation.window.chat_id;
+            if chat_id == 0 || !drafts.drafts.contains_key(&chat_id) {
+                ui.flash("no draft to discard");
+            } else {
+                ui.set_mode(Mode::Confirm);
+                conversation.set_confirm(Some(ConfirmKind::DiscardDraft));
+            }
             false
         }
         "settings" => open_profile(&mut *profile, &mut *ui, &mut *conversation, &mut *outbox),
@@ -5212,7 +5235,14 @@ fn preempt_key(
     // a pane, so it outranks the focus: it has to be answered before another
     // key is addressed anywhere.
     if ui.mode == Mode::Confirm {
-        if handle_confirm(&mut *ui, &mut *conversation, &mut *input, &mut *outbox, key) {
+        if handle_confirm(
+            &mut *ui,
+            &mut *conversation,
+            &mut *input,
+            &mut *drafts,
+            &mut *outbox,
+            key,
+        ) {
             begin_change(&mut *ui, &mut *session, &mut *input);
         }
         return Some(false);
@@ -5318,7 +5348,14 @@ fn handle_conversation_key(
         (Mode::Confirm, _) => {
             // Unreachable: `preempt_key` answers a confirmation first, and it is
             // the one that holds the session a change opens its entries on.
-            let _ = handle_confirm(&mut *ui, &mut *conversation, &mut *input, &mut *outbox, key);
+            let _ = handle_confirm(
+                &mut *ui,
+                &mut *conversation,
+                &mut *input,
+                &mut *drafts,
+                &mut *outbox,
+                key,
+            );
             false
         }
     }
