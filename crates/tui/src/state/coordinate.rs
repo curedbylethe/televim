@@ -1303,7 +1303,9 @@ pub(crate) fn handle_confirm(
             match &conversation.confirm {
                 Some(ConfirmKind::Quit) => ui.quit(),
                 Some(ConfirmKind::DiscardDraft) => {
-                    drafts.forget(conversation.conversation.window.chat_id);
+                    drafts
+                        .drafts
+                        .remove(&conversation.conversation.window.chat_id);
                     input.line.clear();
                     conversation.reply_to = None;
                     conversation.editing = None;

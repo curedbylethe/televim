@@ -9975,11 +9975,13 @@ fn discard_asks_and_removes_the_parked_draft() {
     let mut app = App::mock();
     draft_then_leave(&mut app, "unsent words");
     let chat_id = app.conversation.conversation.window.chat_id;
+    assert!(app.drafts.note_read(chat_id, 120));
     run_command_line(&mut app, "discard");
     assert_eq!(app.ui.mode, Mode::Confirm);
     assert_eq!(app.status_text(), DISCARD_PROMPT);
     app.handle_key(press(KeyCode::Char('y')));
     assert!(!app.drafts.drafts.contains_key(&chat_id));
+    assert_eq!(app.drafts.recent_read_marks(10), vec![(chat_id, 120)]);
     assert!(app.input.line.is_empty());
     assert!(app.take_action().is_none());
 }
