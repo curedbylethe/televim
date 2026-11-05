@@ -5859,34 +5859,37 @@ fn a_return_asked_for_while_a_jump_is_on_its_way_is_ignored() {
     );
 }
 
-/// A placeholder is a message the server has not seen, so a jump to one has
-/// nothing to fetch: the reader is told the message cannot be reached and
-/// left where they were, rather than watching a page arrive for an id that
-/// does not exist. Recorded as a known limitation rather than fixed — a
-/// placeholder has no server-side identity to fetch around.
+/// A placeholder remains available after a page replaces the window.
 #[test]
-fn a_return_to_a_placeholder_says_so_and_leaves_the_reader_put() {
+fn a_page_around_keeps_the_placeholder_and_ctrl_o_returns_to_it() {
     let mut app = App::mock();
-    // Numbered below zero, which is what an outgoing message looks like
-    // before the server has given it an id. The window is in message order,
-    // so the placeholder is the oldest row and two steps up from the newest.
     app.apply_latest(vec![reply(-7, 19), message(1, "text"), message(3, "text")]);
     app.handle_key(press(KeyCode::Char('k')));
     app.handle_key(press(KeyCode::Char('k')));
     go_to_reply(&mut app);
     assert!(app.apply_jump(&page(&[16, 17, 18, 19, 20]), 19));
-    assert_eq!(reading(&app), Some(19));
-
     app.handle_key(press_ctrl('o'));
-    assert_eq!(
-        app.pending_jump().map(|jump| jump.target_id),
-        Some(-7),
-        "it was asked for: nothing here can say it will not land"
-    );
+    assert_eq!(app.pending_jump(), None);
+    assert_eq!(reading(&app), Some(-7));
+}
 
-    assert!(!app.apply_jump(&[], -7));
+#[test]
+fn confirming_a_send_renames_the_placeholder_mark() {
+    let mut app = App::mock();
+    app.apply_latest(vec![message(-7, "pending")]);
+    app.conversation.jumplist.record(MOCK_CHAT, -7);
+    assert!(app.confirm_sent(-7, message(42, "sent")));
+    assert_eq!(app.conversation.jumplist.back(MOCK_CHAT, 42), Some(42));
+}
+
+#[test]
+fn a_placeholder_with_no_row_is_refused_without_a_request() {
+    let mut app = App::mock();
+    app.apply_latest(page(&[1, 3]));
+    app.go_to_search_hit(-7);
+    assert_eq!(app.pending_jump(), None);
     assert_eq!(app.status_text(), JUMP_UNAVAILABLE);
-    assert_eq!(reading(&app), Some(19), "and the reader is where they were");
+    assert_eq!(reading(&app), Some(3));
 }
 
 /// Q5: `Ctrl-i` is the same byte as `Tab` on a terminal that does not report

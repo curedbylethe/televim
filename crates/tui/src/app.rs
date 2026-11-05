@@ -2565,7 +2565,7 @@ impl App {
     ///
     /// Delegates to [`coordinate::jump_back`].
     pub fn jump_back(&mut self) {
-        coordinate::jump_back(&mut self.pending, &mut self.conversation);
+        coordinate::jump_back(&mut self.pending, &mut self.conversation, &mut self.ui);
     }
 
     /// Ends the reader's wait for a jump, reporting whether it was still the one
@@ -2626,6 +2626,7 @@ impl App {
         coordinate::go_to(
             &mut self.pending,
             &mut self.conversation,
+            &mut self.ui,
             jump.target_id,
             jump.kind,
         );
@@ -2640,6 +2641,7 @@ impl App {
         coordinate::go_to(
             &mut self.pending,
             &mut self.conversation,
+            &mut self.ui,
             message_id,
             JumpKind::Search,
         );

@@ -412,7 +412,11 @@ pub(crate) fn queue_action(outbox: &mut Outbox, ui: &mut UiState, action: Action
 /// `Ctrl-o`. A mark the window still holds is a cursor move; one it does not
 /// is a jump of its own, on the same terms as any other, because the jump
 /// that took the reader away replaced the window the mark was in.
-pub(crate) fn jump_back(pending: &mut Pending, conversation: &mut ConversationState) {
+pub(crate) fn jump_back(
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    ui: &mut UiState,
+) {
     // Asked before the stack is walked: a walk moves a mark between the two
     // stacks, and a reader who presses `Ctrl-o` while a page is on its way
     // must not have moved one for a return that did not happen.
@@ -430,7 +434,13 @@ pub(crate) fn jump_back(pending: &mut Pending, conversation: &mut ConversationSt
         return;
     };
 
-    go_to(&mut *pending, &mut *conversation, target, JumpKind::Back);
+    go_to(
+        &mut *pending,
+        &mut *conversation,
+        ui,
+        target,
+        JumpKind::Back,
+    );
 }
 
 /// Takes the reader forward to the place a `Ctrl-o` walked them away from.
@@ -439,7 +449,11 @@ pub(crate) fn jump_back(pending: &mut Pending, conversation: &mut ConversationSt
 /// apart from `Tab` sends `Tab` instead, and `Tab` is the pane switch here —
 /// so `Ctrl-n` is the second, unambiguous name for the same step, and on a
 /// terminal that does report the two apart either key walks the jumplist.
-pub(crate) fn jump_forward(pending: &mut Pending, conversation: &mut ConversationState) {
+pub(crate) fn jump_forward(
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    ui: &mut UiState,
+) {
     if pending.pending_jump.is_some() || !conversation.has_conversation() {
         return;
     }
@@ -454,7 +468,13 @@ pub(crate) fn jump_forward(pending: &mut Pending, conversation: &mut Conversatio
         return;
     };
 
-    go_to(&mut *pending, &mut *conversation, target, JumpKind::Forward);
+    go_to(
+        &mut *pending,
+        &mut *conversation,
+        ui,
+        target,
+        JumpKind::Forward,
+    );
 }
 
 /// Goes to `id`, moving the cursor when the window holds it and asking for a
@@ -466,6 +486,7 @@ pub(crate) fn jump_forward(pending: &mut Pending, conversation: &mut Conversatio
 pub(crate) fn go_to(
     pending: &mut Pending,
     conversation: &mut ConversationState,
+    ui: &mut UiState,
     id: i64,
     kind: JumpKind,
 ) {
@@ -476,6 +497,11 @@ pub(crate) fn go_to(
     if let Some(index) = conversation.conversation.window.position_of(id) {
         conversation.vim.set_cursor(index);
         conversation.settle_follow();
+        return;
+    }
+
+    if id <= 0 {
+        ui.flash(JUMP_UNAVAILABLE);
         return;
     }
 
@@ -3988,10 +4014,10 @@ fn handle_normal_ctrl(
         // escaped it, and a second jump would replace the one they are still
         // waiting for.
         KeyCode::Char('o') if pending.pending_jump.is_none() => {
-            jump_back(&mut *pending, &mut *conversation);
+            jump_back(&mut *pending, &mut *conversation, &mut *ui);
         }
         KeyCode::Char('i' | 'n') if pending.pending_jump.is_none() => {
-            jump_forward(&mut *pending, &mut *conversation);
+            jump_forward(&mut *pending, &mut *conversation, &mut *ui);
         }
         _ => {}
     }
@@ -4950,6 +4976,7 @@ fn accept_global_search(
         go_to(
             &mut *pending,
             &mut *conversation,
+            &mut *ui,
             hit.message_id,
             JumpKind::Search,
         );
@@ -4972,6 +4999,7 @@ fn accept_global_search(
     go_to(
         &mut *pending,
         &mut *conversation,
+        &mut *ui,
         hit.message_id,
         JumpKind::Search,
     );

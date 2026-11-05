@@ -764,7 +764,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
   (`Jumping to Sep 26, 2026…`), falling back on `Jumping to a day…` only when no clock
   has been recorded and there is no "today" to be relative to. Day and date jumps record
   their origin as window-replacing jumps do (Q-04), except a non-positive placeholder
-  origin, which has nothing for `Ctrl-o` to land on (G-10).
+  origin: a day jump is anchored on a numbered message, and a placeholder has no day (G-10).
+- **Why a return can find an unsent placeholder:** A replacement page keeps local
+  placeholder rows. A missing non-positive target is refused locally without a
+  fetch, and send confirmation moves jumplist marks to the real message id.
 - **Why a jump keeps the search:** the design engine's `landJump` sets
   `s.search = null` — its hits were rows of the old window — and `DESIGN.md`
   records that. The Rust does the opposite on purpose. `apply_jump` does not touch

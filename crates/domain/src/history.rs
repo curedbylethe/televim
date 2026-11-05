@@ -183,6 +183,12 @@ impl ConversationWindow {
     /// A page that names the same message twice keeps one copy — the first
     /// after the sort — so the window never holds two rows for one identifier.
     pub fn replace(&mut self, messages: impl IntoIterator<Item = Message>) {
+        let local: Vec<Message> = self
+            .messages
+            .iter()
+            .filter(|message| message.id <= 0 && message.chat_id == self.chat_id)
+            .cloned()
+            .collect();
         let mut page: Vec<Message> = messages
             .into_iter()
             .filter(|message| message.chat_id == self.chat_id)
@@ -190,9 +196,15 @@ impl ConversationWindow {
 
         page.sort_by_key(|message| message.id);
         page.dedup_by_key(|message| message.id);
+        page.retain(|message| !local.iter().any(|row| row.id == message.id));
 
-        let dropped = page.len().saturating_sub(CONVERSATION_WINDOW);
+        let dropped = page
+            .len()
+            .saturating_add(local.len())
+            .saturating_sub(CONVERSATION_WINDOW)
+            .min(page.len());
         self.messages = page.into_iter().skip(dropped).collect();
+        self.messages.extend(local);
     }
 
     /// Puts older messages in front of what the window holds.
@@ -766,6 +778,22 @@ mod tests {
     }
 
     // ---- the window ----------------------------------------------------
+
+    #[test]
+    fn replace_keeps_local_rows_after_the_page() {
+        let mut window = window_with(&[-1, -2]);
+        window.replace(page(42, &[3, 4]));
+        assert_eq!(ids(&window), vec![3, 4, -2, -1]);
+    }
+
+    #[test]
+    fn replace_evicts_numbered_rows_before_local_rows() {
+        let mut window = window_with(&[-1]);
+        window.replace(messages(200));
+        assert_eq!(window.len(), CONVERSATION_WINDOW);
+        assert_eq!(window.oldest_id(), Some(2));
+        assert_eq!(window.iter().last().map(|message| message.id), Some(-1));
+    }
 
     #[test]
     fn a_window_opens_empty_and_in_one_conversation() {
