@@ -121,13 +121,22 @@ else; the `release` job carries the release build and the budget.
 `libdbus-1-dev` and `pkg-config` are installed first in both jobs, because
 `keyring`'s Linux backend links against DBus at build time.
 
-`.github/workflows/release.yml`, on every push to `main`, is not a gate. It keeps
-a release PR open (release-please), writes that PR's `CHANGELOG.md` section
-(git-cliff, see `cliff.toml`), and when a release is cut builds
-`x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` binaries, attaches them with
-a `SHA256SUMS` file, and sets the release notes. It compiles in the application
-credentials from the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` secrets, and fails
-if either is missing.
+`.github/workflows/release.yml` is not a gate. A push to `main` runs
+release-please and writes the release PR's `CHANGELOG.md` section (git-cliff, see
+`cliff.toml`). A release tag or a manual dispatch then validates the tag against
+`main` and builds five targets: macOS arm64 and x86_64, Linux x86_64 and arm64,
+and Windows x86_64. Linux builds use an Ubuntu 22.04 container for a glibc 2.35
+floor. Each native runner packages and smoke-tests its archive, including
+`--version`, `--help`, and platform runtime links. The workflow synchronizes only
+the workspace package entry in `Cargo.lock` before its locked build. It uploads
+archives and `SHA256SUMS` to a draft release, downloads and verifies the complete
+asset set, then publishes it. A failed build blocks publishing; failed uploads or
+verification leave the release draft unpublished. Manual dry runs build and test
+without changing a release. Job-level
+permissions limit write access to release-please, changelog, and publish jobs.
+Builds require the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` secrets; missing
+values fail before compilation. Windows TUI, Credential Manager, opener, and
+owner-only file-mode behavior remain outside the CLI smoke test.
 
 `.github/workflows/desktop.yml` is `workflow_dispatch` only, and covers the two
 things a hosted runner cannot do:
