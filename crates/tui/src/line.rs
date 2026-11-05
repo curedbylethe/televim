@@ -2414,6 +2414,39 @@ mod tests {
         assert_eq!(line.caret(), 4, "on the new line between abc and def");
     }
 
+    #[test]
+    fn capital_o_with_shift_opens_above_without_moving_a_character() {
+        let mut line = normal_with("hello");
+
+        line.feed(combo(KeyCode::Char('O'), KeyModifiers::SHIFT));
+
+        assert_eq!(line.text(), "\nhello");
+        assert_eq!(line.caret(), 0);
+        assert_eq!(line.status(), "INSERT");
+    }
+
+    #[test]
+    fn capital_o_on_a_multibyte_row_keeps_the_character_whole() {
+        let mut line = normal_with("helloé");
+
+        keys(&mut line, "O");
+
+        assert_eq!(line.text(), "\nhelloé");
+        assert_eq!(line.caret(), 0);
+        assert_eq!(line.status(), "INSERT");
+    }
+
+    #[test]
+    fn capital_o_on_an_empty_buffer_opens_a_line() {
+        let mut line = normal_with("");
+
+        keys(&mut line, "O");
+
+        assert_eq!(line.text(), "\n");
+        assert_eq!(line.caret(), 0);
+        assert_eq!(line.status(), "INSERT");
+    }
+
     /// `Esc` spends a pending `g` like any other key. A prefix that survived it
     /// would be waiting behind a mode the reader had already left, and the `g`
     /// of the next `gg` would be spent completing nothing.
