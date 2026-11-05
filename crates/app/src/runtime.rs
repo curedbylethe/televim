@@ -742,7 +742,7 @@ fn apply_scenario(app: &mut App, network: &mut net::State, event: scenario::Even
 /// and two copies of it would be two ways to accept a stranger's words.
 pub(crate) fn restore_drafts(app: &mut App, file: &DraftFile, label: Option<&str>) {
     let loaded = file.load();
-    if loaded.newer {
+    if file.foreign() {
         return;
     }
     if drafts_acceptable(loaded.account.as_deref(), label) {
