@@ -2945,7 +2945,12 @@ impl App {
     /// Delegates to [`coordinate::start_reply`].
     #[cfg(test)]
     fn start_reply(&mut self) {
-        coordinate::start_reply(&mut self.ui, &mut self.conversation, &mut self.input);
+        coordinate::start_reply(
+            &mut self.ui,
+            &mut self.conversation,
+            &mut self.input,
+            &self.drafts,
+        );
     }
 
     /// Opens the conversation with a person the search found, or focuses the one

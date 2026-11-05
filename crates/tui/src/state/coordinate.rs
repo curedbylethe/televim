@@ -1085,8 +1085,13 @@ pub(crate) fn start_compose(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
+    drafts: &mut DraftStore,
 ) {
     ui.set_focus(Focus::Input);
+    let chat_id = conversation.conversation.window.chat_id;
+    if drafts.drafts.contains_key(&chat_id) {
+        resume_draft(drafts, conversation, input, chat_id);
+    }
     if !input.line.is_empty() && input.line.subject().is_some() {
         input.line.start_inserting();
         return;
@@ -1104,7 +1109,15 @@ pub(crate) fn start_reply(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
+    drafts: &DraftStore,
 ) {
+    if drafts
+        .drafts
+        .contains_key(&conversation.conversation.window.chat_id)
+    {
+        ui.flash("A draft is waiting: i to continue, :discard.");
+        return;
+    }
     let Some(id) = conversation.cursor_message_id() else {
         return;
     };
@@ -1130,7 +1143,15 @@ pub(crate) fn start_edit(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
+    drafts: &DraftStore,
 ) {
+    if drafts
+        .drafts
+        .contains_key(&conversation.conversation.window.chat_id)
+    {
+        ui.flash("A draft is waiting: i to continue, :discard.");
+        return;
+    }
     let Some(message) = conversation.cursor_message() else {
         return;
     };
@@ -1524,13 +1545,14 @@ pub(crate) fn paste(
     ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
+    drafts: &mut DraftStore,
 ) {
     if conversation.register.is_empty() {
         ui.flash("nothing has been yanked");
         return;
     }
 
-    start_compose(&mut *ui, &mut *conversation, &mut *input);
+    start_compose(&mut *ui, &mut *conversation, &mut *input, drafts);
     input.line.insert(&conversation.register.text());
 }
 
@@ -4200,19 +4222,15 @@ pub(crate) fn handle_normal(
 
     match c {
         'i' | 'a' => {
-            let chat_id = conversation.conversation.window.chat_id;
-            if drafts.drafts.contains_key(&chat_id) {
-                resume_draft(drafts, conversation, input, chat_id);
-            }
-            start_compose(&mut *ui, &mut *conversation, &mut *input);
+            start_compose(&mut *ui, &mut *conversation, &mut *input, drafts);
             false
         }
         'r' => {
-            start_reply(&mut *ui, &mut *conversation, &mut *input);
+            start_reply(&mut *ui, &mut *conversation, &mut *input, drafts);
             false
         }
         'e' => {
-            start_edit(&mut *ui, &mut *conversation, &mut *input);
+            start_edit(&mut *ui, &mut *conversation, &mut *input, drafts);
             false
         }
         // A plain `d`: the table reports nothing for it, so a `d` that does
@@ -4226,7 +4244,7 @@ pub(crate) fn handle_normal(
             false
         }
         'p' => {
-            paste(&mut *ui, &mut *conversation, &mut *input);
+            paste(&mut *ui, &mut *conversation, &mut *input, drafts);
             false
         }
         'D' => {
