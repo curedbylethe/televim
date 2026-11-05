@@ -3380,11 +3380,8 @@ impl App {
         // The open chat's draft, when it is a message being written and has
         // words in it: the same test `park_draft` makes, so a `:` command or a
         // search is never drawn as one. A chat that is not open has no draft.
-        let draft = self.input.line.text();
-        if self.input.line.purpose().is_buffer()
-            && !draft.is_empty()
-            && self.conversation.conversation.window.chat_id != 0
-        {
+        let draft = self.open_draft_text();
+        if !draft.is_empty() && self.conversation.conversation.window.chat_id != 0 {
             laid_out.push(RowSpan {
                 kind: RowKind::Draft,
                 message_id: None,
@@ -3395,6 +3392,17 @@ impl App {
         }
 
         laid_out
+    }
+
+    pub(crate) fn open_draft_text(&self) -> &str {
+        if self.input.line.purpose().is_buffer() && !self.input.line.is_empty() {
+            self.input.line.text()
+        } else {
+            self.drafts
+                .drafts
+                .get(&self.conversation.conversation.window.chat_id)
+                .map_or("", |line| line.text())
+        }
     }
 
     /// The rows the panel spends on what is not a message, in a panel `height`
