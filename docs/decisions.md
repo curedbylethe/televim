@@ -764,7 +764,7 @@ are in [`../AGENTS.md`](../AGENTS.md).
   (`Jumping to Sep 26, 2026…`), falling back on `Jumping to a day…` only when no clock
   has been recorded and there is no "today" to be relative to. Day and date jumps record
   their origin as window-replacing jumps do (Q-04), except a non-positive placeholder
-  origin: a day jump is anchored on a numbered message, and a placeholder has no day (G-10).
+  origin, which has nothing for `Ctrl-o` to land on (G-10).
 - **Why a return can find an unsent placeholder:** A replacement page keeps local
   placeholder rows. A missing non-positive target is refused locally without a
   fetch, and send confirmation moves jumplist marks to the real message id.
@@ -1473,14 +1473,16 @@ are in [`../AGENTS.md`](../AGENTS.md).
   already the card's action key for the account's own card, so the key is
   learned once.
 
-- **Why destructive actions ask:** a confirmation is for an
+- **Why only block, unblock, delete and report ask:** a confirmation is for an
   action the screen cannot undo. Block and report are visible to another
   account; a deletion removes local data and, for both sides, the peer's copy
   too. Archive is undone by `:archived`, and bare `:rename` restores the peer's
   name, so both report their result in a flash instead of interrupting the
   reader with a question. The confirmation captures its subject and its
   captured `both`/blocked direction when it is raised, so `y` cannot act on a
-  row the reader moved to afterwards; `n` and `Esc` change nothing. The prompt
+  row the reader moved to afterwards; `n` and `Esc` change nothing. Draft
+  discard also asks first, because typed words are local data the reader may
+  not be able to recover. The prompt
   is the status line, the hint row is empty, and the mode label is the one red
   `CONFIRM` role.
 
