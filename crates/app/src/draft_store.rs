@@ -47,7 +47,6 @@ pub(crate) struct DraftFile {
 /// phone configured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoadedDrafts {
-    pub newer: bool,
     pub account: Option<String>,
     pub drafts: Vec<(i64, String)>,
     pub subjects: Vec<(i64, bool, i64)>,
@@ -62,7 +61,6 @@ impl LoadedDrafts {
     /// unreadable one, or any other read failure.
     fn empty() -> Self {
         Self {
-            newer: false,
             account: None,
             drafts: Vec::new(),
             subjects: Vec::new(),
@@ -203,14 +201,12 @@ impl DraftFile {
             self.foreign.set(true);
             tracing::warn!(version, "drafts file was written by a newer version");
             return LoadedDrafts {
-                newer: true,
                 ..LoadedDrafts::empty()
             };
         }
 
         match serde_json::from_slice::<Payload>(&bytes) {
             Ok(payload) => LoadedDrafts {
-                newer: false,
                 account: payload.account,
                 drafts: payload.drafts.into_iter().collect(),
                 subjects: payload
@@ -445,7 +441,7 @@ mod tests {
             &[(7, true, 9)],
         );
         let loaded = file.load();
-        assert!(!loaded.newer);
+        assert!(!file.foreign());
         assert_eq!(loaded.drafts, vec![(7, "seven".to_owned())]);
         assert_eq!(loaded.reads, vec![(7, 3)]);
         assert_eq!(loaded.subjects, vec![(7, true, 9)]);
@@ -457,7 +453,7 @@ mod tests {
         let raw = br#"{"version":2,"drafts":["new shape"],"read":"new shape"}"#;
         fs::write(&file.path, raw).expect("future file");
         let loaded = file.load();
-        assert!(loaded.newer);
+        assert!(file.foreign());
         assert!(loaded.drafts.is_empty() && loaded.reads.is_empty() && loaded.subjects.is_empty());
         assert!(file.foreign());
         file.save(&[(7, "seven".to_owned())], &[], None, &[]);

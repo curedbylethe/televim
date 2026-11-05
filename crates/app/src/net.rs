@@ -7732,7 +7732,8 @@ mod tests {
         let raw = br#"{"version":2,"drafts":{"7":"future"}}"#;
         std::fs::write(&path, raw).expect("future file");
         let file = DraftFile::new(path.clone());
-        assert!(file.load().newer);
+        file.load();
+        assert!(file.foreign());
         let mut state = State::default();
         state.set_draft_file(file);
         let mut app = app_with_a_conversation(CHAT, 2);
