@@ -9987,6 +9987,48 @@ fn discard_asks_and_removes_the_parked_draft() {
 }
 
 #[test]
+fn reply_edit_and_paste_preserve_a_parked_draft() {
+    for key in [KeyCode::Char('r'), KeyCode::Char('e')] {
+        let mut app = App::mock();
+        let chat_id = app.conversation.conversation.window.chat_id;
+        app.drafts
+            .restore(vec![(chat_id, "parked words".to_owned())], Vec::new());
+        app.handle_key(press(key));
+        assert_eq!(app.drafts.drafts[&chat_id].text(), "parked words");
+        assert!(app.input.line.is_empty());
+        assert_eq!(
+            app.ui.status,
+            "A draft is waiting: i to continue, :discard."
+        );
+        app.handle_key(press(KeyCode::Char('i')));
+        assert_eq!(app.input.line.text(), "parked words");
+    }
+
+    let mut app = App::mock();
+    let chat_id = app.conversation.conversation.window.chat_id;
+    app.drafts
+        .restore(vec![(chat_id, "parked words".to_owned())], Vec::new());
+    app.conversation.register = crate::app::Register::set(vec!["paste".to_owned()]);
+    app.handle_key(press(KeyCode::Char('p')));
+    assert_eq!(app.input.line.text(), "parked wordspaste");
+    assert!(!app.drafts.drafts.contains_key(&chat_id));
+}
+
+#[test]
+fn a_refused_global_search_does_not_park() {
+    let mut app = App::mock();
+    draft_then_leave(&mut app, "unsent words");
+    let chat_id = app.conversation.conversation.window.chat_id;
+    app.handle_key(press(KeyCode::Char(':')));
+    type_text(&mut app, "settings");
+    app.handle_key(press(KeyCode::Enter));
+    assert!(app.drafts.drafts.contains_key(&chat_id));
+    app.conversation.user_search.begin("ada");
+    app.handle_key(press(KeyCode::Char('?')));
+    assert_eq!(app.drafts.drafts[&chat_id].text(), "unsent words");
+}
+
+#[test]
 fn cancelling_discard_restores_the_draft() {
     for answer in [KeyCode::Char('n'), KeyCode::Esc] {
         let mut app = App::mock();
