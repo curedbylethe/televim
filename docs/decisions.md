@@ -517,14 +517,11 @@ are in [`../AGENTS.md`](../AGENTS.md).
   in `app`. It has no fixed cap, because evicting a live draft to
   satisfy one would lose the reader's words, the failure the feature exists to
   prevent; instead an entry is dropped when its draft becomes empty, so the map
-  holds only peers with text in the bar. The draft's subject (`reply_to`,
-  `editing`) is still dropped on a switch, because it lives on `App` rather than
-  in the `LineEditor` and restoring a reply target is a separate product decision;
-  only text, caret, mode and selection travel. Across restarts the map is
-  persisted as plain `(peer id, text)` pairs in `televim.drafts.json` beside
-  the configuration: every loop pass snapshots the parked map plus the live
-  line and rewrites the file when the snapshot changed — only text crosses
-  that boundary, no cursor, undo or purpose — through an atomic sibling-temp
+  holds only peers with text in the bar. A parked line retains its reply or
+  edit subject and restores it when its conversation opens. Across restarts the
+  file keeps text as `(peer id, text)` pairs and subjects under a separate key
+  in `televim.drafts.json` beside the configuration. Every loop pass snapshots
+  the parked map plus the live line and rewrites changed data through an atomic sibling-temp
   rename at `0600`, so a kill loses at most one 250 ms tick (and a kill in
   the pass after a send resurrects the sent line, accepted). The file carries
   `cfg.phone` as its account tag and a launch for another account discards

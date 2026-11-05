@@ -191,6 +191,7 @@ pub struct LineEditor {
     text: String,
     editor: VimLineEditor,
     purpose: PromptKind,
+    subject: Option<i64>,
 
     /// The text as it was before the key now being applied.
     ///
@@ -236,6 +237,7 @@ impl LineEditor {
             text: String::new(),
             editor: VimLineEditor::new(),
             purpose: PromptKind::Message,
+            subject: None,
             before: String::new(),
             caret_before: 0,
             pending_g: false,
@@ -261,6 +263,7 @@ impl LineEditor {
         }
 
         self.purpose = purpose;
+        self.subject = None;
         self.start_inserting();
     }
 
@@ -272,6 +275,7 @@ impl LineEditor {
     pub fn open_with(&mut self, purpose: PromptKind, text: String) {
         self.text = text;
         self.purpose = purpose;
+        self.subject = None;
         self.start_inserting();
     }
 
@@ -294,6 +298,7 @@ impl LineEditor {
         // Zeroed, not just emptied: this is the buffer a passphrase is typed in.
         zeroize::Zeroize::zeroize(&mut self.text);
         self.purpose = PromptKind::Message;
+        self.subject = None;
         self.editor.reset();
     }
 
@@ -473,6 +478,14 @@ impl LineEditor {
         self.purpose
     }
 
+    pub(crate) const fn subject(&self) -> Option<i64> {
+        self.subject
+    }
+
+    pub(crate) fn set_subject(&mut self, subject: Option<i64>) {
+        self.subject = subject;
+    }
+
     /// Whether the bar paints this line as bullets rather than as its text.
     ///
     /// Derived rather than stored, because the only prompt that conceals is a
@@ -486,13 +499,10 @@ impl LineEditor {
 
     /// Keeps the text and forgets what it was for.
     ///
-    /// What closing a conversation does to the draft, and what parking does to it
-    /// on the way into the per-peer store: the words are kept, but the subject
-    /// they were written against does not survive, and a draft that kept its
-    /// purpose would submit as a reply to a message in a chat that is no longer
-    /// open.
+    /// Used when closing the current conversation's live line.
     pub fn forget_purpose(&mut self) {
         self.purpose = PromptKind::Message;
+        self.subject = None;
     }
 
     /// Takes the text the line's last yank produced, if there was one.
@@ -1031,7 +1041,7 @@ impl LineEditor {
     /// the wrapper presses it. At the end, because a draft the reader is
     /// continuing is written from the end, and an empty buffer has nowhere
     /// else for the caret to be.
-    fn start_inserting(&mut self) {
+    pub(crate) fn start_inserting(&mut self) {
         self.editor.reset();
         self.editor.set_cursor(self.text.len(), &self.text);
         let _ = self.editor.handle_key(Key::char('i'), &self.text);

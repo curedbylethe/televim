@@ -1140,8 +1140,11 @@ impl State {
         let chat_id = app.conversation.conversation.window.chat_id;
         let drafts = app.drafts.snapshot(Some((chat_id, &app.input.line)));
         let reads = app.drafts.recent_read_marks(HISTORY_CACHE_PEERS);
+        let subjects = app
+            .drafts
+            .snapshot_subjects(Some((chat_id, &app.input.line)));
         if !drafts.is_empty() || !reads.is_empty() {
-            file.save(&drafts, &reads, self.slot.label(cfg).as_deref());
+            file.save(&drafts, &reads, self.slot.label(cfg).as_deref(), &subjects);
         }
     }
 
@@ -7698,7 +7701,7 @@ mod tests {
     fn signing_out_removes_the_drafts_file() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let file = DraftFile::new(dir.path().join("televim.drafts.json"));
-        file.save(&[(CHAT, "unsent".to_owned())], &[], Some("+1555"));
+        file.save(&[(CHAT, "unsent".to_owned())], &[], Some("+1555"), &[]);
         assert!(dir.path().join("televim.drafts.json").exists());
 
         let mut app = app_with_a_conversation(CHAT, 2);
@@ -9258,7 +9261,8 @@ mod tests {
     fn the_open_conversations_draft_survives_the_ready() {
         for (what, mut state) in [("warm", warm_state()), ("cold", State::default())] {
             let mut app = launching();
-            app.drafts.restore(vec![(CHAT, "unsent".to_owned())]);
+            app.drafts
+                .restore(vec![(CHAT, "unsent".to_owned())], Vec::new());
             open_from_cache(&mut app, &mut state);
 
             ready(&mut app, &mut state, vec![chat(CHAT), chat(CHAT + 1)]);
@@ -13951,6 +13955,7 @@ mod switch_tests {
             &[(CHAT, "half a sentence".to_owned())],
             &[(CHAT, 3)],
             Some("+1555"),
+            &[],
         );
         fs::write(&history, b"account A's own bytes").expect("the fixture is written");
         (config_path, drafts, history)
@@ -14361,6 +14366,7 @@ mod switch_tests {
             &[(CHAT, "half a sentence".to_owned())],
             &[(CHAT, 3)],
             Some("+1555"),
+            &[],
         );
         fs::write(&history, b"account A's own bytes").expect("the fixture is written");
         fs::write(&session, b"account A's session").expect("the fixture is written");

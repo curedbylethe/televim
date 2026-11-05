@@ -1,7 +1,7 @@
 //! Unsent words on disk: the drafts file beside the configuration.
 //!
 //! `tui` owns the drafts and their snapshot shape (`Vec<(i64, String)>`,
-//! plain peer id plus text — no cursor, no undo, no purpose) and it owns no
+//! plain peer id plus text, with subjects in a separate list — no cursor or undo) and it owns no
 //! filesystem, so the file lives here, in the crate that owns the
 //! configuration path. The payload carries the account the words were written
 //! under, so a launch for another account discards them rather than seeding
@@ -44,6 +44,7 @@ pub(crate) struct DraftFile {
 pub(crate) struct LoadedDrafts {
     pub account: Option<String>,
     pub drafts: Vec<(i64, String)>,
+    pub subjects: Vec<(i64, bool, i64)>,
     /// `(peer id, highest id the peer has read)`, oldest first: the order
     /// the file holds them, which is the recency order. A file in the older
     /// object form has no order, so its marks come back in map order.
@@ -57,6 +58,7 @@ impl LoadedDrafts {
         Self {
             account: None,
             drafts: Vec::new(),
+            subjects: Vec::new(),
             reads: Vec::new(),
         }
     }
@@ -86,10 +88,41 @@ struct Payload {
     drafts: BTreeMap<i64, String>,
     #[serde(
         default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "lenient_subjects"
+    )]
+    subjects: BTreeMap<i64, StoredSubject>,
+    #[serde(
+        default,
         skip_serializing_if = "Vec::is_empty",
         deserialize_with = "lenient_reads"
     )]
     read: Vec<(i64, i64)>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredSubject {
+    id: i64,
+    #[serde(default)]
+    editing: bool,
+}
+
+fn lenient_subjects<'de, D>(deserializer: D) -> Result<BTreeMap<i64, StoredSubject>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(peer, value)| {
+            Some((
+                peer.parse().ok()?,
+                serde_json::from_value(value.clone()).ok()?,
+            ))
+        })
+        .collect())
 }
 
 /// Reads the `read` key without letting it fail the whole payload.
@@ -149,6 +182,11 @@ impl DraftFile {
             Ok(payload) => LoadedDrafts {
                 account: payload.account,
                 drafts: payload.drafts.into_iter().collect(),
+                subjects: payload
+                    .subjects
+                    .into_iter()
+                    .map(|(peer, subject)| (peer, subject.editing, subject.id))
+                    .collect(),
                 reads: payload.read,
             },
             Err(error) => {
@@ -168,12 +206,30 @@ impl DraftFile {
         drafts: &[(i64, String)],
         reads: &[(i64, i64)],
         account: Option<&str>,
+        subjects: &[(i64, bool, i64)],
     ) {
         let payload = Payload {
             account: account.map(str::to_owned),
             drafts: drafts
                 .iter()
                 .map(|(peer_id, text)| (*peer_id, text.clone()))
+                .collect(),
+            subjects: subjects
+                .iter()
+                .filter(|(peer, _, _)| {
+                    drafts
+                        .iter()
+                        .any(|(id, text)| id == peer && !text.is_empty())
+                })
+                .map(|(peer, editing, id)| {
+                    (
+                        *peer,
+                        StoredSubject {
+                            id: *id,
+                            editing: *editing,
+                        },
+                    )
+                })
                 .collect(),
             read: reads.to_vec(),
         };
@@ -305,7 +361,7 @@ mod tests {
         let (_dir, file) = scratch("drafts.json");
         let drafts = vec![(30, "thirty".to_owned()), (7, "seven".to_owned())];
 
-        file.save(&drafts, &[], Some("+15551234567"));
+        file.save(&drafts, &[], Some("+15551234567"), &[]);
 
         let loaded = file.load();
         assert_eq!(loaded.account.as_deref(), Some("+15551234567"));
@@ -334,7 +390,7 @@ mod tests {
             "corrupt JSON loads as nothing, warned about, launch carries on"
         );
 
-        file.save(&[(7, "seven".to_owned())], &[], None);
+        file.save(&[(7, "seven".to_owned())], &[], None, &[]);
         assert_eq!(
             file.load().drafts,
             vec![(7, "seven".to_owned())],
@@ -346,7 +402,7 @@ mod tests {
     fn a_save_leaves_a_whole_file_and_no_temp_behind() {
         let (_dir, file) = scratch("drafts.json");
 
-        file.save(&[(7, "seven".to_owned())], &[], Some("+15551234567"));
+        file.save(&[(7, "seven".to_owned())], &[], Some("+15551234567"), &[]);
 
         let raw = fs::read_to_string(&file.path).expect("the file the save wrote");
         let parsed: serde_json::Value =
@@ -374,7 +430,7 @@ mod tests {
 
         file.clear();
 
-        file.save(&[(7, "seven".to_owned())], &[], None);
+        file.save(&[(7, "seven".to_owned())], &[], None, &[]);
         assert!(file.path.exists());
         file.clear();
         assert!(!file.path.exists());
@@ -421,6 +477,7 @@ mod tests {
             &[(7, "first account's".to_owned())],
             &[(7, 9)],
             legacy.label(&cfg).as_deref(),
+            &[],
         );
         let legacy_loaded = legacy_file.load();
 
@@ -442,6 +499,7 @@ mod tests {
             &[(7, "seven's".to_owned())],
             &[(7, 4)],
             seven.label(&cfg).as_deref(),
+            &[],
         );
         let seven_loaded = seven_file.load();
 
@@ -547,12 +605,53 @@ mod tests {
         assert!(drafts_acceptable(loaded.account.as_deref(), Some("+1555")));
 
         let mut app = app_with_a_conversation(7);
-        app.drafts.restore(loaded.drafts);
+        app.drafts.restore(loaded.drafts, loaded.subjects);
         assert_eq!(
             app.drafts.snapshot(None),
             vec![(7, "mid-sentence".to_owned())],
             "the words are back in the map after the relaunch"
         );
+    }
+
+    #[test]
+    fn reply_and_edit_subjects_survive_a_relaunch() {
+        let (_dir, file) = scratch("drafts.json");
+        let drafts = vec![(7, "reply".to_owned()), (8, "edit".to_owned())];
+        let subjects = vec![(7, false, 42), (8, true, 43)];
+        file.save(&drafts, &[], None, &subjects);
+        let loaded = file.load();
+        let mut app = app_with_a_conversation(7);
+        app.drafts.restore(loaded.drafts, loaded.subjects);
+        assert_eq!(app.drafts.snapshot(None), drafts);
+        assert_eq!(app.drafts.snapshot_subjects(None), subjects);
+    }
+
+    #[test]
+    fn a_damaged_subject_does_not_cost_the_drafts() {
+        let (_dir, file) = scratch("drafts.json");
+        fs::write(
+            &file.path,
+            r#"{"drafts":{"7":"reply","8":"edit"},"subjects":{"7":{"id":42},"8":{"id":"broken"}}}"#,
+        )
+        .expect("fixture");
+        let loaded = file.load();
+        assert_eq!(loaded.drafts.len(), 2);
+        assert_eq!(loaded.subjects, vec![(7, false, 42)]);
+        let mut app = app_with_a_conversation(7);
+        app.drafts.restore(loaded.drafts, loaded.subjects);
+        assert_eq!(app.drafts.snapshot_subjects(None), vec![(7, false, 42)]);
+    }
+
+    #[test]
+    fn a_subject_without_words_is_not_written() {
+        let (_dir, file) = scratch("drafts.json");
+        file.save(
+            &[(7, String::new())],
+            &[],
+            None,
+            &[(7, false, 42), (8, true, 43)],
+        );
+        assert!(file.load().subjects.is_empty());
     }
 
     /// Snapshot, save, submit, re-snapshot, save, re-load: the entry is gone
@@ -562,14 +661,15 @@ mod tests {
     fn a_sent_line_leaves_the_file_on_the_next_sync() {
         let (_dir, file) = scratch("drafts.json");
         let mut app = app_with_a_conversation(7);
-        app.drafts.restore(vec![(7, "parked".to_owned())]);
+        app.drafts
+            .restore(vec![(7, "parked".to_owned())], Vec::new());
         app.input
             .line
             .open_with(PromptKind::Message, "sending this".to_owned());
         app.ui.focus = Focus::Input;
 
         let snapshot = app.drafts.snapshot(Some((7, &app.input.line)));
-        file.save(&snapshot, &[], None);
+        file.save(&snapshot, &[], None, &[]);
         assert_eq!(
             file.load().drafts,
             vec![(7, "sending this".to_owned())],
@@ -580,7 +680,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         let snapshot = app.drafts.snapshot(Some((7, &app.input.line)));
-        file.save(&snapshot, &[], None);
+        file.save(&snapshot, &[], None, &[]);
         assert_eq!(
             file.load(),
             LoadedDrafts::empty(),
@@ -599,12 +699,13 @@ mod tests {
             &[(7, "someone else's".to_owned())],
             &[],
             Some("+10000000001"),
+            &[],
         );
 
         let loaded = file.load();
         let mut app = app_with_a_conversation(7);
         if drafts_acceptable(loaded.account.as_deref(), Some("+19999999999")) {
-            app.drafts.restore(loaded.drafts);
+            app.drafts.restore(loaded.drafts, loaded.subjects);
         }
 
         assert_eq!(
@@ -622,6 +723,7 @@ mod tests {
             &[(7, "seven".to_owned())],
             &[(30, 4), (7, 9)],
             Some("+15551234567"),
+            &[],
         );
 
         let loaded = file.load();
@@ -638,7 +740,7 @@ mod tests {
     fn read_marks_are_written_as_an_ordered_array() {
         let (_dir, file) = scratch("drafts.json");
 
-        file.save(&[], &[(9, 5), (4, 7), (2, 3)], None);
+        file.save(&[], &[(9, 5), (4, 7), (2, 3)], None, &[]);
 
         let raw: Value = serde_json::from_str(&fs::read_to_string(&file.path).expect("the file"))
             .expect("the payload is JSON");
@@ -730,7 +832,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let (_dir, file) = scratch("drafts.json");
-        file.save(&[(7, "seven".to_owned())], &[(7, 9)], Some("+1555"));
+        file.save(&[(7, "seven".to_owned())], &[(7, 9)], Some("+1555"), &[]);
 
         let mode = fs::metadata(&file.path)
             .expect("the file the save wrote")
@@ -742,12 +844,12 @@ mod tests {
     #[test]
     fn a_failed_write_leaves_the_previous_file_whole() {
         let (_dir, file) = scratch("drafts.json");
-        file.save(&[(7, "first".to_owned())], &[(7, 4)], None);
+        file.save(&[(7, "first".to_owned())], &[(7, 4)], None, &[]);
 
         // A directory where the temp file would go makes the write fail before
         // the target is touched.
         fs::create_dir(temp_sibling(&file.path)).expect("a blocking directory");
-        file.save(&[(7, "second".to_owned())], &[(7, 9)], None);
+        file.save(&[(7, "second".to_owned())], &[(7, 9)], None, &[]);
 
         let loaded = file.load();
         assert_eq!(
@@ -765,7 +867,7 @@ mod tests {
     #[test]
     fn a_mark_stored_for_another_account_never_seeds_the_store() {
         let (_dir, file) = scratch("drafts.json");
-        file.save(&[], &[(7, 9)], Some("+10000000001"));
+        file.save(&[], &[(7, 9)], Some("+10000000001"), &[]);
 
         let loaded = file.load();
         let mut app = App::new();
