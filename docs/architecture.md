@@ -377,7 +377,8 @@ draft map and the read receipts live on `DraftStore` (`state/drafts.rs`): each
 conversation's `LineEditor` is parked under its outgoing peer id when the
 reader leaves and restored when they return. Across restarts `app` persists
 the snapshot beside the configuration (`televim.drafts.json`: atomic rename,
-account-tagged, removed on sign-out); `tui` itself names no file. `event.rs` is the
+account-tagged, versioned with reply/edit subjects; newer versions are left
+untouched, including on sign-out); `tui` itself names no file. `event.rs` is the
 context-free key map: `App::handle_key` answers its `Quit` (`Ctrl-C`) before the
 precompute, and `coordinate::handle_key` keeps the focus and mode dispatch.
 

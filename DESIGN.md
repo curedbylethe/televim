@@ -968,7 +968,8 @@ harder to aim and un-Vim-like.
 - *Record rule (Q-04).* Day and date jumps are window-replacing jumps, so each
   records the cursor's message as the origin before it moves, exactly as `gd` does;
   in-window moves (plain `j`/`k`, paging) never record one, and a non-positive
-  (placeholder) origin is never recorded because it has no day (G-10). The result is that `Ctrl-o` after
+  (placeholder) origin is never recorded, because there is nothing for `Ctrl-o`
+  to land on (G-10). The result is that `Ctrl-o` after
   `:date` returns where the reader was.
 - *Labels.* Follow the documented pattern `Jumping to <where>…`, in the same ink as
   every other status-line sentence (`text`), at rank 6. `<where>` uses the
