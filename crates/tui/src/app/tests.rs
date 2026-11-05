@@ -9966,3 +9966,52 @@ fn a_submitted_command_leaves_the_draft_parked() {
     app.handle_key(press(KeyCode::Char('i')));
     assert_eq!(app.input.line.text(), "unsent words");
 }
+
+#[test]
+fn discard_asks_and_removes_the_parked_draft() {
+    let mut app = App::mock();
+    draft_then_leave(&mut app, "unsent words");
+    let chat_id = app.conversation.conversation.window.chat_id;
+    run_command_line(&mut app, "discard");
+    assert_eq!(app.ui.mode, Mode::Confirm);
+    assert_eq!(app.status_text(), DISCARD_PROMPT);
+    app.handle_key(press(KeyCode::Char('y')));
+    assert!(!app.drafts.drafts.contains_key(&chat_id));
+    assert!(app.input.line.is_empty());
+    assert!(app.take_action().is_none());
+}
+
+#[test]
+fn cancelling_discard_restores_the_draft() {
+    for answer in [KeyCode::Char('n'), KeyCode::Esc] {
+        let mut app = App::mock();
+        draft_then_leave(&mut app, "unsent words");
+        run_command_line(&mut app, "discard");
+        app.handle_key(press(answer));
+        assert_eq!(app.input.line.text(), "unsent words");
+        assert_eq!(app.ui.mode, Mode::Normal);
+    }
+}
+
+#[test]
+fn discard_without_a_draft_refuses() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "discard");
+    assert_ne!(app.ui.mode, Mode::Confirm);
+    assert_eq!(app.ui.status, "no draft to discard");
+}
+
+#[test]
+fn cancelling_discard_restores_the_reply_subject() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('r')));
+    let target = app.conversation.reply_to.expect("reply target");
+    type_text(&mut app, "reply words");
+    app.handle_key(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Esc));
+    run_command_line(&mut app, "discard");
+    app.handle_key(press(KeyCode::Char('n')));
+    assert_eq!(app.input.line.text(), "reply words");
+    assert_eq!(app.input.line.purpose(), PromptKind::Reply);
+    assert_eq!(app.conversation.reply_to, Some(target));
+}

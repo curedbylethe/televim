@@ -246,7 +246,7 @@ authority: the numbers below were re-measured from it.
 | conversation, Visual | ` d: delete  y: yank  s: forward  r: reply  Esc: cancel` | 54 |
 | the forward picker is up | `VISUAL  j/k: choose  ⏎: forward  Esc: cancel` | 44 |
 | a deletion is confirmed | ` y: delete  n/Esc: cancel` | 24 |
-| the bar holds a draft, not focused | ` ⏎ draft — i to continue, ^J/⏎ to discard` | 41 |
+| the bar holds a draft, not focused | ` ⏎ draft — i to continue, :discard` | 41 |
 | the line is being typed in | ` ⏎: send  ^J: newline  shift+⏎: newline where supported` | 55 |
 | a `:shortcode` is being completed | ` ⇥/⏎: pick  ↑/↓: choose  Esc: close` | 35 |
 | the line's own Normal mode | ` i/a: ins  w/b/e  x: del  dw/cc  p: paste  gg/G: ends  ⏎: send  Esc` | 67 |
@@ -580,6 +580,7 @@ code.
 | `Nothing to open yet: the upload is still running.` | ditto on an upload in flight, where the file is not settled | `noMedia` |
 | `Nothing to open: the file is not here.` | ditto on a message whose transfer failed and has no file on hand | `noMedia` |
 | `televim` | the resting status line, when there is nothing to say | `IDLE_STATUS` |
+| `Discard this draft? (y/n)` | discarding the open conversation draft | `DISCARD_PROMPT` |
 | `Quit televim? (y/n)` | a screen-wide confirmation | `QUIT_PROMPT` |
 | `Delete your message from both sides? (y/n)` | ditto, naming **which side** | `DELETE_OUTGOING_PROMPT` |
 | `Delete 3 of your messages? (y/n)` | a count, and pluralisation | `delete_yours_prompt` |
@@ -867,7 +868,7 @@ quote.
   "follow" and has the same cost. It lost because a quote is a definition of
   context rather than a path, and because `gd` reads as a pair with `Ctrl-o`,
   which is how Vim teaches `gd` in the first place.
-- Rejected: `Enter` (bound, and means "discard a draft" here), `'` and `` ` `` (marks,
+- Rejected: `Enter` (discard uses the confirmed `:discard` command), `'` and `` ` `` (marks,
   which this program does not have), and `K` (Vim's "look up", which a reader would
   expect to show the quote rather than move).
 
@@ -1271,12 +1272,13 @@ gains a key, `d`, because three actions have no other home.
 | `:delete-chat [both]` | the highlighted chat | yes | `Delete this conversation? (y/n)` or `… for both sides?` |
 | `:report [reason]` | the card's person, else the highlighted chat | yes, naming the reason | `Report {name} to Telegram as {reason}? (y/n)` |
 | `:contacts` | — | no | lists the account's contacts; `⏎` opens the card |
+| `:discard` | the open conversation draft | yes | `draft discarded` |
 | `:attach <path>` | the open conversation | yes, naming the kind and the file | `attach image vacation.jpg? (y/n)` / `attach file report.pdf? (y/n)` |
 | `:open` | the highlighted message | no | `opening image in the viewer…` |
 | `:save <path>` | the highlighted message | no | `saved image to {path}` |
 
 **Confirmation is for what cannot be undone from the screen.** Block, unblock,
-delete and report ask; archive and rename do not, because `:archived` brings the
+delete, report and draft discard ask; archive and rename do not, because `:archived` brings the
 chat back and bare `:rename` restores the peer's name. A confirmation captures
 its subject when it is raised, so `y` cannot act on a different row, and `n` or
 `Esc` changes nothing. The prompt is the status line; the bar is empty; the mode

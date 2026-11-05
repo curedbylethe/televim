@@ -121,7 +121,7 @@ const CARD_CONTACT_HINT: &str = " j/k: row  h/l: within  v: vis  y/yy: yank  d: 
 /// A draft is a draft, and saying so is the difference between it and a message
 /// that failed to send — which this program has, and which the conversation
 /// draws as `[failed: …]`.
-const DRAFT_HINT: &str = " ⏎ draft — i to continue, ^J/⏎ to discard";
+const DRAFT_HINT: &str = " ⏎ draft — i to continue, :discard";
 
 /// The hint while the line is being typed in.
 ///
@@ -314,7 +314,7 @@ pub fn hint(app: &App) -> &'static str {
             crate::card::CardSubject::Contact(_) => CARD_CONTACT_HINT,
         },
         (Focus::Conversation, Mode::Visual) => VISUAL_HINT,
-        (Focus::Conversation, Mode::Normal) if !app.input.line.is_empty() => DRAFT_HINT,
+        (Focus::Conversation, Mode::Normal) if !app.open_draft_text().is_empty() => DRAFT_HINT,
         (Focus::Conversation, Mode::Normal) => NORMAL_HINT,
         // The two states that say nothing, and both say it for the same reason.
         // A confirmation outranks every hint on the status line, so the prompt's

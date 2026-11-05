@@ -490,3 +490,42 @@ fn attachment_success_settles_and_open_save_commands_refuse_invalid_subjects() {
     t.wait_until(|s| s.contains("Save where? :save <path> copies the media to that path."))
         .expect("save explains its required destination path");
 }
+
+fn prepare_discard(t: &mut termlens::Terminal) {
+    open_conversation(t);
+    t.send(Key::Char('i')).expect("enter insert mode");
+    t.wait_until(|s| s.contains("INSERT")).expect("insert mode");
+    t.send_str("unsent words").expect("type draft");
+    t.wait_until(|s| s.contains("unsent words"))
+        .expect("draft shown");
+    t.send(Key::Esc).expect("leave insert mode");
+    t.wait_until(|s| s.contains("NORMAL")).expect("normal mode");
+    t.send(Key::Esc).expect("leave line");
+    t.wait_until(|s| s.contains("┌ draft")).expect("draft row");
+    t.send_str(":discard").expect("type discard");
+    t.send(Key::Enter).expect("submit command");
+    t.wait_until(|s| s.contains("Discard this draft? (y/n)"))
+        .expect("discard confirmation");
+}
+
+#[test]
+fn a_discard_command_asks_and_then_throws_the_draft_away() {
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline(&sandbox);
+    prepare_discard(&mut t);
+    t.send(Key::Char('y')).expect("confirm discard");
+    t.wait_until(|s| s.contains("draft discarded") && !s.contains("unsent words"))
+        .expect("draft removed");
+}
+
+#[test]
+fn a_cancelled_discard_keeps_the_draft() {
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline(&sandbox);
+    prepare_discard(&mut t);
+    t.send(Key::Char('n')).expect("cancel discard");
+    t.wait_until(|s| s.contains("unsent words") && !s.contains("Discard this draft?"))
+        .expect("draft restored");
+}

@@ -440,7 +440,7 @@ Working today:
   block, delete and report ask `y/n` first; the contacts list opens a person's
   card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
-  `:attach <path>`, `:open`, `:save <path>`,
+  `:discard`, `:attach <path>`, `:open`, `:save <path>`,
   `:date <ISO>`, `:settings`, `:signin`, `:add-account`, `:retry`, `:unlock`,
   `:passphrase`, `:export-session <path>`, `:import-session <path>`, and the
   eight chat and contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,

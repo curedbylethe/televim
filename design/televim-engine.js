@@ -16,7 +16,7 @@
     list: ' j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin',
     visual: ' d: delete  y: yank  s: forward  r: reply  Esc: cancel',
     /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
-    draft: ' ⏎ draft — i to continue, ^J/⏎ to discard',
+    draft: ' ⏎ draft — i to continue, :discard',
     typing: ' ⏎: send  ^J: newline  shift+⏎: newline where supported',
     complete: ' ⇥/⏎: pick  ↑/↓: choose  Esc: close',
     lnormal: ' i/a: ins  w/b/e  x: del  dw/cc  p: paste  gg/G: ends  ⏎: send  Esc',
@@ -1239,7 +1239,6 @@
       case 'n': case 'N': stepSearch(s, k === 'n' ? 1 : -1); break;
       case 'o': openMedia(s); break;
       case 'Escape': { const u = liveUpload(s); if (u) cancelUpload(u); else s.search = null; break; }
-      case 'Enter': case 'C-j': if (s.draft && s.draft.ctx === ctx(s)) s.draft = null; break;
       case 'Tab': case 'h': togglePane(s); break;
       case 'l': openCard(s, 'person'); break;
       case 'A': openCard(s, 'person'); break;
@@ -1477,7 +1476,7 @@
     const own = o.kind === 'message' || o.kind === 'reply' || o.kind === 'edit' || ['name', 'username', 'bio'].includes(o.kind);
     if (own && d && d.ctx === ctx(s)) {
       if (o.kind === 'message') { s.line = { kind: d.kind, buf: d.buf, pos: d.pos, mode: 'insert', from, ref: d.ref, origin: d.origin }; s.draft = null; s.focus = 'input'; return; }
-      refuse(s, 'A draft is waiting: i to continue, ⏎ to discard.'); return;
+      refuse(s, 'A draft is waiting: i to continue, :discard.'); return;
     }
     const buf = o.buf || '';
     s.line = { kind: o.kind, buf, pos: buf.length, mode: 'insert', from, ref: o.ref, origin: buf, pend: '' };
@@ -1633,7 +1632,11 @@
       case 'newchat': runNewChat(s, buf); return;
       case 'command': {
         const c = buf.trim().replace(/^:/, ''); closeLine(s);
-        if (c === 'settings') openSettings(s);
+        if (c === 'discard') {
+          if (s.draft && s.draft.ctx === ctx(s)) ask(s, 'Discard this draft? (y/n)', () => { s.draft = null; s.flash = 'draft discarded'; });
+          else refuse(s, 'no draft to discard');
+        }
+        else if (c === 'settings') openSettings(s);
         else if (c === 'new' || c.startsWith('new ')) openNewChat(s, c.replace(/^new\s*/, ''));
         else if (c === 'archive') archiveChat(s);
         else if (c === 'mute') muteChat(s, true);

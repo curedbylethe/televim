@@ -173,6 +173,7 @@ pub fn delete_mixed_prompt(yours: usize, theirs: usize) -> String {
 /// The same screen-wide shape as a deletion's, and the same `y`/`n`: quitting is
 /// the other destructive thing a keypress can do here, and it is the one a
 /// mistyped key can do without the reader meaning to.
+pub const DISCARD_PROMPT: &str = "Discard this draft? (y/n)";
 pub const QUIT_PROMPT: &str = "Quit televim? (y/n)";
 
 /// The prompt the status line shows when a sign-out is waiting to be confirmed.
@@ -968,6 +969,9 @@ pub enum ConfirmKind {
     /// nothing to send anywhere, and a quit that waited on the network would be
     /// a quit that can hang.
     Quit,
+
+    /// Discard the open conversation draft.
+    DiscardDraft,
 
     /// Sign out, and forget the session this program holds.
     ///
@@ -3590,6 +3594,7 @@ impl App {
         }
         match &self.conversation.confirm {
             Some(ConfirmKind::Quit) => return QUIT_PROMPT.to_owned(),
+            Some(ConfirmKind::DiscardDraft) => return DISCARD_PROMPT.to_owned(),
             Some(ConfirmKind::Logout) => return LOGOUT_PROMPT.to_owned(),
             Some(ConfirmKind::ImportSession { path }) => return import_prompt(path),
             Some(ConfirmKind::Attach { path, kind, .. }) => return attach_prompt(path, *kind),
