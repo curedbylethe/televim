@@ -1,25 +1,23 @@
 name: Release
 
-# Every push to main does three things, in order.
-#
-# 1. release-please keeps one release PR open. It bumps the workspace version
-#    and, when that PR is merged, tags vX.Y.Z and creates the GitHub release.
-# 2. While a release PR is open, git-cliff writes its CHANGELOG.md section from
-#    the commits since the last tag, so the PR carries the notes it publishes.
-# 3. When a release is created, the binaries are built and attached to it.
-#
-# The build compiles in the application credentials from the TELEGRAM_API_ID
-# and TELEGRAM_API_HASH secrets. A user's own environment or televim.toml still
-# overrides them, so a user can sign in as their own application. See the
-# README's "Installing" section.
-
 on:
   push:
     branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z)
+        required: true
+        type: string
+      dry_run:
+        description: Build and smoke-test without publishing
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: release
@@ -27,21 +25,26 @@ concurrency:
 
 jobs:
   release-please:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
       version: ${{ steps.release.outputs.version }}
     steps:
-      # Reads release-please-config.json and .release-please-manifest.json.
       - uses: googleapis/release-please-action@v5
         id: release
 
   changelog:
     needs: release-please
-    # On the run that cut a release, the release PR has just been merged.
-    if: needs.release-please.outputs.release_created != 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release-please.outputs.release_created != 'true' && needs.release-please.outputs.tag_name == ''
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
         with:
@@ -63,18 +66,14 @@ jobs:
           git switch -C "$branch" "origin/$branch"
 
           version=$(sed -n 's/^version = "\([^"]*\)".*x-release-please-version.*/\1/p' Cargo.toml)
-          # The last release tag, or the baseline commit before the first tag.
           base=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo fa69be717a2bf44117b1c4eb35ca48db70f6ad31)
 
-          # Start from main's CHANGELOG.md, so a re-run adds one section rather
-          # than stacking a second copy on the first.
           git show origin/main:CHANGELOG.md > CHANGELOG.md
           git-cliff "$base..HEAD" --tag "v$version" --strip header -o "$RUNNER_TEMP/section.md"
           python3 scripts/release/splice-changelog.py CHANGELOG.md "$RUNNER_TEMP/section.md"
 
-          # release-please bumped Cargo.toml; the lockfile's workspace entries
-          # follow on the next resolve. A plain resolve keeps every other pin.
-          cargo metadata --format-version 1 >/dev/null
+          # Keep the lockfile's package pins while syncing the workspace version.
+          cargo update -p televim --precise "$version"
 
           git add CHANGELOG.md Cargo.lock
           if git diff --cached --quiet; then
@@ -86,40 +85,149 @@ jobs:
             commit -m "docs: changelog for $version"
           git push origin "HEAD:$branch"
 
-  build:
+  prepare:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.prepare.outputs.tag }}
+      version: ${{ steps.prepare.outputs.version }}
+      publish: ${{ steps.prepare.outputs.publish }}
+      reason: ${{ steps.prepare.outputs.reason }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 0
+
+      - name: validate release ref
+        id: prepare
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --tags
+
+          case "$EVENT_NAME" in
+            push)
+              if [ "$GITHUB_REF" = refs/heads/main ]; then
+                tag="$RELEASE_TAG"
+              else
+                tag="$REF_NAME"
+              fi
+              ;;
+            workflow_dispatch)
+              if [ "$GITHUB_REF" != refs/heads/main ]; then
+                {
+                  echo 'tag='
+                  echo 'version='
+                  echo 'publish=false'
+                  echo 'reason=manual dispatch must use the main branch'
+                } >> "$GITHUB_OUTPUT"
+                echo 'Manual dispatch must use the main branch; build and publish are skipped.'
+                exit 0
+              fi
+              tag="$DISPATCH_TAG"
+              ;;
+            *) tag='' ;;
+          esac
+
+          if [ -z "$tag" ]; then
+            {
+              echo 'tag='
+              echo 'version='
+              echo 'publish=false'
+              echo 'reason=no release tag was produced'
+            } >> "$GITHUB_OUTPUT"
+            echo 'No release tag; build and publish are skipped.'
+            exit 0
+          fi
+
+          if ! printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::invalid release tag: $tag"
+            exit 1
+          fi
+          if ! git cat-file -e "$tag^{commit}"; then
+            echo "::error::tag does not resolve to a commit: $tag"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag" origin/main; then
+            echo "::error::tag is not on origin/main: $tag"
+            exit 1
+          fi
+
+          version=${tag#v}
+          tagged_version=$(git show "$tag:Cargo.toml" | sed -n 's/^version = "\([^"]*\)".*x-release-please-version.*/\1/p')
+          if [ "$tagged_version" != "$version" ]; then
+            echo "::error::tag $tag does not match Cargo.toml version $tagged_version"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ] && [ "$RELEASE_VERSION" != "$version" ]; then
+            echo "::error::release-please version $RELEASE_VERSION does not match $tag"
+            exit 1
+          fi
+
+          publish=true
+          reason='release tag validated'
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then
+            publish=false
+            reason='dry run requested; release mutation is disabled'
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "publish=$publish"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+          echo "$reason"
+
+  build-linux:
+    needs: prepare
+    if: needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    container: ubuntu:22.04
+    permissions:
+      contents: read
+    steps:
+      - name: system dependencies
+        run: apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates build-essential pkg-config libdbus-1-dev
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 1
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.98.1"
-
-      # Same system dependency as ci.yml: keyring's Linux backend links DBus.
-      - name: system dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ runner.arch }}
 
-      # The credentials are compiled in (crates/app/src/config.rs), so a build
-      # without them would ship a binary that cannot sign in. Fail instead.
-      - name: build
+      - name: build and package
         env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET: ${{ matrix.target }}
           TELEVIM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEVIM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         run: |
+          set -euo pipefail
           case "$TELEVIM_API_ID" in
             ''|*[!0-9]*) echo "::error::TELEGRAM_API_ID secret is missing or not a number"; exit 1 ;;
           esac
@@ -127,32 +235,262 @@ jobs:
             echo "::error::TELEGRAM_API_HASH secret is missing"
             exit 1
           fi
-          cargo build --release --locked
 
-      - name: package
-        env:
-          VERSION: ${{ needs.release-please.outputs.version }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          mkdir -p dist
-          tar -czf "dist/televim-${VERSION}-${TARGET}.tar.gz" -C target/release televim
+          cargo update -p televim --precise "$VERSION"
+          python3 - <<'PY'
+          import json
+          import subprocess
+          import re
+
+          def normalized(text):
+              blocks = re.split(r"(?m)(?=^\[\[package\]\]$)", text)
+              matches = 0
+              for index, block in enumerate(blocks):
+                  if re.search(r'(?m)^name = "televim"$', block):
+                      matches += 1
+                      blocks[index] = re.sub(r'(?m)^version = "[^"]+"$', 'version = "__VERSION__"', block, count=1)
+              if matches != 1:
+                  raise SystemExit("Cargo.lock must contain exactly one televim package")
+              return "".join(blocks)
+
+          before = subprocess.check_output(["git", "show", "HEAD:Cargo.lock"], text=True)
+          after = open("Cargo.lock").read()
+          if normalized(before) != normalized(after):
+              raise SystemExit("cargo update changed Cargo.lock beyond the televim version")
+          PY
+          cargo build --release --locked --target "$TARGET" -p televim --bin televim
+          binary="target/$TARGET/release/televim"
+          test -s "$binary"
+          [ "$("$binary" --version)" = "televim $VERSION" ]
+          "$binary" --help >/dev/null
+
+          stage="televim-$VERSION-$TARGET"
+          mkdir -p "$stage" dist
+          install -m 755 "$binary" "$stage/televim"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          tar -czf "dist/$stage.tar.gz" -C "$stage" televim README.md LICENSE-MIT LICENSE-APACHE
+
+          verify=$(mktemp -d)
+          trap 'rm -rf "$verify"' EXIT
+          tar -xzf "dist/$stage.tar.gz" -C "$verify"
+          (cd "$verify" && test "$(find . -maxdepth 1 -type f -printf '%f\n' | sort | tr '\n' ' ')" = 'LICENSE-APACHE LICENSE-MIT README.md televim ')
+          test -x "$verify/televim"
+          [ "$("$verify/televim" --version)" = "televim $VERSION" ]
+          "$verify/televim" --help >/dev/null
+          ldd "$verify/televim" | tee "$RUNNER_TEMP/ldd.txt"
+          if grep -q 'not found' "$RUNNER_TEMP/ldd.txt"; then exit 1; fi
+          grep -q 'libdbus-1' "$RUNNER_TEMP/ldd.txt"
+          objdump -T "$verify/televim" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1
 
       - uses: actions/upload-artifact@v7
         with:
           name: televim-${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
+          retention-days: 7
 
-  publish:
-    needs: [release-please, build]
-    runs-on: ubuntu-latest
-    env:
-      TAG: ${{ needs.release-please.outputs.tag_name }}
+  build-macos:
+    needs: prepare
+    if: needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ runner.arch }}
+
+      - name: build and package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          TELEVIM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEVIM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          set -euo pipefail
+          case "$TELEVIM_API_ID" in
+            ''|*[!0-9]*) echo "::error::TELEGRAM_API_ID secret is missing or not a number"; exit 1 ;;
+          esac
+          if [ -z "$TELEVIM_API_HASH" ]; then
+            echo "::error::TELEGRAM_API_HASH secret is missing"
+            exit 1
+          fi
+
+          cargo update -p televim --precise "$VERSION"
+          python3 - <<'PY'
+          import subprocess
+          import re
+
+          def normalized(text):
+              blocks = re.split(r"(?m)(?=^\[\[package\]\]$)", text)
+              matches = 0
+              for index, block in enumerate(blocks):
+                  if re.search(r'(?m)^name = "televim"$', block):
+                      matches += 1
+                      blocks[index] = re.sub(r'(?m)^version = "[^"]+"$', 'version = "__VERSION__"', block, count=1)
+              if matches != 1:
+                  raise SystemExit("Cargo.lock must contain exactly one televim package")
+              return "".join(blocks)
+
+          before = subprocess.check_output(["git", "show", "HEAD:Cargo.lock"], text=True)
+          after = open("Cargo.lock").read()
+          if normalized(before) != normalized(after):
+              raise SystemExit("cargo update changed Cargo.lock beyond the televim version")
+          PY
+          cargo build --release --locked --target "$TARGET" -p televim --bin televim
+          binary="target/$TARGET/release/televim"
+          test -s "$binary"
+          [ "$("$binary" --version)" = "televim $VERSION" ]
+          "$binary" --help >/dev/null
+
+          stage="televim-$VERSION-$TARGET"
+          mkdir -p "$stage" dist
+          install -m 755 "$binary" "$stage/televim"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
+          tar -czf "dist/$stage.tar.gz" -C "$stage" televim README.md LICENSE-MIT LICENSE-APACHE
+
+          verify=$(mktemp -d)
+          trap 'rm -rf "$verify"' EXIT
+          tar -xzf "dist/$stage.tar.gz" -C "$verify"
+          (cd "$verify" && test "$(find . -type f -print | sed 's|^./||' | sort | tr '\n' ' ')" = 'LICENSE-APACHE LICENSE-MIT README.md televim ')
+          test -x "$verify/televim"
+          [ "$("$verify/televim" --version)" = "televim $VERSION" ]
+          "$verify/televim" --help >/dev/null
+          otool -L "$verify/televim" | tee "$RUNNER_TEMP/otool.txt"
+          if grep -Eq '/opt/homebrew|/usr/local' "$RUNNER_TEMP/otool.txt"; then exit 1; fi
+          vtool -show-build "$verify/televim"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: televim-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    needs: prepare
+    if: needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc-${{ runner.arch }}
+
+      - name: build, package, and smoke-test
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TELEVIM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEVIM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        shell: pwsh
+        run: |
+          if ($env:TELEVIM_API_ID -notmatch '^[0-9]+$') { throw 'TELEGRAM_API_ID secret is missing or not a number' }
+          if ([string]::IsNullOrEmpty($env:TELEVIM_API_HASH)) { throw 'TELEGRAM_API_HASH secret is missing' }
+
+          cargo update -p televim --precise $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo.lock version sync failed' }
+          @'
+          import subprocess
+          import re
+
+          def normalized(text):
+              blocks = re.split(r"(?m)(?=^\[\[package\]\]$)", text)
+              matches = 0
+              for index, block in enumerate(blocks):
+                  if re.search(r'(?m)^name = "televim"$', block):
+                      matches += 1
+                      blocks[index] = re.sub(r'(?m)^version = "[^"]+"$', 'version = "__VERSION__"', block, count=1)
+              if matches != 1:
+                  raise SystemExit("Cargo.lock must contain exactly one televim package")
+              return "".join(blocks)
+
+          before = subprocess.check_output(["git", "show", "HEAD:Cargo.lock"], text=True)
+          after = open("Cargo.lock").read()
+          if normalized(before) != normalized(after):
+              raise SystemExit("cargo update changed Cargo.lock beyond the televim version")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo.lock changed outside the televim package entry' }
+
+          cargo build --release --locked --target x86_64-pc-windows-msvc -p televim --bin televim
+          if ($LASTEXITCODE -ne 0) { throw 'release build failed' }
+          $binary = 'target/x86_64-pc-windows-msvc/release/televim.exe'
+          if (-not (Test-Path $binary) -or (Get-Item $binary).Length -eq 0) { throw 'release executable is missing' }
+          $version = & $binary --version
+          if ($LASTEXITCODE -ne 0 -or $version -ne "televim $env:VERSION") { throw "unexpected --version output: $version" }
+          & $binary --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw '--help failed' }
+
+          $stage = "televim-$env:VERSION-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Force $stage, 'dist' | Out-Null
+          Copy-Item $binary "$stage/televim.exe"
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE $stage
+          $archive = "dist/$stage.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $archive
+          $verify = Join-Path $env:RUNNER_TEMP 'televim-verify'
+          New-Item -ItemType Directory -Force $verify | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $verify
+          $expected = @('LICENSE-APACHE', 'LICENSE-MIT', 'README.md', 'televim.exe')
+          $actual = @(Get-ChildItem $verify -File | ForEach-Object Name | Sort-Object)
+          if (Compare-Object $expected $actual) { throw "unexpected archive contents: $actual" }
+          if (-not (Test-Path "$verify/televim.exe")) { throw 'archive has no televim.exe' }
+          $version = & "$verify/televim.exe" --version
+          if ($LASTEXITCODE -ne 0 -or $version -ne "televim $env:VERSION") { throw "unexpected packaged --version output: $version" }
+          & "$verify/televim.exe" --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'packaged --help failed' }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: televim-x86_64-pc-windows-msvc
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [prepare, build-linux, build-macos, build-windows]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/download-artifact@v8
         with:
@@ -160,25 +498,83 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: checksums
-        run: |
-          cd dist
-          sha256sum ./*.tar.gz > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: attach binaries
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
-
-      # The release notes are the same section CHANGELOG.md carries.
       - uses: taiki-e/install-action@v2
         with:
           tool: git-cliff@2.14.2
 
-      - name: release notes
+      - name: check staged assets and create checksums
+        run: |
+          set -euo pipefail
+          expected="televim-$VERSION-aarch64-apple-darwin.tar.gz
+          televim-$VERSION-x86_64-apple-darwin.tar.gz
+          televim-$VERSION-x86_64-unknown-linux-gnu.tar.gz
+          televim-$VERSION-aarch64-unknown-linux-gnu.tar.gz
+          televim-$VERSION-x86_64-pc-windows-msvc.zip"
+          actual=$(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
+          [ "$actual" = "$(printf '%s\n' "$expected" | sort)" ]
+          (cd dist && for file in televim-*.tar.gz televim-*.zip; do sha256sum "$file"; done | LC_ALL=C sort -k2 > SHA256SUMS)
+
+      - name: create or verify a draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git-cliff --latest --strip header -o "$RUNNER_TEMP/notes.md"
-          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          set -euo pipefail
+          if release=$(gh release view "$TAG" --json isDraft,assets 2>/dev/null); then
+            is_draft=$(printf '%s' "$release" | jq -r '.isDraft')
+            if [ "$is_draft" != true ]; then
+              echo "::error::refusing to overwrite published release $TAG"
+              exit 1
+            fi
+          else
+            git-cliff --tag "$TAG" "$TAG^..$TAG" --strip header -o "$RUNNER_TEMP/notes.md"
+            if [ ! -s "$RUNNER_TEMP/notes.md" ]; then
+              printf 'televim %s\n' "$TAG" > "$RUNNER_TEMP/notes.md"
+            fi
+            gh release create "$TAG" --draft --verify-tag --title "televim $TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          gh release upload "$TAG" dist/* --clobber
+
+      - name: download and verify published draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir verify
+          gh release download "$TAG" --dir verify
+          expected="SHA256SUMS
+          televim-$VERSION-aarch64-apple-darwin.tar.gz
+          televim-$VERSION-x86_64-apple-darwin.tar.gz
+          televim-$VERSION-x86_64-unknown-linux-gnu.tar.gz
+          televim-$VERSION-aarch64-unknown-linux-gnu.tar.gz
+          televim-$VERSION-x86_64-pc-windows-msvc.zip"
+          actual=$(find verify -maxdepth 1 -type f -printf '%f\n' | sort)
+          [ "$actual" = "$(printf '%s\n' "$expected" | sort)" ]
+          (cd verify && sha256sum -c SHA256SUMS)
+
+          for archive in verify/*.tar.gz; do
+            tar -tvzf "$archive" | tee "$RUNNER_TEMP/archive-list.txt"
+            grep -Eq '^-rwxr-xr-x .* televim$' "$RUNNER_TEMP/archive-list.txt"
+            for file in README.md LICENSE-MIT LICENSE-APACHE; do grep -q " $file$" "$RUNNER_TEMP/archive-list.txt"; done
+          done
+          for archive in verify/*.zip; do
+            unzip -l "$archive" | tee "$RUNNER_TEMP/archive-list.txt"
+            for file in televim.exe README.md LICENSE-MIT LICENSE-APACHE; do grep -q " $file$" "$RUNNER_TEMP/archive-list.txt"; done
+          done
+
+          release=$(gh release view "$TAG" --json assets)
+          for archive in dist/*.tar.gz dist/*.zip; do
+            name=${archive##*/}
+            local_digest="sha256:$(sha256sum "$archive" | cut -d' ' -f1)"
+            remote_digest=$(printf '%s' "$release" | jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest')
+            [ "$local_digest" = "$remote_digest" ]
+          done
+
+      - name: publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$TAG" --draft=false
+
+      - name: print recovery command
+        if: failure()
+        run: |
+          echo "Recovery: gh workflow run release.yml -f tag='$TAG'"
