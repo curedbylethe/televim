@@ -54,11 +54,13 @@ Real, and named so they are not mistaken for oversights:
     may still be open` reports the opener's exit. A configured viewer command (`viewer`,
     `viewer_image`, `viewer_video`, `viewer_audio`) is run directly and waited on, so
     its sentence reports the viewer's own exit; only the platform default keeps this limit.
-  - *Windows is untested.* The default is `cmd /C start "" /WAIT`, which waits for the
-    started process, so its sentence reports the viewer's exit. That wait has not been
-    run on Windows: no CI leg runs there, and the release check is the manual steps in
-    the `OPENER` doc comment in `crates/app/src/runtime.rs`. A target that detaches
-    itself can still return early; a configured viewer command is the escape hatch.
+  - *Windows release CI is limited to build and CLI smoke tests.* The release workflow
+    builds Windows x86_64 and checks `--version` and `--help`. It does not validate the
+    TUI, Credential Manager, opener, or owner-only file modes. The default opener is
+    `cmd /C start "" /WAIT`, which waits for the started process, but the manual check
+    in the `OPENER` doc comment in `crates/app/src/runtime.rs` remains outstanding. A
+    target that detaches itself can still return early; a configured viewer command is
+    the escape hatch. Treat Windows as experimental until that manual check passes.
 - **The global search has no sender filter.** `from:`, `sender:` and `by:` are
   refused by the prompt's parser, each naming the word as typed (`from:ada is not
   a filter here: global search has no sender filter.`), and the prompt reopens with the line still in it

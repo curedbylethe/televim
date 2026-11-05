@@ -1225,6 +1225,16 @@ are in [`../AGENTS.md`](../AGENTS.md).
   minor while `0.x`, `feat` bumps the minor, and `fix` bumps the patch. The first
   `1.0.0` is the v1 public release; from there, full semver applies: major for a
   break, minor for an addition, patch for a fix.
+- **Why release-please remains canonical and tag/manual builds share one workflow:**
+  release-please keeps versioning and the release PR on `main`; tag pushes and
+  manual dispatch use the same validated build, smoke, and publish path. This keeps
+  direct release builds available without adding a second release implementation.
+- **Why Linux release builds use an Ubuntu 22.04 container:** the runner image can
+  change its glibc version over time. The pinned container holds the documented
+  glibc floor at 2.35 for both Linux architectures.
+- **Why releases stay drafts until every asset verifies:** release assets upload
+  separately, so a failed upload can leave a partial set. Verification checks the
+  full archive set and checksums before the workflow makes the release public.
 - **Why global search is bound to `?` and `:search`, not a `g/` chord or the command line alone:**
   `?` is free on both panes, is the vim key for a backward search, and is one
   keystroke from the home row, which is the keyboard path this client promises.
