@@ -1235,6 +1235,13 @@ are in [`../AGENTS.md`](../AGENTS.md).
 - **Why releases stay drafts until every asset verifies:** release assets upload
   separately, so a failed upload can leave a partial set. Verification checks the
   full archive set and checksums before the workflow makes the release public.
+- **Why pre-v1 installation uses POSIX and PowerShell scripts instead of Homebrew:**
+  the project already publishes versioned release archives, and two small
+  platform installers give users a one-command path without requiring another
+  package manager.
+- **Why installers use user-local directories and guarded PATH updates:** a
+  default install should not need administrator rights or change a system-wide
+  path. The profile marker and existing-entry check make repeated installs safe.
 - **Why global search is bound to `?` and `:search`, not a `g/` chord or the command line alone:**
   `?` is free on both panes, is the vim key for a backward search, and is one
   keystroke from the home row, which is the keyboard path this client promises.

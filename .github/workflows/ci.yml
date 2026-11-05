@@ -124,6 +124,31 @@ jobs:
       - name: design
         run: make design-check
 
+  installers:
+    name: installers (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: test POSIX installer
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        run: sh scripts/install.test.sh
+
+      - name: test PowerShell installer
+        if: runner.os == 'Windows'
+        run: pwsh -NoProfile -File scripts/install.test.ps1
+
+      - name: parse PowerShell installer
+        if: runner.os == 'Linux'
+        run: pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw scripts/install.ps1)) | Out-Null"
+
   release:
     name: release
     runs-on: ubuntu-latest
