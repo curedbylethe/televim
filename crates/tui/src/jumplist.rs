@@ -98,6 +98,28 @@ impl Jumplist {
         trim(&mut marks.back, depth);
     }
 
+    /// Moves a placeholder's marks to its confirmed message identifier.
+    pub fn rename(&mut self, peer_id: i64, from: i64, to: i64) {
+        if from == to {
+            return;
+        }
+        if let Some(marks) = self.conversations.get_mut(&peer_id) {
+            for stack in [&mut marks.back, &mut marks.forward] {
+                for id in stack.iter_mut() {
+                    if *id == from {
+                        *id = to;
+                    }
+                }
+                let mut previous = None;
+                stack.retain(|id| {
+                    let keep = previous != Some(*id);
+                    previous = Some(*id);
+                    keep
+                });
+            }
+        }
+    }
+
     /// The message before the one at `from`, or `None` when there is none.
     ///
     /// `from` is where the reader is now, and it is pushed onto the forward
@@ -146,6 +168,18 @@ mod tests {
     use super::*;
 
     const CHAT: i64 = 7;
+
+    #[test]
+    fn rename_updates_both_stacks_and_collapses_adjacent_duplicates() {
+        let mut list = Jumplist::default();
+        list.record(CHAT, 42);
+        list.record(CHAT, -1);
+        assert_eq!(list.back(CHAT, -1), Some(-1));
+        list.rename(CHAT, -1, 42);
+        let marks = &list.conversations[&CHAT];
+        assert_eq!(marks.back.iter().copied().collect::<Vec<_>>(), vec![42]);
+        assert_eq!(marks.forward.iter().copied().collect::<Vec<_>>(), vec![42]);
+    }
 
     /// A place recorded and then walked back from `from`.
     fn walk_back(id: i64, from: i64) -> Option<i64> {

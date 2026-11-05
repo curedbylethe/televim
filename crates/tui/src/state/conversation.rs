@@ -542,7 +542,11 @@ impl ConversationState {
     /// owed.
     pub(crate) fn confirm_sent(&mut self, temp_id: i64, real: Message) -> bool {
         let anchor = self.cursor_message_id();
+        let identity = (real.chat_id, real.id);
         let changed = self.conversation.confirm_sent(temp_id, real);
+        if identity.0 == self.conversation.window.chat_id {
+            self.jumplist.rename(identity.0, temp_id, identity.1);
+        }
         if changed {
             self.after_window_change(anchor);
         }
