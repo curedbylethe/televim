@@ -186,7 +186,7 @@ impl ConversationWindow {
         let local: Vec<Message> = self
             .messages
             .iter()
-            .filter(|message| message.id <= 0 && message.chat_id == self.chat_id)
+            .filter(|message| !is_numbered(message.id) && message.chat_id == self.chat_id)
             .cloned()
             .collect();
         let mut page: Vec<Message> = messages
