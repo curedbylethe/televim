@@ -9909,3 +9909,48 @@ fn clearing_the_alias_of_a_person_with_no_server_name_does_not_blank_the_card() 
         Some("Countess")
     );
 }
+
+#[test]
+fn opening_the_command_prompt_keeps_the_draft() {
+    let mut app = App::mock();
+    draft_then_leave(&mut app, "unsent words");
+    app.handle_key(press(KeyCode::Char(':')));
+    assert_eq!(app.input.line.purpose(), PromptKind::Command);
+    assert!(app.input.line.is_empty());
+    app.handle_key(press(KeyCode::Esc));
+    assert_eq!(app.input.line.text(), "unsent words");
+    assert_eq!(app.input.line.purpose(), PromptKind::Message);
+}
+
+#[test]
+fn opening_search_and_escaping_keeps_the_draft() {
+    for key in ['/', '?'] {
+        let mut app = App::mock();
+        draft_then_leave(&mut app, "unsent words");
+        app.handle_key(press(KeyCode::Char(key)));
+        app.handle_key(press(KeyCode::Esc));
+        assert_eq!(app.input.line.text(), "unsent words");
+        assert_eq!(app.input.line.purpose(), PromptKind::Message);
+    }
+}
+
+#[test]
+fn a_submitted_command_leaves_the_draft_parked() {
+    let mut app = App::mock();
+    draft_then_leave(&mut app, "unsent words");
+    let chat_id = app.conversation.conversation.window.chat_id;
+    app.handle_key(press(KeyCode::Char(':')));
+    type_text(&mut app, "settings");
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(
+        app.drafts
+            .drafts
+            .get(&chat_id)
+            .map(crate::line::LineEditor::text),
+        Some("unsent words")
+    );
+    assert_ne!(app.input.line.text(), "unsent words");
+    assert!(drafted(&app));
+    app.handle_key(press(KeyCode::Char('i')));
+    assert_eq!(app.input.line.text(), "unsent words");
+}

@@ -292,12 +292,12 @@ pub(crate) fn resume_draft(drafts: &mut DraftStore, input: &mut InputState, chat
 /// Parks the open conversation's draft under its peer id.
 ///
 /// Called while [`ConversationState`] still names the peer the words belong
-/// to, before [`select_chat_none`] zeroes it. The draft is moved out
+/// to, before a prompt opens or [`select_chat_none`] zeroes it. The draft is moved out
 /// rather than copied, and its purpose is forgotten on the way into the map,
 /// so the stored copy is always a plain message: the reply or edit subject
 /// names a message in the conversation being left. An empty buffer drops the
-/// peer's entry rather than storing a blank, so the map holds only peers
-/// with a live draft.
+/// peer's existing entry intact rather than storing a blank, so a prompt
+/// submitted before a conversation switch does not lose its parked draft.
 ///
 /// Only a buffer draft is parked. A sign-in field or a `:`/`/` prompt is a
 /// question mid-answer, not words the reader is writing, and the caller's own
@@ -313,13 +313,24 @@ pub(crate) fn park_draft(
     }
 
     if input.line.is_empty() {
-        drafts.drafts.remove(&chat_id);
         return;
     }
 
     let mut draft = std::mem::take(&mut input.line);
     draft.forget_purpose();
     drafts.drafts.insert(chat_id, draft);
+}
+
+fn open_line_prompt(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    drafts: &mut DraftStore,
+    purpose: PromptKind,
+) {
+    park_draft(conversation, input, drafts);
+    ui.set_focus(Focus::Input);
+    input.line.open(purpose);
 }
 
 /// Closes the conversation on show.
@@ -3461,7 +3472,15 @@ pub(crate) fn handle_line(
             &mut *profile,
         ),
         LineVerdict::LeftEditing => {
+            let restore_draft = !input.line.purpose().is_buffer()
+                && ui.pane == Pane::Conversation
+                && drafts
+                    .drafts
+                    .contains_key(&conversation.conversation.window.chat_id);
             leave_line(&mut *ui, &mut *conversation, &mut *input, &mut *profile);
+            if restore_draft {
+                resume_draft(drafts, input, conversation.conversation.window.chat_id);
+            }
             false
         }
         LineVerdict::TooLong => {
@@ -3946,6 +3965,7 @@ pub(crate) fn handle_normal(
     pending: &mut Pending,
     conversation: &mut ConversationState,
     input: &mut InputState,
+    drafts: &mut DraftStore,
     list: &mut ChatListState,
     outbox: &mut Outbox,
     profile: &mut ProfileCard,
@@ -4106,6 +4126,10 @@ pub(crate) fn handle_normal(
 
     match c {
         'i' | 'a' => {
+            let chat_id = conversation.conversation.window.chat_id;
+            if drafts.drafts.contains_key(&chat_id) {
+                resume_draft(drafts, input, chat_id);
+            }
             start_compose(&mut *ui, &mut *conversation, &mut *input);
             false
         }
@@ -4163,13 +4187,11 @@ pub(crate) fn handle_normal(
             false
         }
         '/' => {
-            ui.set_focus(Focus::Input);
-            input.line.open(PromptKind::Search);
+            open_line_prompt(ui, conversation, input, drafts, PromptKind::Search);
             false
         }
         ':' => {
-            ui.set_focus(Focus::Input);
-            input.line.open(PromptKind::Command);
+            open_line_prompt(ui, conversation, input, drafts, PromptKind::Command);
             false
         }
         // `?` is the global search: messages in every private chat. Unbound
@@ -4180,8 +4202,7 @@ pub(crate) fn handle_normal(
                 ui.flash("close the new-chat list first (Esc)");
                 return false;
             }
-            ui.set_focus(Focus::Input);
-            input.line.open(PromptKind::GlobalSearch);
+            open_line_prompt(ui, conversation, input, drafts, PromptKind::GlobalSearch);
             false
         }
         'q' => {
@@ -4652,6 +4673,7 @@ pub(crate) fn handle_profile(
                 &mut *pending,
                 &mut *conversation,
                 &mut *input,
+                &mut *drafts,
                 &mut *list,
                 &mut *outbox,
                 &mut *profile,
@@ -5252,6 +5274,7 @@ fn handle_conversation_key(
             &mut *pending,
             &mut *conversation,
             &mut *input,
+            &mut *drafts,
             &mut *list,
             &mut *outbox,
             &mut *profile,

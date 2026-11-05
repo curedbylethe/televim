@@ -171,9 +171,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>, layout: &[RowSpan]) 
         .filter(|span| span.kind == rows::RowKind::Draft)
     {
         let words = app
-            .input
-            .line
-            .text()
+            .open_draft_text()
             .get(draft.text.clone())
             .unwrap_or_default();
         items.extend(
