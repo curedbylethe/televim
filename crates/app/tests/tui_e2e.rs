@@ -502,7 +502,10 @@ fn prepare_discard(t: &mut termlens::Terminal) {
     t.wait_until(|s| s.contains("NORMAL")).expect("normal mode");
     t.send(Key::Esc).expect("leave line");
     t.wait_until(|s| s.contains("┌ draft")).expect("draft row");
-    t.send_str(":discard").expect("type discard");
+    t.send(Key::Char(':')).expect("open the command prompt");
+    t.wait_until(|s| s.contains("┌ Command") && !s.contains(":unsent·words"))
+        .expect("command prompt starts empty");
+    t.send_str("discard").expect("type discard");
     t.send(Key::Enter).expect("submit command");
     t.wait_until(|s| s.contains("Discard this draft? (y/n)"))
         .expect("discard confirmation");
