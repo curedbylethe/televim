@@ -31,8 +31,9 @@
 
 ## CI Pipeline
 
-`.github/workflows/ci.yml` runs three jobs on `ubuntu-latest`. `changes`
-classifies the diff and is what the other two wait on. `lint` runs on every push
+`.github/workflows/ci.yml` runs `changes`, `lint`, and `release` on
+`ubuntu-latest`, plus an `installers` matrix on Ubuntu, macOS, and Windows.
+`changes` classifies the diff and gates the other jobs. `lint` runs on every push
 and pull request. `release` is gated at the job level to a push to `main` that
 changes code, the nightly schedule, and a pull request labelled `memory`; an
 ordinary pull request does not start it.
@@ -55,8 +56,8 @@ Two trigger rules sit above the jobs:
   `scripts/ci/classify-changes.test.sh`, before classifying. `lint` then skips
   everything that needs Rust — toolchain, system packages, cache, `fmt`,
   `clippy`, `boundary`, `test` and the PTY upload — and runs only
-  `make design-check`; the `release` job does not start. The job still reports,
-  so a docs-only pull request leaves no required status pending. A diff that
+  `make design-check`; the `release` and `installers` jobs do not start. The job
+  still reports, so a docs-only pull request leaves no required status pending. A diff that
   cannot be computed — a new branch's first push, a force-push that outran the
   clone, a scheduled run — is classified as code, so a tree nobody inspected
   still gets the full gate.
@@ -103,6 +104,11 @@ variable is `termlens`'s, not televim's, so a bump can change the file naming or
 scope; the test process reads it, not the spawned binary, which is also why it
 is pinned to the workspace — an integration test's working directory is the
 crate directory.
+
+The `installers` job runs `scripts/install.test.sh` on Ubuntu and macOS, and
+`scripts/install.test.ps1` on Windows. Both use a local HTTP fixture to check
+download, checksum verification, installation, and failure cases without a
+published release. Ubuntu also parses the PowerShell script with `pwsh`.
 
 The memory budget is **not** in `make ci`: it needs a release build and a pty,
 and neither belongs in a per-commit gate. It lives in the `release` job. It
@@ -157,6 +163,12 @@ Everything below runs under `make test` unless its bullet says otherwise: the
 goldens and property tests are ordinary `#[test]`s, and the deterministic
 mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
 `fuzz/` is the only local-only command.
+
+- **Installer tests:** `sh scripts/install.test.sh` runs the local fixture on
+  Linux and macOS; `pwsh -NoProfile -File scripts/install.test.ps1` runs it on
+  Windows. The fixture covers successful and repeated installs, checksum
+  failures, unsupported platforms, and missing assets. It does not need Rust or
+  Telegram credentials.
 
 - **Unit Tests:** `#[cfg(test)]` modules live beside the code they cover, in
   `domain`, `tui`, `telegram-framework` and `app`. Test the Vim motion logic
