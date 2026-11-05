@@ -4,6 +4,7 @@
   "bootstrap-sha": "fa69be717a2bf44117b1c4eb35ca48db70f6ad31",
   "bump-minor-pre-major": true,
   "skip-changelog": true,
+  "draft": true,
   "extra-files": [
     {
       "type": "generic",
