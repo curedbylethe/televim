@@ -31,8 +31,9 @@
 
 ## CI Pipeline
 
-`.github/workflows/ci.yml` runs `changes`, `lint`, and `release` on
+`.github/workflows/ci.yml` is configured to run `changes`, `lint`, and `release` on
 `ubuntu-latest`, plus an `installers` matrix on Ubuntu, macOS, and Windows.
+This workflow configuration has not run in this change.
 `changes` classifies the diff and gates the other jobs. `lint` runs on every push
 and pull request. `release` is gated at the job level to a push to `main` that
 changes code, the nightly schedule, and a pull request labelled `memory`; an
@@ -105,7 +106,7 @@ scope; the test process reads it, not the spawned binary, which is also why it
 is pinned to the workspace — an integration test's working directory is the
 crate directory.
 
-The `installers` job runs `scripts/install.test.sh` on Ubuntu and macOS, and
+The configured `installers` job runs `scripts/install.test.sh` on Ubuntu and macOS, and
 `scripts/install.test.ps1` on Windows. Both use a local HTTP fixture to check
 download, checksum verification, installation, and failure cases without a
 published release. Ubuntu also parses the PowerShell script with `pwsh`.
@@ -127,22 +128,25 @@ else; the `release` job carries the release build and the budget.
 `libdbus-1-dev` and `pkg-config` are installed first in both jobs, because
 `keyring`'s Linux backend links against DBus at build time.
 
-`.github/workflows/release.yml` is not a gate. A push to `main` runs
-release-please and writes the release PR's `CHANGELOG.md` section (git-cliff, see
-`cliff.toml`). A release tag or a manual dispatch then validates the tag against
-`main` and builds five targets: macOS arm64 and x86_64, Linux x86_64 and arm64,
-and Windows x86_64. Linux builds use an Ubuntu 22.04 container for a glibc 2.35
-floor. Each native runner packages and smoke-tests its archive, including
-`--version`, `--help`, and platform runtime links. The workflow synchronizes only
-the workspace package entry in `Cargo.lock` before its locked build. It uploads
-archives and `SHA256SUMS` to a draft release, downloads and verifies the complete
-asset set, then publishes it. A failed build blocks publishing; failed uploads or
-verification leave the release draft unpublished. Manual dry runs build and test
-without changing a release. Job-level
-permissions limit write access to release-please, changelog, and publish jobs.
-Builds require the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` secrets; missing
-values fail before compilation. Windows TUI, Credential Manager, opener, and
-owner-only file-mode behavior remain outside the CLI smoke test.
+`.github/workflows/release.yml` is separate from the CI gate and has no
+pull-request trigger. Pushes to `main` run release-please and write the release
+PR's `CHANGELOG.md` section (git-cliff, see `cliff.toml`). Tag pushes and manual
+dispatches from `main` use the same release path; each tag must resolve to a
+commit on `main` and match the workspace version. The workflow is configured for
+five native targets: macOS arm64 and x86_64, Linux x86_64 and arm64, and Windows
+x86_64. Linux builds use an Ubuntu 22.04 container for a glibc 2.35 floor. Each
+runner packages and smoke-tests its archive, including `--version`, `--help`,
+and platform runtime links. The workflow syncs only the workspace package entry
+in `Cargo.lock` before its locked build. It uploads archives and `SHA256SUMS` to
+a draft release, downloads and verifies the full asset set, then publishes it.
+A failed build blocks publishing; failed uploads or verification leave the
+release draft unpublished. Manual dry runs build and smoke-test without changing
+a release. Job permissions limit write access to release-please, changelog, and
+publish jobs. Builds require the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`
+secrets; missing values fail before compilation. The workflow configuration is
+linted locally; native release legs and draft publication still require a run.
+Windows TUI, Credential Manager, opener, and owner-only file-mode behavior
+remain outside the CLI smoke test.
 
 `.github/workflows/desktop.yml` is `workflow_dispatch` only, and covers the two
 things a hosted runner cannot do:
