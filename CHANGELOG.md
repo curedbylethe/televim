@@ -5,6 +5,53 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.8.0] - 2026-11-06
+
+### Added
+
+- **telegram-framework:** Name the account in a stored session
+- **app:** Keep an accounts index beside the configuration
+- **app:** Tag caches with the slot that owns them
+- **tui:** Ask for a second account instead of refusing
+- **app:** Add a second account without signing the first one out
+- **app:** Keep the reader's place across an account switch
+- **tui:** List the known accounts on the self card
+- **app:** Switch to a listed account from the self card
+- **telegram-framework:** Upload attachments with progress and cancel
+- **proto:** Send attachments through the client
+- **app:** Orchestrate attachment sends and exports
+- **tui:** Attach, open and save media by command
+- Preserve draft reply and edit subjects
+- **tui:** Confirm before discarding drafts
+- **app:** Protect newer draft file versions
+- **install:** Add the POSIX installer
+- **install:** Add the Windows installer
+
+### Fixed
+
+- **tui:** Tell the network when a sign-in is abandoned at the phone step
+- **app:** Keep the picker truthful and the reader's place on a failed switch
+- **telegram-framework:** Classify live media from raw messages
+- **app:** Settle synthetic upload failures
+- **media:** Align attachment paths, progress, and copy behavior
+- **tui:** Preserve drafts while opening prompts
+- **tui:** Keep placeholder jump marks alive
+- **tui:** Keep read marks when discarding drafts
+- **tui:** Preserve parked drafts across compose actions
+- **release:** Harden release and installer paths
+- **release:** Harden legacy tags and PATH updates
+- **release:** Enforce platform and installer checks
+
+### ci
+
+- Run the memory budget off ordinary pull requests
+- Split the workflow into a fast job and a single-build release job
+- Drop --locked from the release build
+- Cancel superseded runs and skip the Rust jobs on docs-only changes
+- Test the docs-only classifier and stop extra cancellations
+- **release:** Build and verify release matrix
+- **install:** Exercise installers on three platforms
+
 ## [0.6.0] - 2026-10-17
 
 ### Added
