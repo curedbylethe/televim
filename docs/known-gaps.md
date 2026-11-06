@@ -186,7 +186,13 @@ Real, and named so they are not mistaken for oversights:
   `d` work and a selection is drawn. `r` in Visual says no, for one of two reasons —
   see [`decisions.md`](./decisions.md). Neither `domain::utf16_len` nor the rendering of an
   incoming quote's fragment is written, because both exist only for a quote this
-  build cannot send.
+  build cannot send. `p` is unbound in Visual: replacing a selection with the
+  reader's own text would make a key that looks additive destructive.
+- **`:w` is not a command.** See the command list in [`product.md`](./product.md).
+- **The yank clipboard is one-way and says nothing.** Whether a terminal honours
+  OSC 52 is not something this program can find out, so a refused or capped write
+  is not a failure of the yank and is not reported as one. `y` reaching the
+  register is the feature; the clipboard is a convenience on top.
 - **Only `W`, `B`, `E`, `j` and `k` *behind an operator* in the input refuse
   non-ASCII text.** They say no with a flash, because `vim-line` counts those
   motions in bytes and `d`/`c` slice in the same key. `w`, `b` and `e` on

@@ -438,8 +438,9 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   wrote, the stored baseline, and the bands in
   `scripts/memory/thresholds.json`, and fails when a figure rises past
   `baseline + max(relative × baseline, absolute)`. Only an increase counts as a
-  regression. It is a guard on *change*; the README's declared targets are
-  untouched and remain the contract. The failure message names the metric, the
+  regression. It is a guard on *change*; the targets declared in
+  [`product.md`](./product.md) are untouched and remain the contract. The failure
+  message names the metric, the
   measured value, the baseline, the delta, and the threshold, and the same
   numbers go to `$GITHUB_STEP_SUMMARY` as a markdown table so a breach is
   visible in the run rather than only in a log line.
