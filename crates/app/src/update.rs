@@ -353,7 +353,15 @@ pub(crate) fn apply(app: &mut App, event: Event) {
         Event::Checked => {}
         Event::Failed => app.flash("could not check for updates"),
         Event::Progress(progress) => app.update_progress(progress),
-        Event::Ready { staged, .. } => app.update_ready(staged),
+        Event::Ready { available, staged } => {
+            let result = std::env::current_exe()
+                .map_err(|_| UpdateError::ReplaceFailed)
+                .and_then(|exe| replace(&exe, &staged));
+            match result {
+                Ok(()) => app.update_installed(&available),
+                Err(error) => app.update_failed(error.to_string()),
+            }
+        }
         Event::ApplyFailed { reason, .. } => app.update_failed(reason),
         Event::Cancelled => app.update_cancelled(),
     }
@@ -369,6 +377,41 @@ enum UpdateError {
     StagedBinaryUnusable,
     UnsupportedTarget,
     Transport,
+    Managed(Managed),
+    ReplaceFailed,
+    #[cfg(any(windows, test))]
+    RollbackFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Managed {
+    Homebrew,
+    MacPorts,
+    Nix,
+    Cargo,
+    Snap,
+    Flatpak,
+    Scoop,
+    Winget,
+    System,
+}
+
+impl Managed {
+    fn sentence(self) -> &'static str {
+        match self {
+            Self::Homebrew => "televim was installed by Homebrew. Run brew upgrade televim.",
+            Self::MacPorts => "televim was installed by MacPorts. Run sudo port upgrade televim.",
+            Self::Nix => "televim was installed by Nix. Run nix profile upgrade televim.",
+            Self::Cargo => "televim was installed by cargo. Run cargo install televim.",
+            Self::Snap => "televim was installed by snap. Run sudo snap refresh televim.",
+            Self::Flatpak => "televim was installed by Flatpak. Run flatpak update.",
+            Self::Scoop => "televim was installed by Scoop. Run scoop update televim.",
+            Self::Winget => "televim was installed by winget. Run winget upgrade televim.",
+            Self::System => {
+                "televim may be managed by your system package manager. See README installation instructions."
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for UpdateError {
@@ -394,8 +437,88 @@ impl std::fmt::Display for UpdateError {
                 "Updates support macOS and Linux x86_64/aarch64 and Windows x86_64 only; nothing was installed."
             }
             Self::Transport => "The update download failed; nothing was installed.",
+            Self::Managed(manager) => return f.write_str(manager.sentence()),
+            Self::ReplaceFailed => {
+                "The verified update could not replace televim; the staged binary remains available. Install manually with the README installer."
+            }
+            #[cfg(any(windows, test))]
+            Self::RollbackFailed => {
+                "The verified update could not replace televim, and rollback failed. The previous binary remains beside the executable as .old."
+            }
         };
         f.write_str(sentence)
+    }
+}
+
+fn managed_by(path: &Path) -> Option<Managed> {
+    managed_by_with(path, |dir| {
+        fs::metadata(dir).is_ok_and(|metadata| !metadata.permissions().readonly())
+    })
+}
+
+fn managed_by_with(path: &Path, mut writable: impl FnMut(&Path) -> bool) -> Option<Managed> {
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let checks = [
+        ("/opt/homebrew/", Managed::Homebrew),
+        ("/usr/local/cellar/", Managed::Homebrew),
+        ("/usr/local/opt/", Managed::Homebrew),
+        ("/opt/local/", Managed::MacPorts),
+        ("/nix/store/", Managed::Nix),
+        ("/.cargo/bin/", Managed::Cargo),
+        ("/snap/", Managed::Snap),
+        ("/var/lib/flatpak/", Managed::Flatpak),
+        ("/scoop/apps/", Managed::Scoop),
+        ("/appdata/local/microsoft/winget/", Managed::Winget),
+    ];
+    if let Some((_, manager)) = checks
+        .iter()
+        .find(|(prefix, _)| normalized.contains(prefix))
+    {
+        return Some(*manager);
+    }
+    for dir in ["/usr/bin", "/usr/local/bin"] {
+        if normalized.starts_with(&format!("{dir}/")) && !writable(Path::new(dir)) {
+            return Some(Managed::System);
+        }
+    }
+    None
+}
+
+fn replace(exe: &Path, staged: &Path) -> Result<(), UpdateError> {
+    if let Some(manager) = managed_by(exe) {
+        return Err(UpdateError::Managed(manager));
+    }
+    #[cfg(windows)]
+    replace_windows(exe, staged)?;
+    #[cfg(not(windows))]
+    fs::rename(staged, exe).map_err(|_| UpdateError::ReplaceFailed)?;
+    if let Some(parent) = staged.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn replace_windows(exe: &Path, staged: &Path) -> Result<(), UpdateError> {
+    let old = exe.with_extension("exe.old");
+    fs::rename(exe, &old).map_err(|_| UpdateError::ReplaceFailed)?;
+    if fs::rename(staged, exe).is_err() {
+        return match fs::rename(&old, exe) {
+            Ok(()) => Err(UpdateError::ReplaceFailed),
+            Err(_) => Err(UpdateError::RollbackFailed),
+        };
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn remove_old_backup(exe: &Path) {
+    let old = exe.with_extension("exe.old");
+    if let Err(error) = fs::remove_file(&old) {
+        tracing::debug!(%error, path = %old.display(), "could not remove previous executable backup");
     }
 }
 
@@ -640,6 +763,13 @@ pub(crate) fn handle(
             }
         }
         Action::Apply { available } => {
+            let managed = std::env::current_exe()
+                .ok()
+                .and_then(|exe| managed_by(&exe));
+            if let Some(manager) = managed {
+                app.update_failed(UpdateError::Managed(manager).to_string());
+                return;
+            }
             if !app.update_begin_apply(&available) {
                 return;
             }
@@ -682,6 +812,8 @@ pub(crate) fn handle(
                 app.flash("could not save update dismissal");
             }
         }
+        Action::Restart => app.confirm_update_restart(),
+        Action::InstalledLater => {}
     }
 }
 
@@ -1000,5 +1132,109 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn replacement_moves_verified_bytes_and_preserves_neighboring_data() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let exe = dir.path().join("televim");
+        let staged_dir = dir.path().join("stage");
+        fs::create_dir(&staged_dir).expect("stage dir");
+        let staged = staged_dir.join("televim");
+        let config = dir.path().join("config");
+        let draft = dir.path().join("draft");
+        let history = dir.path().join("history");
+        fs::write(&exe, b"old").expect("old executable");
+        fs::write(&staged, b"verified new binary").expect("staged executable");
+        fs::write(&config, b"config").expect("config");
+        fs::write(&draft, b"draft").expect("draft");
+        fs::write(&history, b"history").expect("history");
+        replace(&exe, &staged).expect("replace executable");
+        assert_eq!(
+            fs::read(&exe).expect("new executable"),
+            b"verified new binary"
+        );
+        assert_eq!(fs::read(config).expect("config remains"), b"config");
+        assert_eq!(fs::read(draft).expect("draft remains"), b"draft");
+        assert_eq!(fs::read(history).expect("history remains"), b"history");
+        #[cfg(not(windows))]
+        assert!(!exe.with_extension("old").exists());
+    }
+
+    #[test]
+    fn managed_prefixes_normalize_both_separator_styles() {
+        let cases = [
+            ("/opt/homebrew/bin/televim", Managed::Homebrew),
+            ("C:\\opt\\homebrew\\bin\\televim.exe", Managed::Homebrew),
+            ("/usr/local/Cellar/televim/bin/televim", Managed::Homebrew),
+            ("/opt/local/bin/televim", Managed::MacPorts),
+            ("/nix/store/hash-televim/bin/televim", Managed::Nix),
+            ("/home/user/.cargo/bin/televim", Managed::Cargo),
+            ("/snap/bin/televim", Managed::Snap),
+            ("/var/lib/flatpak/exports/bin/televim", Managed::Flatpak),
+            (
+                "C:\\Users\\me\\scoop\\apps\\televim\\current\\televim.exe",
+                Managed::Scoop,
+            ),
+            (
+                "C:\\Users\\me\\AppData\\Local\\Microsoft\\WinGet\\Links\\televim.exe",
+                Managed::Winget,
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(managed_by(Path::new(path)), Some(expected), "{path}");
+        }
+        assert_eq!(managed_by(Path::new("/home/user/.local/bin/televim")), None);
+        assert_eq!(
+            managed_by_with(Path::new("/usr/bin/televim"), |_| false),
+            Some(Managed::System)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_executable_directory_refuses_without_changing_original() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let exe = dir.path().join("televim");
+        let staged = dir.path().join("staged");
+        fs::write(&exe, b"original").expect("original executable");
+        fs::write(&staged, b"verified").expect("staged executable");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555))
+            .expect("make directory read-only");
+        assert_eq!(replace(&exe, &staged), Err(UpdateError::ReplaceFailed));
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755))
+            .expect("restore directory permissions");
+        assert_eq!(fs::read(&exe).expect("original remains"), b"original");
+        assert_eq!(
+            fs::read(&staged).expect("verified stage remains"),
+            b"verified"
+        );
+    }
+
+    #[test]
+    fn windows_second_rename_failure_rolls_back_and_backup_sweep_is_best_effort() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let exe = dir.path().join("televim.exe");
+        fs::write(&exe, b"old").expect("old executable");
+        let missing_stage = dir.path().join("missing.exe");
+        assert_eq!(
+            replace_windows(&exe, &missing_stage),
+            Err(UpdateError::ReplaceFailed)
+        );
+        assert_eq!(fs::read(&exe).expect("rollback restored exe"), b"old");
+        let staged = dir.path().join("staged.exe");
+        fs::write(&staged, b"new").expect("staged executable");
+        replace_windows(&exe, &staged).expect("windows replacement");
+        let old = exe.with_extension("exe.old");
+        assert_eq!(fs::read(&exe).expect("new executable"), b"new");
+        assert_eq!(
+            fs::read(&old).expect("backup remains until next launch"),
+            b"old"
+        );
+        remove_old_backup(&exe);
+        assert!(!old.exists());
+        remove_old_backup(&exe);
     }
 }

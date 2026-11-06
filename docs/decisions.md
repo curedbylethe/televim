@@ -1242,6 +1242,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
 - **Why installers use user-local directories and guarded PATH updates:** a
   default install should not need administrator rights or change a system-wide
   path. The profile marker and existing-entry check make repeated installs safe.
+- **Why in-app updates stage and rename:** a verified binary is staged beside
+  the executable, then renamed into place; managed paths are refused so the
+  package manager remains the owner. Restart uses the existing confirmation
+  flow and exits, avoiding a second process-launch mechanism.
 - **Why installation has one detailed guide and a README quickstart:** the guide
   owns target requirements, runtime dependencies, manual setup, and data paths;
   the README keeps the common install command easy to find.

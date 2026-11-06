@@ -1323,7 +1323,7 @@ pub(crate) fn handle_confirm(
         KeyCode::Char('y') => {
             let change = conversation.confirm == Some(ConfirmKind::ChangePassphrase);
             match &conversation.confirm {
-                Some(ConfirmKind::Quit) => ui.quit(),
+                Some(ConfirmKind::Quit | ConfirmKind::Restart) => ui.quit(),
                 Some(ConfirmKind::DiscardDraft) => {
                     drafts
                         .drafts

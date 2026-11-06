@@ -487,4 +487,6 @@ Working today:
   failure does not delay launch. `updates = "off"` or `TELEVIM_UPDATES=off`
   disables checks; the default is `auto`. A dim input-bar indicator names a
   newer release; `:update` opens its consent prompt. `Later` postpones automatic
-  offers for that version, while `:update` can reopen it.
+  offers for that version, while `:update` can reopen it. A verified update
+  replaces the executable and offers Restart or Later; Restart asks for
+  confirmation and exits so the next launch uses the new version.

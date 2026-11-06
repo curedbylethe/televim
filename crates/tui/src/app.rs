@@ -176,6 +176,7 @@ pub fn delete_mixed_prompt(yours: usize, theirs: usize) -> String {
 /// mistyped key can do without the reader meaning to.
 pub const DISCARD_PROMPT: &str = "Discard this draft? (y/n)";
 pub const QUIT_PROMPT: &str = "Quit televim? (y/n)";
+pub const RESTART_PROMPT: &str = " Restart televim? (y/n)";
 
 /// The prompt the status line shows when a sign-out is waiting to be confirmed.
 ///
@@ -970,6 +971,8 @@ pub enum ConfirmKind {
     /// nothing to send anywhere, and a quit that waited on the network would be
     /// a quit that can hang.
     Quit,
+    /// Exit after an update so the next launch uses the installed version.
+    Restart,
 
     /// Discard the open conversation draft.
     DiscardDraft,
@@ -3136,8 +3139,13 @@ impl App {
         self.ui.update.cancelled();
     }
 
-    pub fn update_ready(&mut self, staged: std::path::PathBuf) {
-        self.ui.update.ready(staged);
+    pub fn update_installed(&mut self, available: &str) {
+        self.ui.update.installed(available);
+    }
+
+    pub fn confirm_update_restart(&mut self) {
+        self.conversation.set_confirm(Some(ConfirmKind::Restart));
+        self.ui.mode = Mode::Confirm;
     }
 
     /// The one way in, whatever the reader came from: the signed-out card's
@@ -3663,6 +3671,7 @@ impl App {
         }
         match &self.conversation.confirm {
             Some(ConfirmKind::Quit) => return QUIT_PROMPT.to_owned(),
+            Some(ConfirmKind::Restart) => return RESTART_PROMPT.to_owned(),
             Some(ConfirmKind::DiscardDraft) => return DISCARD_PROMPT.to_owned(),
             Some(ConfirmKind::Logout) => return LOGOUT_PROMPT.to_owned(),
             Some(ConfirmKind::ImportSession { path }) => return import_prompt(path),

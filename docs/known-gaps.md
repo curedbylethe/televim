@@ -373,6 +373,10 @@ Real, and named so they are not mistaken for oversights:
 - **Release binaries are unsigned and not notarized.** macOS Gatekeeper and
   Windows SmartScreen may warn or block them. `SHA256SUMS` checks file integrity;
   it does not establish publisher identity. See [`installing.md`](./installing.md).
+- **The in-app updater has platform limits.** Windows self-replacement is not
+  proven on a real Windows host (L-3). Package-manager refusal uses executable
+  path heuristics, not manager metadata (L-1). Checksums prove integrity, not
+  publisher identity (G-5), and prerelease updates have no opt-in.
 - **Key wiping cannot reach copies made before a `Drop`.** The `FileKey`, the
   passphrase, the cipher's intermediate keys and its expanded round keys are all
   wiped when they drop (the `zeroize` features on `aes-gcm-siv` and `aes`). A copy

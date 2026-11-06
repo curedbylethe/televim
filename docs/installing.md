@@ -233,12 +233,14 @@ Unix owner-only mode guarantee.
 
 ## Upgrading
 
-Run the installer again, or download the new target archive and replace the
-executable. Verify the result with `televim --version`. Upgrading preserves the
-config, drafts, history, media, and keyring entries.
+Use `:update` for an in-app upgrade, then choose Restart to use the new version.
+The update verifies the release digest and replaces only the executable. Config,
+session, drafts, history, media, and keyring entries stay in place. The current
+window keeps running its old version until restart.
 
-The in-app `:update` path downloads the same target archive and verifies its
-digest against the release's `SHA256SUMS` before staging it beside the executable.
+For package-managed installs, use that manager's upgrade command. Otherwise,
+rerun the installer or follow the [manual replacement steps](#manual-install).
+Verify manual upgrades with `televim --version`.
 
 Set `TELEVIM_VERSION` before running an installer to pin a version. Keep
 existing `session_kdf_memory_kib`, `session_kdf_passes`, and `session_kdf_lanes`
