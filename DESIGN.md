@@ -1433,6 +1433,61 @@ it by peer id, because the model's chats have no ids. The frames show the
 model's behaviour in those five, and the build's is the one this document
 describes.
 
+## Updating televim: a notice, an offer, and one opt-in step
+
+A newer stable release is news the reader may act on, never a reason to
+interrupt them. The notice stays quiet, the offer waits for an idle moment, and
+the reader must choose Update before anything is installed.
+
+**The notice.** `televim 0.9.0 available — :update`, in `text-dim`, on the input
+bar's bottom border, right-aligned with one blank cell before the corner. The
+status row starts its sentence at column 11: an eight-cell mode label, a space,
+the connection dot, and a space. Its 69 sentence cells already belong to the
+ranked hint. The notice never takes focus or moves the cursor. It remains while
+a newer release is known and disappears after that version installs.
+
+**When the offer may appear by itself.** Offer a release at most once per
+version, and only when the reader is idle: no confirmation, sign-in or
+passphrase prompt, forward picker or other key-intercepting overlay; no text in
+the input line; no Visual selection; and no upload in flight. Otherwise leave
+the notice and wait. `:update` opens the offer over a kept draft without
+changing it.
+
+**The offer.** Draw a bordered dialog over the conversation column. Name the
+installed and available versions, then show `[ Update ]` and `[ Later ]`.
+Highlight Later first; keep brackets around both actions so reverse video is
+not the only cue. Inside the dialog, `h` and `l` move the highlight, `Enter`
+answers, and `Esc` answers Later. The hint reads
+` h/l: choose  ⏎: confirm  Esc: later`. Do not add a Normal-mode alias.
+
+**Progress is text.** Show the current stage as `[update… downloading]`,
+`[update… verifying]` or `[update… installing]`. Change the text only when
+the stage changes. Do not show a percentage, spinner or countdown. `Esc` or
+`Enter` cancels between stages. Keep the draft untouched.
+
+**Failure.** Name the failed check and say `nothing was installed`. Use no red;
+red belongs to `CONFIRM`. End every failure with
+`Retry with :update, or rerun the installer from the README.` The actions are
+`[ Retry ]` and `[ Later ]`, with Later highlighted.
+
+**Dismissal.** Remember Later for that version. Keep the notice, but do not
+show the offer again for that version. `:update` still opens it. A newer
+version may be offered once.
+
+**Success and restart.** Say `televim 0.9.0 is installed.` and explain that the
+running window remains on 0.8.0 until restart. Show `[ Restart ]` and
+`[ Later ]`, with Later highlighted. Restart raises the existing
+` Restart televim? (y/n)` confirmation and uses the quit path. Later leaves the
+new binary installed and the current window running the old version.
+
+**Palette.** Add no role, mode label or status rank. Keep the dialog's ordinary
+border, dim hint, and reverse-video highlight. Use red only for `CONFIRM`.
+
+Frames: nine in `update-states.html`, with rows in
+`update-states-frames.js`: indicator, offer, progress, success, checksum and
+network failures, dismissed, dismissed after relaunch, and restart. They are
+hand-laid examples of these rules, not scenes of `televim-engine.js`.
+
 ## Components
 
 Ten, with their states, and the `TestBackend` assertion that would catch each
