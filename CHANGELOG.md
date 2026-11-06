@@ -5,6 +5,22 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.9.0] - 2026-11-06
+
+### Added
+
+- **app:** Check stable releases in background
+- **tui:** Add stable update offer
+- **app:** Stage verified update downloads
+- **app:** Replace verified updates and confirm restart
+
+### Fixed
+
+- **release:** Run tag builds after release-please skip
+- **release:** Run Linux packaging with Bash
+- **tui:** Align update progress with design
+- **app:** Keep update offer across launches and tidy failed updates
+
 ## [0.8.0] - 2026-11-06
 
 ### Added
