@@ -55,8 +55,9 @@ Real, and named so they are not mistaken for oversights:
     `viewer_image`, `viewer_video`, `viewer_audio`) is run directly and waited on, so
     its sentence reports the viewer's own exit; only the platform default keeps this limit.
   - *Windows release CI is limited to build and CLI smoke tests.* The release workflow
-    is configured to build Windows x86_64 and check `--version` and `--help`; those
-    native release legs have not run in this change. It does not validate the TUI,
+    builds Windows x86_64 and checks `--version` and `--help`; the native release
+    matrix has not completed a run. macOS minimum versions remain unmeasured until
+    release artifacts report their `minos` values. The workflow does not validate the TUI,
     Credential Manager, opener, or owner-only file modes. The default opener is
     `cmd /C start "" /WAIT`, which waits for the started process, but the manual check
     in the `OPENER` doc comment in `crates/app/src/runtime.rs` remains outstanding. A

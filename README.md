@@ -294,7 +294,7 @@ Working today:
   because a description is rebuilt on every page and a cached locator would be stale.
   `o` on a media message in Normal mode opens it in the platform viewer:
   `open -W` on macOS, `xdg-open` on Linux, `cmd /C start "" /WAIT` on Windows.
-  The release workflow is configured to build and CLI-smoke-test Windows; the
+  The release workflow builds and CLI-smoke-tests Windows; the
   TUI, Credential Manager, opener and owner-only file modes still need a manual
   check.
   The file comes from the media cache: a message opened before is served from
@@ -550,8 +550,8 @@ Installers put `televim` on your user `PATH` and verify the archive checksum.
 
 | OS | Architecture | Target | Archive | Minimum / status |
 | :--- | :--- | :--- | :--- | :--- |
-| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | macOS 11+ |
-| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | macOS 10.12+ |
+| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | unmeasured |
+| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | unmeasured |
 | Linux | x86_64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
 | Linux | arm64 | `aarch64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
 | Windows | x86_64 | `x86_64-pc-windows-msvc` | `.zip` | Windows 10+; experimental |

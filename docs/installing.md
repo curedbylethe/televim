@@ -7,15 +7,15 @@ build from source, see [`README.md`](../README.md#building).
 
 | OS | Architecture | Target | Archive | Minimum / status |
 | :--- | :--- | :--- | :--- | :--- |
-| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | macOS 11.0 |
-| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | macOS 10.12 |
+| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | unmeasured |
+| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | unmeasured |
 | Linux | x86_64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
 | Linux | arm64 | `aarch64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
 | Windows | x86_64 | `x86_64-pc-windows-msvc` | `.zip` | Windows 10+; experimental |
 
 Windows remains experimental until the manual TUI, Credential Manager, and
-file-opener check passes. The release workflow is configured to build and
-CLI-smoke-test Windows; those checks do not cover the TUI, Credential Manager,
+file-opener check passes. The release workflow builds and CLI-smoke-tests
+Windows; those checks do not cover the TUI, Credential Manager,
 or file opener. Windows arm64, Linux musl/Alpine, and 32-bit targets are
 unsupported.
 

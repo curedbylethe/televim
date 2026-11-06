@@ -5,7 +5,28 @@ $server = $null
 $oldArchitecture = $env:PROCESSOR_ARCHITECTURE
 $oldArchitectureW6432 = $env:PROCESSOR_ARCHITEW6432
 $oldBaseUrl = $env:TELEVIM_BASE_URL
-$oldUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$oldVersion = $env:TELEVIM_VERSION
+$oldInstallDir = $env:TELEVIM_INSTALL_DIR
+$environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+$oldUserPath = if ($environmentKey) {
+    $value = $environmentKey.GetValue('Path', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if ($null -ne $value) { @{ Exists = $true; Value = $value; Kind = $environmentKey.GetValueKind('Path') } }
+    else { @{ Exists = $false } }
+} else { @{ Exists = $false } }
+if ($environmentKey) { $environmentKey.Dispose() }
+
+function Get-RawUserPath {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+    if (-not $key) { return $null }
+    try { return [string] $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+    finally { $key.Dispose() }
+}
+
+function Set-RawUserPath($value) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try { $key.SetValue('Path', $value, [Microsoft.Win32.RegistryValueKind]::ExpandString) }
+    finally { $key.Dispose() }
+}
 
 function Assert($condition, $message) {
     if (-not $condition) { throw $message }
@@ -57,33 +78,49 @@ try {
     Assert $ready 'Local HTTP fixture did not start.'
 
     $installDir = Join-Path $temporary 'bin'
-    $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $userPathBefore = Get-RawUserPath
     $installOutput = Invoke-Installer '9.9.9' $installDir | Out-String
     $installed = Join-Path $installDir 'televim.exe'
     Assert (Test-Path -LiteralPath $installed) 'Installer did not copy televim.exe.'
     Assert ($installOutput.Contains('Installed Televim')) 'Installer did not report success after checksum verification.'
-    Assert ([Environment]::GetEnvironmentVariable('Path', 'User') -eq $userPathBefore) '-NoModifyPath changed the User PATH.'
+    Assert ((Get-RawUserPath) -eq $userPathBefore) '-NoModifyPath changed the User PATH.'
     Invoke-Installer '9.9.9' $installDir | Out-Null
     Assert ((Get-ChildItem -LiteralPath $installDir -File).Count -eq 1) 'Repeated install left extra files.'
 
     $pathInstallDir = Join-Path $temporary 'path-bin'
-    $pathSeed = Join-Path $temporary 'existing-path'
-    [Environment]::SetEnvironmentVariable('Path', $pathSeed, 'User')
+    $pathSeed = '%USERPROFILE%\existing-path;;C:\tools\'
+    Set-RawUserPath $pathSeed
     & $installer -Version '9.9.9' -InstallDir $pathInstallDir -SkipVersionCheck | Out-Null
-    $pathAfterFirstInstall = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $pathAfterFirstInstall = Get-RawUserPath
     $pathEntries = @($pathAfterFirstInstall -split ';' | ForEach-Object { $_.Trim().TrimEnd([char[]]@('\')) } | Where-Object { $_ })
     Assert (@($pathEntries | Where-Object { [string]::Equals($_, $pathInstallDir, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) 'Installer did not add its directory to User PATH once.'
     & $installer -Version '9.9.9' -InstallDir $pathInstallDir -SkipVersionCheck | Out-Null
-    $pathAfterSecondInstall = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $pathAfterSecondInstall = Get-RawUserPath
     $pathEntries = @($pathAfterSecondInstall -split ';' | ForEach-Object { $_.Trim().TrimEnd([char[]]@('\')) } | Where-Object { $_ })
     Assert (@($pathEntries | Where-Object { [string]::Equals($_, $pathInstallDir, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) 'Repeated install duplicated its User PATH entry.'
-    Assert ($pathEntries[0] -eq $pathSeed) 'Installer changed the existing User PATH entry.'
-    [Environment]::SetEnvironmentVariable('Path', $oldUserPath, 'User')
+    Assert ($pathAfterSecondInstall.StartsWith("$pathSeed;", [StringComparison]::Ordinal)) 'Installer changed the existing User PATH text.'
+    Assert ($pathEntries[0] -eq '%USERPROFILE%\existing-path') 'Installer expanded an existing User PATH variable.'
 
     $badDir = Join-Path $temporary 'bad-checksum-bin'
     Set-Content -LiteralPath (Join-Path $versionDir 'SHA256SUMS') -Value (('0' * 64) + "  $asset")
     Assert-InstallerFails '9.9.9' $badDir 'SHA-256 mismatch'
     Assert (-not (Test-Path -LiteralPath (Join-Path $badDir 'televim.exe'))) 'Checksum failure installed the binary.'
+
+    $iexDir = Join-Path $temporary 'iex-bin'
+    $env:TELEVIM_VERSION = '9.9.9'
+    $env:TELEVIM_INSTALL_DIR = $iexDir
+    try {
+        $iexOutput = (Get-Content -LiteralPath $installer -Raw | Invoke-Expression 2>&1 | Out-String)
+        throw "Expected the documented Invoke-Expression form to report checksum failure; output: $iexOutput"
+    }
+    catch {
+        if (($_ | Out-String) -notlike '*SHA-256 mismatch*') { throw }
+    }
+    Assert (-not (Test-Path -LiteralPath (Join-Path $iexDir 'televim.exe'))) 'Invoke-Expression checksum failure installed the binary.'
+    if ($null -eq $oldVersion) { Remove-Item Env:TELEVIM_VERSION -ErrorAction SilentlyContinue }
+    else { $env:TELEVIM_VERSION = $oldVersion }
+    if ($null -eq $oldInstallDir) { Remove-Item Env:TELEVIM_INSTALL_DIR -ErrorAction SilentlyContinue }
+    else { $env:TELEVIM_INSTALL_DIR = $oldInstallDir }
 
     $unsafeVersionDir = Join-Path $temporary 'releases/download/v9.9.8'
     New-Item -ItemType Directory -Force -Path $unsafeVersionDir | Out-Null
@@ -110,17 +147,28 @@ try {
 
     $source = Get-Content -LiteralPath $installer -Raw
     Assert ($source -notmatch '(?i)\bsetx\b') 'Installer must not use setx.'
-    Assert ($source.Contains("GetEnvironmentVariable('Path', 'User')") -and $source.Contains('SetEnvironmentVariable(''Path'', $newUserPath, ''User'')') -and $source.Contains('OrdinalIgnoreCase')) 'User PATH update must check for an existing entry.'
+    Assert ($source.Contains('DoNotExpandEnvironmentNames') -and $source.Contains('RegistryValueKind]::ExpandString') -and $source.Contains('OrdinalIgnoreCase') -and $source -notmatch '\[CmdletBinding\]') 'Installer invocation and User PATH update must preserve raw existing entries.'
     Write-Output 'PowerShell installer tests passed.'
 }
 finally {
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
-    [Environment]::SetEnvironmentVariable('Path', $oldUserPath, 'User')
+    if ($oldUserPath.Exists) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+        try { $key.SetValue('Path', $oldUserPath.Value, $oldUserPath.Kind) }
+        finally { $key.Dispose() }
+    } else {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        if ($key) { try { $key.DeleteValue('Path', $false) } finally { $key.Dispose() } }
+    }
     if ($null -eq $oldArchitecture) { Remove-Item Env:PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue }
     else { $env:PROCESSOR_ARCHITECTURE = $oldArchitecture }
     if ($null -eq $oldArchitectureW6432) { Remove-Item Env:PROCESSOR_ARCHITEW6432 -ErrorAction SilentlyContinue }
     else { $env:PROCESSOR_ARCHITEW6432 = $oldArchitectureW6432 }
     if ($null -eq $oldBaseUrl) { Remove-Item Env:TELEVIM_BASE_URL -ErrorAction SilentlyContinue }
     else { $env:TELEVIM_BASE_URL = $oldBaseUrl }
+    if ($null -eq $oldVersion) { Remove-Item Env:TELEVIM_VERSION -ErrorAction SilentlyContinue }
+    else { $env:TELEVIM_VERSION = $oldVersion }
+    if ($null -eq $oldInstallDir) { Remove-Item Env:TELEVIM_INSTALL_DIR -ErrorAction SilentlyContinue }
+    else { $env:TELEVIM_INSTALL_DIR = $oldInstallDir }
     Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
 }

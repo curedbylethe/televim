@@ -1,4 +1,3 @@
-[CmdletBinding()]
 param(
     [string] $Version = $env:TELEVIM_VERSION,
     [string] $InstallDir = $env:TELEVIM_INSTALL_DIR,
@@ -19,7 +18,7 @@ Usage: install.ps1 [-Version <version>] [-InstallDir <path>] [-NoModifyPath]
 The unsigned executable may trigger SmartScreen. Restart the terminal after
 installation so the updated User PATH takes effect.
 '@ | Write-Output
-    exit 0
+    return
 }
 
 if ($env:OS -ne 'Windows_NT') {
@@ -116,22 +115,32 @@ try {
     Copy-Item -LiteralPath (Join-Path $extractDir 'televim.exe') -Destination (Join-Path $InstallDir 'televim.exe') -Force
 
     if (-not $NoModifyPath) {
-        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-        $pathEntries = @($userPath -split ';' | ForEach-Object { $_.Trim().TrimEnd([char[]]@('\')) } | Where-Object { $_ })
-        if (-not ($pathEntries | Where-Object { [string]::Equals($_, $InstallDir.TrimEnd([char[]]@('\')), [StringComparison]::OrdinalIgnoreCase) })) {
-            $newUserPath = (@($pathEntries) + $InstallDir) -join ';'
-            try {
-                [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+        $environmentKey = $null
+        try {
+            $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+            if ($null -eq $environmentKey) {
+                $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
             }
-            catch {
-                Write-Warning "Could not update User PATH. Add this directory manually: $InstallDir"
+            $userPath = [string] $environmentKey.GetValue(
+                'Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+            $pathEntries = @($userPath -split ';' | ForEach-Object { $_.Trim().TrimEnd([char[]]@('\')) } | Where-Object { $_ })
+            if (-not ($pathEntries | Where-Object { [string]::Equals($_, $InstallDir.TrimEnd([char[]]@('\')), [StringComparison]::OrdinalIgnoreCase) })) {
+                $newUserPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
+                $environmentKey.SetValue('Path', $newUserPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
             }
+        }
+        catch {
+            Write-Warning "Could not update User PATH. Add this directory manually: $InstallDir"
+        }
+        finally {
+            if ($environmentKey) { $environmentKey.Dispose() }
         }
     }
 
     if (-not $SkipVersionCheck) {
         $versionOutput = & (Join-Path $InstallDir 'televim.exe') --version
-        if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch '^televim\s+' -or $versionOutput -notmatch [regex]::Escape($Version)) {
+        if ($LASTEXITCODE -ne 0 -or $versionOutput -ne "televim $Version") {
             throw "Installed binary could not verify version $Version. Check architecture and Windows runtime requirements."
         }
     }

@@ -51,6 +51,38 @@ env HOME="$tmp/home" SHELL=/bin/bash PATH="$PATH" TELEVIM_OS=Linux TELEVIM_ARCH=
 [ "$(grep -Fc '# >>> televim installer >>>' "$tmp/home/.profile")" -eq 1 ]
 env HOME="$tmp/home" SHELL=/bin/bash PATH="$PATH" TELEVIM_OS=Linux TELEVIM_ARCH=x86_64 TELEVIM_BASE_URL="$base" TELEVIM_VERSION=9.9.9 TELEVIM_INSTALL_DIR="$install_dir" sh "$here/install.sh" >/dev/null
 [ "$(grep -Fc '# >>> televim installer >>>' "$tmp/home/.profile")" -eq 1 ]
+
+cat > "$tmp/televim" <<'EOF'
+#!/bin/sh
+printf 'televim 9.9.90\n'
+EOF
+chmod 755 "$tmp/televim"
+tar -czf "$version_dir/$asset" -C "$tmp" televim README.md LICENSE-MIT LICENSE-APACHE
+if command -v sha256sum >/dev/null 2>&1; then
+  digest=$(sha256sum "$version_dir/$asset" | awk '{print $1}')
+else
+  digest=$(shasum -a 256 "$version_dir/$asset" | awk '{print $1}')
+fi
+printf '%s  %s\n' "$digest" "$asset" > "$version_dir/SHA256SUMS"
+if env HOME="$tmp/home" SHELL=/bin/bash PATH="$PATH" TELEVIM_OS=Linux TELEVIM_ARCH=x86_64 TELEVIM_BASE_URL="$base" TELEVIM_VERSION=9.9.9 TELEVIM_INSTALL_DIR="$tmp/wrong-version-bin" sh "$here/install.sh" >"$tmp/wrong-version.out" 2>&1; then
+  echo 'a longer version number unexpectedly passed the installer check' >&2
+  exit 1
+fi
+grep -q 'unexpected version' "$tmp/wrong-version.out"
+[ ! -e "$tmp/wrong-version-bin/televim" ]
+cat > "$tmp/televim" <<'EOF'
+#!/bin/sh
+printf 'televim 9.9.9\n'
+EOF
+chmod 755 "$tmp/televim"
+tar -czf "$version_dir/$asset" -C "$tmp" televim README.md LICENSE-MIT LICENSE-APACHE
+if command -v sha256sum >/dev/null 2>&1; then
+  digest=$(sha256sum "$version_dir/$asset" | awk '{print $1}')
+else
+  digest=$(shasum -a 256 "$version_dir/$asset" | awk '{print $1}')
+fi
+printf '%s  %s\n' "$digest" "$asset" > "$version_dir/SHA256SUMS"
+
 path_home=$tmp/path-home
 mkdir -p "$path_home"
 env HOME="$path_home" SHELL=/bin/bash PATH="$install_dir:$PATH" TELEVIM_OS=Linux TELEVIM_ARCH=x86_64 TELEVIM_BASE_URL="$base" TELEVIM_VERSION=9.9.9 TELEVIM_INSTALL_DIR="$install_dir" sh "$here/install.sh" >"$tmp/path.out"

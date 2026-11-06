@@ -31,9 +31,8 @@
 
 ## CI Pipeline
 
-`.github/workflows/ci.yml` is configured to run `changes`, `lint`, and `release` on
+`.github/workflows/ci.yml` runs `changes`, `lint`, and `release` on
 `ubuntu-latest`, plus an `installers` matrix on Ubuntu, macOS, and Windows.
-This workflow configuration has not run in this change.
 `changes` classifies the diff and gates the other jobs. `lint` runs on every push
 and pull request. `release` is gated at the job level to a push to `main` that
 changes code, the nightly schedule, and a pull request labelled `memory`; an
@@ -143,8 +142,7 @@ A failed build blocks publishing; failed uploads or verification leave the
 release draft unpublished. Manual dry runs build and smoke-test without changing
 a release. Job permissions limit write access to release-please, changelog, and
 publish jobs. Builds require the `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`
-secrets; missing values fail before compilation. The workflow configuration is
-linted locally; native release legs and draft publication still require a run.
+secrets; missing values fail before compilation.
 Windows TUI, Credential Manager, opener, and owner-only file-mode behavior
 remain outside the CLI smoke test.
 
