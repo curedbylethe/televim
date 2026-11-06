@@ -515,6 +515,7 @@ crates/app/
 │   │                   #   messages per peer, the chat list, the merge
 │   ├── media_cache.rs  # The media directory beside the config: one file
 │   │                   #   per content hash, bounded by bytes and by count
+│   ├── update.rs       # Stable-release check, version comparison, and hint store
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
@@ -791,6 +792,13 @@ which says how a picture reaches the terminal. `auto` asks the environment once
 WezTerm) and is `kitty` only where one of them is named. It is resolved in
 `runtime.rs` and handed to `tui` as `tui::state::ui::GraphicsMode` through
 `App::with_graphics`, fixed before the first frame like the other two.
+
+`Config` also reads `TELEVIM_UPDATES` and `updates` — `auto` by default, `off`
+to disable the check. After the first frame, `runtime.rs` checks GitHub's latest
+stable release once per 24 hours using `curl` or PowerShell on a blocking task.
+The API body is capped at 1 MiB, and the check time and dismissed version live
+in `<config stem>.updates.json`. `TELEVIM_UPDATE_URL` is a test-only endpoint
+override.
 
 `Config` also reads `TELEVIM_JUMPLIST_DEPTH` — 100 by default, allowed 1 to 1000 —
 which is how many back/forward marks each conversation's jumplist keeps. It is

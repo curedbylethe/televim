@@ -14,6 +14,7 @@ mod net;
 mod runtime;
 #[cfg(debug_assertions)]
 mod scenario;
+mod update;
 
 use anyhow::Result;
 use clap::Parser;

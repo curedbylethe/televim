@@ -43,7 +43,12 @@ pub fn sandbox() -> Sandbox {
 
 /// Spawn the `televim` binary with no credentials, 80x24, in `sandbox`.
 pub fn spawn_offline(sandbox: &Sandbox) -> Terminal {
-    spawn(sandbox, None)
+    spawn(sandbox, None, None)
+}
+
+/// Spawn with the update check enabled against a local dead port.
+pub fn spawn_offline_with_update_url(sandbox: &Sandbox, url: &str) -> Terminal {
+    spawn(sandbox, None, Some(url))
 }
 
 /// Spawn the offline binary, which replays `script` once [`Scenario::fire`] runs.
@@ -58,7 +63,7 @@ pub fn spawn_offline_with_scenario(sandbox: &Sandbox, script: &str) -> Scenario 
     fire.push(".fire");
 
     Scenario {
-        terminal: spawn(sandbox, Some(&path)),
+        terminal: spawn(sandbox, Some(&path), None),
         fire: PathBuf::from(fire),
     }
 }
@@ -91,7 +96,7 @@ impl std::ops::DerefMut for Scenario {
 }
 
 /// The one spawn path: `scenario` is the script the binary replays, if any.
-fn spawn(sandbox: &Sandbox, scenario: Option<&Path>) -> Terminal {
+fn spawn(sandbox: &Sandbox, scenario: Option<&Path>, update_url: Option<&str>) -> Terminal {
     let config = sandbox
         .config
         .to_str()
@@ -102,9 +107,17 @@ fn spawn(sandbox: &Sandbox, scenario: Option<&Path>) -> Terminal {
         .timeout(Duration::from_secs(5))
         .current_dir(sandbox.dir.path())
         .env("TELEVIM_SESSION_PATH", &sandbox.session)
-        .env("TELEVIM_SESSION_PASSPHRASE", PASSPHRASE);
+        .env("TELEVIM_SESSION_PASSPHRASE", PASSPHRASE)
+        .env(
+            "TELEVIM_UPDATES",
+            if update_url.is_some() { "auto" } else { "off" },
+        );
     let builder = match scenario {
         Some(path) => builder.env("TELEVIM_SCENARIO", path),
+        None => builder,
+    };
+    let builder = match update_url {
+        Some(url) => builder.env("TELEVIM_UPDATE_URL", url),
         None => builder,
     };
     builder

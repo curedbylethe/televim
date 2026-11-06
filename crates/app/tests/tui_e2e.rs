@@ -103,6 +103,15 @@ fn launches_to_chat_list_in_normal_mode() {
     .expect("chat list in NORMAL mode");
 }
 
+#[test]
+fn dead_update_endpoint_does_not_delay_launch() {
+    let sandbox = common::sandbox();
+    let mut t = common::spawn_offline_with_update_url(&sandbox, "http://127.0.0.1:1/latest");
+
+    t.wait_until(|s| s.contains("Chats") && s.contains("NORMAL"))
+        .expect("chat list draws while update check fails in background");
+}
+
 /// The warm-start cache seeds the chat list before the first frame, so a
 /// launch with a history file shows its chats with no network.
 #[test]
