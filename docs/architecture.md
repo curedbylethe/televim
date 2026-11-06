@@ -809,8 +809,9 @@ WezTerm) and is `kitty` only where one of them is named. It is resolved in
 `Config` also reads `TELEVIM_UPDATES` and `updates` — `auto` by default, `off`
 to disable the check. After the first frame, `runtime.rs` checks GitHub's latest
 stable release once per 24 hours using `curl` or PowerShell on a blocking task.
-The API body is capped at 1 MiB, and the check time and dismissed version live
-in `<config stem>.updates.json`. `TELEVIM_UPDATE_URL` is a test-only endpoint
+The API body is capped at 1 MiB, and the check time, the latest release found
+and the dismissed version live in `<config stem>.updates.json`. A launch inside
+the 24 hours offers the stored release again, without the network. `TELEVIM_UPDATE_URL` is a test-only endpoint
 override.
 
 `Config` also reads `TELEVIM_JUMPLIST_DEPTH` — 100 by default, allowed 1 to 1000 —
