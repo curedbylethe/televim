@@ -188,7 +188,7 @@ jobs:
 
   build-linux:
     needs: prepare
-    if: needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    if: always() && !cancelled() && needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     strategy:
       fail-fast: false
       matrix:
@@ -277,7 +277,7 @@ jobs:
 
   build-macos:
     needs: prepare
-    if: needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    if: always() && !cancelled() && needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     strategy:
       fail-fast: false
       matrix:
@@ -371,7 +371,7 @@ jobs:
 
   build-windows:
     needs: prepare
-    if: needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    if: always() && !cancelled() && needs.prepare.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: windows-latest
     permissions:
       contents: read
@@ -445,7 +445,7 @@ jobs:
 
   publish:
     needs: [prepare, build-linux, build-macos, build-windows]
-    if: needs.prepare.outputs.publish == 'true'
+    if: always() && !cancelled() && needs.prepare.outputs.publish == 'true' && needs.build-linux.result == 'success' && needs.build-macos.result == 'success' && needs.build-windows.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
