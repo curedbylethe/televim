@@ -5290,7 +5290,7 @@ fn preempt_key(
             ui.update.stage(),
             crate::state::update::Stage::Applying { .. }
         ) {
-            if key.code == KeyCode::Esc {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
                 queue_action(
                     outbox,
                     ui,

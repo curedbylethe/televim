@@ -2687,21 +2687,24 @@ fn update_offer_defaults_to_later_and_answers_only_after_confirmation() {
 }
 
 #[test]
-fn update_progress_renders_stage_and_only_escape_cancels() {
+fn update_progress_uses_design_stages_and_enter_or_escape_cancels() {
     let mut app = App::mock();
     app.ui.update.available("0.8.0", "0.9.0");
     assert!(app.update_begin_apply("0.9.0"));
     for (progress, word) in [
         (crate::state::update::Progress::Downloading, "downloading"),
         (crate::state::update::Progress::Verifying, "verifying"),
-        (crate::state::update::Progress::Extracting, "extracting"),
-        (crate::state::update::Progress::Checking, "checking"),
+        (crate::state::update::Progress::Extracting, "installing"),
+        (crate::state::update::Progress::Checking, "installing"),
     ] {
         app.update_progress(progress);
         assert!(frame_rows(&app).iter().any(|row| row.contains(word)));
     }
     app.handle_key(press(KeyCode::Enter));
-    assert!(app.take_action().is_none());
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Update(crate::state::update::Action::Cancel))
+    );
     app.handle_key(press(KeyCode::Esc));
     assert_eq!(
         app.take_action(),

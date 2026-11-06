@@ -90,8 +90,8 @@ fn render_details(
         Stage::Applying { progress, .. } => match progress {
             crate::state::update::Progress::Downloading => "downloading",
             crate::state::update::Progress::Verifying => "verifying",
-            crate::state::update::Progress::Extracting => "extracting",
-            crate::state::update::Progress::Checking => "checking",
+            crate::state::update::Progress::Extracting
+            | crate::state::update::Progress::Checking => "installing",
         },
         Stage::Failed { .. } => "Update could not be staged.",
         Stage::Installed { .. } => "",
@@ -114,7 +114,7 @@ fn render_details(
     match stage {
         Stage::Applying { .. } => {
             frame.render_widget(
-                Paragraph::new("Esc: cancel after current step").style(dim),
+                Paragraph::new("Esc/⏎: cancel after current step").style(dim),
                 rows[5],
             );
         }
