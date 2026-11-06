@@ -430,9 +430,10 @@ here — and it only measures on the platform it was recorded on: see below.
 A baseline is only comparable to a run on the platform it was taken on. The
 stored baseline names its `platform`, and the check enforces only when that
 matches the running host. The only committed baseline is
-`docs/memory-baseline.json`, and it is `darwin-arm64`; CI runs `ubuntu-latest`,
-so the check has had no baseline to enforce against there and has been
-reporting, not failing. On a host with no stored baseline it **reports and does
+`docs/memory-baseline.json`, and it is `darwin-arm64`; the memory-budget job runs
+on `ubuntu-latest`, so it has no baseline to enforce against there and has been
+reporting, not failing. Installer tests and native release builds do not measure
+memory. On a host with no stored baseline it **reports and does
 not fail**, because a threshold cannot be calibrated on a machine it was never
 measured on; the run still writes its report, which a maintainer reads and
 records with `check.py --record-baseline`. Enforcement on the CI host therefore
@@ -785,8 +786,9 @@ against a fragmenting heap. The choice could not be measured on this host either
 — macOS RSS moves by roughly 2x between runs with no code change, so a
 candidate's delta is inside the noise rather than a result — and
 `std::alloc::System` is the one answer that is the same on macOS, Linux and
-Windows and needs no C toolchain on any of them. Windows is not exercised in CI
-and is named as a platform gap.
+Windows and needs no C toolchain on any of them. Windows installer CI and the
+release CLI smoke test are configured, but neither runs the memory harness or
+measures RSS. Windows therefore has no memory baseline or guarantee.
 
 `#[global_allocator]` does not exist, and if it ever did it would be declared in
 `crates/app/src/main.rs` — the composition root — because an allocator is a

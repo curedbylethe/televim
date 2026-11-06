@@ -55,12 +55,13 @@ Real, and named so they are not mistaken for oversights:
     `viewer_image`, `viewer_video`, `viewer_audio`) is run directly and waited on, so
     its sentence reports the viewer's own exit; only the platform default keeps this limit.
   - *Windows release CI is limited to build and CLI smoke tests.* The release workflow
-    builds Windows x86_64 and checks `--version` and `--help`. It does not validate the
-    TUI, Credential Manager, opener, or owner-only file modes. The default opener is
+    is configured to build Windows x86_64 and check `--version` and `--help`; those
+    native release legs have not run in this change. It does not validate the TUI,
+    Credential Manager, opener, or owner-only file modes. The default opener is
     `cmd /C start "" /WAIT`, which waits for the started process, but the manual check
     in the `OPENER` doc comment in `crates/app/src/runtime.rs` remains outstanding. A
     target that detaches itself can still return early; a configured viewer command is
-    the escape hatch. Treat Windows as experimental until that manual check passes.
+    the escape hatch. Treat Windows as experimental until CI and that manual check pass.
 - **The global search has no sender filter.** `from:`, `sender:` and `by:` are
   refused by the prompt's parser, each naming the word as typed (`from:ada is not
   a filter here: global search has no sender filter.`), and the prompt reopens with the line still in it
@@ -342,7 +343,8 @@ Real, and named so they are not mistaken for oversights:
   such a file signs in again. Until then it is read as described; nothing is
   removed yet.
 - **Signing out deletes the keyring entry and no more.** `KeyringStore::clear`
-  deletes the `session` credential and counts a missing one as success. The OS
+  deletes the `session` credential and counts a missing one as success. It leaves
+  the shared `file-key` credential in place. The OS
   credential store owns the bytes it keeps, so it may leave a backup, a version
   or a free-list copy that this repo cannot reach, and the in-memory mirror is
   grammers-owned, so its bytes cannot be wiped either; only the wrapper's own
@@ -351,6 +353,14 @@ Real, and named so they are not mistaken for oversights:
   empty (`clearing_a_used_session_resets_counters_peers_and_the_stored_copy`), and
   the client is dropped, which aborts its runner, so no grammers session or socket
   outlives it. There is no integration test that watches a socket close.
+- **Linux keyring use needs a Secret Service session.** Release binaries need the
+  platform D-Bus runtime library and a Secret Service provider such as GNOME
+  Keyring or KWallet. A headless system without a session bus cannot use that
+  store; configure `session_path` and a passphrase instead. See
+  [`installing.md`](./installing.md).
+- **Release binaries are unsigned and not notarized.** macOS Gatekeeper and
+  Windows SmartScreen may warn or block them. `SHA256SUMS` checks file integrity;
+  it does not establish publisher identity. See [`installing.md`](./installing.md).
 - **Key wiping cannot reach copies made before a `Drop`.** The `FileKey`, the
   passphrase, the cipher's intermediate keys and its expanded round keys are all
   wiped when they drop (the `zeroize` features on `aes-gcm-siv` and `aes`). A copy
