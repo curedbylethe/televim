@@ -482,3 +482,7 @@ Working today:
   launch finds no session. A plaintext file from an older build is read once and
   rewritten sealed; that reader goes after 2026-12-31, and a plaintext file is then
   treated as corrupt.
+- **Stable release checks:** after the first frame, Televim checks GitHub once
+  per day for a newer stable release. The check runs off the event loop; network
+  failure does not delay launch. `updates = "off"` or `TELEVIM_UPDATES=off`
+  disables checks; the default is `auto`.

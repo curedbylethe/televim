@@ -40,6 +40,7 @@ use crate::media_cache::MediaCache;
 use crate::net;
 #[cfg(debug_assertions)]
 use crate::scenario;
+use crate::update;
 use domain::message::MediaKind;
 use tui::app::App;
 use tui::state::ui::{GraphicsMode, StickerMode};
@@ -66,6 +67,9 @@ pub(crate) enum AppEvent {
 
     /// A viewer has exited, reported by the thread that waited for it.
     Viewer(ViewerDone),
+
+    /// A stable-release check completed away from the event loop.
+    Update(update::Event),
 }
 
 /// What a viewer's wait reports: the file it was given, and how the viewer ended.
@@ -708,6 +712,7 @@ fn drain_while_suspended(
     while let Ok(event) = rx.try_recv() {
         match event {
             AppEvent::Net(event) => net::apply(app, network, event),
+            AppEvent::Update(event) => update::apply(app, event),
             // A replayed directive is the network's answer as far as this is
             // concerned, so it is applied for the same reason.
             #[cfg(debug_assertions)]
@@ -901,6 +906,7 @@ async fn event_loop(
     // drawing before a round trip has finished. What it finds out arrives as an
     // event, like everything else.
     net::spawn_bring_up(cfg.clone(), config_path, paths.slot, tx.clone());
+    schedule_update_check(cfg.updates_enabled(), config_path, tx.clone());
 
     let mut held: VecDeque<AppEvent> = VecDeque::new();
 
@@ -941,6 +947,7 @@ async fn event_loop(
             Ok(Some(AppEvent::Input(Event::FocusLost))) => focus_changed(&mut app, keys, false)?,
             Ok(Some(AppEvent::Input(_))) | Err(_) => {}
             Ok(Some(AppEvent::Net(event))) => net::apply(&mut app, &mut network, event),
+            Ok(Some(AppEvent::Update(event))) => update::apply(&mut app, event),
             // The same doors the network's answers go through: an arrival walks
             // the update path, and a fetch is the screen's own in-flight mark.
             #[cfg(debug_assertions)]
@@ -1031,6 +1038,56 @@ fn unix_seconds() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+/// Checks for a newer stable release off the event loop, once the first frame exists.
+fn schedule_update_check(
+    enabled: bool,
+    config_path: &Path,
+    sender: mpsc::UnboundedSender<AppEvent>,
+) {
+    if !enabled {
+        return;
+    }
+    let config_path = config_path.to_path_buf();
+    drop(tokio::spawn(async move {
+        // The loop draws its first frame before awaiting, so this starts after it.
+        tokio::task::yield_now().await;
+        spawn_update_check(config_path, sender);
+    }));
+}
+
+fn spawn_update_check(config_path: PathBuf, sender: mpsc::UnboundedSender<AppEvent>) {
+    let now = unix_seconds().max(0).cast_unsigned();
+    tokio::task::spawn_blocking(move || {
+        let path = update::store_path(&config_path);
+        let mut store = update::Store::load(&path);
+        if !update::due(store.checked, now) {
+            return;
+        }
+        let Some(installed) = update::Version::parse(env!("CARGO_PKG_VERSION")) else {
+            tracing::error!("compiled application version is invalid");
+            return;
+        };
+        // Test hook for an unreachable local endpoint; ordinary runs use GitHub.
+        let url =
+            std::env::var("TELEVIM_UPDATE_URL").unwrap_or_else(|_| update::RELEASE_URL.to_owned());
+        let event = update::check(
+            &update::PlatformTransport,
+            &url,
+            &installed,
+            store.dismissed.as_deref(),
+        );
+        if matches!(&event, update::Event::Failed) {
+            tracing::debug!("could not check for updates");
+        } else {
+            store.checked = Some(now);
+            if let Err(error) = store.save(&path) {
+                tracing::debug!(%error, "could not save update check time");
+            }
+        }
+        let _ = sender.send(AppEvent::Update(event));
+    });
 }
 
 /// Records what the reader's clock says and the zone it is read in, for one pass.

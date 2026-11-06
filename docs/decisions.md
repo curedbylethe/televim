@@ -1654,3 +1654,13 @@ are in [`../AGENTS.md`](../AGENTS.md).
 - **Why draft discard is a confirmed command:** `:discard` removes the open
   conversation draft and its subject. Confirmation prevents accidental loss,
   and Enter remains unbound to discard.
+
+- **Why update checks use the platform HTTP tool:** a TLS client would add a
+  sizeable dependency to a binary with a fixed memory and size budget. `curl`
+  on macOS and Linux and PowerShell on Windows are already required by the
+  installers; the check runs off the event loop and fails quietly when a tool
+  is missing or the reader is offline.
+- **Why the update check reads GitHub's latest-release API:** the release
+  workflow already publishes stable tags and versioned assets there. A separate
+  manifest would duplicate release state and could drift from the assets the
+  installer verifies.

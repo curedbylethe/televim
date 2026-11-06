@@ -154,6 +154,11 @@ pub struct Config {
     /// keeps the value it was launched with.
     pub graphics: String,
 
+    /// Whether to check for stable releases: `auto` or `off`.
+    ///
+    /// The exact word `off` disables checks; unknown values keep the default.
+    pub updates: Option<String>,
+
     /// Application identifier, from <https://my.telegram.org>.
     ///
     /// Identifies the *application*, not the account: every user of a build
@@ -262,6 +267,7 @@ impl Default for Config {
             bidi: BIDI_TERMINAL.to_owned(),
             stickers: STICKERS_INLINE.to_owned(),
             graphics: GRAPHICS_AUTO.to_owned(),
+            updates: None,
             api_id: None,
             api_hash: None,
             phone: None,
@@ -397,6 +403,12 @@ impl Config {
     #[must_use]
     pub fn jumplist_depth(&self) -> usize {
         self.jumplist_depth.unwrap_or(DEFAULT_DEPTH)
+    }
+
+    /// Whether the background stable-release check is enabled.
+    #[must_use]
+    pub fn updates_enabled(&self) -> bool {
+        self.updates.as_deref() != Some("off")
     }
 
     /// The application credentials, if both were given.
@@ -620,6 +632,33 @@ mod tests {
     fn the_jumplist_depth_defaults_to_a_hundred() {
         assert_eq!(bare().jumplist_depth(), DEFAULT_DEPTH);
         assert_eq!(bare().jumplist_depth(), 100);
+    }
+
+    #[test]
+    fn updates_default_on_and_only_exact_off_disables_them() {
+        assert!(bare().updates_enabled());
+        assert!(
+            load_toml("updates-unknown", "updates = \"OFF\"\n")
+                .expect("unknown spelling loads")
+                .updates_enabled()
+        );
+        assert!(
+            !load_toml("updates-off", "updates = \"off\"\n")
+                .expect("off loads")
+                .updates_enabled()
+        );
+    }
+
+    #[test]
+    fn the_environment_supplies_the_updates_key() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+        // SAFETY: process-wide environment, written only by tests in this module under ENV.
+        unsafe { std::env::set_var("TELEVIM_UPDATES", "off") };
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+        // SAFETY: as above — clearing the variable this test set.
+        unsafe { std::env::remove_var("TELEVIM_UPDATES") };
+        assert!(!cfg.updates_enabled());
     }
 
     /// The depth is read from the file under its own key.

@@ -72,6 +72,8 @@ A source build has no application credentials. Set `TELEVIM_API_ID` and
 Televim reads optional `televim.toml` from the current directory. Use
 `--config <path>` to select another file. Logs, drafts, history, and the account
 list are stored beside it; the media cache can use a separate directory.
+Stable release checks run in the background once per day. Set `updates = "off"`
+or `TELEVIM_UPDATES=off` to disable them; the default is `auto`.
 
 The login session uses the OS credential store by default. Set `session_path` to
 store it in an encrypted file, and set `TELEVIM_SESSION_PASSPHRASE` or
