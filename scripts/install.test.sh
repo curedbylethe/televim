@@ -13,23 +13,27 @@ trap cleanup 0 HUP INT TERM
 server=$tmp/server
 version_dir=$server/v9.9.9
 mkdir -p "$version_dir" "$tmp/home"
-cat > "$tmp/televim" <<'EOF'
-#!/bin/sh
-printf 'televim 9.9.9\n'
-EOF
-chmod 755 "$tmp/televim"
 printf 'fixture\n' > "$tmp/README.md"
 printf 'fixture\n' > "$tmp/LICENSE-MIT"
 printf 'fixture\n' > "$tmp/LICENSE-APACHE"
 
 asset=televim-9.9.9-x86_64-unknown-linux-gnu.tar.gz
-tar -czf "$version_dir/$asset" -C "$tmp" televim README.md LICENSE-MIT LICENSE-APACHE
-if command -v sha256sum >/dev/null 2>&1; then
-  digest=$(sha256sum "$version_dir/$asset" | awk '{print $1}')
-else
-  digest=$(shasum -a 256 "$version_dir/$asset" | awk '{print $1}')
-fi
-printf '%s  %s\n' "$digest" "$asset" > "$version_dir/SHA256SUMS"
+make_fixture() {
+  version_output=$1
+  cat > "$tmp/televim" <<EOF
+#!/bin/sh
+printf '%s\\n' '$version_output'
+EOF
+  chmod 755 "$tmp/televim"
+  tar -czf "$version_dir/$asset" -C "$tmp" televim README.md LICENSE-MIT LICENSE-APACHE
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum "$version_dir/$asset" | awk '{print $1}')
+  else
+    digest=$(shasum -a 256 "$version_dir/$asset" | awk '{print $1}')
+  fi
+  printf '%s  %s\n' "$digest" "$asset" > "$version_dir/SHA256SUMS"
+}
+make_fixture 'televim 9.9.9'
 
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 python3 -m http.server "$port" --directory "$server" --bind 127.0.0.1 > "$tmp/http.log" 2>&1 &
@@ -52,36 +56,14 @@ env HOME="$tmp/home" SHELL=/bin/bash PATH="$PATH" TELEVIM_OS=Linux TELEVIM_ARCH=
 env HOME="$tmp/home" SHELL=/bin/bash PATH="$PATH" TELEVIM_OS=Linux TELEVIM_ARCH=x86_64 TELEVIM_BASE_URL="$base" TELEVIM_VERSION=9.9.9 TELEVIM_INSTALL_DIR="$install_dir" sh "$here/install.sh" >/dev/null
 [ "$(grep -Fc '# >>> televim installer >>>' "$tmp/home/.profile")" -eq 1 ]
 
-cat > "$tmp/televim" <<'EOF'
-#!/bin/sh
-printf 'televim 9.9.90\n'
-EOF
-chmod 755 "$tmp/televim"
-tar -czf "$version_dir/$asset" -C "$tmp" televim README.md LICENSE-MIT LICENSE-APACHE
-if command -v sha256sum >/dev/null 2>&1; then
-  digest=$(sha256sum "$version_dir/$asset" | awk '{print $1}')
-else
-  digest=$(shasum -a 256 "$version_dir/$asset" | awk '{print $1}')
-fi
-printf '%s  %s\n' "$digest" "$asset" > "$version_dir/SHA256SUMS"
+make_fixture 'televim 9.9.90'
 if env HOME="$tmp/home" SHELL=/bin/bash PATH="$PATH" TELEVIM_OS=Linux TELEVIM_ARCH=x86_64 TELEVIM_BASE_URL="$base" TELEVIM_VERSION=9.9.9 TELEVIM_INSTALL_DIR="$tmp/wrong-version-bin" sh "$here/install.sh" >"$tmp/wrong-version.out" 2>&1; then
   echo 'a longer version number unexpectedly passed the installer check' >&2
   exit 1
 fi
 grep -q 'unexpected version' "$tmp/wrong-version.out"
 [ ! -e "$tmp/wrong-version-bin/televim" ]
-cat > "$tmp/televim" <<'EOF'
-#!/bin/sh
-printf 'televim 9.9.9\n'
-EOF
-chmod 755 "$tmp/televim"
-tar -czf "$version_dir/$asset" -C "$tmp" televim README.md LICENSE-MIT LICENSE-APACHE
-if command -v sha256sum >/dev/null 2>&1; then
-  digest=$(sha256sum "$version_dir/$asset" | awk '{print $1}')
-else
-  digest=$(shasum -a 256 "$version_dir/$asset" | awk '{print $1}')
-fi
-printf '%s  %s\n' "$digest" "$asset" > "$version_dir/SHA256SUMS"
+make_fixture 'televim 9.9.9'
 
 path_home=$tmp/path-home
 mkdir -p "$path_home"

@@ -7,8 +7,8 @@ build from source, see [`README.md`](../README.md#building).
 
 | OS | Architecture | Target | Archive | Minimum / status |
 | :--- | :--- | :--- | :--- | :--- |
-| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | unmeasured |
-| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | unmeasured |
+| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | macOS 11.0 |
+| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | macOS 10.12 |
 | Linux | x86_64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
 | Linux | arm64 | `aarch64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
 | Windows | x86_64 | `x86_64-pc-windows-msvc` | `.zip` | Windows 10+; experimental |
@@ -197,8 +197,8 @@ encrypted `session_path` and `session_passphrase` configuration described above.
 
 ## Windows
 
-Windows x86_64 is experimental. The Windows release workflow is configured to
-build and smoke-test the executable, but the TUI, Credential Manager, and file
+Windows x86_64 is experimental. The Windows release workflow builds and
+smoke-tests the executable, but the TUI, Credential Manager, and file
 opener still need a manual check. The binary is unsigned. SmartScreen may show
 “Windows protected your PC”; choose **More info** and **Run anyway** only if you
 trust the download. Smart App Control may block unsigned code without a

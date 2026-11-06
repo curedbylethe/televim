@@ -211,8 +211,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: use current license files
-        run: git fetch --depth=1 origin main && git checkout origin/main -- LICENSE-MIT LICENSE-APACHE
+      - name: use current release files
+        run: git fetch --depth=1 origin '+refs/heads/main:refs/remotes/origin/main' && git checkout origin/main -- LICENSE-MIT LICENSE-APACHE scripts/release/check-lock.py
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -293,8 +293,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: use current license files
-        run: git fetch --depth=1 origin main && git checkout origin/main -- LICENSE-MIT LICENSE-APACHE
+      - name: use current release files
+        run: git fetch --depth=1 origin '+refs/heads/main:refs/remotes/origin/main' && git checkout origin/main -- LICENSE-MIT LICENSE-APACHE scripts/release/check-lock.py
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -366,8 +366,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: use current license files
-        run: git fetch --depth=1 origin main && git checkout origin/main -- LICENSE-MIT LICENSE-APACHE
+      - name: use current release files
+        run: git fetch --depth=1 origin '+refs/heads/main:refs/remotes/origin/main' && git checkout origin/main -- LICENSE-MIT LICENSE-APACHE scripts/release/check-lock.py
 
       - uses: dtolnay/rust-toolchain@master
         with:

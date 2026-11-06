@@ -131,8 +131,8 @@ else; the `release` job carries the release build and the budget.
 pull-request trigger. Pushes to `main` run release-please and write the release
 PR's `CHANGELOG.md` section (git-cliff, see `cliff.toml`). Tag pushes and manual
 dispatches from `main` use the same release path; each tag must resolve to a
-commit on `main` and match the workspace version. The workflow is configured for
-five native targets: macOS arm64 and x86_64, Linux x86_64 and arm64, and Windows
+commit on `main` and match the workspace version. The workflow builds five
+native targets: macOS arm64 and x86_64, Linux x86_64 and arm64, and Windows
 x86_64. Linux builds use an Ubuntu 22.04 container for a glibc 2.35 floor. Each
 runner packages and smoke-tests its archive, including `--version`, `--help`,
 and platform runtime links. The workflow syncs only the workspace package entry

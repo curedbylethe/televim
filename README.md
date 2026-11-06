@@ -550,8 +550,8 @@ Installers put `televim` on your user `PATH` and verify the archive checksum.
 
 | OS | Architecture | Target | Archive | Minimum / status |
 | :--- | :--- | :--- | :--- | :--- |
-| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | unmeasured |
-| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | unmeasured |
+| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | macOS 11+ |
+| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | macOS 10.12+ |
 | Linux | x86_64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
 | Linux | arm64 | `aarch64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
 | Windows | x86_64 | `x86_64-pc-windows-msvc` | `.zip` | Windows 10+; experimental |
