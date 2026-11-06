@@ -9,7 +9,7 @@ risen past what the budget allows.
     metric | measured | baseline | allowed | threshold | verdict
 
 The budget is a guard on *change*, not on the project's declared targets: those
-stay where README puts them. A figure that shrinks is never a failure.
+stay where `docs/product.md` puts them. A figure that shrinks is never a failure.
 
 Platform: a baseline is only comparable to a run on the platform it was taken
 on. A host with no stored baseline is reported and not enforced, because a

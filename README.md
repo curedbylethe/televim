@@ -10,7 +10,7 @@ A keyboard-driven Telegram client for the terminal, with Vim-style Normal, Inser
 and Visual modes. It runs on macOS and Linux, with an experimental Windows
 build; it shows private user-to-user chats only, with no groups, channels, or bots.
 
-Pre-1.0: see [known gaps](docs/known-gaps.md). See [memory notes](docs/memory.md) for measurement details.
+Pre-1.0: see [known gaps](docs/known-gaps.md).
 
 ![televim showing a chat list and a conversation](docs/images/televim.png)
 
@@ -41,7 +41,7 @@ irm https://raw.githubusercontent.com/curedbylethe/televim/main/scripts/install.
 ```
 
 The installer uses `$HOME/.local/bin` on macOS and Linux, or
-`%LOCALAPPDATA%\televim\bin` on Windows. It offers to add the directory to
+`%LOCALAPPDATA%\televim\bin` on Windows. It adds the directory to
 `PATH`; open a new terminal after installation. Use `--no-modify-path` or
 `-NoModifyPath` to skip the `PATH` change.
 
@@ -122,8 +122,7 @@ Type `:` in a conversation or profile card for `:chat`, `:new`, `:search`, `:att
 
 ## Troubleshooting
 
-- **“televim has no application credentials”**: a source build needs
-  `TELEVIM_API_ID` and `TELEVIM_API_HASH`, or `api_id` and `api_hash` in config.
+- **“televim has no application credentials”**: see [source-build credentials](#credentials).
 - **Linux keyring errors**: install your distribution's DBus runtime package
   and a Secret Service provider such as GNOME Keyring or KWallet. For headless
   use, configure `session_path` and a passphrase. See [Linux details](docs/installing.md#linux).

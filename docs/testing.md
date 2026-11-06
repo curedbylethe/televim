@@ -402,6 +402,7 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   `h=$(sips -g pixelHeight target/rtl-shots/readme_hero.png | awk '/pixelHeight/{print $2}')`
   and crop one bottom row with
   `magick target/rtl-shots/readme_hero.png -strip -gravity south -chop 0x$((h / 24)) docs/images/televim.png`.
+  Keep kitty at its configured 24-row height; the crop assumes that height.
   The crop removes the offline no-credentials status row. Refreshing needs macOS,
   kitty, Screen Recording permission for the terminal, and ImageMagick.
 - **Memory Verification:** implemented as `make measure`, not as part of `ci`.
