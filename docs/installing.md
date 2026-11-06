@@ -237,6 +237,9 @@ Run the installer again, or download the new target archive and replace the
 executable. Verify the result with `televim --version`. Upgrading preserves the
 config, drafts, history, media, and keyring entries.
 
+The in-app `:update` path downloads the same target archive and verifies its
+digest against the release's `SHA256SUMS` before staging it beside the executable.
+
 Set `TELEVIM_VERSION` before running an installer to pin a version. Keep
 existing `session_kdf_memory_kib`, `session_kdf_passes`, and `session_kdf_lanes`
 values unchanged: the encrypted session file will not open with a different

@@ -523,7 +523,7 @@ crates/app/
 │   │                   #   messages per peer, the chat list, the merge
 │   ├── media_cache.rs  # The media directory beside the config: one file
 │   │                   #   per content hash, bounded by bytes and by count
-│   ├── update.rs       # Stable-release check, version comparison, consent and hint store
+│   ├── update.rs       # Stable check, consent, bounded verified download and adjacent staging
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
@@ -532,6 +532,11 @@ crates/app/
 │   └── tui_e2e.rs            # PTY tests; arrivals/fetches via a debug seam
 └── Cargo.toml
 ```
+
+The updater uses curl or PowerShell for bounded downloads. It streams release
+archives, capped at 32 MiB, to `.televim-update-<pid>` beside the executable,
+then verifies `SHA256SUMS`, extracts only `televim`, and checks its version.
+The archive is never held in memory; hashing uses a fixed 64 KiB buffer.
 
 `accounts.rs` is the one resolver for the four artefacts that belong to an
 account: `slot_paths` derives the drafts file, the history file, the media

@@ -1,5 +1,7 @@
 //! State for the stable release offer.
 
+use std::path::PathBuf;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateState {
     stage: Stage,
@@ -15,6 +17,30 @@ pub enum Stage {
         available: String,
         offered: bool,
     },
+    Applying {
+        installed: String,
+        available: String,
+        progress: Progress,
+    },
+    Failed {
+        installed: String,
+        available: String,
+        reason: String,
+        offered: bool,
+    },
+    Ready {
+        installed: String,
+        available: String,
+        staged: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    Downloading,
+    Verifying,
+    Extracting,
+    Checking,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,6 +55,7 @@ pub enum Action {
     Open,
     Apply { available: String },
     Later { available: String },
+    Cancel,
 }
 
 impl UpdateState {
@@ -46,22 +73,110 @@ impl UpdateState {
     }
 
     pub(crate) fn open(&mut self) -> bool {
-        let Stage::Available { offered, .. } = &mut self.stage else {
-            return false;
-        };
-        *offered = true;
+        match &mut self.stage {
+            Stage::Available { offered, .. } | Stage::Failed { offered, .. } => *offered = true,
+            _ => return false,
+        }
         self.selected = Choice::Later;
         true
     }
 
     pub(crate) fn close(&mut self) {
-        if let Stage::Available { offered, .. } = &mut self.stage {
-            *offered = false;
+        match &mut self.stage {
+            Stage::Available { offered, .. } | Stage::Failed { offered, .. } => *offered = false,
+            _ => {}
         }
     }
 
     pub(crate) fn is_open(&self) -> bool {
-        matches!(self.stage, Stage::Available { offered: true, .. })
+        matches!(
+            self.stage,
+            Stage::Available { offered: true, .. }
+                | Stage::Applying { .. }
+                | Stage::Failed { offered: true, .. }
+                | Stage::Ready { .. }
+        )
+    }
+
+    pub(crate) fn begin_apply(&mut self, available: &str) -> bool {
+        let Some((installed, current)) = self.versions() else {
+            return false;
+        };
+        if current != available {
+            return false;
+        }
+        self.stage = Stage::Applying {
+            installed,
+            available: current,
+            progress: Progress::Downloading,
+        };
+        true
+    }
+
+    pub(crate) fn progress(&mut self, progress: Progress) {
+        if let Stage::Applying {
+            progress: stage, ..
+        } = &mut self.stage
+        {
+            *stage = progress;
+        }
+    }
+
+    pub(crate) fn fail(&mut self, reason: String) {
+        if let Stage::Applying {
+            installed,
+            available,
+            ..
+        } = &self.stage
+        {
+            self.stage = Stage::Failed {
+                installed: installed.clone(),
+                available: available.clone(),
+                reason,
+                offered: true,
+            };
+            self.selected = Choice::Later;
+        }
+    }
+
+    pub(crate) fn cancelled(&mut self) {
+        if let Stage::Applying {
+            installed,
+            available,
+            ..
+        } = &self.stage
+        {
+            self.stage = Stage::Available {
+                installed: installed.clone(),
+                available: available.clone(),
+                offered: false,
+            };
+        }
+    }
+
+    pub(crate) fn ready(&mut self, staged: PathBuf) {
+        if let Stage::Applying {
+            installed,
+            available,
+            ..
+        } = &self.stage
+        {
+            self.stage = Stage::Ready {
+                installed: installed.clone(),
+                available: available.clone(),
+                staged,
+            };
+        }
+    }
+
+    pub(crate) fn indicator_version(&self) -> Option<&str> {
+        match &self.stage {
+            Stage::Available { available, .. }
+            | Stage::Applying { available, .. }
+            | Stage::Failed { available, .. }
+            | Stage::Ready { available, .. } => Some(available),
+            Stage::Idle => None,
+        }
     }
 
     pub(crate) fn selected(&self) -> Choice {
@@ -73,18 +188,42 @@ impl UpdateState {
     }
 
     pub(crate) fn answer(&mut self) -> Option<Action> {
-        let Stage::Available { available, .. } = &self.stage else {
-            return None;
-        };
-        let action = match self.selected {
-            Choice::Update => Action::Apply {
-                available: available.clone(),
-            },
-            Choice::Later => Action::Later {
-                available: available.clone(),
-            },
+        if matches!(self.stage, Stage::Applying { .. }) {
+            return Some(Action::Cancel);
+        }
+        let available = match &self.stage {
+            Stage::Available {
+                available,
+                offered: true,
+                ..
+            }
+            | Stage::Failed {
+                available,
+                offered: true,
+                ..
+            } => available.clone(),
+            _ => return None,
         };
         self.close();
-        Some(action)
+        Some(match self.selected {
+            Choice::Update => Action::Apply { available },
+            Choice::Later => Action::Later { available },
+        })
+    }
+
+    fn versions(&self) -> Option<(String, String)> {
+        match &self.stage {
+            Stage::Available {
+                installed,
+                available,
+                ..
+            }
+            | Stage::Failed {
+                installed,
+                available,
+                ..
+            } => Some((installed.clone(), available.clone())),
+            _ => None,
+        }
     }
 }

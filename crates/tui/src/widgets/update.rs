@@ -10,11 +10,28 @@ use crate::app::App;
 use crate::state::update::{Choice, Stage};
 
 pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
-    let Stage::Available {
+    let stage = app.ui.update.stage();
+    let (Stage::Available {
         installed,
         available,
         offered: true,
-    } = app.ui.update.stage()
+    }
+    | Stage::Failed {
+        installed,
+        available,
+        offered: true,
+        ..
+    }
+    | Stage::Applying {
+        installed,
+        available,
+        ..
+    }
+    | Stage::Ready {
+        installed,
+        available,
+        ..
+    }) = stage
     else {
         return;
     };
@@ -30,10 +47,16 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         height,
     );
     frame.render_widget(Clear, dialog);
+    let title = match stage {
+        Stage::Applying { .. } => " Updating ",
+        Stage::Failed { .. } => " Update failed ",
+        Stage::Ready { .. } => " Update verified ",
+        _ => " Update available ",
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(app.ui.theme.border)
-        .title(Span::styled(" Update available ", app.ui.theme.text));
+        .title(Span::styled(title, app.ui.theme.text));
     let inner = block.inner(dialog);
     frame.render_widget(block, dialog);
     let rows = Layout::default()
@@ -50,12 +73,31 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
             Constraint::Min(1),
         ])
         .split(inner);
+    render_details(app, stage, installed, available, frame, &rows);
+}
+
+fn render_details(
+    app: &App,
+    stage: &Stage,
+    installed: &str,
+    available: &str,
+    frame: &mut Frame<'_>,
+    rows: &[Rect],
+) {
     let text = app.ui.theme.text;
     let dim = app.ui.theme.text_dim;
-    frame.render_widget(
-        Paragraph::new("A newer stable release is available.").style(text),
-        rows[0],
-    );
+    let headline = match stage {
+        Stage::Applying { progress, .. } => match progress {
+            crate::state::update::Progress::Downloading => "downloading",
+            crate::state::update::Progress::Verifying => "verifying",
+            crate::state::update::Progress::Extracting => "extracting",
+            crate::state::update::Progress::Checking => "checking",
+        },
+        Stage::Failed { .. } => "Update could not be staged.",
+        Stage::Ready { .. } => "Verified update is ready.",
+        _ => "A newer stable release is available.",
+    };
+    frame.render_widget(Paragraph::new(headline).style(text), rows[0]);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!("Installed  {installed}"), dim),
@@ -64,18 +106,41 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         ])),
         rows[2],
     );
-    frame.render_widget(
-        Paragraph::new("Update downloads the verified archive and").style(text),
-        rows[4],
-    );
-    frame.render_widget(
-        Paragraph::new("replaces the binary. This window keeps").style(text),
-        rows[5],
-    );
-    frame.render_widget(
-        Paragraph::new(format!("running {installed} until you restart.")).style(text),
-        rows[6],
-    );
+    match stage {
+        Stage::Applying { .. } => {
+            frame.render_widget(
+                Paragraph::new("Esc: cancel after current step").style(dim),
+                rows[5],
+            );
+        }
+        Stage::Failed { reason, .. } => {
+            frame.render_widget(Paragraph::new(reason.as_str()).style(text), rows[4]);
+        }
+        Stage::Ready { .. } => {
+            frame.render_widget(
+                Paragraph::new(format!("running {installed} until stage 05 replaces it."))
+                    .style(text),
+                rows[4],
+            );
+        }
+        _ => {
+            frame.render_widget(
+                Paragraph::new("Update downloads the verified archive and").style(text),
+                rows[4],
+            );
+            frame.render_widget(
+                Paragraph::new("replaces the binary. This window keeps").style(text),
+                rows[5],
+            );
+            frame.render_widget(
+                Paragraph::new(format!("running {installed} until you restart.")).style(text),
+                rows[6],
+            );
+        }
+    }
+    if matches!(stage, Stage::Applying { .. } | Stage::Ready { .. }) {
+        return;
+    }
     let update = action(
         "[ Update ]",
         app.ui.update.selected() == Choice::Update,

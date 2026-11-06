@@ -1,13 +1,15 @@
 //! Stable release checks use bounded platform tools and a small adjacent hint file.
 //!
-//! The API response is capped at 1 MiB. No archive is read here; downloads are
-//! staged in a later update step.
+//! API responses cap at 1 MiB, checksum files at 64 KiB, and release archives at
+//! 32 MiB. Archives stream to disk; SHA-256 uses a fixed 64 KiB buffer.
 
 use std::cmp::Ordering;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use serde::{Deserialize, Serialize};
 use tui::app::App;
@@ -15,6 +17,9 @@ use tui::app::App;
 pub(crate) const RELEASE_URL: &str =
     "https://api.github.com/repos/curedbylethe/televim/releases/latest";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_CHECKSUM_BYTES: u64 = 64 * 1024;
+const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
+const HASH_BUFFER_BYTES: usize = 64 * 1024;
 const CHECK_INTERVAL: u64 = 24 * 60 * 60;
 const STORE_VERSION: u32 = 1;
 
@@ -146,30 +151,66 @@ pub(crate) enum Event {
     },
     Failed,
     Checked,
+    Progress(tui::state::update::Progress),
+    Ready {
+        available: String,
+        staged: PathBuf,
+    },
+    ApplyFailed {
+        available: String,
+        reason: String,
+    },
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TransportError;
 
 pub(crate) trait Transport: Send + Sync {
-    fn get(&self, url: &str) -> Result<Vec<u8>, TransportError>;
+    fn get_bytes(&self, url: &str, cap: u64) -> Result<Vec<u8>, TransportError>;
+    fn download(&self, url: &str, path: &Path, cap: u64) -> Result<(), TransportError>;
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlatformTransport;
 
 impl Transport for PlatformTransport {
-    fn get(&self, url: &str) -> Result<Vec<u8>, TransportError> {
+    fn get_bytes(&self, url: &str, cap: u64) -> Result<Vec<u8>, TransportError> {
+        let mut body = Vec::new();
+        Self::run(url, None, cap, Some(&mut body))?;
+        if body.is_empty() {
+            return Err(TransportError);
+        }
+        Ok(body)
+    }
+
+    fn download(&self, url: &str, path: &Path, cap: u64) -> Result<(), TransportError> {
+        Self::run(url, Some(path), cap, None)
+    }
+}
+
+impl PlatformTransport {
+    fn run(
+        url: &str,
+        path: Option<&Path>,
+        cap: u64,
+        body: Option<&mut Vec<u8>>,
+    ) -> Result<(), TransportError> {
+        let reads_body = body.is_some();
         #[cfg(windows)]
         let mut command = {
             let mut command = Command::new("powershell");
-            command.args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$ProgressPreference='SilentlyContinue'; (Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 $env:TELEVIM_UPDATE_URL).Content",
-            ]);
+            let script = if path.is_some() {
+                r"$r=[Net.HttpWebRequest]::Create($env:TELEVIM_UPDATE_URL); $r.Timeout=10000; $r.ReadWriteTimeout=10000; $s=$null; $f=$null; try {$w=$r.GetResponse(); if($w.ContentLength -gt [long]$env:TELEVIM_UPDATE_CAP){exit 1}; $s=$w.GetResponseStream(); $f=[IO.File]::Create($env:TELEVIM_UPDATE_PATH); $b=New-Object byte[] 65536; [long]$n=0; while(($c=$s.Read($b,0,[int][Math]::Min($b.Length,[long]$env:TELEVIM_UPDATE_CAP-$n+1))) -gt 0){if($n+$c -gt [long]$env:TELEVIM_UPDATE_CAP){exit 1}; $f.Write($b,0,$c); $n+=$c} } finally {if($f){$f.Dispose()}; if($s){$s.Dispose()}; if($w){$w.Dispose()}}"
+            } else {
+                r"$r=[Net.HttpWebRequest]::Create($env:TELEVIM_UPDATE_URL); $r.Timeout=10000; $r.ReadWriteTimeout=10000; $s=$null; $m=New-Object IO.MemoryStream; try {$w=$r.GetResponse(); if($w.ContentLength -gt [long]$env:TELEVIM_UPDATE_CAP){exit 1}; $s=$w.GetResponseStream(); $b=New-Object byte[] 65536; [long]$n=0; while(($c=$s.Read($b,0,[int][Math]::Min($b.Length,[long]$env:TELEVIM_UPDATE_CAP-$n+1))) -gt 0){if($n+$c -gt [long]$env:TELEVIM_UPDATE_CAP){exit 1}; $m.Write($b,0,$c); $n+=$c}; [Console]::OpenStandardOutput().Write($m.ToArray(),0,[int]$m.Length) } finally {if($s){$s.Dispose()}; if($w){$w.Dispose()}; $m.Dispose()}"
+            };
+            command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
             command.env("TELEVIM_UPDATE_URL", url);
+            command.env("TELEVIM_UPDATE_CAP", cap.to_string());
+            if let Some(path) = path {
+                command.env("TELEVIM_UPDATE_PATH", path);
+            }
             command
         };
         #[cfg(not(windows))]
@@ -180,10 +221,12 @@ impl Transport for PlatformTransport {
                 "--max-time",
                 "10",
                 "--max-filesize",
-                "1048576",
-                "--url",
-                url,
+                &cap.to_string(),
             ]);
+            if let Some(path) = path {
+                command.arg("-o").arg(path);
+            }
+            command.arg("--url").arg(url);
             command
         };
 
@@ -193,21 +236,21 @@ impl Transport for PlatformTransport {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| TransportError)?;
-        let mut body = Vec::new();
-        let stdout = child.stdout.take().ok_or(TransportError)?;
-        let read = stdout
-            .take((MAX_RESPONSE_BYTES + 1) as u64)
-            .read_to_end(&mut body);
-        if read.is_err() || body.len() > MAX_RESPONSE_BYTES {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(TransportError);
+        let mut body = body;
+        if let Some(bytes) = body.as_deref_mut() {
+            let stdout = child.stdout.take().ok_or(TransportError)?;
+            let read = stdout.take(cap.saturating_add(1)).read_to_end(bytes);
+            if read.is_err() || bytes.len() as u64 > cap {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(TransportError);
+            }
         }
         let status = child.wait().map_err(|_| TransportError)?;
-        if !status.success() || body.is_empty() {
+        if !status.success() || reads_body && body.as_ref().is_some_and(|bytes| bytes.is_empty()) {
             return Err(TransportError);
         }
-        Ok(body)
+        Ok(())
     }
 }
 
@@ -280,7 +323,7 @@ pub(crate) fn check(
     installed: &Version,
     dismissed: Option<&str>,
 ) -> Event {
-    let Ok(body) = transport.get(url) else {
+    let Ok(body) = transport.get_bytes(url, MAX_RESPONSE_BYTES as u64) else {
         return Event::Failed;
     };
     let Some(available) = release_version(&body) else {
@@ -309,10 +352,285 @@ pub(crate) fn apply(app: &mut App, event: Event) {
         }
         Event::Checked => {}
         Event::Failed => app.flash("could not check for updates"),
+        Event::Progress(progress) => app.update_progress(progress),
+        Event::Ready { staged, .. } => app.update_ready(staged),
+        Event::ApplyFailed { reason, .. } => app.update_failed(reason),
+        Event::Cancelled => app.update_cancelled(),
     }
 }
 
-pub(crate) fn handle(app: &mut App, config_path: &Path, action: tui::state::update::Action) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateError {
+    ChecksumMismatch,
+    ChecksumMissing,
+    ArchiveTruncated,
+    ArchiveMembers,
+    StagingUnwritable,
+    StagedBinaryUnusable,
+    UnsupportedTarget,
+    Transport,
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sentence = match self {
+            Self::ChecksumMismatch => "The update checksum did not match; nothing was installed.",
+            Self::ChecksumMissing => {
+                "The update checksum was missing or ambiguous; nothing was installed."
+            }
+            Self::ArchiveTruncated => {
+                "The update archive was incomplete or invalid; nothing was installed."
+            }
+            Self::ArchiveMembers => {
+                "The update archive contained unexpected files; nothing was installed."
+            }
+            Self::StagingUnwritable => {
+                "The update could not be staged; install televim with the README installer."
+            }
+            Self::StagedBinaryUnusable => {
+                "The downloaded update may not match this machine; install televim with the README installer."
+            }
+            Self::UnsupportedTarget => {
+                "Updates support macOS and Linux x86_64/aarch64 and Windows x86_64 only; nothing was installed."
+            }
+            Self::Transport => "The update download failed; nothing was installed.",
+        };
+        f.write_str(sentence)
+    }
+}
+
+fn asset(os: &str, arch: &str) -> Result<(&'static str, &'static str), UpdateError> {
+    let (target, ext) = match (os, arch) {
+        ("macos", "aarch64") => ("aarch64-apple-darwin", "tar.gz"),
+        ("macos", "x86_64") => ("x86_64-apple-darwin", "tar.gz"),
+        ("linux", "x86_64") => ("x86_64-unknown-linux-gnu", "tar.gz"),
+        ("linux", "aarch64") => ("aarch64-unknown-linux-gnu", "tar.gz"),
+        ("windows", "x86_64") => ("x86_64-pc-windows-msvc", "zip"),
+        _ => return Err(UpdateError::UnsupportedTarget),
+    };
+    Ok((target, ext))
+}
+
+fn checksum(body: &[u8], filename: &str) -> Result<String, UpdateError> {
+    if body.len() as u64 > MAX_CHECKSUM_BYTES {
+        return Err(UpdateError::ChecksumMissing);
+    }
+    let mut found = None;
+    for line in body.split(|b| *b == b'\n') {
+        let line = std::str::from_utf8(line)
+            .map_err(|_| UpdateError::ChecksumMissing)?
+            .trim_end_matches('\r');
+        if line.len() < 66 {
+            continue;
+        }
+        let (hash, suffix) = line.split_at(64);
+        let name = suffix
+            .strip_prefix("  ")
+            .or_else(|| suffix.strip_prefix(" *"));
+        let Some(name) = name else {
+            continue;
+        };
+        if name == filename {
+            if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) || found.is_some() {
+                return Err(UpdateError::ChecksumMissing);
+            }
+            found = Some(hash.to_ascii_lowercase());
+        }
+    }
+    found.ok_or(UpdateError::ChecksumMissing)
+}
+
+fn digest(path: &Path) -> Result<String, UpdateError> {
+    use sha2::Digest as _;
+
+    let mut file = fs::File::open(path).map_err(|_| UpdateError::ArchiveTruncated)?;
+    let size = file
+        .metadata()
+        .map_err(|_| UpdateError::ArchiveTruncated)?
+        .len();
+    if size == 0 || size > MAX_ARCHIVE_BYTES {
+        return Err(UpdateError::ArchiveTruncated);
+    }
+    let mut hash = sha2::Sha256::new();
+    let mut buffer = vec![0u8; HASH_BUFFER_BYTES].into_boxed_slice();
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| UpdateError::ArchiveTruncated)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn verify_digest(path: &Path, expected: &str) -> Result<(), UpdateError> {
+    if digest(path)? == expected.to_ascii_lowercase() {
+        Ok(())
+    } else {
+        Err(UpdateError::ChecksumMismatch)
+    }
+}
+
+fn stage_update(
+    transport: &dyn Transport,
+    available: &str,
+    cancel: &AtomicBool,
+    sender: &tokio::sync::mpsc::UnboundedSender<crate::runtime::AppEvent>,
+) -> Result<PathBuf, UpdateError> {
+    use tui::state::update::Progress;
+    let (target, extension) = asset(std::env::consts::OS, std::env::consts::ARCH)?;
+    let filename = format!("televim-{available}-{target}.{extension}");
+    let base = format!("https://github.com/curedbylethe/televim/releases/download/v{available}/");
+    let exe = std::env::current_exe().map_err(|_| UpdateError::StagingUnwritable)?;
+    let parent = exe.parent().ok_or(UpdateError::StagingUnwritable)?;
+    let stage = parent.join(format!(".televim-update-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir(&stage).map_err(|_| UpdateError::StagingUnwritable)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = fs::set_permissions(&stage, fs::Permissions::from_mode(0o700));
+    }
+    let result = (|| {
+        if cancel.load(AtomicOrdering::Acquire) {
+            return Err(UpdateError::Transport);
+        }
+        let archive = stage.join(&filename);
+        let _ = sender.send(crate::runtime::AppEvent::Update(Event::Progress(
+            Progress::Downloading,
+        )));
+        transport
+            .download(&format!("{base}{filename}"), &archive, MAX_ARCHIVE_BYTES)
+            .map_err(|_| UpdateError::Transport)?;
+        let sums = transport
+            .get_bytes(&format!("{base}SHA256SUMS"), MAX_CHECKSUM_BYTES)
+            .map_err(|_| UpdateError::Transport)?;
+        if cancel.load(AtomicOrdering::Acquire) {
+            return Err(UpdateError::Transport);
+        }
+        let _ = sender.send(crate::runtime::AppEvent::Update(Event::Progress(
+            Progress::Verifying,
+        )));
+        let expected = checksum(&sums, &filename)?;
+        verify_digest(&archive, &expected)?;
+        if cancel.load(AtomicOrdering::Acquire) {
+            return Err(UpdateError::Transport);
+        }
+        let _ = sender.send(crate::runtime::AppEvent::Update(Event::Progress(
+            Progress::Extracting,
+        )));
+        let binary = extract_binary(&archive, &stage)?;
+        if cancel.load(AtomicOrdering::Acquire) {
+            return Err(UpdateError::Transport);
+        }
+        let _ = sender.send(crate::runtime::AppEvent::Update(Event::Progress(
+            Progress::Checking,
+        )));
+        verify_staged_binary(&binary, available)?;
+        let _ = fs::remove_file(&archive);
+        Ok(binary)
+    })();
+    match result {
+        Ok(path) => Ok(path),
+        Err(error) => {
+            let _ = fs::remove_dir_all(&stage);
+            Err(error)
+        }
+    }
+}
+
+fn extract_binary(archive: &Path, stage: &Path) -> Result<PathBuf, UpdateError> {
+    let binary = stage.join(if cfg!(windows) {
+        "televim.exe"
+    } else {
+        "televim"
+    });
+    #[cfg(windows)]
+    {
+        let script = r"$z=[IO.Compression.ZipFile]::OpenRead($env:TELEVIM_UPDATE_ARCHIVE); try { $allowed=@('televim.exe','README.md','LICENSE-MIT','LICENSE-APACHE'); foreach($e in $z.Entries){if($e.FullName -match '[/\\]|\.\.' -or $e.FullName -notin $allowed){exit 2}}; $e=$z.GetEntry('televim.exe'); if($null -eq $e){exit 2}; [IO.Compression.ZipFileExtensions]::ExtractToFile($e,$env:TELEVIM_UPDATE_BINARY,$true) } finally {$z.Dispose()}";
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("TELEVIM_UPDATE_ARCHIVE", archive)
+            .env("TELEVIM_UPDATE_BINARY", &binary)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| UpdateError::ArchiveTruncated)?;
+        if !status.success() {
+            return Err(UpdateError::ArchiveMembers);
+        }
+    }
+    #[cfg(unix)]
+    {
+        let listing = Command::new("tar")
+            .args(["-tzf"])
+            .arg(archive)
+            .output()
+            .map_err(|_| UpdateError::ArchiveTruncated)?;
+        if !listing.status.success() {
+            return Err(UpdateError::ArchiveTruncated);
+        }
+        let names = String::from_utf8(listing.stdout).map_err(|_| UpdateError::ArchiveMembers)?;
+        if names
+            .lines()
+            .any(|n| !["televim", "README.md", "LICENSE-MIT", "LICENSE-APACHE"].contains(&n))
+            || !names.lines().any(|n| n == "televim")
+        {
+            return Err(UpdateError::ArchiveMembers);
+        }
+        let status = Command::new("tar")
+            .args(["-xzf"])
+            .arg(archive)
+            .arg("-C")
+            .arg(stage)
+            .arg("televim")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|_| UpdateError::ArchiveTruncated)?;
+        if !status.success() {
+            return Err(UpdateError::ArchiveTruncated);
+        }
+    }
+    let metadata = fs::symlink_metadata(&binary).map_err(|_| UpdateError::ArchiveMembers)?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        return Err(UpdateError::ArchiveMembers);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(UpdateError::ArchiveMembers);
+        }
+    }
+    Ok(binary)
+}
+
+fn verify_staged_binary(binary: &Path, available: &str) -> Result<(), UpdateError> {
+    let output = Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| UpdateError::StagedBinaryUnusable)?;
+    if output.status.success() && output.stdout == format!("televim {available}\n").as_bytes() {
+        Ok(())
+    } else {
+        Err(UpdateError::StagedBinaryUnusable)
+    }
+}
+
+pub(crate) fn handle(
+    app: &mut App,
+    config_path: &Path,
+    action: tui::state::update::Action,
+    cancel: &mut Option<Arc<AtomicBool>>,
+    tx: &tokio::sync::mpsc::UnboundedSender<crate::runtime::AppEvent>,
+) {
     use tui::state::update::Action;
 
     match action {
@@ -322,7 +640,38 @@ pub(crate) fn handle(app: &mut App, config_path: &Path, action: tui::state::upda
             }
         }
         Action::Apply { available } => {
-            tracing::info!(%available, "update installation awaits stage 04");
+            if !app.update_begin_apply(&available) {
+                return;
+            }
+            let flag = Arc::new(AtomicBool::new(false));
+            *cancel = Some(Arc::clone(&flag));
+            let transport = PlatformTransport;
+            let sender = tx.clone();
+            drop(tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let result = stage_update(&transport, &available, &flag, &sender);
+                    let event = match result {
+                        Ok(staged) => Event::Ready { available, staged },
+                        Err(UpdateError::Transport) if flag.load(AtomicOrdering::Acquire) => {
+                            Event::Cancelled
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "verified update staging failed");
+                            Event::ApplyFailed {
+                                available,
+                                reason: error.to_string(),
+                            }
+                        }
+                    };
+                    let _ = sender.send(crate::runtime::AppEvent::Update(event));
+                })
+                .await;
+            }));
+        }
+        Action::Cancel => {
+            if let Some(flag) = cancel {
+                flag.store(true, AtomicOrdering::Release);
+            }
         }
         Action::Later { available } => {
             let path = store_path(config_path);
@@ -343,8 +692,11 @@ mod tests {
     struct Fake(Result<Vec<u8>, TransportError>);
 
     impl Transport for Fake {
-        fn get(&self, _url: &str) -> Result<Vec<u8>, TransportError> {
+        fn get_bytes(&self, _url: &str, _cap: u64) -> Result<Vec<u8>, TransportError> {
             self.0.clone()
+        }
+        fn download(&self, _url: &str, _path: &Path, _cap: u64) -> Result<(), TransportError> {
+            Err(TransportError)
         }
     }
 
@@ -396,6 +748,180 @@ mod tests {
     }
 
     #[test]
+    fn release_asset_map_is_exact_and_checksum_lookup_is_unambiguous() {
+        assert_eq!(
+            asset("macos", "aarch64"),
+            Ok(("aarch64-apple-darwin", "tar.gz"))
+        );
+        assert_eq!(
+            asset("macos", "x86_64"),
+            Ok(("x86_64-apple-darwin", "tar.gz"))
+        );
+        assert_eq!(
+            asset("linux", "x86_64"),
+            Ok(("x86_64-unknown-linux-gnu", "tar.gz"))
+        );
+        assert_eq!(
+            asset("linux", "aarch64"),
+            Ok(("aarch64-unknown-linux-gnu", "tar.gz"))
+        );
+        assert_eq!(
+            asset("windows", "x86_64"),
+            Ok(("x86_64-pc-windows-msvc", "zip"))
+        );
+        assert_eq!(
+            asset("windows", "aarch64"),
+            Err(UpdateError::UnsupportedTarget)
+        );
+        assert_eq!(
+            asset("linux", "x86_64-musl"),
+            Err(UpdateError::UnsupportedTarget)
+        );
+        let file = "televim-0.9.0-x86_64-unknown-linux-gnu.tar.gz";
+        let line = format!("{}  {file}\n", "a".repeat(64));
+        assert_eq!(checksum(line.as_bytes(), file), Ok("a".repeat(64)));
+        let starred = format!("{} *{file}\n", "A".repeat(64));
+        assert_eq!(checksum(starred.as_bytes(), file), Ok("a".repeat(64)));
+        assert_eq!(checksum(b"", file), Err(UpdateError::ChecksumMissing));
+        assert_eq!(
+            checksum(
+                format!("{}  {file}\n{}  {file}\n", "a".repeat(64), "b".repeat(64)).as_bytes(),
+                file
+            ),
+            Err(UpdateError::ChecksumMissing)
+        );
+        assert_eq!(
+            checksum(format!("{}  other.zip\n", "a".repeat(64)).as_bytes(), file),
+            Err(UpdateError::ChecksumMissing)
+        );
+    }
+
+    #[test]
+    fn archive_digest_streams_and_rejects_mismatch_or_truncation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("archive");
+        fs::write(&archive, b"abc").expect("write archive");
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(verify_digest(&archive, expected), Ok(()));
+        assert_eq!(
+            verify_digest(&archive, &"0".repeat(64)),
+            Err(UpdateError::ChecksumMismatch)
+        );
+        fs::write(&archive, []).expect("truncate archive");
+        assert_eq!(digest(&archive), Err(UpdateError::ArchiveTruncated));
+        fs::File::create(&archive)
+            .expect("create oversized archive")
+            .set_len(MAX_ARCHIVE_BYTES + 1)
+            .expect("extend archive");
+        assert_eq!(digest(&archive), Err(UpdateError::ArchiveTruncated));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_extraction_accepts_only_allowlisted_members_and_checks_version() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fn archive(dir: &Path, source: &Path) -> PathBuf {
+            let archive = dir.join("release.tar.gz");
+            let status = Command::new("tar")
+                .args(["-czf"])
+                .arg(&archive)
+                .arg("-C")
+                .arg(source)
+                .args(["televim", "README.md", "LICENSE-MIT", "LICENSE-APACHE"])
+                .status()
+                .expect("tar exists");
+            assert!(status.success());
+            archive
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source");
+        fs::create_dir(&source).expect("source dir");
+        let executable = source.join("televim");
+        fs::write(&executable, "#!/bin/sh\necho 'televim 0.9.0'\n").expect("write script");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("make executable");
+        for name in ["README.md", "LICENSE-MIT", "LICENSE-APACHE"] {
+            fs::write(source.join(name), "release file").expect("write allowed file");
+        }
+        let archive = archive(dir.path(), &source);
+        let stage = dir.path().join("stage");
+        fs::create_dir(&stage).expect("stage dir");
+        let binary = extract_binary(&archive, &stage).expect("extract allowlisted binary");
+        assert!(binary.is_file());
+        assert_eq!(fs::read_dir(&stage).expect("read stage").count(), 1);
+        assert_eq!(verify_staged_binary(&binary, "0.9.0"), Ok(()));
+        assert_eq!(
+            verify_staged_binary(&binary, "0.8.0"),
+            Err(UpdateError::StagedBinaryUnusable)
+        );
+
+        let unexpected = source.join("unexpected.txt");
+        fs::write(&unexpected, "no").expect("write unexpected file");
+        let bad = dir.path().join("bad.tar.gz");
+        let status = Command::new("tar")
+            .args(["-czf"])
+            .arg(&bad)
+            .arg("-C")
+            .arg(&source)
+            .arg("televim")
+            .arg("unexpected.txt")
+            .status()
+            .expect("tar exists");
+        assert!(status.success());
+        let bad_stage = dir.path().join("bad-stage");
+        fs::create_dir(&bad_stage).expect("bad stage dir");
+        assert_eq!(
+            extract_binary(&bad, &bad_stage),
+            Err(UpdateError::ArchiveMembers)
+        );
+
+        let invalid = dir.path().join("not-gzip");
+        fs::write(&invalid, b"not a gzip archive").expect("write invalid archive");
+        let invalid_stage = dir.path().join("invalid-stage");
+        fs::create_dir(&invalid_stage).expect("invalid stage dir");
+        assert_eq!(
+            extract_binary(&invalid, &invalid_stage),
+            Err(UpdateError::ArchiveTruncated)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn zip_extraction_uses_powershell_and_returns_only_the_binary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source");
+        fs::create_dir(&source).expect("source dir");
+        fs::copy(
+            std::env::current_exe().expect("test binary"),
+            source.join("televim.exe"),
+        )
+        .expect("copy test executable");
+        for name in ["README.md", "LICENSE-MIT", "LICENSE-APACHE"] {
+            fs::write(source.join(name), "release file").expect("write allowed file");
+        }
+        let archive = dir.path().join("release.zip");
+        let script = "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::CreateFromDirectory($env:TELEVIM_UPDATE_SOURCE,$env:TELEVIM_UPDATE_ARCHIVE)";
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("TELEVIM_UPDATE_SOURCE", &source)
+            .env("TELEVIM_UPDATE_ARCHIVE", &archive)
+            .status()
+            .expect("PowerShell exists");
+        assert!(status.success());
+        let stage = dir.path().join("stage");
+        fs::create_dir(&stage).expect("stage dir");
+        let binary = extract_binary(&archive, &stage).expect("extract allowlisted executable");
+        assert!(binary.is_file());
+        assert_eq!(fs::read_dir(&stage).expect("read stage").count(), 1);
+        assert_eq!(
+            verify_staged_binary(&binary, "0.9.0"),
+            Err(UpdateError::StagedBinaryUnusable)
+        );
+    }
+
+    #[test]
     fn daily_check_and_transport_failure_are_pure() {
         assert!(due(None, 10));
         assert!(!due(Some(10), 10 + CHECK_INTERVAL - 1));
@@ -423,12 +949,15 @@ mod tests {
         };
         store.save(&path).expect("initial store saves");
 
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         handle(
             &mut App::new(),
             &config,
             tui::state::update::Action::Later {
                 available: "0.9.0".to_owned(),
             },
+            &mut None,
+            &tx,
         );
 
         let saved = Store::load(&path);
