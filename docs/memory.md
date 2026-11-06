@@ -787,8 +787,8 @@ against a fragmenting heap. The choice could not be measured on this host either
 candidate's delta is inside the noise rather than a result — and
 `std::alloc::System` is the one answer that is the same on macOS, Linux and
 Windows and needs no C toolchain on any of them. Windows installer CI and the
-release CLI smoke test are configured, but neither runs the memory harness or
-measures RSS. Windows therefore has no memory baseline or guarantee.
+release CLI smoke tests do not run the memory harness or measure RSS. Windows
+therefore has no memory baseline or guarantee.
 
 `#[global_allocator]` does not exist, and if it ever did it would be declared in
 `crates/app/src/main.rs` — the composition root — because an allocator is a

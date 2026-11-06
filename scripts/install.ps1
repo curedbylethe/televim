@@ -116,6 +116,7 @@ try {
 
     if (-not $NoModifyPath) {
         $environmentKey = $null
+        $pathChanged = $false
         try {
             $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
             if ($null -eq $environmentKey) {
@@ -128,6 +129,7 @@ try {
             if (-not ($pathEntries | Where-Object { [string]::Equals($_, $InstallDir.TrimEnd([char[]]@('\')), [StringComparison]::OrdinalIgnoreCase) })) {
                 $newUserPath = if ([string]::IsNullOrEmpty($userPath)) { $InstallDir } else { "$userPath;$InstallDir" }
                 $environmentKey.SetValue('Path', $newUserPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+                $pathChanged = $true
             }
         }
         catch {
@@ -135,6 +137,30 @@ try {
         }
         finally {
             if ($environmentKey) { $environmentKey.Dispose() }
+        }
+        if ($pathChanged) {
+            try {
+                if (-not ('TelevimEnvironmentChange' -as [type])) {
+                    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class TelevimEnvironmentChange {
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint message, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
+}
+'@
+                }
+                $broadcastResult = [IntPtr]::Zero
+                $sent = [TelevimEnvironmentChange]::SendMessageTimeout(
+                    [IntPtr]0xffff, 0x001A, [IntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$broadcastResult
+                )
+                if ($sent -eq [IntPtr]::Zero) {
+                    Write-Warning 'Windows did not receive the PATH update notification. Sign out and back in if new terminals do not see Televim.'
+                }
+            }
+            catch {
+                Write-Warning 'Windows could not broadcast the PATH update. Sign out and back in if new terminals do not see Televim.'
+            }
         }
     }
 

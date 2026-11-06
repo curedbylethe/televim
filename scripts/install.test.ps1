@@ -147,7 +147,7 @@ try {
 
     $source = Get-Content -LiteralPath $installer -Raw
     Assert ($source -notmatch '(?i)\bsetx\b') 'Installer must not use setx.'
-    Assert ($source.Contains('DoNotExpandEnvironmentNames') -and $source.Contains('RegistryValueKind]::ExpandString') -and $source.Contains('OrdinalIgnoreCase') -and $source -notmatch '\[CmdletBinding\]') 'Installer invocation and User PATH update must preserve raw existing entries.'
+    Assert ($source.Contains('DoNotExpandEnvironmentNames') -and $source.Contains('RegistryValueKind]::ExpandString') -and $source.Contains('SendMessageTimeout') -and $source.Contains('OrdinalIgnoreCase') -and $source -notmatch '\[CmdletBinding\]') 'Installer invocation and User PATH update must preserve and announce raw existing entries.'
     Write-Output 'PowerShell installer tests passed.'
 }
 finally {
