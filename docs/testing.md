@@ -396,6 +396,14 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   terminal that runs it. Offline it reaches the chat list and the input bar only;
   a scene can seed cached messages into the conversation. The picture is a screen capture cropped to the window, so a window in front of kitty is in it: keep the screen clear and trust the `.txt` first. Nothing compares the images
   automatically yet; they are read by a person.
+  The `readme_hero` scene seeds fictional chats and messages offline. Recreate
+  the README image with `make build` and
+  `python3 scripts/rtl/kitty_shots.py readme_hero`, then set `h` with
+  `h=$(sips -g pixelHeight target/rtl-shots/readme_hero.png | awk '/pixelHeight/{print $2}')`
+  and crop one bottom row with
+  `magick target/rtl-shots/readme_hero.png -strip -gravity south -chop 0x$((h / 24)) docs/images/televim.png`.
+  The crop removes the offline no-credentials status row. Refreshing needs macOS,
+  kitty, Screen Recording permission for the terminal, and ImageMagick.
 - **Memory Verification:** implemented as `make measure`, not as part of `ci`.
   The driver (`scripts/memory/measure.py`) builds the release binary and
   `crates/app/examples/memory_harness.rs`, runs the harness five times, launches
