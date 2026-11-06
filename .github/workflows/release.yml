@@ -227,6 +227,7 @@ jobs:
           key: ${{ matrix.target }}-${{ runner.arch }}
 
       - name: build and package
+        shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           TARGET: ${{ matrix.target }}
