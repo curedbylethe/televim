@@ -10,4 +10,5 @@ pub mod passphrase;
 pub mod profile;
 pub mod signin;
 pub mod status_bar;
+pub mod update;
 pub mod user_list;

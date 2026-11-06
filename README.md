@@ -120,7 +120,7 @@ Use `televim --chat <id>` to open a chat directly.
 | `Esc` | Return to Normal mode; press again to leave the line |
 | Arrow keys | Move the caret |
 
-Type `:` in a conversation or profile card for `:chat`, `:new`, `:search`, `:attach`, `:save`, and `:q`; see the full [command list](docs/product.md#feature-set).
+Type `:` in a conversation or profile card for `:chat`, `:new`, `:search`, `:attach`, `:save`, `:update`, and `:q`; see the full [command list](docs/product.md#feature-set).
 
 ## Troubleshooting
 

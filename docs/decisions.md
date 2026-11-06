@@ -1664,3 +1664,9 @@ are in [`../AGENTS.md`](../AGENTS.md).
   workflow already publishes stable tags and versioned assets there. A separate
   manifest would duplicate release state and could drift from the assets the
   installer verifies.
+- **Why the update offer is an overlay, and its indicator sits on the bar border:**
+  a new `Mode` would make a release check compete with conversation navigation
+  and require every mode reader to learn about installation. The overlay owns
+  its keys only while open and leaves the draft and selection alone. The dim
+  indicator uses the input bar's bottom border, so it does not compete with the
+  status row's 69 key-hint cells.

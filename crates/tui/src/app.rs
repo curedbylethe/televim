@@ -43,6 +43,7 @@ use crate::state::pending::Pending;
 use crate::state::profile::ProfileCard;
 use crate::state::session::SessionState;
 use crate::state::ui::{GraphicsMode, IDLE_STATUS, StickerMode, UiState};
+use crate::state::update;
 use crate::widgets;
 
 /// How close to an end of the loaded messages the cursor has to get before the
@@ -1097,6 +1098,9 @@ fn delete_prompt(ids: &[i64], outgoing: usize, skipped: usize) -> String {
 /// twice gets one action, not two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// Open or answer the stable release offer.
+    Update(update::Action),
+
     /// Send `text` to `chat_id` as a reply to `reply_to`, if any.
     ///
     /// `temp_id` is the placeholder the message is already rendered as, and is
@@ -2907,7 +2911,7 @@ impl App {
         // The context-free globals answer here, before the precompute.
         // `coordinate::preempt_key` answers `Ctrl-C` the same way below, so the
         // two arms agree; the lower one can go in a later cleanup.
-        if key_to_action(key, self.ui.mode) == AppAction::Quit {
+        if !self.ui.update.is_open() && key_to_action(key, self.ui.mode) == AppAction::Quit {
             self.ui.quit();
             return;
         }
@@ -3077,6 +3081,43 @@ impl App {
     /// writers would let them disagree.
     pub fn set_connection(&mut self, connection: ConnectionState) {
         self.ui.set_connection(connection);
+    }
+
+    /// Records a release and offers it only when the reader is idle.
+    pub fn accept_update(&mut self, installed: &str, available: &str, auto_offer: bool) -> bool {
+        self.ui.update.available(installed, available);
+        let idle = self.ui.mode == Mode::Normal
+            && self.ui.focus != Focus::Input
+            && self.session.signin.is_none()
+            && self.session.pass.is_none()
+            && self.conversation.confirm.is_none()
+            && self.conversation.picking().is_none()
+            && !self.conversation.contacts.is_active()
+            && !self.list.archived_is_open()
+            && !self.conversation.user_search.is_active()
+            && !self.conversation.global_search.is_active()
+            && !self.conversation.search.is_active()
+            && self.input.line.is_empty()
+            && self.selection().is_none()
+            && self.card_selection().is_none()
+            && !self.conversation.conversation.window.iter().any(|message| {
+                message.status == domain::message::MessageStatus::Sending && message.media.is_some()
+            });
+        if auto_offer && idle {
+            self.ui.update.open()
+        } else {
+            false
+        }
+    }
+
+    /// Opens a known release offer on explicit request.
+    pub fn open_update(&mut self) -> bool {
+        self.ui.update.open()
+    }
+
+    /// Completes or postpones the currently highlighted release offer.
+    pub fn answer_update(&mut self) -> Option<update::Action> {
+        self.ui.update.answer()
     }
 
     /// The one way in, whatever the reader came from: the signed-out card's
@@ -3266,6 +3307,7 @@ impl App {
         // The global search covers the body, rows above the status line, so the
         // panes are not drawn behind it: it is given the whole frame.
         widgets::global_list::render(self, area, frame);
+        widgets::update::render(self, horizontal[1], frame);
         widgets::status_bar::render(self, vertical[2], frame);
     }
 

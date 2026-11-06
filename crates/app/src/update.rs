@@ -303,14 +303,36 @@ pub(crate) fn apply(app: &mut App, event: Event) {
         Event::Available {
             installed,
             available,
-            dismissed: false,
+            dismissed,
         } => {
-            app.set_status(format!(
-                "televim {available} available — :update (installed {installed})"
-            ));
+            app.accept_update(&installed, &available, !dismissed);
         }
-        Event::Available { .. } | Event::Checked => {}
+        Event::Checked => {}
         Event::Failed => app.flash("could not check for updates"),
+    }
+}
+
+pub(crate) fn handle(app: &mut App, config_path: &Path, action: tui::state::update::Action) {
+    use tui::state::update::Action;
+
+    match action {
+        Action::Open => {
+            if !app.open_update() {
+                app.flash("no update is available");
+            }
+        }
+        Action::Apply { available } => {
+            tracing::info!(%available, "update installation awaits stage 04");
+        }
+        Action::Later { available } => {
+            let path = store_path(config_path);
+            let mut store = Store::load(&path);
+            store.dismissed = Some(available);
+            if let Err(error) = store.save(&path) {
+                tracing::warn!(%error, "could not save update dismissal");
+                app.flash("could not save update dismissal");
+            }
+        }
     }
 }
 
@@ -388,6 +410,30 @@ mod tests {
             ),
             Event::Failed
         );
+    }
+
+    #[test]
+    fn later_persists_dismissal_without_dropping_check_time() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = dir.path().join("televim.toml");
+        let path = store_path(&config);
+        let store = Store {
+            checked: Some(123),
+            ..Store::default()
+        };
+        store.save(&path).expect("initial store saves");
+
+        handle(
+            &mut App::new(),
+            &config,
+            tui::state::update::Action::Later {
+                available: "0.9.0".to_owned(),
+            },
+        );
+
+        let saved = Store::load(&path);
+        assert_eq!(saved.dismissed.as_deref(), Some("0.9.0"));
+        assert_eq!(saved.checked, Some(123));
     }
 
     #[test]

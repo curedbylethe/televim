@@ -456,6 +456,20 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 
     frame.render_widget(paragraph, area);
 
+    if matches!(
+        app.ui.update.stage(),
+        crate::state::update::Stage::Available { .. }
+    ) {
+        let label = "televim 0.9.0 available — :update";
+        let width = u16::try_from(columns(label)).unwrap_or(u16::MAX);
+        let x = area.right().saturating_sub(2).saturating_sub(width);
+        let y = area.bottom().saturating_sub(1);
+        frame.render_widget(
+            Paragraph::new(Span::styled(label, app.ui.theme.text_dim)),
+            Rect::new(x, y, width, 1),
+        );
+    }
+
     // The caret is painted by `body_row`, into the buffer, as an ordinary cell.
     //
     // It used to be asked of the terminal with `set_cursor_position`, and the two
