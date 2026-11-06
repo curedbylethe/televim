@@ -142,6 +142,54 @@ SCENES = {
         ],
         "wait": "see you",
     },
+    "readme_hero": {
+        "env": {"TELEVIM_SESSION_PASSPHRASE": "readme-hero-only"},
+        "chats": [(1, "Ada"), (2, "Grace"), (3, "Alan"), (4, "Edsger")],
+        "messages": {
+            1: [
+                {
+                    "id": 1,
+                    "text": "Hey Ada, are you free for lunch?",
+                    "timestamp": int(time.time()) - 5 * 60,
+                    "is_outgoing": False,
+                },
+                {
+                    "id": 2,
+                    "text": "Could do 12:30 at the cafe.",
+                    "timestamp": int(time.time()) - 4 * 60,
+                    "is_outgoing": False,
+                },
+                {
+                    "id": 3,
+                    "text": "12:30 works. See you there!",
+                    "timestamp": int(time.time()) - 3 * 60,
+                    "is_outgoing": True,
+                },
+                {
+                    "id": 4,
+                    "text": "Great. I will bring the notes.",
+                    "timestamp": int(time.time()) - 2 * 60,
+                    "is_outgoing": False,
+                },
+                {
+                    "id": 5,
+                    "text": "Perfect, talk soon.",
+                    "timestamp": int(time.time()) - 60,
+                    "is_outgoing": False,
+                },
+            ]
+        },
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("\r", lambda s: "Hey Ada" in s),
+            ("i", lambda s: "INSERT" in s),
+            ("\x7f", lambda s: "│:" not in s),
+            ("\x1b", lambda s: "NORMAL" in s),
+            ("\x1b", lambda s: "Hey Ada" in s and "│:" not in s),
+        ],
+        "wait": "Perfect, talk soon.",
+    },
     "messages_terminal": {
         "chats": [(1, "Ada")],
         "messages": {
@@ -334,6 +382,7 @@ def run_scene(name, scene):
             OUT.mkdir(parents=True, exist_ok=True)
             (OUT / f"{name}.txt").write_text(screen_text(sock))
             try:
+                kitty(sock, "focus-window")
                 shot(sock, OUT / f"{name}.png")
                 print(f"wrote {name}.png and {name}.txt")
             except RuntimeError as err:
