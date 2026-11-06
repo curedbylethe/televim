@@ -216,13 +216,19 @@ impl PlatformTransport {
         #[cfg(not(windows))]
         let mut command = {
             let mut command = Command::new("curl");
-            command.args([
-                "-fsSL",
-                "--max-time",
-                "10",
-                "--max-filesize",
-                &cap.to_string(),
-            ]);
+            command.args(["-fsSL", "--max-filesize", &cap.to_string()]);
+            if path.is_some() {
+                command.args([
+                    "--connect-timeout",
+                    "10",
+                    "--speed-limit",
+                    "1024",
+                    "--speed-time",
+                    "10",
+                ]);
+            } else {
+                command.args(["--max-time", "10"]);
+            }
             if let Some(path) = path {
                 command.arg("-o").arg(path);
             }
@@ -260,9 +266,22 @@ pub(crate) struct Store {
     version: u32,
     pub(crate) dismissed: Option<String>,
     pub(crate) checked: Option<u64>,
+    pub(crate) latest: Option<String>,
 }
 
 impl Store {
+    pub(crate) fn cached(&self, installed: &Version) -> Option<Event> {
+        let available = Version::parse(self.latest.as_deref()?)?;
+        if available <= *installed {
+            return None;
+        }
+        let available = available.to_string();
+        Some(Event::Available {
+            installed: installed.to_string(),
+            dismissed: self.dismissed.as_deref() == Some(available.as_str()),
+            available,
+        })
+    }
     pub(crate) fn load(path: &Path) -> Self {
         let Ok(bytes) = fs::read(path) else {
             return Self::default();
@@ -359,7 +378,12 @@ pub(crate) fn apply(app: &mut App, event: Event) {
                 .and_then(|exe| replace(&exe, &staged));
             match result {
                 Ok(()) => app.update_installed(&available),
-                Err(error) => app.update_failed(error.to_string()),
+                Err(error) => {
+                    if let Some(parent) = staged.parent() {
+                        let _ = fs::remove_dir_all(parent);
+                    }
+                    app.update_failed(error.to_string());
+                }
             }
         }
         Event::ApplyFailed { reason, .. } => app.update_failed(reason),
@@ -393,7 +417,6 @@ enum Managed {
     Flatpak,
     Scoop,
     Winget,
-    System,
 }
 
 impl Managed {
@@ -407,9 +430,6 @@ impl Managed {
             Self::Flatpak => "televim was installed by Flatpak. Run flatpak update.",
             Self::Scoop => "televim was installed by Scoop. Run scoop update televim.",
             Self::Winget => "televim was installed by winget. Run winget upgrade televim.",
-            Self::System => {
-                "televim may be managed by your system package manager. See README installation instructions."
-            }
         }
     }
 }
@@ -439,7 +459,7 @@ impl std::fmt::Display for UpdateError {
             Self::Transport => "The update download failed; nothing was installed.",
             Self::Managed(manager) => return f.write_str(manager.sentence()),
             Self::ReplaceFailed => {
-                "The verified update could not replace televim; the staged binary remains available. Install manually with the README installer."
+                "The verified update could not replace televim; nothing was installed. Install manually with the README installer."
             }
             #[cfg(any(windows, test))]
             Self::RollbackFailed => {
@@ -451,12 +471,6 @@ impl std::fmt::Display for UpdateError {
 }
 
 fn managed_by(path: &Path) -> Option<Managed> {
-    managed_by_with(path, |dir| {
-        fs::metadata(dir).is_ok_and(|metadata| !metadata.permissions().readonly())
-    })
-}
-
-fn managed_by_with(path: &Path, mut writable: impl FnMut(&Path) -> bool) -> Option<Managed> {
     let normalized = path
         .to_string_lossy()
         .replace('\\', "/")
@@ -478,11 +492,6 @@ fn managed_by_with(path: &Path, mut writable: impl FnMut(&Path) -> bool) -> Opti
         .find(|(prefix, _)| normalized.contains(prefix))
     {
         return Some(*manager);
-    }
-    for dir in ["/usr/bin", "/usr/local/bin"] {
-        if normalized.starts_with(&format!("{dir}/")) && !writable(Path::new(dir)) {
-            return Some(Managed::System);
-        }
     }
     None
 }
@@ -1105,11 +1114,26 @@ mod tests {
             version: 0,
             dismissed: Some("0.9.0".into()),
             checked: Some(1_762_300_000),
+            latest: Some("0.9.0".into()),
         };
         store.save(&path).expect("write store");
         let loaded = Store::load(&path);
         assert_eq!(loaded.dismissed.as_deref(), Some("0.9.0"));
         assert_eq!(loaded.checked, Some(1_762_300_000));
+        assert_eq!(loaded.latest.as_deref(), Some("0.9.0"));
+        assert_eq!(
+            loaded.cached(&Version::parse("0.8.0").expect("valid version")),
+            Some(Event::Available {
+                installed: "0.8.0".into(),
+                available: "0.9.0".into(),
+                dismissed: true,
+            })
+        );
+        assert!(
+            loaded
+                .cached(&Version::parse("0.9.0").expect("valid version"))
+                .is_none()
+        );
         fs::write(&path, b"bad json").expect("replace store");
         assert!(Store::load(&path).checked.is_none());
         fs::write(&path, br#"{"version":2,"checked":42}"#).expect("replace schema");
@@ -1185,10 +1209,6 @@ mod tests {
             assert_eq!(managed_by(Path::new(path)), Some(expected), "{path}");
         }
         assert_eq!(managed_by(Path::new("/home/user/.local/bin/televim")), None);
-        assert_eq!(
-            managed_by_with(Path::new("/usr/bin/televim"), |_| false),
-            Some(Managed::System)
-        );
     }
 
     #[cfg(unix)]

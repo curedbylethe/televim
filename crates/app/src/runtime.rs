@@ -1066,13 +1066,16 @@ fn spawn_update_check(config_path: PathBuf, sender: mpsc::UnboundedSender<AppEve
     tokio::task::spawn_blocking(move || {
         let path = update::store_path(&config_path);
         let mut store = update::Store::load(&path);
-        if !update::due(store.checked, now) {
-            return;
-        }
         let Some(installed) = update::Version::parse(env!("CARGO_PKG_VERSION")) else {
             tracing::error!("compiled application version is invalid");
             return;
         };
+        if !update::due(store.checked, now) {
+            if let Some(event) = store.cached(&installed) {
+                let _ = sender.send(AppEvent::Update(event));
+            }
+            return;
+        }
         // Test hook for an unreachable local endpoint; ordinary runs use GitHub.
         let url =
             std::env::var("TELEVIM_UPDATE_URL").unwrap_or_else(|_| update::RELEASE_URL.to_owned());
@@ -1086,6 +1089,10 @@ fn spawn_update_check(config_path: PathBuf, sender: mpsc::UnboundedSender<AppEve
             tracing::debug!("could not check for updates");
         } else {
             store.checked = Some(now);
+            store.latest = match &event {
+                update::Event::Available { available, .. } => Some(available.clone()),
+                _ => None,
+            };
             if let Err(error) = store.save(&path) {
                 tracing::debug!(%error, "could not save update check time");
             }
