@@ -706,6 +706,8 @@ struct Switch {
 /// What the loop knows about the network between events.
 #[derive(Default)]
 pub struct State {
+    /// Cooperative cancellation token for the active update staging worker.
+    update_cancel: Option<Arc<AtomicBool>>,
     /// The client, once it is up.
     client: Option<Arc<ProtoClient>>,
 
@@ -2426,8 +2428,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // client is exactly what a switch does not have, and the cancel has to work
     // with none.
     while let Some(action) = state.next_action(app) {
-        if let Action::Update(action) = action {
-            update::handle(app, &state.config_path, action);
+        if handle_update_action(app, state, &action, tx) {
             continue;
         }
         match &action {
@@ -2520,6 +2521,25 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             request_jump(&client, jump, cursor, tx);
         }
     }
+}
+
+fn handle_update_action(
+    app: &mut App,
+    state: &mut State,
+    action: &Action,
+    tx: &UnboundedSender<AppEvent>,
+) -> bool {
+    let Action::Update(action) = action else {
+        return false;
+    };
+    update::handle(
+        app,
+        &state.config_path,
+        action.clone(),
+        &mut state.update_cancel,
+        tx,
+    );
+    true
 }
 
 /// The download a media open asks for, if it can be asked for at all.

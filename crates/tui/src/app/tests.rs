@@ -2687,6 +2687,46 @@ fn update_offer_defaults_to_later_and_answers_only_after_confirmation() {
 }
 
 #[test]
+fn update_progress_renders_stage_and_only_escape_cancels() {
+    let mut app = App::mock();
+    app.ui.update.available("0.8.0", "0.9.0");
+    assert!(app.update_begin_apply("0.9.0"));
+    for (progress, word) in [
+        (crate::state::update::Progress::Downloading, "downloading"),
+        (crate::state::update::Progress::Verifying, "verifying"),
+        (crate::state::update::Progress::Extracting, "extracting"),
+        (crate::state::update::Progress::Checking, "checking"),
+    ] {
+        app.update_progress(progress);
+        assert!(frame_rows(&app).iter().any(|row| row.contains(word)));
+    }
+    app.handle_key(press(KeyCode::Enter));
+    assert!(app.take_action().is_none());
+    app.handle_key(press(KeyCode::Esc));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Update(crate::state::update::Action::Cancel))
+    );
+}
+
+#[test]
+fn update_failure_keeps_indicator_and_offer_can_retry_or_close() {
+    let mut app = App::mock();
+    app.ui.update.available("0.8.0", "0.9.0");
+    assert!(app.update_begin_apply("0.9.0"));
+    app.update_failed("download failed; nothing was installed.".to_owned());
+    assert_eq!(app.ui.update.indicator_version(), Some("0.9.0"));
+    app.handle_key(press(KeyCode::Esc));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Update(crate::state::update::Action::Later {
+            available: "0.9.0".to_owned()
+        }))
+    );
+    assert_eq!(app.ui.update.indicator_version(), Some("0.9.0"));
+}
+
+#[test]
 fn update_offer_idle_gate_keeps_draft_and_indicator_on_input_border() {
     let mut app = App::mock();
     app.handle_key(press(KeyCode::Char('i')));

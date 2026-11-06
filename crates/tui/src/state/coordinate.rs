@@ -3236,7 +3236,10 @@ pub(crate) fn run_command(
         }
         "settings" => open_profile(&mut *profile, &mut *ui, &mut *conversation, &mut *outbox),
         "update" => {
-            if matches!(ui.update.stage(), Stage::Available { .. }) {
+            if matches!(
+                ui.update.stage(),
+                Stage::Available { .. } | Stage::Failed { .. }
+            ) {
                 ui.update.open();
             } else {
                 ui.flash("no update is available");
@@ -5283,6 +5286,19 @@ fn preempt_key(
     key: KeyEvent,
 ) -> Option<bool> {
     if ui.update.is_open() {
+        if matches!(
+            ui.update.stage(),
+            crate::state::update::Stage::Applying { .. }
+        ) {
+            if key.code == KeyCode::Esc {
+                queue_action(
+                    outbox,
+                    ui,
+                    Action::Update(crate::state::update::Action::Cancel),
+                );
+            }
+            return Some(false);
+        }
         match key.code {
             KeyCode::Char('h') => ui.update.move_choice(Choice::Later),
             KeyCode::Char('l') => ui.update.move_choice(Choice::Update),

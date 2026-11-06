@@ -3120,6 +3120,26 @@ impl App {
         self.ui.update.answer()
     }
 
+    pub fn update_begin_apply(&mut self, available: &str) -> bool {
+        self.ui.update.begin_apply(available)
+    }
+
+    pub fn update_progress(&mut self, progress: update::Progress) {
+        self.ui.update.progress(progress);
+    }
+
+    pub fn update_failed(&mut self, reason: String) {
+        self.ui.update.fail(reason);
+    }
+
+    pub fn update_cancelled(&mut self) {
+        self.ui.update.cancelled();
+    }
+
+    pub fn update_ready(&mut self, staged: std::path::PathBuf) {
+        self.ui.update.ready(staged);
+    }
+
     /// The one way in, whatever the reader came from: the signed-out card's
     ///
     /// Delegates to [`coordinate::begin_signin`].

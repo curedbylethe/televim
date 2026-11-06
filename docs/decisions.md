@@ -1670,3 +1670,7 @@ are in [`../AGENTS.md`](../AGENTS.md).
   its keys only while open and leaves the draft and selection alone. The dim
   indicator uses the input bar's bottom border, so it does not compete with the
   status row's 69 key-hint cells.
+- **Why verified update archives stream to disk:** the archive is capped at 32 MiB
+  and never held in memory. SHA-256 reads it through a fixed 64 KiB buffer; the
+  64 KiB checksum list is separately capped. This bounds memory while staging
+  beside the executable for the later atomic replacement.
