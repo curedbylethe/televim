@@ -212,7 +212,10 @@ jobs:
           persist-credentials: false
 
       - name: use current release files
-        run: git fetch --depth=1 origin '+refs/heads/main:refs/remotes/origin/main' && git checkout origin/main -- LICENSE-MIT LICENSE-APACHE scripts/release/check-lock.py
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --depth=1 origin '+refs/heads/main:refs/remotes/origin/main'
+          git checkout origin/main -- LICENSE-MIT LICENSE-APACHE scripts/release/check-lock.py
 
       - uses: dtolnay/rust-toolchain@master
         with:
