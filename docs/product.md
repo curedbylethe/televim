@@ -415,7 +415,7 @@ Working today:
   card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
   `:discard`, `:attach <path>`, `:open`, `:save <path>`,
-  `:date <ISO>`, `:settings`, `:signin`, `:add-account`, `:retry`, `:unlock`,
+  `:date <ISO>`, `:settings`, `:update`, `:signin`, `:add-account`, `:retry`, `:unlock`,
   `:passphrase`, `:export-session <path>`, `:import-session <path>`, and the
   eight chat and contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,
   `:rename [name]`, `:delete-chat [both]`, `:report [reason]`, `:contacts`).
@@ -485,4 +485,6 @@ Working today:
 - **Stable release checks:** after the first frame, Televim checks GitHub once
   per day for a newer stable release. The check runs off the event loop; network
   failure does not delay launch. `updates = "off"` or `TELEVIM_UPDATES=off`
-  disables checks; the default is `auto`.
+  disables checks; the default is `auto`. A dim input-bar indicator names a
+  newer release; `:update` opens its consent prompt. `Later` postpones automatic
+  offers for that version, while `:update` can reopen it.

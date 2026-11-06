@@ -75,6 +75,7 @@ use crate::draft_store::DraftFile;
 use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
 use crate::runtime::AppEvent;
+use crate::update;
 
 /// How many messages one page holds.
 ///
@@ -2425,6 +2426,10 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // client is exactly what a switch does not have, and the cancel has to work
     // with none.
     while let Some(action) = state.next_action(app) {
+        if let Action::Update(action) = action {
+            update::handle(app, &state.config_path, action);
+            continue;
+        }
         match &action {
             Action::AddAccount => {
                 state.detach_account(app, Opening::Fresh);
@@ -3418,6 +3423,7 @@ fn request_plain(
             | Action::ImportSession { .. }
             | Action::SubmitSessionPassphrase { .. }
             | Action::ChangeSessionPassphrase { .. }
+            | Action::Update(_)
             | Action::SendAttachment { .. }
             | Action::CancelUpload { .. }
             | Action::RetryUpload { .. }

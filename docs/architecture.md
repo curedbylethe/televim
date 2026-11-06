@@ -301,7 +301,8 @@ crates/tui/
 │   │   ├── search_query.rs # The typed filters (media:/since:/until:) -> SearchSpec
 │   │   ├── input.rs        # InputState: the live line and the emoji popup
 │   │   ├── drafts.rs       # DraftStore: per-peer parked drafts and read receipts
-│   │   └── ui.rs           # UiState, FrameMetrics: mode, focus, the frame's cells, each peer's presence
+│   │   ├── ui.rs           # UiState, FrameMetrics: mode, focus, the frame's cells, each peer's presence
+│   │   └── update.rs       # Stable release offer and its consent state
 │   ├── card.rs         # One profile panel over two subjects: the row model, the
 │                      #   drawing, and which rows exist
 │   ├── date.rs         # Civil dates: day keys, labels and `HH:MM`. Pure; no clock
@@ -330,6 +331,7 @@ crates/tui/
 │   │   ├── emoji_popup.rs  # The `:shortcode` completion above the bar
 │   │   ├── global_list.rs  # The every-conversation search overlay, grouped by chat
 │   │   ├── input_bar.rs
+│   │   ├── update.rs       # Stable release offer overlay
 │   │   ├── profile.rs   # The card, in the conversation's rectangle
 │   │   ├── status_bar.rs
 │   │   └── user_list.rs # The new-chat results overlay, over the chat list
@@ -382,6 +384,12 @@ account-tagged, versioned with reply/edit subjects; newer versions are left
 untouched, including on sign-out); `tui` itself names no file. `event.rs` is the
 context-free key map: `App::handle_key` answers its `Quit` (`Ctrl-C`) before the
 precompute, and `coordinate::handle_key` keeps the focus and mode dispatch.
+
+The update offer is an overlay rather than a `Mode`: it owns its keys while
+open, without changing the conversation mode, input line or draft. Its dim
+availability indicator sits on the input bar's bottom border, leaving the
+status row for the current mode and its 69 key-hint cells. `:update` opens a
+known offer even when an automatic offer was postponed by activity.
 
 The media commands use the same outbox seam. `:attach <path>` checks the design's
 image and document extension allowlist, raises a confirmation, and captures the
@@ -515,7 +523,7 @@ crates/app/
 │   │                   #   messages per peer, the chat list, the merge
 │   ├── media_cache.rs  # The media directory beside the config: one file
 │   │                   #   per content hash, bounded by bytes and by count
-│   ├── update.rs       # Stable-release check, version comparison, and hint store
+│   ├── update.rs       # Stable-release check, version comparison, consent and hint store
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop

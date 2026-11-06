@@ -50,6 +50,7 @@ use crate::jumplist::Jumplist;
 use crate::line::LineVerdict;
 use crate::rows::{self, RowSpan};
 use crate::state::ui::IDLE_STATUS;
+use crate::state::update::{Choice, Stage};
 
 use super::chat_list::ChatListState;
 use super::conversation::ConversationState;
@@ -3234,6 +3235,14 @@ pub(crate) fn run_command(
             false
         }
         "settings" => open_profile(&mut *profile, &mut *ui, &mut *conversation, &mut *outbox),
+        "update" => {
+            if matches!(ui.update.stage(), Stage::Available { .. }) {
+                ui.update.open();
+            } else {
+                ui.flash("no update is available");
+            }
+            false
+        }
         // The same path from the signed-out card and from a launch with no
         // session: they are the same question, and two entry points would be
         // two flows that could come to differ.
@@ -5273,6 +5282,23 @@ fn preempt_key(
     drafts: &mut DraftStore,
     key: KeyEvent,
 ) -> Option<bool> {
+    if ui.update.is_open() {
+        match key.code {
+            KeyCode::Char('h') => ui.update.move_choice(Choice::Later),
+            KeyCode::Char('l') => ui.update.move_choice(Choice::Update),
+            KeyCode::Enter | KeyCode::Esc => {
+                if key.code == KeyCode::Esc {
+                    ui.update.move_choice(Choice::Later);
+                }
+                if let Some(action) = ui.update.answer() {
+                    queue_action(outbox, ui, Action::Update(action));
+                }
+            }
+            _ => {}
+        }
+        return Some(false);
+    }
+
     // Ctrl-C always quits.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         ui.quit();

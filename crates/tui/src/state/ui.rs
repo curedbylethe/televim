@@ -9,6 +9,7 @@ use domain::presence::Presence;
 use crate::app::{FLASH_FOR, Focus, Mode, Pane};
 use crate::bidi::BidiMode;
 use crate::state::connection::ConnectionState;
+use crate::state::update::UpdateState;
 use crate::theme::Theme;
 
 /// How many message rows the conversation panel is assumed to have before it
@@ -136,6 +137,9 @@ pub struct UiState {
     /// the same event — nowhere else.
     pub connection: ConnectionState,
 
+    /// The last stable release check and its offer.
+    pub update: UpdateState,
+
     /// When a transient status stops applying, if it is transient.
     pub(crate) status_until: Option<Instant>,
 
@@ -216,6 +220,7 @@ impl UiState {
             status: IDLE_STATUS.to_string(),
             should_quit: false,
             connection: ConnectionState::Connecting,
+            update: UpdateState::default(),
             status_until: None,
             typing_until: None,
             peer_presence: HashMap::new(),

@@ -13,3 +13,4 @@ pub mod profile;
 pub(crate) mod search_query;
 pub mod session;
 pub mod ui;
+pub mod update;

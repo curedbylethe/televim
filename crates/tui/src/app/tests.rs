@@ -2648,6 +2648,63 @@ fn settings_command_opens_the_profile() {
     assert_eq!(app.ui.pane, Pane::Profile(ProfileId::SelfAccount));
 }
 
+#[test]
+fn update_offer_defaults_to_later_and_answers_only_after_confirmation() {
+    let mut app = App::mock();
+    app.ui.update.available("0.8.0", "0.9.0");
+
+    run_command_line(&mut app, "update");
+    assert!(app.ui.update.is_open());
+    assert!(app.take_action().is_none());
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Update(crate::state::update::Action::Later {
+            available: "0.9.0".to_owned(),
+        }))
+    );
+
+    run_command_line(&mut app, "update");
+    app.handle_key(press(KeyCode::Char('l')));
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Update(crate::state::update::Action::Apply {
+            available: "0.9.0".to_owned(),
+        }))
+    );
+
+    run_command_line(&mut app, "update");
+    app.handle_key(press(KeyCode::Char('q')));
+    assert!(!app.ui.should_quit);
+    app.handle_key(press(KeyCode::Esc));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Update(crate::state::update::Action::Later {
+            available: "0.9.0".to_owned(),
+        }))
+    );
+}
+
+#[test]
+fn update_offer_idle_gate_keeps_draft_and_indicator_on_input_border() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('i')));
+    type_text(&mut app, "keep this draft");
+    let draft = app.input.line.text().to_owned();
+    assert!(!app.accept_update("0.8.0", "0.9.0", true));
+    assert_eq!(app.input.line.text(), draft);
+
+    let rows = frame_rows(&app);
+    assert!(rows[22].contains("televim 0.9.0 available — :update"));
+    assert_eq!(frame_buffer(&app)[(79, 22)].symbol(), "┘");
+    app.handle_key(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Esc));
+    run_command_line(&mut app, "update");
+    assert!(app.ui.update.is_open());
+    assert_eq!(app.open_draft_text(), draft);
+}
+
 /// A `:` line is a command line, not a message, so it is not a buffer and
 /// never opens a shortcode completion — which is why the catalog cannot
 /// intercept `Enter` here. The test is here because that is the reason, and
