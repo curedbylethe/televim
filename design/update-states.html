@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>televim: the update offer, seven states (80×24)</title>
+<link rel="stylesheet" href="design-system/tokens.css">
+<link rel="stylesheet" href="televim.css">
+<style>
+  .state { margin: 0 0 1.5lh; }
+  .pair { display: flex; flex-wrap: wrap; gap: 2lh 32px; align-items: flex-start; }
+  .pair figure { margin: 0; }
+  .pair figcaption { color: var(--text-dim); padding-bottom: 6px; }
+  .state > .caption { margin: 1lh 0 6px; color: var(--text); }
+  .state > .legend { margin: 0 0 1lh; max-width: 88ch; }
+  .pair { margin-bottom: 2lh; }
+  h2 { font-size: 1em; font-weight: bold; margin: 3lh 0 1lh; }
+  pre.paste {
+    margin: 1lh 0 0; padding: 2ch 0 0; border-top: 1px solid var(--border);
+    max-width: 88ch; white-space: pre-wrap; color: var(--text); font-size: 13px;
+    line-height: 1.5;
+  }
+  details { margin-top: 1lh; }
+  summary { color: var(--text-dim); cursor: pointer; }
+  summary:focus-visible { outline: 1px solid var(--border-focused); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div class="chrome" data-od-id="chrome">
+  <h1 data-od-id="page-title">the update offer: seven states</h1>
+  <p class="sub" data-od-id="page-sub">A quiet notice that a newer stable release exists, and a one-step, opt-in update. The conversation, the hint rows and the status ranks are untouched: the notice is a line of dim text on the bar's bottom edge, and the dialog is a modal the reader raises. Nine frames at 80×24, each drawn at 1:1 in a dark and a light terminal from the roles <b>text</b>, <b>text-dim</b>, <b>border</b>, <b>border-focused</b> and the mode labels, with reverse video for the highlighted action. Nothing moves: progress is text redrawn on an event. The frames are drawn from the rules below, not from <b>televim-engine.js</b>.</p>
+
+  <div id="states" data-od-id="states"></div>
+
+  <h2 data-od-id="spec-heading">The section for DESIGN.md</h2>
+  <p class="legend" data-od-id="spec-paste-note">Paste from the rule to the end of the block, after the section on global message search. It adds one hint, <b>dialog</b>, owned by the dialog the way the contacts and archive lists own theirs, and one placement for the notice. No palette role, status rank or existing hint changes. The failure frames use the same short fallback sentence as the design section.</p>
+  <details open data-od-id="design-md-details">
+  <summary data-od-id="design-md-summary">the section itself, as markdown, from ## to the frames line</summary>
+  <pre class="paste" data-od-id="design-md-section">## Updating televim: a notice, an offer, and one opt-in step
+
+A newer stable release is news the reader may act on, never a reason to
+interrupt them. The notice stays quiet, the offer waits for an idle moment, and
+the reader must choose Update before anything is installed.
+
+**The notice.** `televim 0.9.0 available — :update`, in `text-dim`, on the input
+bar's bottom border, right-aligned with one blank cell before the corner. The
+status row starts its sentence at column 11: an eight-cell mode label, a space,
+the connection dot, and a space. Its 69 sentence cells already belong to the
+ranked hint. The notice never takes focus or moves the cursor. It remains while
+a newer release is known and disappears after that version installs.
+
+**When the offer may appear by itself.** Offer a release at most once per
+version, and only when the reader is idle: no confirmation, sign-in or
+passphrase prompt, forward picker or other key-intercepting overlay; no text in
+the input line; no Visual selection; and no upload in flight. Otherwise leave
+the notice and wait. `:update` opens the offer over a kept draft without
+changing it.
+
+**The offer.** Draw a bordered dialog over the conversation column. Name the
+installed and available versions, then show `[ Update ]` and `[ Later ]`.
+Highlight Later first; keep brackets around both actions so reverse video is
+not the only cue. Inside the dialog, `h` and `l` move the highlight, `Enter`
+answers, and `Esc` answers Later. The hint reads
+` h/l: choose  ⏎: confirm  Esc: later`. Do not add a Normal-mode alias.
+
+**Progress is text.** Show the current stage as `[update… downloading]`,
+`[update… verifying]` or `[update… installing]`. Change the text only when
+the stage changes. Do not show a percentage, spinner or countdown. `Esc` or
+`Enter` cancels between stages. Keep the draft untouched.
+
+**Failure.** Name the failed check and say `nothing was installed`. Use no red;
+red belongs to `CONFIRM`. End every failure with
+`Retry with :update, or rerun the installer from the README.` The actions are
+`[ Retry ]` and `[ Later ]`, with Later highlighted.
+
+**Dismissal.** Remember Later for that version. Keep the notice, but do not
+show the offer again for that version. `:update` still opens it. A newer
+version may be offered once.
+
+**Success and restart.** Say `televim 0.9.0 is installed.` and explain that the
+running window remains on 0.8.0 until restart. Show `[ Restart ]` and
+`[ Later ]`, with Later highlighted. Restart raises the existing
+` Restart televim? (y/n)` confirmation and uses the quit path. Later leaves the
+new binary installed and the current window running the old version.
+
+**Palette.** Add no role, mode label or status rank. Keep the dialog's ordinary
+border, dim hint, and reverse-video highlight. Use red only for `CONFIRM`.
+
+Frames: nine in `update-states.html`, with rows in
+`update-states-frames.js`: indicator, offer, progress, success, checksum and
+network failures, dismissed, dismissed after relaunch, and restart. They are
+hand-laid examples of these rules, not scenes of `televim-engine.js`.</pre>
+  </details>
+</div>
+<script src="update-states-frames.js"></script>
+<script>
+  (function () {
+    'use strict';
+    const host = document.getElementById('states');
+    const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const html = (rows) => rows.map((r) => r.map(([t, role]) => '<span class="' + role + '">' + esc(t) + '</span>').join('')).join('\n');
+    const STATES = [
+      ['indicator', '1. The notice', 'A line of dim text on the bar\'s bottom edge, above the connection dot, and nothing else: no dialog, no flash, no change of focus. The reader is typing a message and the caret is still in the bar. The status row is not used because its 69 cells are the hints\' budget and a ranked sentence can hide whatever shares the row.'],
+      ['offer', '2. The offer', 'Raised by <b>:update</b>, so it opens over the kept draft; the automatic offer waits for an idle reader. Installed and available versions, one sentence on what Update does, two actions. <b>Later</b> is highlighted so that a stray <b>⏎</b> is the safe answer. The bar is not lit and the input line has no focus.'],
+      ['progress', '3. Download in progress', 'The same box. The stage text changes from download to verify. No percentage or spinner appears; cancellation is available between stages. The draft has not moved.'],
+      ['success', '4. Installed', 'The new binary is on disk and the running window is still 0.8.0, which the dialog says in so many words. The notice is gone. Later is highlighted: nothing quits without a keystroke that means it.'],
+      ['failure', '5. Failure, in two causes', 'Checksum and network are different problems with different advice, so they are different first sentences. Both say that nothing was installed and which version is still there, and both give the same fallback. The installer command is a placeholder to be filled from the README. No red: red is <b>CONFIRM</b>.'],
+      ['dismissed', '6. After Later', 'The quiet notice remains for 0.9.0, but the offer does not return. The draft is kept. A second launch draws no dialog; the remembered version still has its notice.'],
+      ['restart', '7. Restart', 'Restart reuses the quit confirmation row: <b>Restart televim? (y/n)</b> with the existing <b>CONFIRM</b> label in the one red role. Restart asks first through the existing confirmation; <b>n</b> or <b>Esc</b> returns to the conversation.']
+    ];
+    STATES.forEach(([id, title, lead]) => {
+      const sec = document.createElement('div');
+      sec.className = 'state';
+      sec.setAttribute('data-od-id', 'state-' + id);
+      const h = document.createElement('h2');
+      h.textContent = title;
+      sec.appendChild(h);
+      const p = document.createElement('p');
+      p.className = 'legend';
+      p.setAttribute('data-od-id', 'lead-' + id);
+      p.innerHTML = lead;
+      sec.appendChild(p);
+      US.frames.filter((f) => f.state === id).forEach((f) => {
+        const cap = document.createElement('p');
+        cap.className = 'caption';
+        cap.setAttribute('data-od-id', 'caption-' + f.id);
+        cap.textContent = f.id + ': ' + f.label;
+        sec.appendChild(cap);
+        const pair = document.createElement('div');
+        pair.className = 'pair';
+        ['dark', 'light'].forEach((theme) => {
+          const fig = document.createElement('figure');
+          const fc = document.createElement('figcaption');
+          fc.textContent = theme + ' terminal';
+          fig.appendChild(fc);
+          const pre = document.createElement('pre');
+          pre.className = 'screen';
+          pre.setAttribute('data-terminal', theme);
+          pre.setAttribute('data-od-id', 'frame-' + f.id + '-' + theme);
+          pre.setAttribute('role', 'img');
+          pre.setAttribute('aria-label', 'The update offer, ' + f.id + ', ' + theme + ' terminal, 80 by 24. Status: ' + f.status.trim());
+          pre.innerHTML = html(f.rows);
+          fig.appendChild(pre);
+          pair.appendChild(fig);
+        });
+        sec.appendChild(pair);
+      });
+      host.appendChild(sec);
+    });
+  })();
+</script>
+</body>
+</html>

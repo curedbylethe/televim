@@ -44,6 +44,8 @@ PAIRS=(
   "design/logo/televim-social.png:logo/televim-social.png"
   "design/global-search-states.html:global-search-states.html"
   "design/global-search-states-frames.js:global-search-states-frames.js"
+  "design/update-states.html:update-states.html"
+  "design/update-states-frames.js:update-states-frames.js"
 )
 
 die() { printf 'design-sync: %s\n' "$1" >&2; exit 1; }

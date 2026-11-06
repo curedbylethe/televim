@@ -315,6 +315,12 @@ Real, and named so they are not mistaken for oversights:
   both sides is checked by nothing. Closing it means teaching the checker a second
   frame format, which is a new harness rather than a change to this one.
 
+- **The update design frames are byte-synced, not scene-checked.**
+  `design/update-states.html` and `design/update-states-frames.js` are drawn
+  from the update rules, not from `televim-engine.js`. `make design-check`
+  compares the vendored files with OpenDesign but does not render these frames.
+  Closing this gap means teaching the checker a second frame format.
+
 - **The draft row is shown only while following the newest message.** Scrolled
   up, it is not drawn and reserves no rows, because it is drawn after the slice
   and would sit under an older message, misplacing the draft. The input bar still
