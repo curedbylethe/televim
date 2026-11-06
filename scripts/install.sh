@@ -138,7 +138,7 @@ tar -xzf "$TEMP_DIR/$ASSET" -C "$TEMP_DIR/extract" televim
 [ -f "$TEMP_DIR/extract/televim" ] && [ ! -L "$TEMP_DIR/extract/televim" ] && [ -x "$TEMP_DIR/extract/televim" ] || fail "archive has no executable televim: $ASSET"
 VERSION_OUTPUT=$("$TEMP_DIR/extract/televim" --version 2>&1) || fail 'downloaded binary could not run; check its architecture and runtime libraries'
 case "$VERSION_OUTPUT" in
-  "televim "*"$VERSION"*) ;;
+  "televim $VERSION") ;;
   *) fail "downloaded binary reported an unexpected version: $VERSION_OUTPUT" ;;
 esac
 
@@ -207,7 +207,7 @@ fi
 
 INSTALLED_VERSION=$("$INSTALL_DIR/televim" --version 2>&1) || fail "binary installed at $INSTALL_DIR/televim but could not run; check architecture and libdbus-1"
 case "$INSTALLED_VERSION" in
-  "televim "*"$VERSION"*) ;;
+  "televim $VERSION") ;;
   *) fail "installed binary reported an unexpected version: $INSTALLED_VERSION" ;;
 esac
 printf 'Installed televim %s at %s/televim\n' "$VERSION" "$INSTALL_DIR"
