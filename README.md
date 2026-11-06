@@ -20,6 +20,7 @@ RSS at idle after loading 50+ chats.
 | File | What is in it |
 | :--- | :------------ |
 | [`AGENTS.md`](./AGENTS.md) | The hard constraints for agents and contributors |
+| [`docs/installing.md`](./docs/installing.md) | Install, upgrade and remove televim on macOS, Linux and Windows |
 | [`docs/architecture.md`](./docs/architecture.md) | Workspace layout, the dependency rule, per-crate design |
 | [`docs/dependencies.md`](./docs/dependencies.md) | Why each dependency is chosen or pinned |
 | [`docs/decisions.md`](./docs/decisions.md) | Key Decisions — the ADRs |
@@ -292,7 +293,10 @@ Working today:
   large attachment is never held whole. The attachment is re-read by identifier,
   because a description is rebuilt on every page and a cached locator would be stale.
   `o` on a media message in Normal mode opens it in the platform viewer:
-  `open -W` on macOS, `xdg-open` on Linux, `cmd /C start "" /WAIT` on Windows (waits, but untested: no Windows CI leg).
+  `open -W` on macOS, `xdg-open` on Linux, `cmd /C start "" /WAIT` on Windows.
+  The release workflow is configured to build and CLI-smoke-test Windows; the
+  TUI, Credential Manager, opener and owner-only file modes still need a manual
+  check.
   The file comes from the media cache: a message opened before is served from
   disk with no request, and a first open downloads it and stores it there. The
   cache is a directory of `0600`, plaintext files named by the sha256 of their
@@ -541,28 +545,35 @@ Not built, and named here so nobody reads the roadmap below as current:
 
 ## Installing
 
-Each release is on the [GitHub Releases](https://github.com/curedbylethe/televim/releases)
-page, with a binary per platform and a `SHA256SUMS` file. Binaries are built for
-Apple silicon macOS (`aarch64-apple-darwin`) and Linux on x86_64
-(`x86_64-unknown-linux-gnu`). On Intel macOS, build from source (see
-[Building](#building)).
+Release archives are on [GitHub Releases](https://github.com/curedbylethe/televim/releases).
+Installers put `televim` on your user `PATH` and verify the archive checksum.
 
-On Linux, the binary links DBus for the credential store. Install the runtime
-library first, for example `sudo apt install libdbus-1-3` on Debian and Ubuntu.
+| OS | Architecture | Target | Archive | Minimum / status |
+| :--- | :--- | :--- | :--- | :--- |
+| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | macOS 11+ |
+| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | macOS 10.12+ |
+| Linux | x86_64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
+| Linux | arm64 | `aarch64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
+| Windows | x86_64 | `x86_64-pc-windows-msvc` | `.zip` | Windows 10+; experimental |
+
+macOS/Linux:
 
 ```console
-$ VERSION=0.2.0      # the release you want, without the v
-$ TARGET=aarch64-apple-darwin      # or x86_64-unknown-linux-gnu
-$ BASE=https://github.com/curedbylethe/televim/releases/download/v$VERSION
-$ curl -LO $BASE/televim-$VERSION-$TARGET.tar.gz
-$ curl -LO $BASE/SHA256SUMS
-$ sha256sum --ignore-missing -c SHA256SUMS      # shasum -a 256 on macOS
-$ tar -xzf televim-$VERSION-$TARGET.tar.gz
-$ install -m 755 televim ~/.local/bin/televim   # any directory on your PATH
+$ curl -fsSL https://raw.githubusercontent.com/curedbylethe/televim/main/scripts/install.sh | sh
 ```
 
-`SHA256SUMS` confirms the download matches what the release published. It comes
-from the same place as the binary, so it does not prove who built it.
+Windows PowerShell:
+
+```powershell
+PS> irm https://raw.githubusercontent.com/curedbylethe/televim/main/scripts/install.ps1 | iex
+```
+
+For a pinned release, set `TELEVIM_VERSION` before running the installer. Use
+`--no-modify-path` on Unix or `-NoModifyPath` on Windows to manage `PATH`
+yourself. See [`docs/installing.md`](./docs/installing.md) for manual downloads,
+checksum commands, system requirements, upgrade, uninstall and troubleshooting.
+Inspect an installer before piping it to a shell. `SHA256SUMS` checks download
+integrity; it does not identify the publisher.
 
 ### Credentials
 
@@ -589,12 +600,27 @@ Either overrides the built-in pair. Pass another config path with
 beside the config file. The login session goes to the OS credential store unless
 `session_path` is set.
 
+### Upgrading
+
+Run the installer again to replace the binary. Config, drafts, history, media
+and keyring entries stay in place. See [`docs/installing.md`](./docs/installing.md#upgrading).
+
+### Uninstalling
+
+Remove the binary and, if desired, the installer's `PATH` entry. Remove app data
+separately. See [`docs/installing.md`](./docs/installing.md#uninstalling) before
+deleting config, session or media files.
+
 ## Building
 
 ```console
 $ make ci      # fmt-check lint boundary test design-check build-release
+$ make build-release
 $ make run     # the debug binary
 $ make watch   # the same, under cargo-watch
 ```
+
+See [`docs/installing.md`](./docs/installing.md#building-from-source) to build
+and run from source.
 
 The planned shape of what is left here is worked out in `~/.opencode/plan/`.
