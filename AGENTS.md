@@ -92,6 +92,7 @@ Individual targets, and what each one proves, are in
 | File | What is in it |
 | :--- | :------------ |
 | [`README.md`](./README.md) | Project overview, goals, the feature set as it ships, acceptance criteria |
+| [`docs/installing.md`](./docs/installing.md) | Install, upgrade and remove televim on macOS, Linux and Windows |
 | [`docs/architecture.md`](./docs/architecture.md) | Workspace layout, the dependency rule, per-crate design |
 | [`docs/dependencies.md`](./docs/dependencies.md) | Library rationale, and why each dependency is chosen or pinned; the `grammers`/`glass_pumpkin` saga |
 | [`docs/decisions.md`](./docs/decisions.md) | Key Decisions — the ADRs, each with the reasoning behind it |
