@@ -2727,6 +2727,56 @@ fn update_failure_keeps_indicator_and_offer_can_retry_or_close() {
 }
 
 #[test]
+fn installed_update_drops_indicator_and_restart_uses_confirm_prompt() {
+    let mut app = App::mock();
+    app.ui.update.available("0.8.0", "0.9.0");
+    assert!(app.update_begin_apply("0.9.0"));
+    app.update_installed("0.9.0");
+    assert_eq!(app.ui.update.indicator_version(), None);
+    let rows = frame_rows(&app);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("televim 0.9.0 is installed."))
+    );
+    assert!(rows.iter().any(|row| row.contains("[ Restart ]")));
+    app.ui
+        .update
+        .move_choice(crate::state::update::Choice::Update);
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Update(crate::state::update::Action::Restart))
+    );
+    app.confirm_update_restart();
+    assert_eq!(app.status_text(), RESTART_PROMPT);
+    app.handle_key(press(KeyCode::Char('n')));
+    assert!(!app.ui.should_quit);
+    assert_eq!(app.ui.mode, Mode::Normal);
+
+    app.confirm_update_restart();
+    app.handle_key(press(KeyCode::Esc));
+    assert!(!app.ui.should_quit);
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert_eq!(app.conversation.confirm, None);
+
+    app.confirm_update_restart();
+    app.handle_key(press(KeyCode::Char('y')));
+    assert!(app.ui.should_quit);
+
+    let mut later = App::mock();
+    later.ui.update.available("0.8.0", "0.9.0");
+    assert!(later.update_begin_apply("0.9.0"));
+    later.update_installed("0.9.0");
+    later.handle_key(press(KeyCode::Enter));
+    assert_eq!(
+        later.take_action(),
+        Some(Action::Update(crate::state::update::Action::InstalledLater))
+    );
+    assert!(!later.ui.update.is_open());
+    assert_eq!(later.ui.update.indicator_version(), None);
+}
+
+#[test]
 fn update_offer_idle_gate_keeps_draft_and_indicator_on_input_border() {
     let mut app = App::mock();
     app.handle_key(press(KeyCode::Char('i')));

@@ -804,6 +804,10 @@ async fn event_loop(
     initial_chat: Option<i64>,
     index: Option<&accounts::AccountsIndex>,
 ) -> Result<()> {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        update::remove_old_backup(&exe);
+    }
     // When a key was taken on the previous pass, so the next frame can be timed
     // against it. Nothing to report in an ordinary run, hence the `Option`.
     let mut keypress_to_probe: Option<Instant> = None;

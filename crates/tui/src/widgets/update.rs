@@ -27,7 +27,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
         available,
         ..
     }
-    | Stage::Ready {
+    | Stage::Installed {
         installed,
         available,
         ..
@@ -50,7 +50,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let title = match stage {
         Stage::Applying { .. } => " Updating ",
         Stage::Failed { .. } => " Update failed ",
-        Stage::Ready { .. } => " Update verified ",
+        Stage::Installed { .. } => " Update installed ",
         _ => " Update available ",
     };
     let block = Block::default()
@@ -94,8 +94,13 @@ fn render_details(
             crate::state::update::Progress::Checking => "checking",
         },
         Stage::Failed { .. } => "Update could not be staged.",
-        Stage::Ready { .. } => "Verified update is ready.",
+        Stage::Installed { .. } => "",
         _ => "A newer stable release is available.",
+    };
+    let headline = if matches!(stage, Stage::Installed { .. }) {
+        format!("televim {available} is installed.")
+    } else {
+        headline.to_owned()
     };
     frame.render_widget(Paragraph::new(headline).style(text), rows[0]);
     frame.render_widget(
@@ -116,10 +121,12 @@ fn render_details(
         Stage::Failed { reason, .. } => {
             frame.render_widget(Paragraph::new(reason.as_str()).style(text), rows[4]);
         }
-        Stage::Ready { .. } => {
+        Stage::Installed { .. } => {
             frame.render_widget(
-                Paragraph::new(format!("running {installed} until stage 05 replaces it."))
-                    .style(text),
+                Paragraph::new(format!(
+                    "Restart televim to use {available}. This window keeps running {installed}."
+                ))
+                .style(text),
                 rows[4],
             );
         }
@@ -138,17 +145,21 @@ fn render_details(
             );
         }
     }
-    if matches!(stage, Stage::Applying { .. } | Stage::Ready { .. }) {
+    if matches!(stage, Stage::Applying { .. }) {
         return;
     }
-    let update = action(
-        "[ Update ]",
+    let first = action(
+        if matches!(stage, Stage::Installed { .. }) {
+            "[ Restart ]"
+        } else {
+            "[ Update ]"
+        },
         app.ui.update.selected() == Choice::Update,
         app,
     );
     let later = action("[ Later ]", app.ui.update.selected() == Choice::Later, app);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![update, Span::raw("  "), later]))
+        Paragraph::new(Line::from(vec![first, Span::raw("  "), later]))
             .alignment(Alignment::Center),
         rows[7],
     );
