@@ -281,8 +281,10 @@ jobs:
         include:
           - runner: macos-15
             target: aarch64-apple-darwin
+            minos: "11.0"
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+            minos: "10.12"
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -309,6 +311,7 @@ jobs:
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           TARGET: ${{ matrix.target }}
+          MINIMUM_MACOS_VERSION: ${{ matrix.minos }}
           TELEVIM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEVIM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         run: |
@@ -344,7 +347,17 @@ jobs:
           "$verify/televim" --help >/dev/null
           otool -L "$verify/televim" | tee "$RUNNER_TEMP/otool.txt"
           if grep -Eq '/opt/homebrew|/usr/local' "$RUNNER_TEMP/otool.txt"; then exit 1; fi
-          vtool -show-build "$verify/televim"
+          vtool -show-build "$verify/televim" | tee "$RUNNER_TEMP/vtool.txt"
+          actual_minos=$(awk '
+            /cmd LC_BUILD_VERSION/ { mode="build"; next }
+            /cmd LC_VERSION_MIN_MACOSX/ { mode="legacy"; next }
+            mode == "build" && $1 == "minos" { print $2; exit }
+            mode == "legacy" && $1 == "version" { print $2; exit }
+          ' "$RUNNER_TEMP/vtool.txt")
+          if [ "$actual_minos" != "$MINIMUM_MACOS_VERSION" ]; then
+            echo "::error::expected macOS minimum $MINIMUM_MACOS_VERSION, got $actual_minos"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v7
         with:

@@ -36,6 +36,10 @@ function Invoke-Installer($version, $installDir) {
     & $installer -Version $version -InstallDir $installDir -NoModifyPath -SkipVersionCheck
 }
 
+function Invoke-InstallerExpression {
+    Get-Content -LiteralPath $installer -Raw | Invoke-Expression
+}
+
 function Assert-InstallerFails($version, $installDir, $expectedText) {
     try {
         $output = (& $installer -Version $version -InstallDir $installDir -NoModifyPath -SkipVersionCheck 2>&1 | Out-String)
@@ -90,7 +94,8 @@ try {
     $pathInstallDir = Join-Path $temporary 'path-bin'
     $pathSeed = '%USERPROFILE%\existing-path;;C:\tools\'
     Set-RawUserPath $pathSeed
-    & $installer -Version '9.9.9' -InstallDir $pathInstallDir -SkipVersionCheck | Out-Null
+    $pathInstallOutput = (& $installer -Version '9.9.9' -InstallDir $pathInstallDir -SkipVersionCheck 3>&1 | Out-String)
+    Assert ($pathInstallOutput -notmatch '(?i)(could not broadcast|did not receive)') 'Installer failed to notify Windows after changing User PATH.'
     $pathAfterFirstInstall = Get-RawUserPath
     $pathEntries = @($pathAfterFirstInstall -split ';' | ForEach-Object { $_.Trim().TrimEnd([char[]]@('\')) } | Where-Object { $_ })
     Assert (@($pathEntries | Where-Object { [string]::Equals($_, $pathInstallDir, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) 'Installer did not add its directory to User PATH once.'
@@ -110,7 +115,7 @@ try {
     $env:TELEVIM_VERSION = '9.9.9'
     $env:TELEVIM_INSTALL_DIR = $iexDir
     try {
-        $iexOutput = (Get-Content -LiteralPath $installer -Raw | Invoke-Expression 2>&1 | Out-String)
+        $iexOutput = (Invoke-InstallerExpression 2>&1 | Out-String)
         throw "Expected the documented Invoke-Expression form to report checksum failure; output: $iexOutput"
     }
     catch {
