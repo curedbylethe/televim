@@ -162,7 +162,7 @@ fn steady_frame_us(terminal: &mut Terminal<TestBackend>, app: &App) -> u64 {
 
 /// Keypress to the frame that shows it, one sample per keypress.
 ///
-/// This is the harness's answer to the README's "input latency" row: the same
+/// This is the harness's answer to `docs/product.md`'s "input latency" row: the same
 /// interval the real binary's probe measures, taken over a whole pass rather
 /// than one key.
 fn input_latency_us(terminal: &mut Terminal<TestBackend>, app: &mut App) -> Vec<u64> {
