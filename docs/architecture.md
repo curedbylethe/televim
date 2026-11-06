@@ -14,9 +14,10 @@ televim/
 ├── clippy.toml                 # Linting rules
 ├── Makefile                    # fmt / lint / boundary / test / ci / build-release
 ├── AGENTS.md                   # The hard constraints, and pointers to everything else
-├── README.md                   # Overview, goals, feature set, acceptance criteria
-├── docs/                       # The reasoning: architecture, dependencies,
+├── README.md                   # Getting started: install, first run, controls
+├── docs/                       # Product definition and project reasoning:
 │                               #   decisions, testing, memory, known gaps
+│   └── product.md              # Goals, acceptance criteria, shipped features
 ├── .cargo/
 │   └── config.toml             # Aliases (`cargo t`, `l`, `f`); no build flags set
 ├── .github/

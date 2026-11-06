@@ -1,0 +1,484 @@
+# Product
+
+Televim is a keyboard-driven Telegram client for the terminal; this page records its goals, acceptance criteria, and shipped feature set.
+
+## Goals
+
+1. **Performance First:** Operate within a 50 MB RAM ceiling (stretch goal of 20–30 MB) by using a compile-time TUI, an arena allocator, and avoiding dynamic dispatch in hot paths.
+2. **Vim-Centric UX:** Provide a modal editing experience (Normal, Insert, Visual) for chat navigation, message composition, and search. Every action must be reachable from the home row.
+3. **Focus & Distraction-Free:** Display only user-to-user private chats. No bots, groups, or channels. This scope drastically reduces the state surface and memory footprint.
+4. **Architectural Integrity:** Enforce a clean architecture where the Telegram protocol, domain logic, and UI are independent crates. The domain layer must have zero knowledge of `tokio` or `ratatui`.
+
+## Acceptance criteria (v1)
+
+| Metric                   | Target                                                                                                             | Measurement Method                                          |
+| :----------------------- | :----------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------- |
+| **Memory Usage**         | < 50 MB RSS at idle after loading 50+ chats.                                                                       | `make measure`, RSS read in-process; see `docs/memory.md`.   |
+| **Startup Time**         | < 500 ms from launch to the chat list rendering on screen.                                                         | `make measure`, `Instant` probe to the first drawn frame (the empty frame; see `docs/memory.md`). |
+| **Input Latency**        | < 16 ms (one frame) for a keypress to reflect in the UI.                                                           | `make measure`, `Instant` probe from keypress to frame (excludes the terminal read and paint). |
+| **Binary Size**          | < 15 MB (stripped, `lto = "fat"`).                                                                                 | `ls -lh target/release/televim`.                            |
+| **Vim Fidelity**         | 95% of navigation commands from `vim-line` and common Normal-mode motions (hjkl, gg, G, /, n, N) work as expected. | Integration tests with `termlens` (`app/tests/tui_e2e.rs`). Today they cover launch, the seeded cache, INSERT typing, resuming a draft, `:q`, Ctrl-u/Ctrl-d scrolling, an arrival moving a pinned view, an arrival leaving a scrolled-back view alone, and both fetch indicators, not the full command set. |
+| **Protocol Correctness** | Successfully authenticate, fetch the private chat list, and send/receive messages via MTProto.                     | End-to-end test against a Telegram test DC.                 |
+
+## Feature set
+
+Working today:
+
+- **Profile card:** one widget over two subjects, the signed-in account with `S`
+  and a contact with `A`, shown in the conversation's rectangle rather than as a
+  third column. **A row is the same kind of object a message is**: `j`/`k`/`gg`/`G`
+  between rows, `h`/`l` and `w`/`b`/`e`/`0`/`$` *within* a row's value, `v` for a
+  selection — and `j` to reach further, which is how a selection becomes a set of
+  whole rows, so there is no `V` — `y` the selection, and `d` on a row that acts. A
+  value wraps and is still one row, so its highlight covers all of it. `Esc` is a
+  ladder — a selection, then the card, then out — and `h` at a row's first cell is
+  the way back, because there is nothing to its left for the motion to reach. Pane
+  movement is `Ctrl-w h`/`Ctrl-w l`, since `h`/`l` are a motion; `Ctrl-w l` says
+  nothing is drawn to the right of a card.
+  A card opens from the chat list without replacing the conversation. Stopping on a
+  chat after moving the highlight shows its card in the conversation's rectangle,
+  and focus stays where it was, so `j`/`k` keep moving the list. `Enter` on the list
+  shows the same card and moves focus to it. `Enter` on the card **confirms**: the
+  conversation opens through the same path as choosing the chat from the list, and
+  the card goes. A card whose chat is not in the list lists that private chat under
+  the name the card holds (the peer id when it holds none) and opens it, the same way
+  a new conversation from user search does. `Esc` closes the card
+  and leaves the conversation as it was. `S` is unchanged and shows the account's own
+  card.
+  A row exists **only when the peer says something**, so a birthday a privacy
+  setting hides is a row that is not there rather than one reading "not set", and
+  the title's `(n/m)` is what tells a reader a row went. `y` with no selection is
+  `yy`: there is no pending-yank latch on a card, so the second press yanks the same
+  row again, and the hint naming `y/yy` is naming one key rather than two. The
+  design's per-peer **colour slot is held and not built** — see [`known-gaps.md`](./known-gaps.md).
+  `add account` opens the sign-in at the phone step for a second account without
+  signing the first one out: its client goes and its files stay where they are, so
+  `Esc` at the phone step cancels and brings it back. The card also lists the
+  accounts this machine already knows, one row each and the signed-in one marked
+  `active`; `d` on another switches to it through the same detach rather than
+  signing in again — its files stay where they are, and an account whose stored
+  session is gone lands on the sign-in view for it, where `Esc` returns to the
+  account left. `logout`
+  confirms on the same screen-wide row and then signs out — the session is
+  discarded, the list empties, and the sign-in field comes back for the phone; on a
+  contact's card `d` acts on its `rename`, `block`/`unblock` and `report` rows, and
+  on a value row it is dropped. Read once at start-up, not on open: a panel that blanked and refilled every time would be one
+  the reader could not trust. With no credentials it says so, and says why.
+- **A contact's card reads their profile, and says so until it arrives.** `A`
+  queues a `users.getFullUser` for the person the highlight is on, and the card
+  draws **no rows at all** until the answer lands — a shell sentence naming them
+  and saying it is reading, or a shell sentence saying why it could not be read.
+  Half a card that fills in is a card the reader has to believe a moment before
+  they do not have to, and a shell is the one thing that says what it is waiting
+  for. The two shell sentences are the account's with their own wording: the
+  account's first line is `not signed in` because its problem is credentials, and
+  putting that on a failed profile read would send a reader to check something
+  that is not the problem.
+  A contact's rows are the ones **they** said, and a field their privacy hides is
+  *absent* rather than empty — so the identity row degrades to the username alone
+  and to **no row at all** when there is neither, which is not what your own card
+  does. Your own card writes `not set`, because you always have a phone number and
+  a missing one is a fact; a contact who sets no username has not told you
+  something is wrong with them. The count in the title is what makes the
+  difference visible.
+  One read per card opened, dropped when the card is no longer on show, because a
+  round trip is long enough that opening a second card first is the normal case
+  rather than a race.
+- **Authentication:** MTProto login with 2FA, asked for in the sign-in surface
+  rather than in the configuration: `:signin` opens it, and a launch that finds no
+  session opens it with the phone already in the bar. The phone, the code
+  Telegram sends and a two-factor password are typed in the bar (titles
+  ` Phone `, ` Login code `, ` Password `, the last masked); the panel draws its
+  `Phone` and `Login code` rows, and a
+  `two-factor password (n attempts left)` row **only** when Telegram answers
+  `SESSION_PASSWORD_NEEDED`. A refusal is a sentence that stays up rather than a
+  flash. `⏎` sends the field once — a second `⏎` while `Checking…` says so and
+  sends nothing, and `⏎` with no client up flashes
+  `not connected yet — the client is not up` and keeps the draft. The session is
+  stored in the OS keyring, or in an **encrypted** file when `session_path` is set
+  (AES-256-GCM-SIV, `0600`, written atomically; the profile card says
+  `encrypted file <path>`). The file's key is `TELEVIM_SESSION_PASSPHRASE` (or
+  `session_passphrase` in the configuration; prefer the variable), else a random key
+  kept in the OS keyring. With neither, the launch ends at `offline:` naming the
+  missing key and the file is left as it was — it is never written in plaintext —
+  and a wrong passphrase ends the same way and never discards the session. Either
+  way televim then asks for the passphrase in a box over the right column, typed
+  as bullets and held in memory only: `⏎` tries it (a wrong one is refused, kept
+  on the box, and writes nothing), `Esc` leaves the session locked and `:unlock`
+  asks again. Put it in `TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` to
+  skip the question. `:passphrase` changes the passphrase of the open file (see
+  the commands). A file
+  written by an older build is encrypted on its first launch, and the status line
+  says once that it was not encrypted and now is. A passphrase is stretched with
+  Argon2id at 19 MiB, 2 passes, 1 lane unless `session_kdf_memory_kib` (8192 to
+  524288), `session_kdf_passes` (1 to 8) or `session_kdf_lanes` (1 to 4) say
+  otherwise; an out-of-range value fails the launch naming the key. The cost is not
+  recorded in the file, so changing it makes a file sealed under the old cost
+  unopenable until it is set back. A stored session that
+  cannot be parsed is discarded at launch: the status line says
+  so and the sign-in field opens, rather than the launch ending at an `offline:`
+  the reader can do nothing with. A launch that does end at `offline:` has asked
+  for the chat list three times and waited between them, naming the reason, the
+  wait and the count on the status line each time — and `:retry` asks again.
+- **Chat List:** private chats only, filtered to exclude bots, groups and
+  channels, with pins and unread counts (the last-message preview is the forward
+  picker's). `j`/`k` move the
+  highlight, `gg`/`G` reach both ends, and `Enter` shows the highlighted chat's
+  profile card, which `Enter` in turn confirms into the conversation (see the
+  profile card above). `:chat <id>` still works. Moving the
+  highlight shows the card of the chat it lands on, once the reader has stopped
+  moving — a held key would otherwise fetch the card of every chat it scrolled
+  past, and the conversation itself is neither opened nor marked by browsing.
+  Confirming a chat that has unread messages tells Telegram it is read, up to the
+  newest message the list knows of, and the count clears once Telegram accepts
+  that; a refused marker leaves the count where it was, and the next open asks
+  again. While any card covers the conversation nothing is marked: the mark waits
+  for the card to be confirmed or closed. A message that arrives in the
+  conversation on show is marked read the same way, and one that arrives under a
+  card is kept and marked on the pass after `Esc`; a read
+  done on another device sets the count to whatever Telegram still counts as
+  unread. A peer's read of your messages is kept across restarts, and a read the
+  live feed missed is recovered when the chat list is next fetched, so `[read]`
+  is shown for it. `p` pins the highlighted chat, or
+  unpins it; the pin is kept by Telegram, so it survives a restart, and pinned
+  chats lead the list in Telegram's own pin order, and the rest follow newest first. The focused pane's border is drawn in `Theme::border_focused`; `h` moves to the
+  chat list, `l` opens the highlighted chat from the list, and `Tab` cycles focus;
+  `Ctrl+w` steps back out of the line.
+- **Starting a conversation with someone new:** `/` on the chat list finds a
+  *person* rather than a message — there is no open conversation for it to
+  search, so it does not borrow the conversation's meaning — and `:new <query>`
+  opens the same prompt from anywhere `:` reaches, pre-filled. It is the same
+  surface as the message search: a prompt on the bar behind a `/` prefix with a
+  status label, submitted with `Enter`. The server
+  answers with candidates; an ambiguous set is drawn as a short overlay list over
+  the chat list, walked with `j`/`k` or `↑`/`↓` and opened with `Enter`, and
+  dismissed with `Esc`. Each row is the person's name, their `@username` when
+  they have one, and a standing — `chat` when a conversation with them already
+  exists, `new` when choosing them makes one — with the fragment the reader typed
+  inked `match`. The rows are ranked rather than taken in the server's order:
+  someone with no conversation yet leads someone who already has one, then comes
+  the closest match (a name prefix, then a name that contains the words, then a
+  handle prefix, then a handle that contains them; for a `@handle` query the
+  handles alone, exact before prefix before substring), then the name itself.
+  Picking someone already in the list focuses that chat rather than
+  creating a second; picking someone new lists and opens one at the top of the
+  unpinned block, above the conversations that were already there. Submitting the
+  prompt empty lists the reader's most-contacted people instead, the server's
+  top correspondents (`contacts.GetTopPeers`), in the same overlay, in the
+  server's order. An account with frequent contacts switched off says so —
+  `the account has frequent contacts switched off in Telegram's settings` —
+  rather than reporting a read that failed. The status line says
+  where the search stands: `searching…` while an answer is in flight, the count
+  when it lands, and why when it finds nobody or fails.
+- **Searching every conversation:** `?` opens a prompt on the bar, from the
+  conversation and from the chat list alike, and `:search <query>` runs the same
+  search from anywhere `:` reaches; a bare `:search` or an empty `?` repeats the
+  last one, filters and all. Matches come from the server: the request asks for
+  one-to-one chats, so a person's private chat and a bot's direct messages are
+  both in its answer, a hundred at a time. The
+  list pages itself: when the cursor reaches the last hit and the server has more,
+  the next page is asked for and appended under the rows already read, and an empty
+  page ends the list. A hit in a bot's direct messages, a group, a channel or a
+  chat the client does not hold is dropped from the list and counted: the chat
+  list shows people only, so such a hit could not be opened. The answer is drawn as an overlay
+  over the whole body: one rule per run of one chat's hits, with the chat's name
+  and the run's count, then one or two rows per message with the time, the
+  sender as `[them]` or `[you]`, and up to two lines of context cut around the
+  first match, with every match inked `match`. `j`/`k` or the arrows move between messages, `{` and
+  `}` between chat headers, and `gg`/`G` to the first and last message. `Enter`
+  opens the message's chat with the cursor on that message: a message already on
+  screen, or in the local history cache, is a cursor move, and one that is neither is
+  fetched, as `gd` fetches a quoted message, with `Jumping…` on the bar until it lands. `Esc` closes the overlay,
+  returns focus to the pane the search was raised from, and forgets the query. The
+  overlay owns the keys while it is up, so none of them writes to a chat; `/`, `:`
+  and `?` still open their prompts, and `?` is refused while the new-chat list is
+  up. The status line says where the search stands: `?<query> — searching…`, then
+  `?<query> — N results in M chats` when it lands, `no matches`, or
+  `search failed (<reason>)`. Hits that were dropped add `, N dropped`; a page on
+  its way adds `, loading more…`; a flood wait keeps whatever rows were fetched
+  and says `paused: retry in Ns`, then sends the same request again when the wait
+  is over.
+  Filters are typed into the same line: `media:` takes `photo_video`, `document`,
+  `music`, `voice` or `url`, and `since:`/`until:` take a `YYYY-MM-DD` day in the
+  reader's zone, both inclusive. With a filter the status names it in place of the
+  chat count — `?<query> — photo_video, from 2026-01-01 — N results` — and
+  `from:`, `sender:` and `by:` are refused, because the server's global search has
+  no sender filter; a malformed token refuses the search and reopens the prompt
+  with the line still in it. `/` keeps its meaning on each pane.
+- **Conversation View:** `j`/`k` by message, `gg`/`G`, `Ctrl+d`/`Ctrl+u` by a
+  screenful, `gg` to the first unread, `n` to cycle search matches. A numeric
+  prefix makes `gg`/`G` walk day boundaries instead: `[N]gg` steps N day
+  boundaries up and `[N]G` N down, landing on the first message of the day each
+  reaches — a day with no messages is a boundary crossed, never landed on — and
+  fetching the day with a date page when the window does not hold it. `:date
+  <ISO>` goes to an exact `YYYY-MM-DD` day the same way, read in the reader's
+  own zone. `gd` on a
+  message that quotes another goes to the quoted message: a cursor move when it
+  is loaded, and otherwise a page fetched around it that replaces the window,
+  with `Jumping to the quoted message…` said while that page is in flight.
+  A day that is not loaded says `Jumping to <day>…`, `<day>` in the
+  day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`); a `:date`
+  that is not `YYYY-MM-DD` is refused with `not a date: <argument>` and the
+  reader stays put.
+  `Ctrl-o` goes back to the message the jump left and `Ctrl-i` (or `Ctrl-n`, for
+  terminals that send `Ctrl-i` as `Tab`) forward again —
+  a return to a message the window no longer holds is fetched the same way, and
+  says `Jumping back…` or `Jumping forward…`. The marks are kept per
+  conversation, so leaving a chat and returning walks back to where the reader
+  stood before the switch; an empty chat list — a sign-out, or the detach before a
+  second account signs in — forgets them. Each
+  conversation keeps up to `jumplist_depth` marks on **either** stack (default
+  100, `TELEVIM_JUMPLIST_DEPTH`, 1 to 1000). While a page is in flight only
+  `Esc` answers, and it leaves the reader where they were. `gd` on a message
+  that quotes nothing refuses with `Not a reply: gd jumps to the message a reply
+  quotes.`, and a quote the client cannot fetch at all with `That message is no
+  longer available.` Messages soft-wrap to the panel's width — at whitespace, or
+  after a zero-width non-joiner (ZWNJ, U+200C) where there is one to break at, and
+  at the panel's edge where there is not — so a message is as many rows as its text
+  needs. Everything that measures
+  the conversation counts those rows rather than messages: the slice, the
+  scrollbar beside it, a page, and the
+  `FETCH_MARGIN` (20) that asks for a page. `[you]`/`[them]` and a reply's quoted
+  target are on the first row of a message, `[sending…]`/`[failed: …]` on the
+  last.
+- **Visual mode:** `v`/`V` start charwise/linewise selection at the cursor's message; `Esc` drops it; `o`/`O` swap its ends; `j`/`k` move between messages; `h`, `l`, `w`, `b`, `e`, `0`, `$`, `f`, `t`, `F`, and `T` move within one message. A selection spanning two or more messages is a set of messages; one inside a single message is a text range. `y` yanks it, `d` deletes it with confirmation, and `s` forwards it.
+- **Media:** a message that carries something and says nothing about it still has
+  a body — `[image]`, `[video]`, `[gif]`, `[voice]`, `[sticker]`,
+  `[animated sticker]` or `[file]` — so an attachment does not render as an empty
+  row. A message with a caption shows the
+  caption and nothing else, and a kind this build does not model becomes
+  `[file]` rather than disappearing; a message with no media at all is unchanged.
+  A static sticker with its bytes draws its picture inline — a bounded block,
+  24 columns by 8 rows, half-block cells — and `[sticker]` while they are
+  missing. An animated sticker is never decoded: a TGS or a WebM draws
+  `[animated sticker]`, and `o` opens the cached file in the viewer.
+  `stickers = "off"` (or `TELEVIM_STICKERS=off`) draws the token for
+  every sticker message and fetches nothing. `:attach` sends images and documents;
+  sticker sending and the sticker picker are not built. `graphics = "auto"` (or
+  `TELEVIM_GRAPHICS`) places the picture with the kitty graphics protocol where
+  the environment names kitty, ghostty or WezTerm; `kitty` forces it and `off`
+  keeps the half-block cells everywhere. Sixel is not yet supported. Fetching the bytes is a client-level operation today
+  (`ProtoClient::download_media_to`): the download streams to a temp file in the
+  cache directory as each chunk lands and is renamed into place once hashed, so a
+  large attachment is never held whole. The attachment is re-read by identifier,
+  because a description is rebuilt on every page and a cached locator would be stale.
+  `o` on a media message in Normal mode opens it in the platform viewer:
+  `open -W` on macOS, `xdg-open` on Linux, `cmd /C start "" /WAIT` on Windows.
+  The release workflow builds and CLI-smoke-tests Windows; the
+  TUI, Credential Manager, opener and owner-only file modes still need a manual
+  check.
+  The file comes from the media cache: a message opened before is served from
+  disk with no request, and a first open downloads it and stores it there. The
+  cache is a directory of `0600`, plaintext files named by the sha256 of their
+  bytes (`<sha256>.<ext>`), so messages with the same bytes share one file. It is
+  not encrypted — unlike the session file — so it is readable by anything running
+  as the reader and by any backup; the gap and its follow-up are in
+  [`known-gaps.md`](known-gaps.md). Three
+  kinds of pointer name a file: `<chat>-<message>.ref` for each message,
+  `m<id>.ref` for each Telegram media id, which a forwarded copy shares, and
+  `<chat>-<message>.thumb` for the small preview a document or photo already
+  carries. The preview is no download — it rides on the message — and is stored
+  as a blob of its own so it is read once, served from disk after that, and
+  invalidated with its message: dropped when the message's entry is, or kept
+  while a parent another message shares remains. A pointer
+  also records a CRC32 of the blob's bytes: a lookup verifies the file on disk and
+  evicts a corrupt or truncated one rather than serving it, so its message is
+  fetched again. The directory is kept beside the config as `televim.media` unless `media_cache_dir`
+  (or `TELEVIM_MEDIA_CACHE_DIR`) names another. It keeps at most
+  `media_cache_max_bytes` bytes (or `TELEVIM_MEDIA_CACHE_MAX_BYTES`; default 1 GiB)
+  and 256 pointers. A file over the byte cap is refused. Past either limit the least
+  recently used pointer goes first, and its file with it once no pointer names it.
+  An edit drops its message's pointer; a deletion drops the pointer for that id in
+  any chat. The directory is emptied when the account changes and on sign-out, except a file a
+  viewer is still open on, which stays until that viewer reports and is otherwise swept on the
+  next launch. If
+  that directory cannot be written, this run uses `televim.media-<account>` under the
+  platform cache directory (`dirs::cache_dir()`) instead, with the same limits, so
+  the cached media survives a restart; only when there is no platform cache directory
+  does it fall back to the system temp directory, warning that it will not survive.
+  The configured directory is left as it is and the next launch tries it again. Files
+  saved by earlier versions under the temp directory are not migrated or removed; the
+  OS reclaims them. The terminal leaves the alternate screen and raw mode for the
+  viewer and comes back where it was. A download is bounded by `media_cache_max_bytes` (the
+  quota) and a free-space check, and refused — the status line saying so — when its declared
+  size is over the cap or the cache's filesystem has no room for it; otherwise it streams to
+  disk. While a download runs, its row shows `[image… 42%]` beside
+  the placeholder (the megabytes so far when Telegram declared no size); `Esc` on that
+  message stops it, and a failed download shows `[failed: …] (o retries)`, `o` on it trying again.
+  `:attach <path>` asks `attach image <name>? (y/n)` or
+  `attach file <name>? (y/n)` before sending. It accepts `jpg`,
+  `jpeg`, `png` and `webp` images, plus `pdf`, `doc`, `docx`, `odt`, `rtf`,
+  `txt`, `md`, `csv`, `xls`, `xlsx`, `ppt` and `pptx` documents. Images go as
+  photos; documents go as files. The optimistic row shows `[sending…]`, and
+  upload progress shows bytes read beside it, not server-confirmed parts. `Esc`
+  cancels at the next read; a failed row shows `[failed: …] (o retries)`, and
+  `o` or `:open` retries while the path remains in this run's memory. A relaunch
+  loses that path, so run `:attach` again. `:open` also opens the media on the
+  highlighted message. `:save <path>` downloads a cache miss, then copies the
+  attachment to that path and overwrites an existing destination. `:attach` and
+  `:save` expand a leading `~` or `~/`.
+  `:attach` has no caption argument; edit the sent message to add a caption.
+  Albums and voice recordings have no send command.
+  The viewer is set per kind of media: `viewer_image` (photos and stickers),
+  `viewer_video` (videos and GIFs) and `viewer_audio` (voice messages), each also read
+  from `TELEVIM_VIEWER_IMAGE`, `TELEVIM_VIEWER_VIDEO` and `TELEVIM_VIEWER_AUDIO`.
+  `viewer` (`TELEVIM_VIEWER`) covers every kind without its own key, files included. A
+  value is a command line split on whitespace: the first word is the program, the rest
+  are its arguments, and the file path is added last. There is no shell, so quotes, `~`
+  and `$VAR` are not expanded. A blank value is unset, and a kind with nothing set uses
+  the platform opener above. A configured program is run directly and waited on, so the
+  status line reports the viewer's own exit; one that is not installed is said on the
+  status line by name, with the path of the file. The known limits of the
+  hand-off are in [`known-gaps.md`](known-gaps.md).
+- **Message Composition:** `i`/`a` to compose, `Enter` to send, `Esc` to stop
+  typing and a second `Esc` to leave — nothing typed is ever lost to an `Esc`.
+  The line is a real editor (`vim-line`, wrapped in `tui::line`): caret
+  movement, `w`/`b`/`e`, `x`, `dw`, `cc`, `p`, `gg`/`G`, `o`, a visual selection with
+  `d` and `y`, and multi-line messages with `Ctrl+J` (`Shift+Enter` where the
+  terminal volunteers the distinction). `gg`, `G` and `o` are the wrapper's, not the
+  library's — see [`decisions.md`](./decisions.md). The bar is always a draft: it grows to six
+  rows, and each conversation keeps its own: leaving parks it, re-entering
+  restores it, and another conversation starts with its own bar. Quitting keeps
+  them too: the loop writes `televim.drafts.json` beside the config whenever the
+  drafts change, so a relaunch — even after a `kill -9`, which loses at most one
+  250 ms tick — puts the words back. It is drawn with
+  a painted caret that `TestBackend` can assert, which the real terminal's could
+  not.
+  A `:shortcode` opens a completion popup above the bar: `↑`/`↓` choose a
+  candidate, `⇥`/`⏎` accept one, `Esc` closes the popup, and every other key
+  keeps typing into the draft. Reply with `r`, edit with `e` — and since a
+  reply carries the message it quotes, `gd` on one goes to that message and
+  `Ctrl-o` brings the reader back. `j` from the newest message rests the cursor
+  on the draft's row below it, and `i` there resumes the draft in Insert with the
+  caret at its end.
+  `:attach <path>` asks for confirmation and adds an optimistic media row before
+  the upload starts.
+- **Text direction:** the draft in the bar is drawn by the same rules as an
+  incoming message. In the default mode the row is emitted as it is stored and the
+  terminal's shaper reverses a right-to-left run; in the opt-in `BidiMode::Visual`
+  (`bidi = "visual"`) this program applies the permutation instead, for the whole
+  draft and every row of a wrapped one, and the caret and the selection are marked
+  on the cells their logical positions land on. The `: ` and `/` prefix is chrome
+  and is never permuted. `bidi = "words"` is for kitty, which reverses each
+  right-to-left word on its own: it emits a right-to-left row's words in reverse
+  order, each one whole, so the words read in order and the letters still join.
+  The stored text, and what is sent, are unchanged in every mode.
+- **Send / edit / delete:** one message with `d`, or every message a selection
+  covers in Visual, with a confirmation before deleting. The prompt counts, says
+  which side the messages are from, and says how many were left out because they
+  are placeholders. Delete removes for both sides. More than a hundred messages is
+  several requests with a pause between them, and a failure part-way through is
+  reported as how many went through rather than as a plain failure.
+- **Forward:** `f` in Normal forwards the message under the cursor, or the current
+  selection if there is one; `s` in Visual forwards the selection. Either raises a
+  picker of your chats over the conversation. `j`/`k` or the arrows choose a chat,
+  `Enter` queues the forward into it and clears the selection, and `Esc` puts the
+  picker away and keeps the selection. The forward stays in the current chat: the
+  destination is not opened, and the status line reports how many went through. The
+  messages keep their authors and captions, as Telegram renders a forward. Placeholders
+  are left out and counted, and more than a hundred messages go in several requests.
+  Telegram can refuse a forward from a chat that protects its content; the status
+  line then names that chat, and nothing checks for it before the send. The picker
+  walks the chat list only, and leaves out deleted accounts, which stay in the list.
+- **Search:** `/` searches the loaded window, then asks the server and prefers
+  its answer. `n` repeats or cycles. This is the *conversation's* search; the
+  chat list has its own `/` that finds a person instead — see *Starting a
+  conversation with someone new* — so the two never shadow each other.
+- **Typing indicator:** the conversation title grows a dim `· typing` note while
+  the peer is composing one. It ends when they cancel, when their message lands,
+  or six seconds after the last sign of it, and it is furniture on the title
+  rather than a message row, so it never displaces a message; when the title has
+  no room it is dropped whole rather than truncated. Advertising our own typing is
+  not built.
+- **Online / last seen:** the conversation title shows the open peer's status as a
+  dim `· online`, `· last seen today`, `· last seen yesterday`, `· last seen on <day
+  or date>`, or — for a peer who restricts it — `· last seen recently`, `· last seen
+  within a week` or `· last seen within a month`. A contact's card carries the same
+  words on one `status` row. A peer who hides presence shows nothing: no title note
+  and no row. The title note yields to the typing note while the peer types, and is
+  dropped whole when the title has no room. The status is sticky: it stands until
+  the next update for that peer, with no expiry, so it can be stale. The chat list
+  shows no presence.
+- **Yank / paste:** `y` in Visual puts the selection in a register — the selected
+  characters for a text selection, one line per message oldest-first for a set of
+  them — and `p` in Normal opens the line with it. A yank is also offered to the
+  system clipboard with OSC 52, best-effort and truncated to 74 kB of sequence;
+  the register is the half that always works. The register is cleared by opening
+  another conversation. `p` is not bound in Visual. The line keeps its own
+  internal yank buffer for its own `p`, fed by its own `y` and `d`; the two
+  registers are deliberately not shared, because their formats differ.
+- **Chat and contact actions:** `:archive` and `:archived`, `:block`/`:unblock`,
+  `:rename [name]`, `:delete-chat [both]`, `:report [reason]` and `:contacts`.
+  A local name is yours, kept with the history file and cleared by bare
+  `:rename`; archive keeps a chat in the archive folder rather than deleting it;
+  block, delete and report ask `y/n` first; the contacts list opens a person's
+  card, which carries `rename`, `block`/`unblock` and `report` rows.
+- **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
+  `:discard`, `:attach <path>`, `:open`, `:save <path>`,
+  `:date <ISO>`, `:settings`, `:signin`, `:add-account`, `:retry`, `:unlock`,
+  `:passphrase`, `:export-session <path>`, `:import-session <path>`, and the
+  eight chat and contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,
+  `:rename [name]`, `:delete-chat [both]`, `:report [reason]`, `:contacts`).
+  `:date <ISO>` takes `YYYY-MM-DD` in the reader's own zone and jumps to the
+  first message of that day, loading a page when the window does not hold it;
+  anything else is refused with `not a date: <argument>`.
+  `:unlock` asks for the session passphrase again after `Esc` left the session
+  locked. `:passphrase` asks `y/n`, then the new passphrase twice, and re-seals the
+  session file and the history cache under it; the old one stops opening either,
+  the OS keyring is left alone, and the box says to update
+  `TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` if the old passphrase was
+  set there. A mismatch between the two entries, `Esc`, or a key that does not open
+  the file changes nothing; the command is refused while the session is locked.
+  The last two copy the stored session between backends: `:export-session` writes
+  it, sealed under the current key, to a file; `:import-session` reads such a file
+  into the signed-in account's store (its slot's session file, or the OS keyring when
+  none is set) after a `y/n`, refuses a session that belongs to another account than the
+  one signed in, and reconnects with it. The auth key travels inside the snapshot;
+  the live session and the source are left as they were. The path is required.
+  `:retry` re-runs the bring-up — the client, the chat list, the feed — and is how
+  a launch that exhausted its three chat-list attempts is cleared without a
+  restart; while a bring-up is already in flight it says so and does nothing.
+  `q` in the conversation and `:q`/`:quit` both raise `Quit televim? (y/n)` first
+  — the same screen-wide confirmation a deletion uses — because `q` is one
+  keystroke away from a key that types nothing else. `y` quits, `n` or `Esc`
+  stays. `Ctrl-C` does **not** ask: it is the way out when the program is wedged,
+  and a terminal that is not answering cannot draw the question either.
+- **Reconnect:** if the update feed stops mid-session, televim rebuilds the client
+  from the stored session in-process and takes a new feed — no restart and no
+  re-login — while keeping the reader's place: the open conversation and its
+  cursor, the chat-list highlight, the jumplist, the selection, the register and
+  the draft all survive. The status line says `reconnecting` while it happens, and
+  one automatic reconnect is tried; if the feed stops again before any update
+  arrives, the status line says `offline:` and `:retry` asks again. A `●` beside
+  the sentence always shows which holds: green while the feed delivers, yellow
+  while a bring-up or rebuild is under way, red once the budget is spent.
+  A switch of account carries far less: `:add-account` and picking a listed
+  account on the self card keep the peer id of the
+  open conversation, so the new account lands in that chat when its own list holds
+  the person and on the top row with `that account has no chat with this person`
+  when it does not; the cursor, the draft, the register and the scroll position
+  stay with the account that left, because a message id is that account's sequence
+  and means nothing in another's.
+- **History cache:** media bytes are not in this file; they are in the media cache
+  (see **Media** above). The newest 200 messages of each of the 32 most recently
+  touched private conversations (at most 8 MiB of JSON-encoded message text in all; the least
+  recently touched conversations go first), and the first 500 rows of the chat list,
+  are kept in `televim.history.json` beside the config — sealed with the session
+  file's envelope and key, `0600`, written atomically and off the loop's thread,
+  behind every page, feed event and list change, with writes coalesced within 500 ms
+  and flushed on exit. A launch with a warm cache draws the cached chat list and the first
+  conversation (or the `--chat` one, when the cache holds it) **before any network
+  round trip**, under `connecting…`; the `Ready` that follows refreshes the list
+  around the reader, and the newest page replaces the cached rows, with
+  `Cached messages — loading the latest…` on the status line while it is on its
+  way. Every page the client fetches is merged into the cache, and an edit, a
+  deletion or an arrival over the feed is folded in too. If the launch ends at
+  `offline:`, the cached list and the cached conversations stay readable and
+  switchable, and the status line still says `offline:`. Text, the media *kind* and
+  its Telegram media id are kept; media bytes, presence and unsent placeholders
+  never are. The file is tagged with the signed-in account's id and checked once `Ready`
+  names the account; another account's file is discarded. A page fetched under a
+  feed that has since ended is dropped. The file is removed on sign-out and when a
+  launch finds no session. A plaintext file from an older build is read once and
+  rewritten sealed; that reader goes after 2026-12-31, and a plaintext file is then
+  treated as corrupt.

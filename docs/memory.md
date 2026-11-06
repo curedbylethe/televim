@@ -199,9 +199,10 @@ measurement is narrower than the words.
 
 **First frame is the empty/sign-in frame, not the chat list.** The loop draws
 before any network round trip, so the frame being timed is the one that says the
-program has nothing to connect as. The README's < 500 ms target is unchanged and
-still the contract; this note is about which frame the number describes. The
-"populated load" row is the harness's substitute, and it measures a synthetic
+program has nothing to connect as. The `< 500 ms` target in
+[`product.md`](./product.md) is unchanged and still the contract; this note is
+about which frame the number describes. The "populated load" row is the
+harness's substitute, and it measures a synthetic
 60-chat screen rather than a fetched one. A launch with a warm history cache
 draws the cached chat list in its first frame, still before any round trip, but
 the measured launch has no cache, so its first frame is still the empty one.
@@ -768,8 +769,9 @@ fetch/translate triple `Vec<Message>` path (`telegram-framework/src/history.rs:1
 `proto/src/history.rs:151-164`, `domain/src/history.rs:182-192`) — are all
 outside an arena that cannot be handed one without that bleed. MTProto decoding
 is inside `grammers`. Recorded in [`decisions.md`](./decisions.md); `bumpalo` is
-not a dependency. One drift left deliberately: the README's first project goal
-still names an arena among the means of staying under the ceiling. That line is
+not a dependency. One drift left deliberately: the first project goal in
+[`product.md`](./product.md) still names an arena among the means of staying
+under the ceiling. That line is
 a stated goal rather than a claim about the tree, and rewriting a goal to match
 a measurement would be moving the target — so this paragraph is the record of
 what was actually found.
