@@ -124,9 +124,9 @@ Type `:` in a conversation or profile card for `:chat`, `:new`, `:search`, `:att
 
 - **“televim has no application credentials”**: a source build needs
   `TELEVIM_API_ID` and `TELEVIM_API_HASH`, or `api_id` and `api_hash` in config.
-- **Linux keyring errors**: install `libdbus-1-3` and a Secret Service provider
-  such as GNOME Keyring or KWallet. For headless use, configure `session_path`
-  and a passphrase.
+- **Linux keyring errors**: install your distribution's DBus runtime package
+  and a Secret Service provider such as GNOME Keyring or KWallet. For headless
+  use, configure `session_path` and a passphrase. See [Linux details](docs/installing.md#linux).
 - **macOS blocks launch**: binaries are unsigned. If you trust the download,
   allow it in System Settings → Privacy & Security.
 - **Windows warning**: Windows is experimental and the binary is unsigned; SmartScreen may warn.
