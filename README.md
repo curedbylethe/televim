@@ -6,112 +6,153 @@
 
 # televim
 
-A cross-platform Telegram client for the terminal, written in Rust. `televim` is
-a portmanteau of "Telegram" and "Vim," signalling its terminal-first,
-keyboard-driven identity: the UI is driven by Vim keybindings (Normal and
-Insert today; Visual mode is a stub).
+A keyboard-driven Telegram client for the terminal, with Vim-style Normal, Insert,
+and Visual modes. It runs on macOS and Linux, with an experimental Windows
+build; it shows private user-to-user chats only, with no groups, channels, or bots.
 
-It displays **only private user-to-user chats** — no channels, no bots, no
-groups. The primary constraint is **memory**: the client must stay under 50 MB
-RSS at idle after loading 50+ chats.
+Pre-1.0: see [known gaps](docs/known-gaps.md). See [memory notes](docs/memory.md) for measurement details.
+
+![televim showing a chat list and a conversation](docs/images/televim.png)
+
+*Fictional offline chats; the status row is cropped.*
+
+## Install
+
+Release binaries are on [GitHub Releases](https://github.com/curedbylethe/televim/releases).
+
+| Platform | Status |
+| :--- | :--- |
+| macOS, Apple silicon (11.0+) | Supported |
+| macOS, Intel (10.12+) | Supported |
+| Linux, x86_64 (glibc 2.35+) | Supported |
+| Linux, arm64 (glibc 2.35+) | Supported |
+| Windows, x86_64 | Experimental |
+
+**macOS and Linux**
+
+```console
+curl -fsSL https://raw.githubusercontent.com/curedbylethe/televim/main/scripts/install.sh | sh
+```
+
+**Windows PowerShell**
+
+```powershell
+irm https://raw.githubusercontent.com/curedbylethe/televim/main/scripts/install.ps1 | iex
+```
+
+The installer uses `$HOME/.local/bin` on macOS and Linux, or
+`%LOCALAPPDATA%\televim\bin` on Windows. It offers to add the directory to
+`PATH`; open a new terminal after installation. Use `--no-modify-path` or
+`-NoModifyPath` to skip the `PATH` change.
+
+Manual archives and `SHA256SUMS` are on the [release page](https://github.com/curedbylethe/televim/releases).
+The checksum detects a broken download, not a compromised release; see the
+[manual install and checksum steps](docs/installing.md).
+
+On Linux, install DBus (`libdbus-1-3` on Debian or Ubuntu) and a Secret Service provider. See [platform details](docs/installing.md#linux).
+
+## First run
+
+<a id="credentials"></a>
+
+Install, then start Televim:
+
+```console
+televim
+```
+
+Release binaries include Telegram application credentials, so no API setup is
+needed. Sign in with your phone number and Telegram's code; enter your
+two-factor password if asked. Type each value in the input bar and press
+`Enter`. Both release and source builds require your Telegram login.
+
+A source build has no application credentials. Set `TELEVIM_API_ID` and
+`TELEVIM_API_HASH`, or add `api_id` and `api_hash` to `televim.toml`.
+
+Televim reads optional `televim.toml` from the current directory. Use
+`--config <path>` to select another file. Logs, drafts, history, and the account
+list are stored beside it; the media cache can use a separate directory.
+
+The login session uses the OS credential store by default. Set `session_path` to
+store it in an encrypted file, and set `TELEVIM_SESSION_PASSPHRASE` or
+`session_passphrase` to provide its passphrase. For keyring-free Linux setup,
+see [first-run platform details](docs/installing.md#first-run).
+
+Use `televim --chat <id>` to open a chat directly.
+
+## Essential controls
+
+**Anywhere**
+
+| Key | Action |
+| :--- | :--- |
+| `?` / `:` | Search chats / open commands from a conversation or profile card |
+| `Esc` / `Ctrl-C` | Cancel or step back / quit immediately |
+
+**Chat list**
+
+| Key | Action |
+| :--- | :--- |
+| `j` / `k` / `gg` / `G` | Move highlight; jump to first / last chat |
+| `l` / `Enter` | Open chat / profile card |
+| `/` / `p` | Start chat / pin or unpin the highlighted chat |
+
+**Conversation**
+
+| Key | Action |
+| :--- | :--- |
+| `j` / `k` | Previous / next message |
+| `Ctrl-d` / `Ctrl-u` | Page down / up |
+| `gg` / `G` | First unread / newest message |
+| `i` / `a` | Write a message |
+| `v` / `V` / `y` | Select text or messages; copy with `y` in Visual mode |
+| `d` / `r` / `e` / `f` | Delete (confirms) / reply / edit / forward |
+| `/` / `n` / `N` | Search this chat / next / previous match |
+| `h` / `q` | Return to list / quit (confirms) |
+
+**Composer**
+
+| Key | Action |
+| :--- | :--- |
+| `Enter` / `Ctrl-J` | Send / insert a new line |
+| `Esc` | Return to Normal mode; press again to leave the line |
+| Arrow keys | Move the caret |
+
+Type `:` in a conversation or profile card for `:chat`, `:new`, `:search`, `:attach`, `:save`, and `:q`; see the full [command list](docs/product.md#feature-set).
+
+## Troubleshooting
+
+- **“televim has no application credentials”**: a source build needs
+  `TELEVIM_API_ID` and `TELEVIM_API_HASH`, or `api_id` and `api_hash` in config.
+- **Linux keyring errors**: install `libdbus-1-3` and a Secret Service provider
+  such as GNOME Keyring or KWallet. For headless use, configure `session_path`
+  and a passphrase.
+- **macOS blocks launch**: binaries are unsigned. If you trust the download,
+  allow it in System Settings → Privacy & Security.
+- **Windows warning**: Windows is experimental and the binary is unsigned; SmartScreen may warn.
+- **Logs**: `televim.log` is beside the config file. Include it when reporting a
+  problem in the [issue tracker](https://github.com/curedbylethe/televim/issues).
 
 ## Documentation
 
-| File | What is in it |
-| :--- | :------------ |
-| [`AGENTS.md`](./AGENTS.md) | The hard constraints for agents and contributors |
-| [`docs/installing.md`](./docs/installing.md) | Install, upgrade and remove televim on macOS, Linux and Windows |
-| [`docs/product.md`](./docs/product.md) | Goals, acceptance criteria, and the feature set as it ships |
-| [`docs/architecture.md`](./docs/architecture.md) | Workspace layout, the dependency rule, per-crate design |
-| [`docs/dependencies.md`](./docs/dependencies.md) | Why each dependency is chosen or pinned |
-| [`docs/decisions.md`](./docs/decisions.md) | Key Decisions — the ADRs |
-| [`docs/testing.md`](./docs/testing.md) | Quality harness, `Makefile`, CI, the test layers |
-| [`docs/memory.md`](./docs/memory.md) | The memory budget: measured baseline, declared work, and what the harness does not measure |
-| [`docs/known-gaps.md`](./docs/known-gaps.md) | Known gaps and v2 hooks |
-| [`DESIGN.md`](./DESIGN.md) | The design system |
-| [`design/logo/`](./design/logo/) | The mark: the dark and light lockups, the favicon, and the social-preview card |
-| [`CHANGELOG.md`](./CHANGELOG.md) | Release history, generated per release from the commits |
+| Guide | Covers |
+| :--- | :--- |
+| [Installing](docs/installing.md) | Install, upgrade, uninstall, and platform details |
+| [Product](docs/product.md) | Goals, acceptance criteria, features, and commands |
+| [Known gaps](docs/known-gaps.md) | Current limitations |
+| [Architecture](docs/architecture.md) | System design |
+| [Decisions](docs/decisions.md) | Key project decisions |
+| [Testing](docs/testing.md) | Build and verification commands |
+| [Design system](DESIGN.md) | Interface design rules |
+| [Changelog](CHANGELOG.md) | Release history |
 
-Goals, acceptance criteria, and the feature set as it ships live in [`docs/product.md`](./docs/product.md).
+<a id="building"></a>
 
-## Installing
+## Building from source
 
-Release archives are on [GitHub Releases](https://github.com/curedbylethe/televim/releases).
-Installers put `televim` on your user `PATH` and verify the archive checksum.
+Run `make build-release` for a release binary or `make run` for a debug build.
+A source build needs the credentials listed above. See the [build guide](docs/testing.md).
 
-| OS | Architecture | Target | Archive | Minimum / status |
-| :--- | :--- | :--- | :--- | :--- |
-| macOS | Apple silicon | `aarch64-apple-darwin` | `.tar.gz` | macOS 11+ |
-| macOS | Intel | `x86_64-apple-darwin` | `.tar.gz` | macOS 10.12+ |
-| Linux | x86_64 | `x86_64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
-| Linux | arm64 | `aarch64-unknown-linux-gnu` | `.tar.gz` | glibc 2.35+ |
-| Windows | x86_64 | `x86_64-pc-windows-msvc` | `.zip` | Windows 10+; experimental |
+## License
 
-macOS/Linux:
-
-```console
-$ curl -fsSL https://raw.githubusercontent.com/curedbylethe/televim/main/scripts/install.sh | sh
-```
-
-Windows PowerShell:
-
-```powershell
-PS> irm https://raw.githubusercontent.com/curedbylethe/televim/main/scripts/install.ps1 | iex
-```
-
-For a pinned release, set `TELEVIM_VERSION` before running the installer. Use
-`--no-modify-path` on Unix or `-NoModifyPath` on Windows to manage `PATH`
-yourself. See [`docs/installing.md`](./docs/installing.md) for manual downloads,
-checksum commands, system requirements, upgrade, uninstall and troubleshooting.
-Inspect an installer before piping it to a shell. `SHA256SUMS` checks download
-integrity; it does not identify the publisher.
-
-### Credentials
-
-televim signs in as a Telegram application. The release binaries are built with
-the maintainer's `api_id` and `api_hash`, so they run with no setup. The
-credentials are not secret from someone who looks inside the binary, so you can
-use your own instead. Register an application at
-[my.telegram.org](https://my.telegram.org) and set either:
-
-```console
-$ export TELEVIM_API_ID=1234567
-$ export TELEVIM_API_HASH=0123456789abcdef0123456789abcdef
-```
-
-or, in a `televim.toml` in the directory you run it from:
-
-```toml
-api_id = 1234567
-api_hash = "0123456789abcdef0123456789abcdef"
-```
-
-Either overrides the built-in pair. Pass another config path with
-`televim --config path/to/televim.toml`. The drafts and history files are written
-beside the config file. The login session goes to the OS credential store unless
-`session_path` is set.
-
-### Upgrading
-
-Run the installer again to replace the binary. Config, drafts, history, media
-and keyring entries stay in place. See [`docs/installing.md`](./docs/installing.md#upgrading).
-
-### Uninstalling
-
-Remove the binary and, if desired, the installer's `PATH` entry. Remove app data
-separately. See [`docs/installing.md`](./docs/installing.md#uninstalling) before
-deleting config, session or media files.
-
-## Building
-
-```console
-$ make ci      # fmt-check lint boundary test design-check build-release
-$ make build-release
-$ make run     # the debug binary
-$ make watch   # the same, under cargo-watch
-```
-
-See [`docs/installing.md`](./docs/installing.md#building-from-source) to build
-and run from source.
-
-The planned shape of what is left here is worked out in `~/.opencode/plan/`.
+MIT OR Apache-2.0.
