@@ -5,6 +5,7 @@ $server = $null
 $oldArchitecture = $env:PROCESSOR_ARCHITECTURE
 $oldArchitectureW6432 = $env:PROCESSOR_ARCHITEW6432
 $oldBaseUrl = $env:TELEVIM_BASE_URL
+$oldUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 
 function Assert($condition, $message) {
     if (-not $condition) { throw $message }
@@ -65,6 +66,20 @@ try {
     Invoke-Installer '9.9.9' $installDir | Out-Null
     Assert ((Get-ChildItem -LiteralPath $installDir -File).Count -eq 1) 'Repeated install left extra files.'
 
+    $pathInstallDir = Join-Path $temporary 'path-bin'
+    $pathSeed = Join-Path $temporary 'existing-path'
+    [Environment]::SetEnvironmentVariable('Path', $pathSeed, 'User')
+    & $installer -Version '9.9.9' -InstallDir $pathInstallDir -SkipVersionCheck | Out-Null
+    $pathAfterFirstInstall = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $pathEntries = @($pathAfterFirstInstall -split ';' | ForEach-Object { $_.Trim().TrimEnd([char[]]@('\')) } | Where-Object { $_ })
+    Assert (@($pathEntries | Where-Object { [string]::Equals($_, $pathInstallDir, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) 'Installer did not add its directory to User PATH once.'
+    & $installer -Version '9.9.9' -InstallDir $pathInstallDir -SkipVersionCheck | Out-Null
+    $pathAfterSecondInstall = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $pathEntries = @($pathAfterSecondInstall -split ';' | ForEach-Object { $_.Trim().TrimEnd([char[]]@('\')) } | Where-Object { $_ })
+    Assert (@($pathEntries | Where-Object { [string]::Equals($_, $pathInstallDir, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 1) 'Repeated install duplicated its User PATH entry.'
+    Assert ($pathEntries[0] -eq $pathSeed) 'Installer changed the existing User PATH entry.'
+    [Environment]::SetEnvironmentVariable('Path', $oldUserPath, 'User')
+
     $badDir = Join-Path $temporary 'bad-checksum-bin'
     Set-Content -LiteralPath (Join-Path $versionDir 'SHA256SUMS') -Value (('0' * 64) + "  $asset")
     Assert-InstallerFails '9.9.9' $badDir 'SHA-256 mismatch'
@@ -100,6 +115,7 @@ try {
 }
 finally {
     if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+    [Environment]::SetEnvironmentVariable('Path', $oldUserPath, 'User')
     if ($null -eq $oldArchitecture) { Remove-Item Env:PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue }
     else { $env:PROCESSOR_ARCHITECTURE = $oldArchitecture }
     if ($null -eq $oldArchitectureW6432) { Remove-Item Env:PROCESSOR_ARCHITEW6432 -ErrorAction SilentlyContinue }
