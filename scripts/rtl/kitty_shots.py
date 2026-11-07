@@ -206,8 +206,9 @@ SCENES = {
         ],
         "wait": "see you",
     },
-    # A lam-alef word with a trailing clock, in the default mode (`Terminal`, no
-    # TELEVIM_BIDI). `سلام` is three columns as a string and four cells as drawn.
+    # A lam-alef word with a trailing clock, in the default mode (`auto`, which
+    # selects `Words` on kitty; no TELEVIM_BIDI). `سلام` is three columns as a
+    # string and four cells as drawn.
     # This script asserts nothing: read `lam_alef_note.txt` and check that the
     # last letter `م` is present and the clock stands to its right and not on top
     # of it, then look at the png for how kitty shaped the pair. Not part of
@@ -342,7 +343,6 @@ def seed(sandbox, chats, messages=None):
     if messages:
         file["peers"] = {str(peer): rows for peer, rows in messages.items()}
     (sandbox / "televim.history.json").write_text(json.dumps(file, ensure_ascii=False))
-    (sandbox / "televim.toml").write_text("")
 
 
 def run_scene(name, scene):

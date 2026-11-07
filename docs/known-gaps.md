@@ -308,6 +308,13 @@ Real, and named so they are not mistaken for oversights:
   on one that reverses the whole line, where the words would be reversed twice;
   `auto` selects it only on kitty. This default still rests on the manual layer:
   repository tests cannot prove how kitty shapes or orders emitted bytes.
+  Checked on kitty 0.49.2 on macOS 27.0.1, 2026-11-08, through
+  `scripts/rtl/kitty_shots.py messages_terminal draft_two_words` with no
+  `televim.toml` and no `TELEVIM_BIDI`. In both the conversation and input bar,
+  `سلام` is the rightmost word and `خوبی` is left of it. The `.txt` and `.png`
+  files are local artifacts under `target/rtl-shots/` and are not committed.
+  This is an observation, not a repository assertion; tests cannot prove how
+  kitty shapes or orders emitted bytes.
 - **The search's new design frames are byte-synced, not scene-checked.**
   `design/global-search-states.html` and `global-search-states-frames.js` are
   drawn from the rules in `DESIGN.md`'s global-search section, not as scenes of
