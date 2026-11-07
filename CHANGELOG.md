@@ -5,6 +5,12 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.9.1] - 2026-11-07
+
+### Fixed
+
+- **app:** Resolve the default bidi mode to words on kitty
+
 ## [0.9.0] - 2026-11-06
 
 ### Added
