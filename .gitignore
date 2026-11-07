@@ -3,6 +3,7 @@
 # will have compiled files and executables
 debug/
 target/
+/crates/web-demo/dist/
 
 # libFuzzer's crash reproducers and the inputs it grows, from the detached
 # workspace in `fuzz/`. The named seeds in `fuzz/corpus/session/` are committed;
