@@ -2,15 +2,15 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 #[cfg(test)]
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use crossterm::event::KeyEvent;
+use crate::key::KeyEvent;
 #[cfg(test)]
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::key::{KeyCode, KeyModifiers};
 use domain::account::Account;
 use domain::chat::Chat;
 use domain::global_search::{GlobalHit, GlobalSearchState, SearchSpec};

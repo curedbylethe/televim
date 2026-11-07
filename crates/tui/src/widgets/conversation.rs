@@ -1012,11 +1012,11 @@ mod tests {
     use super::*;
     use crate::app::JumpKind;
     use crate::app::{App, TYPING_FOR};
+    use crate::key::{KeyCode, KeyEvent, KeyModifiers};
     use crate::state::ui::GraphicsMode;
     use crate::sticker::STICKER_TEST_WEBP;
     use crate::theme::Theme;
     use crate::wrap::columns;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use domain::message::MediaKind;
     use domain::presence::Presence;
     use domain::selection::Mark;
@@ -1025,7 +1025,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::style::Color;
-    use std::time::Instant;
+    use web_time::Instant;
 
     /// The theme's own values, so a palette change does not have to touch a test.
     ///

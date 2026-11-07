@@ -1,9 +1,9 @@
-//! Maps crossterm key events to the keys that answer before any focus or mode
+//! Maps key events to the keys that answer before any focus or mode
 //! branch. Everything else is `Noop`, and the `App` passes it on to
 //! `coordinate::handle_key`, which owns the context-dependent keys.
 
 use crate::app::Mode;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::key::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppAction {

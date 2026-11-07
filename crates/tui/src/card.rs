@@ -1261,7 +1261,7 @@ mod drawing {
     /// value, and `h` closes the card only at the leftmost glyph.
     #[test]
     fn h_and_l_follow_the_painted_column_on_a_right_to_left_value() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::key::{KeyCode, KeyEvent, KeyModifiers};
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let mut app = self_card().with_bidi(crate::bidi::BidiMode::Visual);
         if let crate::app::AccountState::Known(account) = &mut app.session.account {
