@@ -126,7 +126,7 @@
 use std::cell::RefCell;
 use std::ops::Range;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::key::{KeyCode, KeyEvent, KeyModifiers};
 use domain::vim::{CharMotion, char_motion};
 use vim_line::{Key, KeyCode as VKey, LineEditor as _, TextEdit, VimLineEditor};
 

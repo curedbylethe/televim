@@ -31,8 +31,11 @@ grammers-mtproto = { version = "0.10.0" }
 grammers-mtsender = { version = "0.10.0" }
 
 # TUI
-ratatui = "0.30"
+ratatui = { version = "0.30", default-features = false, features = [
+  "all-widgets", "layout-cache", "macros", "std", "underline-color",
+] }
 crossterm = "0.28"
+web-time = "1.1"
 vim-line = "7.7"
 # One use: how wide a string is on a terminal. `ratatui` already resolves it,
 # so `tui`'s row layout and its caret column share the same table.

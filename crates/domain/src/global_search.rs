@@ -30,7 +30,7 @@
 //! rows already fetched.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use crate::message::MediaKind;
 

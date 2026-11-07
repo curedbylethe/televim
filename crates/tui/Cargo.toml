@@ -7,8 +7,8 @@ license.workspace = true
 
 [dependencies]
 domain.workspace = true
+web-time.workspace = true
 ratatui.workspace = true
-crossterm.workspace = true
 vim-line = "7.7"
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
@@ -17,6 +17,9 @@ emojis.workspace = true
 image-webp.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+crossterm.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+web-time.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

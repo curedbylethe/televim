@@ -46,7 +46,7 @@ tracing-subscriber.workspace = true
 base64.workspace = true
 
 crossterm.workspace = true
-ratatui.workspace = true
+ratatui = { workspace = true, features = ["crossterm"] }
 
 [dev-dependencies]
 # The integration tests keep their session in a scratch file, so a run never

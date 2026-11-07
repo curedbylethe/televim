@@ -362,7 +362,7 @@ fn clip(text: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use crate::app::{Action, Focus, PromptKind};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::key::{KeyCode, KeyEvent, KeyModifiers};
     use domain::session::SessionState;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -950,7 +950,7 @@ mod tests {
         );
         press(&mut app, KeyCode::Tab);
         // Once the pause sentence has expired, the row names the way back.
-        app.expire_status(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        app.expire_status(web_time::Instant::now() + web_time::Duration::from_secs(10));
 
         assert_eq!(
             crate::widgets::input_bar::hint(&app),

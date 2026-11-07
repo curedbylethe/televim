@@ -122,7 +122,7 @@ pub fn render(app: &App, above: Rect, bar: Rect, frame: &mut Frame<'_>) {
 mod tests {
     use super::*;
     use crate::bidi::BidiMode;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::key::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::{Buffer, Cell};

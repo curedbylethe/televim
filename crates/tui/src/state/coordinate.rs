@@ -21,9 +21,9 @@
 // off for this module rather than allowed thirty times over.
 #![allow(clippy::too_many_arguments)]
 
-use std::time::Instant;
+use web_time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::key::{KeyCode, KeyEvent, KeyModifiers};
 use domain::chat::Chat;
 use domain::global_search::GlobalSearchState;
 use domain::history::{CONVERSATION_WINDOW, ConversationView, ConversationWindow, unread_target};
