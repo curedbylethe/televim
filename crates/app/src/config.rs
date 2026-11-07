@@ -81,10 +81,12 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// Who arranges a right-to-left row: the terminal, or this program.
+/// Who arranges a right-to-left row: `auto`, `terminal`, `visual` or `words`.
+/// `auto` is the default; it chooses `words` only when the launch environment
+/// names kitty. Explicit values win, and the choice stays fixed for the launch.
 ///
-/// The two the terminal itself will not do for us, named as the configuration
-/// spells them.
+/// The values, named as the configuration spells them.
+const BIDI_AUTO: &str = "auto";
 const BIDI_TERMINAL: &str = "terminal";
 const BIDI_VISUAL: &str = "visual";
 const BIDI_WORDS: &str = "words";
@@ -116,21 +118,17 @@ pub struct Config {
     pub log_level: String,
     pub theme: String,
 
-    /// Who emits a right-to-left row: `terminal`, `visual` or `words`.
+    /// Who emits a right-to-left row: `auto`, `terminal`, `visual` or `words`.
     ///
-    /// `terminal` — the default — emits the row in logical order and leaves the
-    /// reordering to whatever is drawing it, which is what a terminal that
-    /// shapes Arabic or Hebrew needs. `visual` applies the permutation here
-    /// instead, for a terminal that does neither (xterm, alacritty); it is a
-    /// scramble on a shaping one. `words` emits a row's words in reverse order,
-    /// each one whole, for a terminal that reverses each word on its own (kitty):
-    /// the words read in order and the letters still join. There is no detection,
-    /// so this is a setting and not a fact this program can go and read off the
-    /// far end.
+    /// `auto` — the default — chooses `words` when `KITTY_WINDOW_ID` is set or
+    /// `TERM=xterm-kitty`; otherwise it chooses `terminal`. Explicit values win.
+    /// `terminal` emits the row in logical order for a terminal that shapes it.
+    /// `visual` permutes here for a terminal that does neither (xterm, alacritty).
+    /// `words` reverses the words, each whole, for kitty's per-word reversal.
     ///
-    /// **Per machine, not per terminal:** an ssh hop keeps the value it was
-    /// launched with, and `tmux` multiplexes one value over every pane. Whether
-    /// the right value followed you is the reader's to know.
+    /// The default is resolved once from the launch environment. An explicit
+    /// value stays per machine, so an ssh hop keeps it. `tmux` multiplexes one
+    /// value over every pane.
     pub bidi: String,
 
     /// Whether a decoded sticker draws its picture: `inline` or `off`.
@@ -264,7 +262,7 @@ impl Default for Config {
         Self {
             log_level: "info".to_owned(),
             theme: "default".to_owned(),
-            bidi: BIDI_TERMINAL.to_owned(),
+            bidi: BIDI_AUTO.to_owned(),
             stickers: STICKERS_INLINE.to_owned(),
             graphics: GRAPHICS_AUTO.to_owned(),
             updates: None,
@@ -312,7 +310,7 @@ impl Config {
         let mut builder = config::Config::builder()
             .set_default("log_level", "info")?
             .set_default("theme", "default")?
-            .set_default("bidi", BIDI_TERMINAL)?
+            .set_default("bidi", BIDI_AUTO)?
             .set_default("stickers", STICKERS_INLINE)?
             .set_default("graphics", GRAPHICS_AUTO)?;
 
@@ -444,11 +442,13 @@ impl Config {
     /// the value is a word from the documentation, not a path, and `config`
     /// lowercases the *key* without touching the value.
     #[must_use]
-    pub fn bidi_mode(&self) -> BidiMode {
+    pub fn bidi_mode(&self, lookup: impl Fn(&str) -> Option<String>) -> BidiMode {
         match self.bidi.as_str() {
             BIDI_VISUAL => BidiMode::Visual,
             BIDI_WORDS => BidiMode::Words,
-            _ => BidiMode::Terminal,
+            BIDI_AUTO if kitty_words_terminal(lookup) => BidiMode::Words,
+            BIDI_TERMINAL => BidiMode::Terminal,
+            _ => BidiMode::default(),
         }
     }
 
@@ -501,6 +501,11 @@ fn kitty_terminal(lookup: impl Fn(&str) -> Option<String>) -> bool {
             lookup("TERM_PROGRAM").as_deref(),
             Some("ghostty" | "WezTerm")
         )
+}
+
+/// Whether the environment names kitty for bidi's per-word default.
+fn kitty_words_terminal(lookup: impl Fn(&str) -> Option<String>) -> bool {
+    lookup("KITTY_WINDOW_ID").is_some() || lookup("TERM").as_deref() == Some("xterm-kitty")
 }
 
 #[cfg(test)]
@@ -935,9 +940,9 @@ mod tests {
     #[test]
     fn the_terminal_permutes_right_to_left_rows_unless_asked_not_to() {
         assert_eq!(
-            bare().bidi_mode(),
+            bare().bidi_mode(env(&[])),
             BidiMode::Terminal,
-            "and the default configuration says so"
+            "auto resolves to terminal without a kitty signal"
         );
 
         let mut cfg = bare();
@@ -946,7 +951,9 @@ mod tests {
         // Asserted through the application, which is where the value lands and
         // is the only reader of it — no terminal is involved either way.
         assert_eq!(
-            tui::app::App::new().with_bidi(cfg.bidi_mode()).bidi(),
+            tui::app::App::new()
+                .with_bidi(cfg.bidi_mode(env(&[])))
+                .bidi(),
             BidiMode::Visual
         );
     }
@@ -957,10 +964,10 @@ mod tests {
     fn the_words_value_selects_the_word_order_mode() {
         let mut cfg = bare();
         cfg.bidi = "words".to_owned();
-        assert_eq!(cfg.bidi_mode(), BidiMode::Words);
+        assert_eq!(cfg.bidi_mode(env(&[])), BidiMode::Words);
 
         cfg.bidi = "Words".to_owned();
-        assert_eq!(cfg.bidi_mode(), BidiMode::Terminal);
+        assert_eq!(cfg.bidi_mode(env(&[])), BidiMode::Terminal);
     }
 
     /// A spelling the configuration does not know leaves the reordering to the
@@ -969,10 +976,95 @@ mod tests {
     fn an_unknown_spelling_of_the_bidi_key_is_the_terminal_not_visual() {
         let mut cfg = bare();
         cfg.bidi = "Visual".to_owned();
-        assert_eq!(cfg.bidi_mode(), BidiMode::Terminal);
+        assert_eq!(
+            cfg.bidi_mode(env(&[("KITTY_WINDOW_ID", "3")])),
+            BidiMode::Terminal
+        );
 
         cfg.bidi = String::new();
-        assert_eq!(cfg.bidi_mode(), BidiMode::Terminal);
+        assert_eq!(cfg.bidi_mode(env(&[])), BidiMode::Terminal);
+    }
+
+    #[test]
+    fn auto_orders_words_on_kitty() {
+        let cfg = bare();
+        assert_eq!(
+            cfg.bidi_mode(env(&[("KITTY_WINDOW_ID", "3")])),
+            BidiMode::Words
+        );
+        assert_eq!(
+            cfg.bidi_mode(env(&[("TERM", "xterm-kitty")])),
+            BidiMode::Words
+        );
+    }
+
+    #[test]
+    fn auto_leaves_other_terminals_in_terminal_order() {
+        let cfg = bare();
+        assert_eq!(
+            cfg.bidi_mode(env(&[("TERM_PROGRAM", "ghostty")])),
+            BidiMode::Terminal
+        );
+        assert_eq!(
+            cfg.bidi_mode(env(&[("TERM_PROGRAM", "WezTerm")])),
+            BidiMode::Terminal
+        );
+        assert_eq!(
+            cfg.bidi_mode(env(&[("TERM", "xterm-256color")])),
+            BidiMode::Terminal
+        );
+        assert_eq!(cfg.bidi_mode(env(&[])), BidiMode::Terminal);
+    }
+
+    #[test]
+    fn explicit_bidi_values_win_over_kitty() {
+        let kitty = env(&[("KITTY_WINDOW_ID", "3")]);
+        let mut cfg = bare();
+        cfg.bidi = BIDI_TERMINAL.to_owned();
+        assert_eq!(cfg.bidi_mode(kitty), BidiMode::Terminal);
+
+        cfg.bidi = BIDI_VISUAL.to_owned();
+        assert_eq!(
+            cfg.bidi_mode(env(&[("KITTY_WINDOW_ID", "3")])),
+            BidiMode::Visual
+        );
+
+        cfg.bidi = BIDI_WORDS.to_owned();
+        assert_eq!(cfg.bidi_mode(env(&[])), BidiMode::Words);
+    }
+
+    #[test]
+    fn both_bidi_default_sites_use_auto() {
+        assert_eq!(Config::default().bidi, BIDI_AUTO);
+
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+        let names = ["TELEVIM_BIDI", "TELEGRAM_BIDI"];
+        let saved = names.map(|name| (name, std::env::var_os(name)));
+        // SAFETY: the environment is process-wide and these test mutations are
+        // serialized with the module's other environment tests.
+        unsafe {
+            for (name, _) in &saved {
+                std::env::remove_var(name);
+            }
+        }
+
+        let loaded = Config::load(Path::new("a-file-that-does-not-exist.toml"));
+
+        // SAFETY: restore the process environment values saved above.
+        unsafe {
+            for (name, value) in saved {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                }
+            }
+        }
+        let loaded = loaded.expect("a missing config file is not an error");
+        assert_eq!(loaded.bidi, BIDI_AUTO);
+        assert_eq!(loaded.bidi_mode(env(&[])), BidiMode::Terminal);
+        assert_eq!(
+            loaded.bidi_mode(env(&[("KITTY_WINDOW_ID", "3")])),
+            BidiMode::Words
+        );
     }
 
     /// Stickers draw inline unless the reader says `off`, and saying `off` is
@@ -1050,7 +1142,7 @@ mod tests {
         assert_eq!(cfg.credentials(), Some((4242, "from-the-environment")));
         assert_eq!(cfg.log_level, "info", "and the defaults still apply");
         assert_eq!(
-            cfg.bidi_mode(),
+            cfg.bidi_mode(|key| std::env::var(key).ok()),
             BidiMode::Visual,
             "so the escape hatch is reachable from the environment alone"
         );

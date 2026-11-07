@@ -817,7 +817,7 @@ async fn event_loop(
     // while the window is open would make the same conversation two different
     // heights depending on when it was asked.
     let mut app = App::new()
-        .with_bidi(cfg.bidi_mode())
+        .with_bidi(cfg.bidi_mode(|key| std::env::var(key).ok()))
         .with_stickers(cfg.sticker_mode())
         .with_graphics(cfg.graphics_mode(|key| std::env::var(key).ok()));
     // The jumplist's depth, read once here and fixed for the life of the run,
