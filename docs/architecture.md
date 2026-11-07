@@ -85,6 +85,9 @@ in one direction and wider in another:
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
 | `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `dotenvy`, `serde`, `serde_json`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64`, `time` |
 
+`demo-support` owns the offline simulator and fictional world. It maps every
+`tui::Action` to effects or an explicit status, mutates only in-memory fixtures,
+and advances scheduled updates only when its driver advances simulated time.
 
 ## Config that lives on disk, not here
 
