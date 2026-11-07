@@ -82,7 +82,7 @@ lint: ## Run clippy to catch common mistakes and improve code
 .PHONY: boundary
 boundary: ## Assert that only telegram-framework can reach grammers
 	@fail=0; \
-	for crate in domain proto tui telegram-framework; do \
+	for crate in domain proto tui demo-support telegram-framework; do \
 		if ! tree=$$($(CARGO) tree -p $$crate 2>&1); then \
 			echo "error: could not resolve $$crate, so the boundary is unverified"; \
 			fail=1; \
