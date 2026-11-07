@@ -3,7 +3,7 @@ pub use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use std::ops::BitOr;
+    use std::ops::{BitOr, BitOrAssign};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum KeyCode {
@@ -58,6 +58,12 @@ mod wasm {
 
         fn bitor(self, other: Self) -> Self::Output {
             Self(self.0 | other.0)
+        }
+    }
+
+    impl BitOrAssign for KeyModifiers {
+        fn bitor_assign(&mut self, other: Self) {
+            self.0 |= other.0;
         }
     }
 
