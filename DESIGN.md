@@ -342,7 +342,7 @@ nothing downstream of the domain can learn a message's direction from its type.
   run and keeps its own order. A clock time reads `21:30`, not `30:12`.
 - **The reorder never changes a row's width.** The pieces partition the row — no
   byte dropped, none drawn twice — and their cell widths sum to the row's, so the
-  the three modes differ in the *order* of the cells and in nothing else. That
+  three modes differ in the *order* of the cells and in nothing else. That
   makes the mode a layout-independent fact and not a reflow.
 - **Rows are broken logically, in `wrap`, and only reordered at paint time.** The
   line breaks of a right-to-left message are the breaks its logical order gives

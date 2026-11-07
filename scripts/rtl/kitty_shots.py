@@ -343,6 +343,7 @@ def seed(sandbox, chats, messages=None):
     if messages:
         file["peers"] = {str(peer): rows for peer, rows in messages.items()}
     (sandbox / "televim.history.json").write_text(json.dumps(file, ensure_ascii=False))
+    # The scenes exercise defaults, so leave `televim.toml` absent.
 
 
 def run_scene(name, scene):
