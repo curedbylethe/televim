@@ -1,21 +1,21 @@
 //! Which way a row reads, and the order its pieces are drawn in.
 //!
 //! A terminal draws the cells it is handed, left to right, in the order it is
-//! handed them. It does not know that `שלום` is one word read from the right, so
-//! nothing here can rely on it: a row that reads right-to-left has to arrive at
-//! the terminal as an ordered list of pieces, already permuted.
+//! handed them. [`BidiMode`] chooses whether this program permutes the row or
+//! hands its stored order to the terminal's shaper.
 //!
 //! Two questions get asked, and they are asked of different things. **Which
 //! direction** is a property of the message as a whole, and is answered by the
 //! first strong character anywhere in it — [`base_direction`]. **In what order
-//! the pieces go** is a property of one wrapped row, and is answered by the
-//! Unicode Bidirectional Algorithm over that row alone, at the base direction the
-//! message was given ([`visual_row`]).
+//! the pieces go** is a property of one wrapped row. [`BidiMode::Visual`] runs
+//! the Unicode Bidirectional Algorithm over that row alone, at the base direction
+//! the message was given ([`visual_row`]); [`BidiMode::Words`] reverses the
+//! stored word runs instead of running the algorithm over the row.
 //!
 //! Whether this program permutes the pieces or hands them over as they are stored
-//! is [`BidiMode`], and it is a fact about the terminal rather than about the row:
-//! one terminal class reverses the run itself and one does not, and only the
-//! reader knows which they are on.
+//! is [`BidiMode`]. Configuration defaults to `auto`, which selects
+//! [`BidiMode::Words`] on kitty and [`BidiMode::Terminal`] elsewhere; explicit
+//! `terminal`, `visual` and `words` values win. The choice is fixed at launch.
 //!
 //! A row is not a reordered `String`. It stays `&text[range]` — [`crate::wrap`]
 //! needs that, and so does every row range in the panel — and what comes back is
@@ -49,21 +49,20 @@ use crate::wrap::columns;
 pub enum BidiMode {
     /// Emit the row as it is stored, and let the terminal rearrange it.
     ///
-    /// The default, and the right one for the terminals that shape: kitty,
-    /// wezterm, foot, iTerm2 and VTE all run a shaper that reverses a
-    /// right-to-left run for us, so a second reversal here would scramble the
-    /// row rather than fix it. On a terminal that neither shapes nor applies the
-    /// algorithm (xterm, alacritty) this leaves the row left-to-right, which is
-    /// what it does today.
+    /// The enum default, and the configuration default outside kitty. Kitty's
+    /// shaper reverses each right-to-left run separately, so a multi-word row
+    /// keeps logical word order unless [`BidiMode::Words`] reverses the runs.
+    /// On a terminal that neither shapes nor applies the algorithm (xterm,
+    /// alacritty), this leaves the row left-to-right.
     #[default]
     Terminal,
 
     /// Emit the row already permuted, by [`visual_row`].
     ///
-    /// Correct on a terminal that draws the cells it is handed and does nothing
-    /// else, and scrambled on one that shapes. Which of those a reader has is a
-    /// setting on their terminal and not a fact about this program, so it is
-    /// theirs to say rather than something to detect.
+    /// The explicit `visual` value applies whole-row bidi for a terminal that
+    /// draws the cells it is handed and does nothing else. A whole-line
+    /// reorderer's bidi remains the reader's setting; `auto` detects kitty only
+    /// to select [`BidiMode::Words`].
     Visual,
 
     /// Emit a right-to-left row's words in reverse order, each word as stored.
@@ -72,9 +71,11 @@ pub enum BidiMode {
     /// its own, and not the line as a whole (kitty does this): such a terminal
     /// draws `سلام خوبی` with the words in logical order, each one reversed.
     /// Reversing the words here puts them in reading order, and each word still
-    /// reaches the terminal as one run it can join. It is opt-in because a
-    /// terminal that applies the algorithm to the whole line would reverse the
-    /// words a second time.
+    /// reaches the terminal as one run for its shaper. Configuration `auto`
+    /// selects this mode only on kitty; explicit `words` selects it anywhere.
+    /// It is wrong on a terminal that applies bidi to the whole line, which
+    /// would reverse the words a second time. Explicit `terminal` or `visual`
+    /// values always take precedence over `auto`.
     Words,
 }
 

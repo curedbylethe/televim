@@ -256,12 +256,13 @@ Real, and named so they are not mistaken for oversights:
 - **A peer with no bare identifier is skipped**, and the skip is unreachable
   today. See [`decisions.md`](./decisions.md) for why, and which test guards it.
 
-- **xterm and alacritty render RTL wrong in the default mode.** The default emits
-  logical order and leaves the reordering to the terminal, which is the right
-  answer for a terminal that shapes — kitty, wezterm, foot, iTerm2, VTE — and the
-  wrong one for the two that do not, because nothing reverses the run for them.
-  The opt-in `BidiMode::Visual` applies the permutation here instead, and is
-  reachable as `bidi = "visual"` (`TELEVIM_BIDI=visual`); it is one value for the
+- **xterm and alacritty render RTL wrong in the default mode.** `bidi = "auto"`
+  resolves to `Words` on kitty and `Terminal` elsewhere. `Terminal` leaves the
+  reordering to the terminal, which is the right answer for one-word runs on
+  shaping terminals; xterm and alacritty do not reverse the run, so they remain
+  wrong by default. The opt-in `BidiMode::Visual` applies the permutation here
+  instead, and is reachable as `bidi = "visual"` (`TELEVIM_BIDI=visual`); it is
+  one value for the
   machine rather than one per terminal, so an ssh hop into a shaping terminal
   keeps the setting it was launched with. Per-`TERM` is the v2 hook; see
   [`decisions.md`](./decisions.md).
@@ -294,8 +295,9 @@ Real, and named so they are not mistaken for oversights:
   `make test`: `columns("لا")` is 1 and `drawn_cells("لا")` is 2, and the Arabic
   trailing note's column is asserted from `drawn_cells` in all three modes. The input bar's right-to-left
   tests inherit the same ceiling whole: the glyph-order tests drive
-  `BidiMode::Visual` only, and the default path is pinned by the ASCII tests beside
-  them, which cannot tell a shaper's reorder from no reorder at all. The caret tests
+  `BidiMode::Visual` only, and the default `auto` path is pinned by the ASCII
+  tests beside them, which cannot tell a shaper's reorder from no reorder at all.
+  The caret tests
   after an Arabic draft run in both modes and check cell positions, not glyph shape.
   The reversed modes rest on one observed behaviour: kitty 0.49.2 keeps a cell's
   background on its emitted column while it reverses the glyphs, so `emitted_caret`
@@ -303,7 +305,9 @@ Real, and named so they are not mistaken for oversights:
   on kitty (`make rtl-shots`) at the start and end of an Arabic draft, in `terminal`
   and `words`; a middle position and any other shaping terminal are not checked.
   `words` is written for a terminal that reverses each word on its own, and is wrong
-  on one that reverses the whole line, where the words would be reversed twice.
+  on one that reverses the whole line, where the words would be reversed twice;
+  `auto` selects it only on kitty. This default still rests on the manual layer:
+  repository tests cannot prove how kitty shapes or orders emitted bytes.
 - **The search's new design frames are byte-synced, not scene-checked.**
   `design/global-search-states.html` and `global-search-states-frames.js` are
   drawn from the rules in `DESIGN.md`'s global-search section, not as scenes of
