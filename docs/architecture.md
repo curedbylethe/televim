@@ -778,14 +778,18 @@ session opens the sign-in field with the phone already in the bar, and the flow
 asks for the code there, then for a two-factor password when Telegram says the
 account has one.
 
-`Config` also reads `TELEVIM_BIDI` — `terminal` (the default), `words` or `visual` — which
-says whether this program or the terminal arranges a right-to-left row. In every
-mode `h`/`l` and the arrows step by painted column through `tui::bidi::visual_step`:
+`Config` also reads `TELEVIM_BIDI` — `auto` (the default), `terminal`, `visual` or
+`words` — which says whether this program or the terminal arranges a right-to-left
+row. `auto` resolves once in `runtime.rs` from `KITTY_WINDOW_ID` or
+`TERM=xterm-kitty`: it selects `Words` on kitty and `Terminal` elsewhere. Explicit
+values win. In every mode `h`/`l` and the arrows step by painted column through
+`tui::bidi::visual_step`:
 on the input line, in the conversation's Visual mode and on the profile card. It is
 read once in `runtime.rs` and handed to `tui` as a plain `tui::bidi::BidiMode`
 through `App::with_bidi`, which is the only path a configuration value takes into
-`App`; `tui` names no configuration type. The value is per machine rather than per
-terminal, so an ssh hop keeps it — see [`decisions.md`](./decisions.md).
+`App`; `tui` names no configuration type. The resolved default depends on the
+launch environment; an explicit value is per machine, so an ssh hop keeps it —
+see [`decisions.md`](./decisions.md).
 
 `Config` also reads `TELEVIM_STICKERS` — `inline` (the default) or `off` — which
 says whether a decoded sticker draws its picture or its token. It is read once

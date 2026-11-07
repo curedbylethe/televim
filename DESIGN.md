@@ -330,8 +330,10 @@ nothing downstream of the domain can learn a message's direction from its type.
   algorithm's own default and not a special case here.
 - **In what order a row's pieces are drawn** is a property of that one row, and
   is the Unicode Bidirectional Algorithm over the row alone, at the base direction
-  the message was given. A row is not a reordered string: it stays the logical
-  slice it was, and what comes back is a list of *pieces* of it in the order they
+  the message was given in `Visual`. `Words` instead reverses the row's stored
+  word runs and leaves each word whole for the terminal shaper. A row is not a
+  reordered string: it stays the logical slice it was, and what comes back is a
+  list of *pieces* of it in the order they
   are drawn. **A piece is always a whole number of grapheme clusters and always
   a logical slice**, because a piece is text the painter slices, and a Hebrew word
   is not written in the order it is read.
@@ -340,7 +342,7 @@ nothing downstream of the domain can learn a message's direction from its type.
   run and keeps its own order. A clock time reads `21:30`, not `30:12`.
 - **The reorder never changes a row's width.** The pieces partition the row — no
   byte dropped, none drawn twice — and their cell widths sum to the row's, so the
-  two modes differ in the *order* of the cells and in nothing else. That is what
+  the three modes differ in the *order* of the cells and in nothing else. That
   makes the mode a layout-independent fact and not a reflow.
 - **Rows are broken logically, in `wrap`, and only reordered at paint time.** The
   line breaks of a right-to-left message are the breaks its logical order gives
@@ -355,17 +357,20 @@ nothing downstream of the domain can learn a message's direction from its type.
   Right-aligning the body would collide with the trailing note, which is already
   at the far end of the row, and with the logical wrap geometry.
 
-**Who does the reordering is a setting, and the default is the terminal.**
-`BidiMode::Terminal` emits the row as it is stored and lets the terminal's shaper
-reverse a right-to-left run; `BidiMode::Visual` permutes the row here first. Both
-are correct programs, on different terminals: kitty, wezterm, foot, iTerm2 and VTE
-all shape and would reverse a second time if this program permuted as well, while
-xterm and alacritty draw the cells they are handed and do nothing else. **There is
-no detection**, because bidi and shaping are a setting on a terminal rather than
-an identity — `wezterm` ships `bidi_enabled=false`, VTE needs `CSI ? 2501 h` — and
-detection breaks under `tmux` and `ssh`. It is read once from configuration at
-start-up and never while a frame is being drawn, so the same conversation is the
-same height whichever way it is asked.
+**Who does the reordering is a setting, and the default is `auto`.** It resolves
+to `Words` on kitty and `Terminal` on every other terminal. `Terminal` emits the
+row as stored and leaves shaping and reordering to the terminal;
+`Words` reverses the stored word runs for kitty's per-run shaper; `Visual` applies
+the Unicode Bidirectional Algorithm to the whole row for a terminal that draws
+cells as handed. Explicit `terminal`, `visual` and `words` values always win, and
+a missed kitty probe falls back to `Terminal`. Whole-line bidi is not detected,
+because it is a terminal setting rather than an identity — `wezterm` ships
+`bidi_enabled=false`, VTE needs `CSI ? 2501 h` — and detection breaks under
+`tmux` and `ssh`. Kitty is the narrow exception: its per-run reversing is a
+shaper behavior, not a bidi setting, so `auto` selects `Words` there. If kitty
+starts applying bidi to whole lines or gains a whole-line setting, remove that
+kitty branch. The mode is read once from configuration at start-up, never while
+a frame is being drawn.
 
 **Not claimed here, and not delivered:** contextual shaping (Arabic joining is
 the terminal's, and a terminal that does not join renders unjoined), Rule L4

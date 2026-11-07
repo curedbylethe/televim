@@ -354,14 +354,17 @@ Working today:
   `:attach <path>` asks for confirmation and adds an optimistic media row before
   the upload starts.
 - **Text direction:** the draft in the bar is drawn by the same rules as an
-  incoming message. In the default mode the row is emitted as it is stored and the
-  terminal's shaper reverses a right-to-left run; in the opt-in `BidiMode::Visual`
+  incoming message. The default `bidi = "auto"` selects `words` on kitty and
+  `terminal` elsewhere; explicit values win. In `terminal` the row is emitted as
+  stored and the terminal shapes or reorders it if supported; in the opt-in
+  `BidiMode::Visual`
   (`bidi = "visual"`) this program applies the permutation instead, for the whole
   draft and every row of a wrapped one, and the caret and the selection are marked
   on the cells their logical positions land on. The `: ` and `/` prefix is chrome
-  and is never permuted. `bidi = "words"` is for kitty, which reverses each
-  right-to-left word on its own: it emits a right-to-left row's words in reverse
-  order, each one whole, so the words read in order and the letters still join.
+  and is never permuted. `bidi = "words"` is for kitty's shaper, which reverses
+  each right-to-left word on its own: it emits a right-to-left row's words in
+  reverse order, each one whole, so the words read in order and the letters still
+  join.
   The stored text, and what is sent, are unchanged in every mode.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
