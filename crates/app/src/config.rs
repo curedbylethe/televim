@@ -87,7 +87,6 @@ impl fmt::Debug for Secret {
 ///
 /// The values, named as the configuration spells them.
 const BIDI_AUTO: &str = "auto";
-const BIDI_TERMINAL: &str = "terminal";
 const BIDI_VISUAL: &str = "visual";
 const BIDI_WORDS: &str = "words";
 
@@ -447,8 +446,7 @@ impl Config {
             BIDI_VISUAL => BidiMode::Visual,
             BIDI_WORDS => BidiMode::Words,
             BIDI_AUTO if kitty_words_terminal(lookup) => BidiMode::Words,
-            BIDI_TERMINAL => BidiMode::Terminal,
-            _ => BidiMode::default(),
+            _ => BidiMode::Terminal,
         }
     }
 
@@ -1020,7 +1018,7 @@ mod tests {
     fn explicit_bidi_values_win_over_kitty() {
         let kitty = env(&[("KITTY_WINDOW_ID", "3")]);
         let mut cfg = bare();
-        cfg.bidi = BIDI_TERMINAL.to_owned();
+        cfg.bidi = "terminal".to_owned();
         assert_eq!(cfg.bidi_mode(kitty), BidiMode::Terminal);
 
         cfg.bidi = BIDI_VISUAL.to_owned();
