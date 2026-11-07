@@ -5,6 +5,7 @@ members = [
     "crates/proto",
     "crates/domain",
     "crates/tui",
+    "crates/demo-support",
     "crates/app",
 ]
 
