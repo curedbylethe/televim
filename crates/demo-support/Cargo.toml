@@ -1,0 +1,14 @@
+[package]
+name = "demo-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+domain = { path = "../domain" }
+tui = { path = "../tui" }
+
+[lints]
+workspace = true
