@@ -1,0 +1,405 @@
+use std::path::PathBuf;
+
+use demo_support::{DemoAccount, DemoSimulator, DemoWorld, Effect};
+use domain::{message::Message, presence::Presence, updates::UpdateEvent};
+use tui::{
+    App, ConnectionState, SessionStore,
+    app::Action,
+    bidi::BidiMode,
+    state::ui::{GraphicsMode, StickerMode},
+};
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
+
+const OFFLINE_STATUS: &str = "Offline demo · fictional conversations · no Telegram connection.";
+
+pub struct Driver {
+    pub app: App,
+    pub sim: DemoSimulator,
+    base_timestamp: i64,
+    started: Instant,
+    last_tick: Instant,
+    offset_seconds: i64,
+    seeded_chat_id: i64,
+}
+
+impl Driver {
+    #[must_use]
+    pub fn new() -> Self {
+        let base_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_secs();
+        let base_timestamp =
+            i64::try_from(base_timestamp).expect("current Unix timestamp fits in signed seconds");
+        let offset_seconds = -(js_sys::Date::new_0().get_timezone_offset() as i64 * 60);
+        let sim = DemoSimulator::new(DemoWorld::new(base_timestamp));
+        let seeded_chat_id = sim.world.active().default_chat;
+        let app = build_app(sim.world.active(), base_timestamp, offset_seconds);
+        let now = Instant::now();
+        let mut driver = Self {
+            app,
+            sim,
+            base_timestamp,
+            started: now,
+            last_tick: now,
+            offset_seconds,
+            seeded_chat_id,
+        };
+        driver.schedule_intro();
+        driver
+    }
+
+    pub fn tick(&mut self) {
+        let now = Instant::now();
+        let delta_ms =
+            u64::try_from(now.duration_since(self.last_tick).as_millis()).unwrap_or(u64::MAX);
+        self.last_tick = now;
+
+        let open_chat_id = self.app.current_chat_id();
+        self.sim
+            .set_open_chat_id((open_chat_id != 0).then_some(open_chat_id));
+        for effect in self.sim.advance(delta_ms) {
+            self.apply_effect(effect);
+        }
+
+        #[cfg(debug_assertions)]
+        let mut drained = false;
+        for _ in 0..100 {
+            let mut any = false;
+            while let Some(action) = self.app.take_action() {
+                any = true;
+                self.dispatch(action);
+            }
+            while self.app.take_session_action().is_some() {
+                any = true;
+                self.app
+                    .set_status("Session management is disabled in the offline demo.");
+            }
+            while let Some(action) = self.app.take_local_name_action() {
+                any = true;
+                self.dispatch(action);
+            }
+            if !any {
+                #[cfg(debug_assertions)]
+                {
+                    drained = true;
+                }
+                break;
+            }
+        }
+        #[cfg(debug_assertions)]
+        if !drained {
+            self.app.flash("demo action loop stopped");
+        }
+
+        let elapsed = i64::try_from(self.started.elapsed().as_secs()).unwrap_or(i64::MAX);
+        self.app.record_now(
+            self.base_timestamp.saturating_add(elapsed),
+            self.offset_seconds,
+        );
+        self.app.expire_status(now);
+        self.app.expire_typing(now);
+        self.app.open_settled_card(now);
+        self.seed_open_chat();
+        self.sync_reads();
+        if self.app.take_clipboard().is_some() {
+            self.app
+                .set_status("Clipboard is not available in this browser.");
+        }
+    }
+
+    pub fn handle_key(&mut self, key: tui::key::KeyEvent) {
+        self.app.handle_key(key);
+    }
+
+    pub fn render(&self, frame: &mut ratzilla::ratatui::Frame<'_>) {
+        self.app.render(frame);
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    pub fn switch_account(&mut self, id: i64) -> bool {
+        if !self.sim.world.switch_to(id) {
+            self.app.set_status("No such demo account.");
+            return false;
+        }
+        self.app = build_app(
+            self.sim.world.active(),
+            self.base_timestamp,
+            self.offset_seconds,
+        );
+        self.seeded_chat_id = self.sim.world.active().default_chat;
+        true
+    }
+
+    fn schedule_intro(&mut self) {
+        let account = self.sim.world.active();
+        let chat_id = account.default_chat;
+        let other_chat = account
+            .chats
+            .iter()
+            .find(|chat| chat.id != chat_id)
+            .map_or(chat_id, |chat| chat.id);
+        let last_incoming = account
+            .messages(chat_id)
+            .iter()
+            .rev()
+            .find(|message| !message.is_outgoing)
+            .map_or(0, |message| message.id);
+
+        self.sim.set_open_chat_id(Some(chat_id));
+        self.sim.schedule_presence(chat_id, Presence::Online, 1_500);
+        self.sim.schedule_typing(chat_id, true, 2_000);
+        self.sim.schedule_typing(chat_id, false, 5_000);
+        self.sim.schedule_arrival(
+            chat_id,
+            "The lantern is lit. I'll be there in ten.",
+            None,
+            6_000,
+        );
+        self.sim
+            .schedule_read_receipt(chat_id, last_incoming, 9_000);
+        self.sim
+            .schedule_presence(other_chat, Presence::Recently, 12_000);
+    }
+
+    fn dispatch(&mut self, action: Action) {
+        let effects = self.sim.dispatch(&self.app, action);
+        for effect in effects {
+            self.apply_effect(effect);
+        }
+    }
+
+    fn apply_effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::Update(event) => {
+                let _ = self.app.apply_update(&event);
+            }
+            Effect::Sent {
+                chat_id,
+                temp_id,
+                message,
+            } => {
+                self.app.end_send(temp_id);
+                if self.app.current_chat_id() == chat_id {
+                    self.app.confirm_sent(temp_id, message.clone());
+                }
+                self.apply_chat_preview(chat_id, &message);
+            }
+            Effect::SendFailed {
+                temp_id, reason, ..
+            } => {
+                self.app.fail_send(temp_id, reason.clone());
+                self.app.flash(reason);
+            }
+            Effect::UploadProgress { sent, total, .. } => {
+                self.app
+                    .set_status(format!("Uploading {sent}/{total} bytes…"));
+            }
+            Effect::MediaProgress {
+                received, total, ..
+            } => {
+                self.app
+                    .set_status(format!("Downloading {received}/{total} bytes…"));
+            }
+            Effect::RequestFilePicker { temp_id, .. } => {
+                self.app
+                    .fail_send(temp_id, "File selection is unavailable.".to_owned());
+            }
+            Effect::RequestOpenMedia { .. } | Effect::RequestSaveMedia { .. } => {
+                self.app
+                    .set_status("The browser media viewer is not available yet.");
+            }
+            Effect::MediaCancelled {
+                chat_id,
+                message_id,
+            } => {
+                self.app.conversation.downloads.forget(chat_id, message_id);
+                self.app.flash("Download cancelled.");
+            }
+            Effect::Edited {
+                chat_id,
+                message_id,
+                text,
+            } => {
+                let _ = self.app.apply_update(&UpdateEvent::MessageEdited {
+                    chat_id,
+                    message_id,
+                    new_text: std::borrow::Cow::Owned(text),
+                });
+            }
+            Effect::Deleted { message_ids, .. } => {
+                let _ = self
+                    .app
+                    .apply_update(&UpdateEvent::MessagesDeleted { message_ids });
+            }
+            Effect::Forwarded {
+                dest_chat_id,
+                messages,
+            } => {
+                for message in messages {
+                    let _ = self.app.apply_update(&UpdateEvent::NewMessage(message));
+                }
+                let destination = self
+                    .sim
+                    .world
+                    .active()
+                    .chat(dest_chat_id)
+                    .map_or_else(|| "conversation".to_owned(), |chat| chat.title.clone());
+                self.app.set_status(format!("Forwarded to {destination}."));
+            }
+            Effect::Searched {
+                chat_id,
+                query,
+                ids,
+                total,
+            } => {
+                self.app.apply_searched(chat_id, &query, ids, total);
+            }
+            Effect::GlobalSearched {
+                spec,
+                hits,
+                total,
+                dropped,
+                has_more,
+                append,
+            } => {
+                if append {
+                    self.app
+                        .append_global_search(&spec, hits, total, dropped, has_more);
+                } else {
+                    self.app
+                        .adopt_global_search(&spec, hits, total, dropped, has_more);
+                }
+            }
+            Effect::Contact {
+                peer_id,
+                blocked,
+                result,
+            } => self.app.set_contact(peer_id, Some(blocked), result),
+            Effect::Contacts { result } => match result {
+                Ok(people) => self.app.conversation.contacts.adopt(people),
+                Err(reason) => self.app.conversation.contacts.fail(reason),
+            },
+            Effect::PinToggled { chat_id, pinned } => self.app.set_pinned(chat_id, pinned),
+            Effect::Archived { chat_id, archived } => {
+                self.app.set_archived(chat_id, archived);
+            }
+            Effect::Blocked { peer_id, blocked } => self.app.set_blocked(peer_id, blocked),
+            Effect::LocalNameSaved { peer_id, name } => {
+                self.app.set_local_name(peer_id, name.as_deref());
+            }
+            Effect::ConversationDeleted { chat_id } => self.app.remove_conversation(chat_id),
+            Effect::Reported { peer_id, reason } => self.app.set_status(format!(
+                "Report recorded locally for {peer_id} ({reason:?}); nothing was sent to Telegram."
+            )),
+            Effect::SwitchAccount { id } => {
+                self.switch_account(id);
+            }
+            Effect::ReadMarked { chat_id, .. } => {
+                self.clear_world_unread(chat_id);
+                self.app.mark_chat_read(chat_id);
+            }
+            Effect::Status(sentence) => self.app.set_status(sentence),
+            Effect::UpdateUnavailable => {
+                self.app.update_cancelled();
+                self.app.flash("Updates are disabled in the offline demo.");
+            }
+        }
+    }
+
+    fn apply_chat_preview(&mut self, chat_id: i64, message: &Message) {
+        let mut chats = self.app.chats().to_vec();
+        if let Some(chat) = chats.iter_mut().find(|chat| chat.id == chat_id) {
+            chat.last_message = Some(std::borrow::Cow::Owned(message.display_body().to_owned()));
+            chat.last_message_id = Some(message.id);
+            chat.last_timestamp = Some(message.timestamp);
+            self.app.set_chats(chats);
+        }
+    }
+
+    fn sync_reads(&mut self) {
+        let chat_id = self.app.current_chat_id();
+        if self
+            .app
+            .chats()
+            .iter()
+            .any(|chat| chat.id == chat_id && chat.unread_count > 0)
+        {
+            self.clear_world_unread(chat_id);
+            self.app.mark_chat_read(chat_id);
+        }
+    }
+
+    fn seed_open_chat(&mut self) {
+        let chat_id = self.app.conversation.conversation.window.chat_id;
+        if chat_id == 0 || chat_id == self.seeded_chat_id {
+            return;
+        }
+        self.seeded_chat_id = chat_id;
+        let messages = self.sim.world.active().messages(chat_id).to_vec();
+        self.app.apply_latest(messages);
+    }
+
+    fn clear_world_unread(&mut self, chat_id: i64) {
+        let account = self.sim.world.active_mut();
+        for chat in account
+            .chats
+            .iter_mut()
+            .chain(account.archived.iter_mut())
+            .filter(|chat| chat.id == chat_id)
+        {
+            chat.unread_count = 0;
+        }
+    }
+}
+
+impl Default for Driver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn build_app(account: &DemoAccount, base_timestamp: i64, offset_seconds: i64) -> App {
+    let mut app = App::new()
+        .with_bidi(BidiMode::Visual)
+        .with_stickers(StickerMode::Token)
+        .with_graphics(GraphicsMode::Halfblocks);
+    app.conversation = app.conversation.with_jumplist_depth(100);
+    app.set_client_available(true);
+    app.session.credentials_configured = false;
+    app.set_session_store(SessionStore::EncryptedFile(PathBuf::from(
+        "(in-memory demo)",
+    )));
+    app.set_connection(ConnectionState::Offline);
+    app.set_account(Ok(account.account.clone()));
+    app.set_known_accounts(account.known_accounts.clone());
+    let mut chats = account.chats.clone();
+    let mut archived = account.archived.clone();
+    for chat in chats.iter_mut().chain(&mut archived) {
+        if let Some(messages) = account.messages.get(&chat.id) {
+            if let Some(message) = messages.last() {
+                chat.last_message =
+                    Some(std::borrow::Cow::Owned(message.display_body().to_owned()));
+                chat.last_message_id = Some(message.id);
+                chat.last_timestamp = Some(message.timestamp);
+            } else {
+                chat.last_message = None;
+                chat.last_message_id = None;
+                chat.last_timestamp = None;
+            }
+        }
+    }
+    app.set_chats(chats);
+    app.set_archived_chats(archived);
+    for (peer_id, name) in &account.local_names {
+        app.set_local_name(*peer_id, Some(name));
+    }
+    app.select_chat_by_id(account.default_chat);
+    app.apply_latest(account.messages(account.default_chat).to_vec());
+    app.record_now(base_timestamp, offset_seconds);
+    app.set_status(OFFLINE_STATUS);
+    app
+}
