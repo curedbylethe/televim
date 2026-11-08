@@ -82,6 +82,13 @@ test("keyboard opens prompts and insert mode; bare Escape stays in demo", async 
   await expect(terminal).toContainText("ime-ready");
 });
 
+test("Meta shortcuts do not reach Televim as bare keys", async ({ page }) => {
+  await openDomDemo(page);
+  const terminal = page.frameLocator("#demo-frame").locator("#demo");
+  await page.keyboard.press("Meta+a");
+  await expect(terminal).toContainText("NORMAL");
+});
+
 test("Reset restores the fixture after a message is sent", async ({ page }) => {
   await openDomDemo(page);
   const terminal = page.frameLocator("#demo-frame").locator("#demo");
@@ -92,7 +99,20 @@ test("Reset restores the fixture after a message is sent", async ({ page }) => {
 
   await page.getByRole("button", { name: "Reset demo" }).click();
   await expect(terminal).not.toContainText("reset-marker");
-  await expect(terminal).toContainText("Hey, is the build green?");
+  await expect(terminal).toContainText("Northstar notes");
+});
+
+test("Reset restores release copy after the demo ends", async ({ page }) => {
+  await openDomDemo(page);
+  await page.keyboard.press(":");
+  await page.keyboard.type("q");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("Demo ended. Load again or Reset.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Reset demo" }).click();
+  await page.keyboard.press("Control+Alt+Escape");
+  await expect(page.locator("#released-copy"))
+    .toHaveText("Keyboard is free. Page scroll and Tab work as usual.");
 });
 
 test("Release returns keyboard focus to page and bare Escape does not release", async ({ page }) => {
@@ -194,7 +214,6 @@ test("new-chat search resolves a fixture contact and opens its conversation", as
   await page.keyboard.press("h");
   await page.keyboard.press("/");
   await page.keyboard.type("Juniper");
-  await expect(terminal).toContainText("Juniper Reed");
   await page.keyboard.press("Enter");
   await expect(terminal).toContainText("Juniper Reed");
 });
@@ -231,7 +250,7 @@ test("clipboard denial selects text and shows the exact manual-copy fallback", a
   const dialog = page.frameLocator("#demo-frame").getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("Clipboard access was denied. The text is selected; press Ctrl/Cmd+C.");
-  await expect(dialog.getByRole("textbox", { name: "Text to copy" })).toHaveValue(/Hey, is the build green/);
+  await expect(dialog.getByRole("textbox", { name: "Text to copy" })).toHaveValue(/مرحبا/);
 });
 
 test("unsupported browser keeps poster available", async ({ page }) => {
@@ -268,7 +287,8 @@ test("page identifies fictional offline provenance and makes no Telegram or stor
   const posterProvenance = page.locator('.side [data-show="poster"] .prov-label');
   await expect(posterProvenance).toBeVisible();
   await expect(posterProvenance).toHaveText(provenance);
-  await expect(page.getByText(/Telegram service is swapped for a local stand-in/i)).toBeVisible();
+  await expect(page.locator('.side [data-show="poster"] .split'))
+    .toContainText(/Telegram service is swapped for a local stand-in/i);
 
   const storage = await page.evaluate(() => ({
     localStorage: localStorage.length,

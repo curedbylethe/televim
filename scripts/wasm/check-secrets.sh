@@ -15,7 +15,7 @@ if find "$dist" \( -name '*.map' -o -name '*.dSYM' \) -print | grep -q .; then
 fi
 
 if find "$dist" -type f \( -name '*.html' -o -name '*.js' -o -name '*.css' -o -name '*.txt' \) \
-  -exec grep -n -i -E '\b(phone|password|passcode)\b' {} + | grep -v -i -E 'disabled|no session|not available|demo'; then
+  -exec grep -h -n -i -E '\b(phone|password|passcode)\b' {} + | grep -v -i -E 'disabled|no session|not available|demo'; then
   echo "unexpected credential UI copy"
   exit 1
 fi

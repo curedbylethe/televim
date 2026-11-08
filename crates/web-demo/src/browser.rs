@@ -151,6 +151,9 @@ impl BrowserBridge {
         dialog.set_inner_html("");
         let result = (|| {
             let title = element(&document, "h2", "Clipboard fallback")?;
+            title.set_attribute("id", "televim-demo-clipboard-title")?;
+            dialog.remove_attribute("data-televim-demo-media")?;
+            dialog.set_attribute("aria-labelledby", "televim-demo-clipboard-title")?;
             let message = element(
                 &document,
                 "p",

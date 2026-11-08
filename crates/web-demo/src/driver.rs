@@ -265,12 +265,6 @@ impl Driver {
                 self.app
                     .set_status(format!("Uploading {sent}/{total} bytes…"));
             }
-            Effect::MediaProgress {
-                received, total, ..
-            } => {
-                self.app
-                    .set_status(format!("Downloading {received}/{total} bytes…"));
-            }
             Effect::RequestFilePicker {
                 chat_id,
                 temp_id,
@@ -307,13 +301,6 @@ impl Driver {
                     chat_id,
                     message_id,
                 );
-            }
-            Effect::MediaCancelled {
-                chat_id,
-                message_id,
-            } => {
-                self.app.conversation.downloads.forget(chat_id, message_id);
-                self.app.flash("Download cancelled.");
             }
             Effect::Edited {
                 chat_id,

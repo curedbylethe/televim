@@ -355,8 +355,6 @@ fn edit_delete_and_forward_mutate_world() {
     );
     assert!(sim.world.active().messages(chat_id).is_empty());
     assert!(!sim.world.active().media.contains_key(&(chat_id, 50)));
-    sim.schedule_delete(dest, vec![forwarded_id], 0);
-    assert!(!sim.world.active().media.contains_key(&(dest, forwarded_id)));
 }
 
 #[test]

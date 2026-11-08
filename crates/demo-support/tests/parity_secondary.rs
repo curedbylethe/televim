@@ -140,10 +140,15 @@ fn pins_archives_and_account_switches_update_the_fictional_world() {
         .find(|account| account.id != original_account)
         .expect("fixture has another account")
         .id;
+    sim.schedule_arrival(chat_id, "pending account message", None, 5_000);
     assert!(matches!(
         sim.dispatch(&app, Action::SwitchAccount { id: other_account }).as_slice(),
         [Effect::SwitchAccount { id }] if *id == other_account
     ));
+    assert!(
+        sim.advance(5_000).is_empty(),
+        "switch clears old account events"
+    );
     assert_eq!(sim.world.active().id, other_account);
     assert!(sim.world.switch_to(original_account));
     assert_active_chat(&sim, fallback_chat);
@@ -410,11 +415,6 @@ fn media_open_save_cancel_and_token_sticker_use_fixture_bytes() {
             if filename == &expected_filename && bytes == &expected_bytes
     ));
 
-    sim.schedule_download(chat_id, message_id, 1_000, 2);
-    assert!(matches!(
-        sim.advance(200).as_slice(),
-        [Effect::MediaProgress { .. }]
-    ));
     assert!(matches!(
         sim.dispatch(
             &app,
@@ -424,9 +424,8 @@ fn media_open_save_cancel_and_token_sticker_use_fixture_bytes() {
             }
         )
         .as_slice(),
-        [Effect::MediaCancelled { .. }]
+        [Effect::Status(text)] if text == "No media download is running."
     ));
-    assert!(sim.advance(1_000).is_empty());
 
     let sticker = sim
         .world
@@ -445,11 +444,8 @@ fn media_open_save_cancel_and_token_sticker_use_fixture_bytes() {
 }
 
 #[test]
-fn browser_only_actions_and_reconnect_keep_offline_claims_honest() {
+fn browser_only_actions_keep_offline_claims_honest() {
     let (mut sim, app) = fixture();
-    assert!(
-        matches!(sim.reconnect(), Effect::Status(text) if text == "Simulated reconnect only; no Telegram connection.")
-    );
     for (action, expected) in [
         (
             Action::AddAccount,

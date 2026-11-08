@@ -137,6 +137,8 @@
   $("#reset").addEventListener("pointerdown", (event) => event.preventDefault());
   $("#reset").addEventListener("click", () => {
     ended = false;
+    $("#interact-label").textContent = "Click to interact";
+    $("#released-copy").textContent = "Keyboard is free. Page scroll and Tab work as usual.";
     post({ type: "reset" });
     show("running");
     frame.focus();

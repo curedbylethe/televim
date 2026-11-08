@@ -34,12 +34,6 @@ pub enum Effect {
         sent: u64,
         total: u64,
     },
-    MediaProgress {
-        chat_id: i64,
-        message_id: i64,
-        received: u64,
-        total: u64,
-    },
     RequestFilePicker {
         chat_id: i64,
         temp_id: i64,
@@ -55,10 +49,6 @@ pub enum Effect {
         filename: String,
         mime: &'static str,
         bytes: Vec<u8>,
-    },
-    MediaCancelled {
-        chat_id: i64,
-        message_id: i64,
     },
     Edited {
         chat_id: i64,

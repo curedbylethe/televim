@@ -102,6 +102,10 @@ fn install_ctrl_w_guard() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| std::io::Error::other("demo terminal mount is unavailable"))?;
     let guard =
         Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
+            if event.meta_key() {
+                event.stop_propagation();
+                return;
+            }
             let Some(document) = web_sys::window().and_then(|window| window.document()) else {
                 return;
             };
