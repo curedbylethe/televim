@@ -979,31 +979,34 @@
     s.chat = clamp(s.chat, 0, Math.max(0, s.chats.length - 1));
     s.flash = 'archived ' + localName(s, c.name);
   }
-  /* Mute, the manual unread mark and the bulk read act on the chat-list highlight, never on a card's
-     person: all three are properties of a conversation, and a person with none has nothing to mute.
+  /* Mute and the manual unread mark take the command subject every chat action takes (`subjectChat`):
+     the card's person while a card has the focus, the chat-list highlight otherwise. A person with no
+     conversation has nothing to mute, so that case is refused with the existing sentence. The bulk read
+     has no subject: it acts on every chat that carries a count or a mark.
      None asks first. Each is undone from the screen it acts on — `:unmute`, and opening the chat — and
      none is visible to anybody else, which is the line the confirmations in this section draw.
      `muted` stops Telegram's notification and nothing on this screen: the count stays. `marked` is a
      flag, not a count: it stands alone or beside a real count. */
   function muteChat(s, on) {
-    const c = s.chats[s.chat];
+    const c = s.chats[subjectChat(s)];
     if (!c) return refuse(s, NOTHING_TO_ACT_ON);
     c.muted = on;
     s.flash = (on ? 'muted ' : 'unmuted ') + localName(s, c.name);
   }
   function markUnread(s) {
-    const c = s.chats[s.chat];
+    const c = s.chats[subjectChat(s)];
     if (!c) return refuse(s, NOTHING_TO_ACT_ON);
     c.marked = true;
     s.flash = 'marked ' + localName(s, c.name) + ' unread';
   }
   /* A bulk action reports what it did and what it could not: one request per chat, so one can fail
      while the rest land. A chat that fails keeps its count (and its mark), which is how the reader
-     finds the rest. In the model a chat carrying `readFail` stands in for the request that failed. */
+     finds the rest. A chat is read when it carries a count or a manual mark, so a mark-only chat loses its
+     mark. In the model a chat carrying `readFail` stands in for the request that failed. */
   function markAllRead(s) {
     let done = 0, failed = 0;
     s.chats.forEach((c) => {
-      if (!c.unread) return;
+      if (!c.unread && !c.marked) return;
       if (c.readFail) { failed++; return; }
       c.unread = 0; c.marked = false; done++;
     });
@@ -3149,6 +3152,9 @@
       { name: 'Walking past a marked row does not clear it', keys: '<Tab>jjj:mark-unread<CR>jk' },
       { name: 'Opening the marked chat clears the mark', keys: '<Tab>jjj:mark-unread<CR><CR>' },
       { name: ':mark-all-read: every count goes', keys: '<Tab>:mark-all-read<CR>' },
+      { name: ':mark-all-read: a mark with no count goes too', keys: '<Tab>jjj:mark-unread<CR>:mark-all-read<CR>' },
+      { name: ':mark-all-read: a failed request keeps count and mark', start: 'readFails', keys: '<Tab>jjjjjjjjj:mark-unread<CR>gg:mark-all-read<CR>' },
+      { name: ':mute follows the card\'s subject, and a person with no chat is refused', keys: ':contacts<CR>' + 'j'.repeat(13) + '<CR>:mute<CR>' },
       { name: ':mark-all-read: one request failed, its count stays', start: 'readFails', keys: '<Tab>:mark-all-read<CR>' }] }
   ];
   function scene(si, vi) {

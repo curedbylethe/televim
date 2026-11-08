@@ -263,6 +263,8 @@ const ROW_SCREENS = [
   ['chat-row-mute-frame', 'mute: the sentence, and the row says so', 'chat list, a muted chat under the highlight, the sentence on the status row', 'Mute: the sentence, and the row says so'],
   ['chat-row-highlight-frame', 'all four on one row, under the highlight', 'chat list, a pinned, muted, marked and counted row under the highlight', 'The same row under the highlight'],
   ['chat-row-opened-frame', 'opening the marked chat clears the mark', 'chat list, the marked chat opened, the mark gone', 'Opening the marked chat clears the mark'],
+  ['chat-row-read-mark-frame', ':mark-all-read, a mark with no count', 'chat list, mark all read clears a mark that has no count', ':mark-all-read: a mark with no count goes too'],
+  ['chat-row-read-keeps-frame', ':mark-all-read, a failed request keeps count and mark', 'chat list, mark all read with one request failed, its count and mark kept', ':mark-all-read: a failed request keeps count and mark'],
   ['chat-row-read-failed-frame', ':mark-all-read, one request failed', 'chat list, mark all read with one request failed, its count kept', ':mark-all-read: one request failed, its count stays']
 ].map(([id, caption, aria, variant]) => {
   const [si, vi] = variantIndex('unread', variant);
