@@ -11,6 +11,7 @@ mod draft_store;
 mod history_store;
 mod media_cache;
 mod net;
+mod notify;
 mod runtime;
 #[cfg(debug_assertions)]
 mod scenario;

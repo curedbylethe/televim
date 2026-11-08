@@ -473,6 +473,9 @@ budget. Its artifact size and browser timings are tracked in
 
 - `tokio` **current-thread** runtime: `Builder::new_current_thread()` in
   `app/src/runtime.rs`, explicitly, even though the `full` feature set is enabled.
+- The binary includes `notify-rust` for desktop notifications: no thread at idle,
+  and one blocking-pool thread only while a notification is being shown. This is
+  declared, not measured; `make measure` records the binary and RSS cost.
 - A bounded conversation window: `domain::history::ConversationWindow` caps at
   `CONVERSATION_WINDOW` messages, so full history is never held.
 - A bounded history cache: at most `HISTORY_CACHE_DEPTH` (200) messages for each

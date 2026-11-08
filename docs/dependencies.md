@@ -48,6 +48,7 @@ Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 | Dependency | Why it is here |
 | :--------- | :-------------- |
 | `tokio` | The async runtime. One event loop, so the runtime is current-thread: `app/src/runtime.rs` chooses `new_current_thread()` explicitly at startup even though the `full` feature set is enabled — see [`memory.md`](./memory.md). |
+| `notify-rust` | Best-effort desktop notifications. Linux uses its pure-Rust `zbus` backend; macOS uses `mac-notification-sys`. No C library is required. |
 | `anyhow` | Error handling at the `app` boundary, where there is nothing typed left to match on. |
 | `thiserror` | Typed errors in `telegram-framework`, `proto` and `domain`. |
 | `serde` / `serde_json` | Configuration and the config-adjacent data files: drafts, history, media cache, accounts index, session file, and log. See [`installing.md`](./installing.md#uninstalling) for paths. The history cache added **no dependency**: it is the drafts file's atomic `0600` JSON write over the `serde_json` `app` already had, sealed through `telegram-framework::sealed` — the session file's envelope and key provider, so sealing it reuses the existing crypto and adds nothing. |

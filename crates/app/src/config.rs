@@ -151,6 +151,9 @@ pub struct Config {
     /// keeps the value it was launched with.
     pub graphics: String,
 
+    /// Whether desktop notifications are enabled: `on` (default) or `off`.
+    pub notifications: String,
+
     /// Whether to check for stable releases: `auto` or `off`.
     ///
     /// The exact word `off` disables checks; unknown values keep the default.
@@ -264,6 +267,7 @@ impl Default for Config {
             bidi: BIDI_AUTO.to_owned(),
             stickers: STICKERS_INLINE.to_owned(),
             graphics: GRAPHICS_AUTO.to_owned(),
+            notifications: "on".to_owned(),
             updates: None,
             api_id: None,
             api_hash: None,
@@ -311,7 +315,8 @@ impl Config {
             .set_default("theme", "default")?
             .set_default("bidi", BIDI_AUTO)?
             .set_default("stickers", STICKERS_INLINE)?
-            .set_default("graphics", GRAPHICS_AUTO)?;
+            .set_default("graphics", GRAPHICS_AUTO)?
+            .set_default("notifications", "on")?;
 
         builder = with_compiled_credentials(
             builder,
@@ -329,11 +334,14 @@ impl Config {
             .add_source(config::Environment::with_prefix("TELEGRAM"))
             .add_source(config::Environment::with_prefix("TELEVIM"));
 
-        let cfg: Config = builder
+        let mut cfg: Config = builder
             .build()
             .context("building config")?
             .try_deserialize()
             .context("deserialising config")?;
+        if cfg.notifications.trim().is_empty() {
+            "on".clone_into(&mut cfg.notifications);
+        }
         cfg.validate_kdf()?;
         cfg.validate_jumplist_depth()?;
         Ok(cfg)
@@ -721,6 +729,7 @@ mod tests {
         let cfg = bare();
 
         assert_eq!(cfg.log_level, "info");
+        assert_eq!(cfg.notifications, "on");
         assert_eq!(cfg.credentials(), None);
         assert_eq!(
             cfg.session_path, None,
@@ -738,6 +747,34 @@ mod tests {
             cfg.jumplist_depth, None,
             "the jumplist's own depth is the default"
         );
+    }
+
+    #[test]
+    fn notifications_are_read_from_the_file() {
+        assert_eq!(
+            load_toml("notifications-off", "notifications = \"off\"\n")
+                .expect("the key loads")
+                .notifications,
+            "off"
+        );
+    }
+
+    #[test]
+    fn the_environment_supplies_notifications_and_blank_uses_the_default() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+        // SAFETY: process-wide environment, written only by tests in this module under ENV.
+        unsafe { std::env::set_var("TELEVIM_NOTIFICATIONS", "off") };
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+        // SAFETY: as above — clearing the variable this test set.
+        unsafe { std::env::set_var("TELEVIM_NOTIFICATIONS", "") };
+        let blank = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a blank environment value is ignored");
+        // SAFETY: as above — clearing the variable this test set.
+        unsafe { std::env::remove_var("TELEVIM_NOTIFICATIONS") };
+
+        assert_eq!(cfg.notifications, "off");
+        assert_eq!(blank.notifications, "on");
     }
 
     /// Each viewer key is read from the file under its own name.
