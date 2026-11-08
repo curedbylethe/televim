@@ -4,8 +4,9 @@ This matrix tracks current native controls against the browser demo. **simulated
 
 Playwright specs cover the shell's poster, lazy load, keyboard, Reset, focus
 release, mobile input and IME, failure states, provenance, network boundary and
-WebGL2 startup. The gated `wasm` CI job runs this suite. Local runs require Trunk
-and Playwright; browser-adapted rows also list manual checks where needed.
+WebGL2 startup. The gated `wasm` CI job runs this suite after its browser Rust
+tests pass. Local runs require Trunk and Playwright; browser-adapted rows also
+list manual checks where needed.
 
 | Browser check | Evidence | Local result |
 | :--- | :--- | :--- |

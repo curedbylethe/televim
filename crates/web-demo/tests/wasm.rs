@@ -117,7 +117,7 @@ fn sent_and_edited_effects_keep_chat_preview_message_cache() {
         id: 70_001,
         chat_id,
         text: Cow::Borrowed("preview before edit"),
-        timestamp: 1_730_000_100,
+        timestamp: driver.sim.world.base_timestamp + 60,
         status: MessageStatus::Sent,
         is_outgoing: true,
         reply_to: None,
