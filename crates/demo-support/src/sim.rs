@@ -137,12 +137,7 @@ impl DemoSimulator {
                     .queue
                     .iter()
                     .find_map(|scheduled| match &scheduled.effect {
-                        Effect::UploadProgress {
-                            chat_id,
-                            temp_id: id,
-                            ..
-                        }
-                        | Effect::Sent {
+                        Effect::Sent {
                             chat_id,
                             temp_id: id,
                             ..
@@ -158,9 +153,9 @@ impl DemoSimulator {
                     return vec![Self::status("No upload is running for that message.")];
                 };
                 self.queue.retain(|scheduled| !match &scheduled.effect {
-                    Effect::UploadProgress { temp_id: id, .. }
-                    | Effect::Sent { temp_id: id, .. }
-                    | Effect::SendFailed { temp_id: id, .. } => *id == temp_id,
+                    Effect::Sent { temp_id: id, .. } | Effect::SendFailed { temp_id: id, .. } => {
+                        *id == temp_id
+                    }
                     _ => false,
                 });
                 self.failed_uploads.retain(|(_, id, _)| *id != temp_id);
@@ -182,8 +177,7 @@ impl DemoSimulator {
                     self.queue.retain(|scheduled| {
                         !matches!(
                             &scheduled.effect,
-                            Effect::UploadProgress { temp_id: id, .. }
-                                | Effect::Sent { temp_id: id, .. }
+                            Effect::Sent { temp_id: id, .. }
                                 | Effect::SendFailed { temp_id: id, .. }
                                 if *id == temp_id
                         )
@@ -202,8 +196,7 @@ impl DemoSimulator {
                 self.queue.retain(|scheduled| {
                     !matches!(
                         &scheduled.effect,
-                        Effect::UploadProgress { temp_id: id, .. }
-                            | Effect::Sent { temp_id: id, .. }
+                        Effect::Sent { temp_id: id, .. }
                             | Effect::SendFailed { temp_id: id, .. }
                             if *id == temp_id
                     )

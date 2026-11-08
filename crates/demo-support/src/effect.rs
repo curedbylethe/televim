@@ -28,12 +28,6 @@ pub enum Effect {
         temp_id: i64,
         reason: String,
     },
-    UploadProgress {
-        chat_id: i64,
-        temp_id: i64,
-        sent: u64,
-        total: u64,
-    },
     RequestFilePicker {
         chat_id: i64,
         temp_id: i64,

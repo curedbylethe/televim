@@ -60,7 +60,7 @@ list manual checks where needed.
 | Account | Add account or logout | `:add-account`, `:logout` | “The demo has a fixed cast. Use the account card to switch.” | impossible | `simulator::unsupported_native_actions_say_why` |
 | Session | Sign in and passphrase | `:signin`, `:unlock`, `:passphrase` | “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.”; “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest`; `simulator::unsupported_native_actions_say_why` |
 | Session | Import or export | `:import-session <path>`, `:export-session <path>` | “Session import is unavailable in the browser demo.”; “Session export is unavailable in the browser demo.” | impossible | `simulator::unsupported_native_actions_say_why` |
-| Connection | Retry | `:retry` | No Telegram reconnect runs in the browser demo | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
+| Connection | Retry | `:retry` | Reports that retry is unavailable because the offline demo has no Telegram connection | browser-adapted | `wasm::retry_command_reports_that_the_offline_demo_cannot_reconnect` |
 | History | Older and newer pages | scroll to either edge | Deterministic local pages apply through native `App` paging APIs | simulated | `parity_secondary::history_pages_and_read_receipts_apply_to_real_app_state` |
 | Read state | Read receipt | open conversation | Scheduled receipt updates native message read state | simulated | `parity_secondary::history_pages_and_read_receipts_apply_to_real_app_state` |
 | Search | Global filters and pages | `:search <query>` | Native search state receives filtered results in stable 20-result pages | simulated | `parity_secondary::filtered_global_search_pages_append_to_real_search_state`; `simulator::search_filters_and_global_pages_are_deterministic` |
@@ -126,7 +126,7 @@ Every command in the product list has a row here. Supported commands use native 
 | `:update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `:signin` | “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.” | impossible | `simulator::unsupported_native_actions_say_why` |
 | `:add-account` | “The demo has a fixed cast. Use the account card to switch.” | impossible | `simulator::unsupported_native_actions_say_why` |
-| `:retry` | No Telegram reconnect runs in the browser demo | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
+| `:retry` | “Retry is unavailable: the offline demo has no Telegram connection.” | browser-adapted | `wasm::retry_command_reports_that_the_offline_demo_cannot_reconnect` |
 | `:unlock` | “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `:passphrase` | “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `:export-session <path>` | “Session export is unavailable in the browser demo.” | impossible | `simulator::unsupported_native_actions_say_why` |
@@ -201,4 +201,4 @@ The `PromptKind` inventory is `Message`, `Command`, `Search`, `NewChat`,
 - **global search:** Search text plus `media:`, `since:`, and `until:` filters; page results and open a hit.
 - **media and stickers:** Attach local file, open/save fixture media, and verify sticker fallback.
 - **session refusal:** Try sign-in, unlock, passphrase, import/export, add-account, and logout; verify each exact refusal sentence.
-- **connection and settings:** Confirm the demo stays offline; open `:settings` and use browser display controls.
+- **retry and settings:** Run `:retry` and verify its offline refusal; open `:settings` and use browser display controls.

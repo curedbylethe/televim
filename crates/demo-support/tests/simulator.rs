@@ -679,15 +679,6 @@ fn cancelled_upload_retry_reopens_picker_without_a_fake_message() {
     let before = sim.world.active().messages(chat_id).len();
     let temp_id = -900;
     sim.schedule(
-        100,
-        Effect::UploadProgress {
-            chat_id,
-            temp_id,
-            sent: 1,
-            total: 2,
-        },
-    );
-    sim.schedule(
         300,
         Effect::SendFailed {
             chat_id,
