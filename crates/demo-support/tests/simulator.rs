@@ -503,6 +503,69 @@ fn scheduled_arrivals_respect_open_chat_and_timing() {
 }
 
 #[test]
+fn blocked_peer_arrivals_are_suppressed_until_unblocked() {
+    let mut sim = simulator();
+    let app = app_for(&sim);
+    let chat_id = *sim
+        .world
+        .active()
+        .blocked
+        .iter()
+        .next()
+        .expect("blocked fixture");
+    let before_messages = sim.world.active().messages(chat_id).len();
+    let before_unread = sim
+        .world
+        .active()
+        .chat(chat_id)
+        .expect("blocked peer has a chat")
+        .unread_count;
+
+    sim.schedule_arrival(chat_id, "suppressed message", None, 100);
+
+    assert!(sim.advance(100).is_empty());
+    assert_eq!(sim.world.active().messages(chat_id).len(), before_messages);
+    assert_eq!(
+        sim.world
+            .active()
+            .chat(chat_id)
+            .map(|chat| chat.unread_count),
+        Some(before_unread)
+    );
+
+    let effects = sim.dispatch(
+        &app,
+        Action::SetBlocked {
+            peer_id: chat_id,
+            name: "Fixture peer".into(),
+            blocked: false,
+        },
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Blocked { blocked: false, .. }]
+    ));
+    sim.schedule_arrival(chat_id, "permitted message", None, 100);
+
+    assert!(matches!(
+        sim.advance(100).as_slice(),
+        [Effect::Update(domain::updates::UpdateEvent::NewMessage(message))]
+            if message.text == "permitted message"
+    ));
+    assert_eq!(
+        sim.world.active().messages(chat_id).len(),
+        before_messages + 1
+    );
+    assert_eq!(
+        sim.world
+            .active()
+            .chat(chat_id)
+            .map(|chat| chat.unread_count),
+        Some(before_unread + 1)
+    );
+}
+
+#[test]
 fn unsupported_native_actions_say_why() {
     let mut sim = simulator();
     let app = app_for(&sim);
