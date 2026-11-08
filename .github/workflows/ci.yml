@@ -149,6 +149,56 @@ jobs:
         if: runner.os == 'Linux'
         run: pwsh -NoProfile -Command "[scriptblock]::Create((Get-Content -Raw scripts/install.ps1)) | Out-Null"
 
+  wasm:
+    name: wasm
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.22.1,wasm-pack@0.15.1
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.22.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/web-demo/e2e/pnpm-lock.yaml
+
+      - run: make wasm-check
+      - run: make wasm-build
+
+      - name: browser Rust tests
+        env:
+          WASM_BINDGEN_TEST_TIMEOUT: 120
+        run: |
+          if [ -n "${CHROMEWEBDRIVER:-}" ]; then
+            export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
+          fi
+          make wasm-test
+
+      - name: install Playwright browsers
+        working-directory: crates/web-demo/e2e
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+
+      - run: make wasm-e2e
+      - run: make wasm-boundary
+
   release:
     name: release
     runs-on: ubuntu-latest

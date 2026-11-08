@@ -96,6 +96,32 @@ boundary: ## Assert that only telegram-framework can reach grammers
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "✅ no grammers outside telegram-framework's live feature"
 
+.PHONY: wasm-check
+wasm-check: ## Type-check the detached browser demo for wasm32
+	$(CARGO) check --manifest-path crates/web-demo/Cargo.toml --target wasm32-unknown-unknown
+
+.PHONY: wasm-build
+wasm-build: ## Build the static browser demo with Trunk
+	cd crates/web-demo && trunk build --release --locked
+
+.PHONY: wasm-test
+wasm-test: ## Run wasm-bindgen tests in headless Chrome
+	cd crates/web-demo && wasm-pack test --headless --chrome
+
+.PHONY: wasm-e2e
+wasm-e2e: wasm-build ## Run the Playwright browser suite with pnpm
+	cd crates/web-demo/e2e && pnpm install --frozen-lockfile && pnpm exec playwright test
+
+.PHONY: wasm-boundary
+wasm-boundary: ## Assert the detached demo has no Telegram protocol crates
+	@tree=$$($(CARGO) tree --manifest-path crates/web-demo/Cargo.toml -p web-demo) || exit 1; \
+	if echo "$$tree" | grep -Eq 'grammers|telegram-framework|proto'; then \
+		echo "wasm boundary violation"; exit 1; \
+	fi
+
+.PHONY: wasm
+wasm: wasm-check wasm-test wasm-e2e wasm-boundary ## Run all browser demo checks
+
 .PHONY: check
 check: ## Type-check the entire workspace (faster than a full build)
 	$(CARGO) check --all-targets

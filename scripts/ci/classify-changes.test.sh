@@ -24,6 +24,7 @@ check false 'markdown under docs' docs/testing.md
 check false 'an image under docs' docs/diagram.png
 check false 'a dotfile under docs' docs/.gitkeep
 check true  'a Rust source' crates/tui/src/lib.rs
+check true  'the web demo' crates/web-demo/index.html
 check true  'a build script whose directory starts with docs' docs-src/build.rs
 check true  'docs plus code' docs/testing.md crates/app/src/main.rs
 check true  'a workflow' .github/workflows/ci.yml

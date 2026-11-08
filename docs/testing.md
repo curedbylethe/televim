@@ -26,13 +26,27 @@
 | `make audit` | `cargo audit` (needs `cargo-audit` installed) |
 | `make bench` | A/B compare of the criterion micro-benches; writes `target/bench-compare.json` and `.md`. `BENCH_MODE=smoke` (default) or `full`; `BENCH_ARGS="--save-baseline NAME"` or `"--baseline NAME"`. Reports deltas and never fails on slowness |
 | `make update` | `cargo update` — **drops the `glass_pumpkin` pin**; see Dependency Notes |
+| `make wasm-check` | type-check detached `web-demo` for `wasm32-unknown-unknown` |
+| `make wasm-build` | build the static browser demo with pinned Trunk |
+| `make wasm-test` | run wasm-bindgen tests in headless Chrome; needs `wasm-pack` and ChromeDriver |
+| `make wasm-e2e` | build the demo and run locked Playwright tests with pnpm; needs Node and Chromium |
+| `make wasm-boundary` | ensure detached `web-demo` excludes Telegram protocol crates |
+| `make wasm` | run all browser demo checks; needs the Rust wasm target, Trunk, wasm-pack, ChromeDriver, Node, pnpm and Chromium |
 
 `lint` and `test` both pass `--all-features` for the reason given above.
 
+The WASM targets stay outside `make ci`. Install the target with
+`rustup target add wasm32-unknown-unknown`, then install Trunk and wasm-pack at
+the versions pinned in `.github/workflows/ci.yml`. Playwright needs Node 22,
+pnpm 10.22.0 and Chromium.
+
 ## CI Pipeline
 
-`.github/workflows/ci.yml` runs `changes`, `lint`, and `release` on
-`ubuntu-latest`, plus an `installers` matrix on Ubuntu, macOS, and Windows.
+`.github/workflows/ci.yml` runs `changes`, `lint`, `release`, and a gated `wasm`
+job on `ubuntu-latest`, plus an `installers` matrix on Ubuntu, macOS, and
+Windows. The WASM job runs only when `changes` reports code; docs-only changes
+still run only `make design-check`. `make ci` remains the native gate. The WASM
+job is not a required branch-protection check until maintainers mark it required.
 `changes` classifies the diff and gates the other jobs. `lint` runs on every push
 and pull request. `release` is gated at the job level to a push to `main` that
 changes code, the nightly schedule, and a pull request labelled `memory`; an
@@ -165,6 +179,11 @@ Everything below runs under `make test` unless its bullet says otherwise: the
 goldens and property tests are ordinary `#[test]`s, and the deterministic
 mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
 `fuzz/` is the only local-only command.
+
+- **WASM browser demo:** `demo-support` fixtures and simulator run under the
+  native test gate. Detached `web-demo` Rust/browser checks run through the
+  separate, code-gated `wasm` CI job; `make ci` does not require browser tools.
+  Playwright uses the locked pnpm workspace under `crates/web-demo/e2e/`.
 
 - **Installer tests:** `sh scripts/install.test.sh` runs the local fixture on
   Linux and macOS; `pwsh -NoProfile -File scripts/install.test.ps1` runs it on
