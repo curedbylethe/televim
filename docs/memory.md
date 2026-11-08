@@ -467,6 +467,10 @@ while calibrating this one.
 
 ## What is in place
 
+The detached browser WASM artifact is outside this native RSS and executable
+budget. Its artifact size and browser timings are tracked in
+[`web-demo.md`](./web-demo.md); they do not change the native baseline.
+
 - `tokio` **current-thread** runtime: `Builder::new_current_thread()` in
   `app/src/runtime.rs`, explicitly, even though the `full` feature set is enabled.
 - A bounded conversation window: `domain::history::ConversationWindow` caps at

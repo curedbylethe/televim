@@ -16,6 +16,18 @@ Pre-1.0: see [known gaps](docs/known-gaps.md).
 
 *Fictional offline chats; the status row is cropped.*
 
+## Browser demo
+
+Televim's Pages deployment target is
+[curedbylethe.github.io/televim](https://curedbylethe.github.io/televim/). The
+first deployment waits for this branch to merge and Pages to publish. It runs
+the real Rust interface with fictional conversations and no Telegram
+connection. The page shows the provenance label **Interactive Rust/WASM demo ·
+fictional conversations · offline** before load.
+
+Build locally with `make wasm-pages`. See the [browser demo guide](docs/web-demo.md),
+[parity matrix](docs/web-demo-parity.md) and [portfolio embed contract](docs/web-demo-embed.md).
+
 ## Install
 
 Release binaries are on [GitHub Releases](https://github.com/curedbylethe/televim/releases).
@@ -146,6 +158,10 @@ Type `:` in a conversation or profile card for `:chat`, `:new`, `:search`, `:att
 | [Architecture](docs/architecture.md) | System design |
 | [Decisions](docs/decisions.md) | Key project decisions |
 | [Testing](docs/testing.md) | Build and verification commands |
+| [Browser demo](docs/web-demo.md) | Architecture, build, limits, hosting and checks |
+| [Browser parity](docs/web-demo-parity.md) | TUI flow outcomes and evidence |
+| [Portfolio embed](docs/web-demo-embed.md) | Lazy iframe contract for the portfolio repo |
+| [Dependencies](docs/dependencies.md) | Libraries, versions, licenses and rationale |
 | [Design system](DESIGN.md) | Interface design rules |
 | [Changelog](CHANGELOG.md) | Release history |
 

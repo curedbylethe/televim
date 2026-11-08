@@ -1678,3 +1678,28 @@ are in [`../AGENTS.md`](../AGENTS.md).
   and never held in memory. SHA-256 reads it through a fixed 64 KiB buffer; the
   64 KiB checksum list is separately capped. This bounds memory while staging
   beside the executable for the later atomic replacement.
+- **Why `web-demo` is a detached workspace:** browser-only dependencies and
+  Trunk stay outside the root workspace, so native `make ci` and its dependency
+  graph do not need browser tooling.
+- **Why the browser demo does not add an `app` library target:** the demo
+  composes `domain`, `tui` and `demo-support` directly; it does not import the
+  native networking or runtime layers.
+- **Why browser input uses `tui::key`:** `crossterm` is target-gated on native
+  targets, while `tui::key` carries the shared portable key event. `web-time`
+  supplies the browser-safe clock used by `domain` and `tui`; ratatui has default
+  features disabled so the browser does not pull a native backend.
+- **Why Ratzilla uses WebGL2 with a DOM fallback:** WebGL2 is the default grid
+  renderer, and the DOM backend gives an accessible text renderer when WebGL2 is
+  unavailable. Canvas was not added as a third backend.
+- **Why the simulator stays beside production logic:** `DemoSimulator` returns
+  effects which the browser driver applies through public `App` methods. The
+  simulator does not replace or fork Televim input and rendering behavior.
+- **Why demo state is not saved:** the offline fixture stays in memory; Reset
+  restores its initial cast. No `localStorage` or browser session store is used.
+- **Why the browser demo uses an iframe shell:** the shell loads WASM only after
+  the visitor asks, and the same-origin frame isolates keyboard focus and reset
+  controls. The portfolio consumes the Televim Pages URL through the documented
+  embed contract.
+- **Why browser rendering is not terminal-compatibility evidence:** the browser
+  renderer draws terminal cells but does not shape Arabic across adjacent cells
+  or reproduce native terminal behavior.

@@ -636,7 +636,35 @@ Real, and named so they are not mistaken for oversights:
   rest cannot be reached, or unarchived, from `:archived`. Paging needs an
   offset peer built from the last row.
 
+## Browser demo
+
+- **The browser demo is not a Telegram client.** Its fictional simulator has no
+  login, session import/export, Telegram updates, or server-side calls. Sign-in,
+  session and update commands return explicit offline-demo messages.
+- **Browser state lasts only until reload or Reset.** The demo has no
+  `localStorage`, IndexedDB, or native history/media cache. A reset restores the
+  seeded cast and discards local changes.
+- **The cast and media are fixed fixtures.** Visitors can switch seeded accounts,
+  but cannot add accounts or use Televim's native media cache. Browser file
+  selection and downloads use local bytes and do not write native file paths.
+- **Terminal messages do not become browser links.** Link opening from message
+  text is not implemented; shell navigation remains ordinary page navigation.
+- **The browser renderer does not provide terminal shaping.** It paints one glyph
+  per cell. RTL text can be reordered, but Arabic shaping and joining across cells
+  are not provided; see [`web-demo.md`](./web-demo.md).
+- **The recording and portfolio integration are external work.** The repository
+  ships a static poster and the [iframe contract](./web-demo-embed.md). The
+  portfolio PR and live embed check remain pending.
+
 ## v2 Hooks
+
+Browser demo follow-ups remain out of scope unless planned as a separate feature:
+
+- Live Telegram access and session persistence in the browser are not planned.
+- A real recording belongs on the portfolio page; the Televim repository ships
+  the static poster.
+- Cross-origin iframe policy depends on the portfolio host's CSP and remains to
+  be checked with the external embed.
 
 The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`) or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, those features won't require coupling protocol types to the UI. Media upload and download exist: `:attach` streams a local file to Telegram, while `o` fetches received media into the cache for the platform viewer.
 

@@ -25,6 +25,7 @@ televim/
 │       ├── ci.yml              # Hosted: lint on every push/PR
 │       │                       #   release build + memory when code changes, on
 │       │                       #   main, nightly, or a PR labelled `memory`
+│       ├── pages.yml           # Static browser demo deploy on main/manual dispatch
 │       └── desktop.yml         # Self-hosted: keyring round trip, real datacenter
 │
 └── crates/
@@ -45,10 +46,13 @@ televim/
     │                           #   grapheme, jumplist, line, rows, state,
     │                           #   text_row, theme, widgets, wrap
     ├── demo-support/           # Fictional, deterministic offline demo fixtures
-    └── app/                    # Composition root & CLI binary
-        ├── src/                # main, accounts, config, draft_store,
-        │                       #   history_store, media_cache, net, runtime
-        └── tests/              # proto_integration.rs, tui_e2e.rs
+    ├── app/                    # Composition root & CLI binary
+    │   ├── src/                # main, accounts, config, draft_store,
+    │   │                       #   history_store, media_cache, net, runtime
+    │   └── tests/              # proto_integration.rs, tui_e2e.rs
+    └── web-demo/               # Detached browser workspace; own Cargo.lock
+        ├── src/                # Ratzilla backend, browser bridge, offline driver
+        └── e2e/                # Locked Playwright shell tests
 ```
 
 There is no workspace-level `tests/` or `benches/`. Integration tests live in the
@@ -71,7 +75,8 @@ workspace-level `benches/`.
 **Dependency rule (strict):** `domain` knows nothing of `telegram-framework` or
 `tui`; `app` orchestrates them. `tui` depends on `domain` but **not** on `proto`
 or `telegram-framework`. Only `telegram-framework` may reference `grammers`
-types, and `make boundary` is what proves it.
+types. `make boundary` checks the root workspace, including `demo-support`;
+`make wasm-boundary` checks detached `web-demo` for protocol crates.
 
 Per-crate dependencies, which are narrower than the crate diagrams below suggest
 in one direction and wider in another:
@@ -81,13 +86,28 @@ in one direction and wider in another:
 | `domain` | `thiserror` |
 | `tui` | `domain`, `ratatui`, `crossterm`, `vim-line`, `unicode-width`, `unicode-segmentation`, `unicode-bidi`, `emojis`, `image-webp`, `tracing` |
 | `demo-support` | `domain`, `tui` |
+| `web-demo` (detached) | `domain`, `tui`, `demo-support`, Ratzilla and browser bindings; no `app`, `proto`, or `telegram-framework` |
 | `telegram-framework` | `thiserror`, `tracing`, `tokio`, `serde`, `serde_json`, `keyring`, `aes-gcm-siv`, `argon2`, `getrandom`, `zeroize`, and behind `live` the `grammers-*` crates. The four after `keyring` are `sealed`'s, and they are always compiled. |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
 | `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `dotenvy`, `serde`, `serde_json`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64`, `time` |
 
+`tui` uses `ratatui` with default features disabled. `crossterm` is a native-only
+target dependency; `tui::key` is the backend-neutral key event type shared with
+the browser. `web-time` supplies `Instant` and `Duration` to `domain` and `tui`
+on WASM, while native targets use the standard library.
+
 `demo-support` owns the offline simulator and fictional world. It maps every
 `tui::Action` to effects or an explicit status, mutates only in-memory fixtures,
 and advances scheduled updates only when its driver advances simulated time.
+
+`web-demo` lives under `crates/` but owns a separate Cargo workspace and
+lockfile, so native `make ci` and its `--all-features` graph stay free of
+browser-only tooling. Its Ratzilla backend renders the real `tui::App` through
+WebGL2, with the DOM renderer as an accessible fallback. `Driver` joins that App
+to `DemoSimulator`; simulator effects return through public App methods.
+`BrowserBridge` handles browser clipboard, file-picker and media actions. A
+static shell in `index.html` loads `demo.html` in a same-origin iframe on demand
+and owns focus release and reset.
 
 ## Config that lives on disk, not here
 
