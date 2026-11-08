@@ -97,6 +97,10 @@ impl Driver {
                 any = true;
                 self.dispatch(action);
             }
+            if self.app.take_retry_request() {
+                any = true;
+                self.app.flash("Retry is unavailable: the offline demo has no Telegram connection.");
+            }
             while self.app.take_session_action().is_some() {
                 any = true;
                 self.app
@@ -260,10 +264,6 @@ impl Driver {
             } => {
                 self.app.fail_send(temp_id, reason.clone());
                 self.app.flash(reason);
-            }
-            Effect::UploadProgress { sent, total, .. } => {
-                self.app
-                    .set_status(format!("Uploading {sent}/{total} bytes…"));
             }
             Effect::RequestFilePicker {
                 chat_id,
