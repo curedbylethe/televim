@@ -49,7 +49,7 @@ list manual checks where needed.
 | Messaging | Failed send, retry upload, dismiss | `o`, `D` | Native failure state and upload actions | simulated | `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions` |
 | Quit | Immediate quit | `Ctrl-C` or `:q` | Real `App` sets quit state; driver emits `quit-demo` for shell release | browser-adapted | `parity_core::selection_yank_and_quit_set_native_state`; browser manual: quit and reset |
 | Quit | Close browser tab | `Ctrl-W` | Native key still reaches `App`; prevent default while terminal has focus | browser-adapted | browser manual: Ctrl-W with terminal focused |
-| Update | Install update | `:update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
+| Update | Install update | `:update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | Chat list | Pin or unpin | `p` or profile action | Native `App` ordering plus simulator state | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world`; `simulator::local_mutations_persist_until_reset` |
 | Chat list | Archive or restore | `:archive`, `:archived` | Native archive folder; opening archived chat and restoring uses native state | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world`; `tui::app::tests::archiving_moves_a_chat_and_unarchiving_puts_it_back` |
 | Arrival | Blocked peer | `:block`, `:unblock` | Blocked peers produce no scheduled arrivals; unblocked peers resume arrivals | simulated | `simulator::blocked_peer_arrivals_are_suppressed_until_unblocked` |
@@ -58,14 +58,14 @@ list manual checks where needed.
 | Contacts | Report peer | `:report [reason]` | Report stays in simulator memory; no network report is sent | simulated | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
 | Account | Switch account | account card selection | Switches among three seeded accounts; local fixture data stays isolated | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world`; `fixtures::world_has_three_complete_fictional_accounts` |
 | Account | Add account or logout | `:add-account`, `:logout` | “The demo has a fixed cast. Use the account card to switch.” | impossible | `simulator::unsupported_native_actions_say_why` |
-| Session | Sign in and passphrase | `:signin`, `:unlock`, `:passphrase` | “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.”; “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest`; `simulator::unsupported_native_actions_say_why` |
+| Session | Sign in and passphrase | `:signin`, `:unlock`, `:passphrase` | “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.”; “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest`; `simulator::unsupported_native_actions_say_why` |
 | Session | Import or export | `:import-session <path>`, `:export-session <path>` | “Session import is unavailable in the browser demo.”; “Session export is unavailable in the browser demo.” | impossible | `simulator::unsupported_native_actions_say_why` |
-| Connection | Retry | `:retry` | Browser driver reports simulated reconnect; it does not connect to Telegram | browser-adapted | `DemoSimulator::reconnect`; browser manual: retry status |
+| Connection | Retry | `:retry` | No Telegram reconnect runs in the browser demo | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | History | Older and newer pages | scroll to either edge | Deterministic local pages apply through native `App` paging APIs | simulated | `parity_secondary::history_pages_and_read_receipts_apply_to_real_app_state` |
 | Read state | Read receipt | open conversation | Scheduled receipt updates native message read state | simulated | `parity_secondary::history_pages_and_read_receipts_apply_to_real_app_state` |
 | Search | Global filters and pages | `:search <query>` | Native search state receives filtered results in stable 20-result pages | simulated | `parity_secondary::filtered_global_search_pages_append_to_real_search_state`; `simulator::search_filters_and_global_pages_are_deterministic` |
-| Media | Open and save | `Enter`, `:save` | Open is reported to the shell; save uses fixture bytes through browser download | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: open and save media |
-| Media | Cancel download | cancel media prompt | Scheduled progress stops and simulator emits cancellation | simulated | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes` |
+| Media | Open and save | `Enter`, `:save` | Open uses the browser viewer; save starts an immediate fixture-byte download | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: open and save media |
+| Media | Cancel download | cancel media prompt | Browser downloads complete immediately; no in-flight download can be cancelled | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes` |
 | Media | Send attachment | `:attach` | Browser file picker records the selected filename; file bytes are not read or uploaded | browser-adapted | `simulator::selected_attachment_records_filename_without_claiming_file_bytes`; browser manual: attach local file |
 | Stickers | Render fixture sticker | conversation render | Real sticker decoder runs; token mode remains available when graphics are unavailable | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: sticker fallback |
 | Presence | Typing and online status | simulated time | Presence and typing updates reach real `App` state on deterministic timers | simulated | `simulator::scheduled_arrivals_respect_open_chat_and_timing` |
@@ -80,7 +80,7 @@ effect; refusal rows also use `simulator::unsupported_native_actions_say_why`.
 
 | Action variants | Demo outcome | Category | Evidence |
 | :--- | :--- | :--- | :--- |
-| `Update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
+| `Update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `Send`, `Edit`, `Delete`, `Forward` | Mutate fictional messages through the local simulator | simulated | `parity_core::send_and_reply_use_fixture_state`; `simulator::edit_delete_and_forward_mutate_world` |
 | `SendAttachment` | Browser file picker records a filename; bytes stay unread and unuploaded | browser-adapted | `simulator::selected_attachment_records_filename_without_claiming_file_bytes` |
 | `CancelUpload`, `RetryUpload`, `DismissUpload` | Cancel, retry or dismiss a local simulated upload | simulated | `simulator::cancelled_upload_retries_once_without_early_world_message`; `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions` |
@@ -89,7 +89,7 @@ effect; refusal rows also use `simulator::unsupported_native_actions_say_why`.
 | `TogglePin`, `SwitchAccount` | Change the active fictional account's local state | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world` |
 | `Login`, `LoginCancelled`, `AddAccount`, `Logout`, `ExportSession`, `ImportSession`, `SubmitSessionPassphrase`, `ChangeSessionPassphrase` | “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.”; “Sign-in cancelled; the demo stays signed in.”; “The demo has a fixed cast. Use the account card to switch.”; “Logout is disabled. Use Reset demo to start over.”; “Session export is unavailable in the browser demo.”; “Session import is unavailable in the browser demo.”; “There is no session passphrase in the demo.” | impossible | `simulator::unsupported_native_actions_say_why` |
 | `OpenMedia`, `SaveMedia` | Open or download local fixture bytes through browser APIs | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes` |
-| `CancelMediaDownload` | Cancel a deterministic local fixture download | simulated | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes` |
+| `CancelMediaDownload` | Report that browser fixture downloads complete immediately | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes` |
 | `SetArchived`, `SetBlocked`, `SetLocalName`, `DeleteConversation`, `ReportPeer` | Apply local account and contact changes; no server request | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world`; `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data`; `simulator::local_mutations_persist_until_reset` |
 
 ## Unicode and bidi
@@ -123,12 +123,12 @@ Every command in the product list has a row here. Supported commands use native 
 | `:save <path>` | Browser download uses fixture bytes; path is not written | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: save media |
 | `:date <ISO>` | Jump to nearest fixture message date | simulated | `tui::app::tests::a_date_jump_label_names_the_day` |
 | `:settings` | Open self profile card; shell display settings remain browser controls | browser-adapted | `tui::app::tests::settings_command_opens_the_profile`; browser manual: settings |
-| `:update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
+| `:update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `:signin` | “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.” | impossible | `simulator::unsupported_native_actions_say_why` |
 | `:add-account` | “The demo has a fixed cast. Use the account card to switch.” | impossible | `simulator::unsupported_native_actions_say_why` |
-| `:retry` | “Simulated reconnect only; no Telegram connection.” | browser-adapted | `DemoSimulator::reconnect`; browser manual: retry status |
-| `:unlock` | “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
-| `:passphrase` | “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
+| `:retry` | No Telegram reconnect runs in the browser demo | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
+| `:unlock` | “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
+| `:passphrase` | “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `:export-session <path>` | “Session export is unavailable in the browser demo.” | impossible | `simulator::unsupported_native_actions_say_why` |
 | `:import-session <path>` | “Session import is unavailable in the browser demo.” | impossible | `simulator::unsupported_native_actions_say_why` |
 | `:contacts` | List seeded contacts; empty contact list stays empty | simulated | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
@@ -154,19 +154,19 @@ The `PromptKind` inventory is `Message`, `Command`, `Search`, `NewChat`,
 | NewChat, GlobalSearch | Contact discovery, global search | Native prompts; seeded contacts and local search pages | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data`; `parity_secondary::filtered_global_search_pages_append_to_real_search_state` |
 | Reply, Edit | Compose reply or edit outgoing message | Native prompts; simulator updates fixture state | `parity_core::send_and_reply_use_fixture_state`; `parity_core::edit_uses_fixture_state` |
 | Phone, Code, Password | Sign-in fields | Refused with “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.” | `simulator::unsupported_native_actions_say_why`; browser manual: sign-in refusal |
-| Passphrase, NewPassphrase, RepeatPassphrase | Unlock or change session passphrase | Refused with “There is no session passphrase in the demo.” | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
+| Passphrase, NewPassphrase, RepeatPassphrase | Unlock or change session passphrase | Refused with “There is no session passphrase in the demo.” | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | Quit | Confirm browser demo exit | Shell handles exit event; Reset re-enters demo | `parity_core::selection_yank_and_quit_set_native_state`; browser manual: quit and reset |
 | Restart | Confirm after update install | No update can be installed; status says “No update is installed in the offline demo.” | `simulator::unsupported_native_actions_say_why` |
 | DiscardDraft | Confirm draft discard | Native confirmation clears local draft | `parity_core::discard_command_confirms_and_clears_the_draft` |
-| Logout, ImportSession, ChangePassphrase | Confirm session mutation | Session actions remain unavailable; no account or file is changed | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
+| Logout, ImportSession, ChangePassphrase | Confirm session mutation | Session actions remain unavailable; no account or file is changed | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | Attach | Confirm local media send | Browser file picker records the filename; no bytes are read or uploaded | `simulator::selected_attachment_records_filename_without_claiming_file_bytes`; browser manual: attach local file |
 | DeleteMessages | Confirm selected message deletion | Deletes fixture messages locally | `parity_core::delete_uses_fixture_state` |
 | Block | Confirm block or unblock | Updates local blocked set; no server request | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
 | Forward | Choose destination chat | Copies fixture messages with new local ids | `simulator::edit_delete_and_forward_mutate_world`; browser manual: forward message |
 | Report | Confirm peer report | Records locally; says no Telegram report was sent | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
-| Update offer | Apply, restart, cancel, or later | Applying is unavailable; no update is downloaded or installed | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
+| Update offer | Apply, restart, cancel, or later | Applying is unavailable; no update is downloaded or installed | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | Contacts overlay | Browse, select, cancel | Native directory over seeded contacts; empty result is preserved | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data`; browser manual: contacts |
-| Media dialog | Open, save, cancel, or close | Browser viewer/download handles fixture bytes; no local path is persisted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: media and stickers |
+| Media dialog | Open, save, or close | Browser viewer/download handles fixture bytes; save completes immediately and no local path is persisted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: media and stickers |
 | Clipboard fallback | Deny browser clipboard permission | Demo selects copied text and shows the manual-copy instruction | `shell.spec.ts` clipboard denial fallback in gated `wasm` CI |
 
 ## Source inventory
@@ -199,6 +199,6 @@ The `PromptKind` inventory is `Message`, `Command`, `Search`, `NewChat`,
 - **contacts and profile:** Open contacts, search a new conversation, rename, block/unblock, report, and switch seeded accounts.
 - **history and receipts:** Scroll older/newer, jump with `:date`, and verify local read state updates.
 - **global search:** Search text plus `media:`, `since:`, and `until:` filters; page results and open a hit.
-- **media and stickers:** Attach local file, open/save fixture media, cancel download, and verify sticker fallback.
+- **media and stickers:** Attach local file, open/save fixture media, and verify sticker fallback.
 - **session refusal:** Try sign-in, unlock, passphrase, import/export, add-account, and logout; verify each exact refusal sentence.
-- **retry and settings:** Run `:retry` and verify offline status; open `:settings` and use browser display controls.
+- **connection and settings:** Confirm the demo stays offline; open `:settings` and use browser display controls.

@@ -113,9 +113,9 @@ wasm-e2e: wasm-build ## Run the Playwright browser suite with pnpm
 	cd crates/web-demo/e2e && pnpm install --frozen-lockfile && pnpm exec playwright test
 
 .PHONY: wasm-boundary
-wasm-boundary: ## Assert the detached demo has no Telegram protocol crates
-	@tree=$$($(CARGO) tree --manifest-path crates/web-demo/Cargo.toml -p web-demo) || exit 1; \
-	if echo "$$tree" | grep -Eq 'grammers|telegram-framework|proto'; then \
+wasm-boundary: ## Assert the detached demo has no Telegram or native runtime crates
+	@tree=$$($(CARGO) tree --manifest-path crates/web-demo/Cargo.toml -p web-demo --target wasm32-unknown-unknown) || exit 1; \
+	if echo "$$tree" | grep -Eq 'grammers|telegram-framework|proto|tokio|crossterm'; then \
 		echo "wasm boundary violation"; exit 1; \
 	fi
 

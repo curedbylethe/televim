@@ -398,6 +398,7 @@ impl DemoSimulator {
                 if !self.world.switch_to(id) {
                     return vec![Self::status("That account is not in the demo cast.")];
                 }
+                self.queue.clear();
                 vec![Effect::SwitchAccount { id }]
             }
             Action::Logout => vec![Self::status(
@@ -454,22 +455,8 @@ impl DemoSimulator {
                     vec![Self::status("That demo message has no media to save.")]
                 }
             }
-            Action::CancelMediaDownload {
-                chat_id,
-                message_id,
-            } => {
-                let before = self.queue.len();
-                self.queue.retain(|item| !matches!(item.effect, Effect::MediaProgress { chat_id: id, message_id: mid, .. } if id == chat_id && mid == message_id));
-                if self.queue.len() == before {
-                    vec![Self::status(
-                        "No media download is running for that message.",
-                    )]
-                } else {
-                    vec![Effect::MediaCancelled {
-                        chat_id,
-                        message_id,
-                    }]
-                }
+            Action::CancelMediaDownload { .. } => {
+                vec![Self::status("No media download is running.")]
             }
             Action::SetArchived { chat_id, archived } => {
                 let account = self.active_mut();
@@ -637,19 +624,6 @@ impl DemoSimulator {
         self.schedule(delay_ms, Effect::Update(UpdateEvent::NewMessage(message)));
     }
 
-    pub fn schedule_delete(&mut self, chat_id: i64, message_ids: Vec<i64>, delay_ms: u64) {
-        if let Some(messages) = self.active_mut().messages.get_mut(&chat_id) {
-            messages.retain(|message| !message_ids.contains(&message.id));
-        }
-        self.active_mut()
-            .media
-            .retain(|(id, message_id), _| *id != chat_id || !message_ids.contains(message_id));
-        self.schedule(
-            delay_ms,
-            Effect::Update(UpdateEvent::MessagesDeleted { message_ids }),
-        );
-    }
-
     pub fn schedule_typing(&mut self, chat_id: i64, typing: bool, delay_ms: u64) {
         self.schedule(
             delay_ms,
@@ -728,28 +702,6 @@ impl DemoSimulator {
             messages: page,
             exhausted,
         })
-    }
-
-    /// Describes a reconnect without claiming a Telegram connection.
-    #[must_use]
-    pub fn reconnect(&self) -> Effect {
-        Self::status("Simulated reconnect only; no Telegram connection.")
-    }
-
-    pub fn schedule_download(&mut self, chat_id: i64, message_id: i64, total: u64, steps: u8) {
-        let count = steps.max(1);
-        for step in 1..=count {
-            let received = total.saturating_mul(u64::from(step)) / u64::from(count);
-            self.schedule(
-                u64::from(step) * 200,
-                Effect::MediaProgress {
-                    chat_id,
-                    message_id,
-                    received,
-                    total,
-                },
-            );
-        }
     }
 
     pub fn record_failed_upload(&mut self, chat_id: i64, temp_id: i64, kind: MediaKind) {
