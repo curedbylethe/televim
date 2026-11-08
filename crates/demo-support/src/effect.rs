@@ -6,11 +6,18 @@ use domain::{
     updates::UpdateEvent,
     user::UserCandidate,
 };
+use tui::app::FetchDirection;
 
 /// Result of a simulated action. The browser driver applies these to `App`.
 #[derive(Debug, Clone)]
 pub enum Effect {
     Update(UpdateEvent),
+    HistoryPage {
+        chat_id: i64,
+        direction: FetchDirection,
+        messages: Vec<Message>,
+        exhausted: bool,
+    },
     Sent {
         chat_id: i64,
         temp_id: i64,

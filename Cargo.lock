@@ -1076,6 +1076,7 @@ name = "demo-support"
 version = "0.9.1"
 dependencies = [
  "domain",
+ "ratatui",
  "tui",
 ]
 

@@ -9,7 +9,7 @@ use domain::{
     updates::UpdateEvent,
     user::rank_candidates,
 };
-use tui::{Action, App, state::update};
+use tui::{Action, App, app::FetchDirection, state::update};
 
 use crate::search::{self, GLOBAL_PAGE_SIZE, GlobalPage};
 use crate::{DemoWorld, Effect};
@@ -572,6 +572,9 @@ impl DemoSimulator {
         media: Option<MediaKind>,
         delay_ms: u64,
     ) {
+        if self.active().blocked.contains(&chat_id) {
+            return;
+        }
         let message = self.new_message(
             chat_id,
             text.to_owned(),
@@ -641,6 +644,68 @@ impl DemoSimulator {
             delay_ms,
             Effect::Update(UpdateEvent::ReadReceipt { chat_id, max_id }),
         );
+    }
+
+    /// Builds a local history page around a loaded message identifier.
+    #[must_use]
+    pub fn history_page(
+        &self,
+        chat_id: i64,
+        direction: FetchDirection,
+        anchor_id: i64,
+        limit: usize,
+    ) -> Option<Effect> {
+        if limit == 0 || direction == FetchDirection::Latest {
+            return None;
+        }
+        let messages = self.active().messages(chat_id);
+        if messages.is_empty() {
+            return None;
+        }
+
+        let (page, exhausted) = match direction {
+            FetchDirection::Older => {
+                let older: Vec<_> = messages
+                    .iter()
+                    .filter(|message| message.id < anchor_id)
+                    .collect();
+                let start = older.len().saturating_sub(limit);
+                (
+                    older[start..]
+                        .iter()
+                        .map(|message| (*message).clone())
+                        .collect(),
+                    start == 0,
+                )
+            }
+            FetchDirection::Newer => {
+                let newer: Vec<_> = messages
+                    .iter()
+                    .filter(|message| message.id > anchor_id)
+                    .collect();
+                (
+                    newer
+                        .iter()
+                        .take(limit)
+                        .map(|message| (*message).clone())
+                        .collect(),
+                    newer.len() <= limit,
+                )
+            }
+            FetchDirection::Latest => return None,
+        };
+        Some(Effect::HistoryPage {
+            chat_id,
+            direction,
+            messages: page,
+            exhausted,
+        })
+    }
+
+    /// Describes a reconnect without claiming a Telegram connection.
+    #[must_use]
+    pub fn reconnect(&self) -> Effect {
+        Self::status("Simulated reconnect only; no Telegram connection.")
     }
 
     pub fn schedule_upload(&mut self, chat_id: i64, temp_id: i64, total: u64, steps: u8) {
