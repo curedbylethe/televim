@@ -22,6 +22,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     backend::run(driver)
 }
 
+pub fn notify_quit() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    if let Ok(event) = web_sys::Event::new("quit-demo") {
+        let _ = window.dispatch_event(&event);
+    }
+}
+
 #[wasm_bindgen]
 pub fn reset_demo() {
     DRIVER.with(|slot| {
