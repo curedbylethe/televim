@@ -171,6 +171,7 @@
     if (event.origin !== location.origin || event.source !== frame.contentWindow) return;
     switch (event.data?.type) {
       case "ready":
+        if (plate.dataset.state !== "loading") return;
         window.clearTimeout(timer);
         performance.mark("televim-ready");
         focusTerminal();

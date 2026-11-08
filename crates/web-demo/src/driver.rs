@@ -1,5 +1,9 @@
 use demo_support::{DemoAccount, DemoSimulator, DemoWorld, Effect};
-use domain::{message::Message, presence::Presence, updates::UpdateEvent};
+use domain::{
+    message::{MediaKind, Message},
+    presence::Presence,
+    updates::UpdateEvent,
+};
 use tui::{
     App, ConnectionState, SessionStore,
     app::{Action, FetchDirection},
@@ -276,7 +280,8 @@ impl Driver {
                     .browser
                     .pick_file(&mut self.app, chat_id, temp_id, kind)
                 {
-                    self.sim.record_failed_upload(chat_id, temp_id);
+                    self.app.end_send(temp_id);
+                    self.sim.record_failed_upload(chat_id, temp_id, kind);
                     self.app.fail_send(temp_id, reason.to_owned());
                 }
             }
@@ -410,6 +415,7 @@ impl Driver {
             self.fail_picked_file(
                 picked.chat_id,
                 picked.temp_id,
+                picked.requested,
                 "No file selected; nothing was sent.",
             );
             return;
@@ -419,6 +425,7 @@ impl Driver {
             self.fail_picked_file(
                 picked.chat_id,
                 picked.temp_id,
+                picked.requested,
                 "That file type does not match the requested attachment.",
             );
             return;
@@ -430,6 +437,7 @@ impl Driver {
             self.fail_picked_file(
                 picked.chat_id,
                 picked.temp_id,
+                picked.requested,
                 "That conversation is no longer in the demo.",
             );
             return;
@@ -508,8 +516,9 @@ impl Driver {
         self.app.conversation.conversation.window.chat_id
     }
 
-    fn fail_picked_file(&mut self, chat_id: i64, temp_id: i64, reason: &str) {
-        self.sim.record_failed_upload(chat_id, temp_id);
+    fn fail_picked_file(&mut self, chat_id: i64, temp_id: i64, kind: MediaKind, reason: &str) {
+        self.app.end_send(temp_id);
+        self.sim.record_failed_upload(chat_id, temp_id, kind);
         self.app.fail_send(temp_id, reason.to_owned());
     }
 

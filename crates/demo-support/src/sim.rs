@@ -30,7 +30,7 @@ pub struct DemoSimulator {
     queue: VecDeque<Scheduled>,
     last_global: Option<GlobalPage>,
     pub reports: Vec<(i64, ReportReason)>,
-    failed_uploads: Vec<(i64, i64)>,
+    failed_uploads: Vec<(i64, i64, MediaKind)>,
     open_chat_id: Option<i64>,
 }
 
@@ -163,8 +163,9 @@ impl DemoSimulator {
                     | Effect::SendFailed { temp_id: id, .. } => *id == temp_id,
                     _ => false,
                 });
-                self.failed_uploads.retain(|(_, id)| *id != temp_id);
-                self.failed_uploads.push((chat_id, temp_id));
+                self.failed_uploads.retain(|(_, id, _)| *id != temp_id);
+                self.failed_uploads
+                    .push((chat_id, temp_id, MediaKind::File));
                 vec![Effect::SendFailed {
                     chat_id,
                     temp_id,
@@ -175,9 +176,9 @@ impl DemoSimulator {
                 if let Some(index) = self
                     .failed_uploads
                     .iter()
-                    .position(|entry| *entry == (chat_id, temp_id))
+                    .position(|entry| entry.0 == chat_id && entry.1 == temp_id)
                 {
-                    self.failed_uploads.remove(index);
+                    let (_, _, kind) = self.failed_uploads.remove(index);
                     self.queue.retain(|scheduled| {
                         !matches!(
                             &scheduled.effect,
@@ -187,29 +188,17 @@ impl DemoSimulator {
                                 if *id == temp_id
                         )
                     });
-                    let message = self.new_message(
+                    vec![Effect::RequestFilePicker {
                         chat_id,
-                        String::new(),
-                        true,
-                        MessageStatus::Sent,
-                        None,
-                        Some(MediaKind::File),
-                    );
-                    self.schedule(
-                        450,
-                        Effect::Sent {
-                            chat_id,
-                            temp_id,
-                            message,
-                        },
-                    );
-                    vec![Self::status("The demo attachment is queued for retry.")]
+                        temp_id,
+                        kind,
+                    }]
                 } else {
                     vec![Self::status("There is no failed demo upload to retry.")]
                 }
             }
             Action::DismissUpload { temp_id } => {
-                self.failed_uploads.retain(|(_, id)| *id != temp_id);
+                self.failed_uploads.retain(|(_, id, _)| *id != temp_id);
                 self.queue.retain(|scheduled| {
                     !matches!(
                         &scheduled.effect,
@@ -648,20 +637,6 @@ impl DemoSimulator {
         self.schedule(delay_ms, Effect::Update(UpdateEvent::NewMessage(message)));
     }
 
-    pub fn schedule_edit(&mut self, chat_id: i64, message_id: i64, text: &str, delay_ms: u64) {
-        if let Some(message) = self.message_mut(chat_id, message_id) {
-            message.text = Cow::Owned(text.to_owned());
-        }
-        self.schedule(
-            delay_ms,
-            Effect::Update(UpdateEvent::MessageEdited {
-                chat_id,
-                message_id,
-                new_text: Cow::Owned(text.to_owned()),
-            }),
-        );
-    }
-
     pub fn schedule_delete(&mut self, chat_id: i64, message_ids: Vec<i64>, delay_ms: u64) {
         if let Some(messages) = self.active_mut().messages.get_mut(&chat_id) {
             messages.retain(|message| !message_ids.contains(&message.id));
@@ -777,9 +752,13 @@ impl DemoSimulator {
         }
     }
 
-    pub fn record_failed_upload(&mut self, chat_id: i64, temp_id: i64) {
-        if !self.failed_uploads.contains(&(chat_id, temp_id)) {
-            self.failed_uploads.push((chat_id, temp_id));
+    pub fn record_failed_upload(&mut self, chat_id: i64, temp_id: i64, kind: MediaKind) {
+        if !self
+            .failed_uploads
+            .iter()
+            .any(|entry| entry.0 == chat_id && entry.1 == temp_id)
+        {
+            self.failed_uploads.push((chat_id, temp_id, kind));
         }
     }
 

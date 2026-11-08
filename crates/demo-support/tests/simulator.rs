@@ -66,23 +66,21 @@ fn every_action_has_an_effect() {
 }
 
 #[test]
-fn browser_picker_failure_can_retry_the_same_upload() {
+fn retrying_picker_failure_requests_an_attachment_again() {
     let mut sim = simulator();
     let app = app_for(&sim);
     let chat_id = sim.world.active().default_chat;
     let temp_id = -700;
-    sim.record_failed_upload(chat_id, temp_id);
+    sim.record_failed_upload(chat_id, temp_id, MediaKind::Photo);
 
     let effects = sim.dispatch(&app, Action::RetryUpload { chat_id, temp_id });
     assert!(
-        matches!(effects.as_slice(), [Effect::Status(message)] if message == "The demo attachment is queued for retry.")
+        matches!(effects.as_slice(), [Effect::RequestFilePicker { chat_id: id, temp_id: pending, kind: MediaKind::Photo }] if *id == chat_id && *pending == temp_id)
     );
-
-    assert!(sim.advance(500).iter().any(|effect| matches!(
-        effect,
-        Effect::Sent { chat_id: id, temp_id: pending, .. }
-            if *id == chat_id && *pending == temp_id
-    )));
+    assert!(
+        sim.advance(500).is_empty(),
+        "retry waits for a file selection"
+    );
 }
 
 fn update_and_message_actions(chat_id: i64, other_chat: i64) -> Vec<Action> {
@@ -676,7 +674,7 @@ fn blocked_peer_arrivals_are_suppressed_until_unblocked() {
 }
 
 #[test]
-fn cancelled_upload_retries_once_without_early_world_message() {
+fn cancelled_upload_retry_reopens_picker_without_a_fake_message() {
     let mut sim = simulator();
     let app = app_for(&sim);
     let chat_id = sim.world.active().default_chat;
@@ -704,14 +702,13 @@ fn cancelled_upload_retries_once_without_early_world_message() {
         sim.dispatch(&app, Action::CancelUpload { temp_id }).as_slice(),
         [Effect::SendFailed { reason, .. }] if reason == "Upload cancelled; nothing was sent."
     ));
-    sim.dispatch(&app, Action::RetryUpload { chat_id, temp_id });
-    assert!(sim.advance(449).is_empty());
-    assert_eq!(sim.world.active().messages(chat_id).len(), before);
     assert!(matches!(
-        sim.advance(1).as_slice(),
-        [Effect::Sent { temp_id: id, .. }] if *id == temp_id
+        sim.dispatch(&app, Action::RetryUpload { chat_id, temp_id }).as_slice(),
+        [Effect::RequestFilePicker { chat_id: id, temp_id: pending, kind: MediaKind::File }]
+            if *id == chat_id && *pending == temp_id
     ));
-    assert_eq!(sim.world.active().messages(chat_id).len(), before + 1);
+    assert!(sim.advance(500).is_empty());
+    assert_eq!(sim.world.active().messages(chat_id).len(), before);
 
     sim.schedule(
         100,
@@ -721,7 +718,7 @@ fn cancelled_upload_retries_once_without_early_world_message() {
             reason: "old failure".into(),
         },
     );
-    sim.record_failed_upload(chat_id, -901);
+    sim.record_failed_upload(chat_id, -901, MediaKind::File);
     sim.dispatch(&app, Action::DismissUpload { temp_id: -901 });
     assert!(sim.advance(100).is_empty());
 }

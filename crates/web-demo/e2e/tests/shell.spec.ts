@@ -46,6 +46,25 @@ test("Load requests one module and exposes running state with provenance", async
   expect(await page.evaluate(() => performance.getEntriesByName("televim-ready", "mark").length)).toBe(1);
 });
 
+test("late ready message cannot undo a failed load", async ({ page }) => {
+  await openPoster(page);
+  await page.evaluate(() => {
+    const frame = document.querySelector<HTMLIFrameElement>("#demo-frame")!;
+    document.querySelector<HTMLElement>("#plate")!.dataset.state = "loading";
+    for (const data of [
+      { type: "failed", message: "load failed" },
+      { type: "ready" },
+    ]) {
+      window.dispatchEvent(new MessageEvent("message", {
+        origin: location.origin,
+        source: frame.contentWindow,
+        data,
+      }));
+    }
+  });
+  await expect(page.locator("#plate")).toHaveAttribute("data-state", "failed");
+});
+
 test("keyboard opens prompts and insert mode; bare Escape stays in demo", async ({ page }) => {
   await openDomDemo(page);
   const terminal = page.frameLocator("#demo-frame").locator("#demo");
