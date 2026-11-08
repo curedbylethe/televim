@@ -543,6 +543,28 @@ impl DemoSimulator {
         self.open_chat_id = chat_id;
     }
 
+    /// Records metadata for a user-selected attachment without reading its bytes.
+    pub fn attachment_message(
+        &mut self,
+        chat_id: i64,
+        filename: String,
+        kind: MediaKind,
+    ) -> Option<Message> {
+        if !self.has_chat(chat_id) {
+            return None;
+        }
+        let message = self.new_message(
+            chat_id,
+            filename,
+            true,
+            MessageStatus::Sent,
+            None,
+            Some(kind),
+        );
+        self.push_message(&message);
+        Some(message)
+    }
+
     pub fn schedule_arrival(
         &mut self,
         chat_id: i64,

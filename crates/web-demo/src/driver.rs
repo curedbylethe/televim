@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use demo_support::{DemoAccount, DemoSimulator, DemoWorld, Effect};
 use domain::{message::Message, presence::Presence, updates::UpdateEvent};
 use tui::{
@@ -10,11 +8,17 @@ use tui::{
 };
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::{
+    browser::{BrowserBridge, PickedFile},
+    file_picker,
+};
+
 const OFFLINE_STATUS: &str = "Offline demo · fictional conversations · no Telegram connection.";
 
 pub struct Driver {
     pub app: App,
     pub sim: DemoSimulator,
+    pub browser: BrowserBridge,
     base_timestamp: i64,
     started: Instant,
     last_tick: Instant,
@@ -39,6 +43,7 @@ impl Driver {
         let mut driver = Self {
             app,
             sim,
+            browser: BrowserBridge::default(),
             base_timestamp,
             started: now,
             last_tick: now,
@@ -50,6 +55,9 @@ impl Driver {
     }
 
     pub fn tick(&mut self) {
+        for picked in self.browser.process(&mut self.app) {
+            self.apply_picked_file(picked);
+        }
         let now = Instant::now();
         let delta_ms =
             u64::try_from(now.duration_since(self.last_tick).as_millis()).unwrap_or(u64::MAX);
@@ -102,9 +110,8 @@ impl Driver {
         self.app.open_settled_card(now);
         self.seed_open_chat();
         self.sync_reads();
-        if self.app.take_clipboard().is_some() {
-            self.app
-                .set_status("Clipboard is not available in this browser.");
+        if let Some(text) = self.app.take_clipboard() {
+            self.browser.copy(&mut self.app, text);
         }
     }
 
@@ -204,13 +211,36 @@ impl Driver {
                 self.app
                     .set_status(format!("Downloading {received}/{total} bytes…"));
             }
-            Effect::RequestFilePicker { temp_id, .. } => {
-                self.app
-                    .fail_send(temp_id, "File selection is unavailable.".to_owned());
+            Effect::RequestFilePicker {
+                chat_id,
+                temp_id,
+                kind,
+            } => {
+                self.browser
+                    .pick_file(&mut self.app, chat_id, temp_id, kind);
             }
-            Effect::RequestOpenMedia { .. } | Effect::RequestSaveMedia { .. } => {
-                self.app
-                    .set_status("The browser media viewer is not available yet.");
+            Effect::RequestOpenMedia {
+                chat_id,
+                message_id,
+            } => {
+                self.browser.open_media(
+                    &mut self.app,
+                    self.sim.world.active(),
+                    chat_id,
+                    message_id,
+                );
+            }
+            Effect::RequestSaveMedia {
+                chat_id,
+                message_id,
+                ..
+            } => {
+                self.browser.save_media(
+                    &mut self.app,
+                    self.sim.world.active(),
+                    chat_id,
+                    message_id,
+                );
             }
             Effect::MediaCancelled {
                 chat_id,
@@ -310,6 +340,42 @@ impl Driver {
         }
     }
 
+    fn apply_picked_file(&mut self, picked: PickedFile) {
+        let Some(file) = picked.file else {
+            self.app.fail_send(
+                picked.temp_id,
+                "No file selected; nothing was sent.".to_owned(),
+            );
+            return;
+        };
+        let name = file.name();
+        let Some(kind) = file_picker::selected_kind(picked.requested, &file.type_(), &name) else {
+            self.app.fail_send(
+                picked.temp_id,
+                "That file type does not match the requested attachment.".to_owned(),
+            );
+            return;
+        };
+        let Some(message) = self
+            .sim
+            .attachment_message(picked.chat_id, name.clone(), kind)
+        else {
+            self.app.fail_send(
+                picked.temp_id,
+                "That conversation is no longer in the demo.".to_owned(),
+            );
+            return;
+        };
+        self.app.end_send(picked.temp_id);
+        if self.app.current_chat_id() == picked.chat_id {
+            self.app.confirm_sent(picked.temp_id, message.clone());
+        }
+        self.apply_chat_preview(picked.chat_id, &message);
+        self.app.set_status(format!(
+            "Attached {name} to the offline demo; no upload occurred."
+        ));
+    }
+
     fn apply_chat_preview(&mut self, chat_id: i64, message: &Message) {
         let mut chats = self.app.chats().to_vec();
         if let Some(chat) = chats.iter_mut().find(|chat| chat.id == chat_id) {
@@ -370,9 +436,7 @@ fn build_app(account: &DemoAccount, base_timestamp: i64, offset_seconds: i64) ->
     app.conversation = app.conversation.with_jumplist_depth(100);
     app.set_client_available(true);
     app.session.credentials_configured = false;
-    app.set_session_store(SessionStore::EncryptedFile(PathBuf::from(
-        "(in-memory demo)",
-    )));
+    app.set_session_store(SessionStore::OfflineDemo);
     app.set_connection(ConnectionState::Offline);
     app.set_account(Ok(account.account.clone()));
     app.set_known_accounts(account.known_accounts.clone());

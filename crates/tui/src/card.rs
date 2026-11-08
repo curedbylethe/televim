@@ -477,6 +477,7 @@ fn session(store: &SessionStore) -> String {
     match store {
         SessionStore::Keyring => "OS keyring".to_owned(),
         SessionStore::EncryptedFile(path) => format!("encrypted file {}", path.display()),
+        SessionStore::OfflineDemo => "not saved".to_owned(),
     }
 }
 
@@ -1097,6 +1098,21 @@ mod drawing {
 
         assert!(text.contains("name"), "the label: {text}");
         assert!(text.contains("Ada"), "the value: {text}");
+    }
+
+    #[test]
+    fn offline_demo_session_row_says_it_is_not_saved() {
+        let mut app = self_card();
+        app.set_session_store(SessionStore::OfflineDemo);
+
+        let text = rows_of(&screen(&app, 40)).join("\n");
+
+        assert!(
+            text.contains("not saved"),
+            "the session is in memory: {text}"
+        );
+        assert!(!text.contains("encrypted file"), "no file exists: {text}");
+        assert!(!text.contains("keyring"), "no keyring is used: {text}");
     }
     /// Every row has a cue and every value starts in the same column, which is
     /// what makes a card scannable: a column of labels and a column of values.
