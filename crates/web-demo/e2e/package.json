@@ -1,0 +1,11 @@
+{
+  "name": "televim-web-demo-e2e",
+  "private": true,
+  "packageManager": "pnpm@10.22.0",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
