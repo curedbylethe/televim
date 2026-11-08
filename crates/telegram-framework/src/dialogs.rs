@@ -57,6 +57,7 @@ pub enum DialogKind {
 /// escapes the crate. `peer_id` is the peer's *bare* identifier — the same
 /// number a message reports as its chat, so an entry here can be matched against
 /// an event without a lookup table.
+#[allow(clippy::struct_excessive_bools)] // Telegram exposes these flags independently.
 #[derive(Debug, Clone)]
 pub struct DialogInfo {
     /// Bare identifier of the peer the conversation is with.
@@ -93,6 +94,9 @@ pub struct DialogInfo {
 
     /// Whether this account has muted notifications for the conversation.
     pub muted: bool,
+
+    /// Whether Telegram has manually marked this conversation unread.
+    pub unread_mark: bool,
 
     /// Highest of this account's outgoing messages the peer has read, as
     /// Telegram last reported it; `0` when the peer has read none.
@@ -208,6 +212,16 @@ impl Client {
             .peer_ref(peer_id)
             .ok_or(FrameworkError::UnknownPeer(peer_id))?;
         self.invoke(&notify_settings_request(peer, muted)).await?;
+        Ok(())
+    }
+
+    /// Sets or clears Telegram's manual unread flag for one conversation.
+    pub async fn set_unread_mark(&self, peer_id: i64, unread: bool) -> Result<(), FrameworkError> {
+        let peer = self
+            .peer_ref(peer_id)
+            .ok_or(FrameworkError::UnknownPeer(peer_id))?;
+        self.invoke(&mark_dialog_unread_request(peer, unread))
+            .await?;
         Ok(())
     }
 
@@ -348,6 +362,7 @@ fn archived_from(
                 last_text: last.2,
                 pinned: raw.pinned,
                 muted: muted(&raw.notify_settings),
+                unread_mark: raw.unread_mark,
                 read_outbox_max_id: read_outbox_max_id(raw.read_outbox_max_id),
             })
         })
@@ -463,6 +478,18 @@ fn input_dialog_peer(peer: PeerRef) -> tl::enums::InputDialogPeer {
     tl::enums::InputDialogPeer::Peer(tl::types::InputDialogPeer { peer: peer.into() })
 }
 
+/// The `messages.markDialogUnread` request for one conversation.
+fn mark_dialog_unread_request(
+    peer: PeerRef,
+    unread: bool,
+) -> tl::functions::messages::MarkDialogUnread {
+    tl::functions::messages::MarkDialogUnread {
+        unread,
+        parent_peer: None,
+        peer: input_dialog_peer(peer),
+    }
+}
+
 /// The `messages.readHistory` request that marks this conversation read.
 ///
 /// A free function over a value, so the request [`Client::mark_read`] sends can
@@ -532,6 +559,7 @@ fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
         last_text: last_message.and_then(|message| last_text(message.text())),
         pinned: raw.pinned,
         muted: muted(&raw.notify_settings),
+        unread_mark: raw.unread_mark,
         read_outbox_max_id: read_outbox_max_id(raw.read_outbox_max_id),
     })
 }
@@ -720,6 +748,7 @@ mod tests {
             last_text: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
         }
     }
 
@@ -880,6 +909,28 @@ mod tests {
     }
 
     #[test]
+    fn a_manual_unread_mark_names_one_dialog_and_its_flag() {
+        let peer = PeerRef {
+            id: PeerId::user(42).expect("42 is in the user range"),
+            auth: PeerAuth::from_hash(7),
+        };
+
+        for unread in [false, true] {
+            let request = mark_dialog_unread_request(peer, unread);
+            assert_eq!(request.unread, unread);
+            assert!(request.parent_peer.is_none());
+            let tl::enums::InputDialogPeer::Peer(dialog) = request.peer else {
+                panic!("manual unread mark names a dialog");
+            };
+            let tl::enums::InputPeer::User(user) = dialog.peer else {
+                panic!("the dialog names the user");
+            };
+            assert_eq!(user.user_id, 42);
+            assert_eq!(user.access_hash, 7);
+        }
+    }
+
+    #[test]
     fn mute_settings_change_only_the_peer_mute_deadline() {
         let peer = PeerRef {
             id: PeerId::user(42).expect("42 is in the user range"),
@@ -995,10 +1046,15 @@ mod tests {
     }
 
     /// A raw dialog row for `peer`, as the archive page lists it.
-    fn raw_dialog(peer: tl::enums::Peer, top_message: i32, pinned: bool) -> tl::enums::Dialog {
+    fn raw_dialog(
+        peer: tl::enums::Peer,
+        top_message: i32,
+        pinned: bool,
+        unread_mark: bool,
+    ) -> tl::enums::Dialog {
         tl::enums::Dialog::Dialog(tl::types::Dialog {
             pinned,
-            unread_mark: false,
+            unread_mark,
             view_forum_as_messages: false,
             peer,
             top_message,
@@ -1046,16 +1102,19 @@ mod tests {
                     tl::enums::Peer::User(tl::types::PeerUser { user_id: 42 }),
                     0,
                     false,
+                    false,
                 ),
                 raw_dialog(
                     tl::enums::Peer::User(tl::types::PeerUser { user_id: 43 }),
                     11,
                     false,
+                    true,
                 ),
                 raw_dialog(
                     tl::enums::Peer::Chat(tl::types::PeerChat { chat_id: 7 }),
                     0,
                     true,
+                    false,
                 ),
             ],
             messages: vec![message],
@@ -1097,6 +1156,7 @@ mod tests {
         assert_eq!(grace.last_text.as_deref(), Some("see you"));
         assert_eq!(grace.last_timestamp, Some(1_700_000_100));
         assert_eq!(grace.unread_count, 3);
+        assert!(grace.unread_mark);
         assert_eq!(grace.read_outbox_max_id, 6);
         assert_eq!(conversations[2].title, "Ada Lovelace");
         assert_eq!(peers.len(), 3, "both users and the chat can be unarchived");

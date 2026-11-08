@@ -2051,6 +2051,7 @@ mod tests {
             last_timestamp: Some(1_730_000_000),
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }]);
@@ -4321,6 +4322,7 @@ mod tests {
             last_timestamp: Some(0),
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }]);

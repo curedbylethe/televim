@@ -98,6 +98,14 @@ impl ProtoClient {
             .map_err(ProtoError::from)
     }
 
+    /// Sets or clears Telegram's manual unread flag for one chat.
+    pub async fn set_unread_mark(&self, chat_id: i64, unread: bool) -> Result<(), ProtoError> {
+        self.inner
+            .set_unread_mark(chat_id, unread)
+            .await
+            .map_err(ProtoError::from)
+    }
+
     /// Fetches the private conversations in the archive folder.
     ///
     /// # Errors
@@ -191,6 +199,7 @@ mod tests {
             last_text: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             read_outbox_max_id: 0,
         }
     }

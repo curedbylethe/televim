@@ -383,6 +383,9 @@ impl DemoSimulator {
                     "Mute settings are unavailable in the offline demo.",
                 )]
             }
+            Action::SetUnreadMark { .. } => vec![Self::status(
+                "Manual unread marks are unavailable in the offline demo.",
+            )],
             Action::Login { field: _, value: _ } => vec![Self::status(
                 "Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.",
             )],

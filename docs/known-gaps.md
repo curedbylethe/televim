@@ -487,6 +487,9 @@ Real, and named so they are not mistaken for oversights:
 - **A mute changed on another device can stay stale until the chat list is fetched.** The update
   pump (`telegram-framework/src/updates.rs:663`) ignores `updateNotifySettings`, so televim learns
   external mute changes on the next dialog fetch.
+- **A manual unread mark changed on another device can stay stale until the chat list is fetched.**
+  The update pump (`telegram-framework/src/updates.rs:663`) ignores `updateDialogUnreadMark`, so
+  televim learns external marks on the next dialog fetch.
 - **`Ready` no longer moves the focus while the reader is typing under
   `connecting…`.** A warm launch lets the reader type into the cached
   conversation's draft before the wire answers; the draft is kept across the

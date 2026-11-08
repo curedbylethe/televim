@@ -3446,6 +3446,32 @@ pub(crate) fn run_command(
             }
             false
         }
+        "mark-unread" => {
+            let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            };
+            if !subject.chat {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            }
+            if !command_needs_client(&mut *ui, &*session) {
+                return false;
+            }
+            if subject.peer_id == conversation.conversation.window.chat_id {
+                ui.flash("that conversation is open; marking it unread would be undone at once");
+                return false;
+            }
+            queue_action(
+                &mut *outbox,
+                &mut *ui,
+                Action::SetUnreadMark {
+                    chat_id: subject.peer_id,
+                    unread: true,
+                },
+            );
+            false
+        }
         "block" | "unblock" => {
             let blocked = cmd == "block";
             let Some(subject) = command_subject(&*ui, &*list, &*profile) else {

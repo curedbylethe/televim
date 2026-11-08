@@ -643,6 +643,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }]);

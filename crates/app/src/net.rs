@@ -419,6 +419,13 @@ pub enum Event {
         result: Result<(), ProtoError>,
     },
 
+    /// A manual unread mark change came back, or the request failed.
+    UnreadMarked {
+        chat_id: i64,
+        unread: bool,
+        result: Result<(), ProtoError>,
+    },
+
     /// A forward came back, or the request failed.
     Forwarded {
         /// The conversation the messages were forwarded from.
@@ -3355,6 +3362,15 @@ fn request_plain(
                 }));
             }
 
+            Action::SetUnreadMark { chat_id, unread } => {
+                let result = client.set_unread_mark(chat_id, unread).await;
+                let _ = tx.send(AppEvent::Net(Event::UnreadMarked {
+                    chat_id,
+                    unread,
+                    result,
+                }));
+            }
+
             // A profile is a question about a person rather than an operation on
             // a conversation, for the same reason as the search below, and it shares
             // this task's shape for the same reason: a round trip here would stop
@@ -3803,6 +3819,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             muted,
             result,
         } => apply_mute_set(app, chat_id, muted, result),
+
+        Event::UnreadMarked {
+            chat_id,
+            unread,
+            result,
+        } => apply_unread_mark(app, chat_id, unread, result),
 
         Event::Archived {
             chat_id,
@@ -5347,6 +5369,17 @@ fn apply_mute_set(app: &mut App, chat_id: i64, muted: bool, result: Result<(), P
     }
 }
 
+/// Applies a manual unread mark only after Telegram accepts it.
+fn apply_unread_mark(app: &mut App, chat_id: i64, unread: bool, result: Result<(), ProtoError>) {
+    match result {
+        Ok(()) => app.set_unread_mark(chat_id, unread),
+        Err(error) => {
+            tracing::debug!(chat_id, %error, "a manual unread mark change failed");
+            app.flash(format!("mark unread: {}", failure_reason(&error)));
+        }
+    }
+}
+
 /// Folds a deletion's answer in.
 ///
 /// The removal itself is the feed's, and the update that does it names no
@@ -5910,6 +5943,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }
@@ -12843,6 +12877,7 @@ mod media_tests {
             last_timestamp: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }]);
@@ -13775,6 +13810,7 @@ mod action_status_tests {
             last_timestamp: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
             read_outbox_max_id: None,
@@ -14214,6 +14250,7 @@ mod switch_tests {
             last_timestamp: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }

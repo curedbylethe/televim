@@ -1251,6 +1251,9 @@ pub enum Action {
     /// Mute or unmute notifications for one chat on the account.
     SetMuted { chat_id: i64, muted: bool },
 
+    /// Set or clear Telegram's manual unread flag for one chat.
+    SetUnreadMark { chat_id: i64, unread: bool },
+
     /// Ask Telegram to move the sign-in flow on with `value`.
     ///
     /// The same hand-over as every other action, and for the same reason: a
@@ -1898,6 +1901,27 @@ impl App {
             format!("muted {name}")
         } else {
             format!("unmuted {name}")
+        });
+    }
+
+    /// Records an unread mark Telegram accepted and says what changed.
+    pub fn set_unread_mark(&mut self, chat_id: i64, unread: bool) {
+        if unread {
+            self.list.list.mark_unread(chat_id);
+        } else {
+            self.list.list.mark_read(chat_id);
+        }
+        let name = self
+            .list
+            .list
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .map_or_else(|| chat_id.to_string(), |chat| chat.title.clone());
+        self.flash(if unread {
+            format!("marked {name} unread")
+        } else {
+            format!("{name} is read")
         });
     }
 
@@ -3878,6 +3902,7 @@ fn mock_chats() -> Vec<Chat> {
             last_timestamp: Some(1_730_000_000),
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         },
@@ -3892,6 +3917,7 @@ fn mock_chats() -> Vec<Chat> {
             last_timestamp: Some(1_729_999_000),
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         },
@@ -3906,6 +3932,7 @@ fn mock_chats() -> Vec<Chat> {
             last_timestamp: Some(1_729_998_000),
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         },

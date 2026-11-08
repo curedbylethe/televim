@@ -1162,6 +1162,9 @@ are in [`../AGENTS.md`](../AGENTS.md).
   share the same mute. The request changes only `mute_until`, leaving preview and sound settings
   untouched. The list marker follows the accepted result rather than the command, so a refused
   request cannot leave a false mute in the screen or history cache.
+- **Why manual unread is a flag beside the count, and opening is its single-chat clear:** Telegram
+  stores `unread_mark` separately from message count. `:mark-unread` changes only that flag after
+  acceptance; opening the conversation clears both through the accepted read marker.
 - **Why the history file is sealed with the session file's envelope:** message
   bodies and the chat list are as sensitive as the session, so the file is
   ciphertext, not `0600` JSON. `HistoryFile` seals the encoded JSON through

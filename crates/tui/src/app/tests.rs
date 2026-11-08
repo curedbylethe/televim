@@ -2681,6 +2681,68 @@ fn accepted_mute_updates_the_row_and_status_for_both_directions() {
     assert_eq!(app.status_text(), format!("unmuted {title}"));
 }
 
+#[test]
+fn mark_unread_queues_one_server_change_without_confirmation() {
+    let mut app = App::mock();
+    app.list.selected_chat = 1;
+    let chat_id = app.chats()[1].id;
+
+    run_command_line(&mut app, "mark-unread");
+
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert_eq!(
+        app.take_action(),
+        Some(Action::SetUnreadMark {
+            chat_id,
+            unread: true
+        })
+    );
+    assert_eq!(app.take_action(), None);
+    assert!(
+        !app.chats()[1].unread_mark,
+        "server acceptance owns the marker"
+    );
+}
+
+#[test]
+fn mark_unread_refuses_without_a_client_and_on_the_open_conversation() {
+    let mut app = App::mock();
+    app.list.selected_chat = 1;
+    app.session.client_available = false;
+
+    run_command_line(&mut app, "mark-unread");
+
+    assert_eq!(
+        app.status_text(),
+        "not connected yet — the client is not up"
+    );
+    assert_eq!(app.take_action(), None);
+    assert!(!app.chats()[1].unread_mark);
+
+    app.session.client_available = true;
+    app.list.selected_chat = 0;
+    run_command_line(&mut app, "mark-unread");
+
+    assert_eq!(
+        app.status_text(),
+        "that conversation is open; marking it unread would be undone at once"
+    );
+    assert_eq!(app.take_action(), None);
+    assert!(!app.chats()[0].unread_mark);
+}
+
+#[test]
+fn accepted_manual_mark_updates_the_row_and_status() {
+    let mut app = App::mock();
+    let chat_id = app.chats()[0].id;
+    let title = app.chats()[0].title.clone();
+
+    app.set_unread_mark(chat_id, true);
+
+    assert!(app.chats()[0].unread_mark);
+    assert_eq!(app.status_text(), format!("marked {title} unread"));
+}
+
 // ---- the profile panel ------------------------------------------------
 
 /// The profile, opened from a mock application.
@@ -10004,6 +10066,34 @@ fn a_command_typed_on_a_card_acts_on_the_card_not_the_highlighted_chat() {
         app.take_action().is_none(),
         "a person with no chat has none to archive"
     );
+}
+
+#[test]
+fn mark_unread_refuses_a_person_without_a_chat() {
+    let mut app = App::mock();
+    card_of_a_stranger(&mut app);
+
+    run_command_line(&mut app, "mark-unread");
+
+    assert_eq!(
+        app.ui.status,
+        "nothing to act on: highlight a chat, open a conversation, or open a card"
+    );
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn mark_unread_refuses_when_no_chat_is_highlighted() {
+    let mut app = App::mock();
+    app.set_chats(Vec::new());
+
+    run_command_line(&mut app, "mark-unread");
+
+    assert_eq!(
+        app.ui.status,
+        "nothing to act on: highlight a chat, open a conversation, or open a card"
+    );
+    assert_eq!(app.take_action(), None);
 }
 
 #[test]
