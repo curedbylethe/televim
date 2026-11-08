@@ -27,6 +27,7 @@ impl ChatKind {
 }
 
 /// A single chat as shown in the chat list.
+#[allow(clippy::struct_excessive_bools)] // These are independent Telegram flags.
 #[derive(Debug, Clone)]
 pub struct Chat {
     pub id: i64,
@@ -47,6 +48,8 @@ pub struct Chat {
     pub pinned: bool,
     /// Whether this account mutes notifications for the chat; not a local setting.
     pub muted: bool,
+    /// Whether Telegram marks this chat unread, separate from its message count.
+    pub unread_mark: bool,
     /// The peer's last reported presence, if one has been seen. Sticky until the
     /// next update for this peer; nothing here expires it.
     pub presence: Option<Presence>,
@@ -93,6 +96,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }

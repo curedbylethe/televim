@@ -366,6 +366,7 @@ impl ChatList {
                 last_timestamp: None,
                 pinned: false,
                 muted: false,
+                unread_mark: false,
                 presence: None,
                 deleted: false,
             },
@@ -412,6 +413,18 @@ impl ChatList {
         true
     }
 
+    /// Marks a chat unread without changing its message count.
+    pub fn mark_unread(&mut self, chat_id: i64) -> bool {
+        let Some(chat) = self.chat_mut(chat_id) else {
+            return false;
+        };
+        if chat.unread_mark {
+            return false;
+        }
+        chat.unread_mark = true;
+        true
+    }
+
     /// Puts a chat back at the place its own order gives it.
     ///
     /// Used when an archived chat returns. A chat already present is left where
@@ -443,8 +456,9 @@ impl ChatList {
         let Some(chat) = self.chat_mut(chat_id) else {
             return false;
         };
-        let changed = chat.unread_count != 0;
+        let changed = chat.unread_count != 0 || chat.unread_mark;
         chat.unread_count = 0;
+        chat.unread_mark = false;
         changed
     }
 
@@ -504,6 +518,7 @@ mod tests {
             last_timestamp: Some(1_000),
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }
@@ -529,6 +544,17 @@ mod tests {
         assert!(list.chats[0].muted);
         assert!(!list.set_muted(1, true));
         assert!(!list.set_muted(9, true));
+    }
+
+    #[test]
+    fn mark_unread_sets_only_a_present_chat_and_is_idempotent() {
+        let mut list = ChatList::with_chats(vec![chat(1)]);
+
+        assert!(list.mark_unread(1));
+        assert!(list.chats[0].unread_mark);
+        assert_eq!(list.chats[0].unread_count, 0);
+        assert!(!list.mark_unread(1));
+        assert!(!list.mark_unread(9));
     }
 
     #[test]
@@ -1139,6 +1165,7 @@ mod tests {
             Chat {
                 unread_count: 3,
                 muted: true,
+                unread_mark: true,
                 ..chat_at(1, 100)
             },
             Chat {
@@ -1149,6 +1176,7 @@ mod tests {
 
         assert!(list.mark_read(1));
         assert_eq!(list.chats[0].unread_count, 0);
+        assert!(!list.chats[0].unread_mark, "reading clears the manual mark");
         assert!(list.chats[0].muted, "reading does not unmute the chat");
         assert_eq!(
             list.chats[1].unread_count, 5,
@@ -1193,6 +1221,7 @@ mod tests {
             Chat {
                 unread_count: 3,
                 muted: true,
+                unread_mark: true,
                 ..chat_at(1, 100)
             },
             Chat {
@@ -1212,6 +1241,10 @@ mod tests {
         assert!(
             list.chats[0].muted,
             "an unread update does not unmute the chat"
+        );
+        assert!(
+            list.chats[0].unread_mark,
+            "inbox reads do not clear manual marks"
         );
         assert_eq!(
             list.chats[1].unread_count, 5,

@@ -729,6 +729,7 @@ struct Payload {
 /// one kind a row is read back as. No presence, because a status read back
 /// from a file is a claim about a moment that has passed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Cached Telegram flags remain independent.
 struct CachedChat {
     id: i64,
     title: String,
@@ -744,6 +745,8 @@ struct CachedChat {
     pinned: bool,
     #[serde(default)]
     muted: bool,
+    #[serde(default)]
+    unread_mark: bool,
     /// Missing from caches written before the flag existed: those read back as
     /// live accounts until the next fetch says otherwise.
     #[serde(default)]
@@ -761,6 +764,7 @@ impl CachedChat {
             last_timestamp: chat.last_timestamp,
             pinned: chat.pinned,
             muted: chat.muted,
+            unread_mark: chat.unread_mark,
             deleted: chat.deleted,
         }
     }
@@ -777,6 +781,7 @@ impl CachedChat {
             last_timestamp: self.last_timestamp,
             pinned: self.pinned,
             muted: self.muted,
+            unread_mark: self.unread_mark,
             presence: None,
             deleted: self.deleted,
         }
@@ -793,6 +798,7 @@ impl CachedChat {
             && self.last_timestamp == chat.last_timestamp
             && self.pinned == chat.pinned
             && self.muted == chat.muted
+            && self.unread_mark == chat.unread_mark
             && self.deleted == chat.deleted
     }
 }
@@ -1768,6 +1774,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             presence: None,
             deleted: false,
         }
@@ -1868,6 +1875,20 @@ mod tests {
         let older: CachedChat =
             serde_json::from_str(r#"{"id":7,"title":"Ada"}"#).expect("an older cached row parses");
         assert!(!older.to_chat().muted);
+    }
+
+    #[test]
+    fn unread_marks_round_trip_and_older_rows_default_to_unmarked() {
+        let mut source = chat(PEER, "Ada");
+        source.unread_mark = true;
+        let cached = CachedChat::from_chat(&source);
+        let encoded = serde_json::to_string(&cached).expect("the chat serializes");
+        let restored: CachedChat = serde_json::from_str(&encoded).expect("the chat parses");
+        assert!(restored.to_chat().unread_mark);
+
+        let older: CachedChat =
+            serde_json::from_str(r#"{"id":7,"title":"Ada"}"#).expect("an older cached row parses");
+        assert!(!older.to_chat().unread_mark);
     }
 
     /// A file written before the list was cached has no `chats` at all, and

@@ -55,6 +55,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
             } else {
                 String::new()
             };
+            let unread_mark = if c.unread_mark { " ●" } else { "" };
             // A pinned chat leads its row with the pin, so the marker says why
             // the chat is at the top as well as that it is.
             let pin = if c.pinned { "📌 " } else { "" };
@@ -64,6 +65,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
                 if c.muted { " ⊘" } else { "" },
                 app.ui.theme.text_dim,
             ));
+            spans.push(Span::styled(unread_mark, app.ui.theme.text));
             spans.push(Span::styled(unread, app.ui.theme.text_dim));
             ListItem::new(Line::from(spans))
         })
@@ -181,6 +183,31 @@ mod tests {
         assert!(!row_text(&buffer, 1).contains('⊘'));
         assert!(row_text(&buffer, 2).contains('⊘'));
         assert!(!row_text(&buffer, 3).contains('⊘'));
+    }
+
+    #[test]
+    fn unread_mark_and_count_have_distinct_ordered_markers() {
+        let mut app = App::mock();
+        let mut chats = app.chats().to_vec();
+        chats.push(chats[0].clone());
+        chats[1].unread_count = 2;
+        chats[2].unread_mark = true;
+        chats[2].unread_count = 0;
+        chats[3].unread_mark = true;
+        chats[3].unread_count = 3;
+        chats[3].muted = true;
+        app.set_chats(chats);
+
+        let buffer = screen(&app, 60, 10);
+        let plain = row_text(&buffer, 1);
+        let count = row_text(&buffer, 2);
+        let mark = row_text(&buffer, 3);
+        let both = row_text(&buffer, 4);
+
+        assert!(!plain.contains('●') && !plain.contains('('), "{plain:?}");
+        assert!(count.contains("(2)") && !count.contains('●'), "{count:?}");
+        assert!(mark.contains('●') && !mark.contains('('), "{mark:?}");
+        assert!(both.contains("⊘ ● (3)"), "{both:?}");
     }
 
     #[test]

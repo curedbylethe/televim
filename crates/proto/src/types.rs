@@ -39,6 +39,7 @@ use telegram_framework::{DialogInfo, DialogKind, MessageInfo};
 /// it arrives over the network and there is nothing in this process to borrow
 /// it from; `Chat` takes a `Cow` so that a caller building one from its own
 /// constant can still avoid the copy.
+#[allow(clippy::struct_excessive_bools)] // These mirror independent account flags.
 #[derive(Debug, Clone)]
 pub(crate) struct ProtoChat {
     pub id: i64,
@@ -70,6 +71,9 @@ pub(crate) struct ProtoChat {
 
     /// Whether the account has muted notifications for this chat.
     pub muted: bool,
+
+    /// Whether Telegram has manually marked this chat unread.
+    pub unread_mark: bool,
 
     /// Whether the peer is a deleted account. Carried through so the forward
     /// picker can leave it out; the chat list still shows it.
@@ -128,6 +132,7 @@ impl From<ProtoChat> for Chat {
             last_timestamp: chat.last_timestamp,
             pinned: chat.pinned,
             muted: chat.muted,
+            unread_mark: chat.unread_mark,
             deleted: chat.deleted,
             presence: None,
             // Zero is Telegram's "nothing read", which is no position at all.
@@ -187,6 +192,7 @@ impl From<DialogInfo> for ProtoChat {
             last_message: dialog.last_text,
             pinned: dialog.pinned,
             muted: dialog.muted,
+            unread_mark: dialog.unread_mark,
             deleted: dialog.deleted,
             read_outbox_max_id: dialog.read_outbox_max_id,
         }
@@ -330,6 +336,7 @@ mod tests {
             last_timestamp: None,
             pinned: false,
             muted: false,
+            unread_mark: false,
             last_message: None,
             deleted: false,
             read_outbox_max_id: 0,
@@ -520,6 +527,7 @@ mod live_tests {
             pinned: false,
             last_text: None,
             muted: false,
+            unread_mark: false,
             read_outbox_max_id: 0,
         }
     }
@@ -602,6 +610,7 @@ mod live_tests {
         source.last_text = Some("see you at six".to_owned());
         source.pinned = true;
         source.muted = true;
+        source.unread_mark = true;
 
         let chat: Chat = ProtoChat::from(source).into();
 
@@ -627,6 +636,7 @@ mod live_tests {
             "the pin has to reach the list or it cannot sort"
         );
         assert!(chat.muted, "the account's notification preference survives");
+        assert!(chat.unread_mark, "the manual unread flag survives");
     }
 
     #[test]
