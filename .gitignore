@@ -4,6 +4,7 @@
 debug/
 target/
 /crates/web-demo/dist/
+/crates/web-demo/e2e/node_modules/
 
 # libFuzzer's crash reproducers and the inputs it grows, from the detached
 # workspace in `fuzz/`. The named seeds in `fuzz/corpus/session/` are committed;
