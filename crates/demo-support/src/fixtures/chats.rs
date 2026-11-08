@@ -27,6 +27,7 @@ pub(super) fn build(account_index: usize, base_timestamp: i64) -> (Vec<Chat>, Ve
                 last_message_id: None,
                 last_timestamp: None,
                 pinned: index == 0,
+                muted: false,
                 presence,
                 deleted: false,
             }
@@ -42,6 +43,7 @@ pub(super) fn build(account_index: usize, base_timestamp: i64) -> (Vec<Chat>, Ve
         last_message_id: None,
         last_timestamp: None,
         pinned: false,
+        muted: false,
         presence: None,
         deleted: false,
     }];

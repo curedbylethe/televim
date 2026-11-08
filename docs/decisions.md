@@ -1157,6 +1157,11 @@ are in [`../AGENTS.md`](../AGENTS.md).
   under a card is kept and marked on the pass after the card closes.
   Sending from the list's `Latest` open, rather than from a `tui` action, keeps the
   client out of the screen's hands and leaves the four-slot action queue for sends.
+- **Why mute is an account-held per-peer setting and appears only after acceptance:** Telegram's
+  `account.updateNotifySettings` owns this preference for one peer, so another device and televim
+  share the same mute. The request changes only `mute_until`, leaving preview and sound settings
+  untouched. The list marker follows the accepted result rather than the command, so a refused
+  request cannot leave a false mute in the screen or history cache.
 - **Why the history file is sealed with the session file's envelope:** message
   bodies and the chat list are as sensitive as the session, so the file is
   ciphertext, not `0600` JSON. `HistoryFile` seals the encoded JSON through

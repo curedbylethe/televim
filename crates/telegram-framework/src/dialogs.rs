@@ -91,6 +91,9 @@ pub struct DialogInfo {
     /// Whether the account has pinned this conversation to the top of its list.
     pub pinned: bool,
 
+    /// Whether this account has muted notifications for the conversation.
+    pub muted: bool,
+
     /// Highest of this account's outgoing messages the peer has read, as
     /// Telegram last reported it; `0` when the peer has read none.
     ///
@@ -196,6 +199,15 @@ impl Client {
             peer: input_dialog_peer(peer),
         })
         .await?;
+        Ok(())
+    }
+
+    /// Mutes or unmutes notifications for one conversation on this account.
+    pub async fn set_muted(&self, peer_id: i64, muted: bool) -> Result<(), FrameworkError> {
+        let peer = self
+            .peer_ref(peer_id)
+            .ok_or(FrameworkError::UnknownPeer(peer_id))?;
+        self.invoke(&notify_settings_request(peer, muted)).await?;
         Ok(())
     }
 
@@ -335,6 +347,7 @@ fn archived_from(
                 last_timestamp: last.1,
                 last_text: last.2,
                 pinned: raw.pinned,
+                muted: muted(&raw.notify_settings),
                 read_outbox_max_id: read_outbox_max_id(raw.read_outbox_max_id),
             })
         })
@@ -461,6 +474,27 @@ fn read_history_request(peer: PeerRef, max_id: i32) -> tl::functions::messages::
     }
 }
 
+/// The notification-settings request that changes only this peer's mute deadline.
+fn notify_settings_request(
+    peer: PeerRef,
+    muted: bool,
+) -> tl::functions::account::UpdateNotifySettings {
+    tl::functions::account::UpdateNotifySettings {
+        peer: tl::enums::InputNotifyPeer::Peer(tl::types::InputNotifyPeer { peer: peer.into() }),
+        settings: tl::enums::InputPeerNotifySettings::Settings(
+            tl::types::InputPeerNotifySettings {
+                show_previews: None,
+                silent: None,
+                mute_until: Some(if muted { i32::MAX } else { 0 }),
+                sound: None,
+                stories_muted: None,
+                stories_hide_sender: None,
+                stories_sound: None,
+            },
+        ),
+    }
+}
+
 /// Maps a dialog `grammers` built into this crate's own description.
 ///
 /// `None` means the entry is a folder. Telegram returns folders next to
@@ -497,8 +531,22 @@ fn dialog_to_info(dialog: &Dialog) -> Option<DialogInfo> {
             .and_then(|message| message_timestamp(message.date().timestamp())),
         last_text: last_message.and_then(|message| last_text(message.text())),
         pinned: raw.pinned,
+        muted: muted(&raw.notify_settings),
         read_outbox_max_id: read_outbox_max_id(raw.read_outbox_max_id),
     })
+}
+
+/// Whether these account notification settings currently mute this peer.
+fn muted(settings: &tl::enums::PeerNotifySettings) -> bool {
+    let tl::enums::PeerNotifySettings::Settings(settings) = settings;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        });
+    settings
+        .mute_until
+        .is_some_and(|mute_until| i64::from(mute_until) > now)
 }
 
 /// Classifies a peer into the kinds a chat list distinguishes.
@@ -671,6 +719,7 @@ mod tests {
             last_timestamp,
             last_text: None,
             pinned: false,
+            muted: false,
         }
     }
 
@@ -828,6 +877,67 @@ mod tests {
         assert_eq!(user.user_id, 42);
         assert_eq!(user.access_hash, 7);
         assert_eq!(request.max_id, 99);
+    }
+
+    #[test]
+    fn mute_settings_change_only_the_peer_mute_deadline() {
+        let peer = PeerRef {
+            id: PeerId::user(42).expect("42 is in the user range"),
+            auth: PeerAuth::from_hash(7),
+        };
+
+        for (muted, expected) in [(true, i32::MAX), (false, 0)] {
+            let request = notify_settings_request(peer, muted);
+            let tl::enums::InputNotifyPeer::Peer(input) = request.peer else {
+                panic!("mute request names one peer");
+            };
+            let tl::enums::InputPeer::User(user) = input.peer else {
+                panic!("a person addresses as an input user peer");
+            };
+            assert_eq!(user.user_id, 42);
+            assert_eq!(user.access_hash, 7);
+
+            let tl::enums::InputPeerNotifySettings::Settings(settings) = request.settings;
+            assert_eq!(settings.mute_until, Some(expected));
+            assert_eq!(settings.show_previews, None);
+            assert_eq!(settings.silent, None);
+            assert_eq!(settings.sound, None);
+            assert_eq!(settings.stories_muted, None);
+            assert_eq!(settings.stories_hide_sender, None);
+            assert_eq!(settings.stories_sound, None);
+        }
+    }
+
+    #[test]
+    fn mute_deadline_is_active_only_while_it_is_in_the_future() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the system clock is after the Unix epoch")
+            .as_secs();
+        let future = i32::try_from(now + 60).expect("mute deadline fits Telegram's timestamp");
+        assert!(muted(&notify_settings(Some(future))));
+        assert!(
+            !muted(&notify_settings(Some(1))),
+            "a past deadline is inactive"
+        );
+        assert!(!muted(&notify_settings(Some(0))));
+        assert!(!muted(&notify_settings(None)));
+    }
+
+    fn notify_settings(mute_until: Option<i32>) -> tl::enums::PeerNotifySettings {
+        tl::enums::PeerNotifySettings::Settings(tl::types::PeerNotifySettings {
+            show_previews: None,
+            silent: None,
+            mute_until,
+            ios_sound: None,
+            android_sound: None,
+            other_sound: None,
+            stories_muted: None,
+            stories_hide_sender: None,
+            stories_ios_sound: None,
+            stories_android_sound: None,
+            stories_other_sound: None,
+        })
     }
 
     #[test]

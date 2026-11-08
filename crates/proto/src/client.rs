@@ -90,6 +90,14 @@ impl ProtoClient {
         Ok(())
     }
 
+    /// Mutes or unmutes notifications for one chat on the account.
+    pub async fn set_muted(&self, chat_id: i64, muted: bool) -> Result<(), ProtoError> {
+        self.inner
+            .set_muted(chat_id, muted)
+            .await
+            .map_err(ProtoError::from)
+    }
+
     /// Fetches the private conversations in the archive folder.
     ///
     /// # Errors
@@ -182,6 +190,7 @@ mod tests {
             last_timestamp: None,
             last_text: None,
             pinned: false,
+            muted: false,
             read_outbox_max_id: 0,
         }
     }

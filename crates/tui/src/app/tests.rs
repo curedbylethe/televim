@@ -2631,6 +2631,56 @@ fn run_command_line(app: &mut App, command: &str) {
     app.handle_key(press(KeyCode::Enter));
 }
 
+#[test]
+fn mute_commands_queue_the_requested_server_change_without_confirmation() {
+    for (command, muted) in [("mute", true), ("unmute", false)] {
+        let mut app = App::mock();
+        let chat_id = app.chats()[app.list.selected_chat].id;
+
+        run_command_line(&mut app, command);
+
+        assert_eq!(app.ui.mode, Mode::Normal);
+        assert_eq!(app.take_action(), Some(Action::SetMuted { chat_id, muted }));
+        assert_eq!(app.take_action(), None);
+        assert!(
+            !app.chats()[app.list.selected_chat].muted,
+            "RPC result owns the marker"
+        );
+    }
+}
+
+#[test]
+fn mute_command_refuses_without_a_client_and_changes_nothing() {
+    let mut app = App::mock();
+    let chat_id = app.chats()[app.list.selected_chat].id;
+    app.session.client_available = false;
+
+    run_command_line(&mut app, "mute");
+
+    assert_eq!(
+        app.status_text(),
+        "not connected yet — the client is not up"
+    );
+    assert_eq!(app.take_action(), None);
+    assert!(!app.chats()[app.list.selected_chat].muted);
+    assert_eq!(app.chats()[app.list.selected_chat].id, chat_id);
+}
+
+#[test]
+fn accepted_mute_updates_the_row_and_status_for_both_directions() {
+    let mut app = App::mock();
+    let chat_id = app.chats()[app.list.selected_chat].id;
+    let title = app.chats()[app.list.selected_chat].title.clone();
+
+    app.set_muted(chat_id, true);
+    assert!(app.chats()[app.list.selected_chat].muted);
+    assert_eq!(app.status_text(), format!("muted {title}"));
+
+    app.set_muted(chat_id, false);
+    assert!(!app.chats()[app.list.selected_chat].muted);
+    assert_eq!(app.status_text(), format!("unmuted {title}"));
+}
+
 // ---- the profile panel ------------------------------------------------
 
 /// The profile, opened from a mock application.

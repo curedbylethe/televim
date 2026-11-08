@@ -2050,6 +2050,7 @@ mod tests {
             last_message_id: Some(20),
             last_timestamp: Some(1_730_000_000),
             pinned: false,
+            muted: false,
             presence: None,
             deleted: false,
         }]);
@@ -4319,6 +4320,7 @@ mod tests {
             last_message_id: Some(1),
             last_timestamp: Some(0),
             pinned: false,
+            muted: false,
             presence: None,
             deleted: false,
         }]);

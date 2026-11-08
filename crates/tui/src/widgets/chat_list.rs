@@ -60,6 +60,10 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
             let pin = if c.pinned { "📌 " } else { "" };
             let mut spans = vec![Span::styled(pin, app.ui.theme.text)];
             spans.extend(drawn(app, &c.title, app.ui.theme.text));
+            spans.push(Span::styled(
+                if c.muted { " ⊘" } else { "" },
+                app.ui.theme.text_dim,
+            ));
             spans.push(Span::styled(unread, app.ui.theme.text_dim));
             ListItem::new(Line::from(spans))
         })
@@ -164,6 +168,19 @@ mod tests {
         // A chat with nothing unread carries no count.
         let first = row_text(&buffer, 1);
         assert!(!first.contains('('), "{first:?}");
+    }
+
+    #[test]
+    fn only_the_muted_chat_has_the_mute_marker() {
+        let mut app = App::mock();
+        let muted_id = app.chats()[1].id;
+        app.set_muted(muted_id, true);
+
+        let buffer = screen(&app, 40, 10);
+
+        assert!(!row_text(&buffer, 1).contains('⊘'));
+        assert!(row_text(&buffer, 2).contains('⊘'));
+        assert!(!row_text(&buffer, 3).contains('⊘'));
     }
 
     #[test]
