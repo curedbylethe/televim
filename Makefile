@@ -122,6 +122,15 @@ wasm-boundary: ## Assert the detached demo has no Telegram protocol crates
 .PHONY: wasm
 wasm: wasm-check wasm-test wasm-e2e wasm-boundary ## Run all browser demo checks
 
+.PHONY: wasm-pages
+wasm-pages: wasm-check ## Build and audit the static GitHub Pages artifact
+	cd crates/web-demo && trunk build --release --locked --public-url "$${PUBLIC_URL:-/televim/}"
+	sh scripts/wasm/check-secrets.sh
+
+.PHONY: wasm-size
+wasm-size: wasm-pages ## Report raw, gzip and brotli sizes for the static demo
+	python3 scripts/wasm/size.py crates/web-demo/dist
+
 .PHONY: check
 check: ## Type-check the entire workspace (faster than a full build)
 	$(CARGO) check --all-targets

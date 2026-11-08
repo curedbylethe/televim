@@ -186,6 +186,7 @@
     switch (event.data?.type) {
       case "ready":
         window.clearTimeout(timer);
+        performance.mark("televim-ready");
         focusTerminal();
         if (rendererFallback) {
           $("#renderer-note").hidden = false;
