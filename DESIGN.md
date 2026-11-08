@@ -1274,9 +1274,9 @@ gains a key, `d`, because three actions have no other home.
 | :------ | :------ | :---------- | :------- |
 | `:archive` | the highlighted chat | no — `:archived` undoes it | `archived {name}` |
 | `:archived` | — | no | lists the archived chats; `⏎` unarchives |
-| `:mute` / `:unmute` | the highlighted chat | no — `:unmute` undoes it | `muted {name}` / `unmuted {name}` |
-| `:mark-unread` | the highlighted chat | no — opening the chat clears it | `marked {name} unread` |
-| `:mark-all-read` | every chat carrying a count | no | `marked {n} chats read` / `marked {n} chats read, {m} failed` |
+| `:mute` / `:unmute` | the card's person, else the highlighted chat | no — `:unmute` undoes it | `muted {name}` / `unmuted {name}` |
+| `:mark-unread` | the card's person, else the highlighted chat | no — opening the chat clears it | `marked {name} unread` |
+| `:mark-all-read` | every chat carrying a count or a mark | no | `marked {n} chats read` / `marked {n} chats read, {m} failed` |
 | `:block` / `:unblock` | the card's person, else the highlighted chat | yes | `Block {name}? (y/n)` / `Unblock {name}? (y/n)` |
 | `:rename [name]` | the card's person, else the highlighted chat | no — bare `:rename` clears | `renamed {name}` / `local name cleared` |
 | `:delete-chat [both]` | the highlighted chat | yes | `Delete this conversation? (y/n)` or `… for both sides?` |
@@ -1315,16 +1315,18 @@ conversation is archived, the conversation closes, because it is no longer in
 the list that owns it.
 
 **Mute stops the notification and nothing on this screen.** `:mute` mutes the
-highlighted chat on Telegram, for good, and `:unmute` undoes it. The chat keeps its
+subject chat on Telegram, for good, and `:unmute` undoes it. The chat keeps its
 place in the list and keeps its unread count: the count is the reader's record of what
 they have not read, and mute is a decision about being interrupted, not about what they
 owe the chat. What stops is the desktop notification. The row says so with `⊘` left of
 the count, because a muted chat that looked like any other would be found again only by
 remembering. None of the three commands asks first: each is undone from the screen it
-acts on, and none is visible to anybody else. They act on the chat-list highlight even
-when a card is on show, since a person with no conversation has nothing to mute.
+acts on, and none is visible to anybody else. They take the subject
+rule above and not the highlight alone: the card's person while a card is on show,
+the highlighted chat otherwise. A card over a person with no conversation has nothing
+to mute or flag, and is refused with the existing `nothing to act on` sentence.
 
-**The manual unread mark is a flag, not a count.** `:mark-unread` flags the highlighted
+**The manual unread mark is a flag, not a count.** `:mark-unread` flags the subject
 chat unread on Telegram and draws `●` on the row: in the count's place when the chat has
 none, left of it when it has one. It invents no number and changes no real one. A flag
 with no count says "come back to this", a count says how much is waiting, and the two
@@ -1332,13 +1334,14 @@ coexist. Opening the chat clears the flag, and opening is the move from the list
 conversation (`⏎`, `Tab`, `h`, `l`, `i`, `a`), not the highlight passing over the row: the highlight
 only previews a chat, and a flag cleared by scrolling past it could not be found again.
 
-**`:mark-all-read` is a bulk action, so its sentence can report a failure.** It sends one
-request per chat that carries a count, and one can fail while the rest land. The sentence
+**`:mark-all-read` is a bulk action, so its sentence can report a failure.** It has no subject: it sends one
+request per chat that carries a count or a manual mark, and one can fail while the rest land. The sentence
 is `marked {n} chats read` when every request landed and `marked {n} chats read, {m}
 failed` when not, `n` counting the chats that were read (with one it says `chat`). A chat
-read this way loses its count and its mark; a chat whose request failed keeps both, which
-is how the reader finds it. A chat carrying only a manual mark has no count, so the
-command leaves it: the flag is the reader's own.
+read this way loses its count and its mark, and a chat carrying only a mark is read too
+and counted in `n`: a flag is an unread state, and a bulk read that left it would leave
+the list half read. A chat whose request failed keeps both, which is how the reader finds
+it, and the row still shows `●` or `● 3`.
 
 **A local name is a name over the peer's, not a replacement of it.** The chat
 row, the message bar, the card and the contacts list all draw the local name;
@@ -1415,12 +1418,14 @@ path echoed. A path opening with `!` stands in for an upload that fails, as it d
 for a failed search, so the failure sentence has a frame to be seen in. Where the
 build and this model disagree, the build is the authority.
 
-Scenes: `unread` in the engine, twelve frames, each reached by the keys a reader
+Scenes: `unread` in the engine, fifteen frames, each reached by the keys a reader
 presses from the list: mute and its sentence, the muted row with its count kept after the
 highlight has moved on, unmute, a mark with no count, a mark beside a count, pinned and
 muted, all four on one row at 24 columns (with a two-digit count, the widest the list
 holds) and the same row under the highlight, walking past a marked row, opening it, and
-`:mark-all-read` with and without a failed request. `readFails` makes one chat's request
+`:mark-all-read` with and without a failed request, a mark with no count cleared by it,
+a failed request keeping count and mark, and `:mute` over a card for a person with no chat.
+`readFails` makes one chat's request
 fail, as a path opening with `!` does for a failed upload.
 
 Scenes: `manage` in the engine, twenty-one frames, each reached by the keys a
