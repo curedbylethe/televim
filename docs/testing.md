@@ -32,13 +32,16 @@
 | `make wasm-e2e` | build the demo and run locked Playwright tests with pnpm; needs Node and Chromium |
 | `make wasm-boundary` | ensure detached `web-demo` excludes Telegram protocol crates |
 | `make wasm` | run all browser demo checks; needs the Rust wasm target, Trunk, wasm-pack, ChromeDriver, Node, pnpm and Chromium |
+| `make wasm-pages` | build `/televim/` static artifact and scan it for credentials/debug files; set `PUBLIC_URL` to override the base |
+| `make wasm-size` | build and report raw/gzip/brotli size per asset and in total; brotli is optional |
 
 `lint` and `test` both pass `--all-features` for the reason given above.
 
 The WASM targets stay outside `make ci`. Install the target with
 `rustup target add wasm32-unknown-unknown`, then install Trunk and wasm-pack at
 the versions pinned in `.github/workflows/ci.yml`. Playwright needs Node 22,
-pnpm 10.22.0 and Chromium.
+pnpm 10.22.0 and Chromium. `make wasm-pages` runs the secret/debug audit;
+`make wasm-size` reports optimized files without enforcing a budget.
 
 ## CI Pipeline
 
@@ -51,6 +54,10 @@ job is not a required branch-protection check until maintainers mark it required
 and pull request. `release` is gated at the job level to a push to `main` that
 changes code, the nightly schedule, and a pull request labelled `memory`; an
 ordinary pull request does not start it.
+
+`.github/workflows/pages.yml` builds and deploys `/televim/` only on `main` or
+manual dispatch. The build can read the repository and configure Pages; only the
+deploy job receives OIDC permission. Pull requests do not publish Pages.
 
 Two trigger rules sit above the jobs:
 
