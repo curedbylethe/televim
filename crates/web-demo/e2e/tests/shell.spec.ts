@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const provenance = "Interactive Rust/WASM demo · fictional conversations · offline";
 
 async function openPoster(page: Page) {
-  await page.goto("/index.html");
+  await page.goto("index.html");
 }
 
 async function openDomDemo(page: Page) {
@@ -21,6 +21,7 @@ test("poster stays readable and does not fetch WebAssembly before Load", async (
   });
   await openPoster(page);
 
+  expect(new URL(page.url()).pathname).toBe("/televim/index.html");
   await expect(page.locator("#plate")).toHaveAttribute("data-state", "poster");
   await expect(page.locator("#poster-frame")).not.toBeEmpty();
   await expect(page.getByText(provenance).first()).toBeVisible();
@@ -41,6 +42,7 @@ test("Load requests one module and exposes running state with provenance", async
   expect(wasmRequests).toHaveLength(1);
   await expect(page.locator("#demo-frame")).toBeVisible();
   await expect(page.getByText(provenance).first()).toBeVisible();
+  expect(await page.evaluate(() => performance.getEntriesByName("televim-ready", "mark").length)).toBe(1);
 });
 
 test("keyboard opens prompts and insert mode; bare Escape stays in demo", async ({ page }) => {
@@ -178,6 +180,8 @@ test("page identifies fictional offline provenance and makes no Telegram or stor
     cookies: document.cookie,
   }));
   expect(storage).toEqual({ localStorage: 0, cookies: "" });
+  const origin = new URL(page.url()).origin;
+  expect(requests.every((url) => new URL(url).origin === origin)).toBe(true);
   expect(requests.some((url) => /telegram|t\.me|api\.telegram/i.test(url))).toBe(false);
 });
 
