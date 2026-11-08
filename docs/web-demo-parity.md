@@ -60,6 +60,20 @@ Browser checks below are manual until Stage 11 adds Playwright. Stage 08 adds se
 | Settings | Open settings | `:settings` | Native command opens the self profile card; browser shell keeps display settings | browser-adapted | `tui::app::tests::settings_command_opens_the_profile`; browser manual: settings card and shell controls |
 | Simulator | Every TUI action | Native action dispatch | Every `Action` variant has an effect or an explicit refusal | simulated | `simulator::every_action_has_an_effect`; `simulator::unsupported_native_actions_say_why` |
 
+## Unicode and bidi
+
+| Flow | Demo behavior | Category | Evidence |
+| :--- | :--- | :--- | :--- |
+| Persian, Arabic, mixed direction and combining marks | Real `App` renders fixture text in Visual mode | simulated | `unicode::app_renders_unicode_corpus_without_losing_glyphs`; browser rendering check not run locally: Trunk unavailable and crates.io DNS blocked |
+| Bidi modes | Visual output is stable and differs from Terminal and Words output | simulated | `unicode::visual_render_is_stable_and_differs_from_terminal_order` |
+| Composer and Backspace | Persian text and decomposed graphemes stay intact; Backspace removes one grapheme | simulated | `unicode::composer_keeps_rtl_text_and_deletes_one_grapheme` |
+| Selection and yank | Character selection and yank preserve logical RTL order | simulated | `unicode::character_selection_yanks_original_logical_text` |
+| RTL search prefix | Search matches Arabic and Persian prefixes without byte slicing | simulated | `unicode::arabic_search_uses_character_prefixes` |
+| Emoji shortcode and following text | Full ZWJ emoji inserts without corrupting the next character | simulated | `unicode::emoji_shortcode_inserts_full_sequence_before_following_text` |
+| Mobile IME | Composition sends committed text once; Enter and Backspace wait for composition to end | browser-adapted | Browser manual and synthetic Playwright composition check pending Stage 11 |
+
+Browser text is one glyph per cell. Bidi reorder does not shape Arabic or join letters across cells. Browser screenshots do not prove terminal compatibility.
+
 ## Command outcomes
 
 Every command in the product list has a row here. Supported commands use native `App` actions; unavailable commands preserve their simulator status sentence verbatim.
