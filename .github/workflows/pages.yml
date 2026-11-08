@@ -47,6 +47,7 @@ jobs:
       - name: Build and audit Pages artifact
         run: |
           PUBLIC_URL=/televim/ make wasm-pages
+          mkdir -p target
           python3 scripts/wasm/size.py crates/web-demo/dist | tee target/web-demo-size.txt
 
       - uses: actions/upload-artifact@v4
