@@ -108,7 +108,7 @@ test("Reset restores release copy after the demo ends", async ({ page }) => {
   await page.keyboard.type("q");
   await page.keyboard.press("Enter");
   await page.keyboard.press("y");
-  await expect(page.getByText("Demo ended. Load again or Reset.")).toBeVisible();
+  await expect(page.locator("#released-copy")).toHaveText("Demo ended. Load again or Reset.");
 
   await page.getByRole("button", { name: "Reset demo" }).click();
   await page.keyboard.press("Control+Alt+Escape");
