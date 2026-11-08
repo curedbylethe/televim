@@ -45,6 +45,8 @@ pub struct Chat {
     pub last_timestamp: Option<i64>,
     /// Whether the account has pinned this chat to the top of the list.
     pub pinned: bool,
+    /// Whether this account mutes notifications for the chat; not a local setting.
+    pub muted: bool,
     /// The peer's last reported presence, if one has been seen. Sticky until the
     /// next update for this peer; nothing here expires it.
     pub presence: Option<Presence>,
@@ -90,6 +92,7 @@ mod tests {
             last_message_id: None,
             last_timestamp: None,
             pinned: false,
+            muted: false,
             presence: None,
             deleted: false,
         }

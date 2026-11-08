@@ -70,6 +70,11 @@ impl ChatListState {
         }
     }
 
+    /// Changes a notification preference without moving the chat.
+    pub(crate) fn set_muted(&mut self, chat_id: i64, muted: bool) {
+        self.list.set_muted(chat_id, muted);
+    }
+
     /// Installs a freshly fetched chat list.
     ///
     /// The list is replaced wholesale, and the selection is clamped rather
@@ -220,6 +225,7 @@ mod tests {
             last_message_id: None,
             last_timestamp: None,
             pinned: false,
+            muted: false,
             presence: None,
             deleted,
         }

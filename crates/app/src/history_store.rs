@@ -742,6 +742,8 @@ struct CachedChat {
     last_timestamp: Option<i64>,
     #[serde(default)]
     pinned: bool,
+    #[serde(default)]
+    muted: bool,
     /// Missing from caches written before the flag existed: those read back as
     /// live accounts until the next fetch says otherwise.
     #[serde(default)]
@@ -758,6 +760,7 @@ impl CachedChat {
             last_message_id: chat.last_message_id,
             last_timestamp: chat.last_timestamp,
             pinned: chat.pinned,
+            muted: chat.muted,
             deleted: chat.deleted,
         }
     }
@@ -773,6 +776,7 @@ impl CachedChat {
             last_message_id: self.last_message_id,
             last_timestamp: self.last_timestamp,
             pinned: self.pinned,
+            muted: self.muted,
             presence: None,
             deleted: self.deleted,
         }
@@ -788,6 +792,7 @@ impl CachedChat {
             && self.last_message_id == chat.last_message_id
             && self.last_timestamp == chat.last_timestamp
             && self.pinned == chat.pinned
+            && self.muted == chat.muted
             && self.deleted == chat.deleted
     }
 }
@@ -1762,6 +1767,7 @@ mod tests {
             last_message_id: None,
             last_timestamp: None,
             pinned: false,
+            muted: false,
             presence: None,
             deleted: false,
         }
@@ -1848,6 +1854,20 @@ mod tests {
             !cache.set_chats(&listed),
             "the same list again is the same cut, so nothing changed"
         );
+    }
+
+    #[test]
+    fn muted_chats_round_trip_and_older_rows_default_to_unmuted() {
+        let mut source = chat(PEER, "Ada");
+        source.muted = true;
+        let cached = CachedChat::from_chat(&source);
+        let encoded = serde_json::to_string(&cached).expect("the chat serializes");
+        let restored: CachedChat = serde_json::from_str(&encoded).expect("the chat parses");
+        assert!(restored.to_chat().muted);
+
+        let older: CachedChat =
+            serde_json::from_str(r#"{"id":7,"title":"Ada"}"#).expect("an older cached row parses");
+        assert!(!older.to_chat().muted);
     }
 
     /// A file written before the list was cached has no `chats` at all, and

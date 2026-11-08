@@ -3425,6 +3425,27 @@ pub(crate) fn run_command(
             }
             false
         }
+        "mute" | "unmute" => {
+            let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            };
+            if !subject.chat {
+                ui.set_status(NOTHING_TO_ACT_ON.to_owned());
+                return false;
+            }
+            if command_needs_client(&mut *ui, &*session) {
+                queue_action(
+                    &mut *outbox,
+                    &mut *ui,
+                    Action::SetMuted {
+                        chat_id: subject.peer_id,
+                        muted: cmd == "mute",
+                    },
+                );
+            }
+            false
+        }
         "block" | "unblock" => {
             let blocked = cmd == "block";
             let Some(subject) = command_subject(&*ui, &*list, &*profile) else {

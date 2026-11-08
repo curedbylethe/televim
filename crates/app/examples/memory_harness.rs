@@ -230,6 +230,7 @@ fn fixture_chats() -> Vec<Chat> {
                 last_message_id: Some(to_id(n + 1)),
                 last_timestamp: Some(FIXED_NOW - to_id(n) * 60),
                 pinned: false,
+                muted: false,
                 presence: None,
                 deleted: false,
             }

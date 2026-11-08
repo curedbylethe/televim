@@ -68,6 +68,9 @@ pub(crate) struct ProtoChat {
     /// Whether the account has pinned this chat to the top of the list.
     pub pinned: bool,
 
+    /// Whether the account has muted notifications for this chat.
+    pub muted: bool,
+
     /// Whether the peer is a deleted account. Carried through so the forward
     /// picker can leave it out; the chat list still shows it.
     pub deleted: bool,
@@ -124,6 +127,7 @@ impl From<ProtoChat> for Chat {
             last_message_id: chat.last_message_id,
             last_timestamp: chat.last_timestamp,
             pinned: chat.pinned,
+            muted: chat.muted,
             deleted: chat.deleted,
             presence: None,
             // Zero is Telegram's "nothing read", which is no position at all.
@@ -182,6 +186,7 @@ impl From<DialogInfo> for ProtoChat {
             last_timestamp: dialog.last_timestamp,
             last_message: dialog.last_text,
             pinned: dialog.pinned,
+            muted: dialog.muted,
             deleted: dialog.deleted,
             read_outbox_max_id: dialog.read_outbox_max_id,
         }
@@ -324,6 +329,7 @@ mod tests {
             last_message_id: None,
             last_timestamp: None,
             pinned: false,
+            muted: false,
             last_message: None,
             deleted: false,
             read_outbox_max_id: 0,
@@ -513,6 +519,7 @@ mod live_tests {
             last_timestamp: None,
             pinned: false,
             last_text: None,
+            muted: false,
             read_outbox_max_id: 0,
         }
     }
@@ -594,6 +601,7 @@ mod live_tests {
         source.last_timestamp = Some(1_700_000_000);
         source.last_text = Some("see you at six".to_owned());
         source.pinned = true;
+        source.muted = true;
 
         let chat: Chat = ProtoChat::from(source).into();
 
@@ -618,6 +626,7 @@ mod live_tests {
             chat.pinned,
             "the pin has to reach the list or it cannot sort"
         );
+        assert!(chat.muted, "the account's notification preference survives");
     }
 
     #[test]

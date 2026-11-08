@@ -365,6 +365,7 @@ impl ChatList {
                 last_message_id: None,
                 last_timestamp: None,
                 pinned: false,
+                muted: false,
                 presence: None,
                 deleted: false,
             },
@@ -396,6 +397,18 @@ impl ChatList {
                 .unwrap_or(self.chats.len())
         };
         self.chats.insert(to, chat);
+        true
+    }
+
+    /// Sets whether this chat is muted, without changing its place in the list.
+    pub fn set_muted(&mut self, chat_id: i64, muted: bool) -> bool {
+        let Some(chat) = self.chat_mut(chat_id) else {
+            return false;
+        };
+        if chat.muted == muted {
+            return false;
+        }
+        chat.muted = muted;
         true
     }
 
@@ -490,6 +503,7 @@ mod tests {
             last_message_id: Some(9),
             last_timestamp: Some(1_000),
             pinned: false,
+            muted: false,
             presence: None,
             deleted: false,
         }
@@ -505,6 +519,16 @@ mod tests {
 
     fn ids(list: &ChatList) -> Vec<i64> {
         list.chats.iter().map(|chat| chat.id).collect()
+    }
+
+    #[test]
+    fn set_muted_changes_only_a_present_chat_and_is_idempotent() {
+        let mut list = ChatList::with_chats(vec![chat(1)]);
+
+        assert!(list.set_muted(1, true));
+        assert!(list.chats[0].muted);
+        assert!(!list.set_muted(1, true));
+        assert!(!list.set_muted(9, true));
     }
 
     #[test]
@@ -1114,6 +1138,7 @@ mod tests {
         let mut list = ChatList::with_chats(vec![
             Chat {
                 unread_count: 3,
+                muted: true,
                 ..chat_at(1, 100)
             },
             Chat {
@@ -1124,6 +1149,7 @@ mod tests {
 
         assert!(list.mark_read(1));
         assert_eq!(list.chats[0].unread_count, 0);
+        assert!(list.chats[0].muted, "reading does not unmute the chat");
         assert_eq!(
             list.chats[1].unread_count, 5,
             "the other chat keeps its count"
@@ -1166,6 +1192,7 @@ mod tests {
         let mut list = ChatList::with_chats(vec![
             Chat {
                 unread_count: 3,
+                muted: true,
                 ..chat_at(1, 100)
             },
             Chat {
@@ -1181,6 +1208,10 @@ mod tests {
         assert_eq!(
             list.chats[0].unread_count, 1,
             "the server's figure, not zero"
+        );
+        assert!(
+            list.chats[0].muted,
+            "an unread update does not unmute the chat"
         );
         assert_eq!(
             list.chats[1].unread_count, 5,
