@@ -1,10 +1,11 @@
 # Dependencies
 
-**No version numbers live in this file.** Every version, feature and default is
-canonical in `[workspace.dependencies]` in the root `Cargo.toml`, and crate
-manifests inherit from it with `workspace = true` — never a hardcoded version in
-a crate manifest. This file records *why* a dependency is there, what it is
-pinned against, and what breaks when it moves.
+**No version numbers live in this file.** Native versions, features and defaults
+are canonical in `[workspace.dependencies]` in the root `Cargo.toml`; crate
+manifests inherit with `workspace = true`. The detached browser demo has its own
+workspace dependencies and lockfile under `crates/web-demo/`. This file records
+*why* a dependency is there, what it is pinned against, and what breaks when it
+moves.
 
 ## Changing one
 
@@ -67,6 +68,7 @@ Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 | `config` | Layered TOML + env configuration. |
 | `dotenvy` | One use: loading `.env` so the credentials it holds reach `Config`. A missing file is not an error. |
 | `base64` | One use: base64 inside the OSC 52 clipboard sequence. `app/src/runtime.rs` writes that sequence because it is the only place holding the terminal; `tui` records the text and never writes it. |
+
 | `time` | One use: the machine's UTC offset at an instant, with the `local-offset` feature. `app/src/runtime.rs::local_offset` reads it once per frame and hands `tui` plain seconds, so `tui` never reads a zone. Chosen over `chrono`, which is in the lockfile only through `grammers-client` behind the off-by-default `live` feature, so depending on it would widen the default tree, and over a hand-rolled `libc::localtime_r`, which means an `unsafe` call and TZif parsing in this workspace. `time` is already in the lockfile through `ratatui-widgets`, and `local-offset` pulls only `libc` and `num_threads`, which were there already: the tree gains no crate, and the lockfile change is the `app` edge. A `None` from the platform falls back to UTC. Why the offset is read per pass: [`decisions.md`](./decisions.md). |
 | `keyring` | Cross-platform OS keyring for the session string and the random file key that seals the session *file* (`service "televim"`, `account "file-key"`); never store session strings in plaintext. It ships no default backend, so every platform store is named explicitly. On macOS it uses Keychain; on Windows, Credential Manager and system libraries. Linux uses Secret Service over D-Bus: builds need `libdbus-1-dev` and `pkg-config`, while runtime needs `libdbus-1-3` (Debian/Ubuntu), `dbus-libs` (Fedora), or `dbus` (Arch), plus a D-Bus session and Secret Service provider. See [`installing.md`](./installing.md#linux). |
 | `aes-gcm-siv` | The AEAD that seals the session file, in `telegram-framework::sealed`: AES-256-GCM-SIV (RFC 8452), built with `default-features = false` and only `aes`, `alloc` and `zeroize`. Chosen over XChaCha20-Poly1305 for two reasons. It reuses the `aes`/`cipher`/`ctr` stack already locked through `grammers-crypto` and `keyring`'s `crypto-rust`, so it adds a thin mode on top of a cipher the tree already builds rather than a second cipher. And it is nonce-misuse-resistant by construction: the nonce is random per save, and a repeat would leak only that two plaintexts were equal, not the authentication key. XChaCha20's 192-bit nonce makes a repeat negligible, but that is a property of the random source, where SIV's resistance is a property of the cipher. Pure Rust, so no C toolchain on any platform. New lockfile entries: `aead`, `polyval`, `universal-hash`. |
@@ -84,6 +86,24 @@ Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 | `tempfile` | Dev-only. |
 | `static_assertions` | Dev-only. Compile-time assertions, used to lock the "a login token cannot be cloned or reused" guarantee with the compiler rather than with a convention. |
 | `termlens` | Dev-only. Runs the `televim` binary in a pseudo-terminal for the PTY integration tests in `app/tests/tui_e2e.rs`. Default features, which pull `insta` for screen snapshots. |
+
+### Detached browser demo
+
+These dependencies live in `crates/web-demo`, which has its own lockfile and is
+outside the native workspace and `make ci` gate.
+
+| Dependency/tool | Why it is here | License |
+| :--- | :--- | :--- |
+| Ratzilla / ratatui | WebGL2 and DOM backends render the real `tui::App`; the browser uses `tui::key` and has no terminal backend. | MIT |
+| wasm-bindgen / web-sys / js-sys | Browser entry point, same-origin shell bridge, clipboard and file picker APIs. | MIT / Apache-2.0 |
+| gloo-timers / web-time | Browser-safe timer and portable clock used by the demo driver. | MIT / Apache-2.0 |
+| wasm-bindgen-test | Rust tests that run in a browser through wasm-pack. | MIT / Apache-2.0 |
+| Trunk / wasm-opt | Reproducible static asset generation and WebAssembly optimization. | MIT / Apache-2.0 |
+| Playwright | Browser shell, mobile input and base-path checks; pinned by `pnpm-lock.yaml`. | Apache-2.0 |
+
+The demo does not fetch fonts, scripts, analytics or media from a CDN. The
+WebGL2 font atlas uses the browser's local font fallback. See
+[`web-demo.md`](./web-demo.md) for the Pages CSP and artifact audit.
 
 ### Declared but not depended on
 
