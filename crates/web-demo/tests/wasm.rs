@@ -46,6 +46,18 @@ fn key_mapping_covers_letters_arrows_tab_escape_and_modifiers() {
 }
 
 #[wasm_bindgen_test]
+fn driver_open_chat_id_does_not_follow_chat_list_highlight() {
+    let mut driver = Driver::new();
+    let open_chat_id = driver.open_chat_id();
+
+    driver.handle_key(TuiKeyEvent::new(TuiKeyCode::Char('h'), KeyModifiers::NONE));
+    driver.handle_key(TuiKeyEvent::new(TuiKeyCode::Char('j'), KeyModifiers::NONE));
+
+    assert_ne!(driver.app.current_chat_id(), open_chat_id);
+    assert_eq!(driver.open_chat_id(), open_chat_id);
+}
+
+#[wasm_bindgen_test]
 fn app_renders_fixture_into_test_backend() {
     let driver = Driver::new();
     let backend = TestBackend::new(80, 24);

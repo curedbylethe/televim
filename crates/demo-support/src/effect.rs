@@ -95,6 +95,10 @@ pub enum Effect {
     Contacts {
         result: Result<Vec<UserCandidate>, String>,
     },
+    UserSearch {
+        query: String,
+        result: Result<Vec<UserCandidate>, String>,
+    },
     PinToggled {
         chat_id: i64,
         pinned: bool,

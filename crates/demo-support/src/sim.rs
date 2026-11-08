@@ -333,9 +333,13 @@ impl DemoSimulator {
                     chat_ids.contains(&id)
                 });
                 if candidates.is_empty() {
-                    vec![Self::status("No demo contact matches that search.")]
+                    vec![Effect::UserSearch {
+                        query,
+                        result: Err("No demo contact matches that search.".into()),
+                    }]
                 } else {
-                    vec![Effect::Contacts {
+                    vec![Effect::UserSearch {
+                        query,
                         result: Ok(candidates),
                     }]
                 }
@@ -767,6 +771,12 @@ impl DemoSimulator {
                 reason: reason.to_owned(),
             },
         );
+    }
+
+    pub fn record_failed_upload(&mut self, chat_id: i64, temp_id: i64) {
+        if !self.failed_uploads.contains(&(chat_id, temp_id)) {
+            self.failed_uploads.push((chat_id, temp_id));
+        }
     }
 
     fn run_global(&mut self, spec: SearchSpec, append: bool) -> Vec<Effect> {

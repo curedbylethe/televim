@@ -50,19 +50,23 @@ impl BrowserBridge {
         }
     }
 
-    pub fn pick_file(&mut self, app: &mut App, chat_id: i64, temp_id: i64, kind: MediaKind) {
+    pub fn pick_file(
+        &mut self,
+        app: &mut App,
+        chat_id: i64,
+        temp_id: i64,
+        kind: MediaKind,
+    ) -> Result<(), &'static str> {
         if self
             .picker
             .open(self.results.clone(), chat_id, temp_id, kind)
             .is_err()
         {
-            app.fail_send(
-                temp_id,
-                "The browser file picker could not open.".to_owned(),
-            );
+            return Err("The browser file picker could not open.");
         } else {
             app.set_status("Choose a fictional demo attachment from this device.");
         }
+        Ok(())
     }
 
     pub fn open_media(

@@ -77,6 +77,8 @@ workspace-level `benches/`.
 or `telegram-framework`. Only `telegram-framework` may reference `grammers`
 types. `make boundary` checks the root workspace, including `demo-support`;
 `make wasm-boundary` checks detached `web-demo` for protocol crates.
+The browser shell is a separate `televim-web-demo` OpenDesign artifact; the
+terminal design system and `make design-check` remain scoped to `televim-app`.
 
 Per-crate dependencies, which are narrower than the crate diagrams below suggest
 in one direction and wider in another:

@@ -178,7 +178,15 @@ fn contacts_profiles_blocks_reports_and_empty_results_use_seeded_data() {
             }
         )
         .as_slice(),
-        [Effect::Contacts { result: Ok(results) }] if results.iter().any(|result| result.user_id == candidate.user_id)
+        [Effect::UserSearch { query, result: Ok(results) }]
+            if query == &candidate.display_name && results.iter().any(|result| result.user_id == candidate.user_id)
+    ));
+
+    sim.world.active_mut().contacts.clear();
+    assert!(matches!(
+        sim.dispatch(&app, Action::ResolveUser { query: "nobody".into() }).as_slice(),
+        [Effect::UserSearch { query, result: Err(reason) }]
+            if query == "nobody" && reason == "No demo contact matches that search."
     ));
 
     let updated = sim.dispatch(

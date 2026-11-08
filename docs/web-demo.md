@@ -92,12 +92,12 @@ GitHub Pages serves the static artifact at `https://curedbylethe.github.io/telev
 The Playwright server mounts the build under that same path before checking the
 poster, iframe, WASM request and controls.
 
-Both HTML pages set a meta Content Security Policy. It allows same-origin assets
-and frames, blob media, inline styles used by the terminal page, and
-`wasm-unsafe-eval` required by WebAssembly. It does not allow `unsafe-eval`,
-third-party connections or remote fonts. GitHub Pages cannot set response
-headers; meta CSP cannot set `frame-ancestors`, so an embedding host controls
-whether it permits this page in an iframe.
+Both HTML pages set a meta Content Security Policy. The demo page allows
+`unsafe-inline` for Trunk's generated module loader and `wasm-unsafe-eval` for
+WebAssembly. Both allow same-origin assets and frames; neither allows
+`unsafe-eval`, third-party connections or remote fonts. GitHub Pages cannot set
+response headers; meta CSP cannot set `frame-ancestors`, so an embedding host
+controls whether it permits this page in an iframe.
 
 Run `make wasm-pages` to build and scan `dist/` for credential-shaped strings,
 debug maps and credential environment variables. Run `make wasm-size` to report

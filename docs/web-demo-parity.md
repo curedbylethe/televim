@@ -13,6 +13,7 @@ Other browser-adapted rows still need the listed manual check.
 | Poster, lazy module load, provenance, no external requests | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
 | Keyboard prompts, Insert, bare Esc, Reset and release | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
 | Mobile keys, text input and committed IME | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
+| Clipboard success and denial fallback | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
 | Unsupported, failed and WebGL2 states | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
 
 | Area | Flow / key | Native trigger | Demo behavior | Category | Evidence |
@@ -63,10 +64,10 @@ Other browser-adapted rows still need the listed manual check.
 | History | Older and newer pages | scroll to either edge | Deterministic local pages apply through native `App` paging APIs | simulated | `parity_secondary::history_pages_and_read_receipts_apply_to_real_app_state` |
 | Read state | Read receipt | open conversation | Scheduled receipt updates native message read state | simulated | `parity_secondary::history_pages_and_read_receipts_apply_to_real_app_state` |
 | Search | Global filters and pages | `:search <query>` | Native search state receives filtered results in stable 20-result pages | simulated | `parity_secondary::filtered_global_search_pages_append_to_real_search_state`; `simulator::search_filters_and_global_pages_are_deterministic` |
-| Media | Open and save | `Enter`, `:save` | Open is reported to the shell; save uses fixture bytes through browser download | browser-adapted | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes`; browser manual: open and save media |
-| Media | Cancel download | cancel media prompt | Scheduled progress stops and simulator emits cancellation | simulated | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes` |
+| Media | Open and save | `Enter`, `:save` | Open is reported to the shell; save uses fixture bytes through browser download | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: open and save media |
+| Media | Cancel download | cancel media prompt | Scheduled progress stops and simulator emits cancellation | simulated | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes` |
 | Media | Send attachment | `:attach` | Browser file picker supplies bytes to the deterministic simulator | browser-adapted | `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions`; browser manual: attach local file |
-| Stickers | Render fixture sticker | conversation render | Real sticker decoder runs; token mode remains available when graphics are unavailable | browser-adapted | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes`; browser manual: sticker fallback |
+| Stickers | Render fixture sticker | conversation render | Real sticker decoder runs; token mode remains available when graphics are unavailable | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: sticker fallback |
 | Presence | Typing and online status | simulated time | Seeded typing and presence updates arrive on deterministic timers | simulated | `simulator::scheduled_arrivals_respect_open_chat_and_timing` |
 | Settings | Open settings | `:settings` | Native command opens the self profile card; browser shell keeps display settings | browser-adapted | `tui::app::tests::settings_command_opens_the_profile`; browser manual: settings card and shell controls |
 | Simulator | Every TUI action | Native action dispatch | Every `Action` variant has an effect or an explicit refusal | simulated | `simulator::every_action_has_an_effect`; `simulator::unsupported_native_actions_say_why` |
@@ -87,8 +88,8 @@ effect; refusal rows also use `simulator::unsupported_native_actions_say_why`.
 | `Search`, `GlobalSearch`, `MoreGlobal` | Search local messages and page deterministic results | simulated | `parity_secondary::filtered_global_search_pages_append_to_real_search_state` |
 | `TogglePin`, `SwitchAccount` | Change the active fictional account's local state | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world` |
 | `Login`, `LoginCancelled`, `AddAccount`, `Logout`, `ExportSession`, `ImportSession`, `SubmitSessionPassphrase`, `ChangeSessionPassphrase` | Refuse sign-in, account and session operations with status text | impossible | `simulator::unsupported_native_actions_say_why` |
-| `OpenMedia`, `SaveMedia` | Open or download local fixture bytes through browser APIs | browser-adapted | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes` |
-| `CancelMediaDownload` | Cancel a deterministic local fixture download | simulated | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes` |
+| `OpenMedia`, `SaveMedia` | Open or download local fixture bytes through browser APIs | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes` |
+| `CancelMediaDownload` | Cancel a deterministic local fixture download | simulated | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes` |
 | `SetArchived`, `SetBlocked`, `SetLocalName`, `DeleteConversation`, `ReportPeer` | Apply local account and contact changes; no server request | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world`; `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data`; `simulator::local_mutations_persist_until_reset` |
 
 ## Unicode and bidi
@@ -118,8 +119,8 @@ Every command in the product list has a row here. Supported commands use native 
 | `:more` | Append next fixture search page when more results exist | simulated | `parity_secondary::filtered_global_search_pages_append_to_real_search_state`; browser manual: global search |
 | `:discard` | Confirm then clear current draft | simulated | `parity_core::discard_command_confirms_and_clears_the_draft` |
 | `:attach` | Browser file picker returns local bytes to simulator | browser-adapted | `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions`; browser manual: attach local file |
-| `:open` | Open available fixture media in browser viewer | browser-adapted | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes`; browser manual: open media |
-| `:save <path>` | Browser download uses fixture bytes; path is not written | browser-adapted | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes`; browser manual: save media |
+| `:open` | Open available fixture media in browser viewer | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: open media |
+| `:save <path>` | Browser download uses fixture bytes; path is not written | browser-adapted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: save media |
 | `:date <ISO>` | Jump to nearest fixture message date | simulated | browser manual: date jump |
 | `:settings` | Open self profile card; shell display settings remain browser controls | browser-adapted | `tui::app::tests::settings_command_opens_the_profile`; browser manual: settings |
 | `:update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
@@ -165,8 +166,8 @@ The `PromptKind` inventory is `Message`, `Command`, `Search`, `NewChat`,
 | Report | Confirm peer report | Records locally; says no Telegram report was sent | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
 | Update offer | Apply, restart, cancel, or later | Applying is unavailable; no update is downloaded or installed | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
 | Contacts overlay | Browse, select, cancel | Native directory over seeded contacts; empty result is preserved | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data`; browser manual: contacts |
-| Media dialog | Open, save, cancel, or close | Browser viewer/download handles fixture bytes; no local path is persisted | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes`; browser manual: media and stickers |
-| Clipboard fallback | Deny browser clipboard permission | Demo reports clipboard failure rather than claiming a copy succeeded | `parity_core::selection_yank_and_quit_set_native_state`; browser manual: clipboard |
+| Media dialog | Open, save, cancel, or close | Browser viewer/download handles fixture bytes; no local path is persisted | `parity_secondary::media_open_save_cancel_and_token_sticker_use_fixture_bytes`; browser manual: media and stickers |
+| Clipboard fallback | Deny browser clipboard permission | Demo selects copied text and shows the manual-copy instruction | `shell.spec.ts` clipboard denial fallback (browser run pending CI) |
 
 ## Source inventory
 
