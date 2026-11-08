@@ -487,9 +487,9 @@ impl Driver {
         };
 
         self.app.begin_fetch(direction);
-        if let Some(effect) = self
-            .sim
-            .history_page(chat_id, direction, anchor_id, HISTORY_PAGE_SIZE)
+        if let Some(effect) =
+            self.sim
+                .history_page(chat_id, direction, anchor_id, HISTORY_PAGE_SIZE)
         {
             self.apply_effect(effect);
         } else {

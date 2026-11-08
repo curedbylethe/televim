@@ -77,32 +77,34 @@ fn install_shell_messages() -> Result<(), Box<dyn std::error::Error>> {
         .location()
         .origin()
         .map_err(|_| std::io::Error::other("browser origin is unavailable"))?;
-    let callback = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-        if event.origin() != origin {
-            return;
-        }
-        let data = event.data();
-        let Ok(kind) = js_sys::Reflect::get(&data, &JsValue::from_str("type")) else {
-            return;
-        };
-        match kind.as_string().as_deref() {
-            Some("key") => {
-                let Ok(code) = js_sys::Reflect::get(&data, &JsValue::from_str("code")) else {
-                    return;
-                };
-                let Ok(modifiers) = js_sys::Reflect::get(&data, &JsValue::from_str("modifiers"))
-                else {
-                    return;
-                };
-                if let (Some(code), Some(modifiers)) = (code.as_string(), modifiers.as_f64()) {
-                    send_key(&code, modifiers as u8);
-                }
+    let callback =
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
+            if event.origin() != origin {
+                return;
             }
-            Some("reset") => reset_demo(),
-            Some("focus") => focus_demo(),
-            _ => {}
-        }
-    });
+            let data = event.data();
+            let Ok(kind) = js_sys::Reflect::get(&data, &JsValue::from_str("type")) else {
+                return;
+            };
+            match kind.as_string().as_deref() {
+                Some("key") => {
+                    let Ok(code) = js_sys::Reflect::get(&data, &JsValue::from_str("code")) else {
+                        return;
+                    };
+                    let Ok(modifiers) =
+                        js_sys::Reflect::get(&data, &JsValue::from_str("modifiers"))
+                    else {
+                        return;
+                    };
+                    if let (Some(code), Some(modifiers)) = (code.as_string(), modifiers.as_f64()) {
+                        send_key(&code, modifiers as u8);
+                    }
+                }
+                Some("reset") => reset_demo(),
+                Some("focus") => focus_demo(),
+                _ => {}
+            }
+        });
     window
         .add_event_listener_with_callback("message", callback.as_ref().unchecked_ref())
         .map_err(|_| std::io::Error::other("failed to install the shell message bridge"))?;
