@@ -645,8 +645,9 @@ Real, and named so they are not mistaken for oversights:
   `localStorage`, IndexedDB, or native history/media cache. A reset restores the
   seeded cast and discards local changes.
 - **The cast and media are fixed fixtures.** Visitors can switch seeded accounts,
-  but cannot add accounts or use Televim's native media cache. Browser file
-  selection and downloads use local bytes and do not write native file paths.
+  but cannot add accounts or use Televim's native media cache. File selection
+  records the filename only; fixture downloads use local bytes and write no
+  native file paths.
 - **Terminal messages do not become browser links.** Link opening from message
   text is not implemented; shell navigation remains ordinary page navigation.
 - **The browser renderer does not provide terminal shaping.** It paints one glyph

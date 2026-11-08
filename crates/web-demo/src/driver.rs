@@ -244,10 +244,12 @@ impl Driver {
                 message,
             } => {
                 self.app.end_send(temp_id);
+                let _ = self
+                    .app
+                    .apply_update(&UpdateEvent::NewMessage(message.clone()));
                 if self.open_chat_id() == chat_id {
                     self.app.confirm_sent(temp_id, message.clone());
                 }
-                self.apply_chat_preview(chat_id, &message);
             }
             Effect::SendFailed {
                 temp_id, reason, ..
@@ -395,10 +397,6 @@ impl Driver {
             Effect::SwitchAccount { id } => {
                 self.switch_account(id);
             }
-            Effect::ReadMarked { chat_id, .. } => {
-                self.clear_world_unread(chat_id);
-                self.app.mark_chat_read(chat_id);
-            }
             Effect::Status(sentence) => self.app.set_status(sentence),
             Effect::UpdateUnavailable => {
                 self.app.update_cancelled();
@@ -437,23 +435,15 @@ impl Driver {
             return;
         };
         self.app.end_send(picked.temp_id);
+        let _ = self
+            .app
+            .apply_update(&UpdateEvent::NewMessage(message.clone()));
         if self.open_chat_id() == picked.chat_id {
             self.app.confirm_sent(picked.temp_id, message.clone());
         }
-        self.apply_chat_preview(picked.chat_id, &message);
         self.app.set_status(format!(
-            "Attached {name} to the offline demo; no upload occurred."
+            "Recorded {name} in the offline demo; file bytes were not read or uploaded."
         ));
-    }
-
-    fn apply_chat_preview(&mut self, chat_id: i64, message: &Message) {
-        let mut chats = self.app.chats().to_vec();
-        if let Some(chat) = chats.iter_mut().find(|chat| chat.id == chat_id) {
-            chat.last_message = Some(std::borrow::Cow::Owned(message.display_body().to_owned()));
-            chat.last_message_id = Some(message.id);
-            chat.last_timestamp = Some(message.timestamp);
-            self.app.set_chats(chats);
-        }
     }
 
     fn sync_reads(&mut self) {

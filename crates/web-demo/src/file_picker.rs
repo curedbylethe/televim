@@ -1,8 +1,11 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use domain::message::MediaKind;
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
-use web_sys::{Event, HtmlInputElement};
+use web_sys::{Event, HtmlInputElement, Window};
 
 use crate::browser::ResultEvent;
 
@@ -13,8 +16,10 @@ pub(crate) struct Picker {
 
 struct Pending {
     input: HtmlInputElement,
+    window: Window,
     _change: Closure<dyn FnMut(Event)>,
     _cancel: Closure<dyn FnMut(Event)>,
+    _focus: Closure<dyn FnMut(Event)>,
 }
 
 impl Picker {
@@ -28,8 +33,9 @@ impl Picker {
         if self.pending.is_some() {
             return Err(JsValue::from_str("a file picker is already open"));
         }
-        let document = web_sys::window()
-            .and_then(|window| window.document())
+        let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is unavailable"))?;
+        let document = window
+            .document()
             .ok_or_else(|| JsValue::from_str("document is unavailable"))?;
         let input = document
             .create_element("input")?
@@ -44,9 +50,14 @@ impl Picker {
             .ok_or_else(|| JsValue::from_str("document body is unavailable"))?
             .append_child(&input)?;
 
+        let settled = Rc::new(Cell::new(false));
         let event_input = input.clone();
         let event_results = results.clone();
+        let event_settled = Rc::clone(&settled);
         let change = Closure::wrap(Box::new(move |_event: Event| {
+            if event_settled.replace(true) {
+                return;
+            }
             let file = event_input.files().and_then(|files| files.get(0));
             remove_input(&event_input);
             event_results
@@ -60,7 +71,32 @@ impl Picker {
         }) as Box<dyn FnMut(Event)>);
 
         let event_input = input.clone();
+        let event_settled = Rc::clone(&settled);
+        let event_results = results.clone();
         let cancel = Closure::wrap(Box::new(move |_event: Event| {
+            if event_settled.replace(true) {
+                return;
+            }
+            remove_input(&event_input);
+            event_results
+                .borrow_mut()
+                .push(ResultEvent::FilePicked(crate::browser::PickedFile {
+                    chat_id,
+                    temp_id,
+                    requested,
+                    file: None,
+                }));
+        }) as Box<dyn FnMut(Event)>);
+
+        let event_input = input.clone();
+        let event_settled = settled;
+        let focus = Closure::wrap(Box::new(move |_event: Event| {
+            if event_input.files().is_some_and(|files| files.length() > 0) {
+                return;
+            }
+            if event_settled.replace(true) {
+                return;
+            }
             remove_input(&event_input);
             results
                 .borrow_mut()
@@ -74,10 +110,13 @@ impl Picker {
 
         input.add_event_listener_with_callback("change", change.as_ref().unchecked_ref())?;
         input.add_event_listener_with_callback("cancel", cancel.as_ref().unchecked_ref())?;
+        window.add_event_listener_with_callback("focus", focus.as_ref().unchecked_ref())?;
         self.pending = Some(Pending {
             input: input.clone(),
+            window,
             _change: change,
             _cancel: cancel,
+            _focus: focus,
         });
         input.click();
         Ok(())
@@ -86,6 +125,10 @@ impl Picker {
     pub fn clear(&mut self) {
         if let Some(pending) = self.pending.take() {
             remove_input(&pending.input);
+            let _ = pending.window.remove_event_listener_with_callback(
+                "focus",
+                pending._focus.as_ref().unchecked_ref(),
+            );
         }
     }
 }

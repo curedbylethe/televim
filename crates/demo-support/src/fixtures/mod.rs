@@ -5,7 +5,6 @@ mod people;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use domain::presence::Presence;
 use tui::KnownAccount;
 
 use crate::{DemoAccount, DemoMedia};
@@ -59,18 +58,6 @@ fn account(index: usize, base_timestamp: i64, cast: &[domain::account::Account])
 
     let blocked = BTreeSet::from([chat_ids[2]]);
     let local_names = BTreeMap::from([(chat_ids[0], "Northstar notes".to_owned())]);
-    let typing = BTreeSet::from([chat_ids[1]]);
-    let presence = BTreeMap::from([
-        (chat_ids[0], Presence::Online),
-        (
-            chat_ids[1],
-            Presence::Offline {
-                was_online: i32::try_from(base_timestamp.saturating_sub(3_600)).unwrap_or(i32::MAX),
-            },
-        ),
-        (chat_ids[2], Presence::Recently),
-    ]);
-
     DemoAccount {
         id,
         label,
@@ -85,7 +72,5 @@ fn account(index: usize, base_timestamp: i64, cast: &[domain::account::Account])
         blocked,
         local_names,
         media,
-        typing,
-        presence,
     }
 }
