@@ -2,7 +2,7 @@ use demo_support::{DemoAccount, DemoSimulator, DemoWorld, Effect};
 use domain::{message::Message, presence::Presence, updates::UpdateEvent};
 use tui::{
     App, ConnectionState, SessionStore,
-    app::Action,
+    app::{Action, FetchDirection},
     bidi::BidiMode,
     state::ui::{GraphicsMode, StickerMode},
 };
@@ -14,6 +14,7 @@ use crate::{
 };
 
 const OFFLINE_STATUS: &str = "Offline demo · fictional conversations · no Telegram connection.";
+const HISTORY_PAGE_SIZE: usize = 8;
 
 pub struct Driver {
     pub app: App,
@@ -123,6 +124,7 @@ impl Driver {
         self.app.expire_typing(now);
         self.app.open_settled_card(now);
         self.seed_open_chat();
+        self.request_history_page();
         self.sync_reads();
         if let Some(text) = self.app.take_clipboard() {
             self.browser.copy(&mut self.app, text);
@@ -210,6 +212,31 @@ impl Driver {
         match effect {
             Effect::Update(event) => {
                 let _ = self.app.apply_update(&event);
+            }
+            Effect::HistoryPage {
+                chat_id,
+                direction,
+                messages,
+                exhausted,
+            } => {
+                if chat_id != self.app.current_chat_id() {
+                    return;
+                }
+                match direction {
+                    FetchDirection::Latest => {
+                        self.app.apply_latest(messages);
+                    }
+                    FetchDirection::Older => {
+                        self.app.apply_older(messages);
+                    }
+                    FetchDirection::Newer => {
+                        self.app.apply_newer(messages);
+                    }
+                }
+                self.app.end_fetch(direction);
+                if exhausted {
+                    self.app.exhaust(direction);
+                }
             }
             Effect::Sent {
                 chat_id,
@@ -432,8 +459,43 @@ impl Driver {
             return;
         }
         self.seeded_chat_id = chat_id;
-        let messages = self.sim.world.active().messages(chat_id).to_vec();
-        self.app.apply_latest(messages);
+        let messages = self.sim.world.active().messages(chat_id);
+        self.app.apply_latest(latest_page(messages));
+        self.app.exhaust(FetchDirection::Newer);
+        if messages.len() <= HISTORY_PAGE_SIZE {
+            self.app.exhaust(FetchDirection::Older);
+        }
+    }
+
+    fn request_history_page(&mut self) {
+        let chat_id = self.app.current_chat_id();
+        if chat_id == 0 {
+            return;
+        }
+        let (direction, anchor_id) = if self.app.wants_older() {
+            let Some(message) = self.app.conversation.conversation.window.iter().next() else {
+                return;
+            };
+            (FetchDirection::Older, message.id)
+        } else if self.app.wants_newer() {
+            let Some(message) = self.app.conversation.conversation.window.iter().last() else {
+                return;
+            };
+            (FetchDirection::Newer, message.id)
+        } else {
+            return;
+        };
+
+        self.app.begin_fetch(direction);
+        if let Some(effect) = self
+            .sim
+            .history_page(chat_id, direction, anchor_id, HISTORY_PAGE_SIZE)
+        {
+            self.apply_effect(effect);
+        } else {
+            self.app.end_fetch(direction);
+            self.app.exhaust(direction);
+        }
     }
 
     fn clear_world_unread(&mut self, chat_id: i64) {
@@ -489,8 +551,21 @@ fn build_app(account: &DemoAccount, base_timestamp: i64, offset_seconds: i64) ->
         app.set_local_name(*peer_id, Some(name));
     }
     app.select_chat_by_id(account.default_chat);
-    app.apply_latest(account.messages(account.default_chat).to_vec());
+    let messages = account.messages(account.default_chat);
+    app.apply_latest(latest_page(messages));
+    app.exhaust(FetchDirection::Newer);
+    if messages.len() <= HISTORY_PAGE_SIZE {
+        app.exhaust(FetchDirection::Older);
+    }
     app.record_now(base_timestamp, offset_seconds);
     app.set_status(OFFLINE_STATUS);
     app
+}
+
+fn latest_page(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .skip(messages.len().saturating_sub(HISTORY_PAGE_SIZE))
+        .cloned()
+        .collect()
 }
