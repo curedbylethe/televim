@@ -1,6 +1,10 @@
 mod backend;
+mod browser;
+mod clipboard;
 mod driver;
+mod file_picker;
 mod input;
+mod media_viewer;
 
 use std::{cell::RefCell, rc::Rc};
 

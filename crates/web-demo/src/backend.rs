@@ -48,6 +48,9 @@ where
         let driver = Rc::clone(&driver);
         move |key| {
             if let Some(key) = to_key(key) {
+                if driver.borrow().browser.dialog_open() {
+                    return;
+                }
                 let mut driver = driver.borrow_mut();
                 driver.tick();
                 driver.handle_key(key);

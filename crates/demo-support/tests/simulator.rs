@@ -234,6 +234,33 @@ fn send_success_and_failure_are_scheduled() {
 }
 
 #[test]
+fn selected_attachment_uses_a_fresh_message_id_and_persists_metadata() {
+    let mut sim = simulator();
+    let chat_id = sim.world.active().default_chat;
+    let previous_max = sim
+        .world
+        .active()
+        .messages
+        .values()
+        .flatten()
+        .map(|message| message.id)
+        .max()
+        .expect("fixtures contain messages");
+
+    let message = sim
+        .attachment_message(chat_id, "sketch.png".to_owned(), MediaKind::Photo)
+        .expect("fixture chat exists");
+
+    assert!(message.id > previous_max);
+    assert_eq!(message.text, "sketch.png");
+    assert_eq!(message.media, Some(MediaKind::Photo));
+    assert!(message.is_outgoing);
+    assert!(sim.world.active().messages(chat_id).iter().any(|stored| {
+        stored.id == message.id && stored.text == message.text && stored.media == message.media
+    }));
+}
+
+#[test]
 fn edit_delete_and_forward_mutate_world() {
     let mut sim = simulator();
     let app = app_for(&sim);
