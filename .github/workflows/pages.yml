@@ -1,0 +1,72 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/web-demo/**"
+      - "crates/demo-support/**"
+      - "crates/tui/**"
+      - "crates/domain/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Makefile"
+      - "scripts/wasm/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/configure-pages@v6
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.22.1
+
+      - name: Build and audit Pages artifact
+        run: |
+          PUBLIC_URL=/televim/ make wasm-pages
+          python3 scripts/wasm/size.py crates/web-demo/dist | tee target/web-demo-size.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-demo-size
+          path: target/web-demo-size.txt
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: crates/web-demo/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
