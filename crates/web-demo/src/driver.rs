@@ -99,7 +99,8 @@ impl Driver {
             }
             if self.app.take_retry_request() {
                 any = true;
-                self.app.flash("Retry is unavailable: the offline demo has no Telegram connection.");
+                self.app
+                    .flash("Retry is unavailable: the offline demo has no Telegram connection.");
             }
             while self.app.take_session_action().is_some() {
                 any = true;
