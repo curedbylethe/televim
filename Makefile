@@ -98,6 +98,7 @@ boundary: ## Assert that only telegram-framework can reach grammers
 
 .PHONY: wasm-check
 wasm-check: ## Type-check the detached browser demo for wasm32
+	$(CARGO) fmt --manifest-path crates/web-demo/Cargo.toml -- --check
 	$(CARGO) check --manifest-path crates/web-demo/Cargo.toml --target wasm32-unknown-unknown
 
 .PHONY: wasm-build
