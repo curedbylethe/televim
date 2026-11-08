@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Televim · Offline terminal</title>
+  <link data-trunk rel="rust" data-wasm-opt="z">
+  <link data-trunk rel="copy-file" href="index.html">
+  <link data-trunk rel="copy-file" href="shell.css">
+  <link data-trunk rel="copy-file" href="shell.js">
+  <link data-trunk rel="copy-file" href="poster.txt">
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #0d0d0d; }
+    #demo { width: 800px; height: 480px; outline: none; }
+    #demo:focus-visible { outline: 2px solid #b01e28; outline-offset: -2px; }
+    dialog[data-televim-demo-dialog] { max-width: min(90vw, 720px); max-height: 85vh; overflow: auto; border: 1px solid #0d0d0d; padding: 24px; background: #ede4d3; color: #0d0d0d; font: 16px/1.5 system-ui, sans-serif; }
+    dialog[data-televim-demo-dialog]::backdrop { background: rgb(13 13 13 / 78%); }
+    dialog[data-televim-demo-dialog] h2 { margin: 0 0 16px; }
+    dialog[data-televim-demo-dialog] textarea { display: block; width: min(70vw, 640px); min-height: 12rem; margin: 16px 0; }
+    dialog[data-televim-demo-dialog] button { min-height: 44px; padding: 8px 16px; border: 1px solid #0d0d0d; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+    dialog[data-televim-demo-dialog] :focus-visible { outline: 2px solid #b01e28; outline-offset: 3px; }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <div id="demo" tabindex="0" role="application" aria-roledescription="terminal"
+       aria-label="Televim terminal. Fictional conversations, offline."></div>
+  <noscript><p>This demo needs JavaScript and WebAssembly.</p></noscript>
+</body>
+</html>

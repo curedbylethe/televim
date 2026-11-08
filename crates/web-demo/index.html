@@ -1,12 +1,118 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Televim WASM feasibility</title>
-    <link data-trunk rel="rust" data-wasm-opt="z" />
-  </head>
-  <body>
-    <main id="demo" aria-label="Televim WASM feasibility"></main>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Televim · Interactive demo</title>
+  <link rel="stylesheet" href="./shell.css">
+</head>
+<body>
+  <main class="dossier">
+    <p class="crumb">Project dossier <span aria-hidden="true">/</span> Televim <span aria-hidden="true">/</span> Exhibit</p>
+    <article class="plate" id="plate" data-state="poster" aria-labelledby="plate-title">
+      <header class="plate-head">
+        <span>Televim</span>
+        <span>Rust <span aria-hidden="true">/</span> Ratatui <span aria-hidden="true">/</span> WebAssembly</span>
+      </header>
+      <div class="plate-title">
+        <h1 id="plate-title">Televim</h1>
+        <p class="lede">A keyboard-driven Telegram client that runs in a terminal, written in Rust.</p>
+      </div>
+
+      <div class="plate-body">
+        <section class="stage" aria-label="Televim terminal demo">
+          <div class="poster" data-show="poster unsupported failed">
+            <p class="poster-label">Frame from the real Televim TUI · fictional data</p>
+            <pre class="poster-frame" id="poster-frame" aria-label="Static frame from Televim"><!-- poster.txt is loaded by the static page --></pre>
+          </div>
+
+          <div class="prov-strip" data-show="running released" hidden>
+            <div>
+              <p class="prov-label">Interactive Rust/WASM demo · fictional conversations · offline</p>
+              <p class="prov-sub">This is the real Televim interface. Every chat, name and message in it is fictional.</p>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn secondary" id="reset">Reset demo</button>
+              <button type="button" class="btn secondary" id="release" data-show="running" hidden>Release keyboard</button>
+            </div>
+          </div>
+
+          <p class="term-help" id="term-help">Tab and arrows go to Televim. Press Tab to move focus, or use Release keyboard to return to the page. Bare Esc is used by Televim; Ctrl+Alt+Escape releases the keyboard.</p>
+          <div class="term-scroll" id="term-scroll" data-show="loading running released" hidden>
+            <div class="term" id="term">
+              <iframe id="demo-frame" title="Televim interactive demo" allow="clipboard-write" aria-describedby="term-help" tabindex="-1" hidden></iframe>
+              <div class="loading" data-show="loading" hidden>
+                <span class="spinner" aria-hidden="true"></span>
+                <p>Loading the real Televim interface…</p>
+                <button type="button" class="btn secondary" id="cancel">Cancel</button>
+              </div>
+              <button type="button" class="scrim" id="scrim" data-show="released" hidden>
+                <span class="btn bone" id="interact-label">Click to interact</span>
+                <span id="released-copy">Keyboard is free. Page scroll and Tab work as usual.</span>
+              </button>
+            </div>
+          </div>
+          <p class="scroll-note" data-show="running released" hidden>The terminal uses an 80-column layout. Drag sideways to see all of it.</p>
+          <p class="accessible-link" data-show="poster loading running released failed" hidden><a class="link" id="accessible-renderer" href="#demo-frame">Use accessible DOM renderer</a></p>
+          <p id="renderer-note" class="renderer-note" hidden>WebGL2 did not start. The accessible DOM renderer is active.</p>
+
+          <div class="touch" data-show="running released" hidden>
+            <p>Press <kbd>i</kbd> in Televim before typing. Use these keys when your keyboard lacks them.</p>
+            <button type="button" class="btn secondary" id="mobile-type">Type text</button>
+            <input id="mobile-input" class="mobile-input" type="text" inputmode="text" autocomplete="off" aria-label="Type into Televim">
+            <div class="touch-keys" role="group" aria-label="Extra terminal keys">
+              <button type="button" data-key="Escape" aria-label="Send Escape">Esc</button>
+              <button type="button" data-key="Tab" aria-label="Send Tab">Tab</button>
+              <button type="button" data-modifier="Control" aria-label="Hold Control for next key" aria-pressed="false">Ctrl</button>
+              <button type="button" data-key="ArrowUp" aria-label="Send Up arrow">↑</button>
+              <button type="button" data-key="ArrowDown" aria-label="Send Down arrow">↓</button>
+              <button type="button" data-key="Enter" aria-label="Send Enter">Enter</button>
+              <button type="button" data-key="j">j</button>
+              <button type="button" data-key="k">k</button>
+              <button type="button" data-key="/">/</button>
+              <button type="button" data-key=":">:</button>
+              <button type="button" data-key="i">i</button>
+              <button type="button" data-key="v">v</button>
+              <button type="button" class="done" id="touch-done">Done</button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="side" aria-label="Demo information">
+          <section class="panel" data-show="poster">
+            <p class="prov-label">Interactive Rust/WASM demo · fictional conversations · offline</p>
+            <p class="split">The interface and its logic are Televim's own Rust code. The Telegram service is swapped for a local stand-in, so nothing here connects to Telegram.</p>
+            <p>Nothing is saved. Reset demo restores the fictional cast.</p>
+            <button type="button" class="btn primary" id="load">Load interactive demo</button>
+            <p class="hint">One static download. WebAssembly required; WebGL2 preferred, DOM fallback. Best with a physical keyboard.</p>
+            <p class="recording-note">Recording pending · <a class="link" href="#poster-frame">view static dossier</a></p>
+          </section>
+          <section class="panel" data-show="loading" hidden aria-labelledby="loading-title">
+            <h2 class="panel-h" id="loading-title">Loading the demo</h2>
+            <p>Loading the Televim module from this site. Nothing is sent to Telegram.</p>
+          </section>
+          <section class="panel" data-show="unsupported" hidden role="alert" aria-labelledby="unsupported-title">
+            <h2 class="panel-h" id="unsupported-title">This browser can't run the demo</h2>
+            <p>This demo needs WebAssembly. Your browser does not provide it.</p>
+            <a class="link" href="#poster-frame">View the static poster</a>
+          </section>
+          <section class="panel" data-show="failed" hidden role="alert" aria-labelledby="failed-title">
+            <h2 class="panel-h" id="failed-title">The demo could not load.</h2>
+            <p id="failure-copy">The module did not start. Nothing was sent to Telegram.</p>
+            <button type="button" class="btn primary" id="retry">Retry</button>
+            <a class="link" href="#poster-frame">View the static poster</a>
+          </section>
+          <section class="panel" data-show="running released" hidden aria-label="Interactive demo controls">
+            <p>The interface and its logic are Televim's own Rust code. The Telegram service is swapped for a local stand-in, so nothing here connects to Telegram.</p>
+            <p>Nothing is saved. Reset demo restores the fictional cast.</p>
+            <p class="hint">Press Ctrl+Alt+Escape or Release keyboard to return focus to the page.</p>
+          </section>
+        </aside>
+      </div>
+    </article>
+    <p id="live" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+  </main>
+  <script src="./shell.js"></script>
+</body>
 </html>
