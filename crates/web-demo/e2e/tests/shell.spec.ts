@@ -24,7 +24,7 @@ test("poster stays readable and does not fetch WebAssembly before Load", async (
 
   expect(new URL(page.url()).pathname).toBe("/televim/index.html");
   await expect(page.locator("#plate")).toHaveAttribute("data-state", "poster");
-  await expect(page.locator("#poster-frame")).not.toBeEmpty();
+  await expect(page.locator("#poster-frame")).toContainText("Juniper Reed");
   await expect(page.getByText(provenance).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Load interactive demo" })).toBeVisible();
   await expect(page.locator("#reset")).toBeHidden();
@@ -50,7 +50,7 @@ test("keyboard opens prompts and insert mode; bare Escape stays in demo", async 
   await openDomDemo(page);
   const terminal = page.frameLocator("#demo-frame").locator("#demo");
   await page.keyboard.press(":");
-  await expect(terminal).toContainText(":");
+  await expect(terminal).toContainText("Command");
   await page.keyboard.press("Escape");
   await expect(page.locator("#plate")).toHaveAttribute("data-state", "running");
 
@@ -73,7 +73,9 @@ test("Reset restores the fixture after a message is sent", async ({ page }) => {
 });
 
 test("Release returns keyboard focus to page and bare Escape does not release", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 500 });
   await openDomDemo(page);
+  const terminal = page.frameLocator("#demo-frame").locator("#demo");
   await page.keyboard.press("Escape");
   await expect(page.locator("#plate")).toHaveAttribute("data-state", "running");
 
@@ -82,13 +84,22 @@ test("Release returns keyboard focus to page and bare Escape does not release", 
   await expect(page.getByRole("button", { name: /Click to interact/ })).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.locator(":focus")).not.toHaveAttribute("id", "demo-frame");
+  await page.keyboard.press("i");
+  await page.keyboard.type("released-input");
+  await expect(terminal).not.toContainText("released-input");
+  await page.mouse.move(800, 490);
+  await page.mouse.wheel(0, 600);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
 });
 
 test("mobile controls send text and release keyboard without horizontal page overflow", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openDomDemo(page);
   const terminal = page.frameLocator("#demo-frame").locator("#demo");
+  const grid = page.frameLocator("#demo-frame").locator("#demo_ratzilla_grid");
+  const before = await grid.screenshot();
   await page.getByRole("button", { name: "j", exact: true }).click();
+  await expect.poll(async () => !(await grid.screenshot()).equals(before)).toBe(true);
   await page.getByRole("button", { name: "k", exact: true }).click();
   await page.getByRole("button", { name: "i", exact: true }).click();
   await page.getByRole("button", { name: "Type text" }).click();
@@ -105,6 +116,8 @@ test("mobile controls send text and release keyboard without horizontal page ove
   }));
   expect(sizes.body).toBeLessThanOrEqual(sizes.viewport);
   await expect(page.getByRole("group", { name: "Extra terminal keys" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send Left arrow" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send Right arrow" })).toBeVisible();
 });
 
 test("synthetic IME commit is not duplicated, and same text typed later is accepted", async ({ page }) => {

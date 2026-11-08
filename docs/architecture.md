@@ -306,7 +306,7 @@ not reopen this decision.
 
 ### `tui`
 
-`ratatui` widgets and `crossterm` event handling. Depends on `domain` but **not**
+`ratatui` widgets and portable key handling through `tui::key`. Depends on `domain` but **not**
 on `proto` or `telegram-framework`.
 
 ```
@@ -335,7 +335,7 @@ crates/tui/
 │   ├── date.rs         # Civil dates: day keys, labels and `HH:MM`. Pure; no clock
 │   ├── emoji.rs        # The `:query` under the caret, and its candidates
 │   ├── presence.rs     # Presence -> the words on screen ("online", "last seen today"). Pure; the caller passes now
-│   ├── event.rs        # crossterm KeyEvent -> AppAction (context-free keys only)
+│   ├── event.rs        # portable KeyEvent -> AppAction (context-free keys only)
 │   ├── bidi.rs         # Which way a message reads, and the logical ranges one
 │                      #   wrapped row is drawn in, already permuted
 │   ├── grapheme.rs     # Cluster edges: what a delete removes, where a row may break

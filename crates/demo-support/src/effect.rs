@@ -125,10 +125,6 @@ pub enum Effect {
     SwitchAccount {
         id: i64,
     },
-    ReadMarked {
-        chat_id: i64,
-        max_id: i64,
-    },
     Status(String),
     UpdateUnavailable,
 }

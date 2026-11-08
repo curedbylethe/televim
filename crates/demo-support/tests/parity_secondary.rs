@@ -48,10 +48,20 @@ fn fixture() -> (DemoSimulator, App) {
     (sim, app)
 }
 
+fn assert_active_chat(sim: &DemoSimulator, chat_id: i64) {
+    assert!(
+        sim.world
+            .active()
+            .chats
+            .iter()
+            .any(|chat| chat.id == chat_id)
+    );
+}
+
 #[test]
 fn pins_archives_and_account_switches_update_the_fictional_world() {
     let (mut sim, mut app) = fixture();
-    let chat_id = app.current_chat_id();
+    let chat_id = sim.world.active().default_chat;
     let chat_title = app.chats()[app.list.selected_chat].title.clone();
     let second = sim
         .world
@@ -98,6 +108,9 @@ fn pins_archives_and_account_switches_update_the_fictional_world() {
         "archiving open chat closes it"
     );
     assert!(!app.chats().iter().any(|chat| chat.id == chat_id));
+    let fallback_chat = sim.world.active().default_chat;
+    assert_ne!(fallback_chat, chat_id);
+    assert_active_chat(&sim, fallback_chat);
 
     let restored = sim.dispatch(
         &app,
@@ -133,6 +146,7 @@ fn pins_archives_and_account_switches_update_the_fictional_world() {
     ));
     assert_eq!(sim.world.active().id, other_account);
     assert!(sim.world.switch_to(original_account));
+    assert_active_chat(&sim, fallback_chat);
     assert!(
         sim.world
             .active()

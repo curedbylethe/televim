@@ -1,6 +1,6 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
-use domain::message::MessageStatus;
+use domain::message::{Message, MessageStatus};
 use ratzilla::{
     event::{KeyCode, KeyEvent},
     ratatui::{Terminal, backend::TestBackend},
@@ -107,6 +107,60 @@ fn simulator_send_applies_sent_effect_to_app() {
         .find(|message| message.text == "wasm test message")
         .expect("simulated send appears in app history");
     assert_eq!(sent.status, MessageStatus::Sent);
+}
+
+#[wasm_bindgen_test]
+fn sent_and_edited_effects_keep_chat_preview_message_cache() {
+    let mut driver = Driver::new();
+    let chat_id = driver.open_chat_id();
+    let message = Message {
+        id: 70_001,
+        chat_id,
+        text: Cow::Borrowed("preview before edit"),
+        timestamp: 1_730_000_100,
+        status: MessageStatus::Sent,
+        is_outgoing: true,
+        reply_to: None,
+        media: None,
+        media_id: None,
+    };
+    driver.sim.schedule(
+        0,
+        demo_support::Effect::Sent {
+            chat_id,
+            temp_id: -70_001,
+            message,
+        },
+    );
+    driver.tick();
+    assert_eq!(
+        driver
+            .app
+            .chats()
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.last_message.as_deref()),
+        Some("preview before edit")
+    );
+
+    driver.sim.schedule(
+        0,
+        demo_support::Effect::Edited {
+            chat_id,
+            message_id: 70_001,
+            text: "preview after edit".into(),
+        },
+    );
+    driver.tick();
+    assert_eq!(
+        driver
+            .app
+            .chats()
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| chat.last_message.as_deref()),
+        Some("preview after edit")
+    );
 }
 
 #[wasm_bindgen_test]

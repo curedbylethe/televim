@@ -81,9 +81,9 @@ WebGL2 uses Ratzilla's dynamic glyph atlas; the DOM renderer is the accessible f
 
 Composer edits and Backspace operate on grapheme clusters. Selection and yank preserve logical text order. ZWJ emoji can occupy four cells under `unicode-width` even when displayed as two; the TUI keeps those cells, and `Buffer::diff` handles VS16. Do not drop joiners, variation selectors or combining marks to make the browser frame fit.
 
-The mobile hidden input sends committed IME text as Televim keys. Intermediate composition input is ignored; Enter and Backspace wait until composition ends. Browsers without composition events use the input event fallback. Playwright includes a synthetic composition test; browser execution awaits CI because Trunk cannot fetch `minicov` locally.
+The mobile hidden input sends committed IME text as Televim keys. Intermediate composition input is ignored; Enter and Backspace wait until composition ends. Browsers without composition events use the input event fallback. Playwright includes a synthetic composition test; the gated `wasm` CI job runs it.
 
-The evidence suite covers Persian, Arabic, mixed-direction text, combining marks, emoji, search prefixes, composer editing and logical-order yank through the real `App`. Browser rendering checks remain unrun locally: Trunk metadata resolution needs `minicov` from crates.io, and this environment cannot resolve `static.crates.io`. Real OS terminal shaping, RTL terminal emulators and hardware keyboards across mobile systems are not covered.
+The evidence suite covers Persian, Arabic, mixed-direction text, combining marks, emoji, search prefixes, composer editing and logical-order yank through the real `App`. The gated `wasm` CI job runs browser rendering checks. Local browser runs require Trunk and Playwright. Real OS terminal shaping, RTL terminal emulators and hardware keyboards across mobile systems are not covered.
 
 ## Hosting and security policy
 
@@ -106,14 +106,14 @@ command is unavailable.
 
 ## Size and browser performance
 
-No final artifact or browser performance number is recorded yet. Trunk's build
-cannot complete in the current offline environment because Cargo cannot fetch
-`minicov`; the checked-in `dist/` is ignored build output and is not a valid
-measurement source. CI runs the size report on the final optimized Pages build.
+The gated `wasm` CI job builds the artifact and runs the Playwright suite. No
+final artifact-size or browser-performance number is recorded yet. The checked-in
+`dist/` is ignored build output and is not a valid measurement source; CI runs the
+size report on the optimized Pages build.
 
 | Measure | Method | Current result |
 | :--- | :--- | :--- |
-| Artifact bytes | `make wasm-size`; sum each served file after Trunk and wasm-opt | Not measured; Pages build blocked by crates.io DNS |
+| Artifact bytes | `make wasm-size`; sum each served file after Trunk and wasm-opt | Not measured |
 | Poster load | Chrome navigation timing through `domContentLoadedEventEnd` | Not measured |
 | First frame | `draw_web` posts ready after its first frame; the shell marks `televim-ready` when it receives that message | Not measured |
 | Key-to-frame | Chrome Performance trace from key event to next frame | Not measured |
@@ -135,10 +135,10 @@ budget. The browser artifact is not part of native RSS or executable size.
 
 | Criterion | Repo evidence | Status |
 | :--- | :--- | :--- |
-| AC1: real TUI in a static WebAssembly page | WASM check and browser-test target compile; Playwright browser run pending CI | Implemented; runtime check pending |
+| AC1: real TUI in a static WebAssembly page | Gated `wasm` CI builds the artifact and runs Playwright | Implemented; re-run CI after shell output fix |
 | AC2: offline fictional data and no credential path | Detached dependency tree, simulator tests and artifact audit | Implemented; final Pages artifact audit pending build |
 | AC3: supported flows use real app state | Native parity tests and [parity matrix](web-demo-parity.md) | Implemented |
 | AC4: every action handled or refused | Simulator action test and action inventory | Implemented |
-| AC5: browser, Unicode and accessibility evidence | Unit tests and Playwright specs; browser rendering cannot run locally | Implemented; browser run pending CI |
+| AC5: browser, Unicode and accessibility evidence | Unit tests and Playwright specs; gated `wasm` CI runs browser checks | Implemented; re-run CI after shell output fix |
 | AC6: portfolio loads on demand and works at Pages base path | Pages workflow, `/televim/` Playwright setup and [embed contract](web-demo-embed.md) | Repo complete; deployment and external portfolio PR pending |
-| AC7: native boundaries and builds stay intact | `make ci`, WASM check and WASM test-target compilation | Native gate passed; browser CI pending |
+| AC7: native boundaries and builds stay intact | `make ci`, WASM check and WASM test-target compilation; gated `wasm` CI runs Playwright | Native gate passed; re-run browser CI after shell output fix |

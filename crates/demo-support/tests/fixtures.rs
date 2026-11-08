@@ -69,7 +69,6 @@ fn world_has_three_complete_fictional_accounts() {
         assert_eq!(account.chats.iter().filter(|chat| chat.pinned).count(), 1);
         assert_eq!(account.archived.len(), 1);
         assert!(account.chats.iter().any(|chat| chat.unread_count > 0));
-        assert_eq!(account.typing.len(), 1);
         assert_eq!(account.blocked.len(), 1);
         assert!(account.chats[0]
             .last_message_id

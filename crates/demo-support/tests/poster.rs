@@ -33,7 +33,7 @@ fn render_real_app_fixture_poster() {
         app.exhaust(FetchDirection::Older);
     }
 
-    let backend = TestBackend::new(96, 30);
+    let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("create poster terminal");
     terminal
         .draw(|frame| app.render(frame))
@@ -52,4 +52,6 @@ fn render_real_app_fixture_poster() {
     }
     assert!(!poster.trim().is_empty());
     println!("TELEVIM_POSTER_BEGIN\n{poster}TELEVIM_POSTER_END");
+    assert!(poster.contains("Juniper Reed"));
+    assert_eq!(poster, include_str!("../../web-demo/poster.txt"));
 }

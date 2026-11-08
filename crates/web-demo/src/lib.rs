@@ -147,6 +147,9 @@ pub fn send_key(code: &str, modifiers: u8) {
     DRIVER.with(|slot| {
         if let Some(driver) = slot.borrow().as_ref() {
             let mut driver = driver.borrow_mut();
+            if driver.browser.dialog_open() {
+                return;
+            }
             driver.tick();
             driver.handle_key(key);
             driver.tick();

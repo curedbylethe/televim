@@ -1,5 +1,6 @@
 [build]
 target = "demo.html"
+html_output = "demo.html"
 dist = "dist"
 public_url = "/televim/"
 

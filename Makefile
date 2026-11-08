@@ -125,6 +125,8 @@ wasm: wasm-check wasm-test wasm-e2e wasm-boundary ## Run all browser demo checks
 .PHONY: wasm-pages
 wasm-pages: wasm-check ## Build and audit the static GitHub Pages artifact
 	cd crates/web-demo && trunk build --release --locked --public-url "$${PUBLIC_URL:-/televim/}"
+	test -f crates/web-demo/dist/index.html
+	test -f crates/web-demo/dist/demo.html
 	sh scripts/wasm/check-secrets.sh
 
 .PHONY: wasm-size

@@ -133,36 +133,43 @@ impl DemoSimulator {
                 }
             }
             Action::CancelUpload { temp_id } => {
-                let mut effects = Vec::new();
-                self.queue.retain(|scheduled| {
-                    let matches = match &scheduled.effect {
-                        Effect::UploadProgress { temp_id: id, .. }
-                        | Effect::Sent { temp_id: id, .. }
-                        | Effect::SendFailed { temp_id: id, .. } => *id == temp_id,
-                        _ => false,
-                    };
-                    if matches {
-                        match &scheduled.effect {
-                            Effect::UploadProgress { chat_id, .. }
-                            | Effect::Sent { chat_id, .. }
-                            | Effect::SendFailed { chat_id, .. } => {
-                                self.failed_uploads.push((*chat_id, temp_id));
-                            }
-                            _ => {}
+                let chat_id = self
+                    .queue
+                    .iter()
+                    .find_map(|scheduled| match &scheduled.effect {
+                        Effect::UploadProgress {
+                            chat_id,
+                            temp_id: id,
+                            ..
                         }
-                        effects.push(Effect::SendFailed {
-                            chat_id: self.failed_uploads.last().map_or(0, |(chat, _)| *chat),
-                            temp_id,
-                            reason: "Upload cancelled; nothing was sent.".into(),
-                        });
-                    }
-                    !matches
+                        | Effect::Sent {
+                            chat_id,
+                            temp_id: id,
+                            ..
+                        }
+                        | Effect::SendFailed {
+                            chat_id,
+                            temp_id: id,
+                            ..
+                        } if *id == temp_id => Some(*chat_id),
+                        _ => None,
+                    });
+                let Some(chat_id) = chat_id else {
+                    return vec![Self::status("No upload is running for that message.")];
+                };
+                self.queue.retain(|scheduled| !match &scheduled.effect {
+                    Effect::UploadProgress { temp_id: id, .. }
+                    | Effect::Sent { temp_id: id, .. }
+                    | Effect::SendFailed { temp_id: id, .. } => *id == temp_id,
+                    _ => false,
                 });
-                if effects.is_empty() {
-                    vec![Self::status("No upload is running for that message.")]
-                } else {
-                    effects
-                }
+                self.failed_uploads.retain(|(_, id)| *id != temp_id);
+                self.failed_uploads.push((chat_id, temp_id));
+                vec![Effect::SendFailed {
+                    chat_id,
+                    temp_id,
+                    reason: "Upload cancelled; nothing was sent.".into(),
+                }]
             }
             Action::RetryUpload { chat_id, temp_id } => {
                 if let Some(index) = self
@@ -171,6 +178,15 @@ impl DemoSimulator {
                     .position(|entry| *entry == (chat_id, temp_id))
                 {
                     self.failed_uploads.remove(index);
+                    self.queue.retain(|scheduled| {
+                        !matches!(
+                            &scheduled.effect,
+                            Effect::UploadProgress { temp_id: id, .. }
+                                | Effect::Sent { temp_id: id, .. }
+                                | Effect::SendFailed { temp_id: id, .. }
+                                if *id == temp_id
+                        )
+                    });
                     let message = self.new_message(
                         chat_id,
                         String::new(),
@@ -179,7 +195,6 @@ impl DemoSimulator {
                         None,
                         Some(MediaKind::File),
                     );
-                    self.push_message(&message);
                     self.schedule(
                         450,
                         Effect::Sent {
@@ -195,6 +210,15 @@ impl DemoSimulator {
             }
             Action::DismissUpload { temp_id } => {
                 self.failed_uploads.retain(|(_, id)| *id != temp_id);
+                self.queue.retain(|scheduled| {
+                    !matches!(
+                        &scheduled.effect,
+                        Effect::UploadProgress { temp_id: id, .. }
+                            | Effect::Sent { temp_id: id, .. }
+                            | Effect::SendFailed { temp_id: id, .. }
+                            if *id == temp_id
+                    )
+                });
                 vec![Self::status("Attachment dismissed.")]
             }
             Action::Edit {
@@ -230,6 +254,9 @@ impl DemoSimulator {
                     )];
                 }
                 messages.retain(|message| !found.contains(&message.id));
+                self.active_mut()
+                    .media
+                    .retain(|(id, message_id), _| *id != chat_id || !found.contains(message_id));
                 vec![Effect::Deleted {
                     chat_id,
                     message_ids: found,
@@ -245,31 +272,38 @@ impl DemoSimulator {
                         "The destination conversation is not in the demo.",
                     )];
                 }
-                let copies: Vec<Message> = self
+                let copies: Vec<_> = self
                     .active()
                     .messages(chat_id)
                     .iter()
                     .filter(|message| message_ids.contains(&message.id))
-                    .cloned()
+                    .map(|message| {
+                        (
+                            message.clone(),
+                            self.active().media.get(&(chat_id, message.id)).cloned(),
+                        )
+                    })
                     .collect();
                 if copies.is_empty() {
                     return vec![Self::status("No matching message exists to forward.")];
                 }
-                let forwarded: Vec<_> = copies
-                    .into_iter()
-                    .map(|message| {
-                        self.new_message(
-                            dest_chat_id,
-                            message.text.to_string(),
-                            true,
-                            MessageStatus::Sent,
-                            None,
-                            message.media,
-                        )
-                    })
-                    .collect();
-                for message in &forwarded {
-                    self.push_message(message);
+                let mut forwarded = Vec::with_capacity(copies.len());
+                for (source, media) in copies {
+                    let message = self.new_message(
+                        dest_chat_id,
+                        source.text.to_string(),
+                        true,
+                        MessageStatus::Sent,
+                        None,
+                        source.media,
+                    );
+                    if let Some(media) = media {
+                        self.active_mut()
+                            .media
+                            .insert((dest_chat_id, message.id), media);
+                    }
+                    self.push_message(&message);
+                    forwarded.push(message);
                 }
                 vec![Effect::Forwarded {
                     dest_chat_id,
@@ -456,6 +490,11 @@ impl DemoSimulator {
                     move_chat(&mut account.archived, &mut account.chats, chat_id)
                 };
                 if moved {
+                    if (archived && account.default_chat == chat_id)
+                        || (!archived && account.default_chat == 0)
+                    {
+                        account.default_chat = account.chats.first().map_or(0, |chat| chat.id);
+                    }
                     vec![Effect::Archived { chat_id, archived }]
                 } else {
                     vec![Self::status("That conversation is not in the demo.")]
@@ -494,6 +533,9 @@ impl DemoSimulator {
                 account.archived.retain(|chat| chat.id != chat_id);
                 account.messages.remove(&chat_id);
                 account.media.retain(|(id, _), _| *id != chat_id);
+                if account.default_chat == chat_id {
+                    account.default_chat = account.chats.first().map_or(0, |chat| chat.id);
+                }
                 if before == account.chats.len() + account.archived.len() {
                     vec![Self::status("That conversation is not in the demo.")]
                 } else {
@@ -536,6 +578,29 @@ impl DemoSimulator {
             .is_some_and(|item| item.due_ms <= self.now_ms)
         {
             if let Some(item) = self.queue.pop_front() {
+                match &item.effect {
+                    Effect::Update(UpdateEvent::NewMessage(message)) if !message.is_outgoing => {
+                        if self.active().blocked.contains(&message.chat_id) {
+                            continue;
+                        }
+                        self.push_message(message);
+                        if self.open_chat_id != Some(message.chat_id)
+                            && let Some(chat) = self.chat_mut(message.chat_id)
+                        {
+                            chat.unread_count = chat.unread_count.saturating_add(1);
+                        }
+                    }
+                    Effect::Sent { message, .. }
+                        if !self
+                            .active()
+                            .messages(message.chat_id)
+                            .iter()
+                            .any(|saved| saved.id == message.id) =>
+                    {
+                        self.push_message(message);
+                    }
+                    _ => {}
+                }
                 due.push(item.effect);
             }
         }
@@ -552,19 +617,12 @@ impl DemoSimulator {
         &mut self,
         chat_id: i64,
         filename: String,
-        kind: MediaKind,
+        _kind: MediaKind,
     ) -> Option<Message> {
         if !self.has_chat(chat_id) {
             return None;
         }
-        let message = self.new_message(
-            chat_id,
-            filename,
-            true,
-            MessageStatus::Sent,
-            None,
-            Some(kind),
-        );
+        let message = self.new_message(chat_id, filename, true, MessageStatus::Sent, None, None);
         self.push_message(&message);
         Some(message)
     }
@@ -587,12 +645,6 @@ impl DemoSimulator {
             None,
             media,
         );
-        self.push_message(&message);
-        if self.open_chat_id != Some(chat_id)
-            && let Some(chat) = self.chat_mut(chat_id)
-        {
-            chat.unread_count = chat.unread_count.saturating_add(1);
-        }
         self.schedule(delay_ms, Effect::Update(UpdateEvent::NewMessage(message)));
     }
 
@@ -614,6 +666,9 @@ impl DemoSimulator {
         if let Some(messages) = self.active_mut().messages.get_mut(&chat_id) {
             messages.retain(|message| !message_ids.contains(&message.id));
         }
+        self.active_mut()
+            .media
+            .retain(|(id, message_id), _| *id != chat_id || !message_ids.contains(message_id));
         self.schedule(
             delay_ms,
             Effect::Update(UpdateEvent::MessagesDeleted { message_ids }),
@@ -621,11 +676,6 @@ impl DemoSimulator {
     }
 
     pub fn schedule_typing(&mut self, chat_id: i64, typing: bool, delay_ms: u64) {
-        if typing {
-            self.active_mut().typing.insert(chat_id);
-        } else {
-            self.active_mut().typing.remove(&chat_id);
-        }
         self.schedule(
             delay_ms,
             Effect::Update(UpdateEvent::PeerTyping { chat_id, typing }),
@@ -633,7 +683,6 @@ impl DemoSimulator {
     }
 
     pub fn schedule_presence(&mut self, chat_id: i64, presence: Presence, delay_ms: u64) {
-        self.active_mut().presence.insert(chat_id, presence);
         if let Some(chat) = self.chat_mut(chat_id) {
             chat.presence = Some(presence);
         }
@@ -712,39 +761,6 @@ impl DemoSimulator {
         Self::status("Simulated reconnect only; no Telegram connection.")
     }
 
-    pub fn schedule_upload(&mut self, chat_id: i64, temp_id: i64, total: u64, steps: u8) {
-        let count = steps.max(1);
-        for step in 1..=count {
-            let sent = total.saturating_mul(u64::from(step)) / u64::from(count);
-            self.schedule(
-                u64::from(step) * 200,
-                Effect::UploadProgress {
-                    chat_id,
-                    temp_id,
-                    sent,
-                    total,
-                },
-            );
-        }
-        let message = self.new_message(
-            chat_id,
-            String::new(),
-            true,
-            MessageStatus::Sent,
-            None,
-            Some(MediaKind::File),
-        );
-        self.push_message(&message);
-        self.schedule(
-            u64::from(count) * 200 + 100,
-            Effect::Sent {
-                chat_id,
-                temp_id,
-                message,
-            },
-        );
-    }
-
     pub fn schedule_download(&mut self, chat_id: i64, message_id: i64, total: u64, steps: u8) {
         let count = steps.max(1);
         for step in 1..=count {
@@ -759,18 +775,6 @@ impl DemoSimulator {
                 },
             );
         }
-    }
-
-    pub fn schedule_failure(&mut self, chat_id: i64, temp_id: i64, reason: &str, delay_ms: u64) {
-        self.failed_uploads.push((chat_id, temp_id));
-        self.schedule(
-            delay_ms,
-            Effect::SendFailed {
-                chat_id,
-                temp_id,
-                reason: reason.to_owned(),
-            },
-        );
     }
 
     pub fn record_failed_upload(&mut self, chat_id: i64, temp_id: i64) {

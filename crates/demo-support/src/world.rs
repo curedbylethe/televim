@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use domain::account::Account;
 use domain::chat::Chat;
 use domain::message::MediaKind;
-use domain::presence::Presence;
 use domain::user::UserCandidate;
 use tui::KnownAccount;
 
@@ -22,8 +21,6 @@ pub struct DemoAccount {
     pub blocked: BTreeSet<i64>,
     pub local_names: BTreeMap<i64, String>,
     pub media: BTreeMap<(i64, i64), DemoMedia>,
-    pub typing: BTreeSet<i64>,
-    pub presence: BTreeMap<i64, Presence>,
     pub default_chat: i64,
 }
 

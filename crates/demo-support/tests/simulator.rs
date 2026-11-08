@@ -254,7 +254,7 @@ fn send_success_and_failure_are_scheduled() {
 }
 
 #[test]
-fn selected_attachment_uses_a_fresh_message_id_and_persists_metadata() {
+fn selected_attachment_records_filename_without_claiming_file_bytes() {
     let mut sim = simulator();
     let chat_id = sim.world.active().default_chat;
     let previous_max = sim
@@ -273,7 +273,7 @@ fn selected_attachment_uses_a_fresh_message_id_and_persists_metadata() {
 
     assert!(message.id > previous_max);
     assert_eq!(message.text, "sketch.png");
-    assert_eq!(message.media, Some(MediaKind::Photo));
+    assert_eq!(message.media, None);
     assert!(message.is_outgoing);
     assert!(sim.world.active().messages(chat_id).iter().any(|stored| {
         stored.id == message.id && stored.text == message.text && stored.media == message.media
@@ -293,11 +293,23 @@ fn edit_delete_and_forward_mutate_world() {
         .find(|chat| chat.id != chat_id)
         .map_or(chat_id, |chat| chat.id);
     let destination_count = sim.world.active().messages(dest).len();
+    let media = sim
+        .world
+        .active()
+        .media
+        .values()
+        .next()
+        .cloned()
+        .expect("fixtures contain media");
+    sim.world
+        .active_mut()
+        .media
+        .insert((chat_id, 50), media.clone());
     sim.world.active_mut().messages.insert(
         chat_id,
         vec![Message {
             is_outgoing: true,
-            ..message(chat_id, 50, "original", 1_730_000_001, None)
+            ..message(chat_id, 50, "original", 1_730_000_001, Some(media.kind))
         }],
     );
     assert!(matches!(
@@ -316,8 +328,25 @@ fn edit_delete_and_forward_mutate_world() {
         sim.world.active().messages(chat_id)[0].display_body(),
         "changed"
     );
-    assert!(
-        matches!(sim.dispatch(&app, Action::Forward { chat_id, message_ids: vec![50], dest_chat_id: dest }).as_slice(), [Effect::Forwarded { messages, .. }] if messages.len() == 1)
+    let forward_effects = sim.dispatch(
+        &app,
+        Action::Forward {
+            chat_id,
+            message_ids: vec![50],
+            dest_chat_id: dest,
+        },
+    );
+    let [Effect::Forwarded { messages, .. }] = forward_effects.as_slice() else {
+        panic!("message forwards");
+    };
+    let forwarded_id = messages[0].id;
+    assert_eq!(
+        sim.world
+            .active()
+            .media
+            .get(&(dest, forwarded_id))
+            .map(|m| &m.bytes),
+        Some(&media.bytes)
     );
     assert_eq!(
         sim.world.active().messages(dest).len(),
@@ -327,6 +356,9 @@ fn edit_delete_and_forward_mutate_world() {
         matches!(sim.dispatch(&app, Action::Delete { chat_id, message_ids: vec![50] }).as_slice(), [Effect::Deleted { message_ids, .. }] if message_ids == &[50])
     );
     assert!(sim.world.active().messages(chat_id).is_empty());
+    assert!(!sim.world.active().media.contains_key(&(chat_id, 50)));
+    sim.schedule_delete(dest, vec![forwarded_id], 0);
+    assert!(!sim.world.active().media.contains_key(&(dest, forwarded_id)));
 }
 
 #[test]
@@ -489,10 +521,27 @@ fn scheduled_arrivals_respect_open_chat_and_timing() {
         .active()
         .chat(closed)
         .map_or(0, |chat| chat.unread_count);
+    let open_messages = sim.world.active().messages(open).len();
+    let closed_messages = sim.world.active().messages(closed).len();
     sim.schedule_arrival(open, "hello", None, 100);
     sim.schedule_arrival(closed, "hello", None, 100);
     sim.schedule_typing(closed, true, 200);
     sim.schedule_presence(closed, Presence::Online, 300);
+    assert_eq!(
+        sim.world.active().chat(open).map(|chat| chat.unread_count),
+        Some(open_unread)
+    );
+    assert_eq!(sim.world.active().messages(open).len(), open_messages);
+    assert_eq!(sim.world.active().messages(closed).len(), closed_messages);
+    assert_eq!(
+        sim.world
+            .active()
+            .chat(closed)
+            .map(|chat| chat.unread_count),
+        Some(closed_unread)
+    );
+    assert_eq!(sim.advance(99).len(), 0);
+    assert_eq!(sim.advance(1).len(), 2);
     assert_eq!(
         sim.world.active().chat(open).map(|chat| chat.unread_count),
         Some(open_unread)
@@ -504,8 +553,11 @@ fn scheduled_arrivals_respect_open_chat_and_timing() {
             .map(|chat| chat.unread_count),
         Some(closed_unread + 1)
     );
-    assert_eq!(sim.advance(99).len(), 0);
-    assert_eq!(sim.advance(1).len(), 2);
+    assert_eq!(sim.world.active().messages(open).len(), open_messages + 1);
+    assert_eq!(
+        sim.world.active().messages(closed).len(),
+        closed_messages + 1
+    );
     assert!(matches!(
         sim.advance(100).as_slice(),
         [Effect::Update(domain::updates::UpdateEvent::PeerTyping {
@@ -582,6 +634,124 @@ fn blocked_peer_arrivals_are_suppressed_until_unblocked() {
             .chat(chat_id)
             .map(|chat| chat.unread_count),
         Some(before_unread + 1)
+    );
+
+    let unblocked_chat = sim
+        .world
+        .active()
+        .chats
+        .iter()
+        .find(|chat| chat.id != chat_id)
+        .expect("fixture has an unblocked chat")
+        .id;
+    let before_messages = sim.world.active().messages(unblocked_chat).len();
+    let before_unread = sim
+        .world
+        .active()
+        .chat(unblocked_chat)
+        .expect("chat exists")
+        .unread_count;
+    sim.schedule_arrival(unblocked_chat, "blocked before delivery", None, 100);
+    sim.dispatch(
+        &app,
+        Action::SetBlocked {
+            peer_id: unblocked_chat,
+            name: "Fixture peer".into(),
+            blocked: true,
+        },
+    );
+    assert!(sim.advance(100).is_empty());
+    assert_eq!(
+        sim.world.active().messages(unblocked_chat).len(),
+        before_messages
+    );
+    assert_eq!(
+        sim.world
+            .active()
+            .chat(unblocked_chat)
+            .expect("chat exists")
+            .unread_count,
+        before_unread
+    );
+}
+
+#[test]
+fn cancelled_upload_retries_once_without_early_world_message() {
+    let mut sim = simulator();
+    let app = app_for(&sim);
+    let chat_id = sim.world.active().default_chat;
+    let before = sim.world.active().messages(chat_id).len();
+    let temp_id = -900;
+    sim.schedule(
+        100,
+        Effect::UploadProgress {
+            chat_id,
+            temp_id,
+            sent: 1,
+            total: 2,
+        },
+    );
+    sim.schedule(
+        300,
+        Effect::SendFailed {
+            chat_id,
+            temp_id,
+            reason: "old failure".into(),
+        },
+    );
+
+    assert!(matches!(
+        sim.dispatch(&app, Action::CancelUpload { temp_id }).as_slice(),
+        [Effect::SendFailed { reason, .. }] if reason == "Upload cancelled; nothing was sent."
+    ));
+    sim.dispatch(&app, Action::RetryUpload { chat_id, temp_id });
+    assert!(sim.advance(449).is_empty());
+    assert_eq!(sim.world.active().messages(chat_id).len(), before);
+    assert!(matches!(
+        sim.advance(1).as_slice(),
+        [Effect::Sent { temp_id: id, .. }] if *id == temp_id
+    ));
+    assert_eq!(sim.world.active().messages(chat_id).len(), before + 1);
+
+    sim.schedule(
+        100,
+        Effect::SendFailed {
+            chat_id,
+            temp_id: -901,
+            reason: "old failure".into(),
+        },
+    );
+    sim.record_failed_upload(chat_id, -901);
+    sim.dispatch(&app, Action::DismissUpload { temp_id: -901 });
+    assert!(sim.advance(100).is_empty());
+}
+
+#[test]
+fn deleting_default_chat_selects_an_active_fallback() {
+    let mut sim = simulator();
+    let app = app_for(&sim);
+    let deleted = sim.world.active().default_chat;
+
+    assert!(matches!(
+        sim.dispatch(
+            &app,
+            Action::DeleteConversation {
+                chat_id: deleted,
+                name: "Fixture peer".into(),
+                both: false,
+            }
+        )
+        .as_slice(),
+        [Effect::ConversationDeleted { chat_id }] if *chat_id == deleted
+    ));
+    let fallback = sim.world.active().default_chat;
+    assert_ne!(fallback, deleted);
+    assert!(
+        sim.world
+            .active()
+            .chats
+            .iter()
+            .any(|chat| chat.id == fallback)
     );
 }
 

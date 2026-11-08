@@ -47,6 +47,7 @@ pub fn from_touch_key(code: &str, bits: u8) -> Option<TuiKeyEvent> {
     }
     let code = match code {
         "Escape" => TuiKeyCode::Esc,
+        "Tab" if modifiers.contains(KeyModifiers::SHIFT) => TuiKeyCode::BackTab,
         "Tab" => TuiKeyCode::Tab,
         "Enter" => TuiKeyCode::Enter,
         "Backspace" => TuiKeyCode::Backspace,
@@ -86,5 +87,9 @@ mod tests {
             Some(TuiKeyEvent::new(TuiKeyCode::Up, KeyModifiers::CONTROL))
         );
         assert_eq!(from_touch_key("unknown-key", 0), None);
+        assert_eq!(
+            from_touch_key("Tab", 4),
+            Some(TuiKeyEvent::new(TuiKeyCode::BackTab, KeyModifiers::SHIFT))
+        );
     }
 }
