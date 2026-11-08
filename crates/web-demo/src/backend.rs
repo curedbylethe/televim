@@ -1,12 +1,13 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::driver::Driver;
+use crate::driver::{Driver, DriverExit};
 use gloo_timers::callback::Interval;
 use ratzilla::{
     DomBackend, WebGl2Backend, WebRenderer,
     backend::webgl2::{FontAtlasConfig, WebGl2BackendOptions},
     ratatui::{Terminal, backend::Backend},
 };
+use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::input::to_key;
 
@@ -17,6 +18,7 @@ enum Renderer {
 
 thread_local! {
     static TICKER: RefCell<Option<Interval>> = const { RefCell::new(None) };
+    static CTRL_W_GUARD: RefCell<Option<Closure<dyn FnMut(web_sys::KeyboardEvent)>>> = const { RefCell::new(None) };
 }
 
 pub fn run(driver: Rc<RefCell<Driver>>) -> Result<(), Box<dyn std::error::Error>> {
@@ -30,9 +32,10 @@ pub fn run(driver: Rc<RefCell<Driver>>) -> Result<(), Box<dyn std::error::Error>
     };
 
     match renderer {
-        Renderer::Dom => run_backend(DomBackend::new()?, driver),
+        Renderer::Dom => run_backend(DomBackend::new_by_id("demo")?, driver),
         Renderer::WebGl2 => {
             let options = WebGl2BackendOptions::new()
+                .grid_id("demo")
                 .font_atlas_config(FontAtlasConfig::dynamic(&["JetBrains Mono"], 16.0));
             run_backend(WebGl2Backend::new_with_options(options)?, driver)
         }
@@ -43,6 +46,7 @@ fn run_backend<B>(backend: B, driver: Rc<RefCell<Driver>>) -> Result<(), Box<dyn
 where
     B: Backend + ratzilla::WebEventHandler + 'static,
 {
+    install_ctrl_w_guard()?;
     let mut terminal = Terminal::new(backend)?;
     terminal.on_key_event({
         let driver = Rc::clone(&driver);
@@ -55,6 +59,9 @@ where
                 driver.tick();
                 driver.handle_key(key);
                 driver.tick();
+                if driver.take_exit() == DriverExit::Quit {
+                    crate::notify_quit();
+                }
             }
         }
     })?;
@@ -63,5 +70,31 @@ where
     let tick_driver = Rc::clone(&driver);
     let ticker = Interval::new(100, move || tick_driver.borrow_mut().tick());
     TICKER.with(|slot| *slot.borrow_mut() = Some(ticker));
+    Ok(())
+}
+
+fn install_ctrl_w_guard() -> Result<(), Box<dyn std::error::Error>> {
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| std::io::Error::other("browser document is unavailable"))?;
+    let mount = document
+        .get_element_by_id("demo")
+        .ok_or_else(|| std::io::Error::other("demo terminal mount is unavailable"))?;
+    let guard =
+        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
+            let terminal_focused = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.active_element())
+                .is_some_and(|active| {
+                    active.tag_name() == "CANVAS" || active.id() == "demo_ratzilla_grid"
+                });
+            if terminal_focused && event.ctrl_key() && event.key().eq_ignore_ascii_case("w") {
+                event.prevent_default();
+            }
+        });
+    mount
+        .add_event_listener_with_callback("keydown", guard.as_ref().unchecked_ref())
+        .map_err(|_| std::io::Error::other("failed to install the terminal Ctrl-W guard"))?;
+    CTRL_W_GUARD.with(|slot| *slot.borrow_mut() = Some(guard));
     Ok(())
 }

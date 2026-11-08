@@ -24,6 +24,15 @@ pub struct Driver {
     last_tick: Instant,
     offset_seconds: i64,
     seeded_chat_id: i64,
+    exit: DriverExit,
+    quit_notified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DriverExit {
+    #[default]
+    None,
+    Quit,
 }
 
 impl Driver {
@@ -49,12 +58,17 @@ impl Driver {
             last_tick: now,
             offset_seconds,
             seeded_chat_id,
+            exit: DriverExit::None,
+            quit_notified: false,
         };
         driver.schedule_intro();
         driver
     }
 
     pub fn tick(&mut self) {
+        if self.exit != DriverExit::None {
+            return;
+        }
         for picked in self.browser.process(&mut self.app) {
             self.apply_picked_file(picked);
         }
@@ -113,6 +127,9 @@ impl Driver {
         if let Some(text) = self.app.take_clipboard() {
             self.browser.copy(&mut self.app, text);
         }
+        if self.app.ui.should_quit && !self.quit_notified {
+            self.exit = DriverExit::Quit;
+        }
     }
 
     pub fn handle_key(&mut self, key: tui::key::KeyEvent) {
@@ -120,7 +137,17 @@ impl Driver {
     }
 
     pub fn render(&self, frame: &mut ratzilla::ratatui::Frame<'_>) {
-        self.app.render(frame);
+        if self.exit == DriverExit::None && !self.app.ui.should_quit {
+            self.app.render(frame);
+        }
+    }
+
+    pub fn take_exit(&mut self) -> DriverExit {
+        let exit = std::mem::take(&mut self.exit);
+        if exit == DriverExit::Quit {
+            self.quit_notified = true;
+        }
+        exit
     }
 
     pub fn reset(&mut self) {
