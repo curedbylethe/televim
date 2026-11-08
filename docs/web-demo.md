@@ -135,10 +135,10 @@ budget. The browser artifact is not part of native RSS or executable size.
 
 | Criterion | Repo evidence | Status |
 | :--- | :--- | :--- |
-| AC1: real TUI in a static WebAssembly page | Gated `wasm` CI builds the artifact and runs Playwright | Browser Rust tests pending rerun after timestamp fix |
+| AC1: real TUI in a static WebAssembly page | Gated `wasm` CI builds the artifact and runs Playwright | Browser Rust tests pass; Playwright pending |
 | AC2: offline fictional data and no credential path | Detached dependency tree, simulator tests and artifact audit | Implemented; final Pages artifact audit pending build |
 | AC3: supported flows use real app state | Native parity tests and [parity matrix](web-demo-parity.md) | Implemented |
 | AC4: every action handled or refused | Simulator action test and action inventory | Implemented |
-| AC5: browser, Unicode and accessibility evidence | Unit tests and Playwright specs; gated `wasm` CI runs browser checks | Browser Rust tests pending rerun after timestamp fix |
+| AC5: browser, Unicode and accessibility evidence | Unit tests and Playwright specs; gated `wasm` CI runs browser checks | Browser Rust tests pass; Playwright pending |
 | AC6: portfolio loads on demand and works at Pages base path | Pages workflow, `/televim/` Playwright setup and [embed contract](web-demo-embed.md) | Repo complete; deployment and external portfolio PR pending |
-| AC7: native boundaries and builds stay intact | `make ci`, WASM check and WASM test-target compilation; gated `wasm` CI runs Playwright | Native gate passed; browser Rust tests pending rerun after timestamp fix |
+| AC7: native boundaries and builds stay intact | `make ci`, WASM check and WASM test-target compilation; gated `wasm` CI runs Playwright | Native gate passed; browser Rust tests pass; Playwright pending |
