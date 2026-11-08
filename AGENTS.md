@@ -24,9 +24,11 @@ match the compiler edition — both are `2024`.
 2. **Respect the dependency rule.** `domain` knows nothing of
    `telegram-framework`, `tui`, `tokio`, `ratatui` or `grammers`; `tui` depends
    on `domain` but **not** on `proto` or `telegram-framework`; `app`
-   orchestrates them. Only `telegram-framework` may reference `grammers` types,
-   and `make boundary` is what proves it. Need protocol data in `domain`? Add a
-   plain DTO.
+   orchestrates them. Detached `web-demo` may depend on `domain`, `tui` and
+   `demo-support`, but not on `app`, `proto` or `telegram-framework`. Only
+   `telegram-framework` may reference `grammers` types, and `make boundary` plus
+   `make wasm-boundary` prove the two trees. Need protocol data in `domain`? Add
+   a plain DTO.
 3. **Do not use `unwrap()` in production code** — it is denied by Clippy. Use
    `expect()` with a message, or propagate with `?`.
 4. **Keep `panic = "abort"` semantics in mind.** No unwinding: error recovery
@@ -66,7 +68,9 @@ match the compiler edition — both are `2024`.
     nothing else does, and it is the gate CI runs on a pull request that changes
     code, less `build-release` — the release build and the memory budget run
     only on a push to `main` that changes code, nightly, and pull requests
-    labelled for the budget.
+    labelled for the budget. For changes under `crates/web-demo` or
+    `crates/demo-support`, also run the relevant `make wasm-*` targets; `make ci`
+    remains the native gate.
 12. **These files describe what exists.** If a change makes one of them wrong —
     a new dependency, a moved module, a feature that now works — update it in
     the same commit.
@@ -82,7 +86,8 @@ Individual targets, and what each one proves, are in
 
 | Command | Why it exists |
 | :------ | :------------ |
-| `make boundary` | asserts no `grammers` crate outside `telegram-framework` |
+| `make boundary` | checks root workspace for `grammers` outside `telegram-framework` |
+| `make wasm-boundary` | asserts the detached `web-demo` tree has no Telegram crates |
 | `make lint` | `clippy --all-targets --all-features -- -D warnings` |
 | `make test` | `test --all --all-features` |
 | `make design-check` | fails if `design/` and the OpenDesign project differ; **skips loudly** when there is no project on the machine |
@@ -99,5 +104,8 @@ Individual targets, and what each one proves, are in
 | [`docs/decisions.md`](./docs/decisions.md) | Key Decisions — the ADRs, each with the reasoning behind it |
 | [`docs/testing.md`](./docs/testing.md) | Quality harness, the `Makefile`, CI pipelines, the test layers |
 | [`docs/memory.md`](./docs/memory.md) | The memory budget: what is built, what is declared, what is unmeasured |
+| [`docs/web-demo.md`](./docs/web-demo.md) | Browser demo architecture, build, hosting and limitations |
+| [`docs/web-demo-parity.md`](./docs/web-demo-parity.md) | Browser feature parity and evidence matrix |
+| [`docs/web-demo-embed.md`](./docs/web-demo-embed.md) | Portfolio iframe integration contract |
 | [`docs/known-gaps.md`](./docs/known-gaps.md) | Known Gaps — real ones, named so they are not mistaken for oversights — and the v2 hooks |
 | [`DESIGN.md`](./DESIGN.md) | The design system the vendored model in `design/` implements |

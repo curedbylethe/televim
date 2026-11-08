@@ -2,25 +2,36 @@
 
 This matrix tracks current native controls against the browser demo. **simulated** means real Rust state and deterministic local behavior. **browser-adapted** means real Rust behavior uses a browser capability or shell path. **impossible** means the browser has no honest equivalent. **native-missing** means documentation names a feature absent from the current TUI.
 
-Browser checks below are manual until Stage 11 adds Playwright. Stage 08 adds secondary flows; Stage 10 adds Unicode and bidi evidence.
+Playwright specs cover the shell's poster, lazy load, keyboard, Reset, focus
+release, mobile input and IME, failure states, provenance, network boundary and
+WebGL2 startup. The browser suite is committed but has not run locally because
+Trunk cannot fetch `minicov` from crates.io; CI runs it in the gated `wasm` job.
+Other browser-adapted rows still need the listed manual check.
+
+| Browser check | Evidence | Local result |
+| :--- | :--- | :--- |
+| Poster, lazy module load, provenance, no external requests | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
+| Keyboard prompts, Insert, bare Esc, Reset and release | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
+| Mobile keys, text input and committed IME | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
+| Unsupported, failed and WebGL2 states | [`shell.spec.ts`](../crates/web-demo/e2e/tests/shell.spec.ts) | Not run; Trunk build blocked by crates.io DNS |
 
 | Area | Flow / key | Native trigger | Demo behavior | Category | Evidence |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | Modes | Normal | `Esc` from Insert or Visual | Real `Mode::Normal` | simulated | `parity_core::modes_counts_motion_and_focus_use_native_handlers` |
 | Modes | Insert | `i` | Real composer mode | simulated | `parity_core::modes_counts_motion_and_focus_use_native_handlers` |
 | Modes | Visual | `v` | Real character selection mode | simulated | `parity_core::selection_yank_and_quit_set_native_state` |
-| Modes | Linewise Visual | `V` | Real line selection mode | manual: browser core modes | browser manual: core modes |
+| Modes | Linewise Visual | `V` | Real line selection mode | simulated | `parity_core::selection_yank_and_quit_set_native_state`; browser manual: core modes |
 | Counts | Counted motion | `3j`, `3k`, `2w` | Native pending count and motion | simulated | `parity_core::modes_counts_motion_and_focus_use_native_handlers` |
-| Motions | Chat message | `j`, `k`, `h`, `l`, `w`, `b`, `e`, `0`, `$`, `gg`, `G` | Native conversation cursor | manual: browser core motions | browser manual: core motions |
-| Motions | Page | `Ctrl-d`, `Ctrl-u`, `PageUp`, `PageDown` | Native conversation window paging | manual: browser core paging | browser manual: core paging |
-| Motions | Jump history | `Ctrl-o`, `Ctrl-i` | Native jump list | manual: browser jump history |
+| Motions | Chat message | `j`, `k`, `h`, `l`, `w`, `b`, `e`, `0`, `$`, `gg`, `G` | Native conversation cursor | simulated | `parity_core::modes_counts_motion_and_focus_use_native_handlers`; browser manual: core motions |
+| Motions | Page | `Ctrl-d`, `Ctrl-u`, `PageUp`, `PageDown` | Native conversation window paging | simulated | `tui::app::tests::a_page_moves_a_screenful_and_the_bottom_re_engages_following`; browser manual: core paging |
+| Motions | Jump history | `Ctrl-o`, `Ctrl-i` | Native jump list | simulated | `tui::jumplist::tests::the_first_walk_back_marks_where_the_reader_was`; browser manual: jump history |
 | Operators | Delete or yank with motion | `d` / `y` + motion, `dd`, `yy` | Native operator state and action | simulated | `parity_core::invalid_count_clears_and_visual_delete_asks_for_confirmation`; `parity_core::selection_yank_and_quit_set_native_state` |
 | Focus | Cycle panes | `Tab`, `BackTab` | Native pane focus | simulated | `parity_core::modes_counts_motion_and_focus_use_native_handlers` |
-| Focus | Conversation or profile | `h`, `l`, `Enter` | Native chat and profile navigation | manual: browser focus and cards | browser manual: focus and cards |
-| Prompt | Open command prompt | `:` | Native command prompt | manual: browser prompt | browser manual: command prompt |
-| Prompt | Search chats | `?` | Native chat search | manual: browser prompt | browser manual: chat search |
-| Prompt | Search current chat | `/`, `n`, `N` | Native message search | manual: browser prompt | browser manual: message search |
-| Scrolling | Follow and jump | `gg`, `G`, `Ctrl-d`, `Ctrl-u` | Native conversation window | manual: browser scrolling | browser manual: scrolling |
+| Focus | Conversation or profile | `h`, `l`, `Enter` | Native chat and profile navigation | simulated | `tui::app::tests::h_leaves_the_conversation_for_the_chat_list_and_l_comes_back`; browser manual: focus and cards |
+| Prompt | Open command prompt | `:` | Native command prompt | simulated | `tui::app::tests::opening_the_command_prompt_keeps_the_draft`; browser manual: command prompt |
+| Prompt | Search chats | `?` | Native global search | simulated | `tui::app::tests::the_global_prompt_is_titled_search`; browser manual: chat search |
+| Prompt | Search current chat | `/`, `n`, `N` | Native message search | simulated | `tui::app::tests::a_slash_on_the_conversation_still_opens_the_message_search`; browser manual: message search |
+| Scrolling | Follow and jump | `gg`, `G`, `Ctrl-d`, `Ctrl-u` | Native conversation window | simulated | `tui::app::tests::a_page_moves_a_screenful_and_the_bottom_re_engages_following`; browser manual: scrolling |
 | Scrolling | Mouse wheel | Mouse wheel | Browser scroll input reaches the focused terminal | browser-adapted | browser manual: mouse scrolling |
 | Selection | Character selection and yank | `v`, motion, `y` | Native selection; yank text goes through clipboard bridge | browser-adapted | `parity_core::selection_yank_and_quit_set_native_state`; browser manual: clipboard |
 | Selection | Line selection | `V`, motion, `y` | Native line selection and clipboard bridge | browser-adapted | browser manual: line selection and clipboard |
@@ -30,7 +41,7 @@ Browser checks below are manual until Stage 11 adds Playwright. Stage 08 adds se
 | Drafts | Edit and switch chats | `i`, type, `Esc`, switch away and back | Native in-memory draft store | simulated | `parity_core::emoji_completion_and_draft_survive_chat_switch` |
 | Drafts | Reset | Reset button | New demo world clears drafts and local changes | browser-adapted | browser manual: reset clears state |
 | Emoji | Complete shortcode | Type `:smile`, `Tab` or `Enter` | Native popup inserts emoji into composer | simulated | `parity_core::emoji_completion_and_draft_survive_chat_switch` |
-| Emoji | Filter and dismiss | Type shortcode, `Up` / `Down` / `Esc` | Native popup filtering and dismissal | manual: browser emoji popup |
+| Emoji | Filter and dismiss | Type shortcode, `Up` / `Down` / `Esc` | Native popup filtering and dismissal | simulated | `tui::app::tests::a_character_keeps_filtering_and_keeps_the_popup_open`; `tui::app::tests::escape_puts_the_completion_away_and_leaves_the_draft_alone`; browser manual: emoji popup |
 | Rename | Set or clear contact name | `:rename` | Native local name action updates chat and profile | simulated | `parity_core::rename_sets_and_clears_local_name` |
 | Messaging | Send | `Enter` | Native optimistic send and deterministic simulator result | simulated | `parity_core::send_and_reply_use_fixture_state`; `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions` |
 | Messaging | Edit, delete, reply | `e`, `d`, `r` | Native message operations with local simulator effects | simulated | `parity_core::edit_uses_fixture_state`; `parity_core::delete_uses_fixture_state`; `parity_core::send_and_reply_use_fixture_state` |
@@ -60,17 +71,37 @@ Browser checks below are manual until Stage 11 adds Playwright. Stage 08 adds se
 | Settings | Open settings | `:settings` | Native command opens the self profile card; browser shell keeps display settings | browser-adapted | `tui::app::tests::settings_command_opens_the_profile`; browser manual: settings card and shell controls |
 | Simulator | Every TUI action | Native action dispatch | Every `Action` variant has an effect or an explicit refusal | simulated | `simulator::every_action_has_an_effect`; `simulator::unsupported_native_actions_say_why` |
 
+## Action coverage
+
+Every `tui::Action` variant has an explicit row below. The simulator test
+`simulator::every_action_has_an_effect` checks all variants return a meaningful
+effect; refusal rows also use `simulator::unsupported_native_actions_say_why`.
+
+| Action variants | Demo outcome | Category | Evidence |
+| :--- | :--- | :--- | :--- |
+| `Update` | Updates stay disabled in the offline demo | impossible | `parity_secondary::browser_only_actions_and_reconnect_keep_offline_claims_honest` |
+| `Send`, `Edit`, `Delete`, `Forward` | Mutate fictional messages through the local simulator | simulated | `parity_core::send_and_reply_use_fixture_state`; `simulator::edit_delete_and_forward_mutate_world` |
+| `SendAttachment` | Browser file picker supplies local bytes | browser-adapted | `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions` |
+| `CancelUpload`, `RetryUpload`, `DismissUpload` | Stop, retry or dismiss a local fixture upload | simulated | `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions` |
+| `FetchContact`, `FetchContacts`, `ResolveUser` | Read seeded profiles, contacts and candidates | simulated | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
+| `Search`, `GlobalSearch`, `MoreGlobal` | Search local messages and page deterministic results | simulated | `parity_secondary::filtered_global_search_pages_append_to_real_search_state` |
+| `TogglePin`, `SwitchAccount` | Change the active fictional account's local state | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world` |
+| `Login`, `LoginCancelled`, `AddAccount`, `Logout`, `ExportSession`, `ImportSession`, `SubmitSessionPassphrase`, `ChangeSessionPassphrase` | Refuse sign-in, account and session operations with status text | impossible | `simulator::unsupported_native_actions_say_why` |
+| `OpenMedia`, `SaveMedia` | Open or download local fixture bytes through browser APIs | browser-adapted | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes` |
+| `CancelMediaDownload` | Cancel a deterministic local fixture download | simulated | `parity_secondary::media_open_save_cancel_and_sticker_decode_use_fixture_bytes` |
+| `SetArchived`, `SetBlocked`, `SetLocalName`, `DeleteConversation`, `ReportPeer` | Apply local account and contact changes; no server request | simulated | `parity_secondary::pins_archives_and_account_switches_update_the_fictional_world`; `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data`; `simulator::local_mutations_persist_until_reset` |
+
 ## Unicode and bidi
 
 | Flow | Demo behavior | Category | Evidence |
 | :--- | :--- | :--- | :--- |
-| Persian, Arabic, mixed direction and combining marks | Real `App` renders fixture text in Visual mode | simulated | `unicode::app_renders_unicode_corpus_without_losing_glyphs`; browser rendering check not run locally: Trunk unavailable and crates.io DNS blocked |
+| Persian, Arabic, mixed direction and combining marks | Real `App` renders fixture text in Visual mode | simulated | `unicode::app_renders_unicode_corpus_without_losing_glyphs`; browser rendering not run locally: Trunk cannot fetch `minicov` because crates.io DNS fails |
 | Bidi modes | Visual output is stable and differs from Terminal and Words output | simulated | `unicode::visual_render_is_stable_and_differs_from_terminal_order` |
 | Composer and Backspace | Persian text and decomposed graphemes stay intact; Backspace removes one grapheme | simulated | `unicode::composer_keeps_rtl_text_and_deletes_one_grapheme` |
 | Selection and yank | Character selection and yank preserve logical RTL order | simulated | `unicode::character_selection_yanks_original_logical_text` |
 | RTL search prefix | Search matches Arabic and Persian prefixes without byte slicing | simulated | `unicode::arabic_search_uses_character_prefixes` |
 | Emoji shortcode and following text | Full ZWJ emoji inserts without corrupting the next character | simulated | `unicode::emoji_shortcode_inserts_full_sequence_before_following_text` |
-| Mobile IME | Composition sends committed text once; Enter and Backspace wait for composition to end | browser-adapted | Browser manual and synthetic Playwright composition check pending Stage 11 |
+| Mobile IME | Composition sends committed text once; Enter and Backspace wait for composition to end | browser-adapted | Playwright synthetic composition test in `shell.spec.ts` (not run locally; CI pending); browser manual: mobile IME |
 
 Browser text is one glyph per cell. Bidi reorder does not shape Arabic or join letters across cells. Browser screenshots do not prove terminal compatibility.
 
@@ -109,6 +140,12 @@ Every command in the product list has a row here. Supported commands use native 
 | `:report [reason]` | “Report recorded locally. No report was sent to Telegram.” | simulated | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
 
 ## Overlay inventory
+
+The `PromptKind` inventory is `Message`, `Command`, `Search`, `NewChat`,
+`GlobalSearch`, `Reply`, `Edit`, `Phone`, `Code`, `Password`, `Passphrase`,
+`NewPassphrase` and `RepeatPassphrase`. The `ConfirmKind` inventory is `Quit`,
+`Restart`, `DiscardDraft`, `Logout`, `ImportSession`, `ChangePassphrase`,
+`Attach`, `DeleteMessages`, `Block`, `DeleteConversation` and `Report`.
 
 | Overlay | Native flow | Demo outcome | Evidence |
 | :--- | :--- | :--- | :--- |

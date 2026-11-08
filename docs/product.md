@@ -493,3 +493,14 @@ Working today:
   offers for that version, while `:update` can reopen it. A verified update
   replaces the executable and offers Restart or Later; Restart asks for
   confirmation and exits so the next launch uses the new version.
+
+### Browser demo
+
+The offline browser demo renders the real `tui::App` with fictional conversations
+and local simulator effects. It has no Telegram connection, native session,
+terminal-compatibility guarantee, or persistent browser state. Reset restores the
+fixture. Build and verification commands, hosting details, limitations and the
+feature-by-feature evidence matrix live in [`web-demo.md`](./web-demo.md) and
+[`web-demo-parity.md`](./web-demo-parity.md). The public artifact is planned for
+[`https://curedbylethe.github.io/televim/`](https://curedbylethe.github.io/televim/);
+the portfolio iframe contract lives in [`web-demo-embed.md`](./web-demo-embed.md).
