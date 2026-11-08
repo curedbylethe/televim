@@ -28,6 +28,12 @@ pub fn run() -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(all(target_arch = "wasm32", not(test)))]
+#[wasm_bindgen(start)]
+pub fn start() -> Result<(), JsValue> {
+    run().map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
 pub fn notify_quit() {
     notify("quit-demo", None);
 }

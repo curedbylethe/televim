@@ -25,7 +25,9 @@ test("poster stays readable and does not fetch WebAssembly before Load", async (
   expect(new URL(page.url()).pathname).toBe("/televim/index.html");
   await expect(page.locator("#plate")).toHaveAttribute("data-state", "poster");
   await expect(page.locator("#poster-frame")).toContainText("Juniper Reed");
-  await expect(page.getByText(provenance).first()).toBeVisible();
+  const posterProvenance = page.locator('.side [data-show="poster"] .prov-label');
+  await expect(posterProvenance).toBeVisible();
+  await expect(posterProvenance).toHaveText(provenance);
   await expect(page.getByRole("button", { name: "Load interactive demo" })).toBeVisible();
   await expect(page.locator("#reset")).toBeHidden();
   expect(wasmRequests).toEqual([]);
@@ -42,7 +44,9 @@ test("Load requests one module and exposes running state with provenance", async
 
   expect(wasmRequests).toHaveLength(1);
   await expect(page.locator("#demo-frame")).toBeVisible();
-  await expect(page.getByText(provenance).first()).toBeVisible();
+  const runningProvenance = page.locator(".prov-strip .prov-label");
+  await expect(runningProvenance).toBeVisible();
+  await expect(runningProvenance).toHaveText(provenance);
   expect(await page.evaluate(() => performance.getEntriesByName("televim-ready", "mark").length)).toBe(1);
 });
 
@@ -261,7 +265,9 @@ test("page identifies fictional offline provenance and makes no Telegram or stor
   const requests: string[] = [];
   page.on("request", (request) => requests.push(request.url()));
   await openPoster(page);
-  await expect(page.getByText(provenance).first()).toBeVisible();
+  const posterProvenance = page.locator('.side [data-show="poster"] .prov-label');
+  await expect(posterProvenance).toBeVisible();
+  await expect(posterProvenance).toHaveText(provenance);
   await expect(page.getByText(/Telegram service is swapped for a local stand-in/i)).toBeVisible();
 
   const storage = await page.evaluate(() => ({
