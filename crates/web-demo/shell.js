@@ -10,6 +10,8 @@
   let controlHeld = false;
   let activeRenderer = "webgl2";
   let rendererFallback = false;
+  let composing = false;
+  let suppressCommittedInput = "";
 
   function announce(message) {
     live.textContent = "";
@@ -128,6 +130,12 @@
     if (plate.dataset.state === "running") post({ type: "key", code, modifiers });
   }
 
+  function sendText(text) {
+    for (const character of text) sendKey(character);
+    controlHeld = false;
+    $("[data-modifier='Control']").setAttribute("aria-pressed", "false");
+  }
+
   $("#load").addEventListener("click", () => start());
   $("#retry").addEventListener("click", () => {
     retryUsed = true;
@@ -230,22 +238,48 @@
     releaseKeyboard();
   });
   $("#mobile-type").addEventListener("click", () => mobileInput.focus());
-  mobileInput.addEventListener("input", () => {
-    for (const character of mobileInput.value) sendKey(character, controlHeld ? 1 : 0);
+  mobileInput.addEventListener("compositionstart", () => {
+    composing = true;
+    suppressCommittedInput = "";
+  });
+  mobileInput.addEventListener("compositionupdate", () => {
+    composing = true;
+  });
+  mobileInput.addEventListener("compositionend", (event) => {
+    composing = false;
+    const committed = event.data;
+    if (committed) {
+      sendText(committed);
+      suppressCommittedInput = committed;
+      window.setTimeout(() => {
+        if (suppressCommittedInput === committed) suppressCommittedInput = "";
+      }, 0);
+    }
     mobileInput.value = "";
-    controlHeld = false;
-    $("[data-modifier='Control']").setAttribute("aria-pressed", "false");
+  });
+  mobileInput.addEventListener("input", (event) => {
+    const text = mobileInput.value;
+    if (composing || event.isComposing || !text) return;
+    if (text === suppressCommittedInput) {
+      suppressCommittedInput = "";
+    } else {
+      suppressCommittedInput = "";
+      sendText(text);
+    }
+    mobileInput.value = "";
   });
   mobileInput.addEventListener("focus", () => {
     if (plate.dataset.state === "released" && !ended) show("running");
   });
   mobileInput.addEventListener("beforeinput", (event) => {
+    if (composing || event.isComposing) return;
     if (event.inputType === "deleteContentBackward") {
       event.preventDefault();
       sendKey("Backspace");
     }
   });
   mobileInput.addEventListener("keydown", (event) => {
+    if (composing || event.isComposing) return;
     if (event.key === "Enter") {
       event.preventDefault();
       sendKey("Enter");
