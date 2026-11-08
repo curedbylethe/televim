@@ -74,6 +74,7 @@ use crate::config::Config;
 use crate::draft_store::DraftFile;
 use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
+use crate::notify::{DesktopNotifier, Notifier};
 use crate::runtime::AppEvent;
 use crate::update;
 
@@ -706,6 +707,10 @@ struct Switch {
 /// What the loop knows about the network between events.
 #[derive(Default)]
 pub struct State {
+    /// The best-effort desktop notification delivery path, disabled by config.
+    #[expect(dead_code, reason = "stage 06 reads the notification sink")]
+    notify: Option<Arc<dyn Notifier + Send + Sync>>,
+
     /// Cooperative cancellation token for the active update staging worker.
     update_cancel: Option<Arc<AtomicBool>>,
     /// The client, once it is up.
@@ -919,7 +924,10 @@ impl State {
     /// that hangs rather than fails.
     #[must_use]
     pub fn new(cfg: Config, config_path: PathBuf, tx: UnboundedSender<AppEvent>) -> Self {
+        let notify = (cfg.notifications != "off")
+            .then(|| Arc::new(DesktopNotifier) as Arc<dyn Notifier + Send + Sync>);
         Self {
+            notify,
             cfg: Some(cfg),
             config_path,
             tx: Some(tx),
