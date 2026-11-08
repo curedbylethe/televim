@@ -33,3 +33,58 @@ pub fn to_key(key: ratzilla::event::KeyEvent) -> Option<TuiKeyEvent> {
     };
     Some(TuiKeyEvent::new(code, modifiers))
 }
+
+pub fn from_touch_key(code: &str, bits: u8) -> Option<TuiKeyEvent> {
+    let mut modifiers = KeyModifiers::NONE;
+    if bits & 1 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if bits & 2 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if bits & 4 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    let code = match code {
+        "Escape" => TuiKeyCode::Esc,
+        "Tab" => TuiKeyCode::Tab,
+        "Enter" => TuiKeyCode::Enter,
+        "Backspace" => TuiKeyCode::Backspace,
+        "ArrowLeft" => TuiKeyCode::Left,
+        "ArrowRight" => TuiKeyCode::Right,
+        "ArrowUp" => TuiKeyCode::Up,
+        "ArrowDown" => TuiKeyCode::Down,
+        "Delete" => TuiKeyCode::Delete,
+        "Home" => TuiKeyCode::Home,
+        "End" => TuiKeyCode::End,
+        "PageUp" => TuiKeyCode::PageUp,
+        "PageDown" => TuiKeyCode::PageDown,
+        _ => {
+            let mut chars = code.chars();
+            let character = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            TuiKeyCode::Char(character)
+        }
+    };
+    Some(TuiKeyEvent::new(code, modifiers))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touch_keys_preserve_characters_special_keys_and_modifiers() {
+        assert_eq!(
+            from_touch_key("j", 0),
+            Some(TuiKeyEvent::new(TuiKeyCode::Char('j'), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            from_touch_key("ArrowUp", 1),
+            Some(TuiKeyEvent::new(TuiKeyCode::Up, KeyModifiers::CONTROL))
+        );
+        assert_eq!(from_touch_key("unknown-key", 0), None);
+    }
+}
