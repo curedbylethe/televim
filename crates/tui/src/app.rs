@@ -608,9 +608,6 @@ pub enum SessionStore {
     /// have that fact nowhere to live. The store never writes plaintext, so the
     /// label does not offer a reader the other reading.
     EncryptedFile(PathBuf),
-
-    /// No session is created or saved by the offline demo.
-    OfflineDemo,
 }
 
 /// A row of the profile panel.

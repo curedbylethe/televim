@@ -65,6 +65,26 @@ fn every_action_has_an_effect() {
     }
 }
 
+#[test]
+fn browser_picker_failure_can_retry_the_same_upload() {
+    let mut sim = simulator();
+    let app = app_for(&sim);
+    let chat_id = sim.world.active().default_chat;
+    let temp_id = -700;
+    sim.record_failed_upload(chat_id, temp_id);
+
+    let effects = sim.dispatch(&app, Action::RetryUpload { chat_id, temp_id });
+    assert!(
+        matches!(effects.as_slice(), [Effect::Status(message)] if message == "The demo attachment is queued for retry.")
+    );
+
+    assert!(sim.advance(500).iter().any(|effect| matches!(
+        effect,
+        Effect::Sent { chat_id: id, temp_id: pending, .. }
+            if *id == chat_id && *pending == temp_id
+    )));
+}
+
 fn update_and_message_actions(chat_id: i64, other_chat: i64) -> Vec<Action> {
     vec![
         Action::Update(update::Action::Open),

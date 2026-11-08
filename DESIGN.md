@@ -34,6 +34,10 @@ colors:
 
 # Televim
 
+This document defines the terminal surface. The browser shell is a separate
+OpenDesign artifact, `televim-web-demo`, and uses portfolio tokens. `make
+design-check` compares `design/` with the `televim-app` project only.
+
 > Category: Developer Tools
 
 > Surface: terminal

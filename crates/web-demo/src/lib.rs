@@ -125,7 +125,13 @@ pub fn reset_demo() {
 pub fn focus_demo() {
     let Some(element) = web_sys::window()
         .and_then(|window| window.document())
-        .and_then(|document| document.get_element_by_id("demo"))
+        .and_then(|document| {
+            document
+                .query_selector("#demo canvas, #demo_ratzilla_grid")
+                .ok()
+                .flatten()
+                .or_else(|| document.get_element_by_id("demo"))
+        })
         .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
     else {
         return;

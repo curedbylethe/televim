@@ -12,6 +12,7 @@ async function openDomDemo(page: Page) {
   await page.getByRole("link", { name: "Use accessible DOM renderer" }).click();
   await expect(page.locator("#plate")).toHaveAttribute("data-state", "running");
   await expect(page.frameLocator("#demo-frame").locator("#demo")).toBeVisible();
+  await expect(page.frameLocator("#demo-frame").locator("#demo canvas, #demo_ratzilla_grid")).toBeFocused();
 }
 
 test("poster stays readable and does not fetch WebAssembly before Load", async ({ page }) => {
@@ -48,7 +49,6 @@ test("Load requests one module and exposes running state with provenance", async
 test("keyboard opens prompts and insert mode; bare Escape stays in demo", async ({ page }) => {
   await openDomDemo(page);
   const terminal = page.frameLocator("#demo-frame").locator("#demo");
-  await terminal.focus();
   await page.keyboard.press(":");
   await expect(terminal).toContainText(":");
   await page.keyboard.press("Escape");
@@ -62,7 +62,6 @@ test("keyboard opens prompts and insert mode; bare Escape stays in demo", async 
 test("Reset restores the fixture after a message is sent", async ({ page }) => {
   await openDomDemo(page);
   const terminal = page.frameLocator("#demo-frame").locator("#demo");
-  await terminal.focus();
   await page.keyboard.press("i");
   await page.keyboard.type("reset-marker");
   await page.keyboard.press("Enter");
@@ -75,8 +74,6 @@ test("Reset restores the fixture after a message is sent", async ({ page }) => {
 
 test("Release returns keyboard focus to page and bare Escape does not release", async ({ page }) => {
   await openDomDemo(page);
-  const terminal = page.frameLocator("#demo-frame").locator("#demo");
-  await terminal.focus();
   await page.keyboard.press("Escape");
   await expect(page.locator("#plate")).toHaveAttribute("data-state", "running");
 
@@ -113,7 +110,6 @@ test("mobile controls send text and release keyboard without horizontal page ove
 test("synthetic IME commit is not duplicated, and same text typed later is accepted", async ({ page }) => {
   await openDomDemo(page);
   const terminal = page.frameLocator("#demo-frame").locator("#demo");
-  await terminal.focus();
   await page.keyboard.press("i");
   await page.evaluate(() => {
     const input = document.querySelector<HTMLInputElement>("#mobile-input")!;
@@ -142,6 +138,66 @@ test("synthetic IME commit is not duplicated, and same text typed later is accep
   await expect(terminal).toContainText("ああ");
 });
 
+test("Ctrl+Alt+Escape releases keyboard and Click to interact restores it", async ({ page }) => {
+  await openDomDemo(page);
+  await page.keyboard.press("Control+Alt+Escape");
+  await expect(page.locator("#plate")).toHaveAttribute("data-state", "released");
+  await expect(page.getByRole("button", { name: /Click to interact/ })).toBeFocused();
+
+  await page.getByRole("button", { name: /Click to interact/ }).click();
+  await expect(page.locator("#plate")).toHaveAttribute("data-state", "running");
+  await expect(page.frameLocator("#demo-frame").locator("#demo canvas, #demo_ratzilla_grid")).toBeFocused();
+  await page.keyboard.press("i");
+  await page.keyboard.type("focus-restored");
+  await expect(page.frameLocator("#demo-frame").locator("#demo")).toContainText("focus-restored");
+});
+
+test("new-chat search resolves a fixture contact and opens its conversation", async ({ page }) => {
+  await openDomDemo(page);
+  const terminal = page.frameLocator("#demo-frame").locator("#demo");
+  await page.keyboard.press("h");
+  await page.keyboard.press("/");
+  await page.keyboard.type("Juniper");
+  await expect(terminal).toContainText("Juniper Reed");
+  await page.keyboard.press("Enter");
+  await expect(terminal).toContainText("Juniper Reed");
+});
+
+test("clipboard success reports copied state", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(Clipboard.prototype, "writeText", {
+      configurable: true,
+      value: async () => undefined,
+    });
+  });
+  await openDomDemo(page);
+  await page.keyboard.press("g");
+  await page.keyboard.press("g");
+  await page.keyboard.press("V");
+  await page.keyboard.press("j");
+  await page.keyboard.press("y");
+  await expect(page.frameLocator("#demo-frame").getByText("Copied to clipboard.")).toBeVisible();
+});
+
+test("clipboard denial selects text and shows the exact manual-copy fallback", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(Clipboard.prototype, "writeText", {
+      configurable: true,
+      value: () => Promise.reject(new DOMException("denied", "NotAllowedError")),
+    });
+  });
+  await openDomDemo(page);
+  await page.keyboard.press("g");
+  await page.keyboard.press("g");
+  await page.keyboard.press("V");
+  await page.keyboard.press("j");
+  await page.keyboard.press("y");
+  const dialog = page.frameLocator("#demo-frame").getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Clipboard access was denied. The text is selected; press Ctrl/Cmd+C.");
+  await expect(dialog.getByRole("textbox", { name: "Text to copy" })).toHaveValue(/Hey, is the build green/);
+});
+
 test("unsupported browser keeps poster available", async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(window, "WebAssembly", { configurable: true, value: undefined });
@@ -151,6 +207,7 @@ test("unsupported browser keeps poster available", async ({ page }) => {
 
   await expect(page.locator("#plate")).toHaveAttribute("data-state", "unsupported");
   await expect(page.getByRole("heading", { name: "This browser can't run the demo" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "This browser can't run the demo" })).toBeFocused();
   await expect(page.locator("#poster-frame")).not.toBeEmpty();
 });
 

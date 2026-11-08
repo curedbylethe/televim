@@ -78,7 +78,7 @@ impl Driver {
             u64::try_from(now.duration_since(self.last_tick).as_millis()).unwrap_or(u64::MAX);
         self.last_tick = now;
 
-        let open_chat_id = self.app.current_chat_id();
+        let open_chat_id = self.open_chat_id();
         self.sim
             .set_open_chat_id((open_chat_id != 0).then_some(open_chat_id));
         for effect in self.sim.advance(delta_ms) {
@@ -219,7 +219,7 @@ impl Driver {
                 messages,
                 exhausted,
             } => {
-                if chat_id != self.app.current_chat_id() {
+                if chat_id != self.open_chat_id() {
                     return;
                 }
                 match direction {
@@ -244,7 +244,7 @@ impl Driver {
                 message,
             } => {
                 self.app.end_send(temp_id);
-                if self.app.current_chat_id() == chat_id {
+                if self.open_chat_id() == chat_id {
                     self.app.confirm_sent(temp_id, message.clone());
                 }
                 self.apply_chat_preview(chat_id, &message);
@@ -270,8 +270,13 @@ impl Driver {
                 temp_id,
                 kind,
             } => {
-                self.browser
-                    .pick_file(&mut self.app, chat_id, temp_id, kind);
+                if let Err(reason) = self
+                    .browser
+                    .pick_file(&mut self.app, chat_id, temp_id, kind)
+                {
+                    self.sim.record_failed_upload(chat_id, temp_id);
+                    self.app.fail_send(temp_id, reason.to_owned());
+                }
             }
             Effect::RequestOpenMedia {
                 chat_id,
@@ -367,6 +372,14 @@ impl Driver {
                 Ok(people) => self.app.conversation.contacts.adopt(people),
                 Err(reason) => self.app.conversation.contacts.fail(reason),
             },
+            Effect::UserSearch { query, result } => match result {
+                Ok(candidates) => {
+                    self.app.apply_users(&query, candidates);
+                }
+                Err(reason) => {
+                    self.app.fail_users(&query, reason);
+                }
+            },
             Effect::PinToggled { chat_id, pinned } => self.app.set_pinned(chat_id, pinned),
             Effect::Archived { chat_id, archived } => {
                 self.app.set_archived(chat_id, archived);
@@ -396,17 +409,19 @@ impl Driver {
 
     fn apply_picked_file(&mut self, picked: PickedFile) {
         let Some(file) = picked.file else {
-            self.app.fail_send(
+            self.fail_picked_file(
+                picked.chat_id,
                 picked.temp_id,
-                "No file selected; nothing was sent.".to_owned(),
+                "No file selected; nothing was sent.",
             );
             return;
         };
         let name = file.name();
         let Some(kind) = file_picker::selected_kind(picked.requested, &file.type_(), &name) else {
-            self.app.fail_send(
+            self.fail_picked_file(
+                picked.chat_id,
                 picked.temp_id,
-                "That file type does not match the requested attachment.".to_owned(),
+                "That file type does not match the requested attachment.",
             );
             return;
         };
@@ -414,14 +429,15 @@ impl Driver {
             .sim
             .attachment_message(picked.chat_id, name.clone(), kind)
         else {
-            self.app.fail_send(
+            self.fail_picked_file(
+                picked.chat_id,
                 picked.temp_id,
-                "That conversation is no longer in the demo.".to_owned(),
+                "That conversation is no longer in the demo.",
             );
             return;
         };
         self.app.end_send(picked.temp_id);
-        if self.app.current_chat_id() == picked.chat_id {
+        if self.open_chat_id() == picked.chat_id {
             self.app.confirm_sent(picked.temp_id, message.clone());
         }
         self.apply_chat_preview(picked.chat_id, &message);
@@ -441,7 +457,7 @@ impl Driver {
     }
 
     fn sync_reads(&mut self) {
-        let chat_id = self.app.current_chat_id();
+        let chat_id = self.open_chat_id();
         if self
             .app
             .chats()
@@ -468,7 +484,7 @@ impl Driver {
     }
 
     fn request_history_page(&mut self) {
-        let chat_id = self.app.current_chat_id();
+        let chat_id = self.open_chat_id();
         if chat_id == 0 {
             return;
         }
@@ -498,6 +514,15 @@ impl Driver {
         }
     }
 
+    pub(crate) fn open_chat_id(&self) -> i64 {
+        self.app.conversation.conversation.window.chat_id
+    }
+
+    fn fail_picked_file(&mut self, chat_id: i64, temp_id: i64, reason: &str) {
+        self.sim.record_failed_upload(chat_id, temp_id);
+        self.app.fail_send(temp_id, reason.to_owned());
+    }
+
     fn clear_world_unread(&mut self, chat_id: i64) {
         let account = self.sim.world.active_mut();
         for chat in account
@@ -525,7 +550,9 @@ fn build_app(account: &DemoAccount, base_timestamp: i64, offset_seconds: i64) ->
     app.conversation = app.conversation.with_jumplist_depth(100);
     app.set_client_available(true);
     app.session.credentials_configured = false;
-    app.set_session_store(SessionStore::OfflineDemo);
+    app.set_session_store(SessionStore::EncryptedFile(std::path::PathBuf::from(
+        "(in-memory demo)",
+    )));
     app.set_connection(ConnectionState::Offline);
     app.set_account(Ok(account.account.clone()));
     app.set_known_accounts(account.known_accounts.clone());

@@ -29,7 +29,7 @@
         poster: $("#load"),
         loading: $("#cancel"),
         running: frame,
-        released: $("#interact"),
+        released: $("#scrim"),
         unsupported: $("#unsupported-title"),
         failed: $("#retry"),
       }[state];
@@ -45,7 +45,9 @@
     show("running");
     frame.contentWindow?.focus();
     try {
-      frame.contentDocument?.getElementById("demo")?.focus();
+      const target = frame.contentDocument?.querySelector("#demo canvas, #demo_ratzilla_grid")
+        || frame.contentDocument?.getElementById("demo");
+      target?.focus();
     } catch {
       // Same-origin is required for the shell bridge; message origin checks reject others.
     }
@@ -77,23 +79,7 @@
     frame.removeAttribute("src");
     show("loading", true);
     frame.onload = () => {
-      const origin = location.origin;
-      try {
-        frame.contentDocument?.addEventListener("keydown", (event) => {
-          if (event.ctrlKey && event.altKey && event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            post({ type: "release" });
-            return;
-          }
-          if (event.ctrlKey && ["w", "c"].includes(event.key.toLowerCase())) {
-            event.preventDefault();
-          }
-        }, true);
-      } catch {
-        fail("The terminal frame could not be reached from this page.");
-      }
-      if (!frame.contentWindow || frame.contentWindow.location.origin !== origin) {
+      if (!frame.contentWindow || frame.contentWindow.location.origin !== location.origin) {
         fail("The terminal frame did not load from this site.");
       }
     };

@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'">
   <title>Televim · Offline terminal</title>
-  <link data-trunk rel="rust" data-wasm-opt="z">
+  <link data-trunk rel="rust" data-target-name="web_demo" data-wasm-opt="z">
   <link data-trunk rel="copy-file" href="index.html">
   <link data-trunk rel="copy-file" href="shell.css">
   <link data-trunk rel="copy-file" href="shell.js">
@@ -13,7 +13,7 @@
   <style>
     html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #0d0d0d; }
     #demo { width: 800px; height: 480px; outline: none; }
-    #demo:focus-visible { outline: 2px solid #b01e28; outline-offset: -2px; }
+    #demo:focus-visible, #demo canvas:focus-visible, #demo_ratzilla_grid:focus-visible { outline: 2px solid #b01e28; outline-offset: -2px; }
     dialog[data-televim-demo-dialog] { max-width: min(90vw, 720px); max-height: 85vh; overflow: auto; border: 1px solid #0d0d0d; padding: 24px; background: #ede4d3; color: #0d0d0d; font: 16px/1.5 system-ui, sans-serif; }
     dialog[data-televim-demo-dialog]::backdrop { background: rgb(13 13 13 / 78%); }
     dialog[data-televim-demo-dialog] h2 { margin: 0 0 16px; }
