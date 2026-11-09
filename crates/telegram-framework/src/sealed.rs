@@ -408,7 +408,7 @@ impl KeyFileProvider {
     fn key_from_file(&self, bytes: &[u8]) -> Result<FileKey, SessionError> {
         let bytes: [u8; KEY_LEN] = bytes.try_into().map_err(|_| {
             SessionError::Load(format!(
-                "the file key at {} is {} bytes, not {KEY_LEN}; restore the file, or run :logout and sign in again",
+                "the file key at {} is {} bytes, not {KEY_LEN}; restore the file, or delete it and sign out, then sign in again",
                 self.path.display(),
                 bytes.len()
             ))
@@ -952,14 +952,20 @@ mod tests {
     fn a_wrong_length_key_file_is_load_and_left_alone() {
         let dir = tempfile::tempdir().expect("temp dir is created");
         let path = key_path(&dir);
+        let message_of = |result: Result<FileKey, SessionError>| match result {
+            Err(SessionError::Load(message)) => message,
+            other => panic!("the wrong-length file is not a load error: {other:?}"),
+        };
         for contents in [&b"short"[..], &[0u8; KEY_LEN + 1][..]] {
             std::fs::write(&path, contents).expect("write");
             let provider = KeyFileProvider::new(&path);
-            assert!(matches!(
-                provider.opening_key(&[0; SALT_LEN]),
-                Err(SessionError::Load(_))
-            ));
-            assert!(matches!(provider.sealing_key(), Err(SessionError::Load(_))));
+            for message in [
+                message_of(provider.opening_key(&[0; SALT_LEN])),
+                message_of(provider.sealing_key().map(|(_, key)| key)),
+            ] {
+                assert!(message.contains("delete it and sign out"), "{message}");
+                assert!(!message.contains(":logout"), "{message}");
+            }
             assert_eq!(std::fs::read(&path).expect("read"), contents);
         }
     }

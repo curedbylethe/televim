@@ -2315,14 +2315,11 @@ pub(crate) fn file_key_provider(cfg: &Config) -> Arc<dyn KeyProvider> {
 /// A missing key and a rejected one are [`KeyRequired`] underneath, which is what
 /// opens the passphrase question; the sentence is the same either way. A key
 /// file is not a passphrase, so when `passphrase_helps` is false the failure is
-/// plain: the provider's sentence names the key file and this one names the
-/// recovery.
+/// plain: the provider's sentence names the key file and its recovery, and
+/// this one says the session file was left alone.
 fn key_trouble(error: &SessionError, passphrase_helps: bool) -> anyhow::Error {
     if !passphrase_helps {
-        return anyhow::anyhow!(
-            "{error}; restore the key file, or remove it and sign in again; \
-             the session file was left as it was"
-        );
+        return anyhow::anyhow!("{error}; the session file was left as it was");
     }
     match error {
         SessionError::Unavailable(why) => anyhow::Error::new(KeyRequired {
@@ -12998,7 +12995,12 @@ mod session_store_tests {
             sentence.contains(&key_path.display().to_string()),
             "{sentence}"
         );
-        assert!(sentence.contains("sign in again"), "{sentence}");
+        assert_eq!(sentence.matches("sign in again").count(), 1, "{sentence}");
+        assert!(
+            sentence.ends_with("; the session file was left as it was"),
+            "{sentence}"
+        );
+        assert!(!sentence.contains("remove it"), "{sentence}");
         assert!(
             !sentence.contains("TELEVIM_SESSION_PASSPHRASE"),
             "{sentence}"
@@ -13018,7 +13020,17 @@ mod session_store_tests {
                 sentence.contains(&key_path.display().to_string()),
                 "{sentence}"
             );
-            assert!(sentence.contains("sign in again"), "{sentence}");
+            assert!(
+                sentence.ends_with("; the session file was left as it was"),
+                "{sentence}"
+            );
+            assert_eq!(
+                sentence
+                    .matches("the session file was left as it was")
+                    .count(),
+                1,
+                "{sentence}"
+            );
         }
     }
 
