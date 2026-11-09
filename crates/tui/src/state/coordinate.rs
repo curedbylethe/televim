@@ -176,6 +176,10 @@ pub(crate) fn select_chat(
 
     list.select(index);
     pending.set_pending_chat(None);
+    // Preserve the window and fetch when the peer has not changed.
+    if chat_id != 0 && conversation.conversation.window.chat_id == chat_id {
+        return;
+    }
     select_chat_none(
         &mut *ui,
         &mut *outbox,
