@@ -485,15 +485,36 @@ budget. Its artifact size and browser timings are tracked in
   chat-list rows, in memory and in the file beside the configuration — see
   [The history cache](#the-history-cache).
 
-The latest `make measure` run after adding desktop notification delivery
-(Darwin arm64, rustc 1.98.1; five-run median) reports a **7,054,528 B** stripped
-binary, **10.422 MB** idle shipped-binary RSS, **34.797 MB** idle shipped-binary
-RSS with a seeded 60-chat cache, and **4,128,768 B** harness RSS. These are the
-whole current tree, not an isolated notification cost. `make measure-check`
-reports breaches for shipped-binary RSS, seeded-cache RSS and binary size;
-`Cargo.lock` differs from the stored baseline, so this run does not isolate the
-notification dependency's cost. Keep the measured report in
-`target/memory-report.json`; do not infer a per-feature delta from it.
+### Desktop notifications: same-host comparison
+
+Five `make measure` reports on `main` (merge base `79fdeb8`) and five on this
+branch used the same Darwin arm64 host, Rust 1.98.1, release profile, harness,
+and credential-free sandbox. Each report is itself a median of five launches.
+The table compares the medians across those five reports; the raw reports were
+`cur42-base-{1..5}.json` and `cur42-branch-{1..5}.json` in `/private/tmp`.
+
+| Metric | `main` median | Branch median | Delta |
+| :--- | ---: | ---: | ---: |
+| Harness RSS | 3,031,040 B | 4,194,304 B | +1,163,264 B |
+| Shipped-binary RSS | 7.719 MB | 10.344 MB | +2.625 MB |
+| Seeded-cache binary RSS | 7.047 MB | 8.859 MB | +1.812 MB |
+| Populated startup | 2.770 ms | 2.769 ms | -0.001 ms |
+| First frame | 2.030 ms | 2.078 ms | +0.048 ms |
+| Binary input latency | 0.135 ms | 0.174 ms | +0.039 ms |
+| Harness input latency | 0.874 ms | 0.874 ms | 0 ms |
+| Frame time | 0.610 ms | 0.608 ms | -0.002 ms |
+| Stripped binary size | 6,969,136 B | 7,071,040 B | +101,904 B |
+
+The binary-size delta exceeds the current allowance: +101,904 B versus a
+69,691 B band (1% of the fresh `main` anchor). The shipped binary remains below
+the 15 MB product target. `notify-rust` already uses `default-features = false`
+with its required `z` Linux backend; the target-specific dependency tree showed
+no removable feature that preserves Linux notifications. The added cost is the
+desktop notification implementation and its platform backends. The five-run
+branch result is now the stored anchor in this `chore(memory)` commit; all
+regression bands remain unchanged. The notification ID helper changed after
+these reports, but only under Linux or tests, so it does not affect this Darwin
+release binary.
 - A local-name map with no cap of its own: one alias for each person the reader
   has renamed, in the same account-tagged history file and written with the
   same coalesced save as the cache. It is bounded by the reader's typing, one
