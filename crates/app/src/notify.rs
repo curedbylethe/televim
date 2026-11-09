@@ -1,11 +1,11 @@
 //! Best-effort desktop notification delivery.
-#![expect(dead_code, reason = "stage 06 wires the notification trigger")]
 
 use domain::message::{MediaKind, Message};
 
 /// One desktop notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Notice {
+    pub chat_id: i64,
     pub title: String,
     pub body: String,
 }
@@ -26,11 +26,13 @@ impl Notifier for DesktopNotifier {
         };
 
         drop(runtime.spawn_blocking(move || {
-            if let Err(error) = notify_rust::Notification::new()
-                .summary(&notice.title)
-                .body(&notice.body)
-                .show()
-            {
+            let mut notification = notify_rust::Notification::new();
+            notification.summary(&notice.title).body(&notice.body);
+            #[cfg(target_os = "linux")]
+            if let Ok(id) = u32::try_from(notice.chat_id) {
+                notification.id(id);
+            }
+            if let Err(error) = notification.show() {
                 tracing::debug!(%error, "desktop notification was not shown");
             }
         }));

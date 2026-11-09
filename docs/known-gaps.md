@@ -675,7 +675,12 @@ Browser demo follow-ups remain out of scope unless planned as a separate feature
 - Cross-origin iframe policy depends on the portfolio host's CSP and remains to
   be checked with the external embed.
 
-The architecture leaves clear extension points for future features: a notification daemon (via `notify-rust`) or a plugin system (using `wasmtime` for sandboxed extensions). Because the `domain` layer is pure, those features won't require coupling protocol types to the UI. Media upload and download exist: `:attach` streams a local file to Telegram, while `o` fetches received media into the cache for the platform viewer.
+Desktop notifications are best-effort. macOS may silently drop a notice; a burst
+from one chat may replace earlier notices only on desktops that honor the
+notification id, and can show several notices on macOS. A mute that expires while
+Televim stays open remains active until the next chat-list fetch. Media upload
+and download exist: `:attach` streams a local file to Telegram, while `o` fetches
+received media into the cache for the platform viewer.
 
 **The sticker lists, scoped.** Sticker sending and its picker are deferred until
 the client can load and send sticker sets; this is what

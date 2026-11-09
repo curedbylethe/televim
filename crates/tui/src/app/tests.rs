@@ -1,5 +1,16 @@
 use super::*;
 
+#[test]
+fn focus_report_defaults_to_undetected_and_not_focused() {
+    assert_eq!(
+        FocusReport::default(),
+        FocusReport {
+            reported: false,
+            focused: true,
+        }
+    );
+}
+
 /// A message in the sample conversation.
 fn message(id: i64, text: &'static str) -> Message {
     Message {

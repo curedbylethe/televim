@@ -96,6 +96,10 @@ see [first-run platform details](docs/installing.md#first-run).
 
 Use `televim --chat <id>` to open a chat directly.
 
+- Desktop notifications are on by default (`notifications = "off"` disables
+  them). Televim suppresses them for the open or muted chat, outgoing messages,
+  stale arrivals, and while a reported terminal has focus.
+
 ## Essential controls
 
 **Anywhere**

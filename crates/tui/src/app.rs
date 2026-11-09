@@ -591,6 +591,22 @@ pub struct LocalName {
     pub server: String,
 }
 
+/// What the terminal has reported about its focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusReport {
+    pub reported: bool,
+    pub focused: bool,
+}
+
+impl Default for FocusReport {
+    fn default() -> Self {
+        Self {
+            reported: false,
+            focused: true,
+        }
+    }
+}
+
 /// Where the session is kept, as the panel says it.
 ///
 /// Derived from the same configuration the session store itself is built from, so
@@ -1560,6 +1576,9 @@ pub struct App {
     /// Pushed, never read: the index and the slots are `app`'s, and this side
     /// only draws the list it was handed.
     pub known_accounts: Vec<KnownAccount>,
+
+    /// The terminal's reported focus, if it has sent a focus event.
+    pub focus: FocusReport,
 }
 
 impl Default for App {
@@ -1589,6 +1608,7 @@ impl App {
             global_origin: Focus::ChatList,
             local_names: BTreeMap::new(),
             known_accounts: Vec::new(),
+            focus: FocusReport::default(),
         }
     }
 
@@ -1682,6 +1702,30 @@ impl App {
     #[must_use]
     pub fn chats(&self) -> &[Chat] {
         &self.list.list.chats
+    }
+
+    /// The display name used for a chat row, including a local name.
+    #[must_use]
+    pub fn chat_display_name(&self, chat_id: i64) -> Option<&str> {
+        self.local_names
+            .get(&chat_id)
+            .map(|name| name.text.as_str())
+            .or_else(|| {
+                self.chats()
+                    .iter()
+                    .chain(&self.list.archived)
+                    .find(|chat| chat.id == chat_id)
+                    .map(|chat| chat.title.as_str())
+            })
+    }
+
+    /// Whether a visible or archived chat mutes notifications.
+    #[must_use]
+    pub fn chat_is_muted(&self, chat_id: i64) -> bool {
+        self.chats()
+            .iter()
+            .chain(&self.list.archived)
+            .any(|chat| chat.id == chat_id && chat.muted)
     }
 
     /// The chats a forward can land in: the chat list without deleted accounts.

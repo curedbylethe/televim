@@ -392,6 +392,8 @@ fn focus_changed(
     keys: &mut EnhancedKeys<Stdout>,
     gained: bool,
 ) -> std::io::Result<()> {
+    app.focus.reported = true;
+    app.focus.focused = gained;
     app.reset_pending_input();
     if gained {
         keys.resume()?;
