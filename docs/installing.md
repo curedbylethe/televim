@@ -226,8 +226,9 @@ With `session_path` and `session_key_file` there are zero prompts in either row,
 on either build: the key file is read directly and the keychain is not called.
 Without the key file, the row for the build applies.
 
-If a launch ends at `offline:` naming the key file, restore that file, or sign
-out and sign in again. A missing, short or unreadable key file does not discard
+If a launch ends at `offline:` naming the key file, restore that file, or
+delete the session file and the key file, then relaunch. A missing, short or
+unreadable key file does not discard
 the session and does not open a passphrase box; the session file is left as it
 was. A key file that cannot be read because the profile denies access needs the
 same recovery: restore access or restore the file.
@@ -361,9 +362,9 @@ requires manually removing the encrypted session file; Televim cannot recover it
   same release. Do not continue with a mismatched archive.
 - **Keyring or Secret Service error:** start a D-Bus session and a Secret
   Service provider, or configure an encrypted session file.
-- **Key file missing, short or unreadable:** restore the file, or sign out and
-  sign in again. The session file is left as it was and no passphrase box
-  opens; the `offline:` sentence names the key file.
+- **Key file missing, short or unreadable:** restore the file, or delete the
+  session file and the key file, then relaunch. The session file is left as it
+  was and no passphrase box opens; the `offline:` sentence names the key file.
 - **Wrong version or missing asset:** check that the archive version matches
   the release tag and that the target name matches your system.
 

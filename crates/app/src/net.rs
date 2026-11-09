@@ -2316,10 +2316,13 @@ pub(crate) fn file_key_provider(cfg: &Config) -> Arc<dyn KeyProvider> {
 /// opens the passphrase question; the sentence is the same either way. A key
 /// file is not a passphrase, so when `passphrase_helps` is false the failure is
 /// plain: the provider's sentence names the key file and its recovery, and
-/// this one says the session file was left alone.
+/// this one says the session file was left alone and points at the path.
 fn key_trouble(error: &SessionError, passphrase_helps: bool) -> anyhow::Error {
     if !passphrase_helps {
-        return anyhow::anyhow!("{error}; the session file was left as it was");
+        return anyhow::anyhow!(
+            "{error}; the session file was left as it was; \
+             see docs/installing.md for the session file path"
+        );
     }
     match error {
         SessionError::Unavailable(why) => anyhow::Error::new(KeyRequired {
@@ -12995,9 +12998,23 @@ mod session_store_tests {
             sentence.contains(&key_path.display().to_string()),
             "{sentence}"
         );
-        assert_eq!(sentence.matches("sign in again").count(), 1, "{sentence}");
         assert!(
-            sentence.ends_with("; the session file was left as it was"),
+            sentence.contains("delete the session file and this key file"),
+            "{sentence}"
+        );
+        assert!(sentence.contains("relaunch"), "{sentence}");
+        assert!(!sentence.contains(":logout"), "{sentence}");
+        assert!(!sentence.contains("sign out"), "{sentence}");
+        assert!(!sentence.contains("sign in again"), "{sentence}");
+        assert_eq!(
+            sentence
+                .matches("the session file was left as it was")
+                .count(),
+            1,
+            "{sentence}"
+        );
+        assert!(
+            sentence.ends_with("; see docs/installing.md for the session file path"),
             "{sentence}"
         );
         assert!(!sentence.contains("remove it"), "{sentence}");
@@ -13021,7 +13038,10 @@ mod session_store_tests {
                 "{sentence}"
             );
             assert!(
-                sentence.ends_with("; the session file was left as it was"),
+                sentence.ends_with(
+                    "; the session file was left as it was; \
+                     see docs/installing.md for the session file path"
+                ),
                 "{sentence}"
             );
             assert_eq!(
