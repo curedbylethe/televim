@@ -1165,6 +1165,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
 - **Why manual unread is a flag beside the count, and opening is its single-chat clear:** Telegram
   stores `unread_mark` separately from message count. `:mark-unread` changes only that flag after
   acceptance; opening the conversation clears both through the accepted read marker.
+- **Why `:mark-all-read` is sequential, unconfirmed, and not optimistic:** Telegram has no bulk
+  read request. One task walks visible counted chats at their newest known message id, then clears
+  mark-only chats. Accepted per-chat events clear rows; failures leave rows unchanged and contribute
+  to the completion sentence. No confirmation is needed for this reversible local reading state.
 - **Why the history file is sealed with the session file's envelope:** message
   bodies and the chat list are as sensitive as the session, so the file is
   ciphertext, not `0600` JSON. `HistoryFile` seals the encoded JSON through

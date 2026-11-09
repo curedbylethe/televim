@@ -1254,6 +1254,9 @@ pub enum Action {
     /// Set or clear Telegram's manual unread flag for one chat.
     SetUnreadMark { chat_id: i64, unread: bool },
 
+    /// Mark every visible chat read.
+    MarkAllRead,
+
     /// Ask Telegram to move the sign-in flow on with `value`.
     ///
     /// The same hand-over as every other action, and for the same reason: a

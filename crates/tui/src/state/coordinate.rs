@@ -3472,6 +3472,12 @@ pub(crate) fn run_command(
             );
             false
         }
+        "mark-all-read" => {
+            if command_needs_client(&mut *ui, &*session) {
+                queue_action(&mut *outbox, &mut *ui, Action::MarkAllRead);
+            }
+            false
+        }
         "block" | "unblock" => {
             let blocked = cmd == "block";
             let Some(subject) = command_subject(&*ui, &*list, &*profile) else {
