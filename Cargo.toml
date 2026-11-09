@@ -63,6 +63,8 @@ image-webp = "0.2"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Desktop notifications
 notify-rust = { version = "4.18.2", default-features = false, features = ["z"] }
 
 # CLI / config

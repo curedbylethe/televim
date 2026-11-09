@@ -48,7 +48,7 @@ televim/
     ├── demo-support/           # Fictional, deterministic offline demo fixtures
     ├── app/                    # Composition root & CLI binary
     │   ├── src/                # main, accounts, config, draft_store,
-    │   │                       #   history_store, media_cache, net, runtime
+    │   │                       #   history_store, media_cache, net, notify, runtime
     │   └── tests/              # proto_integration.rs, tui_e2e.rs
     └── web-demo/               # Detached browser workspace; own Cargo.lock
         ├── src/                # Ratzilla backend, browser bridge, offline driver
@@ -553,6 +553,7 @@ crates/app/
 │   ├── update.rs       # Stable check, consent, bounded verified download and adjacent staging
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump
+│   ├── notify.rs       # Best-effort desktop notification delivery (Notifier seam)
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
 ├── tests/
 │   ├── proto_integration.rs  # Opt-in, against a real datacenter

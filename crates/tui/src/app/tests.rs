@@ -2678,18 +2678,23 @@ fn mute_command_refuses_without_a_client_and_changes_nothing() {
 }
 
 #[test]
-fn accepted_mute_updates_the_row_and_status_for_both_directions() {
+fn accepted_mute_and_unread_mark_use_local_name_in_status() {
     let mut app = App::mock();
     let chat_id = app.chats()[app.list.selected_chat].id;
-    let title = app.chats()[app.list.selected_chat].title.clone();
+    app.set_local_name(chat_id, Some("Local name"));
 
     app.set_muted(chat_id, true);
     assert!(app.chats()[app.list.selected_chat].muted);
-    assert_eq!(app.status_text(), format!("muted {title}"));
+    assert_eq!(app.status_text(), "muted Local name");
 
     app.set_muted(chat_id, false);
     assert!(!app.chats()[app.list.selected_chat].muted);
-    assert_eq!(app.status_text(), format!("unmuted {title}"));
+    assert_eq!(app.status_text(), "unmuted Local name");
+
+    app.set_unread_mark(chat_id, true);
+    assert_eq!(app.status_text(), "marked Local name unread");
+    app.set_unread_mark(chat_id, false);
+    assert_eq!(app.status_text(), "Local name is read");
 }
 
 #[test]
