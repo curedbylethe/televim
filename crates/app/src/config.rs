@@ -204,6 +204,15 @@ pub struct Config {
     /// file, but a value put in one rests there in the clear.
     pub session_passphrase: Option<Secret>,
 
+    /// A file holding the 32-byte key the session file is encrypted under.
+    ///
+    /// Used when [`Config::session_path`] is set; otherwise only by the history
+    /// cache. Do not combine it with [`Config::session_passphrase`]: one file
+    /// has one key. The app creates the key file with mode `0600` on first use
+    /// and never overwrites it. A relative path resolves against the working
+    /// directory. `TELEVIM_SESSION_KEY_FILE` sets it.
+    pub session_key_file: Option<PathBuf>,
+
     /// Argon2id memory cost of the passphrase-derived file key, in KiB.
     ///
     /// Unset, 19 MiB. Allowed 8192 to 524288. The envelope does not record it:
@@ -276,6 +285,7 @@ impl Default for Config {
             password: None,
             session_path: None,
             session_passphrase: None,
+            session_key_file: None,
             session_kdf_memory_kib: None,
             session_kdf_passes: None,
             session_kdf_lanes: None,
@@ -342,9 +352,21 @@ impl Config {
         if cfg.notifications.trim().is_empty() {
             "on".clone_into(&mut cfg.notifications);
         }
+        cfg.validate_session_key()?;
         cfg.validate_kdf()?;
         cfg.validate_jumplist_depth()?;
         Ok(cfg)
+    }
+
+    /// Refuses a passphrase and a key file at once: one file, one key.
+    fn validate_session_key(&self) -> Result<()> {
+        if self.passphrase().is_some() && self.session_key_file.is_some() {
+            anyhow::bail!(
+                "session_passphrase and session_key_file are both set: choose one, because \
+                 the session file can have only one key"
+            );
+        }
+        Ok(())
     }
 
     /// Refuses a jumplist depth a typo could make useless or unbounded, naming
@@ -617,6 +639,50 @@ mod tests {
         assert_eq!(
             (params.memory_kib, params.passes, params.lanes),
             (19 * 1024, 4, 1)
+        );
+    }
+
+    #[test]
+    fn a_passphrase_and_a_key_file_together_fail_the_launch_naming_both() {
+        let error = load_toml(
+            "both-keys",
+            "session_passphrase = \"hunter2\"\nsession_key_file = \"/tmp/session.key\"\n",
+        )
+        .expect_err("one file has one key");
+
+        let sentence = error.to_string();
+        assert!(sentence.contains("session_passphrase"), "{sentence}");
+        assert!(sentence.contains("session_key_file"), "{sentence}");
+    }
+
+    #[test]
+    fn a_blank_passphrase_beside_a_key_file_is_allowed() {
+        let cfg = load_toml(
+            "blank-pass-key-file",
+            "session_passphrase = \"  \"\nsession_key_file = \"/tmp/session.key\"\n",
+        )
+        .expect("a blank passphrase is absent");
+
+        assert_eq!(
+            cfg.session_key_file,
+            Some(PathBuf::from("/tmp/session.key"))
+        );
+        assert_eq!(cfg.passphrase(), None);
+    }
+
+    #[test]
+    fn the_environment_supplies_the_session_key_file() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+        // SAFETY: process-wide environment, written only by tests in this module under ENV.
+        unsafe { std::env::set_var("TELEVIM_SESSION_KEY_FILE", "/tmp/env-session.key") };
+        let cfg = Config::load(Path::new("a-file-that-does-not-exist.toml"))
+            .expect("a missing file is not an error");
+        // SAFETY: as above — clearing the variable this test set.
+        unsafe { std::env::remove_var("TELEVIM_SESSION_KEY_FILE") };
+
+        assert_eq!(
+            cfg.session_key_file,
+            Some(PathBuf::from("/tmp/env-session.key"))
         );
     }
 
