@@ -797,6 +797,7 @@ pub(crate) fn load_history(
 /// file is loaded here once, handed to the network state with what it held,
 /// written behind every page that changes it, and removed on sign-out; its
 /// media path is the cache's directory.
+#[allow(clippy::too_many_lines)]
 async fn event_loop(
     cfg: &Config,
     config_path: &Path,
@@ -856,7 +857,8 @@ async fn event_loop(
     // conversation and a false clear costs one fetch. A file that may not seed is removed rather
     // than left for the first write to overwrite, so another account's
     // messages do not wait on disk for a page that may never come.
-    let history_file = HistoryFile::new(paths.history.clone(), net::file_key_provider(cfg));
+    let file_keys = net::file_key_provider(cfg);
+    let history_file = HistoryFile::new(paths.history.clone(), file_keys.clone());
     let (history, history_tag) = load_history(&history_file, label.as_deref());
 
     // What the configuration carries goes into the sign-in flow as pre-fills,
@@ -880,6 +882,7 @@ async fn event_loop(
     // Holds the configuration and this channel, because a sign-out has to rebuild
     // the client and `apply` cannot be handed either.
     let mut network = net::State::new(cfg.clone(), config_path.to_path_buf(), tx.clone());
+    network.set_file_keys(file_keys.clone());
     // The slot this launch resolved, and where the index that names it goes:
     // the loop owns both, and `apply` is handed them from here.
     network.set_account(paths.slot, accounts::index_path(config_path));
@@ -911,7 +914,7 @@ async fn event_loop(
     // Not awaited: the terminal is already up, and the first frame is worth
     // drawing before a round trip has finished. What it finds out arrives as an
     // event, like everything else.
-    net::spawn_bring_up(cfg.clone(), config_path, paths.slot, tx.clone());
+    net::spawn_bring_up(cfg.clone(), config_path, paths.slot, file_keys, tx.clone());
     schedule_update_check(cfg.updates_enabled(), config_path, tx.clone());
 
     let mut held: VecDeque<AppEvent> = VecDeque::new();

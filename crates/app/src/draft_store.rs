@@ -179,7 +179,7 @@ impl DraftFile {
     ///
     /// A missing file is an empty launch, not an error. Corrupt JSON is
     /// warned about and forgotten — the file is left for the next sync to
-    /// overwrite, the discard discipline `discard_corrupt_session` keeps for
+    /// overwrite, the discard discipline the session preload keeps for
     /// sessions. Any other read failure is warned about and empty too: a
     /// launch that cannot read drafts still launches.
     pub(crate) fn load(&self) -> LoadedDrafts {

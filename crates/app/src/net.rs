@@ -64,7 +64,7 @@ use proto::{
 };
 use telegram_framework::{
     ClientBuilder, FileStore, FrameworkError, KeyProvider, KeyringKeyProvider, PASSWORD_ATTEMPTS,
-    PassphraseProvider, Refusal, RequestError, SessionError, SessionStore,
+    PassphraseProvider, PreloadedStore, Refusal, RequestError, SessionError, SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, JumpKind, LoginField};
@@ -881,6 +881,14 @@ pub struct State {
     /// configuration resolved; it only exists after that failed.
     passphrase: Option<zeroize::Zeroizing<String>>,
 
+    /// The key source the session file and the history cache share.
+    ///
+    /// Set by the loop at launch, and replaced by [`State::set_file_keys`] when
+    /// a typed passphrase changes the key. `None` wherever no loop set one,
+    /// which is every test: [`State::file_keys`] then builds one from
+    /// [`State::cfg_now`], as the bring-up did before the loop shared it.
+    file_keys: Option<Arc<dyn KeyProvider>>,
+
     /// The channel bring-up answers on. Read only beside [`State::cfg`].
     tx: Option<UnboundedSender<AppEvent>>,
 
@@ -966,6 +974,27 @@ impl State {
             cfg.session_passphrase = Some(crate::config::Secret::from(typed.to_string()));
         }
         Some(cfg)
+    }
+
+    /// Points every bring-up at `keys`: the session file's and the history
+    /// cache's one key source for the rest of the process.
+    pub(crate) fn set_file_keys(&mut self, keys: Arc<dyn KeyProvider>) {
+        self.file_keys = Some(keys);
+    }
+
+    /// The key source a bring-up from this state uses.
+    ///
+    /// The launch's shared Arc when the loop set one, and a provider built from
+    /// [`State::cfg_now`] when it did not — a test, or a state built without a
+    /// loop. The fallback matches [`file_key_provider`]'s keyring source when
+    /// there is no configuration at all.
+    fn file_keys(&self) -> Arc<dyn KeyProvider> {
+        self.file_keys.clone().unwrap_or_else(|| {
+            self.cfg_now().map_or_else(
+                || Arc::new(KeyringKeyProvider::default()) as Arc<dyn KeyProvider>,
+                |cfg| file_key_provider(&cfg),
+            )
+        })
     }
 
     /// The reconnect the feed's end asked for, once.
@@ -1102,7 +1131,7 @@ impl State {
         self.switching = Some(Switch { from, target });
         self.bringing_up = true;
         if let (Some(cfg), Some(tx)) = (self.cfg_now(), self.tx.clone()) {
-            spawn_opening(cfg, &self.config_path, target, tx);
+            spawn_opening(cfg, &self.config_path, target, self.file_keys(), tx);
         }
     }
 
@@ -1123,7 +1152,13 @@ impl State {
         self.adopt_slot(app, switch.from);
         if let (Some(cfg), Some(tx)) = (self.cfg_now(), self.tx.clone()) {
             self.bringing_up = true;
-            spawn_opening(cfg, &self.config_path, Opening::Slot(switch.from), tx);
+            spawn_opening(
+                cfg,
+                &self.config_path,
+                Opening::Slot(switch.from),
+                self.file_keys(),
+                tx,
+            );
         }
         app.flash("sign-in cancelled; back to the account you were signed in as");
     }
@@ -1590,13 +1625,20 @@ pub fn spawn_bring_up(
     cfg: Config,
     config_path: &Path,
     slot: AccountSlot,
+    file_keys: Arc<dyn KeyProvider>,
     tx: UnboundedSender<AppEvent>,
 ) {
-    spawn_opening(cfg, config_path, Opening::Slot(slot), tx);
+    spawn_opening(cfg, config_path, Opening::Slot(slot), file_keys, tx);
 }
 
 /// [`spawn_bring_up`] for either kind of opening.
-fn spawn_opening(cfg: Config, config_path: &Path, opening: Opening, tx: UnboundedSender<AppEvent>) {
+fn spawn_opening(
+    cfg: Config,
+    config_path: &Path,
+    opening: Opening,
+    file_keys: Arc<dyn KeyProvider>,
+    tx: UnboundedSender<AppEvent>,
+) {
     let config_path = config_path.to_path_buf();
     tokio::spawn(async move {
         // Half a pair of application credentials is the same as having none, and
@@ -1608,7 +1650,7 @@ fn spawn_opening(cfg: Config, config_path: &Path, opening: Opening, tx: Unbounde
             return;
         }
 
-        if let Err(reason) = bring_up(&cfg, &config_path, opening, &tx).await {
+        if let Err(reason) = bring_up(&cfg, &config_path, opening, file_keys, &tx).await {
             let key = reason.downcast_ref::<KeyRequired>().map(|key| key.rejected);
             // The `offline:` sentence first and the question after it, so the
             // sentence is what stands when the reader leaves the question.
@@ -1629,10 +1671,12 @@ fn spawn_opening(cfg: Config, config_path: &Path, opening: Opening, tx: Unbounde
 /// as a *value*, and everything that needs a session is skipped when it is false
 /// — the conversations, the account's own profile and the update feed are all
 /// requests an unauthorised client cannot answer.
+#[allow(clippy::too_many_lines)]
 async fn bring_up(
     cfg: &Config,
     config_path: &Path,
     opening: Opening,
+    file_keys: Arc<dyn KeyProvider>,
     tx: &UnboundedSender<AppEvent>,
 ) -> Result<()> {
     let (api_id, api_hash) = cfg.credentials().context(
@@ -1649,13 +1693,13 @@ async fn bring_up(
     let (store, keys, session_store) = match opening {
         Opening::Slot(slot) => {
             let paths = accounts::slot_paths(config_path, cfg, slot.account());
-            let Session { store, keys } = session_store(&paths, cfg);
+            let Session { store, keys } = session_store_shared(&paths, file_keys);
             (store, keys, session_description(&paths))
         }
         Opening::Fresh => {
             // Only when the session will be a file: the key is checked below,
             // before a login code that would have nowhere to be kept.
-            let keys = cfg.session_path.is_some().then(|| file_key_provider(cfg));
+            let keys = cfg.session_path.is_some().then(|| file_keys.clone());
             let store: Box<dyn SessionStore> = Box::new(SlotStore::fresh(
                 config_path.to_path_buf(),
                 cfg.clone(),
@@ -1665,8 +1709,27 @@ async fn bring_up(
             (store, keys, fresh_description(cfg))
         }
     };
+
+    // Read before the preload: opening a legacy plaintext file seals it in
+    // place, so this fact exists only until the store is read.
     let was_plaintext = holds_plaintext_session(cfg);
-    let discarded = discard_corrupt_session(&*store);
+
+    // The store is read here, once, and the answer serves both the corruption
+    // report and the client build: a second read is slow and a second chance to
+    // fail differently. A corrupt snapshot is cleared by the preload.
+    let preloaded = PreloadedStore::new(Arc::from(store));
+    let discarded = preloaded.discarded().map(str::to_owned);
+    let passphrase_helps = keys.as_ref().is_none_or(|keys| keys.accepts_passphrase());
+    if let Some(error) = preloaded.take_failure() {
+        // Before the key probe: a missing key file must not be replaced with a
+        // new key, so a failure returns with the store's bytes as they were.
+        return Err(if keys.is_some() {
+            key_trouble(&error, passphrase_helps)
+        } else {
+            anyhow::Error::new(error).context("building the client")
+        });
+    }
+
     let resealed = (was_plaintext && !holds_plaintext_session(cfg)).then(|| RESEALED.to_owned());
 
     // After the probe above, not before: the probe is what opens an existing file
@@ -1676,17 +1739,19 @@ async fn bring_up(
     // be kept.
     if let Some(keys) = &keys {
         keys.sealing_key()
-            .map_err(|error| key_trouble(&error, true))?;
+            .map_err(|error| key_trouble(&error, passphrase_helps))?;
     }
 
     let client = ClientBuilder::new(api_id, api_hash)
-        .session_store(store)
+        .session_store(Box::new(preloaded))
         .build()
         .await
         .map_err(|error| match error {
             // A file that did not open is the key's doing, and the sentence says
-            // which key. Never a discard: see [`discard_corrupt_session`].
-            FrameworkError::Session(error) if keys.is_some() => key_trouble(&error, true),
+            // which key. Never a discard: the preload owns that decision.
+            FrameworkError::Session(error) if keys.is_some() => {
+                key_trouble(&error, passphrase_helps)
+            }
             error => anyhow::Error::new(error).context("building the client"),
         })?;
 
@@ -1763,33 +1828,6 @@ async fn bring_up(
     tokio::spawn(pump(updates, tx.clone()));
 
     Ok(())
-}
-
-/// A stored session that was unreadable is gone, so the reader has to sign in
-/// again — and there is a sentence for that on the status line.
-///
-/// Placed **above** the store rather than in it: `clear` is part of the store's
-/// own report-not-reset contract, and a store that silently dropped what it
-/// could not parse would be a store that says a session is gone when it is not.
-///
-/// `None` for everything else, deliberately: a store that could not be reached
-/// or read for any other reason is a failure of the machine, not bytes to throw
-/// away, and the reader is better served by the `offline:` line that says so
-/// than by a sign-in that was never going to work.
-fn discard_corrupt_session(store: &dyn SessionStore) -> Option<String> {
-    let Err(SessionError::Corrupt(reason)) = store.load() else {
-        return None;
-    };
-
-    tracing::warn!(%reason, "discarding an unreadable stored session");
-    if let Err(error) = store.clear() {
-        tracing::warn!(%error, "the discarded stored session could not be removed");
-    }
-
-    Some(format!(
-        "the stored session could not be read ({reason}) and has been discarded — \
-         sign in again"
-    ))
 }
 
 /// Says, if a stored session was discarded, why the reader is being signed out.
@@ -2040,12 +2078,22 @@ fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEve
     let Some(cfg) = state.cfg_now() else {
         return;
     };
+    // The typed passphrase is the process's key from here on: the history cache
+    // and every later bring-up use the same Arc.
+    let file_keys = file_key_provider(&cfg);
+    state.set_file_keys(file_keys.clone());
     if let Some(file) = state.history_file.take() {
-        state.history_file = Some(file.rekeyed(file_key_provider(&cfg)));
+        state.history_file = Some(file.rekeyed(file_keys));
     }
     if !state.bringing_up {
         state.bringing_up = true;
-        spawn_opening(cfg, &state.config_path, state.opening(), tx.clone());
+        spawn_opening(
+            cfg,
+            &state.config_path,
+            state.opening(),
+            state.file_keys(),
+            tx.clone(),
+        );
     }
 }
 
@@ -2191,20 +2239,23 @@ struct Session {
     keys: Option<Arc<dyn KeyProvider>>,
 }
 
-/// The store itself: the encrypted file the configuration names, or the
-/// machine's own credential store.
+/// The store the session goes in, resolved under the process's one key provider.
 ///
-/// Resolved afresh by every bring-up and never kept: a cached key would be a
-/// longer-lived secret, and a passphrase changed in the environment is read on
-/// the next `:retry`.
-fn session_store(paths: &SlotPaths, cfg: &Config) -> Session {
-    session_store_with(paths, cfg, || Arc::new(KeyringKeyProvider::default()))
+/// A file session gets the shared Arc, so the session file and the history
+/// cache keep one key; the OS credential store needs none from here, so it is
+/// `None` and a key-file launch makes no credential-store call.
+fn session_store_shared(paths: &SlotPaths, keys: Arc<dyn KeyProvider>) -> Session {
+    let keys = match paths.session {
+        SessionTarget::Keyring(_) => None,
+        SessionTarget::File(_) => Some(keys),
+    };
+    session(paths, keys)
 }
 
-/// [`session_store`], with the OS-keyring key source passed in.
+/// [`session_store_shared`], with the OS-keyring key source passed in.
 ///
-/// A seam for the tests only: it is what lets them resolve a store without
-/// reaching the real credential store.
+/// Used by the tests and by the export/import actions — a store resolved
+/// outside the loop, without reaching the real credential store.
 fn session_store_with(
     paths: &SlotPaths,
     cfg: &Config,
@@ -2214,6 +2265,11 @@ fn session_store_with(
         SessionTarget::Keyring(_) => None,
         SessionTarget::File(_) => Some(key_provider(cfg, keyring)),
     };
+    session(paths, keys)
+}
+
+/// The store `paths` names, with `keys` when the session is a file.
+fn session(paths: &SlotPaths, keys: Option<Arc<dyn KeyProvider>>) -> Session {
     Session {
         keys: keys.clone(),
         store: Box::new(SlotStore::existing(
@@ -2402,6 +2458,7 @@ fn take_resumed_search(app: &mut App, state: &State, now: Instant) -> Option<Act
 /// Called after every event and every tick, so it has to be cheap and it has to
 /// be idempotent: what it decides is [`wanted`]'s, and what it does is start one
 /// fetch and record that it did.
+#[allow(clippy::too_many_lines)]
 pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // A transient status is the one thing here that expires on its own, and a
     // frame cannot expire it: `status_text` is read from a shared reference.
@@ -2432,7 +2489,13 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             app.flash("already trying to connect");
         } else if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
             state.bringing_up = true;
-            spawn_opening(cfg, &state.config_path, state.opening(), tx);
+            spawn_opening(
+                cfg,
+                &state.config_path,
+                state.opening(),
+                state.file_keys(),
+                tx,
+            );
         }
     }
 
@@ -2447,7 +2510,13 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             state.auto_reconnect_used = true;
             if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
                 state.bringing_up = true;
-                spawn_opening(cfg, &state.config_path, state.opening(), tx);
+                spawn_opening(
+                    cfg,
+                    &state.config_path,
+                    state.opening(),
+                    state.file_keys(),
+                    tx,
+                );
             }
         } else if !state.bringing_up {
             apply_offline(app, state, &anyhow::anyhow!("the update feed ended again"));
@@ -3780,8 +3849,14 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         Event::PassphraseChanged(result) => match result {
             Ok(new) => {
                 state.passphrase = Some(zeroize::Zeroizing::new(new.expose().to_owned()));
-                if let (Some(file), Some(cfg)) = (state.history_file.take(), state.cfg_now()) {
-                    state.history_file = Some(file.rekeyed(file_key_provider(&cfg)));
+                if let Some(cfg) = state.cfg_now() {
+                    // One provider for the process: the rekeyed history and
+                    // every later bring-up receive this same Arc.
+                    let file_keys = file_key_provider(&cfg);
+                    state.set_file_keys(file_keys.clone());
+                    if let Some(file) = state.history_file.take() {
+                        state.history_file = Some(file.rekeyed(file_keys));
+                    }
                 }
                 app.passphrase_changed(Ok(()));
             }
@@ -3801,7 +3876,13 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             app.ui.status = match (state.bringing_up, state.cfg_now(), state.tx.clone()) {
                 (false, Some(cfg), Some(tx)) => {
                     state.bringing_up = true;
-                    spawn_opening(cfg, &state.config_path, state.opening(), tx);
+                    spawn_opening(
+                        cfg,
+                        &state.config_path,
+                        state.opening(),
+                        state.file_keys(),
+                        tx,
+                    );
                     format!("{sentence}; reconnecting")
                 }
                 _ => format!("{sentence}; :retry reconnects with it"),
@@ -4922,7 +5003,13 @@ fn apply_logged_out_and_reconnect(app: &mut App, state: &mut State, result: Resu
         // will send, so a `:retry` typed while it is on its way is refused
         // rather than answered with a second client.
         state.bringing_up = true;
-        spawn_opening(cfg, &state.config_path, state.opening(), tx);
+        spawn_opening(
+            cfg,
+            &state.config_path,
+            state.opening(),
+            state.file_keys(),
+            tx,
+        );
     }
 }
 
@@ -11792,58 +11879,6 @@ mod tests {
 
     // ---- a stored session that cannot be read --------------------------
 
-    #[test]
-    fn a_stored_session_that_cannot_be_read_is_discarded_and_the_startup_carries_on() {
-        let dir = tempfile::tempdir().expect("a scratch directory");
-        let path = dir.path().join("session.json");
-        // Bytes that are not a session: what a truncated write, or a file that
-        // belongs to something else, looks like.
-        std::fs::write(&path, b"not json").expect("the corrupt bytes are written");
-        let store = FileStore::with_key_provider(&path, Arc::new(session_store_tests::Fixed));
-
-        let sentence = discard_corrupt_session(&store).expect("corrupt bytes are discarded");
-        assert!(!sentence.is_empty(), "the reader is told what happened");
-
-        assert!(
-            matches!(store.load(), Ok(None)),
-            "so the store is the one a reader with no session has, rather than an \
-             unreadable file that refuses every build"
-        );
-        assert!(
-            !path.exists(),
-            "and the unusable file is gone, rather than left to fail again"
-        );
-    }
-
-    /// The other answer, and the one that must not touch anything: a store with
-    /// a session in it is left exactly as it was found.
-    #[test]
-    fn a_healthy_stored_session_is_left_alone() {
-        let dir = tempfile::tempdir().expect("a scratch directory");
-        let path = dir.path().join("session.json");
-        let store = FileStore::with_key_provider(&path, Arc::new(session_store_tests::Fixed));
-        store
-            .save(&telegram_framework::SessionData::default())
-            .expect("a session is written");
-
-        assert_eq!(discard_corrupt_session(&store), None);
-        assert!(
-            store.load().expect("the session still reads").is_some(),
-            "the reader's session is still there"
-        );
-    }
-
-    /// Nothing stored is not corruption, and neither is a store that could not
-    /// be reached: only `Corrupt` is a session to throw away, so every other
-    /// answer leaves the store alone and leaves a failure where it was.
-    #[test]
-    fn a_store_with_nothing_in_it_is_not_a_corrupt_session() {
-        let store = telegram_framework::MemoryStore::new();
-
-        assert_eq!(discard_corrupt_session(&store), None);
-        assert!(matches!(store.load(), Ok(None)), "and nothing was cleared");
-    }
-
     /// The sentence is what the reader is left with, and it is the *status*
     /// line rather than a flash: a reader who reaches the sign-in form a minute
     /// later has to be able to read why their session is gone.
@@ -12276,6 +12311,7 @@ mod session_store_tests {
 
     use super::*;
     use crate::config::Secret;
+    use std::sync::atomic::AtomicUsize;
 
     /// The configuration path the store is resolved from. Every test here
     /// names its own session file, so this base is never touched.
@@ -12313,6 +12349,44 @@ mod session_store_tests {
 
         fn opening_key(&self, _salt: &[u8; 16]) -> Result<FileKey, SessionError> {
             Err(SessionError::Unavailable("no secret service".to_owned()))
+        }
+    }
+
+    /// A key that counts how often it is asked for one, over [`Fixed`]'s answer.
+    #[derive(Debug, Default)]
+    struct Counting {
+        sealed: AtomicUsize,
+    }
+
+    impl KeyProvider for Counting {
+        fn sealing_key(&self) -> Result<([u8; 16], FileKey), SessionError> {
+            self.sealed.fetch_add(1, Ordering::Relaxed);
+            Fixed.sealing_key()
+        }
+
+        fn opening_key(&self, salt: &[u8; 16]) -> Result<FileKey, SessionError> {
+            Fixed.opening_key(salt)
+        }
+    }
+
+    /// A session store that counts its reads, to show a preload reads once.
+    #[derive(Debug, Default)]
+    struct CountingStore {
+        loads: AtomicUsize,
+    }
+
+    impl SessionStore for CountingStore {
+        fn load(&self) -> Result<Option<SessionData>, SessionError> {
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            Ok(None)
+        }
+
+        fn save(&self, _session: &SessionData) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<(), SessionError> {
+            Ok(())
         }
     }
 
@@ -12639,6 +12713,81 @@ mod session_store_tests {
         assert!(session.keys.is_none());
     }
 
+    /// The launch's one Arc is the state's and the session store's, and the
+    /// state builds no second provider when asked again.
+    #[test]
+    fn one_key_provider_is_shared_by_the_state_and_the_session_store() {
+        let counter = Arc::new(Counting::default());
+        let keys: Arc<dyn KeyProvider> = counter.clone();
+        let mut state = State::default();
+        state.set_file_keys(keys.clone());
+
+        assert!(
+            Arc::ptr_eq(&keys, &state.file_keys()),
+            "the state keeps the shared Arc"
+        );
+        assert!(
+            Arc::ptr_eq(&state.file_keys(), &state.file_keys()),
+            "no second provider is built"
+        );
+        assert_eq!(
+            counter.sealed.load(Ordering::Relaxed),
+            0,
+            "wiring the provider seals nothing"
+        );
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cfg = file_config(&dir.path().join("session.bin"), None);
+        let Session {
+            keys: session_keys, ..
+        } = session_store_shared(&legacy_paths(&cfg), keys.clone());
+        assert!(
+            Arc::ptr_eq(
+                &keys,
+                &session_keys.expect("a file session has a key source")
+            ),
+            "the session store uses the shared Arc"
+        );
+
+        let keyring = Config::default();
+        let Session { keys: none, .. } = session_store_shared(&legacy_paths(&keyring), keys);
+        assert!(none.is_none(), "the credential store needs no file key");
+    }
+
+    /// The preload is the launch's one read: every later load is answered from
+    /// the snapshot it took.
+    #[test]
+    fn the_preload_reads_the_store_once() {
+        let store = Arc::new(CountingStore::default());
+        let inner: Arc<dyn SessionStore> = store.clone();
+        let preloaded = PreloadedStore::new(inner);
+        assert!(preloaded.load().expect("the store loads").is_none());
+        assert!(preloaded.load().expect("the cache answers").is_none());
+        assert_eq!(
+            store.loads.load(Ordering::Relaxed),
+            1,
+            "one read for the corruption probe and the build"
+        );
+    }
+
+    /// With `session_path` and `session_key_file` set, the key file is the
+    /// source and the OS credential store is never asked.
+    #[test]
+    fn a_key_file_session_never_asks_the_keyring() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut cfg = file_config(&dir.path().join("session.bin"), None);
+        cfg.session_key_file = Some(dir.path().join("session.key"));
+
+        let Session { keys, .. } = session_store_with(&legacy_paths(&cfg), &cfg, || {
+            panic!("the keyring is not asked")
+        });
+        assert!(
+            format!("{:?}", keys.expect("a file session has a key source"))
+                .contains("KeyFileProvider"),
+            "the key file is the source"
+        );
+    }
+
     /// Neither key: an `offline:` sentence that names what to set, and the file
     /// is exactly as it was — no discard, and no plaintext written to get round
     /// it.
@@ -12655,13 +12804,8 @@ mod session_store_tests {
         };
         let cfg = file_config(&path, None);
 
-        let Session { store, keys } =
+        let Session { keys, .. } =
             session_store_with(&legacy_paths(&cfg), &cfg, || Arc::new(NoKeyring));
-        assert_eq!(
-            discard_corrupt_session(&*store),
-            None,
-            "an unreachable key is not a corrupt session"
-        );
         let error = keys
             .expect("a file has a key source")
             .sealing_key()
@@ -12693,7 +12837,6 @@ mod session_store_tests {
         let Session { store, .. } =
             session_store_with(&legacy_paths(&cfg), &cfg, || Arc::new(NoKeyring));
 
-        assert_eq!(discard_corrupt_session(&*store), None, "not discarded");
         let error = store.load().expect_err("the file cannot be read");
         assert!(matches!(error, SessionError::Read(_)), "{error:?}");
         let sentence = format!("{:#}", key_trouble(&error, true));
@@ -12748,9 +12891,11 @@ mod session_store_tests {
         for round in 0..2 {
             let Session { store, .. } =
                 session_store_with(&legacy_paths(&cfg), &cfg, || Arc::new(NoKeyring));
+            // Before the preload: the read itself seals a legacy file.
             let was_plaintext = holds_plaintext_session(&cfg);
             assert_eq!(was_plaintext, round == 0);
-            store.load().expect("the file loads");
+            let preloaded = PreloadedStore::new(Arc::from(store));
+            preloaded.load().expect("the preloaded file loads");
             let resealed =
                 (was_plaintext && !holds_plaintext_session(&cfg)).then(|| RESEALED.to_owned());
             report_resealed(resealed, &tx);
@@ -12791,7 +12936,6 @@ mod session_store_tests {
         let Session { store, .. } =
             session_store_with(&legacy_paths(&cfg), &cfg, || Arc::new(NoKeyring));
 
-        assert_eq!(discard_corrupt_session(&*store), None, "not discarded");
         let error = store.load().expect_err("the wrong key does not open it");
         assert!(matches!(error, SessionError::Load(_)), "{error:?}");
         let sentence = format!("{:#}", key_trouble(&error, true));
@@ -12876,6 +13020,51 @@ mod session_store_tests {
             );
             assert!(sentence.contains("sign in again"), "{sentence}");
         }
+    }
+
+    /// A missing key file is found by the preload, before any key is made: the
+    /// session file is left byte for byte and no key file appears.
+    #[tokio::test]
+    async fn a_missing_key_file_returns_before_the_key_probe_and_creates_no_key() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        FileStore::with_key_provider(&path, Arc::new(Fixed))
+            .save(&SessionData::default())
+            .expect("a session is written");
+        let sealed = std::fs::read(&path).expect("the file exists");
+
+        let key_path = dir.path().join("session.key");
+        let mut cfg = file_config(&path, None);
+        cfg.session_key_file = Some(key_path.clone());
+        cfg.api_id = Some(1);
+        cfg.api_hash = Some("0123456789abcdef".to_owned());
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let error = bring_up(
+            &cfg,
+            config_path(),
+            Opening::Slot(AccountSlot::Legacy),
+            file_key_provider(&cfg),
+            &tx,
+        )
+        .await
+        .expect_err("the key file is missing");
+
+        assert!(
+            error.downcast_ref::<KeyRequired>().is_none(),
+            "a key file never opens the passphrase question"
+        );
+        let sentence = format!("{error:#}");
+        assert!(
+            sentence.contains(&key_path.display().to_string()),
+            "{sentence}"
+        );
+        assert!(!key_path.exists(), "no key was created on the failure path");
+        assert_eq!(
+            std::fs::read(&path).expect("the session is still there"),
+            sealed,
+            "the session file is left as it was"
+        );
     }
 
     /// The key file is chosen ahead of the keyring, and a passphrase ahead of the
