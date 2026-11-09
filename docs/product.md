@@ -97,12 +97,14 @@ Working today:
   `not connected yet — the client is not up` and keeps the draft. The session is
   stored in the OS keyring, or in an **encrypted** file when `session_path` is set
   (AES-256-GCM-SIV, `0600`, written atomically; the profile card says
-  `encrypted file <path>`). The file's key is `TELEVIM_SESSION_PASSPHRASE` (or
-  `session_passphrase` in the configuration; prefer the variable), else a random key
-  kept in the OS keyring. With neither, the launch ends at `offline:` naming the
+  `encrypted file <path>`). The file's key is the first of `TELEVIM_SESSION_PASSPHRASE`
+  (or `session_passphrase` in the configuration; prefer the variable), a file named
+  by `session_key_file` (or `TELEVIM_SESSION_KEY_FILE`), or a random key
+  kept in the OS keyring. With none of them, the launch ends at `offline:` naming the
   missing key and the file is left as it was — it is never written in plaintext —
   and a wrong passphrase ends the same way and never discards the session. Either
-  way televim then asks for the passphrase in a box over the right column, typed
+  way, unless a key file was configured, televim then asks for the passphrase in a
+  box over the right column, typed
   as bullets and held in memory only: `⏎` tries it (a wrong one is refused, kept
   on the box, and writes nothing), `Esc` leaves the session locked and `:unlock`
   asks again. Put it in `TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` to
@@ -120,6 +122,58 @@ Working today:
   the reader can do nothing with. A launch that does end at `offline:` has asked
   for the chat list three times and waited between them, naming the reason, the
   wait and the count on the status line each time — and `:retry` asks again.
+- **Session keys and the key file:** the OS keyring is the default and no session
+  file is involved. With `session_path` the session is an encrypted file whose key,
+  and the history cache's, comes from the first configured key source: a
+  passphrase, `session_key_file` (`TELEVIM_SESSION_KEY_FILE`), or the keyring's
+  random `file-key`; a passphrase and a key file are refused together, so at most
+  one of those two is configured. The key file is opt-in: it holds exactly 32 raw
+  bytes,
+  which televim creates with the OS CSPRNG on first use, `0600` on Unix, caches
+  for the process, and **never overwrites**. On Unix a group- or other-readable
+  file is repaired to
+  `0600`, or the launch refuses with `Unavailable` when the repair fails; Windows
+  has no mode and relies on the profile ACL. A relative path resolves against the
+  working directory.
+
+  Setting both a passphrase and `session_key_file` fails at startup with one
+  sentence naming both; a blank passphrase counts as absent. `session_path` plus
+  `session_key_file` makes **zero OS credential-store calls**. `session_key_file`
+  alone only keys the history cache and leaves the session in the keyring, so both
+  settings are needed for zero keychain calls. A missing, short or unreadable key
+  file is `Load` or `Unavailable`, never `Corrupt`: the session is not discarded
+  and no passphrase box opens; the `offline:` sentence names the key file and says
+  to restore it, or to sign out and sign in again, and that the session file was
+  left as it was.
+
+  The tradeoff is deliberate: the key sits beside the ciphertext, protected by
+  `0600` and full-disk encryption rather than the OS credential store. A process
+  running as the same user, and any backup that captures the key file with the
+  session files, can read both. That is why the keyring stays the default and the
+  key file is opt-in. Migration costs one sign-in: a keyring-sealed session cannot
+  open under a newly configured key file, so sign out, add `session_key_file`, and
+  sign in again. Move the key file and its session files as a pair; a key file
+  without the files it sealed opens nothing. `:passphrase` and sign-out do not
+  manage the key file — it is left where it is, like the keyring's `file-key` — so
+  rotation is manual (sign out, remove the session and key file, relaunch, sign
+  in).
+
+  On macOS the keychain prompts are first launch versus later, signed versus
+  unsigned. The first launch shows one prompt per keychain item — the session,
+  plus the history `file-key` when a history file exists and no passphrase or key
+  file supplies the history key — so one or two; later launches show none after
+  Always Allow:
+
+  | Build | First launch | Later launch |
+  | :--- | :--- | :--- |
+  | Signed and notarized | one prompt per keychain item — the session, plus the history `file-key` when applicable; choose Always Allow for each | no prompts |
+  | Unsigned or ad-hoc | one prompt per item per build identity — the session, plus the history `file-key` when applicable; choose Always Allow for each | no prompts for the same binary; a rebuild resets access and repeats the prompts per item |
+
+  With `session_path` and `session_key_file` there are zero prompts in either
+  row, on either build: the key file is read directly and the keychain is not
+  called. Without the key file, the row for the build applies. The recovery when
+  the keychain keeps asking is in
+  [`installing.md`](./installing.md#if-the-keychain-keeps-asking).
 - **Chat List:** private chats only, filtered to exclude bots, groups and
   channels, with pins and unread counts (the last-message preview is the forward
   picker's). `j`/`k` move the
@@ -430,7 +484,13 @@ Working today:
   session file and the history cache under it; the old one stops opening either,
   the OS keyring is left alone, and the box says to update
   `TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` if the old passphrase was
-  set there. A mismatch between the two entries, `Esc`, or a key that does not open
+  set there. `:passphrase` is not supported while `session_key_file` is
+  configured. To switch safely, sign out, remove `session_key_file` from the
+  configuration, delete the old key file (the history cache rebuilds), set
+  `session_passphrase` or `TELEVIM_SESSION_PASSPHRASE`, then sign in. Re-sealing
+  with the setting left in place would make the next launch read the key file and
+  fail to open the session. A mismatch between the
+  two entries, `Esc`, or a key that does not open
   the file changes nothing; the command is refused while the session is locked.
   The last two copy the stored session between backends: `:export-session` writes
   it, sealed under the current key, to a file; `:import-session` reads such a file

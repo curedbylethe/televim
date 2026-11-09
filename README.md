@@ -90,8 +90,11 @@ or `TELEVIM_UPDATES=off` to disable them; the default is `auto`.
 
 The login session uses the OS credential store by default. Set `session_path` to
 store it in an encrypted file, and set `TELEVIM_SESSION_PASSPHRASE` or
-`session_passphrase` to provide its passphrase. For keyring-free Linux setup,
-see [first-run platform details](docs/installing.md#first-run).
+`session_passphrase` to provide its passphrase. To avoid OS keychain calls
+entirely, set `session_path` and `session_key_file`; Televim creates a 32-byte
+`0600` key file on first use. The keyring remains the default. See [session
+storage](docs/product.md) and [the macOS keychain
+recovery](docs/installing.md#if-the-keychain-keeps-asking).
 
 Use `televim --chat <id>` to open a chat directly.
 

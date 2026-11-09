@@ -172,7 +172,8 @@ things a hosted runner cannot do:
 
 - **keyring round trip** — `cargo test -p telegram-framework --all-features -- --ignored`,
   on a self-hosted runner with a real OS credential store. That test is
-  `#[ignore]`d everywhere else for exactly that reason.
+  `#[ignore]`d everywhere else for exactly that reason. The key-file path does
+  not use the keyring and is covered by the ordinary `make test` gate.
 - **live datacenter** — `telegram-framework`'s `auth_integration` with
   `TELEVIM_TEST_DC=1` and the `TELEVIM_*` secrets. It takes a `login_code`
   input; without one, the login tests skip and only the `pong` check runs.
@@ -304,6 +305,18 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   revalidation sentence and its rank, paging held while the newest page is in
   flight — is in `tui/src/app/tests.rs` and the `TestBackend` tests of the
   conversation panel and the status bar.
+- **Session keys:** `sealed::tests` cover the key-file provider over a temp
+  directory: creation on first seal is 32 bytes and, on Unix, mode `0600`; a
+  second provider reads the same key, `opening_key` on a missing file is `Load`
+  and creates nothing, a short file is `Load` and unchanged, an existing file is
+  never overwritten, the cache returns the same key, and `accepts_passphrase` is
+  false for the key file and true for the passphrase and keyring providers. The
+  app tests prove the session file and history cache share one
+  `Arc<dyn KeyProvider>` per process, and that a `session_path` +
+  `session_key_file` config reaches bring-up with a panicking keyring closure, so
+  no credential-store call is made; a missing key file returns before
+  `sealing_key` and does not create one. The key-file tests read a real temp file,
+  not a fake keyring, so they need no OS credential store.
 - **Media cache:** `app/src/media_cache.rs` is tested over a temp directory and no
   client: a file found again after a restart under a pid-free name, the byte cap and
   the entry cap each evicting the oldest modification time first, a small configured

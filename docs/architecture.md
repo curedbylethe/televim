@@ -166,8 +166,13 @@ wraps the bytes `SessionData::to_bytes` produced in a `TVIM1` envelope
 magic and the salt bound as associated data); `open` undoes it, and returns
 `Ok(None)` for bytes that are not an envelope so a legacy plaintext file is still
 read. A `KeyProvider` supplies the 256-bit `FileKey`: `PassphraseProvider`
-stretches a passphrase with Argon2id, `KeyringKeyProvider` keeps a random key in
-the OS credential store (`service "televim"`, `account "file-key"`). `FileStore`
+stretches a passphrase with Argon2id, `KeyFileProvider` reads a 32-byte file
+created `0600` on first seal and never overwritten, `KeyringKeyProvider` keeps a
+random key in the OS credential store (`service "televim"`, `account "file-key"`).
+The source order is a configured passphrase, then a key file, then the keyring,
+but a passphrase and a key file together are refused at startup, so the order
+applies only when at most one of the two is configured. The keyring is the
+default. `FileStore`
 holds an `Arc<dyn KeyProvider>`, seals on every save, opens on every load, and
 migrates a plaintext file on its first load. An envelope that will not open is
 `SessionError::Load`, never `Corrupt`. The reasoning is in
@@ -792,15 +797,19 @@ store of what was read, one layer up, and the window it seeds is the same single
 bounded window as before.
 
 Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
-`TELEVIM_API_HASH`, `TELEVIM_PHONE`, `TELEVIM_CODE`, `TELEVIM_PASSWORD` and
-`TELEVIM_SESSION_PATH`; with no credentials the client is never built and the
+`TELEVIM_API_HASH`, `TELEVIM_PHONE`, `TELEVIM_CODE`, `TELEVIM_PASSWORD`,
+`TELEVIM_SESSION_PATH` and `TELEVIM_SESSION_KEY_FILE`; with no credentials the
+client is never built and the
 sign-in surface names the pair that is missing rather than drawing a form, and
 with no `session_path` the session goes to the OS credential store. With a
-`session_path` the session is an encrypted file, and the key to it is
-`TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase` in the file), else a random
-key kept in the OS credential store; `Config::session_passphrase` is a `Secret`
-whose `Debug` is redacted. `net.rs` resolves the store and its key source afresh
-at every bring-up and caches neither. `phone`,
+`session_path` the session is an encrypted file, and the key to it is a configured
+passphrase (`TELEVIM_SESSION_PASSPHRASE`, or `session_passphrase` in the file),
+else `session_key_file`, else a random key kept in the OS credential store;
+`Config::session_passphrase` is a `Secret`
+whose `Debug` is redacted. `net.rs` resolves the store and its key source at
+launch and shares one provider between the session and history; the keyring and
+key-file providers cache the key for the process, while a typed passphrase is
+dropped with the process. `phone`,
 `code` and `password` are **pre-fills**, not the way in: a launch that finds no
 session opens the sign-in field with the phone already in the bar, and the flow
 asks for the code there, then for a two-factor password when Telegram says the
