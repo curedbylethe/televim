@@ -19,8 +19,7 @@ Pre-1.0: see [known gaps](docs/known-gaps.md).
 ## Browser demo
 
 Televim's Pages deployment target is
-[curedbylethe.github.io/televim](https://curedbylethe.github.io/televim/). The
-first deployment waits for this branch to merge and Pages to publish. It runs
+[curedbylethe.github.io/televim](https://curedbylethe.github.io/televim/). It runs
 the real Rust interface with fictional conversations and no Telegram
 connection. The page shows the provenance label **Interactive Rust/WASM demo ·
 fictional conversations · offline** before load.
