@@ -840,6 +840,61 @@ fn enter_on_the_card_opens_its_conversation() {
     assert_eq!(app.list.selected_chat, 1);
 }
 
+#[test]
+fn confirming_the_open_chat_keeps_its_messages_draft_and_fetch() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('i')));
+    type_text(&mut app, "unfinished draft");
+    app.handle_key(press(KeyCode::Esc));
+    app.handle_key(press(KeyCode::Esc));
+    let before: Vec<_> = app
+        .conversation
+        .conversation
+        .window
+        .iter()
+        .map(|message| message.id)
+        .collect();
+    app.begin_fetch(FetchDirection::Latest);
+    app.handle_key(press(KeyCode::Char('h')));
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(app.ui.pane, Pane::Profile(ProfileId::User(MOCK_CHAT)));
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(app.ui.pane, Pane::Conversation);
+    assert_eq!(
+        app.conversation
+            .conversation
+            .window
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(app.input.line.text(), "unfinished draft");
+    assert!(app.is_fetching(FetchDirection::Latest));
+}
+
+#[test]
+fn chat_command_for_open_chat_keeps_its_messages() {
+    let mut app = App::mock();
+    let before: Vec<_> = app
+        .conversation
+        .conversation
+        .window
+        .iter()
+        .map(|message| message.id)
+        .collect();
+    run_command_line(&mut app, "chat 1");
+    assert_eq!(
+        app.conversation
+            .conversation
+            .window
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
 /// A card whose chat the list does not hold: Enter lists the private chat and
 /// opens it, as `open_user` does for a new conversation. The card is put away
 /// and the conversation is on show with the focus on it.
