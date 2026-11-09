@@ -151,6 +151,17 @@ impl ProtoClient {
         Ok(UpdateStream::new(self.inner.subscribe_updates().await?))
     }
 
+    /// Writes the session if it changed since the last write, for a clean exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] if the session could not be saved.
+    pub fn persist_session_if_changed(&self) -> Result<(), ProtoError> {
+        self.inner.persist_session_if_changed()?;
+
+        Ok(())
+    }
+
     /// Signs the account out and forgets the persisted session.
     ///
     /// Every other method here reads from a session or fills it in; this is the

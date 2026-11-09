@@ -412,6 +412,16 @@ impl Client {
         self.session.persist().map_err(FrameworkError::from)
     }
 
+    /// Writes the session only if something changed since the last write,
+    /// ignoring the automatic-write interval.
+    ///
+    /// For a clean exit: the throttle in [`Client::flush_session`] may be
+    /// holding back the latest peer cache or update position.
+    pub fn persist_session_if_changed(&self) -> Result<(), FrameworkError> {
+        self.session.persist_if_dirty()?;
+        Ok(())
+    }
+
     /// Signs the account out and forgets the persisted session.
     ///
     /// Three things happen, in this order, and only the last two are allowed to
