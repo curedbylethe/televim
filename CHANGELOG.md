@@ -5,6 +5,19 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.12.0] - 2026-11-09
+
+### Added
+
+- **framework:** Count and log every keychain operation
+- **app:** Keep the session in a file with its own key by default
+
+### Fixed
+
+- **framework:** Write the session back at most once every 30 seconds
+- **app:** Bound the automatic reconnect and share one key provider
+- **app:** Save a changed session when the program exits
+
 ## [0.11.0] - 2026-11-09
 
 ### Added
