@@ -21,6 +21,9 @@ unsupported.
 
 Release binaries are unsigned and not notarized. `SHA256SUMS` checks that an
 archive matches its published checksum; it does not prove who built the archive.
+On macOS an unsigned build has an ad-hoc code identity that changes with every
+build, so the keychain treats a rebuild as a new program; see [If the keychain
+keeps asking](#if-the-keychain-keeps-asking).
 
 ## Release names and assets
 
@@ -161,8 +164,10 @@ never to the terminal.
 By default, Televim stores its session in the OS credential store. On Linux, the
 credential store needs a D-Bus session and a Secret Service provider such as
 GNOME Keyring or KWallet. For a headless system, configure an encrypted session
-file with `session_path` and a non-empty `session_passphrase`; see
-[`known-gaps.md`](./known-gaps.md) for the lost-passphrase limit.
+file with `session_path` and a non-empty `session_passphrase`, or with
+`session_path` and `session_key_file` to avoid the credential store entirely;
+see [`known-gaps.md`](./known-gaps.md) for the lost-passphrase limit and the
+key-file exposure.
 
 ## macOS
 
@@ -177,6 +182,59 @@ $ xattr -d com.apple.quarantine ./televim
 
 You can also use Finder's Open action and approve the app in System Settings
 when macOS offers that option. Do not disable Gatekeeper globally.
+
+### If the keychain keeps asking
+
+The keyring is the macOS login keychain. On the first launch, expect one prompt
+per keychain item: the session item, plus the history `file-key` item when a
+history file exists and no passphrase or key file supplies the history key — so
+one or two. Choose **Always Allow** for each. Later launches of the same binary
+show none. An unsigned or ad-hoc build — every release binary, and a source build
+without a stable signing identity — changes its code identity when rebuilt, so
+macOS treats a rebuild as a new program and repeats the prompts per item. A
+signed and notarized build keeps a stable identity and does not repeat them.
+
+To keep the session out of the keychain, configure an encrypted file and its key
+file together:
+
+```toml
+session_path = "/Users/you/.local/share/televim/session"
+session_key_file = "/Users/you/.local/share/televim/session.key"
+```
+
+The environment variables do the same:
+
+```console
+$ export TELEVIM_SESSION_PATH="$HOME/.local/share/televim/session"
+$ export TELEVIM_SESSION_KEY_FILE="$HOME/.local/share/televim/session.key"
+```
+
+On first use Televim creates the key file with 32 random bytes and mode `0600`,
+and never overwrites it. Both settings are needed for zero keychain calls:
+`session_key_file` alone only keys the history cache and leaves the session in
+the keyring. Do not also set `session_passphrase`; the launch refuses with a
+sentence naming both.
+
+The expected dialogs are:
+
+| Build | First launch | Later launch |
+| :--- | :--- | :--- |
+| Signed and notarized | one prompt per keychain item — the session, plus the history `file-key` when applicable; choose Always Allow for each | no prompts |
+| Unsigned or ad-hoc | one prompt per item per build identity — the session, plus the history `file-key` when applicable; choose Always Allow for each | no prompts for the same binary; a rebuild resets access and repeats the prompts per item |
+
+With `session_path` and `session_key_file` there are zero prompts in either row,
+on either build: the key file is read directly and the keychain is not called.
+Without the key file, the row for the build applies.
+
+If a launch ends at `offline:` naming the key file, restore that file, or sign
+out and sign in again. A missing, short or unreadable key file does not discard
+the session and does not open a passphrase box; the session file is left as it
+was. A key file that cannot be read because the profile denies access needs the
+same recovery: restore access or restore the file.
+
+An existing keyring-sealed session cannot open under a newly configured key file.
+The first enable costs one sign-in. Move the key file and its session files as a
+pair; a key file without the files it sealed opens nothing.
 
 ## Linux
 
@@ -193,7 +251,8 @@ D-Bus session available. The archive preserves the executable bit. If a manual
 copy lost it, run `chmod +x ~/.local/bin/televim`.
 
 On a headless machine without a session bus or credential store, use the
-encrypted `session_path` and `session_passphrase` configuration described above.
+encrypted `session_path` and `session_passphrase` configuration described above,
+or `session_path` with `session_key_file` to avoid the credential store.
 
 ## Windows
 
@@ -228,15 +287,16 @@ if (-not $alreadyOnPath) {
 ```
 
 Restart PowerShell or Command Prompt to use the updated `Path`. The session
-uses Windows Credential Manager. Windows file permissions do not provide the
-Unix owner-only mode guarantee.
+uses Windows Credential Manager, or an encrypted file when `session_path` is set.
+A `session_key_file` relies on the profile ACL: Windows has no `0600` mode, so
+the same-owner guarantee is weaker than on Unix.
 
 ## Upgrading
 
 Use `:update` for an in-app upgrade, then choose Restart to use the new version.
 The update verifies the release digest and replaces only the executable. Config,
-session, drafts, history, media, and keyring entries stay in place. The current
-window keeps running its old version until restart.
+session, drafts, history, media, the key file, and keyring entries stay in place.
+The current window keeps running its old version until restart.
 
 For package-managed installs, use that manager's upgrade command. Otherwise,
 rerun the installer or follow the [manual replacement steps](#manual-install).
@@ -268,19 +328,20 @@ longer need:
 | Account media | `C` with `.<id>.media` extension, or `media_cache_dir` with `.<id>` appended |
 | Accounts index | `C` with `.accounts.json` extension (`televim.accounts.json`) |
 | Session | Credential store service `televim`, account `session` or `session-<id>`; otherwise configured `session_path` |
-| File key | Credential store service `televim`, account `file-key` (shared) |
+| Key file | `session_key_file` (`TELEVIM_SESSION_KEY_FILE`); created on first use, `0600` and never overwritten |
+| File key (keyring) | Credential store service `televim`, account `file-key` (shared), when no passphrase or key file supplies the key |
 | Media fallback | User cache directory under `televim/televim.media-<label>` |
 
 Per-account session files add `.<id>` before the configured file extension.
-Environment variables `TELEVIM_MEDIA_CACHE_DIR` and `TELEVIM_SESSION_PATH` can
-move media and session files. A user-created `.env` may also contain Telegram
-credentials or session settings.
+Environment variables `TELEVIM_MEDIA_CACHE_DIR`, `TELEVIM_SESSION_PATH` and
+`TELEVIM_SESSION_KEY_FILE` can move media, session and key files. A user-created
+`.env` may also contain Telegram credentials or session settings.
 
 Signing out deletes the `session` credential-store entry, but leaves the shared
-`file-key`, log, and accounts index. It is not a complete uninstall. Media cache
-files are plaintext, and backups may retain them. Remove backups separately if
-you need to delete that data. A lost session passphrase requires manually
-removing the encrypted session file; Televim cannot recover it.
+`file-key`, a configured key file, log, and accounts index. It is not a complete
+uninstall. Media cache files are plaintext, and backups may retain them. Remove
+backups separately if you need to delete that data. A lost session passphrase
+requires manually removing the encrypted session file; Televim cannot recover it.
 
 ## Troubleshooting
 
@@ -300,6 +361,9 @@ removing the encrypted session file; Televim cannot recover it.
   same release. Do not continue with a mismatched archive.
 - **Keyring or Secret Service error:** start a D-Bus session and a Secret
   Service provider, or configure an encrypted session file.
+- **Key file missing, short or unreadable:** restore the file, or sign out and
+  sign in again. The session file is left as it was and no passphrase box
+  opens; the `offline:` sentence names the key file.
 - **Wrong version or missing asset:** check that the archive version matches
   the release tag and that the target name matches your system.
 

@@ -343,10 +343,11 @@ Real, and named so they are not mistaken for oversights:
 - **A passphrase typed at the prompt is not remembered.** When the session file has
   no key or a refused one, the launch asks for the passphrase (and `:unlock` asks
   again after `Esc`); it is held in memory for that process and never written, so
-  every launch asks again until `TELEVIM_SESSION_PASSPHRASE`, `session_passphrase`
-  or the OS keyring has the key. `:passphrase` re-seals the session file and the
+  every launch asks again until `TELEVIM_SESSION_PASSPHRASE`, `session_passphrase`,
+  `session_key_file` or the OS keyring has the key. `:passphrase` re-seals the session file and the
   history cache under a new passphrase, but it leaves the keyring's `file-key`
-  entry alone, so a reader who relied on the keyring is asked at the next launch.
+  entry and a configured key file alone, so a reader who relied on either is
+  asked at the next launch.
   The Argon2id cost keys (`session_kdf_*`) are still not recorded in the envelope:
   a file opens only under the cost it was sealed with, and a changed value reads as
   a wrong passphrase. `:passphrase` seals under the configured cost but opens under
@@ -365,9 +366,45 @@ Real, and named so they are not mistaken for oversights:
   envelope as corrupt instead of reading and re-sealing it, and a reader still on
   such a file signs in again. Until then it is read as described; nothing is
   removed yet.
+- **A key file trades the OS credential store for a file beside the ciphertext.**
+  It is opt-in and the keyring remains the default. The key is protected by
+  `0600` and full-disk encryption rather than the OS credential store, and that
+  is the tradeoff, not a claim that it is safer.
+  - *Same-user and backup exposure.* Any process running as the reader can read
+    the key file, and any backup that captures the key file with the session
+    files can read both. On Unix a group- or other-readable file is repaired to
+    `0600`, or the launch refuses with `Unavailable`; the repair changes the mode
+    only and never rewrites the key bytes. A file that cannot be repaired needs
+    the same recovery: restore access or restore the file.
+  - *Windows has the profile ACL only.* There is no `0600`; the key file relies on
+    the profile ACL, which is weaker than the Unix owner-only mode.
+  - *No in-place rotation.* Nothing re-seals the session under a new key file.
+    Rotation is manual: sign out, remove the session and key file, relaunch,
+    sign in.
+  - *`:passphrase` and sign-out do not manage the key file.* `:passphrase` is not
+    supported while `session_key_file` is configured: the re-seal leaves the
+    setting in place, so the next launch reads the key file and cannot open the
+    session. Switch safely by signing out, removing `session_key_file` from the
+    configuration, deleting the old key file (the history cache rebuilds),
+    setting `session_passphrase` or `TELEVIM_SESSION_PASSPHRASE`, and signing in.
+    Sign-out leaves the key file, as it leaves the keyring's `file-key`.
+  - *The key file and its session files move as a pair.* Moving the key file
+    without the files it sealed, or the reverse, opens nothing. A keyring-sealed
+    session cannot open under a new key file either: the first enable costs one
+    sign-in and there is no automatic re-seal.
+  - *A missing, short or unreadable key file is a key error, not corruption.* It
+    is `Load` or `Unavailable`, never `Corrupt`; the session is not discarded and
+    no passphrase box opens. The `offline:` sentence names the key file and says
+    to restore it, or to sign out and sign in again, with the session file left
+    as it was. A blank passphrase counts as absent, and a passphrase plus a key
+    file is a startup error naming both.
+  - *One shared passphrase provider may re-derive Argon2id.* The session file and
+    history cache share one provider; its one cached salt can make the two
+    alternate and re-derive. That is a performance note, not a correctness
+    change; the key file and keyring use the zero salt and do not re-derive.
 - **Signing out deletes the keyring entry and no more.** `KeyringStore::clear`
   deletes the `session` credential and counts a missing one as success. It leaves
-  the shared `file-key` credential in place. The OS
+  the shared `file-key` credential and any configured key file in place. The OS
   credential store owns the bytes it keeps, so it may leave a backup, a version
   or a free-list copy that this repo cannot reach, and the in-memory mirror is
   grammers-owned, so its bytes cannot be wiped either; only the wrapper's own
@@ -379,10 +416,13 @@ Real, and named so they are not mistaken for oversights:
 - **Linux keyring use needs a Secret Service session.** Release binaries need the
   platform D-Bus runtime library and a Secret Service provider such as GNOME
   Keyring or KWallet. A headless system without a session bus cannot use that
-  store; configure `session_path` and a passphrase instead. See
+  store; configure `session_path` with a passphrase or a key file instead. See
   [`installing.md`](./installing.md).
 - **Release binaries are unsigned and not notarized.** macOS Gatekeeper and
-  Windows SmartScreen may warn or block them. `SHA256SUMS` checks file integrity;
+  Windows SmartScreen may warn or block them. On macOS the ad-hoc code identity
+  changes on every rebuild, so the keychain asks again after a rebuild even when
+  a later launch of the same binary does not; a configured key file avoids the
+  question. `SHA256SUMS` checks file integrity;
   it does not establish publisher identity. See [`installing.md`](./installing.md).
 - **The in-app updater has platform limits.** Windows self-replacement is not
   proven on a real Windows host (L-3). Package-manager refusal uses executable

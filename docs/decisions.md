@@ -196,7 +196,8 @@ are in [`../AGENTS.md`](../AGENTS.md).
   only when the index has no entry), never the id the row requested, so a stale
   row cannot move the run onto an account it did not open.
 - **Why the file key comes from the environment first, the keyring second, and
-  nowhere else:** the order is `TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase`
+  nowhere else** (**superseded** by *Why the key source order is now configured
+  passphrase, then a key file, then the keyring* below): the order is `TELEVIM_SESSION_PASSPHRASE` (or `session_passphrase`
   in the configuration, which the environment wins over), then a random 256-bit key
   kept in the OS credential store (`service "televim"`, `account "file-key"`, beside
   the `"session"` entry), created on the first save; with neither the session is
@@ -224,10 +225,67 @@ are in [`../AGENTS.md`](../AGENTS.md).
   nothing. The environment variable is preferred to the configuration key because a
   file is a second place the secret rests. The store and its key source are
   resolved afresh at every bring-up (launch, `:retry`, auto-reconnect, sign-back-in)
-  and cached nowhere: a cached key is a longer-lived secret, and a passphrase
+  and cached nowhere (**superseded** by the new order below: the keyring and
+  key-file providers cache their key for the process, and the app shares one
+  provider between the session and history): a cached key is a longer-lived secret, and a passphrase
   changed in the environment is read on the next `:retry`. The profile card names
   the result as `encrypted file <path>`, so a path is never read as a plaintext
   one.
+- **Why the key source order is now configured passphrase, then a key file, then
+  the keyring** (supersedes the *environment first, keyring second, and nowhere
+  else* order and its *cached nowhere* sentence above): the key file sits between
+  them because it answers the case neither existing source did well — a reader
+  whose macOS keychain prompts on every unsigned rebuild, and a headless reader
+  who does not want a passphrase typed or stored. The source order is a configured
+  passphrase, then `session_key_file` (`TELEVIM_SESSION_KEY_FILE`), then the
+  keyring's `file-key` — but a configured passphrase and a key file together are
+  refused at startup with one sentence naming both, so the order applies only
+  when at most one of the two is configured. They are two answers to one
+  question, and silently preferring one would leave the other looking effective.
+  A blank passphrase is absent.
+  `session_path` plus `session_key_file` makes zero OS credential-store calls;
+  `session_key_file` alone only keys the history cache, because the session
+  target still decides whether the session uses a key file and a keyring session
+  must remain allowed. The key file is 32 raw bytes from the OS CSPRNG, created
+  on first seal with `0600` on Unix, cached for the process, and never
+  overwritten; a group- or other-readable file is repaired to `0600` or the
+  launch refuses with `Unavailable`. Windows has no mode; the profile ACL is the
+  protection. The keyring remains the default and the key file is opt-in.
+
+  **The tradeoff:** the key rests beside the ciphertext, protected by `0600` and
+  full-disk encryption instead of the OS credential store. A process running as
+  the same user can read it, and so can a backup that captures the key file with
+  the session files. The keyring is stronger against an attacker who copies
+  files but cannot run as the reader; the key file is the practical answer to a
+  keychain that prompts on every rebuild or a headless box with no Secret
+  Service. Neither is universally safer, so the docs state the tradeoff rather
+  than claim one.
+
+  **Precedent:** Telegram Desktop keeps its local key in `tdata/key_data`, and
+  Telegram for macOS keeps the Postbox key in `.tempkey`; neither uses the login
+  keychain for the MTProto auth key. That is a precedent for a key beside the
+  data, not a claim that either client is more secure. Both have a stable code
+  identity; televim's unsigned ad-hoc cdhash changes per build, which is why the
+  keychain asks again after a rebuild and a key file does not.
+
+  **Migration and lifecycle:** a keyring-sealed session cannot open under a newly
+  configured key file. First enable costs one sign-in, and there is no automatic
+  re-seal. Move the key file and its session files as a pair; the key file alone
+  opens nothing, and a session file without its key opens nothing. Sign-out
+  leaves the key file, as it leaves the keyring's `file-key`, and `:passphrase`
+  is not a supported combination with it. Rotation is manual: sign out, remove
+  the session and key file, relaunch, sign in. A missing or short key file is
+  `Load`; an unreadable one is `Unavailable`; neither is `Corrupt`, because
+  `Corrupt` clears the store and stays reserved for a damaged session payload.
+  Key-file trouble does not offer the passphrase box: `accepts_passphrase` is
+  false for the provider, so a key file cannot silently fall back to a secret the
+  reader did not configure.
+
+  **Performance note:** the session file and history cache share one
+  `KeyProvider` per process. A passphrase provider reuses one Argon2id salt and
+  may re-derive when the two files' salts alternate; that is a performance cost,
+  not a correctness change. The key file and keyring use the zero salt and do not
+  re-derive.
 - **Why the passphrase may now be typed at launch** (supersedes the earlier "there
   is no interactive prompt"): that was deferred for want of a prompt kind, a widget
   and a design pass, and all three now exist. When bring-up finds the session file
