@@ -5065,10 +5065,6 @@ fn apply_history(
     generation: u64,
     result: Result<Vec<Message>, ProtoError>,
 ) {
-    // However it ended, the direction is open again: a fetch that failed
-    // must not close a conversation for good.
-    app.end_fetch(direction);
-
     // A page asked of a client whose feed has since ended knows nothing of what
     // the reconnect missed. The peer guard below cannot tell it apart when the
     // reader reopened the same conversation, so it goes first, whole.
@@ -5079,6 +5075,9 @@ fn apply_history(
     if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
         return;
     }
+
+    // Marks are per direction, so a stale page must not clear the current fetch.
+    app.end_fetch(direction);
 
     match result {
         Ok(page) => {
@@ -8894,6 +8893,65 @@ mod tests {
             "a conversation just opened asks for its newest page"
         );
         begin_latest(app, state, CHAT);
+    }
+
+    #[test]
+    fn stale_peer_page_keeps_current_fetch_mark() {
+        let mut app = app_just_opened();
+        let mut state = State::default();
+        open_pass(&mut app, &mut state);
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT + 1),
+                generation: 0,
+                result: Ok(messages(CHAT + 1, 1..=2)),
+            },
+        );
+        assert!(app.is_fetching(FetchDirection::Latest));
+        assert!(app.conversation.conversation.window.is_empty());
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=2),
+        );
+        assert!(!app.is_fetching(FetchDirection::Latest));
+        assert_eq!(window_ids(&app), vec![1, 2]);
+    }
+
+    #[test]
+    fn stale_generation_page_keeps_current_fetch_mark() {
+        let mut app = app_just_opened();
+        let mut state = State::default();
+        open_pass(&mut app, &mut state);
+        state.feed_generation += 1;
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                generation: 0,
+                result: Ok(messages(CHAT, 1..=2)),
+            },
+        );
+        assert!(app.is_fetching(FetchDirection::Latest));
+        assert!(app.conversation.conversation.window.is_empty());
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=2),
+        );
+        assert!(!app.is_fetching(FetchDirection::Latest));
+        assert_eq!(window_ids(&app), vec![1, 2]);
     }
 
     /// A warm cache paints the conversation before the wire has said anything,
