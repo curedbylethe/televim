@@ -364,6 +364,16 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   `session.rs`, which is `#[ignore]`d because what it needs is a credential
   store rather than a datacenter.
 
+  No automated test can count a macOS keychain dialog; the throttle and the
+  reconnect bound are tested as logic only. Manual check after a rebuild:
+
+  1. Build, then launch with `log_level = "debug"`. Count prompts: expect one
+     per keychain item (session, history `file-key`); choose Always Allow.
+  2. Use the app for two minutes, then quit. Expect no further prompt.
+  3. Relaunch the same binary: expect none.
+  4. Set `session_path` and `session_key_file`, relaunch: expect none.
+  5. The log's `keychain operation` lines must match the prompts counted.
+
   To run the `app` suite, which no workflow runs for you:
 
   ```console
