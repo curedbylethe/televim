@@ -1785,3 +1785,12 @@ are in [`../AGENTS.md`](../AGENTS.md).
   that never send focus events must still support notifications. Once the
   terminal reports focus, only a reported unfocused state permits a notice.
   A profile card over the open conversation counts as not looking at its messages.
+- **Why the session write is throttled to once every 30 seconds:** every request
+  that cached a peer or advanced the update position wrote the whole session to
+  the keychain, a password dialog each time on an unsigned macOS build. A skipped
+  write leaves the session dirty, so the next one carries everything; feed end,
+  logout and a clean exit write at once. A crash can lose up to 30 seconds: the
+  update position replays through `getDifference` and the peer cache
+  renegotiates. The automatic reconnect likewise re-arms only after the new feed
+  has been up for ten minutes, so a flapping feed cannot re-read the keychain at
+  every death.

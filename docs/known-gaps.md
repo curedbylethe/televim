@@ -422,7 +422,9 @@ Real, and named so they are not mistaken for oversights:
   Windows SmartScreen may warn or block them. On macOS the ad-hoc code identity
   changes on every rebuild, so the keychain asks again after a rebuild even when
   a later launch of the same binary does not; a configured key file avoids the
-  question. `SHA256SUMS` checks file integrity;
+  question. Session writes are throttled to one per 30 seconds, so an unsigned
+  build asks a few times per run at worst, not once per request; the two-item
+  first launch (session, history key) still asks twice. `SHA256SUMS` checks file integrity;
   it does not establish publisher identity. See [`installing.md`](./installing.md).
 - **The in-app updater has platform limits.** Windows self-replacement is not
   proven on a real Windows host (L-3). Package-manager refusal uses executable

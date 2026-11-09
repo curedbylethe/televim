@@ -194,6 +194,12 @@ without a stable signing identity — changes its code identity when rebuilt, so
 macOS treats a rebuild as a new program and repeats the prompts per item. A
 signed and notarized build keeps a stable identity and does not repeat them.
 
+While running, the session is written back to the keychain at most once every
+30 seconds, plus once on a clean exit, and the history key is read once per
+launch. After a rebuild on an unsigned build, expect the first-launch prompts
+again; they do not repeat within the run. Set `log_level` to `debug` to see each
+keychain call, logged with its service, account and operation.
+
 To keep the session out of the keychain, configure an encrypted file and its key
 file together:
 
