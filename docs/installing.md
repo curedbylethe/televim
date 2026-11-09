@@ -185,6 +185,12 @@ when macOS offers that option. Do not disable Gatekeeper globally.
 
 ### If the keychain keeps asking
 
+By default Televim keeps the session in an encrypted file beside the
+configuration, with its random 32-byte key in `session.key` next to it, and does
+not call the keychain. The prompts below only apply when you set `session_path`
+alone, or when an older version left the session in the keychain: sign in once
+and the new file takes over.
+
 The keyring is the macOS login keychain. On the first launch, expect one prompt
 per keychain item: the session item, plus the history `file-key` item when a
 history file exists and no passphrase or key file supplies the history key — so

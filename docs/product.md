@@ -127,7 +127,7 @@ Working today:
   and the history cache's, comes from the first configured key source: a
   passphrase, `session_key_file` (`TELEVIM_SESSION_KEY_FILE`), or the keyring's
   random `file-key`; a passphrase and a key file are refused together, so at most
-  one of those two is configured. The key file is opt-in: it holds exactly 32 raw
+  one of those two is configured. The key file is the default when neither a passphrase nor `session_path` is set: it holds exactly 32 raw
   bytes,
   which televim creates with the OS CSPRNG on first use, `0600` on Unix, caches
   for the process, and **never overwrites**. On Unix a group- or other-readable
@@ -149,8 +149,7 @@ Working today:
   The tradeoff is deliberate: the key sits beside the ciphertext, protected by
   `0600` and full-disk encryption rather than the OS credential store. A process
   running as the same user, and any backup that captures the key file with the
-  session files, can read both. That is why the keyring stays the default and the
-  key file is opt-in. Migration costs one sign-in: a keyring-sealed session cannot
+  session files, can read both. That is the tradeoff of making it the default. Migration costs one sign-in: a keyring-sealed session cannot
   open under a newly configured key file, so sign out, add `session_key_file`, and
   sign in again. Move the key file and its session files as a pair; a key file
   without the files it sealed opens nothing. `:passphrase` and sign-out do not

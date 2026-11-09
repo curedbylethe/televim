@@ -367,7 +367,7 @@ Real, and named so they are not mistaken for oversights:
   such a file signs in again. Until then it is read as described; nothing is
   removed yet.
 - **A key file trades the OS credential store for a file beside the ciphertext.**
-  It is opt-in and the keyring remains the default. The key is protected by
+  It is the default, so every user takes this tradeoff unless they set a passphrase or `session_path` alone. The key is protected by
   `0600` and full-disk encryption rather than the OS credential store, and that
   is the tradeoff, not a claim that it is safer.
   - *Same-user and backup exposure.* Any process running as the reader can read

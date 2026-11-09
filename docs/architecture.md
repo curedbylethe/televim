@@ -801,8 +801,9 @@ Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
 `TELEVIM_SESSION_PATH` and `TELEVIM_SESSION_KEY_FILE`; with no credentials the
 client is never built and the
 sign-in surface names the pair that is missing rather than drawing a form, and
-with no `session_path` the session goes to the OS credential store. With a
-`session_path` the session is an encrypted file, and the key to it is a configured
+with no `session_path` the session is an encrypted file beside the config and,
+unless a passphrase or key file is set, its key is `session.key` beside that.
+With a `session_path` the session is an encrypted file, and the key to it is a configured
 passphrase (`TELEVIM_SESSION_PASSPHRASE`, or `session_passphrase` in the file),
 else `session_key_file`, else a random key kept in the OS credential store;
 `Config::session_passphrase` is a `Secret`
