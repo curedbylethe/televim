@@ -2705,6 +2705,32 @@ fn mark_unread_queues_one_server_change_without_confirmation() {
 }
 
 #[test]
+fn mark_all_read_queues_one_action_without_confirmation() {
+    let mut app = App::mock();
+
+    run_command_line(&mut app, "mark-all-read");
+
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert_eq!(app.take_action(), Some(Action::MarkAllRead));
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn mark_all_read_refuses_without_a_client() {
+    let mut app = App::mock();
+    app.session.client_available = false;
+
+    run_command_line(&mut app, "mark-all-read");
+
+    assert_eq!(
+        app.status_text(),
+        "not connected yet — the client is not up"
+    );
+    assert_eq!(app.take_action(), None);
+    assert_eq!(app.ui.mode, Mode::Normal);
+}
+
+#[test]
 fn mark_unread_refuses_without_a_client_and_on_the_open_conversation() {
     let mut app = App::mock();
     app.list.selected_chat = 1;

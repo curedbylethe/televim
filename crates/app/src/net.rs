@@ -483,6 +483,9 @@ pub enum Event {
         max_id: i64,
     },
 
+    /// The visible-list read fan-out finished.
+    BulkReadFinished { done: u32, failed: u32 },
+
     /// An update arrived for a conversation televim displays.
     Update(UpdateEvent),
 
@@ -2474,6 +2477,10 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             state.hold(action);
             break;
         };
+        if matches!(&action, Action::MarkAllRead) {
+            request_mark_all_read(&client, app, tx);
+            continue;
+        }
         let media = media_job(&action, app, state);
         request_action(&client, state, action, media, tx);
     }
@@ -2741,6 +2748,35 @@ fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
     (state.read_acked != Some((open, max_id))).then_some((open, max_id))
 }
 
+/// Collects visible chats that can be marked read, and mark-only chats to clear.
+fn mark_all_targets(app: &App) -> (Vec<(i64, i64)>, Vec<i64>) {
+    let mut reads = Vec::new();
+    let mut marks = Vec::new();
+    for chat in app.chats() {
+        if chat.unread_count > 0 {
+            if let Some(max_id) = chat
+                .last_message_id
+                .filter(|id| *id > 0 && i32::try_from(*id).is_ok())
+            {
+                reads.push((chat.id, max_id));
+            }
+        } else if chat.unread_mark {
+            marks.push(chat.id);
+        }
+    }
+    (reads, marks)
+}
+
+/// The sentence for the completed read fan-out.
+fn bulk_read_sentence(done: u32, failed: u32) -> String {
+    match (done, failed) {
+        (1, 0) => "marked 1 chat read".to_owned(),
+        (_, 0) => format!("marked {done} chats read"),
+        (0, _) => format!("nothing marked read: {failed} failed"),
+        _ => format!("marked {done} chats read, {failed} failed"),
+    }
+}
+
 /// The read marker a Latest page asks for, or none.
 ///
 /// A card that covers the conversation refuses the marker, so the conversation
@@ -2790,6 +2826,50 @@ fn request_read(
                 tracing::debug!(%error, chat_id, max_id, "the read marker was not accepted; the unread count is kept");
             }
         }
+    });
+}
+
+/// Reads every eligible visible chat in one sequential background task.
+fn request_mark_all_read(client: &Arc<ProtoClient>, app: &mut App, tx: &UnboundedSender<AppEvent>) {
+    let (reads, marks) = mark_all_targets(app);
+    if reads.is_empty() && marks.is_empty() {
+        app.flash("nothing to mark read");
+        return;
+    }
+
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let (mut done, mut failed) = (0_u32, 0_u32);
+        for (chat_id, max_id) in reads {
+            match client.mark_read(chat_id, max_id).await {
+                Ok(()) => {
+                    done += 1;
+                    let _ = tx.send(AppEvent::Net(Event::ReadMarked { chat_id, max_id }));
+                }
+                Err(error) => {
+                    failed += 1;
+                    tracing::debug!(%error, chat_id, "mark-all-read: the read marker was not accepted");
+                }
+            }
+        }
+        for chat_id in marks {
+            match client.set_unread_mark(chat_id, false).await {
+                Ok(()) => {
+                    done += 1;
+                    let _ = tx.send(AppEvent::Net(Event::UnreadMarked {
+                        chat_id,
+                        unread: false,
+                        result: Ok(()),
+                    }));
+                }
+                Err(error) => {
+                    failed += 1;
+                    tracing::debug!(%error, chat_id, "mark-all-read: the unread mark was not cleared");
+                }
+            }
+        }
+        let _ = tx.send(AppEvent::Net(Event::BulkReadFinished { done, failed }));
     });
 }
 
@@ -3473,6 +3553,7 @@ fn request_plain(
             // The cancel is answered by `request_action`, which holds the flag;
             // nothing is asked of the network for it either.
             Action::AddAccount
+            | Action::MarkAllRead
             | Action::SwitchAccount { .. }
             | Action::Login { .. }
             | Action::LoginCancelled
@@ -3726,6 +3807,8 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             state.read_acked = Some((chat_id, max_id));
             app.mark_chat_read(chat_id);
         }
+
+        Event::BulkReadFinished { done, failed } => app.flash(bulk_read_sentence(done, failed)),
 
         Event::LoggedOut { result } => apply_logged_out_and_reconnect(app, state, result),
 
@@ -5947,6 +6030,50 @@ mod tests {
             presence: None,
             deleted: false,
         }
+    }
+
+    #[test]
+    fn mark_all_targets_include_visible_counts_and_mark_only_chats() {
+        let mut counted = chat(1);
+        counted.unread_count = 2;
+        counted.last_message_id = Some(10);
+        let mut no_id = chat(2);
+        no_id.unread_count = 1;
+        let mut mark_only = chat(3);
+        mark_only.unread_mark = true;
+        let mut plain = chat(4);
+        plain.unread_mark = false;
+        let mut too_large = chat(5);
+        too_large.unread_count = 1;
+        too_large.last_message_id = Some(i64::from(i32::MAX) + 1);
+        let mut counted_with_mark = chat(6);
+        counted_with_mark.unread_count = 1;
+        counted_with_mark.last_message_id = Some(20);
+        counted_with_mark.unread_mark = true;
+        let mut archived = chat(7);
+        archived.unread_count = 1;
+        archived.last_message_id = Some(30);
+
+        let mut app = App::new();
+        app.set_chats(vec![
+            counted,
+            no_id,
+            mark_only,
+            plain,
+            too_large,
+            counted_with_mark,
+        ]);
+        app.set_archived_chats(vec![archived]);
+
+        assert_eq!(mark_all_targets(&app), (vec![(1, 10), (6, 20)], vec![3]));
+    }
+
+    #[test]
+    fn bulk_read_sentences_cover_success_and_partial_failure() {
+        assert_eq!(bulk_read_sentence(1, 0), "marked 1 chat read");
+        assert_eq!(bulk_read_sentence(3, 0), "marked 3 chats read");
+        assert_eq!(bulk_read_sentence(0, 2), "nothing marked read: 2 failed");
+        assert_eq!(bulk_read_sentence(2, 1), "marked 2 chats read, 1 failed");
     }
 
     #[test]
