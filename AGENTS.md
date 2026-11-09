@@ -78,6 +78,19 @@ match the compiler edition — both are `2024`.
     program draws on the terminal, and grammers logs at info as a matter of course,
     so a logger that shares the screen with the interface takes it apart on the first connection.
 
+### Execution Efficiency Rules
+
+- Prefer the smallest correct implementation that satisfies the request.
+- Inspect only files relevant to the task. Expand exploration when evidence requires it.
+- Avoid unnecessary architectural changes, speculative improvements, and unrelated refactoring.
+- Do not repeatedly read files whose contents are already available in context.
+- Before running expensive commands, determine whether they are necessary.
+- Prefer targeted tests, linting, and type checks over full-project validation.
+- If a command fails repeatedly, diagnose the cause instead of retrying without changes.
+- Do not perform multiple rounds of review unless failures or meaningful risks justify them.
+- Complete the requested change before investigating optional improvements.
+- Report blockers rather than continuing indefinitely without progress.
+
 ## Commands
 
 `make ci` is the local gate: `fmt-check lint boundary test design-check build-release`.
