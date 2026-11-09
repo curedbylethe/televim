@@ -306,6 +306,7 @@ impl KeyringKeyProvider {
         if let Some(key) = cached.as_ref() {
             return Ok(key.clone());
         }
+        crate::session::note_keychain_op(&self.service, &self.account, "resolve");
         let key = key_from_entry(&self.entry()?, create)?;
         *cached = Some(key.clone());
         Ok(key)
