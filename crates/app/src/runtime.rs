@@ -1033,6 +1033,12 @@ async fn event_loop(
     }
 
     network.finish_history(app.chats()).await;
+    // The client throttles its own session writes; a clean exit owes the rest.
+    if let Some(client) = network.client()
+        && let Err(error) = client.persist_session_if_changed()
+    {
+        tracing::warn!(%error, "could not save the session on exit");
+    }
     Ok(())
 }
 

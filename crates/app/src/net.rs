@@ -10054,7 +10054,7 @@ mod tests {
             "a feed that just died is not stable"
         );
 
-        state.auto_reconnect_at = Some(Instant::now() - RECONNECT_STABLE_FOR);
+        state.auto_reconnect_at = Instant::now().checked_sub(RECONNECT_STABLE_FOR);
         apply(&mut app, &mut state, update());
         assert!(!state.auto_reconnect_used, "a feed up for the window is");
     }
