@@ -21,6 +21,12 @@ use crate::updates::UpdateRelay;
 /// Telegram does not publish its limit and applies it per phone number, based
 /// on the account's history, so this is a "you are about to be throttled" nudge
 /// rather than a rule the wrapper enforces.
+/// Shortest gap between two automatic session writes. Each write is a
+/// credential-store call, which on an unsigned macOS build is a password dialog.
+/// What a skipped write holds back replays from the server (update position) or
+/// renegotiates (peer cache).
+const SESSION_WRITE_INTERVAL: Duration = Duration::from_secs(30);
+
 const CODE_REQUEST_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Remembers when a login code was last requested.
@@ -140,6 +146,7 @@ impl ClientBuilder {
             api_hash: self.api_hash,
             session,
             code_requests: CodeRequestLog::default(),
+            session_writes: WriteThrottle::default(),
             updates: UpdateRelay::start(updates),
             dialogs_fetched: AtomicBool::new(false),
             signed_in: Mutex::new(None),
@@ -190,6 +197,7 @@ pub struct Client {
     api_hash: String,
     session: Arc<StoreSession>,
     code_requests: CodeRequestLog,
+    session_writes: WriteThrottle,
     updates: UpdateRelay,
 
     /// Whether [`Client::fetch_dialogs`] has run. A latch: it only ever goes
@@ -534,10 +542,21 @@ impl Client {
     /// it no longer has and log the user out. The write is skipped unless
     /// something actually changed, so a credential-store write stays off the
     /// hot path.
+    ///
+    /// At most one write per [`SESSION_WRITE_INTERVAL`]: a skipped write leaves
+    /// the session dirty, so the next one carries everything. A failed write
+    /// stays dirty and is retried at once.
     pub(crate) fn flush_session(&self) {
+        let now = Instant::now();
+        if !self.session_writes.due(now) {
+            return;
+        }
         match self.session.persist_if_dirty() {
             Ok(false) => {}
-            Ok(true) => tracing::debug!("wrote the session back after it changed"),
+            Ok(true) => {
+                self.session_writes.wrote(now);
+                tracing::debug!("wrote the session back after it changed");
+            }
             Err(error) => tracing::warn!(
                 %error,
                 "the session changed but could not be saved; the next launch may renegotiate or need a new login"
@@ -557,9 +576,34 @@ impl Client {
     }
 }
 
+/// When the session was last written automatically.
+#[derive(Default)]
+struct WriteThrottle(Mutex<Option<Instant>>);
+
+impl WriteThrottle {
+    fn due(&self, now: Instant) -> bool {
+        let last = *self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        last.is_none_or(|at| now.saturating_duration_since(at) >= SESSION_WRITE_INTERVAL)
+    }
+
+    fn wrote(&self, now: Instant) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(now);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_writes_are_one_per_interval() {
+        let throttle = WriteThrottle::default();
+        let start = Instant::now();
+        assert!(throttle.due(start), "the first write is never held back");
+        throttle.wrote(start);
+        assert!(!throttle.due(start + Duration::from_secs(1)));
+        assert!(throttle.due(start + SESSION_WRITE_INTERVAL));
+    }
 
     #[test]
     fn the_first_code_request_is_not_flagged() {
