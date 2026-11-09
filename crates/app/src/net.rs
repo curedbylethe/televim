@@ -13069,6 +13069,23 @@ mod session_store_tests {
         );
     }
 
+    /// The shipped default: a configuration loaded with nothing in it opens its
+    /// session from a key file, so the OS credential store is never asked.
+    #[test]
+    fn the_default_configuration_never_asks_the_keyring() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let cfg = Config::load(&dir.path().join("config.toml")).expect("an empty config loads");
+
+        let Session { keys, .. } = session_store_with(&legacy_paths(&cfg), &cfg, || {
+            panic!("the keyring is not asked")
+        });
+        assert!(
+            format!("{:?}", keys.expect("a default session has a key source"))
+                .contains("KeyFileProvider"),
+            "the key file is the default source"
+        );
+    }
+
     /// Neither key: an `offline:` sentence that names what to set, and the file
     /// is exactly as it was — no discard, and no plaintext written to get round
     /// it.
