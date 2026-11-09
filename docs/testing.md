@@ -539,3 +539,58 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   figure is the empty/sign-in frame (drawn before any round trip), and the
   latency figure spans the loop taking the key to the draw completing — not the
   reader thread's blocking read, and not the terminal's paint.
+
+## Conversation open
+
+`TELEVIM_MEASURE=1` records conversation-open timings in the log beside
+the selected configuration, never on the terminal. For `televim.toml`, the log
+is `televim.log`; other config basenames use the same `.log` extension. The
+log is overwritten on each launch, so save each run before restarting. Use a signed-in account,
+ five distinct conversations with messages, and the same host, terminal height,
+ and network for each comparison. Run one app instance at a time. The log
+ contains peer IDs; remove them before sharing the measurements.
+
+Build the release binary with `make build-release`. Run it with
+`RUST_LOG=info TELEVIM_MEASURE=1 target/release/televim --config <config>`; use the same
+configuration and account throughout. The `conversation open measured` log
+line is emitted after the newest page has been applied and a frame drawn.
+
+- **Cold open after connection:** with the app stopped, move its history file
+  (for `televim.toml`, `televim.history.json` or `televim.<account-id>.history.json`)
+  to a safe backup. The history basename follows the selected config; do not
+  move the account index, session, or drafts. Start the app,
+  wait for the chat list to connect, then open five different conversations with
+  messages. Each must report `seeded=false`. Stop the app and restore the
+  original history file when finished.
+- **Warm open:** with the original history restored and the app connected, open
+  a conversation, leave with `h`, then reopen it five times using `:chat <id>`
+  or the chat list. Each measured reopen must report `seeded=true`; keep the
+  conversation in the 32-peer history cache.
+- **Cold launch:** with the app stopped, back up the history file, then run
+  `RUST_LOG=info TELEVIM_MEASURE=1 target/release/televim --config <config> --chat <id>`.
+  Save the log, stop the app, and move its newly written history file aside
+  before each of five launches. Restore the original history file afterward. Use a conversation
+  with messages and require `seeded=false`.
+
+Record the five values, median, minimum and maximum for each case, with the
+host, terminal height and network. Do not add `input_latency_ms`: it overlaps
+this measurement. `first_row_ms` runs from the opening key as the loop receives
+it to the first completed draw containing rows. For a launch without an opening
+key, it starts when the newest request begins; use `launch_first_row_ms` for the
+whole process launch, including time spent entering a passphrase. For a cold
+launch, `auth_first_row_ms` starts after the stored session passes the Telegram
+authorization check. The separate `auth_to_ready_ms` line ends when the first
+signed-in `Ready` reaches the event loop. Both exclude passphrase entry, key
+derivation, client setup, and the authorization check itself. They include the
+chat-list, account, archive and update-feed setup; the first-row figure also
+includes the history fetch and draw. Use the first signed-in `Ready` and first
+cold conversation in a run; reconnects are not launch samples.
+`fetch_ms` covers the network fetch, and `open_to_apply_ms` ends when its page
+has been applied. `rows` is the page row
+count, `limit` is the requested page size, and `seeded` says whether cached
+rows were present at request time. `Some(...)` is a measured duration in
+milliseconds; `None` means no first row or fetch was measured. `ok=false`
+reports a failed page. Terminal delivery before the event loop and terminal
+painting after the draw are outside these timings. A cached first row can paint
+before its fetch finishes, so compare its first-row and fetch durations
+separately.

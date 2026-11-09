@@ -117,12 +117,41 @@ pub fn note_launch() {
 /// an environment variable rather than a flag so that adding it cannot add a
 /// user-visible surface, and the cost when it is unset is one `var_os` per
 /// event plus a load that is already `None`.
-fn measuring() -> bool {
+pub(crate) fn measuring() -> bool {
     std::env::var_os("TELEVIM_MEASURE").is_some()
 }
 
 /// Set by [`note_launch`], read by the first-frame probe.
 static LAUNCHED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+pub(crate) fn launch_instant() -> Option<Instant> {
+    LAUNCHED.get().copied()
+}
+
+static AUTHORIZED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+static READY_REPORTED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn note_authorized() {
+    if LAUNCHED.get().is_some() {
+        let _ = AUTHORIZED.set(Instant::now());
+    }
+}
+
+pub(crate) fn authorization_instant() -> Option<Instant> {
+    AUTHORIZED.get().copied()
+}
+
+pub(crate) fn probe_authorized_ready() {
+    let Some(authorized) = authorization_instant() else {
+        return;
+    };
+    if !READY_REPORTED.swap(true, Ordering::Relaxed) {
+        tracing::info!(
+            auth_to_ready_ms = authorized.elapsed().as_secs_f64() * 1000.0,
+            "authorized session ready"
+        );
+    }
+}
 
 /// Records the first drawn frame's age, once.
 ///
@@ -797,6 +826,7 @@ pub(crate) fn load_history(
 /// file is loaded here once, handed to the network state with what it held,
 /// written behind every page that changes it, and removed on sign-out; its
 /// media path is the cache's directory.
+#[allow(clippy::too_many_lines)]
 async fn event_loop(
     cfg: &Config,
     config_path: &Path,
@@ -922,6 +952,7 @@ async fn event_loop(
         // shell's. The loop still runs the rest of the pass.
         if !viewers.busy() {
             draw_frame(terminal, &app)?;
+            network.probe_open_frame(&app);
         }
 
         // The key was taken on the previous pass; what arrives here is the
@@ -942,6 +973,9 @@ async fn event_loop(
             Ok(Some(AppEvent::Input(Event::Key(key))))
                 if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
             {
+                if measuring() {
+                    network.set_open_key(Some(Instant::now()));
+                }
                 app.handle_key(key);
                 // The clock only starts for a measured run: an ordinary run
                 // leaves the `None` it has, and never reads the environment.
@@ -969,6 +1003,7 @@ async fn event_loop(
         // reader who scrolled to the top and stopped into a page request, and
         // what starts the next page once one has landed.
         net::drive(&mut app, &mut network, &tx);
+        network.set_open_key(None);
         // Stickers the panel asked for while drawing are taken off the queue
         // here and downloaded in a task, so the tick never waits on the network:
         // each answer comes back as an event and settles on the next pass. Flag
