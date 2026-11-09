@@ -62,6 +62,8 @@
 //! a process dump taken while a session is open still holds the live key.
 
 use std::fmt;
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use aes_gcm_siv::aead::{Aead, Payload};
@@ -164,6 +166,15 @@ pub trait KeyProvider: Send + Sync + fmt::Debug {
     ///
     /// Never creates a key: there is nothing to open with one that was just made.
     fn opening_key(&self, salt: &Salt) -> Result<FileKey, SessionError>;
+
+    /// Whether a failure from this provider may be answered with a passphrase.
+    ///
+    /// Defaults to `true`: no credential store still leaves the passphrase
+    /// fallback. A provider whose key cannot be derived from a passphrase
+    /// returns `false`.
+    fn accepts_passphrase(&self) -> bool {
+        true
+    }
 }
 
 /// Derives the file key from a passphrase with Argon2id.
@@ -350,6 +361,179 @@ fn key_from_entry(entry: &keyring::Entry, create: bool) -> Result<FileKey, Sessi
         )),
         Err(error) => Err(SessionError::Unavailable(error.to_string())),
     }
+}
+
+/// Keeps a random 256-bit file key in a file the app owns.
+///
+/// The file holds exactly [`KEY_LEN`] raw bytes. It is created on the first
+/// [`sealing_key`](KeyProvider::sealing_key) call — never on an open — with
+/// mode `0600` on Unix, and is never overwritten. An existing file with group
+/// or other permission bits is tightened to `0600`, or reported as
+/// [`SessionError::Unavailable`] if that fails.
+///
+/// No OS credential store is touched, so a launch with this provider makes no
+/// keychain dialog.
+pub struct KeyFileProvider {
+    path: PathBuf,
+    cached: Mutex<Option<FileKey>>,
+}
+
+impl KeyFileProvider {
+    /// A provider for the key file at `path`.
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            cached: Mutex::new(None),
+        }
+    }
+
+    /// The key at `path`, created only when `create` and there is no file.
+    fn resolve(&self, create: bool) -> Result<FileKey, SessionError> {
+        let mut cached = lock(&self.cached);
+        if let Some(key) = cached.as_ref() {
+            return Ok(key.clone());
+        }
+        let key = match std::fs::read(&self.path) {
+            Ok(bytes) => self.key_from_file(&bytes)?,
+            Err(error) if error.kind() == ErrorKind::NotFound && create => self.create()?,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Err(missing(&self.path)),
+            Err(error) => return Err(unreadable(&self.path, &error)),
+        };
+        *cached = Some(key.clone());
+        Ok(key)
+    }
+
+    /// Wraps exactly [`KEY_LEN`] bytes, tightening the file's mode first.
+    fn key_from_file(&self, bytes: &[u8]) -> Result<FileKey, SessionError> {
+        let bytes: [u8; KEY_LEN] = bytes.try_into().map_err(|_| {
+            SessionError::Load(format!(
+                "the file key at {} is {} bytes, not {KEY_LEN}; restore the file, or run :logout and sign in again",
+                self.path.display(),
+                bytes.len()
+            ))
+        })?;
+        #[cfg(unix)]
+        self.restrict()?;
+        Ok(FileKey::from_bytes(bytes))
+    }
+
+    /// Tightens an existing key file to `0600` when it is readable by others.
+    #[cfg(unix)]
+    fn restrict(&self) -> Result<(), SessionError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = std::fs::metadata(&self.path)
+            .map_err(|error| unreadable(&self.path, &error))?
+            .permissions()
+            .mode();
+        if mode.trailing_zeros() >= 6 {
+            return Ok(());
+        }
+        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| {
+                SessionError::Unavailable(format!(
+                    "could not restrict the file key at {} to 0600: {error}",
+                    self.path.display()
+                ))
+            },
+        )
+    }
+
+    /// Creates the key file, never overwriting one.
+    fn create(&self) -> Result<FileKey, SessionError> {
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                SessionError::Unavailable(format!(
+                    "could not create the directory for the file key at {}: {error}",
+                    self.path.display()
+                ))
+            })?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        // Generate first, so a failure cannot leave an empty key file behind.
+        let key = FileKey::generate()?;
+        let mut file = match options.open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                // Another process won the create. It may still be writing, so
+                // this read can see a short file and report Load.
+                // shortcut: no retry on the create race, add one if a real
+                // first-use collision shows up.
+                return self.read_existing();
+            }
+            Err(error) => {
+                return Err(SessionError::Unavailable(format!(
+                    "could not create the file key at {}: {error}",
+                    self.path.display()
+                )));
+            }
+        };
+        if let Err(error) = file.write_all(&key.0[..]).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&self.path);
+            return Err(SessionError::Unavailable(format!(
+                "could not write the file key at {}: {error}",
+                self.path.display()
+            )));
+        }
+        Ok(key)
+    }
+
+    /// Reads a file another process just created.
+    fn read_existing(&self) -> Result<FileKey, SessionError> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => self.key_from_file(&bytes),
+            Err(error) if error.kind() == ErrorKind::NotFound => Err(missing(&self.path)),
+            Err(error) => Err(unreadable(&self.path, &error)),
+        }
+    }
+}
+
+impl KeyProvider for KeyFileProvider {
+    fn sealing_key(&self) -> Result<(Salt, FileKey), SessionError> {
+        Ok(([0; SALT_LEN], self.resolve(true)?))
+    }
+
+    fn opening_key(&self, _salt: &Salt) -> Result<FileKey, SessionError> {
+        self.resolve(false)
+    }
+
+    fn accepts_passphrase(&self) -> bool {
+        false
+    }
+}
+
+impl fmt::Debug for KeyFileProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyFileProvider")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The error for a key file that is not there.
+fn missing(path: &Path) -> SessionError {
+    SessionError::Load(format!(
+        "there is no file key at {}; restore the file, or run :logout and sign in again",
+        path.display()
+    ))
+}
+
+/// The error for a key file the OS would not read, apart from [`missing`].
+fn unreadable(path: &Path, error: &std::io::Error) -> SessionError {
+    SessionError::Unavailable(format!(
+        "could not read the file key at {}: {error}",
+        path.display()
+    ))
 }
 
 /// Whether `bytes` begin with the envelope magic.
@@ -716,6 +900,154 @@ mod tests {
         assert_eq!(entry.get_secret().expect("get"), b"short");
     }
 
+    fn key_path(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join("session-key")
+    }
+
+    #[test]
+    fn key_file_is_created_on_seal_with_32_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        let provider = KeyFileProvider::new(&path);
+        let (salt, key) = provider.sealing_key().expect("key");
+        assert_eq!(salt, [0; SALT_LEN]);
+        let bytes = std::fs::read(&path).expect("created");
+        assert_eq!(bytes.len(), KEY_LEN);
+        assert_eq!(bytes, key.0.as_slice());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn a_second_provider_reads_the_same_key() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        let first = KeyFileProvider::new(&path)
+            .sealing_key()
+            .expect("seal key")
+            .1;
+        let second = KeyFileProvider::new(&path)
+            .opening_key(&[0; SALT_LEN])
+            .expect("open key");
+        assert_eq!(first.0.as_slice(), second.0.as_slice());
+    }
+
+    #[test]
+    fn opening_a_missing_key_file_is_load_and_creates_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        let result = KeyFileProvider::new(&path).opening_key(&[0; SALT_LEN]);
+        assert!(matches!(result, Err(SessionError::Load(_))));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_wrong_length_key_file_is_load_and_left_alone() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        for contents in [&b"short"[..], &[0u8; KEY_LEN + 1][..]] {
+            std::fs::write(&path, contents).expect("write");
+            let provider = KeyFileProvider::new(&path);
+            assert!(matches!(
+                provider.opening_key(&[0; SALT_LEN]),
+                Err(SessionError::Load(_))
+            ));
+            assert!(matches!(provider.sealing_key(), Err(SessionError::Load(_))));
+            assert_eq!(std::fs::read(&path).expect("read"), contents);
+        }
+    }
+
+    #[test]
+    fn an_existing_key_file_is_never_overwritten() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        let existing = [7u8; KEY_LEN];
+        std::fs::write(&path, existing).expect("write");
+        let key = KeyFileProvider::new(&path)
+            .sealing_key()
+            .expect("seal key")
+            .1;
+        assert_eq!(key.0.as_slice(), existing.as_slice());
+        assert_eq!(std::fs::read(&path).expect("read"), existing);
+    }
+
+    #[test]
+    fn the_key_is_cached_for_the_provider() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        let provider = KeyFileProvider::new(&path);
+        let first = provider.sealing_key().expect("key").1;
+        std::fs::remove_file(&path).expect("remove");
+        let second = provider.sealing_key().expect("cached key").1;
+        assert_eq!(first.0.as_slice(), second.0.as_slice());
+        assert!(!path.exists(), "the cache recreated the file");
+    }
+
+    #[test]
+    fn an_unreadable_key_file_is_unavailable() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        std::fs::create_dir(&path).expect("directory at the key path");
+        let provider = KeyFileProvider::new(&path);
+        assert!(matches!(
+            provider.opening_key(&[0; SALT_LEN]),
+            Err(SessionError::Unavailable(_))
+        ));
+        assert!(matches!(
+            provider.sealing_key(),
+            Err(SessionError::Unavailable(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_permissive_key_file_is_tightened_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        let key = [7u8; KEY_LEN];
+        std::fs::write(&path, key).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let opened = KeyFileProvider::new(&path)
+            .opening_key(&[0; SALT_LEN])
+            .expect("key");
+        assert_eq!(opened.0.as_slice(), key.as_slice());
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read(&path).expect("read"), key);
+    }
+
+    #[test]
+    fn key_file_provider_debug_carries_no_key_material() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = key_path(&dir);
+        KeyFileProvider::new(&path).sealing_key().expect("key");
+        let debug = format!("{:?}", KeyFileProvider::new(&path));
+        assert!(debug.contains("KeyFileProvider"));
+        let bytes = std::fs::read(&path).expect("read");
+        assert!(!debug.contains(&format!("{bytes:?}")));
+    }
+
+    #[test]
+    fn only_the_key_file_provider_refuses_the_passphrase_fallback() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        assert!(!KeyFileProvider::new(key_path(&dir)).accepts_passphrase());
+        assert!(FixedProvider(1).accepts_passphrase());
+        assert!(PassphraseProvider::new("hunter2").accepts_passphrase());
+        assert!(KeyringKeyProvider::default().accepts_passphrase());
+    }
+
     #[test]
     fn debug_never_prints_key_material() {
         let key = FileKey::from_bytes([0xAB; KEY_LEN]);
@@ -765,5 +1097,6 @@ mod tests {
         assert!(open(&sealed, provider.as_ref()).expect("open").is_some());
         static_assertions::assert_impl_all!(PassphraseProvider: Send, Sync);
         static_assertions::assert_impl_all!(KeyringKeyProvider: Send, Sync);
+        static_assertions::assert_impl_all!(KeyFileProvider: Send, Sync);
     }
 }
