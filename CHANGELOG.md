@@ -5,6 +5,24 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.11.0] - 2026-11-09
+
+### Added
+
+- **framework:** Add a key-file session key provider
+- **framework:** Preload the stored session once per launch
+- **app:** Add the session key-file source
+- **app:** Share one key provider across a launch
+- **app:** Measure conversation open latency
+
+### Fixed
+
+- Correct the key-file recovery guidance
+- Make the key-file recovery work offline
+- **app:** Keep the open fetch mark until its own page lands
+- **tui:** Preserve the open conversation when reselecting it
+- **app:** Restore paging after reconnect
+
 ## [0.10.0] - 2026-11-09
 
 ### Added
