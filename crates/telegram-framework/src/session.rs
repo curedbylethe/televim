@@ -780,6 +780,127 @@ impl SessionStore for KeyringStore {
     }
 }
 
+/// A [`SessionStore`] that reads the underlying store once and serves that
+/// snapshot to every later reader.
+///
+/// A launch reads the session twice for different reasons — once to look for
+/// corruption, once to build the client — and a second read of a keyring entry
+/// is slow and a second chance to fail for a different reason. This wrapper
+/// loads in [`PreloadedStore::new`] and answers every [`load`] from that one
+/// value until a [`save`] or [`clear`] makes it stale.
+///
+/// [`SessionError`] is not `Clone`, so success is what gets cached. A failure is
+/// kept as the original error and handed out once by
+/// [`PreloadedStore::take_failure`], never replayed. A corrupt snapshot is the
+/// exception: it is cleared here, the discarded sentence is reported by
+/// [`PreloadedStore::discarded`], and the cache holds the empty session a
+/// cleared store would have returned.
+///
+/// [`load`]: SessionStore::load
+/// [`save`]: SessionStore::save
+/// [`clear`]: SessionStore::clear
+pub struct PreloadedStore {
+    inner: Arc<dyn SessionStore>,
+    state: Mutex<Preload>,
+    discarded: Option<String>,
+}
+
+/// What the one load found, or that nothing usable was found.
+struct Preload {
+    cached: Cache,
+    failure: Option<SessionError>,
+}
+
+/// The tri-state answer of a preload.
+enum Cache {
+    /// The preload has not run, or a write invalidated what it found.
+    NotLoaded,
+    /// The preload's answer, including the `None` of an empty store.
+    Loaded(Option<SessionData>),
+}
+
+impl PreloadedStore {
+    /// Wraps `inner`, loading it exactly once.
+    ///
+    /// A corrupt snapshot is cleared here and explained by
+    /// [`PreloadedStore::discarded`]. Every other failure is kept for
+    /// [`PreloadedStore::take_failure`] and leaves the cache empty, so a later
+    /// load asks the store again rather than being answered from a stale value.
+    #[must_use]
+    pub fn new(inner: Arc<dyn SessionStore>) -> Self {
+        let (cached, failure, discarded) = match inner.load() {
+            Ok(session) => (Cache::Loaded(session), None, None),
+            Err(SessionError::Corrupt(reason)) => {
+                tracing::warn!(%reason, "discarding an unreadable stored session");
+                match inner.clear() {
+                    Ok(()) => (
+                        Cache::Loaded(None),
+                        None,
+                        Some(format!(
+                            "the stored session could not be read ({reason}) and has been \
+                             discarded — sign in again"
+                        )),
+                    ),
+                    Err(error) => (Cache::NotLoaded, Some(error), None),
+                }
+            }
+            Err(error) => (Cache::NotLoaded, Some(error), None),
+        };
+        Self {
+            inner,
+            state: Mutex::new(Preload { cached, failure }),
+            discarded,
+        }
+    }
+
+    /// The sentence for a corrupt snapshot that was discarded during the
+    /// preload, if there was one.
+    #[must_use]
+    pub fn discarded(&self) -> Option<&str> {
+        self.discarded.as_deref()
+    }
+
+    /// Takes the preload's failure, leaving nothing behind to replay.
+    #[must_use]
+    pub fn take_failure(&self) -> Option<SessionError> {
+        self.lock().failure.take()
+    }
+
+    /// Locks the preload state, recovering from a poisoned mutex.
+    fn lock(&self) -> MutexGuard<'_, Preload> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Drops the cached snapshot, so the next load asks the store again.
+    fn invalidate(&self) {
+        self.lock().cached = Cache::NotLoaded;
+    }
+}
+
+impl SessionStore for PreloadedStore {
+    fn load(&self) -> Result<Option<SessionData>, SessionError> {
+        let mut state = self.lock();
+        if let Cache::Loaded(session) = &state.cached {
+            return Ok(session.clone());
+        }
+        let session = self.inner.load()?;
+        state.cached = Cache::Loaded(session.clone());
+        Ok(session)
+    }
+
+    fn save(&self, session: &SessionData) -> Result<(), SessionError> {
+        self.inner.save(session)?;
+        self.invalidate();
+        Ok(())
+    }
+
+    fn clear(&self) -> Result<(), SessionError> {
+        self.inner.clear()?;
+        self.invalidate();
+        Ok(())
+    }
+}
+
 #[cfg(feature = "live")]
 pub(crate) use bridge::StoreSession;
 
@@ -1279,6 +1400,8 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::error::{AuthError, FrameworkError, RequestError};
     use crate::sealed::{FileKey, KEY_LEN, MAGIC, SALT_LEN, Salt};
@@ -1381,6 +1504,276 @@ mod tests {
         let store = MemoryStore::new();
         store.clear().expect("first clear succeeds");
         store.clear().expect("second clear succeeds");
+    }
+
+    /// A store that counts its loads and otherwise behaves like memory.
+    #[derive(Default)]
+    struct CountedStore {
+        loads: AtomicUsize,
+        inner: MemoryStore,
+    }
+
+    impl SessionStore for CountedStore {
+        fn load(&self) -> Result<Option<SessionData>, SessionError> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            self.inner.load()
+        }
+
+        fn save(&self, session: &SessionData) -> Result<(), SessionError> {
+            self.inner.save(session)
+        }
+
+        fn clear(&self) -> Result<(), SessionError> {
+            self.inner.clear()
+        }
+    }
+
+    fn corrupt_error() -> SessionError {
+        SessionError::Corrupt("bad bytes".to_owned())
+    }
+
+    fn unreadable_error() -> SessionError {
+        SessionError::Load("the credential store is locked".to_owned())
+    }
+
+    /// A store whose load fails, counting the calls to `load` and `clear`.
+    struct BrokenStore {
+        loads: AtomicUsize,
+        clears: AtomicUsize,
+        error: fn() -> SessionError,
+        clear_fails: bool,
+    }
+
+    impl BrokenStore {
+        fn new(error: fn() -> SessionError) -> Self {
+            Self {
+                loads: AtomicUsize::new(0),
+                clears: AtomicUsize::new(0),
+                error,
+                clear_fails: false,
+            }
+        }
+    }
+
+    impl SessionStore for BrokenStore {
+        fn load(&self) -> Result<Option<SessionData>, SessionError> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            Err((self.error)())
+        }
+
+        fn save(&self, _session: &SessionData) -> Result<(), SessionError> {
+            Ok(())
+        }
+
+        fn clear(&self) -> Result<(), SessionError> {
+            self.clears.fetch_add(1, Ordering::SeqCst);
+            if self.clear_fails {
+                Err(SessionError::Clear("it is read-only".to_owned()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn preloaded_store_loads_the_inner_store_once() {
+        let store = Arc::new(CountedStore::default());
+        store.save(&sample_session()).expect("save succeeds");
+
+        let preloaded = PreloadedStore::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "the preload loads once"
+        );
+
+        assert_eq!(
+            preloaded.load().expect("the cached session loads"),
+            Some(sample_session())
+        );
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "a served load must not reach the store"
+        );
+    }
+
+    #[test]
+    fn preloaded_store_remembers_an_empty_store() {
+        let store = Arc::new(CountedStore::default());
+        let preloaded = PreloadedStore::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+
+        assert_eq!(preloaded.load().expect("an empty store loads"), None);
+        assert_eq!(preloaded.load().expect("still empty"), None);
+        assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn preloaded_store_save_invalidates_the_cache() {
+        let store = Arc::new(CountedStore::default());
+        store.save(&sample_session()).expect("save succeeds");
+        let preloaded = PreloadedStore::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+
+        let mut changed = sample_session();
+        changed.phone = Some("+15550000000".to_owned());
+        preloaded.save(&changed).expect("save succeeds");
+
+        assert_eq!(
+            preloaded.load().expect("the saved session loads"),
+            Some(changed)
+        );
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            2,
+            "save must make the next load ask again"
+        );
+    }
+
+    #[test]
+    fn preloaded_store_clear_invalidates_the_cache() {
+        let store = Arc::new(CountedStore::default());
+        store.save(&sample_session()).expect("save succeeds");
+        let preloaded = PreloadedStore::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+
+        preloaded.clear().expect("clear succeeds");
+
+        assert_eq!(preloaded.load().expect("a cleared store loads"), None);
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            2,
+            "clear must make the next load ask again"
+        );
+    }
+
+    #[test]
+    fn preloaded_store_clear_forgets_a_cached_empty_store() {
+        let store = Arc::new(CountedStore::default());
+        let preloaded = PreloadedStore::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+        assert_eq!(preloaded.load().expect("an empty store loads"), None);
+
+        preloaded.clear().expect("clear succeeds");
+
+        assert_eq!(preloaded.load().expect("still empty"), None);
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            2,
+            "a cleared empty cache still asks again"
+        );
+    }
+
+    #[test]
+    fn preloaded_store_clears_a_corrupt_session_once() {
+        let store = Arc::new(BrokenStore::new(corrupt_error));
+        let preloaded = PreloadedStore::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+
+        assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.clears.load(Ordering::SeqCst),
+            1,
+            "a corrupt session is cleared"
+        );
+        let sentence = preloaded.discarded().expect("the discard is explained");
+        assert!(sentence.contains("has been discarded"), "got {sentence}");
+        assert!(
+            preloaded.take_failure().is_none(),
+            "a handled discard is not a failure"
+        );
+
+        assert_eq!(
+            preloaded.load().expect("the discarded session is empty"),
+            None
+        );
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "the cleared cache is served, not re-read"
+        );
+    }
+
+    #[test]
+    fn preloaded_store_reports_a_clear_that_failed() {
+        let mut store = BrokenStore::new(corrupt_error);
+        store.clear_fails = true;
+        let store = Arc::new(store);
+        let preloaded = PreloadedStore::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+
+        assert!(
+            preloaded.discarded().is_none(),
+            "the sentence would claim it is gone"
+        );
+        let error = preloaded
+            .take_failure()
+            .expect("the clear failure is reported");
+        assert!(matches!(error, SessionError::Clear(_)), "got {error:?}");
+        assert!(
+            preloaded.take_failure().is_none(),
+            "a failure is handed out once"
+        );
+
+        assert!(
+            preloaded.load().is_err(),
+            "a session that could not be cleared is still corrupt"
+        );
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            2,
+            "nothing was cached, so the store is asked again"
+        );
+    }
+
+    #[test]
+    fn preloaded_store_does_not_clear_an_unreadable_session() {
+        let store = Arc::new(BrokenStore::new(unreadable_error));
+        let preloaded = PreloadedStore::new(Arc::clone(&store) as Arc<dyn SessionStore>);
+
+        assert_eq!(
+            store.clears.load(Ordering::SeqCst),
+            0,
+            "only corrupt bytes are discarded"
+        );
+        assert!(preloaded.discarded().is_none());
+        let error = preloaded
+            .take_failure()
+            .expect("the read failure is reported");
+        assert!(matches!(error, SessionError::Load(_)), "got {error:?}");
+        assert!(preloaded.take_failure().is_none());
+
+        assert!(
+            preloaded.load().is_err(),
+            "a failed preload must not look like success"
+        );
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            2,
+            "a later load asks the store again"
+        );
+    }
+
+    /// The corruption probe and the client build have to share one load.
+    #[cfg(feature = "live")]
+    #[test]
+    fn preloaded_store_feeds_the_bridge_from_one_load() {
+        let store = Arc::new(CountedStore::default());
+        let preloaded = Arc::new(PreloadedStore::new(
+            Arc::clone(&store) as Arc<dyn SessionStore>
+        ));
+
+        let session =
+            super::bridge::StoreSession::new(Arc::clone(&preloaded) as Arc<dyn SessionStore>)
+                .expect("a fresh session loads");
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "the preload and the bridge share one load"
+        );
+
+        assert_eq!(preloaded.load().expect("the cached session loads"), None);
+        assert_eq!(
+            store.loads.load(Ordering::SeqCst),
+            1,
+            "the cache is not re-read"
+        );
+        drop(session);
     }
 
     #[test]
