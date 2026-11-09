@@ -2,7 +2,7 @@
 //!
 //! This is the **only** crate in the workspace permitted to depend on
 //! `grammers-*`, and it exists to keep that boundary enforceable rather than
-//! merely conventional. It exposes two things:
+//! merely conventional. It exposes three things:
 //!
 //! * **Session storage** — [`SessionData`], the [`SessionStore`] trait, and its
 //!   [`MemoryStore`], [`FileStore`] and [`KeyringStore`] backends. None of them
@@ -111,7 +111,7 @@ pub use error::{AuthError, FrameworkError, RequestError, SessionError};
 pub use sealed::{FileKey, KdfParams, KeyProvider, KeyringKeyProvider, PassphraseProvider};
 pub use session::{
     AccountIdentity, AuthKey, ChannelKind, ChannelState, DcOption, FileStore, KeyringStore,
-    MemoryStore, Peer, SessionData, SessionStore, UpdateState,
+    MemoryStore, Peer, PreloadedStore, SessionData, SessionStore, UpdateState,
 };
 
 #[cfg(feature = "live")]
