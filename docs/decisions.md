@@ -1794,3 +1794,15 @@ are in [`../AGENTS.md`](../AGENTS.md).
   renegotiates. The automatic reconnect likewise re-arms only after the new feed
   has been up for ten minutes, so a flapping feed cannot re-read the keychain at
   every death.
+- **Why the session file and its key file are the default, not the keyring**
+  (supersedes *the keyring remains the default and the key file is opt-in*): the
+  keyring prompts for a password on an unsigned macOS build, once per item and
+  again after each upgrade, and the release binaries are unsigned. With no
+  configuration, `Config::load` now sets `session_path` to `session` beside the
+  config file and, unless a passphrase or key file is set, `session_key_file` to
+  `session.key` beside that. A launch with no configuration makes zero keychain
+  calls. A passphrase, or `session_path` alone, keeps its earlier meaning.
+  **The tradeoff:** the key rests beside the ciphertext, so a process running as
+  the same user, or a backup that captures both, can read the session. **Cost:**
+  a session stored in the keyring by an earlier version is not read; the first
+  launch asks for a sign-in once.

@@ -353,9 +353,28 @@ impl Config {
             "on".clone_into(&mut cfg.notifications);
         }
         cfg.validate_session_key()?;
+        cfg.default_session_files(path);
         cfg.validate_kdf()?;
         cfg.validate_jumplist_depth()?;
         Ok(cfg)
+    }
+
+    /// Keeps the session out of the OS credential store unless asked otherwise.
+    ///
+    /// With no `session_path` the session is an encrypted file beside the
+    /// configuration, and unless a passphrase or key file is set its key is a
+    /// random 32-byte file beside that, created on first use. The credential
+    /// store prompts for a password on an unsigned build, so it is no longer the
+    /// default; set `session_path` alone to choose it for the file's key.
+    fn default_session_files(&mut self, config_path: &Path) {
+        if self.session_path.is_some() {
+            return;
+        }
+        let dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+        self.session_path = Some(dir.join("session"));
+        if self.passphrase().is_none() && self.session_key_file.is_none() {
+            self.session_key_file = Some(dir.join("session.key"));
+        }
     }
 
     /// Refuses a passphrase and a key file at once: one file, one key.
@@ -791,6 +810,23 @@ mod tests {
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn the_default_session_is_a_file_with_its_own_key_file() {
+        let cfg = load_toml("default-session", "").expect("loads");
+        assert!(cfg.session_path.is_some(), "no credential-store session");
+        assert!(cfg.session_key_file.is_some(), "no credential-store key");
+
+        let cfg = load_toml("own-passphrase", "session_passphrase = \"x\"\n").expect("loads");
+        assert!(cfg.session_path.is_some());
+        assert_eq!(cfg.session_key_file, None, "a passphrase is the key");
+
+        let cfg = load_toml("own-path", "session_path = \"/tmp/s\"\n").expect("loads");
+        assert_eq!(
+            cfg.session_key_file, None,
+            "an explicit path keeps its choice"
+        );
+    }
+
+    #[test]
     fn a_configuration_with_nothing_in_it_is_still_a_configuration() {
         let cfg = bare();
 
@@ -799,7 +835,7 @@ mod tests {
         assert_eq!(cfg.credentials(), None);
         assert_eq!(
             cfg.session_path, None,
-            "the credential store is the default"
+            "`load` fills this in, not `default`"
         );
         assert_eq!(
             cfg.media_cache_dir, None,

@@ -88,11 +88,11 @@ list are stored beside it; the media cache can use a separate directory.
 Stable release checks run in the background once per day. Set `updates = "off"`
 or `TELEVIM_UPDATES=off` to disable them; the default is `auto`.
 
-The login session uses the OS credential store by default. Set `session_path` to
-store it in an encrypted file, and set `TELEVIM_SESSION_PASSPHRASE` or
-`session_passphrase` to provide its passphrase. To avoid OS keychain calls
-entirely, set `session_path` and `session_key_file`; Televim creates a 32-byte
-`0600` key file on first use. The keyring remains the default. See [session
+By default the login session is an encrypted file (`session`) beside the
+configuration, and Televim creates a 32-byte `0600` key file (`session.key`) next
+to it on first use, so the OS keychain is never asked. Set
+`TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` to use a passphrase instead,
+or set `session_path` alone to keep the file's key in the OS credential store. See [session
 storage](docs/product.md) and [the macOS keychain
 recovery](docs/installing.md#if-the-keychain-keeps-asking).
 
