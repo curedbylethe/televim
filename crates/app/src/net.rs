@@ -94,6 +94,10 @@ const NOTIFY_FRESH_SECS: i64 = 120;
 /// Only used when Telegram did not say how long to wait: its own answer is the
 /// useful one, and a fixed backoff is either too short to satisfy it or too long
 /// for a failure that will pass on its own.
+/// How long a reconnected feed must stay up before it earns another automatic
+/// reconnect.
+const RECONNECT_STABLE_FOR: Duration = Duration::from_secs(600);
+
 const RETRY: Duration = Duration::from_secs(5);
 
 /// How many times the launch chat-list fetch is asked for before the bring-up is
@@ -966,6 +970,12 @@ pub struct State {
     /// than another rebuild.
     auto_reconnect_used: bool,
 
+    /// When the automatic reconnect was last issued. An update clears
+    /// [`State::auto_reconnect_used`] only once the replacement has lived for
+    /// [`RECONNECT_STABLE_FOR`]: a feed that delivers one update and dies would
+    /// otherwise rebuild the client, and re-read the keychain, at every death.
+    auto_reconnect_at: Option<Instant>,
+
     /// The conversation and newest message Telegram last accepted a read marker
     /// for. A conversation opened again at the same ceiling is not sent again.
     read_acked: Option<(i64, i64)>,
@@ -1060,6 +1070,9 @@ impl State {
     /// there is no configuration at all.
     fn file_keys(&self) -> Arc<dyn KeyProvider> {
         self.file_keys.clone().unwrap_or_else(|| {
+            tracing::warn!(
+                "no shared key provider was set; this bring-up may read the keychain again"
+            );
             self.cfg_now().map_or_else(
                 || Arc::new(KeyringKeyProvider::default()) as Arc<dyn KeyProvider>,
                 |cfg| file_key_provider(&cfg),
@@ -1253,7 +1266,7 @@ impl State {
         crate::runtime::restore_drafts(app, &draft_file, label.as_deref());
         self.draft_file = Some(draft_file);
 
-        let history = HistoryFile::new(paths.history, file_key_provider(&cfg));
+        let history = HistoryFile::new(paths.history, self.file_keys());
         let (cache, tag) = crate::runtime::load_history(&history, label.as_deref());
         self.restore_history(cache);
         self.restore_history_tag(tag);
@@ -2580,6 +2593,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     if state.take_reconnect_request() {
         if auto_reconnect(state) {
             state.auto_reconnect_used = true;
+            state.auto_reconnect_at = Some(Instant::now());
             if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
                 state.bringing_up = true;
                 spawn_opening(
@@ -4051,7 +4065,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // An update is the feed working, so it earns the next automatic
             // reconnect: without this, a reconnect that re-subscribes to a feed
             // that immediately ends again would rebuild the client for ever.
-            state.auto_reconnect_used = false;
+            if state
+                .auto_reconnect_at
+                .is_none_or(|at| at.elapsed() >= RECONNECT_STABLE_FOR)
+            {
+                state.auto_reconnect_used = false;
+            }
             // And the connection holds: a working feed is a connected one.
             app.set_connection(ConnectionState::Connected);
             state.remember_update(&event);
@@ -10019,6 +10038,27 @@ mod tests {
     /// the caller can tell the two refusals apart by [`State::bringing_up`], so a
     /// bring-up already on its way is left to answer for itself while the spent
     /// attempt is the failure.
+    #[test]
+    fn an_update_right_after_a_reconnect_does_not_earn_another() {
+        let mut app = App::new();
+        let mut state = State {
+            auto_reconnect_used: true,
+            auto_reconnect_at: Some(Instant::now()),
+            ..State::default()
+        };
+        let update = || Event::Update(UpdateEvent::NewMessage(messages(CHAT, 41..=41).remove(0)));
+
+        apply(&mut app, &mut state, update());
+        assert!(
+            state.auto_reconnect_used,
+            "a feed that just died is not stable"
+        );
+
+        state.auto_reconnect_at = Some(Instant::now() - RECONNECT_STABLE_FOR);
+        apply(&mut app, &mut state, update());
+        assert!(!state.auto_reconnect_used, "a feed up for the window is");
+    }
+
     #[test]
     fn the_automatic_reconnect_is_allowed_once_and_never_over_a_bring_up() {
         assert!(
