@@ -724,9 +724,47 @@ struct Switch {
     target: Opening,
 }
 
+struct OpenProbe {
+    peer: i64,
+    seeded: bool,
+    started: Instant,
+    launched: Option<Instant>,
+    authorized: Option<Instant>,
+    first_row: Option<Duration>,
+    fetch: Arc<Mutex<Option<Duration>>>,
+    applied: Option<(Duration, usize)>,
+}
+
+impl OpenProbe {
+    fn new(peer: i64, seeded: bool, started: Instant, launched: Option<Instant>) -> Self {
+        Self {
+            peer,
+            seeded,
+            started,
+            launched,
+            authorized: crate::runtime::authorization_instant(),
+            first_row: None,
+            fetch: Arc::new(Mutex::new(None)),
+            applied: None,
+        }
+    }
+
+    fn painted(&mut self, now: Instant, has_rows: bool) {
+        if has_rows && self.first_row.is_none() {
+            self.first_row = Some(now.duration_since(self.started));
+        }
+    }
+
+    fn auth_to_first_row(&self) -> Option<Duration> {
+        (self.started + self.first_row?).checked_duration_since(self.authorized?)
+    }
+}
+
 /// What the loop knows about the network between events.
 #[derive(Default)]
 pub struct State {
+    open_probe: Option<OpenProbe>,
+    open_key: Option<Instant>,
     /// The best-effort desktop notification delivery path, disabled by config.
     notify: Option<Arc<dyn Notifier>>,
 
@@ -943,6 +981,37 @@ pub struct State {
 }
 
 impl State {
+    pub(crate) fn set_open_key(&mut self, pressed: Option<Instant>) {
+        self.open_key = pressed;
+    }
+
+    pub(crate) fn probe_open_frame(&mut self, app: &App) {
+        let Some(probe) = self.open_probe.as_mut() else {
+            return;
+        };
+        if app.conversation.conversation.window.chat_id != probe.peer {
+            return;
+        }
+        let now = Instant::now();
+        probe.painted(now, !app.conversation.conversation.window.is_empty());
+        let Some((applied, rows)) = probe.applied else {
+            return;
+        };
+        let fetch = probe.fetch.lock().ok().and_then(|value| *value);
+        let first_row_ms = probe.first_row.map(|d| d.as_secs_f64() * 1000.0);
+        let launch_first_row_ms = probe.first_row.and_then(|d| {
+            probe
+                .launched
+                .map(|start| (probe.started.duration_since(start) + d).as_secs_f64() * 1000.0)
+        });
+        tracing::info!(peer = probe.peer, seeded = probe.seeded, limit = PAGE, rows,
+            fetch_ms = ?fetch.map(|d| d.as_secs_f64() * 1000.0),
+            open_to_apply_ms = applied.as_secs_f64() * 1000.0,
+            first_row_ms = ?first_row_ms, launch_first_row_ms = ?launch_first_row_ms,
+            auth_first_row_ms = ?probe.auth_to_first_row().map(|d| d.as_secs_f64() * 1000.0),
+            ok = true, "conversation open measured");
+        self.open_probe = None;
+    }
     /// The state the loop starts from, able to bring the client up again.
     ///
     /// Both fields at once rather than a setter each: they are read together and
@@ -1777,6 +1846,8 @@ async fn bring_up(
         report_resealed(resealed, tx);
         return Ok(());
     }
+
+    crate::runtime::note_authorized();
 
     // The one fetch the launch cannot do without, and the one request most
     // likely to be refused on the way in: Telegram rate-limits a client that has
@@ -2618,12 +2689,16 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                 cursor,
                 state.feed_generation,
                 tx,
+                state
+                    .open_probe
+                    .as_ref()
+                    .map(|probe| Arc::clone(&probe.fetch)),
             );
         }
 
         Wanted::Page(direction, cursor) => {
             app.begin_fetch(direction);
-            request(&client, direction, cursor, state.feed_generation, tx);
+            request(&client, direction, cursor, state.feed_generation, tx, None);
         }
 
         Wanted::Jump(jump) => {
@@ -2716,6 +2791,14 @@ fn media_job(action: &Action, app: &mut App, state: &mut State) -> Option<MediaJ
 /// own.
 fn begin_latest(app: &mut App, state: &mut State, peer_id: i64) -> HistoryCursor {
     seed_opened(app, state);
+    if crate::runtime::measuring() {
+        state.open_probe = Some(OpenProbe::new(
+            peer_id,
+            !app.conversation.conversation.window.is_empty(),
+            state.open_key.unwrap_or_else(Instant::now),
+            crate::runtime::launch_instant(),
+        ));
+    }
 
     let cursor = HistoryCursor::new(peer_id);
     // Recorded before the request rather than after it, so that the next pass —
@@ -3017,6 +3100,7 @@ fn request(
     cursor: HistoryCursor,
     generation: u64,
     tx: &UnboundedSender<AppEvent>,
+    fetch_probe: Option<Arc<Mutex<Option<Duration>>>>,
 ) {
     let client = Arc::clone(client);
     let tx = tx.clone();
@@ -3029,12 +3113,18 @@ fn request(
             FetchDirection::Newer => cursor.newest_loaded_id(),
         };
 
+        let started = fetch_probe.as_ref().map(|_| Instant::now());
         let result = match direction {
             FetchDirection::Latest => client.fetch_latest(cursor.peer_id(), PAGE).await,
             FetchDirection::Older => client.fetch_older(&mut cursor, PAGE).await,
             FetchDirection::Newer => client.fetch_newer(&mut cursor, PAGE).await,
         };
 
+        if let (Some(probe), Some(started)) = (fetch_probe, started)
+            && let Ok(mut elapsed) = probe.lock()
+        {
+            *elapsed = Some(started.elapsed());
+        }
         // The loop may have gone; there is then nothing to report the page to.
         let _ = tx.send(AppEvent::Net(Event::History {
             direction,
@@ -3827,6 +3917,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             account,
             session_store,
         } => {
+            crate::runtime::probe_authorized_ready();
             apply_ready(app, state, client, chats, archived, account, session_store);
             // Opened, so whatever lock the launch found is over.
             app.session_unlocked();
@@ -5097,6 +5188,7 @@ fn apply_history(
 
     match result {
         Ok(page) => {
+            let rows = page.len();
             if let Some(kind) = page_kind(direction, anchor, cursor, page.len()) {
                 state.remember_page(cursor.peer_id(), &page, kind);
             }
@@ -5116,9 +5208,24 @@ fn apply_history(
             }
             settle(app, cursor);
             state.history.cursor = Some(cursor);
+            if direction == FetchDirection::Latest
+                && let Some(probe) = state.open_probe.as_mut()
+                && probe.peer == cursor.peer_id()
+            {
+                probe.applied = Some((probe.started.elapsed(), rows));
+            }
         }
 
         Err(error) => {
+            if direction == FetchDirection::Latest
+                && state
+                    .open_probe
+                    .as_ref()
+                    .is_some_and(|probe| probe.peer == cursor.peer_id())
+                && let Some(probe) = state.open_probe.take()
+            {
+                tracing::info!(peer = probe.peer, seeded = probe.seeded, limit = PAGE, ok = false, %error, "conversation open measured");
+            }
             app.ui.status = format!("history: {error}");
             state.history.retry_at = Some(Instant::now() + backoff(&error));
             state.history.retry_peer = Some(cursor.peer_id());
@@ -6186,6 +6293,22 @@ mod tests {
             presence: None,
             deleted: false,
         }
+    }
+
+    #[test]
+    fn open_probe_keeps_first_paint_before_page_applies() {
+        let authorized = Instant::now();
+        let start = authorized + Duration::from_millis(10);
+        let mut probe = OpenProbe::new(CHAT, true, start, None);
+        probe.painted(start + Duration::from_millis(1), false);
+        assert!(probe.first_row.is_none());
+        probe.painted(start + Duration::from_millis(5), true);
+        probe.painted(start + Duration::from_millis(20), true);
+        assert_eq!(probe.first_row, Some(Duration::from_millis(5)));
+        probe.authorized = Some(authorized);
+        assert_eq!(probe.auth_to_first_row(), Some(Duration::from_millis(15)));
+        probe.authorized = Some(start + Duration::from_millis(6));
+        assert_eq!(probe.auth_to_first_row(), None);
     }
 
     #[test]
