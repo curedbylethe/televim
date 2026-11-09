@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use domain::chat::Chat;
@@ -74,7 +74,7 @@ use crate::config::Config;
 use crate::draft_store::DraftFile;
 use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
-use crate::notify::{DesktopNotifier, Notifier};
+use crate::notify::{DesktopNotifier, Notice, Notifier, body_line};
 use crate::runtime::AppEvent;
 use crate::update;
 
@@ -85,6 +85,9 @@ use crate::update;
 /// clamps to the same number, and `proto` reads the clamped value back to decide
 /// whether a direction has run out.
 const PAGE: usize = 100;
+
+/// Catch-up replay older than this cannot interrupt the reader.
+const NOTIFY_FRESH_SECS: i64 = 120;
 
 /// How long to wait before asking for a page again after a failure.
 ///
@@ -725,7 +728,6 @@ struct Switch {
 #[derive(Default)]
 pub struct State {
     /// The best-effort desktop notification delivery path, disabled by config.
-    #[expect(dead_code, reason = "stage 06 reads the notification sink")]
     notify: Option<Arc<dyn Notifier + Send + Sync>>,
 
     /// Cooperative cancellation token for the active update staging worker.
@@ -2802,6 +2804,40 @@ fn card_covers_conversation(app: &App) -> bool {
     matches!(app.ui.pane, tui::app::Pane::Profile(_))
 }
 
+/// Whether the reader can currently see this conversation's messages.
+fn looking_at(app: &App, chat_id: i64) -> bool {
+    app.conversation.conversation.window.chat_id == chat_id && !card_covers_conversation(app)
+}
+
+/// Builds a desktop notice only for a fresh incoming message worth surfacing.
+fn notice_for(app: &App, state: &State, message: &Message) -> Option<Notice> {
+    state.notify.as_ref()?;
+    if message.is_outgoing || looking_at(app, message.chat_id) {
+        return None;
+    }
+    if app.chat_is_muted(message.chat_id) {
+        return None;
+    }
+    if app.focus.reported && app.focus.focused {
+        return None;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        });
+    if now.saturating_sub(message.timestamp) > NOTIFY_FRESH_SECS {
+        return None;
+    }
+    Some(Notice {
+        chat_id: message.chat_id,
+        title: app
+            .chat_display_name(message.chat_id)
+            .map_or_else(|| format!("chat {}", message.chat_id), str::to_owned),
+        body: body_line(message)?,
+    })
+}
+
 /// Tells Telegram the reader has read a conversation up to `max_id`, and hands
 /// the answer back to the loop.
 ///
@@ -3828,6 +3864,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // Whether it moved anything is not acted on: the loop redraws on
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
+            if let UpdateEvent::NewMessage(message) = &event
+                && let Some(notice) = notice_for(app, state, message)
+                && let Some(notifier) = &state.notify
+            {
+                notifier.notify(notice);
+            }
         }
 
         Event::Searched {
@@ -14197,6 +14239,242 @@ mod action_status_tests {
             app.conversation.contacts.items()[0].display_name,
             "Countess"
         );
+    }
+}
+
+#[cfg(test)]
+mod notification_trigger_tests {
+    use std::borrow::Cow;
+
+    use domain::chat::ChatKind;
+    use domain::message::MessageStatus;
+
+    use super::*;
+
+    const CHAT: i64 = 7;
+    const OTHER: i64 = 8;
+
+    #[derive(Default)]
+    struct RecordingNotifier(Mutex<Vec<Notice>>);
+
+    impl Notifier for RecordingNotifier {
+        fn notify(&self, notice: Notice) {
+            self.0.lock().expect("notifier lock").push(notice);
+        }
+    }
+
+    fn chat(id: i64) -> Chat {
+        Chat {
+            read_outbox_max_id: None,
+            id,
+            title: format!("chat-{id}"),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            muted: false,
+            unread_mark: false,
+            presence: None,
+            deleted: false,
+        }
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT), chat(OTHER)]);
+        app
+    }
+
+    fn message(chat_id: i64, text: &'static str) -> Message {
+        Message {
+            id: 1,
+            chat_id,
+            text: Cow::Borrowed(text),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock after Unix epoch")
+                .as_secs()
+                .try_into()
+                .expect("current Unix timestamp fits in i64"),
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+            media: None,
+            media_id: None,
+        }
+    }
+
+    fn configured_state(notifier: Arc<RecordingNotifier>) -> State {
+        State {
+            notify: Some(notifier),
+            ..State::default()
+        }
+    }
+
+    fn arrive(app: &mut App, state: &mut State, message: Message) {
+        apply(app, state, Event::Update(UpdateEvent::NewMessage(message)));
+    }
+
+    fn notices(notifier: &RecordingNotifier) -> Vec<Notice> {
+        notifier.0.lock().expect("notifier lock").clone()
+    }
+
+    #[test]
+    fn a_fresh_arrival_in_a_chat_not_open_sends_one_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(OTHER, "hello\nthere"));
+
+        assert_eq!(
+            notices(&notifier),
+            vec![Notice {
+                chat_id: OTHER,
+                title: "chat-8".to_owned(),
+                body: "hello".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_arrival_in_the_open_chat_sends_no_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        app.conversation.conversation.window.chat_id = CHAT;
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(CHAT, "hello"));
+
+        assert!(notices(&notifier).is_empty());
+    }
+
+    #[test]
+    fn an_arrival_under_a_card_over_the_open_chat_sends_a_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        app.conversation.conversation.window.chat_id = CHAT;
+        app.ui.pane = tui::app::Pane::Profile(tui::app::ProfileId::User(CHAT));
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(CHAT, "hello"));
+
+        assert_eq!(notices(&notifier).len(), 1);
+    }
+
+    #[test]
+    fn muted_visible_and_archived_chats_send_no_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        app.set_muted(CHAT, true);
+        let mut archived = chat(OTHER);
+        archived.muted = true;
+        app.set_archived_chats(vec![archived]);
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(CHAT, "visible"));
+        arrive(&mut app, &mut state, message(OTHER, "archived"));
+
+        assert!(notices(&notifier).is_empty());
+    }
+
+    #[test]
+    fn an_outgoing_message_sends_no_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        let mut state = configured_state(Arc::clone(&notifier));
+        let mut outgoing = message(OTHER, "mine");
+        outgoing.is_outgoing = true;
+
+        arrive(&mut app, &mut state, outgoing);
+
+        assert!(notices(&notifier).is_empty());
+    }
+
+    #[test]
+    fn a_reported_focused_terminal_sends_no_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        app.focus.reported = true;
+        app.focus.focused = true;
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(OTHER, "hello"));
+
+        assert!(notices(&notifier).is_empty());
+    }
+
+    #[test]
+    fn an_unreported_terminal_does_not_suppress_a_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(OTHER, "hello"));
+
+        assert_eq!(notices(&notifier).len(), 1);
+    }
+
+    #[test]
+    fn notifications_off_sends_no_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        let mut state = State::default();
+
+        arrive(&mut app, &mut state, message(OTHER, "hello"));
+
+        assert!(notices(&notifier).is_empty());
+    }
+
+    #[test]
+    fn a_message_five_minutes_old_sends_no_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        let mut state = configured_state(Arc::clone(&notifier));
+        let mut old_message = message(OTHER, "old");
+        old_message.timestamp -= 300;
+
+        arrive(&mut app, &mut state, old_message);
+
+        assert!(notices(&notifier).is_empty());
+    }
+
+    #[test]
+    fn a_media_message_with_empty_text_uses_its_label() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        let mut state = configured_state(Arc::clone(&notifier));
+        let mut media = message(OTHER, "");
+        media.media = Some(MediaKind::Photo);
+
+        arrive(&mut app, &mut state, media);
+
+        assert_eq!(notices(&notifier)[0].body, "[image]");
+    }
+
+    #[test]
+    fn a_message_without_text_or_media_sends_no_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(OTHER, ""));
+
+        assert!(notices(&notifier).is_empty());
+    }
+
+    #[test]
+    fn a_local_chat_name_is_used_as_the_notice_title() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        app.set_local_name(OTHER, Some("Work friend"));
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(OTHER, "hello"));
+
+        assert_eq!(notices(&notifier)[0].title, "Work friend");
     }
 }
 

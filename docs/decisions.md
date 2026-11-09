@@ -1715,3 +1715,15 @@ are in [`../AGENTS.md`](../AGENTS.md).
 - **Why browser rendering is not terminal-compatibility evidence:** the browser
   renderer draws terminal cells but does not shape Arabic across adjacent cells
   or reproduce native terminal behavior.
+- **Why desktop notifications are best-effort and leave the event loop:** the
+  `notify-rust` call runs on Tokio's existing blocking pool, so a platform
+  notification service cannot stall input or network updates. Failures are
+  debug-only and do not change the screen; macOS may silently drop a notice.
+- **Why notification freshness is a 120-second window instead of a replay flag:**
+  the update stream can replay stored updates after launch or reconnect, and it
+  exposes no reliable replay marker. A timestamp cutoff skips old backlog while
+  keeping recent arrivals eligible.
+- **Why focus suppresses notices only after a reported focus event:** terminals
+  that never send focus events must still support notifications. Once the
+  terminal reports focus, only a reported unfocused state permits a notice.
+  A profile card over the open conversation counts as not looking at its messages.

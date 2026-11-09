@@ -474,8 +474,9 @@ budget. Its artifact size and browser timings are tracked in
 - `tokio` **current-thread** runtime: `Builder::new_current_thread()` in
   `app/src/runtime.rs`, explicitly, even though the `full` feature set is enabled.
 - The binary includes `notify-rust` for desktop notifications: no thread at idle,
-  and one blocking-pool thread only while a notification is being shown. This is
-  declared, not measured; `make measure` records the binary and RSS cost.
+  and one blocking-pool thread only while a notification is being shown. The
+  delivery work uses Tokio's existing blocking pool; no thread is created for
+  notifications themselves.
 - A bounded conversation window: `domain::history::ConversationWindow` caps at
   `CONVERSATION_WINDOW` messages, so full history is never held.
 - A bounded history cache: at most `HISTORY_CACHE_DEPTH` (200) messages for each
@@ -483,6 +484,16 @@ budget. Its artifact size and browser timings are tracked in
   (8 MiB) of JSON-encoded message text over all of them, and `HISTORY_CACHE_CHATS` (500)
   chat-list rows, in memory and in the file beside the configuration — see
   [The history cache](#the-history-cache).
+
+The latest `make measure` run after adding desktop notification delivery
+(Darwin arm64, rustc 1.98.1; five-run median) reports a **7,054,528 B** stripped
+binary, **10.422 MB** idle shipped-binary RSS, **34.797 MB** idle shipped-binary
+RSS with a seeded 60-chat cache, and **4,128,768 B** harness RSS. These are the
+whole current tree, not an isolated notification cost. `make measure-check`
+reports breaches for shipped-binary RSS, seeded-cache RSS and binary size;
+`Cargo.lock` differs from the stored baseline, so this run does not isolate the
+notification dependency's cost. Keep the measured report in
+`target/memory-report.json`; do not infer a per-feature delta from it.
 - A local-name map with no cap of its own: one alias for each person the reader
   has renamed, in the same account-tagged history file and written with the
   same coalesced save as the cache. It is bounded by the reader's typing, one
