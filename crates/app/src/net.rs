@@ -45,7 +45,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -731,7 +731,8 @@ struct OpenProbe {
     launched: Option<Instant>,
     authorized: Option<Instant>,
     first_row: Option<Duration>,
-    fetch: Arc<Mutex<Option<Duration>>>,
+    // Zero means pending; a completed fetch stores microseconds plus one.
+    fetch: Arc<AtomicU64>,
     applied: Option<(Duration, usize)>,
 }
 
@@ -744,7 +745,7 @@ impl OpenProbe {
             launched,
             authorized: crate::runtime::authorization_instant(),
             first_row: None,
-            fetch: Arc::new(Mutex::new(None)),
+            fetch: Arc::new(AtomicU64::new(0)),
             applied: None,
         }
     }
@@ -997,7 +998,7 @@ impl State {
         let Some((applied, rows)) = probe.applied else {
             return;
         };
-        let fetch = probe.fetch.lock().ok().and_then(|value| *value);
+        let fetch = probe.fetch.load(Ordering::Relaxed);
         let first_row_ms = probe.first_row.map(|d| d.as_secs_f64() * 1000.0);
         let launch_first_row_ms = probe.first_row.and_then(|d| {
             probe
@@ -1005,7 +1006,7 @@ impl State {
                 .map(|start| (probe.started.duration_since(start) + d).as_secs_f64() * 1000.0)
         });
         tracing::info!(peer = probe.peer, seeded = probe.seeded, limit = PAGE, rows,
-            fetch_ms = ?fetch.map(|d| d.as_secs_f64() * 1000.0),
+            fetch_ms = ?(fetch != 0).then(|| Duration::from_micros(fetch - 1).as_secs_f64() * 1000.0),
             open_to_apply_ms = applied.as_secs_f64() * 1000.0,
             first_row_ms = ?first_row_ms, launch_first_row_ms = ?launch_first_row_ms,
             auth_first_row_ms = ?probe.auth_to_first_row().map(|d| d.as_secs_f64() * 1000.0),
@@ -3100,7 +3101,7 @@ fn request(
     cursor: HistoryCursor,
     generation: u64,
     tx: &UnboundedSender<AppEvent>,
-    fetch_probe: Option<Arc<Mutex<Option<Duration>>>>,
+    fetch_probe: Option<Arc<AtomicU64>>,
 ) {
     let client = Arc::clone(client);
     let tx = tx.clone();
@@ -3120,10 +3121,9 @@ fn request(
             FetchDirection::Newer => client.fetch_newer(&mut cursor, PAGE).await,
         };
 
-        if let (Some(probe), Some(started)) = (fetch_probe, started)
-            && let Ok(mut elapsed) = probe.lock()
-        {
-            *elapsed = Some(started.elapsed());
+        if let (Some(probe), Some(started)) = (fetch_probe, started) {
+            let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX - 1);
+            probe.store(micros.saturating_add(1), Ordering::Relaxed);
         }
         // The loop may have gone; there is then nothing to report the page to.
         let _ = tx.send(AppEvent::Net(Event::History {
@@ -5346,6 +5346,8 @@ fn apply_ready_to_screen_with_archive(
     app.set_connection(ConnectionState::Connected);
     // A new client brings a new feed: pages asked of the old one are stale.
     state.feed_generation += 1;
+    app.end_fetch(FetchDirection::Older);
+    app.end_fetch(FetchDirection::Newer);
     let no_session = matches!(&account, Err(reason) if reason.is_empty());
     // A conversation already on screen is the reader's place, and a `Ready` that
     // lands on top of one is the client being brought back up — or a launch the
@@ -5435,10 +5437,8 @@ fn apply_ready_to_screen_with_archive(
     let carried = state.carried_place.take_if(|_| !switching);
     let mut carried_line: Option<&str> = None;
     let restored = if conversation_open && !no_session {
-        state.history.cursor = None;
-        state.history.jump = None;
-        state.history.retry_at = None;
-        state.history.retry_peer = None;
+        (state.history.cursor, state.history.jump) = (None, None);
+        (state.history.retry_at, state.history.retry_peer) = (None, None);
         app.set_archived_chats(archived);
         app.refresh_chats(chats)
     } else if let Some(place) = carried.as_ref().filter(|place| place.chat_id.is_some()) {
@@ -9110,6 +9110,66 @@ mod tests {
         );
 
         assert_eq!(window_ids(&app), vec![1, 2]);
+    }
+
+    #[test]
+    fn reconnect_releases_paging_marks_without_clearing_new_fetches() {
+        for direction in [FetchDirection::Older, FetchDirection::Newer] {
+            let mut app = app_just_opened();
+            let mut state = state_caching(CHAT, 1..=3);
+            open_pass(&mut app, &mut state);
+            page_arrives(
+                &mut app,
+                &mut state,
+                FetchDirection::Latest,
+                None,
+                messages(CHAT, 1..=3),
+            );
+            app.begin_fetch(direction);
+            let old_generation = state.feed_generation;
+
+            apply(&mut app, &mut state, Event::FeedEnded);
+            apply_ready_to_screen(
+                &mut app,
+                &mut state,
+                vec![chat(CHAT), chat(CHAT + 1)],
+                Ok(domain::account::Account::default()),
+                tui::SessionStore::Keyring,
+            );
+            open_pass(&mut app, &mut state);
+            page_arrives(
+                &mut app,
+                &mut state,
+                FetchDirection::Latest,
+                None,
+                messages(CHAT, 1..=3),
+            );
+
+            assert!(
+                !app.is_fetching(direction),
+                "old paging mark survives reconnect"
+            );
+            assert!(
+                app.wants_older(),
+                "older paging resumes after the latest page"
+            );
+            app.begin_fetch(direction);
+            apply(
+                &mut app,
+                &mut state,
+                Event::History {
+                    direction,
+                    anchor: Some(1),
+                    cursor: HistoryCursor::new(CHAT),
+                    generation: old_generation,
+                    result: Ok(messages(CHAT, 1..=1)),
+                },
+            );
+            assert!(
+                app.is_fetching(direction),
+                "stale page cleared the new fetch"
+            );
+        }
     }
 
     /// The reconnect race: a newest page asked of the dead client lands after
