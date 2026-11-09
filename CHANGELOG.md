@@ -5,6 +5,42 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.10.0] - 2026-11-09
+
+### Added
+
+- **tui:** Prepare domain and tui for wasm
+- **demo-support:** Add deterministic fictional demo world
+- **web-demo:** Add detached wasm feasibility crate
+- **demo-support:** Add deterministic action simulator
+- **web-demo:** Drive the offline demo app
+- **web-demo:** Add browser facilities and offline session state
+- **web-demo:** Add core parity checks and quit routing
+- **demo-support:** Cover secondary parity flows
+- **web-demo:** Page offline conversation history
+- **web-demo:** Integrate lazy portfolio shell
+- **app:** Add desktop notification delivery seam
+- Add per-chat notification muting
+- Add manual unread mark command
+- Add mark-all-read command
+- **app:** Notify for fresh arrivals outside the focused chat
+
+### Fixed
+
+- **tui:** Support wasm key modifier assignment
+- **web-demo:** Handle mobile IME composition
+- **web-demo:** Connect browser lifecycle and local actions
+- **web-demo:** Align simulator queues and reset behavior
+- **web-demo:** Start the selected WASM library
+- **web-demo:** Harden offline boundaries and browser interactions
+- **web-demo:** Report offline retries and remove dead upload progress
+- **ci:** Create Pages size report directory
+- Address notification and unread review findings
+
+### ci
+
+- Publish audited web demo via GitHub Pages
+
 ## [0.9.1] - 2026-11-07
 
 ### Fixed
