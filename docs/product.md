@@ -143,8 +143,8 @@ Working today:
   settings are needed for zero keychain calls. A missing, short or unreadable key
   file is `Load` or `Unavailable`, never `Corrupt`: the session is not discarded
   and no passphrase box opens; the `offline:` sentence names the key file and says
-  to restore it, or to sign out and sign in again, and that the session file was
-  left as it was.
+  to restore it, or to delete the session file and the key file and relaunch, and
+  that the session file was left as it was.
 
   The tradeoff is deliberate: the key sits beside the ciphertext, protected by
   `0600` and full-disk encryption rather than the OS credential store. A process

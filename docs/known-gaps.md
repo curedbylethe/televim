@@ -395,9 +395,9 @@ Real, and named so they are not mistaken for oversights:
   - *A missing, short or unreadable key file is a key error, not corruption.* It
     is `Load` or `Unavailable`, never `Corrupt`; the session is not discarded and
     no passphrase box opens. The `offline:` sentence names the key file and says
-    to restore it, or to sign out and sign in again, with the session file left
-    as it was. A blank passphrase counts as absent, and a passphrase plus a key
-    file is a startup error naming both.
+    to restore it, or to delete the session file and the key file and relaunch,
+    with the session file left as it was. A blank passphrase counts as absent,
+    and a passphrase plus a key file is a startup error naming both.
   - *One shared passphrase provider may re-derive Argon2id.* The session file and
     history cache share one provider; its one cached salt can make the two
     alternate and re-derive. That is a performance note, not a correctness

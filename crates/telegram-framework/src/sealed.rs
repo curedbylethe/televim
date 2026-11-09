@@ -408,7 +408,7 @@ impl KeyFileProvider {
     fn key_from_file(&self, bytes: &[u8]) -> Result<FileKey, SessionError> {
         let bytes: [u8; KEY_LEN] = bytes.try_into().map_err(|_| {
             SessionError::Load(format!(
-                "the file key at {} is {} bytes, not {KEY_LEN}; restore the file, or delete it and sign out, then sign in again",
+                "the file key at {} is {} bytes, not {KEY_LEN}; restore the file, or delete the session file and this key file, then relaunch",
                 self.path.display(),
                 bytes.len()
             ))
@@ -523,7 +523,7 @@ impl fmt::Debug for KeyFileProvider {
 /// The error for a key file that is not there.
 fn missing(path: &Path) -> SessionError {
     SessionError::Load(format!(
-        "there is no file key at {}; restore the file, or run :logout and sign in again",
+        "there is no file key at {}; restore the file, or delete the session file and this key file, then relaunch",
         path.display()
     ))
 }
@@ -904,6 +904,21 @@ mod tests {
         dir.path().join("session-key")
     }
 
+    /// A key-file failure must name a recovery that works offline: no action
+    /// that needs a client.
+    fn assert_offline_recovery(message: &str, path: &Path) {
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(
+            message.contains("delete the session file and this key file"),
+            "{message}"
+        );
+        assert!(message.contains("relaunch"), "{message}");
+        assert!(!message.contains(":logout"), "{message}");
+        assert!(!message.contains("sign out"), "{message}");
+        assert!(!message.contains("sign in again"), "{message}");
+        assert!(!message.contains("remove it"), "{message}");
+    }
+
     #[test]
     fn key_file_is_created_on_seal_with_32_bytes() {
         let dir = tempfile::tempdir().expect("temp dir is created");
@@ -944,7 +959,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir is created");
         let path = key_path(&dir);
         let result = KeyFileProvider::new(&path).opening_key(&[0; SALT_LEN]);
-        assert!(matches!(result, Err(SessionError::Load(_))));
+        match result {
+            Err(SessionError::Load(message)) => assert_offline_recovery(&message, &path),
+            other => panic!("the missing key file is not a load error: {other:?}"),
+        }
         assert!(!path.exists());
     }
 
@@ -963,8 +981,7 @@ mod tests {
                 message_of(provider.opening_key(&[0; SALT_LEN])),
                 message_of(provider.sealing_key().map(|(_, key)| key)),
             ] {
-                assert!(message.contains("delete it and sign out"), "{message}");
-                assert!(!message.contains(":logout"), "{message}");
+                assert_offline_recovery(&message, &path);
             }
             assert_eq!(std::fs::read(&path).expect("read"), contents);
         }
