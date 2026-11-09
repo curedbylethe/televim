@@ -1675,7 +1675,8 @@ async fn bring_up(
     // is told so now, rather than after typing a login code that has nowhere to
     // be kept.
     if let Some(keys) = &keys {
-        keys.sealing_key().map_err(|error| key_trouble(&error))?;
+        keys.sealing_key()
+            .map_err(|error| key_trouble(&error, true))?;
     }
 
     let client = ClientBuilder::new(api_id, api_hash)
@@ -1685,7 +1686,7 @@ async fn bring_up(
         .map_err(|error| match error {
             // A file that did not open is the key's doing, and the sentence says
             // which key. Never a discard: see [`discard_corrupt_session`].
-            FrameworkError::Session(error) if keys.is_some() => key_trouble(&error),
+            FrameworkError::Session(error) if keys.is_some() => key_trouble(&error, true),
             error => anyhow::Error::new(error).context("building the client"),
         })?;
 
@@ -1828,7 +1829,7 @@ fn report_resealed(resealed: Option<String>, tx: &UnboundedSender<AppEvent>) {
 /// for a file and plainly for the OS keyring.
 fn unreadable_session(error: &SessionError, file: bool) -> String {
     if file {
-        format!("{:#}", key_trouble(error))
+        format!("{:#}", key_trouble(error, true))
     } else {
         format!("the stored session could not be read: {error}")
     }
@@ -2060,6 +2061,13 @@ fn change_passphrase(
     new: &str,
     keyring: impl Fn() -> Arc<dyn KeyProvider>,
 ) -> Result<(), String> {
+    if cfg.session_key_file.is_some() {
+        return Err(
+            "this session is encrypted with session_key_file, not a passphrase: sign out, \
+             remove session_key_file, delete the old key file, set a passphrase, and sign in"
+                .to_owned(),
+        );
+    }
     let Some(path) = &cfg.session_path else {
         return Err(
             "there is no session file: :passphrase changes the passphrase of the encrypted \
@@ -2216,7 +2224,7 @@ fn session_store_with(
 }
 
 /// Where the session file's key comes from: the passphrase if there is one,
-/// otherwise the OS credential store.
+/// else the key file, otherwise the OS credential store.
 ///
 /// The order is the whole policy. Neither being usable is not answered here with
 /// a third source — least of all with no key at all — but when the provider is
@@ -2225,13 +2233,16 @@ fn key_provider(
     cfg: &Config,
     keyring: impl FnOnce() -> Arc<dyn KeyProvider>,
 ) -> Arc<dyn KeyProvider> {
-    match cfg.passphrase() {
-        Some(passphrase) => Arc::new(PassphraseProvider::with_params(
+    if let Some(passphrase) = cfg.passphrase() {
+        return Arc::new(PassphraseProvider::with_params(
             passphrase,
             cfg.kdf_params(),
-        )),
-        None => keyring(),
+        ));
     }
+    if let Some(path) = &cfg.session_key_file {
+        return Arc::new(telegram_framework::sealed::KeyFileProvider::new(path));
+    }
+    keyring()
 }
 
 /// The key source the history cache is sealed under: the session file's own,
@@ -2246,8 +2257,17 @@ pub(crate) fn file_key_provider(cfg: &Config) -> Arc<dyn KeyProvider> {
 /// alternative they will fear is that it was thrown away.
 ///
 /// A missing key and a rejected one are [`KeyRequired`] underneath, which is what
-/// opens the passphrase question; the sentence is the same either way.
-fn key_trouble(error: &SessionError) -> anyhow::Error {
+/// opens the passphrase question; the sentence is the same either way. A key
+/// file is not a passphrase, so when `passphrase_helps` is false the failure is
+/// plain: the provider's sentence names the key file and this one names the
+/// recovery.
+fn key_trouble(error: &SessionError, passphrase_helps: bool) -> anyhow::Error {
+    if !passphrase_helps {
+        return anyhow::anyhow!(
+            "{error}; restore the key file, or remove it and sign in again; \
+             the session file was left as it was"
+        );
+    }
     match error {
         SessionError::Unavailable(why) => anyhow::Error::new(KeyRequired {
             rejected: false,
@@ -12646,7 +12666,7 @@ mod session_store_tests {
             .expect("a file has a key source")
             .sealing_key()
             .expect_err("there is no key");
-        let sentence = format!("{:#}", key_trouble(&error));
+        let sentence = format!("{:#}", key_trouble(&error, true));
         assert!(
             sentence.contains("TELEVIM_SESSION_PASSPHRASE") && sentence.contains("keyring"),
             "the sentence names both keys: {sentence}"
@@ -12676,7 +12696,7 @@ mod session_store_tests {
         assert_eq!(discard_corrupt_session(&*store), None, "not discarded");
         let error = store.load().expect_err("the file cannot be read");
         assert!(matches!(error, SessionError::Read(_)), "{error:?}");
-        let sentence = format!("{:#}", key_trouble(&error));
+        let sentence = format!("{:#}", key_trouble(&error, true));
         assert!(sentence.contains("permissions"), "{sentence}");
         assert!(sentence.contains("left as it was"), "{sentence}");
         assert!(
@@ -12774,7 +12794,7 @@ mod session_store_tests {
         assert_eq!(discard_corrupt_session(&*store), None, "not discarded");
         let error = store.load().expect_err("the wrong key does not open it");
         assert!(matches!(error, SessionError::Load(_)), "{error:?}");
-        let sentence = format!("{:#}", key_trouble(&error));
+        let sentence = format!("{:#}", key_trouble(&error, true));
         assert!(
             sentence.contains("TELEVIM_SESSION_PASSPHRASE"),
             "{sentence}"
@@ -12790,7 +12810,7 @@ mod session_store_tests {
     #[test]
     fn only_a_missing_or_rejected_key_asks_for_a_passphrase() {
         let wanted = |error: &SessionError| {
-            key_trouble(error)
+            key_trouble(error, true)
                 .downcast_ref::<KeyRequired>()
                 .map(|key| key.rejected)
         };
@@ -12802,11 +12822,144 @@ mod session_store_tests {
         assert_eq!(wanted(&SessionError::Read("denied".into())), None);
         assert_eq!(wanted(&SessionError::Corrupt("junk".into())), None);
         // The sentence is unchanged by the type it travels in.
-        let sentence = format!("{:#}", key_trouble(&SessionError::Unavailable("x".into())));
+        let sentence = format!(
+            "{:#}",
+            key_trouble(&SessionError::Unavailable("x".into()), true)
+        );
         assert!(
             sentence.contains("TELEVIM_SESSION_PASSPHRASE"),
             "{sentence}"
         );
+    }
+
+    /// A key file is a key none of the keyring's failures can be answered with a
+    /// passphrase, so its errors are plain and name the file and the recovery.
+    #[test]
+    fn a_key_file_failure_is_plain_and_names_the_key_file_and_recovery() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let key_path = dir.path().join("session.key");
+        let provider = telegram_framework::sealed::KeyFileProvider::new(&key_path);
+        let error = provider
+            .opening_key(&[0; 16])
+            .expect_err("the key file is absent");
+        assert!(matches!(error, SessionError::Load(_)), "{error:?}");
+
+        let raised = key_trouble(&error, false);
+        assert!(
+            raised.downcast_ref::<KeyRequired>().is_none(),
+            "a key file never opens the passphrase question"
+        );
+        let sentence = format!("{raised:#}");
+        assert!(
+            sentence.contains(&key_path.display().to_string()),
+            "{sentence}"
+        );
+        assert!(sentence.contains("sign in again"), "{sentence}");
+        assert!(
+            !sentence.contains("TELEVIM_SESSION_PASSPHRASE"),
+            "{sentence}"
+        );
+
+        for error in [
+            SessionError::Load(format!("the file key at {} is short", key_path.display())),
+            SessionError::Unavailable(format!(
+                "could not read the file key at {}: denied",
+                key_path.display()
+            )),
+        ] {
+            let raised = key_trouble(&error, false);
+            assert!(raised.downcast_ref::<KeyRequired>().is_none(), "{error:?}");
+            let sentence = format!("{raised:#}");
+            assert!(
+                sentence.contains(&key_path.display().to_string()),
+                "{sentence}"
+            );
+            assert!(sentence.contains("sign in again"), "{sentence}");
+        }
+    }
+
+    /// The key file is chosen ahead of the keyring, and a passphrase ahead of the
+    /// key file. Neither configured falls through to the keyring.
+    #[test]
+    fn a_key_file_outranks_the_keyring_and_a_passphrase_outranks_the_key_file() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let session = dir.path().join("session.bin");
+        let key_path = dir.path().join("session.key");
+
+        let mut keyed = file_config(&session, None);
+        keyed.session_key_file = Some(key_path.clone());
+        let provider = key_provider(&keyed, || panic!("the keyring is not asked"));
+        assert!(
+            format!("{provider:?}").contains("KeyFileProvider"),
+            "the key file is the source"
+        );
+        FileStore::with_key_provider(&session, provider)
+            .save(&SessionData::default())
+            .expect("a session is written");
+        assert_eq!(
+            std::fs::metadata(&key_path)
+                .expect("the key file is created")
+                .len(),
+            32
+        );
+
+        let both = Config {
+            session_path: Some(dir.path().join("both.bin")),
+            session_passphrase: Some(Secret::from("chosen".to_owned())),
+            session_key_file: Some(dir.path().join("unused.key")),
+            ..Config::default()
+        };
+        let path = both.session_path.as_ref().expect("a session path");
+        let provider = key_provider(&both, || panic!("the keyring is not asked"));
+        FileStore::with_key_provider(path, provider)
+            .save(&SessionData::default())
+            .expect("saved under the passphrase");
+        assert!(
+            !dir.path().join("unused.key").exists(),
+            "the key file is not used"
+        );
+        assert!(
+            FileStore::with_key_provider(path, Arc::new(PassphraseProvider::new("chosen")))
+                .load()
+                .expect("opens with the passphrase")
+                .is_some()
+        );
+
+        let keyring = file_config(&dir.path().join("keyring.bin"), None);
+        let provider = key_provider(&keyring, || Arc::new(Fixed));
+        assert!(
+            format!("{provider:?}").contains("Fixed"),
+            "neither configured asks the keyring"
+        );
+    }
+
+    /// A key-file session cannot be re-sealed under a passphrase: the guard runs
+    /// before the file is opened, and leaves both files untouched.
+    #[test]
+    fn a_key_file_session_refuses_a_passphrase_change_and_the_file_is_untouched() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let key_path = dir.path().join("session.key");
+        FileStore::with_key_provider(
+            &path,
+            Arc::new(telegram_framework::sealed::KeyFileProvider::new(&key_path)),
+        )
+        .save(&snapshot(7, 9))
+        .expect("a session is written");
+        let sealed = std::fs::read(&path).expect("the file exists");
+
+        let mut cfg = file_config(&path, None);
+        cfg.session_key_file = Some(key_path.clone());
+        let error = change_passphrase(&cfg, None, "new", || panic!("the key file is not opened"))
+            .expect_err("a key-file session is not re-sealed");
+
+        assert!(error.contains("session_key_file"), "{error}");
+        assert!(
+            error.contains("sign out") && error.contains("remove"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).expect("the file exists"), sealed);
+        assert!(key_path.exists(), "the key file is not deleted");
     }
 
     #[test]
@@ -12884,7 +13037,7 @@ mod session_store_tests {
         let Session { store, keys } =
             session_store_with(&legacy_paths(&cfg), &cfg, || Arc::new(NoKeyring));
         let error = store.load().expect_err("the wrong key does not open it");
-        let required = key_trouble(&error);
+        let required = key_trouble(&error, true);
         assert_eq!(
             required
                 .downcast_ref::<KeyRequired>()
