@@ -809,7 +809,7 @@ else `session_key_file`, else a random key kept in the OS credential store;
 whose `Debug` is redacted. `net.rs` resolves the store and its key source at
 launch and shares one provider between the session and history; the keyring and
 key-file providers cache the key for the process, while a typed passphrase is
-dropped with the process. `phone`,
+dropped with the process. The client writes the session back at most every 30 seconds and once on exit. `phone`,
 `code` and `password` are **pre-fills**, not the way in: a launch that finds no
 session opens the sign-in field with the phone already in the bar, and the flow
 asks for the code there, then for a two-factor password when Telegram says the
