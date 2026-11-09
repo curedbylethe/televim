@@ -1938,12 +1938,8 @@ impl App {
     pub fn set_muted(&mut self, chat_id: i64, muted: bool) {
         self.list.set_muted(chat_id, muted);
         let name = self
-            .list
-            .list
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .map_or_else(|| chat_id.to_string(), |chat| chat.title.clone());
+            .chat_display_name(chat_id)
+            .map_or_else(|| chat_id.to_string(), str::to_owned);
         self.flash(if muted {
             format!("muted {name}")
         } else {
@@ -1959,12 +1955,8 @@ impl App {
             self.list.list.mark_read(chat_id);
         }
         let name = self
-            .list
-            .list
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .map_or_else(|| chat_id.to_string(), |chat| chat.title.clone());
+            .chat_display_name(chat_id)
+            .map_or_else(|| chat_id.to_string(), str::to_owned);
         self.flash(if unread {
             format!("marked {name} unread")
         } else {

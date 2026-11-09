@@ -728,7 +728,7 @@ struct Switch {
 #[derive(Default)]
 pub struct State {
     /// The best-effort desktop notification delivery path, disabled by config.
-    notify: Option<Arc<dyn Notifier + Send + Sync>>,
+    notify: Option<Arc<dyn Notifier>>,
 
     /// Cooperative cancellation token for the active update staging worker.
     update_cancel: Option<Arc<AtomicBool>>,
@@ -943,8 +943,8 @@ impl State {
     /// that hangs rather than fails.
     #[must_use]
     pub fn new(cfg: Config, config_path: PathBuf, tx: UnboundedSender<AppEvent>) -> Self {
-        let notify = (cfg.notifications != "off")
-            .then(|| Arc::new(DesktopNotifier) as Arc<dyn Notifier + Send + Sync>);
+        let notify =
+            (cfg.notifications != "off").then(|| Arc::new(DesktopNotifier) as Arc<dyn Notifier>);
         Self {
             notify,
             cfg: Some(cfg),
@@ -2743,7 +2743,7 @@ fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
         return None;
     }
     let chat = app.chats().iter().find(|chat| chat.id == open)?;
-    if chat.unread_count == 0 {
+    if chat.unread_count == 0 && !chat.unread_mark {
         return None;
     }
     let max_id = chat.last_message_id.filter(|id| *id > 0)?;
@@ -2751,9 +2751,10 @@ fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
 }
 
 /// Collects visible chats that can be marked read, and mark-only chats to clear.
-fn mark_all_targets(app: &App) -> (Vec<(i64, i64)>, Vec<i64>) {
+fn mark_all_targets(app: &App) -> (Vec<(i64, i64)>, Vec<i64>, u32) {
     let mut reads = Vec::new();
     let mut marks = Vec::new();
+    let mut failed = 0;
     for chat in app.chats() {
         if chat.unread_count > 0 {
             if let Some(max_id) = chat
@@ -2761,12 +2762,14 @@ fn mark_all_targets(app: &App) -> (Vec<(i64, i64)>, Vec<i64>) {
                 .filter(|id| *id > 0 && i32::try_from(*id).is_ok())
             {
                 reads.push((chat.id, max_id));
+            } else {
+                failed += 1;
             }
         } else if chat.unread_mark {
             marks.push(chat.id);
         }
     }
-    (reads, marks)
+    (reads, marks, failed)
 }
 
 /// The sentence for the completed read fan-out.
@@ -2867,16 +2870,20 @@ fn request_read(
 
 /// Reads every eligible visible chat in one sequential background task.
 fn request_mark_all_read(client: &Arc<ProtoClient>, app: &mut App, tx: &UnboundedSender<AppEvent>) {
-    let (reads, marks) = mark_all_targets(app);
+    let (reads, marks, mut failed) = mark_all_targets(app);
     if reads.is_empty() && marks.is_empty() {
-        app.flash("nothing to mark read");
+        app.flash(if failed == 0 {
+            "nothing to mark read".to_owned()
+        } else {
+            bulk_read_sentence(0, failed)
+        });
         return;
     }
 
     let client = Arc::clone(client);
     let tx = tx.clone();
     tokio::spawn(async move {
-        let (mut done, mut failed) = (0_u32, 0_u32);
+        let mut done = 0;
         for (chat_id, max_id) in reads {
             match client.mark_read(chat_id, max_id).await {
                 Ok(()) => {
@@ -6107,7 +6114,7 @@ mod tests {
         ]);
         app.set_archived_chats(vec![archived]);
 
-        assert_eq!(mark_all_targets(&app), (vec![(1, 10), (6, 20)], vec![3]));
+        assert_eq!(mark_all_targets(&app), (vec![(1, 10), (6, 20)], vec![3], 2));
     }
 
     #[test]
@@ -7120,6 +7127,24 @@ mod tests {
     #[test]
     fn an_already_read_conversation_sends_nothing() {
         assert_eq!(read_target(&listed(0, Some(20)), &State::default()), None);
+    }
+
+    #[test]
+    fn an_open_conversation_with_only_a_manual_mark_is_read() {
+        let mut app = listed(0, Some(20));
+        app.set_unread_mark(CHAT, true);
+        assert_eq!(read_target(&app, &State::default()), Some((CHAT, 20)));
+
+        apply(
+            &mut app,
+            &mut State::default(),
+            Event::ReadMarked {
+                chat_id: CHAT,
+                max_id: 20,
+            },
+        );
+
+        assert!(!app.chats()[0].unread_mark);
     }
 
     #[test]

@@ -29,14 +29,17 @@ impl Notifier for DesktopNotifier {
             let mut notification = notify_rust::Notification::new();
             notification.summary(&notice.title).body(&notice.body);
             #[cfg(target_os = "linux")]
-            if let Ok(id) = u32::try_from(notice.chat_id) {
-                notification.id(id);
-            }
+            notification.id(replacement_id(notice.chat_id));
             if let Err(error) = notification.show() {
                 tracing::debug!(%error, "desktop notification was not shown");
             }
         }));
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn replacement_id(chat_id: i64) -> u32 {
+    u32::try_from(chat_id.rem_euclid(1_i64 << u32::BITS)).expect("remainder fits a notification id")
 }
 
 /// Builds a single-line notification body, or `None` when the message has no body.
@@ -117,5 +120,14 @@ mod tests {
         let line = body_line(&message).expect("text has a body");
         assert_eq!(line.chars().count(), 161);
         assert!(line.ends_with('…'));
+    }
+
+    #[test]
+    fn replacement_ids_cover_negative_and_large_chat_ids() {
+        let negative = replacement_id(-1);
+        let large = replacement_id(i64::from(u32::MAX) + 1);
+        let largest = replacement_id(i64::MAX);
+        assert_ne!(negative, large);
+        assert_ne!(large, largest);
     }
 }

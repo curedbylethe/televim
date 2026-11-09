@@ -490,6 +490,8 @@ Real, and named so they are not mistaken for oversights:
 - **A manual unread mark changed on another device can stay stale until the chat list is fetched.**
   The update pump (`telegram-framework/src/updates.rs:663`) ignores `updateDialogUnreadMark`, so
   televim learns external marks on the next dialog fetch.
+- **Opening an empty chat cannot clear a manual unread mark.** `readHistory` needs a message ID to
+  advance to. Use `:mark-all-read` to clear the mark when the chat has no last message ID.
 - **`:mark-all-read` excludes archived chats.** It fans out only over the visible chat list; the
   archive is fetched separately and remains untouched.
 - **`Ready` no longer moves the focus while the reader is typing under
