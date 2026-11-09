@@ -27,6 +27,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read as _, Seek as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::de::Error as _;
@@ -695,6 +696,26 @@ fn restrict_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) {}
 
+/// Operations on the OS credential store made by this process.
+static KEYCHAIN_OPS: AtomicUsize = AtomicUsize::new(0);
+
+/// Operations in one process after which the count is worth a warning: a
+/// healthy launch makes two reads and a handful of throttled writes.
+const KEYCHAIN_OPS_WARN_AT: usize = 8;
+
+/// Records one credential-store operation and returns the running total.
+///
+/// Every OS keychain call can raise a password dialog on an unsigned build, so
+/// each one is logged with its service, account and operation, never its value.
+pub(crate) fn note_keychain_op(service: &str, account: &str, op: &str) -> usize {
+    let total = KEYCHAIN_OPS.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+    tracing::debug!(service, account, op, total, "keychain operation");
+    if total == KEYCHAIN_OPS_WARN_AT {
+        tracing::warn!(total, "many keychain operations in one run");
+    }
+    total
+}
+
 /// Persists the session in the OS credential store.
 ///
 /// This is the production backend. It uses the macOS Keychain, the Windows
@@ -758,6 +779,7 @@ impl Default for KeyringStore {
 
 impl SessionStore for KeyringStore {
     fn load(&self) -> Result<Option<SessionData>, SessionError> {
+        note_keychain_op(&self.service, &self.account, "load");
         match self.entry()?.get_secret() {
             Ok(bytes) => SessionData::from_bytes(&bytes).map(Some),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -767,12 +789,14 @@ impl SessionStore for KeyringStore {
 
     fn save(&self, session: &SessionData) -> Result<(), SessionError> {
         let bytes = session.to_bytes()?;
+        note_keychain_op(&self.service, &self.account, "save");
         self.entry()?
             .set_secret(&bytes)
             .map_err(|error| SessionError::Save(error.to_string()))
     }
 
     fn clear(&self) -> Result<(), SessionError> {
+        note_keychain_op(&self.service, &self.account, "clear");
         match self.entry()?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(SessionError::Clear(error.to_string())),
@@ -1401,6 +1425,12 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn each_keychain_operation_advances_the_count() {
+        let a = super::note_keychain_op("s", "a", "load");
+        assert!(super::note_keychain_op("s", "a", "save") > a);
+    }
 
     use super::*;
     use crate::error::{AuthError, FrameworkError, RequestError};
