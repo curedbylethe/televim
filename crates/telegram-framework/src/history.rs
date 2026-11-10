@@ -65,6 +65,20 @@ pub struct HistoryArgs {
     pub limit: i32,
 }
 
+/// A history page with cursor information from Telegram's unfiltered response.
+#[derive(Debug, Clone)]
+pub struct HistoryPage {
+    /// Messages this client can display.
+    pub messages: Vec<MessageInfo>,
+
+    /// Number of raw Telegram messages before unsupported service actions were dropped.
+    pub raw_count: usize,
+
+    /// Oldest and newest identifiers from the raw Telegram page.
+    pub oldest_id: Option<i64>,
+    pub newest_id: Option<i64>,
+}
+
 impl HistoryArgs {
     /// The newest `limit` messages.
     pub fn latest(limit: usize) -> Self {
@@ -205,6 +219,18 @@ impl Client {
         peer_id: i64,
         args: HistoryArgs,
     ) -> Result<Vec<MessageInfo>, FrameworkError> {
+        self.fetch_history_page(peer_id, args)
+            .await
+            .map(|page| page.messages)
+    }
+
+    /// Fetches a page and preserves raw paging metadata before unsupported
+    /// service actions are filtered out.
+    pub async fn fetch_history_page(
+        &self,
+        peer_id: i64,
+        args: HistoryArgs,
+    ) -> Result<HistoryPage, FrameworkError> {
         let Some(peer) = self.peer_ref(peer_id) else {
             tracing::warn!(
                 peer_id,
@@ -254,10 +280,7 @@ impl Client {
             }
         };
 
-        let messages: Vec<MessageInfo> = raw
-            .iter()
-            .filter_map(|raw| message_from_raw(raw, peer_id))
-            .collect();
+        let page = history_page_from_raw(&raw, peer_id);
 
         // Reading history can migrate the datacenter or cache a peer, and that
         // only reaches the store if it is written back here.
@@ -269,11 +292,32 @@ impl Client {
             offset_date = args.offset_date,
             add_offset = args.add_offset,
             limit = args.limit,
-            returned = messages.len(),
+            returned = page.messages.len(),
+            raw = page.raw_count,
             "fetched a page of history"
         );
 
-        Ok(messages)
+        Ok(page)
+    }
+}
+
+fn raw_message_id(message: &tl::enums::Message) -> i32 {
+    match message {
+        tl::enums::Message::Empty(message) => message.id,
+        tl::enums::Message::Message(message) => message.id,
+        tl::enums::Message::Service(message) => message.id,
+    }
+}
+
+fn history_page_from_raw(raw: &[tl::enums::Message], chat_peer_id: i64) -> HistoryPage {
+    HistoryPage {
+        messages: raw
+            .iter()
+            .filter_map(|message| message_from_raw(message, chat_peer_id))
+            .collect(),
+        raw_count: raw.len(),
+        oldest_id: raw.iter().map(raw_message_id).min().map(i64::from),
+        newest_id: raw.iter().map(raw_message_id).max().map(i64::from),
     }
 }
 
@@ -502,7 +546,7 @@ mod tests {
         );
     }
 
-    fn service_message(action: tl::enums::MessageAction) -> tl::enums::Message {
+    fn service_message(id: i32, action: tl::enums::MessageAction) -> tl::enums::Message {
         tl::enums::Message::Service(tl::types::MessageService {
             out: false,
             mentioned: false,
@@ -511,7 +555,7 @@ mod tests {
             silent: false,
             post: false,
             legacy: false,
-            id: 7,
+            id,
             from_id: None,
             peer_id: tl::enums::Peer::User(tl::types::PeerUser { user_id: 42 }),
             saved_peer_id: None,
@@ -526,7 +570,7 @@ mod tests {
     #[test]
     fn contact_signup_is_a_readable_service_message() {
         let message = message_from_raw(
-            &service_message(tl::enums::MessageAction::ContactSignUp),
+            &service_message(7, tl::enums::MessageAction::ContactSignUp),
             42,
         )
         .expect("contact signup is supported");
@@ -537,6 +581,37 @@ mod tests {
 
     #[test]
     fn unsupported_service_actions_are_dropped() {
-        assert!(message_from_raw(&service_message(tl::enums::MessageAction::Empty), 42).is_none());
+        assert!(
+            message_from_raw(&service_message(7, tl::enums::MessageAction::Empty), 42).is_none()
+        );
+    }
+
+    #[test]
+    fn history_page_keeps_raw_count_and_bounds_when_service_rows_are_dropped() {
+        let raw: Vec<_> = (1..=50)
+            .map(|id| {
+                let action = if id > 47 {
+                    tl::enums::MessageAction::Empty
+                } else {
+                    tl::enums::MessageAction::ContactSignUp
+                };
+                service_message(id, action)
+            })
+            .collect();
+
+        let page = history_page_from_raw(&raw, 42);
+
+        assert_eq!(page.messages.len(), 47);
+        assert_eq!(page.raw_count, 50);
+        assert_eq!(page.oldest_id, Some(1));
+        assert_eq!(page.newest_id, Some(50));
+
+        let raw: Vec<_> = (101..=150)
+            .map(|id| service_message(id, tl::enums::MessageAction::Empty))
+            .collect();
+        let page = history_page_from_raw(&raw, 42);
+        assert!(page.messages.is_empty());
+        assert_eq!(page.raw_count, 50);
+        assert_eq!(page.oldest_id, Some(101));
     }
 }
