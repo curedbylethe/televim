@@ -229,12 +229,8 @@ mod migration_tests {
 
 pub fn resolve_config(explicit: Option<&Path>) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("reading current directory")?;
-    if let Some(path) = explicit {
-        return Ok(if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            cwd.join(path)
-        });
+    if explicit.is_some() {
+        return resolve_with(explicit, &cwd, &cwd);
     }
     let data_root = dirs::data_local_dir().context("finding the local data directory")?;
     resolve_with(None, &cwd, &data_root)
