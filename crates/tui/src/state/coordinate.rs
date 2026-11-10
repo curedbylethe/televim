@@ -685,7 +685,7 @@ pub(crate) fn apply_update(
         return ui.set_presence(*chat_id, *presence);
     }
 
-    let listed = list.list.apply_update(event.clone());
+    let listed = list.apply_update(event.clone());
 
     // The message is what the typing was for, so it ends it. Cleared here
     // rather than on the cancel action alone because the cancel is not sent

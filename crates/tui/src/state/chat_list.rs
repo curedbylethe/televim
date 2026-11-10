@@ -1,7 +1,7 @@
 //! The chat list and the selection cursor.
 
 use domain::chat::Chat;
-use domain::updates::{ChatList, sorts_before};
+use domain::updates::{ChatList, UpdateEvent, sorts_before};
 
 /// The chat list and the selection cursor.
 pub struct ChatListState {
@@ -68,6 +68,20 @@ impl ChatListState {
         {
             self.selected_chat = index;
         }
+    }
+
+    /// Applies a feed update while keeping the highlight on its chat if the
+    /// update reorders the list.
+    pub(crate) fn apply_update(&mut self, event: UpdateEvent) -> bool {
+        let highlighted = self.list.chats.get(self.selected_chat).map(|chat| chat.id);
+        let changed = self.list.apply_update(event);
+        if changed
+            && let Some(index) =
+                highlighted.and_then(|id| self.list.chats.iter().position(|chat| chat.id == id))
+        {
+            self.selected_chat = index;
+        }
+        changed
     }
 
     /// Changes a notification preference without moving the chat.

@@ -4231,6 +4231,22 @@ fn one_arrival_reaches_both_the_window_and_the_list() {
     );
 }
 
+#[test]
+fn an_arrival_keeps_the_highlight_on_its_chat_when_the_list_reorders() {
+    let mut app = on_the_chat_list();
+    app.handle_key(press(KeyCode::Char('j')));
+    let highlighted = app.chats()[app.list.selected_chat].id;
+    let moved = app.chats()[2].id;
+
+    assert!(app.apply_update(&UpdateEvent::NewMessage(Message {
+        chat_id: moved,
+        timestamp: 1_740_000_000,
+        ..message(11, "newer")
+    })));
+
+    assert_eq!(app.chats()[app.list.selected_chat].id, highlighted);
+}
+
 /// The newest message the peer has read, for `chat_id`.
 fn read(chat_id: i64, max_id: i64) -> UpdateEvent {
     UpdateEvent::ReadReceipt { chat_id, max_id }
