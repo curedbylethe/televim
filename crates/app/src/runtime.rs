@@ -97,6 +97,11 @@ pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Resul
         .and_then(accounts::AccountsIndex::active_account);
     init_tracing(cfg, config_path);
     profile::migrate_derived_key(config_path, cfg);
+    profile::migrate_legacy_session(
+        config_path,
+        cfg,
+        account.map_or(accounts::AccountSlot::Legacy, accounts::AccountSlot::Id),
+    );
     let paths = accounts::slot_paths(config_path, cfg, account);
     build_runtime()?.block_on(run_async(cfg, config_path, &paths, initial_chat, index))
 }

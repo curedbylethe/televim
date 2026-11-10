@@ -1826,3 +1826,5 @@ are in [`../AGENTS.md`](../AGENTS.md).
   every sibling remains together and no session bytes are lost. The cost is
   that a legacy profile outside the launch directory cannot be discovered
   automatically; the first launch must run there or use `--config`.
+
+- **Why legacy keychain sessions migrate to files:** when the resolved file is absent, Televim reads the previous build account entry and saves through the configured file key provider. It clears the old entry only after save succeeds; empty or failed reads leave it untouched.

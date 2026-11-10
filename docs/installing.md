@@ -191,7 +191,10 @@ By default Televim keeps the session in an encrypted file beside the
 configuration, with its random 32-byte key in `session.key` next to it. A legacy
 file session whose key lives in the keychain copies that key to `session.key`
 once. The first migration may show one macOS prompt; later launches do not
-need the keychain. A legacy keychain session is handled separately.
+need the keychain. A pre-0.12.0 keychain session migrates once when the file is
+absent and its key is available. Televim clears the old entry only after the
+file save succeeds. Empty, corrupt, or unreadable entries stay in the keychain;
+corrupt and unreadable entries are logged.
 
 The keyring is the macOS login keychain. On the first launch, expect one prompt
 per keychain item: the session item, plus the history `file-key` item when a
@@ -247,9 +250,8 @@ the session and does not open a passphrase box; the session file is left as it
 was. A key file that cannot be read because the profile denies access needs the
 same recovery: restore access or restore the file.
 
-An existing keyring-sealed session cannot open under a newly configured key file.
-The first enable costs one sign-in. Move the key file and its session files as a
-pair; a key file without the files it sealed opens nothing.
+Move the key file and its session files as a pair; a key file without the files
+it sealed opens nothing.
 
 ## Linux
 

@@ -417,6 +417,7 @@ Real, and named so they are not mistaken for oversights:
   empty (`clearing_a_used_session_resets_counters_peers_and_the_stored_copy`), and
   the client is dropped, which aborts its runner, so no grammers session or socket
   outlives it. There is no integration test that watches a socket close.
+- **A pre-0.12.0 keychain session migrates once to a file session.** The migration runs only when the file is absent and the file key is available. Empty, corrupt, or unreadable entries remain in the keychain; failures are logged.
 - **Linux keyring use needs a Secret Service session.** Release binaries need the
   platform D-Bus runtime library and a Secret Service provider such as GNOME
   Keyring or KWallet. A headless system without a session bus cannot use that
