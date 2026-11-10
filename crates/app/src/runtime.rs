@@ -95,8 +95,9 @@ pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Resul
     let account = index
         .as_ref()
         .and_then(accounts::AccountsIndex::active_account);
+    let slot = account.map_or(accounts::AccountSlot::Legacy, accounts::AccountSlot::Id);
     init_tracing(cfg, config_path);
-    profile::migrate_derived_key(config_path, cfg);
+    profile::migrate_derived_key(config_path, cfg, slot);
     for slot in session_migration_slots(index.as_ref()) {
         profile::migrate_legacy_session(config_path, cfg, slot);
     }
@@ -905,7 +906,11 @@ async fn event_loop(
     // conversation and a false clear costs one fetch. A file that may not seed is removed rather
     // than left for the first write to overwrite, so another account's
     // messages do not wait on disk for a page that may never come.
-    let file_keys = net::file_key_provider(cfg);
+    let session_path = match &paths.session {
+        accounts::SessionTarget::File(path) => Some(path.as_path()),
+        accounts::SessionTarget::Keyring(_) => None,
+    };
+    let file_keys = net::file_key_provider_for_session(cfg, session_path);
     let history_file = HistoryFile::new(paths.history.clone(), file_keys.clone());
     let (history, history_tag) = load_history(&history_file, label.as_deref());
 

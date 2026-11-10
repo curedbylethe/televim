@@ -1062,6 +1062,11 @@ impl State {
         self.file_keys = Some(keys);
     }
 
+    fn file_key_provider(&self, cfg: &Config) -> Arc<dyn KeyProvider> {
+        let paths = accounts::slot_paths(&self.config_path, cfg, self.slot.account());
+        file_key_provider_for_session(cfg, session_file_path(&paths.session))
+    }
+
     /// The key source a bring-up from this state uses.
     ///
     /// The launch's shared Arc when the loop set one, and a provider built from
@@ -1075,7 +1080,7 @@ impl State {
             );
             self.cfg_now().map_or_else(
                 || Arc::new(KeyringKeyProvider::default()) as Arc<dyn KeyProvider>,
-                |cfg| file_key_provider(&cfg),
+                |cfg| self.file_key_provider(&cfg),
             )
         })
     }
@@ -2000,12 +2005,11 @@ fn export_session(
     keyring: impl Fn() -> Arc<dyn KeyProvider>,
 ) -> Result<String, String> {
     is_the_configured_file(cfg, path)?;
-    let Session { store, .. } = session_store_with(
-        &accounts::slot_paths(config_path, cfg, slot.account()),
-        cfg,
-        &keyring,
-    );
-    let dest = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
+    let paths = accounts::slot_paths(config_path, cfg, slot.account());
+    let session_path = session_file_path(&paths.session);
+    let Session { store, .. } = session_store_with(&paths, cfg, &keyring);
+    let dest =
+        FileStore::with_key_provider(path, key_provider_for_session(cfg, session_path, &keyring));
     export_snapshot(&*store, cfg.session_path.is_some(), &dest, path)
 }
 
@@ -2071,12 +2075,11 @@ fn import_session(
     keyring: impl Fn() -> Arc<dyn KeyProvider>,
 ) -> Result<String, String> {
     is_the_configured_file(cfg, path)?;
-    let source = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
-    let Session { store, .. } = session_store_with(
-        &accounts::slot_paths(config_path, cfg, slot.account()),
-        cfg,
-        &keyring,
-    );
+    let paths = accounts::slot_paths(config_path, cfg, slot.account());
+    let session_path = session_file_path(&paths.session);
+    let source =
+        FileStore::with_key_provider(path, key_provider_for_session(cfg, session_path, &keyring));
+    let Session { store, .. } = session_store_with(&paths, cfg, &keyring);
     import_snapshot(&source, &*store, cfg.session_path.is_some(), known, path)
 }
 
@@ -2165,7 +2168,7 @@ fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEve
     };
     // The typed passphrase is the process's key from here on: the history cache
     // and every later bring-up use the same Arc.
-    let file_keys = file_key_provider(&cfg);
+    let file_keys = state.file_key_provider(&cfg);
     state.set_file_keys(file_keys.clone());
     if let Some(file) = state.history_file.take() {
         state.history_file = Some(file.rekeyed(file_keys));
@@ -2211,7 +2214,8 @@ fn change_passphrase(
     if new.trim().is_empty() {
         return Err("the passphrase cannot be empty".to_owned());
     }
-    let current = FileStore::with_key_provider(path, key_provider(cfg, &keyring));
+    let current =
+        FileStore::with_key_provider(path, key_provider_for_session(cfg, Some(path), &keyring));
     let data = match current.load() {
         Ok(Some(data)) => data,
         Ok(None) => return Err(format!("there is no session in {}", path.display())),
@@ -2346,9 +2350,9 @@ fn session_store_with(
     cfg: &Config,
     keyring: impl FnOnce() -> Arc<dyn KeyProvider>,
 ) -> Session {
-    let keys = match paths.session {
+    let keys = match &paths.session {
         SessionTarget::Keyring(_) => None,
-        SessionTarget::File(_) => Some(key_provider(cfg, keyring)),
+        SessionTarget::File(path) => Some(key_provider_for_session(cfg, Some(path), keyring)),
     };
     session(paths, keys)
 }
@@ -2364,14 +2368,22 @@ fn session(paths: &SlotPaths, keys: Option<Arc<dyn KeyProvider>>) -> Session {
     }
 }
 
+fn session_file_path(target: &SessionTarget) -> Option<&Path> {
+    match target {
+        SessionTarget::File(path) => Some(path),
+        SessionTarget::Keyring(_) => None,
+    }
+}
+
 /// Where the session file's key comes from: passphrase, key file, or the
 /// keychain only while migrating an older derived-key profile.
 ///
 /// The order is the whole policy. Neither being usable is not answered here with
 /// a third source — least of all with no key at all — but when the provider is
 /// first asked for a key, as [`key_trouble`].
-pub(crate) fn key_provider(
+fn key_provider_for_session(
     cfg: &Config,
+    session_path: Option<&Path>,
     keyring: impl FnOnce() -> Arc<dyn KeyProvider>,
 ) -> Arc<dyn KeyProvider> {
     if let Some(passphrase) = cfg.passphrase() {
@@ -2381,12 +2393,7 @@ pub(crate) fn key_provider(
         ));
     }
     if let Some(path) = &cfg.session_key_file {
-        if cfg.session_key_file_derived
-            && !path.exists()
-            && cfg
-                .session_path
-                .as_ref()
-                .is_some_and(|session| session.exists())
+        if cfg.session_key_file_derived && !path.exists() && session_path.is_some_and(Path::exists)
         {
             return keyring();
         }
@@ -2397,8 +2404,15 @@ pub(crate) fn key_provider(
 
 /// The key source the history cache is sealed under: the session file's own,
 /// built from the same configuration, so the two share one key.
-pub(crate) fn file_key_provider(cfg: &Config) -> Arc<dyn KeyProvider> {
-    key_provider(cfg, || Arc::new(KeyringKeyProvider::default()))
+pub(crate) fn file_key_provider_for_session(
+    cfg: &Config,
+    session_path: Option<&Path>,
+) -> Arc<dyn KeyProvider> {
+    key_provider_for_session(
+        cfg,
+        session_path,
+        || Arc::new(KeyringKeyProvider::default()),
+    )
 }
 
 /// The `offline:` sentence for a session file whose key is missing or wrong.
@@ -3966,7 +3980,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                 if let Some(cfg) = state.cfg_now() {
                     // One provider for the process: the rekeyed history and
                     // every later bring-up receive this same Arc.
-                    let file_keys = file_key_provider(&cfg);
+                    let file_keys = state.file_key_provider(&cfg);
                     state.set_file_keys(file_keys.clone());
                     if let Some(file) = state.history_file.take() {
                         state.history_file = Some(file.rekeyed(file_keys));
@@ -12722,7 +12736,10 @@ mod session_store_tests {
 
         let bytes = std::fs::read(&to).expect("the export is a file");
         assert!(telegram_framework::sealed::is_sealed(&bytes), "never plain");
-        let other = FileStore::with_key_provider(&to, key_provider(&cfg, || Arc::new(NoKeyring)));
+        let other = FileStore::with_key_provider(
+            &to,
+            key_provider_for_session(&cfg, cfg.session_path.as_deref(), || Arc::new(NoKeyring)),
+        );
         let copy = other.load().expect("it opens").expect("it holds a session");
         assert_eq!(copy.account().map(|a| a.user_id), Some(7));
         assert_eq!(auth_key_bytes(&copy), [0xAB; 256], "the key travelled");
@@ -12850,9 +12867,12 @@ mod session_store_tests {
         let (path, session) = (dir.path().join("in.bin"), dir.path().join("session.bin"));
         let cfg = file_config(&session, Some("right"));
         let keys = || -> Arc<dyn KeyProvider> { Arc::new(NoKeyring) };
-        FileStore::with_key_provider(&path, key_provider(&cfg, keys))
-            .save(&snapshot(7, 0xEE))
-            .expect("a session is written");
+        FileStore::with_key_provider(
+            &path,
+            key_provider_for_session(&cfg, cfg.session_path.as_deref(), keys),
+        )
+        .save(&snapshot(7, 0xEE))
+        .expect("a session is written");
 
         import_session(
             &cfg,
@@ -13383,7 +13403,7 @@ mod session_store_tests {
             &cfg,
             config_path(),
             Opening::Slot(AccountSlot::Legacy),
-            file_key_provider(&cfg),
+            file_key_provider_for_session(&cfg, cfg.session_path.as_deref()),
             &tx,
         )
         .await
@@ -13416,7 +13436,9 @@ mod session_store_tests {
 
         let mut keyed = file_config(&session, None);
         keyed.session_key_file = Some(key_path.clone());
-        let provider = key_provider(&keyed, || panic!("the keyring is not asked"));
+        let provider = key_provider_for_session(&keyed, Some(&session), || {
+            panic!("the keyring is not asked")
+        });
         assert!(
             format!("{provider:?}").contains("KeyFileProvider"),
             "the key file is the source"
@@ -13438,7 +13460,9 @@ mod session_store_tests {
             ..Config::default()
         };
         let path = both.session_path.as_ref().expect("a session path");
-        let provider = key_provider(&both, || panic!("the keyring is not asked"));
+        let provider = key_provider_for_session(&both, both.session_path.as_deref(), || {
+            panic!("the keyring is not asked")
+        });
         FileStore::with_key_provider(path, provider)
             .save(&SessionData::default())
             .expect("saved under the passphrase");
@@ -13454,10 +13478,37 @@ mod session_store_tests {
         );
 
         let keyring = file_config(&dir.path().join("keyring.bin"), None);
-        let provider = key_provider(&keyring, || Arc::new(Fixed));
+        let provider = key_provider_for_session(&keyring, keyring.session_path.as_deref(), || {
+            Arc::new(Fixed)
+        });
         assert!(
             format!("{provider:?}").contains("Fixed"),
             "neither configured asks the keyring"
+        );
+    }
+
+    #[test]
+    fn a_derived_key_falls_back_for_an_existing_account_session() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let base = dir.path().join("session");
+        let key = dir.path().join("session.key");
+        let cfg = Config {
+            session_path: Some(base),
+            session_key_file: Some(key),
+            session_key_file_derived: true,
+            ..Config::default()
+        };
+        let paths = accounts::slot_paths(config_path(), &cfg, Some(7));
+        let SessionTarget::File(session_path) = &paths.session else {
+            panic!("account session is a file");
+        };
+        std::fs::write(session_path, b"existing session").expect("account session exists");
+
+        let session = session_store_with(&paths, &cfg, || Arc::new(Fixed));
+        let keys = session.keys.expect("file session has a key provider");
+        assert!(
+            format!("{keys:?}").contains("Fixed"),
+            "the account session falls back to the legacy keychain key"
         );
     }
 
@@ -15219,7 +15270,7 @@ mod switch_tests {
         state.set_draft_file(DraftFile::new(drafts.to_path_buf()));
         state.set_history_file(HistoryFile::new(
             history.to_path_buf(),
-            file_key_provider(&cfg),
+            file_key_provider_for_session(&cfg, cfg.session_path.as_deref()),
         ));
         state.switching = Some(Switch {
             from: AccountSlot::Legacy,
@@ -15279,7 +15330,7 @@ mod switch_tests {
         state.set_draft_file(DraftFile::new(drafts.clone()));
         state.set_history_file(HistoryFile::new(
             history.clone(),
-            file_key_provider(&Config::default()),
+            file_key_provider_for_session(&Config::default(), None),
         ));
         let mut app = App::new();
 
@@ -15655,7 +15706,10 @@ mod switch_tests {
         let mut state = State::new(cfg.clone(), config_path.clone(), tx.clone());
         state.set_account(AccountSlot::Legacy, index.clone());
         state.set_draft_file(DraftFile::new(a_drafts.clone()));
-        state.set_history_file(HistoryFile::new(a_history.clone(), file_key_provider(&cfg)));
+        state.set_history_file(HistoryFile::new(
+            a_history.clone(),
+            file_key_provider_for_session(&cfg, cfg.session_path.as_deref()),
+        ));
         let mut app = App::new();
         app.set_chats(vec![chat(10), chat(20), chat(30)]);
         assert!(app.select_chat_by_id(20), "the fixture opens chat 20");
@@ -15765,7 +15819,10 @@ mod switch_tests {
         let mut state = State::new(cfg.clone(), config_path.clone(), tx.clone());
         state.set_account(AccountSlot::Legacy, index.clone());
         state.set_draft_file(DraftFile::new(a_drafts.clone()));
-        state.set_history_file(HistoryFile::new(a_history.clone(), file_key_provider(&cfg)));
+        state.set_history_file(HistoryFile::new(
+            a_history.clone(),
+            file_key_provider_for_session(&cfg, cfg.session_path.as_deref()),
+        ));
         let mut app = App::new();
 
         state.held.push_back(Action::SwitchAccount { id: 7 });
@@ -15849,7 +15906,10 @@ mod switch_tests {
         let mut state = State::new(cfg.clone(), config_path.clone(), tx.clone());
         state.set_account(AccountSlot::Legacy, index.clone());
         state.set_draft_file(DraftFile::new(a_drafts.clone()));
-        state.set_history_file(HistoryFile::new(a_history.clone(), file_key_provider(&cfg)));
+        state.set_history_file(HistoryFile::new(
+            a_history.clone(),
+            file_key_provider_for_session(&cfg, cfg.session_path.as_deref()),
+        ));
         // A settled launch: the bring-up in flight is over.
         state.bringing_up = false;
         let mut app = App::new();
