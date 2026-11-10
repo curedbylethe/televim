@@ -470,7 +470,8 @@ file is the answer.
 
 A Telegram contact-signup event is one `RowKind::Other` row labelled
 `joined Telegram`, in the same separator style and without a sender label.
-Other service actions have no row.
+It breaks message groups on both sides so the adjacent messages keep their
+sender labels and time footers. Other service actions have no row.
 
 A message is still as many rows as its text needs, the sender label still sits
 on its first row and a status still sits on its last. Three treatments sit on
