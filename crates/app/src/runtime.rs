@@ -97,13 +97,25 @@ pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Resul
         .and_then(accounts::AccountsIndex::active_account);
     init_tracing(cfg, config_path);
     profile::migrate_derived_key(config_path, cfg);
-    profile::migrate_legacy_session(
-        config_path,
-        cfg,
-        account.map_or(accounts::AccountSlot::Legacy, accounts::AccountSlot::Id),
-    );
+    for slot in session_migration_slots(index.as_ref()) {
+        profile::migrate_legacy_session(config_path, cfg, slot);
+    }
     let paths = accounts::slot_paths(config_path, cfg, account);
     build_runtime()?.block_on(run_async(cfg, config_path, &paths, initial_chat, index))
+}
+
+fn session_migration_slots(index: Option<&accounts::AccountsIndex>) -> Vec<accounts::AccountSlot> {
+    let mut slots = vec![accounts::AccountSlot::Legacy];
+    if let Some(index) = index {
+        slots.extend(
+            index
+                .accounts
+                .iter()
+                .map(|account| account.slot)
+                .filter(|slot| *slot != accounts::AccountSlot::Legacy),
+        );
+    }
+    slots
 }
 
 /// Records the instant the program was asked to start.
@@ -1483,6 +1495,33 @@ impl ReaderGate {
 mod tests {
     use super::*;
     use tui::state::ui::StickerMode;
+
+    #[test]
+    fn legacy_session_migration_includes_every_indexed_slot() {
+        let index = accounts::AccountsIndex {
+            version: 1,
+            active: Some(7),
+            accounts: vec![
+                accounts::KnownAccount {
+                    id: 42,
+                    phone: None,
+                    slot: accounts::AccountSlot::Legacy,
+                    last_used: 0,
+                },
+                accounts::KnownAccount {
+                    id: 7,
+                    phone: None,
+                    slot: accounts::AccountSlot::Id(7),
+                    last_used: 0,
+                },
+            ],
+        };
+
+        assert_eq!(
+            session_migration_slots(Some(&index)),
+            vec![accounts::AccountSlot::Legacy, accounts::AccountSlot::Id(7)]
+        );
+    }
 
     /// The download, as a request counter: records every pair it is asked
     /// for, and answers with bytes that will not decode — so settling, not
