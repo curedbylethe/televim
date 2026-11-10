@@ -1159,18 +1159,24 @@ mod tests {
     }
 
     #[test]
-    fn replacement_moves_verified_bytes_and_preserves_neighboring_data() {
+    fn an_update_replaces_only_the_executable() {
         let dir = tempfile::tempdir().expect("temp dir");
         let exe = dir.path().join("televim");
         let staged_dir = dir.path().join("stage");
         fs::create_dir(&staged_dir).expect("stage dir");
         let staged = staged_dir.join("televim");
-        let config = dir.path().join("config");
+        let config = dir.path().join("televim.toml");
+        let session = dir.path().join("session");
+        let key = dir.path().join("session.key");
+        let accounts = dir.path().join("televim.accounts.json");
         let draft = dir.path().join("draft");
         let history = dir.path().join("history");
         fs::write(&exe, b"old").expect("old executable");
         fs::write(&staged, b"verified new binary").expect("staged executable");
         fs::write(&config, b"config").expect("config");
+        fs::write(&session, b"session").expect("session");
+        fs::write(&key, b"key").expect("key");
+        fs::write(&accounts, b"accounts").expect("accounts");
         fs::write(&draft, b"draft").expect("draft");
         fs::write(&history, b"history").expect("history");
         replace(&exe, &staged).expect("replace executable");
@@ -1179,6 +1185,9 @@ mod tests {
             b"verified new binary"
         );
         assert_eq!(fs::read(config).expect("config remains"), b"config");
+        assert_eq!(fs::read(session).expect("session remains"), b"session");
+        assert_eq!(fs::read(key).expect("key remains"), b"key");
+        assert_eq!(fs::read(accounts).expect("accounts remain"), b"accounts");
         assert_eq!(fs::read(draft).expect("draft remains"), b"draft");
         assert_eq!(fs::read(history).expect("history remains"), b"history");
         #[cfg(not(windows))]

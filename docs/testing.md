@@ -315,8 +315,13 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   `Arc<dyn KeyProvider>` per process, and that a `session_path` +
   `session_key_file` config reaches bring-up with a panicking keyring closure, so
   no credential-store call is made; a missing key file returns before
-  `sealing_key` and does not create one. The key-file tests read a real temp file,
-  not a fake keyring, so they need no OS credential store.
+  `sealing_key` and does not create one. `a_session_written_before_the_update_opens_with_its_key_file_after_it`
+  saves a session and key file, drops the first provider, then opens both with
+  fresh instances and checks account identity, auth material and update state.
+  `an_update_replaces_only_the_executable` checks that replacement leaves
+  `televim.toml`, `session`, `session.key` and `televim.accounts.json` unchanged.
+  These key-file tests read real temp files, not a fake keyring, so they need no
+  OS credential store.
 - **Media cache:** `app/src/media_cache.rs` is tested over a temp directory and no
   client: a file found again after a restart under a pid-free name, the byte cap and
   the entry cap each evicting the oldest modification time first, a small configured
@@ -413,11 +418,13 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   and the media cache names its file `.tgs`, `.webm` or `.bin` from the magic
   bytes. All of those run on every CI run.
 - **TUI E2E Tests:** `app/tests/tui_e2e.rs` runs the `televim` binary in a pty
-  through `termlens` and asserts on the screen. Fifteen tests: confirmed draft discard and cancellation, the chat list after
+  through `termlens` and asserts on the screen. Seventeen tests: confirmed draft discard and cancellation, the chat list after
   launch, a seeded cache drawn before the first frame, typing in INSERT, resuming
   a draft, `:q` quitting, refusing contacts while offline, Ctrl-u/Ctrl-d moving
   the conversation's visible slice,
   an arrival moving a pinned view, an arrival leaving a scrolled-back view alone,
+  a sealed pre-update session opening without a sign-in, phone, code or
+  passphrase prompt,
   a fetch in flight shown at the edge it is coming from, and three attachment
   scenarios: `attachment_progress_is_shown_beside_sending`,
   `cancelled_attachment_can_be_dismissed`, and

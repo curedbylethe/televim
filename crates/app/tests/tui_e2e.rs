@@ -104,6 +104,24 @@ fn launches_to_chat_list_in_normal_mode() {
 }
 
 #[test]
+fn a_session_written_before_an_update_opens_after_it() {
+    let sandbox = common::sandbox();
+    common::seed_session(&sandbox);
+    common::configure_offline_credentials(&sandbox);
+    let mut t = common::spawn_offline(&sandbox);
+
+    let screen = t
+        .snapshot_after(|s| s.contains("NORMAL") && s.contains("Chats"))
+        .expect("seeded account shell draws");
+    let text = screen.full_text();
+    assert!(text.contains("Chats"), "account shell is shown");
+    assert!(!text.contains("Sign in to Telegram"), "no sign-in card");
+    assert!(!text.contains("Phone number"), "no phone prompt");
+    assert!(!text.contains("Login code"), "no code prompt");
+    assert!(!text.contains("Passphrase"), "no passphrase prompt");
+}
+
+#[test]
 fn dead_update_endpoint_does_not_delay_launch() {
     let sandbox = common::sandbox();
     let mut t = common::spawn_offline_with_update_url(&sandbox, "http://127.0.0.1:1/latest");

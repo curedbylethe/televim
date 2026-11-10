@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
-use telegram_framework::{PassphraseProvider, sealed};
+use telegram_framework::{
+    AuthKey, ChannelState, DcOption, PassphraseProvider, Peer, SessionData, UpdateState, sealed,
+};
 use tempfile::TempDir;
 use termlens::Terminal;
 
@@ -39,6 +41,11 @@ pub fn sandbox() -> Sandbox {
         config,
         session,
     }
+}
+
+pub fn configure_offline_credentials(sandbox: &Sandbox) {
+    std::fs::write(&sandbox.config, "api_id = 1234\napi_hash = \"test\"\n")
+        .expect("write offline test credentials");
 }
 
 /// Spawn the `televim` binary with no credentials, 80x24, in `sandbox`.
@@ -162,6 +169,39 @@ pub fn seed_history(sandbox: &Sandbox, chats: &[(i64, &str)], peers: &[(i64, Vec
         sealed::seal(&plain, &PassphraseProvider::new(PASSPHRASE)).expect("seal seeded history");
     let path = sandbox.config.with_extension("history.json");
     std::fs::write(&path, bytes).expect("write seeded history.json");
+}
+
+/// Writes a sealed authorised snapshot before the binary starts.
+pub fn seed_session(sandbox: &Sandbox) {
+    let session = SessionData {
+        version: SessionData::VERSION,
+        user_id: Some(42),
+        phone: Some("+15551234567".to_owned()),
+        home_dc_id: Some(2),
+        dc_options: vec![DcOption {
+            id: 2,
+            ipv4: "149.154.167.51:443".to_owned(),
+            ipv6: "[2001:67c:4e8:f002::a]:443".to_owned(),
+            auth_key: Some(AuthKey::from_bytes([0xab; AuthKey::LEN])),
+        }],
+        peers: vec![Peer::User {
+            id: 42,
+            auth: Some(42),
+            bot: Some(false),
+            is_self: Some(true),
+        }],
+        update_state: UpdateState {
+            pts: 12,
+            qts: 3,
+            date: 1_700_000_000,
+            seq: 4,
+            channels: vec![ChannelState { id: 7, pts: 5 }],
+        },
+    };
+    let plain = session.to_bytes().expect("serialise seeded session");
+    let bytes =
+        sealed::seal(&plain, &PassphraseProvider::new(PASSPHRASE)).expect("seal seeded session");
+    std::fs::write(&sandbox.session, bytes).expect("write seeded session");
 }
 
 /// The shape `runtime.rs` reads back: `HistoryFile`'s payload, written by hand.
