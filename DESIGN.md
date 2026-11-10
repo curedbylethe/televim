@@ -88,7 +88,7 @@ change.
 | `border-focused` | `Cyan` | `#00afaf` | `#5ad4e6` | `#1a7f8c` | the *only* thing saying where keys go |
 | `text` | `White` | `#e5e5e5` | `#d7dce5` | `#1d2128` | body |
 | `text-dim` | `Gray` | `#8a8a8a` | `#7b8496` | `#6b7280` | decoration, hints, an unfocused draft, a media placeholder |
-| `selection` | `REVERSED` | reverse video | reverse video | reverse video | the row the cursor is on, in a read-only surface; owned by it alone |
+| `selection` | `REVERSED` | reverse video | reverse video | reverse video | every row occupied by the cursor's item, in a read-only surface; owned by it alone |
 | `caret-insert` | — | terminal's own | `#d7dce5` | `#1d2128` | the bar, while the line is composed; on the bar's plain ground |
 | `caret-normal` | — | terminal's own | `#d7dce5` | `#1d2128` | the hollow; `text` on a plain ground, `background` on the reversed row |
 | `match` | `Yellow`+`BOLD` | `#87af00` | `#e5c07b` | `#8a6100` | a search hit; colour **and** bold |
@@ -163,13 +163,13 @@ the port list: the field each one becomes in `crates/tui/src/theme.rs`.
 
 | The visual | What it is | Field | Flag | Class |
 | :--------- | :--------- | :---- | :--- | :---- |
-| **`selection`** | the row the cursor is on, in a read-only surface: reverse video on the row itself | `Theme::selection` (kept) | `r` | `.rv` |
+| **`selection`** | every row occupied by the cursor's item, in a read-only surface | `Theme::selection` (kept) | `r` | `.rv` |
 | **`caret-insert`** | a two-column bar: the line, while it is being composed | `Theme::caret_insert` (added) | `c` | `.ci` |
 | **`caret-normal`** | a hollow cell: the line's own Normal mode, and a card's inline position | `Theme::caret_normal` (added) | `n` | `.cn` |
 
 **The rule, in three parts.**
 
-1. **A read-only surface marks its cursor with reverse video on the row itself,
+1. **A read-only surface marks its cursor with reverse video on every row its item occupies,
    and nothing else is reversed.** This is the rule above, unchanged, and
    `selection-bg` still never uses `REVERSED`: a second user of it leaves the
    reader unable to tell which row the cursor is on.

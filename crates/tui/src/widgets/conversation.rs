@@ -441,6 +441,7 @@ fn message_items<'m>(
             .request(message.chat_id, message.id);
     }
     let coverage = coverage(app, message, index, covered);
+    let cursor_here = app.conversation.vim.cursor() == index;
 
     let mut items = Vec::with_capacity(wrapped.len() + block);
     let mut picture = None;
@@ -453,14 +454,12 @@ fn message_items<'m>(
             last: block == 0 && row + 1 == wrapped.len(),
             group: grouped,
         };
-        items.push(message_row(
-            app,
-            message,
-            &place,
-            range,
-            coverage.as_ref(),
-            draw.width,
-        ));
+        let item = message_row(app, message, &place, range, coverage.as_ref(), draw.width);
+        items.push(if cursor_here {
+            item.style(app.ui.theme.selection)
+        } else {
+            item
+        });
     }
 
     if block > 0
@@ -4040,10 +4039,9 @@ mod tests {
         assert_one_answer(&app, &screen);
     }
 
-    /// A search marks every row of the message it matched, and the cursor
-    /// stands on the first of them.
+    /// A search marks every row of its message, and the cursor reverses them all.
     #[test]
-    fn a_wrapped_match_is_marked_throughout_and_the_cursor_is_on_its_first_row() {
+    fn a_wrapped_match_and_cursor_are_marked_throughout() {
         use ratatui::style::Modifier;
 
         use std::borrow::Cow;
@@ -4068,21 +4066,19 @@ mod tests {
         press(&mut app, KeyCode::Enter);
 
         let screen = screen(&app, 80, 24);
-        let first = cell(&screen, BODY_X, 1);
-        let second = cell(&screen, BODY_X, 2);
-
-        assert_eq!(first.fg, match_fg(), "the first row is marked");
-        assert_eq!(second.fg, match_fg(), "and so is the row after it");
-        assert!(
-            first.modifier.contains(Modifier::REVERSED),
-            "the cursor is on the first of them: {:?}",
-            first.modifier
-        );
-        assert!(
-            !second.modifier.contains(Modifier::REVERSED),
-            "and not on the rest: {:?}",
-            second.modifier
-        );
+        let rows = message_rows(&screen)
+            .into_iter()
+            .filter(|&y| drawn(&screen, y))
+            .collect::<Vec<_>>();
+        assert!(rows.len() > 2, "fixture reaches trailing note: {rows:?}");
+        for y in rows {
+            for x in BODY_X..78 {
+                assert!(
+                    cell(&screen, x, y).modifier.contains(Modifier::REVERSED),
+                    "cursor message cell ({x}, {y}) is reversed"
+                );
+            }
+        }
         assert_one_answer(&app, &screen);
     }
 
