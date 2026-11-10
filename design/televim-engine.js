@@ -457,7 +457,7 @@
 
   /* the two shell cards. The reason is a chain, so it is longer than the panel and it wraps. */
   const NOT_SIGNED_IN = 'not signed in';
-  const SIGNED_OUT_REASON = 'no session: the OS credential store holds no entry for televim, and there is no plaintext file at ~/.local/state/televim/session';
+  const SIGNED_OUT_REASON = 'no session: the encrypted session file is missing from the configured profile';
   const SET_CREDENTIALS = 'Set the credentials again with :signin.';
   const SIGNED_OUT = 'signed out';
   const READING = 'reading the account…';
@@ -2346,8 +2346,8 @@
       const rows = [{ kind: 'value', label: 'name', value: P.name }, { kind: 'value', label: 'username', value: who || 'not set' }];
       if (P.bio) rows.push({ kind: 'value', label: 'bio', value: P.bio });
       if (P.birthday) rows.push({ kind: 'value', label: 'birthday', value: P.birthday });
-      /* the session sits in the OS keyring; the encrypted file is the passphrase scenes' fallback */
-      rows.push({ kind: 'value', label: 'id', value: P.id }, { kind: 'value', label: 'session', value: 'OS keyring' });
+      /* the session and its key live in files under the configured profile */
+      rows.push({ kind: 'value', label: 'id', value: P.id }, { kind: 'value', label: 'session', value: 'encrypted file <path>' });
       /* The accounts this machine knows, one row each, and only when there is more than one:
          a list of one is not a picker, and the signed-in account's number is already in the
          `username` row. The label column is eleven cells and a number is fifteen, so what the

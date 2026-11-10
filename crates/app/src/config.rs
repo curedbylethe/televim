@@ -14,11 +14,8 @@
 //!
 //! # Where the session is kept
 //!
-//! The authorisation key is the one secret this program holds, so by default it
-//! goes to the operating system's credential store — the same default the
-//! framework's builder has. [`Config::session_path`] is the way out for a
-//! machine that has no such store, and the way to keep a run out of it
-//! entirely.
+//! The authorisation key is stored in an encrypted session file. Its file key
+//! lives beside the session unless a passphrase or explicit key file is set.
 //!
 //! # Built-in credentials
 //!
@@ -31,10 +28,9 @@
 //!
 //! The file holds the authorisation key encrypted. The key to it is, in order:
 //! [`Config::session_passphrase`] (`TELEVIM_SESSION_PASSPHRASE`), else a random
-//! key kept in the operating system's credential store. With neither the session
-//! is not read or written at all, and the screen says which key is missing —
-//! the file is never left in plaintext to get around it. Prefer the environment
-//! variable to the configuration file: a file is a second place the secret rests.
+//! key file beside the session. A legacy keychain key is copied there before
+//! the session opens. Prefer the environment variable to the configuration
+//! file: a file is a second place the secret rests.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -209,9 +205,12 @@ pub struct Config {
     /// Used when [`Config::session_path`] is set; otherwise only by the history
     /// cache. Do not combine it with [`Config::session_passphrase`]: one file
     /// has one key. The app creates the key file with mode `0600` on first use
-    /// and never overwrites it. A relative path resolves against the working
-    /// directory. `TELEVIM_SESSION_KEY_FILE` sets it.
+    /// and never overwrites it. A relative path resolves against the
+    /// configuration file's directory. `TELEVIM_SESSION_KEY_FILE` sets it.
     pub session_key_file: Option<PathBuf>,
+
+    #[serde(skip)]
+    pub(crate) session_key_file_derived: bool,
 
     /// Argon2id memory cost of the passphrase-derived file key, in KiB.
     ///
@@ -286,6 +285,7 @@ impl Default for Config {
             session_path: None,
             session_passphrase: None,
             session_key_file: None,
+            session_key_file_derived: false,
             session_kdf_memory_kib: None,
             session_kdf_passes: None,
             session_kdf_lanes: None,
@@ -354,6 +354,15 @@ impl Config {
         }
         cfg.validate_session_key()?;
         cfg.default_session_files(path);
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        for value in [&mut cfg.session_path, &mut cfg.session_key_file]
+            .into_iter()
+            .flatten()
+        {
+            if value.is_relative() {
+                *value = parent.join(&*value);
+            }
+        }
         cfg.validate_kdf()?;
         cfg.validate_jumplist_depth()?;
         Ok(cfg)
@@ -365,15 +374,20 @@ impl Config {
     /// configuration, and unless a passphrase or key file is set its key is a
     /// random 32-byte file beside that, created on first use. The credential
     /// store prompts for a password on an unsigned build, so it is no longer the
-    /// default; set `session_path` alone to choose it for the file's key.
+    /// default.
     fn default_session_files(&mut self, config_path: &Path) {
-        if self.session_path.is_some() {
-            return;
+        if self.session_path.is_none() {
+            let dir = config_path.parent().unwrap_or_else(|| Path::new(""));
+            self.session_path = Some(dir.join("session"));
         }
-        let dir = config_path.parent().unwrap_or_else(|| Path::new(""));
-        self.session_path = Some(dir.join("session"));
         if self.passphrase().is_none() && self.session_key_file.is_none() {
-            self.session_key_file = Some(dir.join("session.key"));
+            self.session_key_file = Some(
+                self.session_path
+                    .as_ref()
+                    .expect("session path defaulted")
+                    .with_extension("key"),
+            );
+            self.session_key_file_derived = true;
         }
     }
 
@@ -821,9 +835,10 @@ mod tests {
 
         let cfg = load_toml("own-path", "session_path = \"/tmp/s\"\n").expect("loads");
         assert_eq!(
-            cfg.session_key_file, None,
-            "an explicit path keeps its choice"
+            cfg.session_key_file.as_deref(),
+            Some(Path::new("/tmp/s.key"))
         );
+        assert!(cfg.session_key_file_derived);
     }
 
     #[test]

@@ -2364,8 +2364,8 @@ fn session(paths: &SlotPaths, keys: Option<Arc<dyn KeyProvider>>) -> Session {
     }
 }
 
-/// Where the session file's key comes from: the passphrase if there is one,
-/// else the key file, otherwise the OS credential store.
+/// Where the session file's key comes from: passphrase, key file, or the
+/// keychain only while migrating an older derived-key profile.
 ///
 /// The order is the whole policy. Neither being usable is not answered here with
 /// a third source — least of all with no key at all — but when the provider is
@@ -2381,6 +2381,15 @@ fn key_provider(
         ));
     }
     if let Some(path) = &cfg.session_key_file {
+        if cfg.session_key_file_derived
+            && !path.exists()
+            && cfg
+                .session_path
+                .as_ref()
+                .is_some_and(|session| session.exists())
+        {
+            return keyring();
+        }
         return Arc::new(telegram_framework::sealed::KeyFileProvider::new(path));
     }
     keyring()

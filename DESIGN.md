@@ -1735,8 +1735,7 @@ back at the phone step, and `logout`, which signs out.
   reads `not set`. A half-filled identity shows the half it has.
 - `bio` and `birthday` are drawn only when present.
 - `id` is the account's numeric id, written after the label.
-- `session` says where the session is kept: `OS keyring`. Had the model placed it
-  in a file it would read `encrypted file <path>`.
+- `session` says where the session is kept: `encrypted file <path>`.
 - `birthday` is written as the month, day and year, then the age in
   parentheses: `Oct 19, 2001 (24 years old)`. **Without the year when there is
   no year** — `10 December` — because a year is a disclosure the account was

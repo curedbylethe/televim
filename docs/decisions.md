@@ -1,5 +1,16 @@
 # Key Decisions
 
+## Default key file and legacy key migration
+
+New profiles store the encrypted session and its random 32-byte key in files
+under the profile directory. A configured passphrase or explicit key file still
+takes precedence. When a derived key file is absent beside an existing session,
+the app reads the legacy `televim` / `file-key` entry and copies it with
+create-new semantics before opening the session. Missing or unreadable legacy
+keys do not create a replacement file, so the old session remains recoverable.
+The keychain entry remains in place. This avoids repeated macOS identity prompts
+after a key has migrated while keeping first-launch migration bounded.
+
 Each entry is a decision and the reasoning behind it. They move verbatim from
 the file this repository used to keep them in, because a record of reasoning
 loses its value the moment it is paraphrased. The rules that follow from them

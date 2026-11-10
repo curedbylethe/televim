@@ -372,7 +372,7 @@ Real, and named so they are not mistaken for oversights:
   such a file signs in again. Until then it is read as described; nothing is
   removed yet.
 - **A key file trades the OS credential store for a file beside the ciphertext.**
-  It is the default, so every user takes this tradeoff unless they set a passphrase or `session_path` alone. The key is protected by
+  It is the default, so every user takes this tradeoff unless they set a passphrase or explicit key file. The key is protected by
   `0600` and full-disk encryption rather than the OS credential store, and that
   is the tradeoff, not a claim that it is safer.
   - *Same-user and backup exposure.* Any process running as the reader can read
@@ -394,9 +394,8 @@ Real, and named so they are not mistaken for oversights:
     setting `session_passphrase` or `TELEVIM_SESSION_PASSPHRASE`, and signing in.
     Sign-out leaves the key file, as it leaves the keyring's `file-key`.
   - *The key file and its session files move as a pair.* Moving the key file
-    without the files it sealed, or the reverse, opens nothing. A keyring-sealed
-    session cannot open under a new key file either: the first enable costs one
-    sign-in and there is no automatic re-seal.
+    without the files it sealed, or the reverse, opens nothing. A legacy file session whose key is held in the keychain migrates to the derived
+    key file without sign-in. Keychain-held session migration is a separate stage.
   - *A missing, short or unreadable key file is a key error, not corruption.* It
     is `Load` or `Unavailable`, never `Corrupt`; the session is not discarded and
     no passphrase box opens. The `offline:` sentence names the key file and says

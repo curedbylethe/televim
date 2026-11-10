@@ -294,8 +294,12 @@ impl KeyringKeyProvider {
         }
     }
 
-    /// The entry is recreated for every lookup, as [`KeyringStore`](crate::KeyringStore)
-    /// does, so the provider stays free of platform handles.
+    /// Reads an existing key without creating a credential-store entry.
+    pub fn existing_key(&self) -> Result<Option<FileKey>, SessionError> {
+        crate::session::note_keychain_op(&self.service, &self.account, "existing_key");
+        existing_key_from_entry(&self.entry()?)
+    }
+
     fn entry(&self) -> Result<keyring::Entry, SessionError> {
         keyring::Entry::new(&self.service, &self.account)
             .map_err(|error| SessionError::Unavailable(error.to_string()))
@@ -310,6 +314,22 @@ impl KeyringKeyProvider {
         let key = key_from_entry(&self.entry()?, create)?;
         *cached = Some(key.clone());
         Ok(key)
+    }
+}
+
+fn existing_key_from_entry(entry: &keyring::Entry) -> Result<Option<FileKey>, SessionError> {
+    match entry.get_secret() {
+        Ok(secret) => {
+            let secret = Zeroizing::new(secret);
+            <[u8; KEY_LEN]>::try_from(secret.as_slice())
+                .map(FileKey::from_bytes)
+                .map(Some)
+                .map_err(|_| {
+                    SessionError::Load("the file key in the OS keyring is malformed".into())
+                })
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(SessionError::Unavailable(error.to_string())),
     }
 }
 
@@ -387,6 +407,44 @@ impl KeyFileProvider {
             path: path.into(),
             cached: Mutex::new(None),
         }
+    }
+
+    /// Writes an existing key without overwriting a key file.
+    pub fn store(&self, key: &FileKey) -> Result<(), SessionError> {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                SessionError::Unavailable(format!(
+                    "could not create the directory for the file key at {}: {error}",
+                    self.path.display()
+                ))
+            })?;
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path).map_err(|error| {
+            SessionError::Unavailable(format!(
+                "could not create the file key at {}: {error}",
+                self.path.display()
+            ))
+        })?;
+        if let Err(error) = file.write_all(&key.0[..]).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&self.path);
+            return Err(SessionError::Unavailable(format!(
+                "could not write the file key at {}: {error}",
+                self.path.display()
+            )));
+        }
+        Ok(())
     }
 
     /// The key at `path`, created only when `create` and there is no file.
@@ -637,6 +695,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use keyring::Entry;
     use keyring::mock::MockCredential;
 
@@ -881,11 +941,32 @@ mod tests {
     #[test]
     fn keyring_open_never_creates_a_key() {
         let entry = mock_entry();
+        assert!(existing_key_from_entry(&entry).expect("no key").is_none());
         assert!(matches!(
             key_from_entry(&entry, false),
             Err(SessionError::Load(_))
         ));
         assert!(matches!(entry.get_secret(), Err(keyring::Error::NoEntry)));
+    }
+
+    #[test]
+    fn existing_key_reads_without_creating_and_reports_malformed_entries() {
+        let entry = mock_entry();
+        entry.set_secret(&[7; KEY_LEN]).expect("set key");
+        assert_eq!(
+            existing_key_from_entry(&entry)
+                .expect("read")
+                .expect("present")
+                .0
+                .as_slice(),
+            &[7; KEY_LEN]
+        );
+        entry.set_secret(b"short").expect("replace");
+        assert!(matches!(
+            existing_key_from_entry(&entry),
+            Err(SessionError::Load(_))
+        ));
+        assert_eq!(entry.get_secret().expect("unchanged"), b"short");
     }
 
     #[test]
@@ -939,6 +1020,74 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn store_copies_key_without_overwriting() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("nested/session.key");
+        let key = FileKey::from_bytes([9; KEY_LEN]);
+        KeyFileProvider::new(&path).store(&key).expect("store");
+        let reopened = KeyFileProvider::new(&path)
+            .opening_key(&[0; SALT_LEN])
+            .expect("read");
+        assert_eq!(reopened.0.as_slice(), &[9; KEY_LEN]);
+        assert!(KeyFileProvider::new(&path).store(&key).is_err());
+    }
+
+    #[derive(Debug)]
+    struct MockLegacyKeyringProvider(Arc<Entry>);
+
+    impl KeyProvider for MockLegacyKeyringProvider {
+        fn sealing_key(&self) -> Result<(Salt, FileKey), SessionError> {
+            Ok((
+                [0; SALT_LEN],
+                existing_key_from_entry(&self.0)?
+                    .ok_or_else(|| SessionError::Load("mock legacy key is missing".into()))?,
+            ))
+        }
+
+        fn opening_key(&self, _salt: &Salt) -> Result<FileKey, SessionError> {
+            existing_key_from_entry(&self.0)?
+                .ok_or_else(|| SessionError::Load("mock legacy key is missing".into()))
+        }
+    }
+
+    #[test]
+    fn legacy_keyring_session_migrates_to_key_file_and_loads() {
+        use crate::session::{FileStore, SessionData, SessionStore};
+
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let session_path = dir.path().join("session");
+        let key_path = dir.path().join("session.key");
+        let entry = Arc::new(mock_entry());
+        entry
+            .set_secret(&[0x5a; KEY_LEN])
+            .expect("legacy key stored");
+        let legacy = Arc::new(MockLegacyKeyringProvider(Arc::clone(&entry)));
+        let expected = SessionData::default();
+
+        FileStore::with_key_provider(&session_path, legacy)
+            .save(&expected)
+            .expect("legacy session sealed");
+        assert!(!key_path.exists(), "old profile has no key file yet");
+
+        let key = existing_key_from_entry(&entry)
+            .expect("legacy key readable")
+            .expect("legacy key exists");
+        KeyFileProvider::new(&key_path)
+            .store(&key)
+            .expect("legacy key copied");
+        let loaded =
+            FileStore::with_key_provider(&session_path, Arc::new(KeyFileProvider::new(&key_path)))
+                .load()
+                .expect("session opens with migrated key");
+
+        assert_eq!(loaded, Some(expected));
+        assert_eq!(
+            std::fs::read(&key_path).expect("key file written"),
+            [0x5a; KEY_LEN]
+        );
     }
 
     #[test]
