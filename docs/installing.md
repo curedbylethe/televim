@@ -156,10 +156,14 @@ The release binary includes the maintainer's Telegram application credentials;
 you do not need to register an application to sign in. To use your own
 credentials, follow [`README.md`'s credentials section](../README.md#credentials).
 
-The default config path is `./televim.toml`. Use `--config <path>` to select
-another path. Drafts, history, the accounts index, and log use that path as
-their base; media can use `media_cache_dir`. The log is written to a file,
-never to the terminal.
+The default config path is `televim.toml` under the operating system's local
+data directory: `~/Library/Application Support/televim` on macOS,
+`%LOCALAPPDATA%\televim` on Windows, and `$XDG_DATA_HOME/televim` on Linux
+(usually `~/.local/share/televim`). Use `--config <path>` to select another
+path. On first launch, Televim adopts a legacy profile in the current directory
+in place and remembers its absolute path. Drafts, history, the accounts index,
+and log use the config path as their base; media can use `media_cache_dir`. The
+log is written to a file, never to the terminal.
 
 By default, Televim stores its session in the OS credential store. On Linux, the
 credential store needs a D-Bus session and a Secret Service provider such as
@@ -326,9 +330,12 @@ Remove the executable from the install directory. Remove the marked Televim
 block from the shell profile if the installer added one, or remove its
 directory from the Windows User `Path`. Uninstalling does not delete app data.
 
-Let `C` be the path passed to `--config`, or `./televim.toml` by default. Televim
-does not create or delete the config file itself. Remove only the files you no
-longer need:
+Let `C` be the path passed to `--config`, or the remembered profile config,
+or the local-data profile config when no profile was adopted. Televim does not
+create or delete the config file itself. Remove only the files you no longer
+need. The profile pointer is `<local-data-directory>/televim/profile`; it
+contains the absolute path to an adopted profile. Removing it makes the next
+launch resolve the default profile again:
 
 | Data | Default location |
 | :--- | :--- |
@@ -340,6 +347,7 @@ longer need:
 | Account drafts/history | `C` with `.<id>.drafts.json` and `.<id>.history.json` extensions |
 | Account media | `C` with `.<id>.media` extension, or `media_cache_dir` with `.<id>` appended |
 | Accounts index | `C` with `.accounts.json` extension (`televim.accounts.json`) |
+| Profile pointer | `<local-data-directory>/televim/profile` |
 | Session | Credential store service `televim`, account `session` or `session-<id>`; otherwise configured `session_path` |
 | Key file | `session_key_file` (`TELEVIM_SESSION_KEY_FILE`); created on first use, `0600` and never overwritten |
 | File key (keyring) | Credential store service `televim`, account `file-key` (shared), when no passphrase or key file supplies the key |

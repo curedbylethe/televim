@@ -47,7 +47,7 @@ televim/
     │                           #   text_row, theme, widgets, wrap
     ├── demo-support/           # Fictional, deterministic offline demo fixtures
     ├── app/                    # Composition root & CLI binary
-    │   ├── src/                # main, accounts, config, draft_store,
+│   ├── src/                # main, accounts, config, profile, draft_store,
     │   │                       #   history_store, media_cache, net, notify, runtime
     │   └── tests/              # proto_integration.rs, tui_e2e.rs
     └── web-demo/               # Detached browser workspace; own Cargo.lock
@@ -128,6 +128,13 @@ and are deliberately **not** copied here — a copy would drift:
 
 `panic = "abort"` means no unwinding — error recovery must be explicit. This is
 consistent with the `clippy.toml` ban on `unwrap()` in production code.
+
+`profile.rs` resolves the config path before `Config::load`: an explicit
+`--config` path wins; otherwise an adopted-profile pointer wins, then an
+existing local-data profile, then a legacy profile in the current directory.
+The default lives under the OS local data directory. Adoption writes only the
+absolute path pointer; it does not move or copy profile files. Every sibling
+file then derives from the resolved config path.
 
 ## Rust Edition Notes
 
