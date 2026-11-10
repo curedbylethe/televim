@@ -4815,6 +4815,31 @@ fn grouping_separators_and_read_state_agree_in_one_window() {
     );
 }
 
+#[test]
+fn service_messages_use_other_rows_after_day_separators() {
+    let mut app = App::mock();
+    let first = message_on(1, (2024, 11, 1));
+    let mut service = message_on(2, (2024, 11, 2));
+    service.text = Cow::Borrowed("joined Telegram");
+    service.is_service = true;
+    app.apply_latest(vec![first, service]);
+
+    let layout = app.row_layout();
+    assert_eq!(layout.len(), 4, "two messages and two day separators");
+    assert!(matches!(&layout[2].kind, RowKind::Other { .. }));
+    assert_eq!(
+        layout[3].kind,
+        RowKind::Other {
+            label: "joined Telegram".into()
+        }
+    );
+    assert_eq!(layout[3].message_id, None);
+    assert_eq!(layout[3].len, 1);
+    let screen = frame_rows(&app).join("\n");
+    assert!(screen.contains("joined Telegram"));
+    assert!(!screen.contains("[them] joined Telegram"));
+}
+
 /// Looking away and coming back leaves everything PR 8 derives from the window
 /// as it was, and restores the one thing the window does not carry (US-X1).
 ///

@@ -3520,20 +3520,33 @@ impl App {
             }
             day = rows::day_of(message.timestamp, offset).or(day);
 
-            // The row's own slice of the message, and its height. Neither reads
-            // the bidi mode: a row is broken logically and permuted at paint
-            // time, so the same window is the same height in either mode.
-            let text = 0..message.display_body().len();
-            let rows = rows::message_rows(self, message, rows::group_of(self, index), width);
-            // A decoded sticker paints its picture below its (empty) text: the
-            // block rows come after the text rows, so the two heights add.
-            let block = rows::sticker_block_rows(message, &self.conversation.stickers);
-            let len = rows.len() + block;
-            self.conversation.stash_rows(message.id, rows);
+            let (kind, len, text) = if message.is_service {
+                (
+                    RowKind::Other {
+                        label: message.display_body().to_owned(),
+                    },
+                    1,
+                    0..0,
+                )
+            } else {
+                // The row's own slice and height never read bidi mode. The
+                // panel permutes the same logical rows at paint time.
+                let text = 0..message.display_body().len();
+                let rows = rows::message_rows(self, message, rows::group_of(self, index), width);
+                // Sticker rows follow its empty text, so both heights add.
+                let block = rows::sticker_block_rows(message, &self.conversation.stickers);
+                let len = rows.len() + block;
+                self.conversation.stash_rows(message.id, rows);
+                (RowKind::Message { index }, len, text)
+            };
 
             laid_out.push(RowSpan {
-                kind: RowKind::Message { index },
-                message_id: Some(message.id),
+                kind,
+                message_id: if message.is_service {
+                    None
+                } else {
+                    Some(message.id)
+                },
                 first,
                 len,
                 text,

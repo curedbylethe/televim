@@ -297,7 +297,10 @@ Working today:
   scrollbar beside it, a page, and the
   `FETCH_MARGIN` (20) that asks for a page. `[you]`/`[them]` and a reply's quoted
   target are on the first row of a message, `[sending…]`/`[failed: …]` on the
-  last.
+  last. A contact's Telegram signup appears as a standalone `joined Telegram`
+  hint in the day-separator style, with no sender tag. The hint is the same in
+  history, live updates, and restored cache; unsupported service actions are
+  dropped.
 - **Visual mode:** `v`/`V` start charwise/linewise selection at the cursor's message; `Esc` drops it; `o`/`O` swap its ends; `j`/`k` move between messages; `h`, `l`, `w`, `b`, `e`, `0`, `$`, `f`, `t`, `F`, and `T` move within one message. A selection spanning two or more messages is a set of messages; one inside a single message is a text range. `y` yanks it, `d` deletes it with confirmation, and `s` forwards it.
 - **Media:** a message that carries something and says nothing about it still has
   a body — `[image]`, `[video]`, `[gif]`, `[voice]`, `[sticker]`,
