@@ -648,7 +648,8 @@ show is near one
 of its ends, sends a read marker when a conversation is opened with unread
 messages (`read_target` picks it and refuses while a profile card covers the window, `request_read` sends it, and
 `Event::ReadMarked` clears the count only once it is accepted), drives the sign-in flow the panel asks for, and folds in whatever
-arrives. A recoverable feed read failure is waited out in the pump's task up to
+arrives. A live message for a chat missing from the list triggers an async list
+refresh. A recoverable feed read failure is waited out in the pump's task up to
 the same bound the launch fetch uses, reporting `Event::FeedRetrying` with the
 reason, the wait and the count; past the bound the feed is ended the way a dead
 one is. When the update feed ends mid-session, `pump` records the position with
