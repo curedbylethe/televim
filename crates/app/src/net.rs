@@ -8722,7 +8722,7 @@ mod tests {
         persist_list(&mut state, &app).await;
         assert_eq!(
             file_chats(&path),
-            vec![(CHAT, None), (CHAT + 1, Some("text".to_owned()))],
+            vec![(CHAT + 1, Some("text".to_owned())), (CHAT, None)],
             "the arrival moved its conversation's preview"
         );
     }

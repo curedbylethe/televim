@@ -4946,13 +4946,12 @@ fn what_pr_eight_holds_is_bounded_by_the_window_and_the_conversation_count() {
     );
 }
 
-/// An event for a conversation the client does not hold has nowhere to go:
-/// neither window can apply it, so nothing observable moved.
+/// An unknown arrival signals that the chat list needs reconciliation.
 #[test]
-fn an_arrival_for_an_unknown_conversation_changes_nothing() {
+fn an_arrival_for_an_unknown_conversation_signals_reconciliation() {
     let mut app = App::mock();
 
-    assert!(!app.apply_update(&UpdateEvent::NewMessage(unknown(11))));
+    assert!(app.apply_update(&UpdateEvent::NewMessage(unknown(11))));
     assert_eq!(app.conversation.conversation.window.len(), 10);
 }
 

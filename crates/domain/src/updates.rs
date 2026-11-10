@@ -6,8 +6,8 @@
 //! so all of it runs on every test run.
 //!
 //! [`ChatList::apply_update`] reports whether anything moved. That report is
-//! what a caller redraws on: the feed carries events for conversations this
-//! client does not hold, and repainting for those would be wasted work.
+//! what a caller redraws on: arrivals for conversations this client does not
+//! hold still report a change so the caller can reconcile the list.
 //!
 //! # What is applied
 //!
@@ -198,9 +198,9 @@ impl ChatList {
 
     /// Applies an event, reporting whether it changed anything.
     ///
-    /// `false` means the event named a conversation or a message this client
-    /// does not hold — a chat that is not in the list, or a message that has
-    /// scrolled out of the window — so nothing observable moved.
+    /// `false` means the event named a conversation or message this client does
+    /// not hold, except a new message for an unknown chat, which signals that
+    /// the caller should reconcile the list.
     #[must_use]
     pub fn apply_update(&mut self, event: UpdateEvent) -> bool {
         match event {
@@ -228,25 +228,40 @@ impl ChatList {
 
     /// Adds a message to its conversation.
     fn apply_new_message(&mut self, message: Message) -> bool {
-        let Some(chat) = self.chat_mut(message.chat_id) else {
-            return false;
+        let Some(index) = self
+            .chats
+            .iter()
+            .position(|chat| chat.id == message.chat_id)
+        else {
+            return true;
         };
 
-        if !message.is_outgoing {
-            chat.unread_count = chat.unread_count.saturating_add(1);
+        let pinned = self.chats[index].pinned;
+        {
+            let chat = &mut self.chats[index];
+            if !message.is_outgoing {
+                chat.unread_count = chat.unread_count.saturating_add(1);
+            }
+
+            // An older replay must not walk the preview backwards.
+            if chat
+                .last_timestamp
+                .is_none_or(|current| message.timestamp >= current)
+            {
+                chat.last_message_id = Some(message.id);
+                chat.last_timestamp = Some(message.timestamp);
+                chat.last_message = Some(message.text.clone());
+            }
         }
 
-        // The list previews the most recent message, so one at least as recent
-        // as the message on show becomes the message on show. An older arrival
-        // leaves it alone: a feed that is replayed out of order must not walk
-        // the preview backwards.
-        if chat
-            .last_timestamp
-            .is_none_or(|current| message.timestamp >= current)
-        {
-            chat.last_message_id = Some(message.id);
-            chat.last_timestamp = Some(message.timestamp);
-            chat.last_message = Some(message.text.clone());
+        if !pinned {
+            let chat = self.chats.remove(index);
+            let index = self
+                .chats
+                .iter()
+                .position(|other| sorts_before(&chat, other))
+                .unwrap_or(self.chats.len());
+            self.chats.insert(index, chat);
         }
 
         // Front first, then trimmed from the back: the window keeps the newest
@@ -703,6 +718,7 @@ mod tests {
         assert_eq!(list.messages[0].id, 10);
         assert_eq!(list.messages[0].text, "hello");
         assert_eq!(list.chats[0].unread_count, 1);
+        assert_eq!(list.chats[0].last_message.as_deref(), Some("hello"));
     }
 
     /// A read acknowledgement says what *has* been read, and the list only knows
@@ -884,6 +900,16 @@ mod tests {
     }
 
     #[test]
+    fn an_arrival_moves_its_chat_to_its_recency_position() {
+        let mut list = ChatList::with_chats(vec![chat_at(2, 2_000), chat_at(1, 1_000)]);
+
+        applied(&mut list, arrival(1, 10, "newer", 3_000));
+
+        assert_eq!(ids(&list), vec![1, 2]);
+        assert_eq!(list.chats[0].last_message.as_deref(), Some("newer"));
+    }
+
+    #[test]
     fn the_window_holds_only_the_newest_messages() {
         let mut list = list();
         let overflow = MESSAGE_WINDOW + 5;
@@ -937,10 +963,10 @@ mod tests {
     }
 
     #[test]
-    fn a_message_for_an_unknown_conversation_changes_nothing() {
+    fn a_message_for_an_unknown_conversation_signals_reconciliation() {
         let mut list = list();
 
-        assert!(!list.apply_update(arrival(99, 10, "hello", 2_000)));
+        assert!(list.apply_update(arrival(99, 10, "hello", 2_000)));
         assert!(list.messages.is_empty());
         assert_eq!(list.chats[0].unread_count, 0);
     }
