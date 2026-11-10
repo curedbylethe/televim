@@ -9,17 +9,83 @@ use telegram_framework::{FileStore, KeyringStore, SessionError, SessionStore};
 use crate::accounts::{self, AccountSlot, SessionTarget};
 use crate::config::Config;
 
-pub fn migrate_derived_key(config_path: &Path, cfg: &Config) {
-    let (Some(key_path), Some(session_path)) = (&cfg.session_key_file, &cfg.session_path) else {
+fn should_migrate_derived_key(cfg: &Config, session_path: Option<&Path>) -> bool {
+    cfg.session_key_file_derived
+        && cfg.passphrase().is_none()
+        && cfg
+            .session_key_file
+            .as_ref()
+            .is_some_and(|path| !path.exists())
+        && session_path.is_some_and(Path::exists)
+}
+
+#[cfg(test)]
+mod derived_key_tests {
+    use super::*;
+
+    #[test]
+    fn derived_key_migration_uses_the_selected_account_session() {
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let cfg = Config {
+            session_path: Some(dir.path().join("session")),
+            session_key_file: Some(dir.path().join("session.key")),
+            session_key_file_derived: true,
+            ..Config::default()
+        };
+        let account_session = dir.path().join("session.7");
+        std::fs::write(&account_session, b"existing session").expect("session exists");
+
+        assert!(should_migrate_derived_key(&cfg, Some(&account_session)));
+    }
+
+    #[test]
+    fn derived_key_migration_refuses_explicit_key_passphrase_existing_key_or_missing_session() {
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let session_path = dir.path().join("session.7");
+        let key_path = dir.path().join("session.key");
+        std::fs::write(&session_path, b"existing session").expect("session exists");
+        let cfg = Config {
+            session_path: Some(dir.path().join("session")),
+            session_key_file: Some(key_path.clone()),
+            session_key_file_derived: true,
+            ..Config::default()
+        };
+
+        let mut explicit_key = cfg.clone();
+        explicit_key.session_key_file_derived = false;
+        assert!(!should_migrate_derived_key(
+            &explicit_key,
+            Some(&session_path)
+        ));
+
+        let mut passphrase = cfg.clone();
+        passphrase.session_passphrase = Some(crate::config::Secret::from("secret".to_owned()));
+        assert!(!should_migrate_derived_key(
+            &passphrase,
+            Some(&session_path)
+        ));
+
+        std::fs::write(&key_path, b"existing key").expect("key exists");
+        assert!(!should_migrate_derived_key(&cfg, Some(&session_path)));
+        std::fs::remove_file(&key_path).expect("key removed");
+
+        let missing_session = dir.path().join("session.8");
+        assert!(!should_migrate_derived_key(&cfg, Some(&missing_session)));
+        assert!(!should_migrate_derived_key(&cfg, None));
+    }
+}
+
+pub fn migrate_derived_key(config_path: &Path, cfg: &Config, slot: AccountSlot) {
+    let paths = accounts::slot_paths(config_path, cfg, slot.account());
+    let SessionTarget::File(session_path) = paths.session else {
         return;
     };
-    if !cfg.session_key_file_derived
-        || cfg.passphrase().is_some()
-        || key_path.exists()
-        || !session_path.exists()
-    {
+    if !should_migrate_derived_key(cfg, Some(&session_path)) {
         return;
     }
+    let Some(key_path) = &cfg.session_key_file else {
+        return;
+    };
     let result = telegram_framework::sealed::KeyringKeyProvider::default()
         .existing_key()
         .and_then(|key| match key {
@@ -44,7 +110,10 @@ pub(crate) fn migrate_legacy_session(config_path: &Path, cfg: &Config, slot: Acc
         return;
     };
     let legacy = KeyringStore::new("televim", accounts::session_name(slot));
-    let primary = FileStore::with_key_provider(path.clone(), crate::net::file_key_provider(cfg));
+    let primary = FileStore::with_key_provider(
+        path.clone(),
+        crate::net::file_key_provider_for_session(cfg, Some(&path)),
+    );
     if let Err(error) = migrate_session(&primary, &legacy, path.exists()) {
         tracing::warn!(
             "could not migrate legacy session to {}: {error}",
