@@ -22,6 +22,7 @@ fn message(id: i64, text: &'static str) -> Message {
         is_outgoing: false,
         reply_to: None,
         media: None,
+        is_service: false,
         media_id: None,
     }
 }
@@ -1831,6 +1832,7 @@ fn conversation(turns: &[(i64, bool)]) -> App {
                 is_outgoing: *outgoing,
                 reply_to: None,
                 media: None,
+                is_service: false,
                 media_id: None,
             })
             .collect(),
@@ -4255,6 +4257,7 @@ fn a_read_acknowledgement_advances_the_open_conversation_and_moves_nothing_else(
             is_outgoing: true,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         },
         Message {
@@ -4266,6 +4269,7 @@ fn a_read_acknowledgement_advances_the_open_conversation_and_moves_nothing_else(
             is_outgoing: true,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         },
     ]);
@@ -4865,6 +4869,7 @@ fn message_of_day(id: i64) -> Message {
         is_outgoing: true,
         reply_to: None,
         media: None,
+        is_service: false,
         media_id: None,
     }
 }
@@ -4916,6 +4921,7 @@ fn what_pr_eight_holds_is_bounded_by_the_window_and_the_conversation_count() {
                 is_outgoing: true,
                 reply_to: None,
                 media: None,
+                is_service: false,
                 media_id: None,
             }
         }));
@@ -5021,6 +5027,7 @@ fn a_group_of_three() -> Vec<Message> {
             is_outgoing: true,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         })
         .collect()

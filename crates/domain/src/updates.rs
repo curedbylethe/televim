@@ -655,6 +655,7 @@ mod tests {
                 MessageStatus::Received
             },
             is_outgoing,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,

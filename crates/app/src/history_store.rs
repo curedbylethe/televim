@@ -816,6 +816,8 @@ struct CachedMessage {
     text: String,
     timestamp: i64,
     is_outgoing: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_service: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reply_to: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -831,6 +833,7 @@ impl CachedMessage {
             text: message.text.clone().into_owned(),
             timestamp: message.timestamp,
             is_outgoing: message.is_outgoing,
+            is_service: message.is_service,
             reply_to: message.reply_to,
             media: message.media.map(CachedMedia::from),
             media_id: message.media_id,
@@ -849,6 +852,7 @@ impl CachedMessage {
                 MessageStatus::Received
             },
             is_outgoing: self.is_outgoing,
+            is_service: self.is_service,
             reply_to: self.reply_to,
             media: self.media.map(MediaKind::from),
             media_id: self.media_id,
@@ -1275,6 +1279,7 @@ mod tests {
             timestamp: id * 10,
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,
@@ -1488,6 +1493,7 @@ mod tests {
 
         let loaded = file.load();
         assert_eq!(ids(&loaded.cache.get(PEER)), vec![4], "read once as it was");
+        assert!(!loaded.cache.get(PEER)[0].is_service);
         assert_eq!(loaded.account.as_deref(), Some("+1555"));
 
         let on_disk = fs::read(&file.path).expect("the file is still there");
@@ -1497,6 +1503,19 @@ mod tests {
             "the plaintext is gone from the file"
         );
         assert_eq!(file.load(), loaded, "and the sealed file loads the same");
+    }
+
+    #[test]
+    fn service_flag_round_trips_and_old_cache_rows_default_to_false() {
+        let mut message = message(4, PEER, "joined Telegram");
+        message.is_service = true;
+        let cached = CachedMessage::from_message(&message);
+        assert!(cached.to_message(PEER).is_service);
+
+        let old: CachedMessage =
+            serde_json::from_str(r#"{"id":4,"text":"old row","timestamp":40,"is_outgoing":false}"#)
+                .expect("old cache row deserializes");
+        assert!(!old.to_message(PEER).is_service);
     }
 
     /// The old inode is zeroed, not merely unlinked.

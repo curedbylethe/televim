@@ -423,6 +423,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         }
     }
@@ -605,6 +606,7 @@ mod live_tests {
             text: format!("message {id}"),
             timestamp: 1_700_000_000 + id,
             is_outgoing,
+            is_service: false,
             reply_to_msg_id: None,
             media: None,
             media_id: None,
