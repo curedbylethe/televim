@@ -5,6 +5,16 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.12.2] - 2026-11-10
+
+### Fixed
+
+- **app:** Stabilize default profile path
+- **app:** Migrate session keys to files
+- **app:** Migrate legacy keychain sessions
+- **app:** Migrate every indexed account session
+- **app:** Use active account session for key migration
+
 ## [0.12.1] - 2026-11-10
 
 ### Fixed
