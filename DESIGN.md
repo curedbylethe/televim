@@ -172,7 +172,7 @@ the port list: the field each one becomes in `crates/tui/src/theme.rs`.
 1. **A read-only surface marks its cursor with reverse video on every row its item occupies,
    and nothing else is reversed.** This is the rule above, unchanged, and
    `selection-bg` still never uses `REVERSED`: a second user of it leaves the
-   reader unable to tell which row the cursor is on.
+   reader unable to tell which item the cursor is on.
 2. **A caret drawn inside a reversed row is the ground colour**, because that row
    has already taken `selection` — which is `text` — as its background. A caret
    in `text` there would be `text` on `text`. The ground is the only ink that

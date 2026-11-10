@@ -26,7 +26,7 @@
 //!
 //! - `selection_bg` never uses `REVERSED`, and neither does `match_hit`. The
 //!   cursor owns reverse video; a second user of it would leave the reader unable
-//!   to tell which row the cursor is on.
+//!   to tell which item the cursor is on.
 //! - `selection_bg` is a background and `match_hit` a foreground, so a cell that
 //!   is both is legible rather than one of them winning outright.
 //! - A cell that is both takes the *selection's* foreground, because the

@@ -4082,6 +4082,76 @@ mod tests {
         assert_one_answer(&app, &screen);
     }
 
+    /// Reverse video follows the cursor's message and leaves its neighbour alone.
+    #[test]
+    fn only_the_cursor_message_is_reversed() {
+        use ratatui::style::Modifier;
+
+        let app = showing(vec![
+            at(1, 0, false, "other-message"),
+            at(2, 1, true, "cursor-message"),
+        ]);
+        let screen = screen(&app, 80, 24);
+        let other = message_rows(&screen)
+            .into_iter()
+            .find(|&y| row(&screen, y).contains("other-message"))
+            .expect("the neighbouring message is drawn");
+        let cursor = message_rows(&screen)
+            .into_iter()
+            .find(|&y| row(&screen, y).contains("cursor-message"))
+            .expect("the cursor message is drawn");
+
+        for x in BODY_X..78 {
+            assert!(
+                !cell(&screen, x, other)
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "neighbour cell ({x}, {other}) stays normal"
+            );
+            assert!(
+                cell(&screen, x, cursor)
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "cursor cell ({x}, {cursor}) is reversed"
+            );
+        }
+    }
+
+    /// Whole-message selection background composes with reverse video on every wrapped row.
+    #[test]
+    fn a_wrapped_selected_cursor_message_keeps_selection_background() {
+        use ratatui::style::Modifier;
+
+        let mut message = at(1, 0, false, "");
+        message.text = std::borrow::Cow::Owned("x".repeat(200));
+        let mut app = showing(vec![message]);
+        assert!(app.select(1, None), "the whole message is selected");
+        let screen = screen(&app, 80, 24);
+        let rows = message_rows(&screen)
+            .into_iter()
+            .filter(|&y| row(&screen, y).contains('x'))
+            .collect::<Vec<_>>();
+        assert!(rows.len() > 2, "the selected message wraps: {rows:?}");
+
+        for y in rows {
+            for x in BODY_X..78 {
+                let cell = cell(&screen, x, y);
+                if cell.symbol() == " " {
+                    continue;
+                }
+                assert_eq!(
+                    cell.bg,
+                    selection_bg(),
+                    "selection background at ({x}, {y})"
+                );
+                assert!(
+                    cell.modifier.contains(Modifier::REVERSED),
+                    "cursor reverse video at ({x}, {y})"
+                );
+            }
+        }
+    }
+
     // ---- sending, replying and confirming ------------------------------
 
     /// A reply is drawn as a prefix on the message's own row, never as a row of
