@@ -236,6 +236,12 @@ pub enum Event {
     /// attempts are spent.
     ChatListRetrying(ChatListRetry),
 
+    /// The chat list requested after a live message named an unknown chat.
+    ChatListRefreshed {
+        generation: u64,
+        result: Result<Vec<Chat>, ProtoError>,
+    },
+
     /// A feed read failed and is being waited out.
     ///
     /// Its own event rather than silence because the reader watching a live
@@ -934,6 +940,9 @@ pub struct State {
 
     /// The channel bring-up answers on. Read only beside [`State::cfg`].
     tx: Option<UnboundedSender<AppEvent>>,
+
+    /// The feed generation with a chat-list refresh in flight.
+    chat_list_refresh: Option<u64>,
 
     /// Whether a bring-up is in flight, so a second one is not started over it.
     ///
@@ -4066,6 +4075,23 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::ChatListRetrying(retry) => apply_chat_list_retrying(app, &retry),
 
+        Event::ChatListRefreshed { generation, result } => {
+            if state.chat_list_refresh == Some(generation) {
+                state.chat_list_refresh = None;
+            }
+            if generation != state.feed_generation {
+                return;
+            }
+            match result {
+                Ok(mut chats) => {
+                    app.apply_local_names(&mut chats);
+                    app.record_read_positions(&chats);
+                    app.refresh_chats(chats);
+                }
+                Err(error) => tracing::warn!(%error, "the chat list could not be refreshed"),
+            }
+        }
+
         Event::FeedRetrying(retry) => {
             // The feed reads past the failure, so what it failed to deliver
             // may be gone: no cached run is known current behind it.
@@ -4102,9 +4128,13 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             {
                 state.read_owed = Some(message.chat_id);
             }
+            let refresh_chat_list = chat_list_needs_refresh(app, &event);
             // Whether it moved anything is not acted on: the loop redraws on
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
+            if refresh_chat_list {
+                request_chat_list_refresh(state);
+            }
             if let UpdateEvent::NewMessage(message) = &event
                 && let Some(notice) = notice_for(app, state, message)
                 && let Some(notifier) = &state.notify
@@ -6250,6 +6280,29 @@ fn apply_feed_retrying(app: &mut App, retry: &FeedRetry) {
     app.set_connection(ConnectionState::Reconnecting);
 }
 
+fn chat_list_needs_refresh(app: &App, event: &UpdateEvent) -> bool {
+    matches!(event, UpdateEvent::NewMessage(message) if !app.chats().iter().any(|chat| chat.id == message.chat_id))
+}
+
+fn request_chat_list_refresh(state: &mut State) {
+    let generation = state.feed_generation;
+    if state.chat_list_refresh == Some(generation) {
+        return;
+    }
+    let (Some(client), Some(tx)) = (state.client.clone(), state.tx.clone()) else {
+        return;
+    };
+
+    state.chat_list_refresh = Some(generation);
+    tokio::spawn(async move {
+        let result = client.fetch_private_chats().await;
+        let _ = tx.send(AppEvent::Net(Event::ChatListRefreshed {
+            generation,
+            result,
+        }));
+    });
+}
+
 /// Whether the launch chat-list fetch may be asked again, and how long to wait.
 ///
 /// `None` once [`CHAT_LIST_ATTEMPTS`] attempts have been spent, which is the one
@@ -6334,6 +6387,75 @@ mod tests {
             presence: None,
             deleted: false,
         }
+    }
+
+    #[test]
+    fn an_unknown_message_arrival_requests_a_chat_list_refresh() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(7)]);
+        let message = |chat_id| {
+            UpdateEvent::NewMessage(Message {
+                id: 1,
+                chat_id,
+                text: Cow::Borrowed("hello"),
+                timestamp: 1,
+                status: MessageStatus::Received,
+                is_outgoing: false,
+                reply_to: None,
+                media: None,
+                media_id: None,
+            })
+        };
+
+        assert!(chat_list_needs_refresh(&app, &message(999)));
+        assert!(!chat_list_needs_refresh(&app, &message(app.chats()[0].id)));
+    }
+
+    #[test]
+    fn a_chat_list_refresh_installs_new_chats_around_the_open_conversation() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(7)]);
+        let open = app.current_chat_id();
+        let mut state = State {
+            chat_list_refresh: Some(0),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRefreshed {
+                generation: 0,
+                result: Ok(vec![chat(open), chat(999)]),
+            },
+        );
+
+        assert!(app.chats().iter().any(|chat| chat.id == 999));
+        assert_eq!(app.current_chat_id(), open);
+        assert_eq!(state.chat_list_refresh, None);
+    }
+
+    #[test]
+    fn a_chat_list_refresh_from_an_old_feed_is_ignored() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(7)]);
+        let mut state = State {
+            feed_generation: 2,
+            chat_list_refresh: Some(2),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRefreshed {
+                generation: 1,
+                result: Ok(vec![chat(999)]),
+            },
+        );
+
+        assert!(!app.chats().iter().any(|chat| chat.id == 999));
+        assert_eq!(state.chat_list_refresh, Some(2));
     }
 
     #[test]
