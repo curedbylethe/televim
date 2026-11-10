@@ -2,6 +2,11 @@
 
 Real, and named so they are not mistaken for oversights:
 
+- **G-13 — first launch from another directory cannot discover a legacy profile.**
+  Adoption checks only the current directory on the first launch. If the old
+  profile is elsewhere, launch once from its directory or pass `--config` with
+  its path; after adoption, the pointer finds it from any directory.
+
 - **The media cache has five known limits.**
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on

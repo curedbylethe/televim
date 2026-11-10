@@ -133,8 +133,10 @@ Working today:
   for the process, and **never overwrites**. On Unix a group- or other-readable
   file is repaired to
   `0600`, or the launch refuses with `Unavailable` when the repair fails; Windows
-  has no mode and relies on the profile ACL. A relative path resolves against the
-  working directory.
+  has no mode and relies on the profile ACL. By default it lives beside the
+  resolved config file; a configured relative path resolves against the working
+  directory. The default config lives under the OS local data directory, unless
+  Televim adopts a legacy profile from the first launch's working directory.
 
   Setting both a passphrase and `session_key_file` fails at startup with one
   sentence naming both; a blank passphrase counts as absent. `session_path` plus

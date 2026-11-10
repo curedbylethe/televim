@@ -12,6 +12,7 @@ mod history_store;
 mod media_cache;
 mod net;
 mod notify;
+mod profile;
 mod runtime;
 #[cfg(debug_assertions)]
 mod scenario;
@@ -26,8 +27,8 @@ struct Cli {
     /// Path to a TOML config file. Missing file -> defaults.
     ///
     /// The log goes beside it, under the same name with a `.log` extension.
-    #[arg(long, default_value = "televim.toml")]
-    config: std::path::PathBuf,
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
 
     /// Open this chat id on launch. Carried into launch state; STAGE-02 selects it.
     #[arg(long)]
@@ -46,9 +47,10 @@ fn main() -> Result<()> {
     // defaults, and that is legitimate.
     let _ = dotenvy::dotenv();
 
-    let cfg = config::Config::load(&cli.config)?;
+    let config_path = profile::resolve_config(cli.config.as_deref())?;
+    let cfg = config::Config::load(&config_path)?;
 
-    runtime::run(&cfg, &cli.config, cli.chat)
+    runtime::run(&cfg, &config_path, cli.chat)
 }
 
 #[cfg(test)]
@@ -64,8 +66,9 @@ mod tests {
     }
 
     #[test]
-    fn omitting_chat_yields_none() {
+    fn omitting_config_and_chat_yields_none() {
         let cli = Cli::try_parse_from(["televim"]).expect("no flag is the ordinary launch");
+        assert_eq!(cli.config, None);
         assert_eq!(cli.chat, None);
     }
 

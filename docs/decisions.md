@@ -1806,3 +1806,12 @@ are in [`../AGENTS.md`](../AGENTS.md).
   the same user, or a backup that captures both, can read the session. **Cost:**
   a session stored in the keyring by an earlier version is not read; the first
   launch asks for a sign-in once.
+- **Why the default profile lives in the local data directory, and adoption uses a pointer:**
+  a working-directory default changes with launch location and can split one
+  account's session, drafts, history and media across directories. The OS local
+  data directory gives every default launch one stable root. On first launch,
+  Televim adopts an existing working-directory profile by writing its absolute
+  config path to a small pointer file. It does not copy or move the profile, so
+  every sibling remains together and no session bytes are lost. The cost is
+  that a legacy profile outside the launch directory cannot be discovered
+  automatically; the first launch must run there or use `--config`.
