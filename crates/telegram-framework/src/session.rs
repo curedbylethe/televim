@@ -1813,6 +1813,32 @@ mod tests {
     }
 
     #[test]
+    fn a_session_written_before_the_update_opens_with_its_key_file_after_it() {
+        let dir = tempfile::tempdir().expect("temp dir is created");
+        let path = dir.path().join("session");
+        let key_path = dir.path().join("session.key");
+        let before = FileStore::with_key_provider(
+            &path,
+            Arc::new(crate::sealed::KeyFileProvider::new(&key_path)),
+        );
+        let expected = sample_session();
+        before.save(&expected).expect("old build saves session");
+        drop(before);
+
+        let after = FileStore::with_key_provider(
+            &path,
+            Arc::new(crate::sealed::KeyFileProvider::new(&key_path)),
+        );
+        let loaded = after
+            .load()
+            .expect("updated build opens session")
+            .expect("session exists");
+        assert_eq!(loaded.account(), expected.account());
+        assert_eq!(loaded.dc_options, expected.dc_options);
+        assert_eq!(loaded.update_state, expected.update_state);
+    }
+
+    #[test]
     fn file_store_creates_missing_parent_directories() {
         let dir = tempfile::tempdir().expect("temp dir is created");
         let path = dir.path().join("nested/deeper/session.json");
