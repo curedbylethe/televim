@@ -5,6 +5,37 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
+use crate::config::Config;
+
+pub fn migrate_derived_key(config_path: &Path, cfg: &Config) {
+    let (Some(key_path), Some(session_path)) = (&cfg.session_key_file, &cfg.session_path) else {
+        return;
+    };
+    if !cfg.session_key_file_derived
+        || cfg.passphrase().is_some()
+        || key_path.exists()
+        || !session_path.exists()
+    {
+        return;
+    }
+    let result = telegram_framework::sealed::KeyringKeyProvider::default()
+        .existing_key()
+        .and_then(|key| match key {
+            Some(key) => telegram_framework::sealed::KeyFileProvider::new(key_path).store(&key),
+            None => Ok(()),
+        });
+    match result {
+        Ok(()) if key_path.exists() => {
+            tracing::info!("copied legacy session key to {}", key_path.display());
+        }
+        Ok(()) => {}
+        Err(error) => tracing::warn!(
+            "could not migrate session key for {}: {error}",
+            config_path.display()
+        ),
+    }
+}
+
 pub fn resolve_config(explicit: Option<&Path>) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("reading current directory")?;
     if let Some(path) = explicit {

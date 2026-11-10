@@ -165,13 +165,11 @@ in place and remembers its absolute path. Drafts, history, the accounts index,
 and log use the config path as their base; media can use `media_cache_dir`. The
 log is written to a file, never to the terminal.
 
-By default, Televim stores its session in the OS credential store. On Linux, the
-credential store needs a D-Bus session and a Secret Service provider such as
-GNOME Keyring or KWallet. For a headless system, configure an encrypted session
-file with `session_path` and a non-empty `session_passphrase`, or with
-`session_path` and `session_key_file` to avoid the credential store entirely;
-see [`known-gaps.md`](./known-gaps.md) for the lost-passphrase limit and the
-key-file exposure.
+By default, Televim stores its encrypted session and 32-byte key file under the
+profile directory. A legacy keychain `file-key` is copied there before opening
+the session. On Linux, this one-time migration needs a D-Bus session and Secret
+Service provider. A later launch reads the file key directly. See
+[`known-gaps.md`](./known-gaps.md) for the lost-key-file limit and exposure.
 
 ## macOS
 
@@ -190,10 +188,10 @@ when macOS offers that option. Do not disable Gatekeeper globally.
 ### If the keychain keeps asking
 
 By default Televim keeps the session in an encrypted file beside the
-configuration, with its random 32-byte key in `session.key` next to it, and does
-not call the keychain. The prompts below only apply when you set `session_path`
-alone, or when an older version left the session in the keychain: sign in once
-and the new file takes over.
+configuration, with its random 32-byte key in `session.key` next to it. A legacy
+file session whose key lives in the keychain copies that key to `session.key`
+once. The first migration may show one macOS prompt; later launches do not
+need the keychain. A legacy keychain session is handled separately.
 
 The keyring is the macOS login keychain. On the first launch, expect one prompt
 per keychain item: the session item, plus the history `file-key` item when a

@@ -95,12 +95,13 @@ Working today:
   flash. `⏎` sends the field once — a second `⏎` while `Checking…` says so and
   sends nothing, and `⏎` with no client up flashes
   `not connected yet — the client is not up` and keeps the draft. The session is
-  stored in the OS keyring, or in an **encrypted** file when `session_path` is set
+  stored in an **encrypted** file under the profile
   (AES-256-GCM-SIV, `0600`, written atomically; the profile card says
   `encrypted file <path>`). The file's key is the first of `TELEVIM_SESSION_PASSPHRASE`
   (or `session_passphrase` in the configuration; prefer the variable), a file named
   by `session_key_file` (or `TELEVIM_SESSION_KEY_FILE`), or a random key
-  kept in the OS keyring. With none of them, the launch ends at `offline:` naming the
+  file beside the session by default. A legacy keychain `file-key` is copied to
+  that file before opening the session. With no usable key, the launch ends at `offline:` naming the
   missing key and the file is left as it was — it is never written in plaintext —
   and a wrong passphrase ends the same way and never discards the session. Either
   way, unless a key file was configured, televim then asks for the passphrase in a
@@ -122,12 +123,11 @@ Working today:
   the reader can do nothing with. A launch that does end at `offline:` has asked
   for the chat list three times and waited between them, naming the reason, the
   wait and the count on the status line each time — and `:retry` asks again.
-- **Session keys and the key file:** the OS keyring is the default and no session
-  file is involved. With `session_path` the session is an encrypted file whose key,
-  and the history cache's, comes from the first configured key source: a
-  passphrase, `session_key_file` (`TELEVIM_SESSION_KEY_FILE`), or the keyring's
-  random `file-key`; a passphrase and a key file are refused together, so at most
-  one of those two is configured. The key file is the default when neither a passphrase nor `session_path` is set: it holds exactly 32 raw
+- **Session keys and the key file:** the session is an encrypted file under the
+  profile. Its key, and the history cache's, comes from a passphrase, explicit
+  `session_key_file` (`TELEVIM_SESSION_KEY_FILE`), or a derived key file beside
+  the session. A legacy keychain `file-key` is copied to that key file once. A
+  passphrase and a key file are refused together. The key file holds exactly 32 raw
   bytes,
   which televim creates with the OS CSPRNG on first use, `0600` on Unix, caches
   for the process, and **never overwrites**. On Unix a group- or other-readable

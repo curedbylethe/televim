@@ -38,6 +38,7 @@ use crate::history_store::{
 };
 use crate::media_cache::MediaCache;
 use crate::net;
+use crate::profile;
 #[cfg(debug_assertions)]
 use crate::scenario;
 use crate::update;
@@ -95,6 +96,7 @@ pub fn run(cfg: &Config, config_path: &Path, initial_chat: Option<i64>) -> Resul
         .as_ref()
         .and_then(accounts::AccountsIndex::active_account);
     init_tracing(cfg, config_path);
+    profile::migrate_derived_key(config_path, cfg);
     let paths = accounts::slot_paths(config_path, cfg, account);
     build_runtime()?.block_on(run_async(cfg, config_path, &paths, initial_chat, index))
 }
