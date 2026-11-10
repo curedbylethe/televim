@@ -1139,6 +1139,7 @@ mod tests {
             is_outgoing: outgoing,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         }
     }
@@ -1363,6 +1364,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,
@@ -2066,6 +2068,7 @@ mod tests {
                     is_outgoing: false,
                     reply_to: None,
                     media: None,
+                    is_service: false,
                     media_id: None,
                 })
                 .collect(),
@@ -3870,6 +3873,7 @@ mod tests {
                 timestamp: 0,
                 status: MessageStatus::Received,
                 is_outgoing: false,
+                is_service: false,
                 reply_to: None,
                 media: None,
                 media_id: None,
@@ -3881,6 +3885,7 @@ mod tests {
                 timestamp: 0,
                 status: MessageStatus::Received,
                 is_outgoing: true,
+                is_service: false,
                 reply_to: Some(90),
                 media: None,
                 media_id: None,
@@ -4057,6 +4062,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,
@@ -4402,6 +4408,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         }]);
 

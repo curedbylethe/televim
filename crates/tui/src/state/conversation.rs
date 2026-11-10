@@ -1061,6 +1061,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         }
     }

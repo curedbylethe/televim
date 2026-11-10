@@ -774,6 +774,7 @@ impl DemoSimulator {
                 .saturating_add(i64::try_from(self.now_ms / 1000).unwrap_or(i64::MAX)),
             status,
             is_outgoing,
+            is_service: false,
             reply_to,
             media,
             media_id: None,

@@ -35,6 +35,7 @@ fn message(chat_id: i64, id: i64, body: &str, media: Option<MediaKind>) -> Messa
         timestamp: NOW.saturating_add(id),
         status: MessageStatus::Received,
         is_outgoing: false,
+        is_service: false,
         reply_to: None,
         media,
         media_id: None,

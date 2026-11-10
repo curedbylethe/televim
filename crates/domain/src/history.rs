@@ -530,6 +530,7 @@ impl ConversationView {
             is_outgoing: true,
             reply_to,
             media: None,
+            is_service: false,
             media_id: None,
         };
         self.window.push_back(std::iter::once(message));
@@ -549,6 +550,7 @@ impl ConversationView {
             is_outgoing: true,
             reply_to,
             media: Some(media),
+            is_service: false,
             media_id: None,
         };
         self.window.push_back(std::iter::once(message));
@@ -735,6 +737,7 @@ mod tests {
             timestamp: 1_700_000_000 + id,
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,

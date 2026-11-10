@@ -1766,6 +1766,7 @@ fn message(chat_id: i64, id: i64) -> Message {
         timestamp: 1_700_000_000,
         status: domain::message::MessageStatus::Received,
         is_outgoing: false,
+        is_service: false,
         reply_to: None,
         media: None,
         media_id: None,

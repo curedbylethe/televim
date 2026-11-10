@@ -77,6 +77,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media,
+            is_service: false,
             media_id: None,
         }
     }

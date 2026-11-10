@@ -162,6 +162,7 @@ mod tests {
             text: "hello".to_owned(),
             timestamp: 1_700_000_000,
             is_outgoing: false,
+            is_service: false,
             reply_to_msg_id: None,
             media: None,
             media_id: None,

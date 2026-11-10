@@ -36,6 +36,7 @@ fn app_with_messages(texts: &[&str]) -> App {
             timestamp: NOW + i64::try_from(index).expect("test timestamp fits"),
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,

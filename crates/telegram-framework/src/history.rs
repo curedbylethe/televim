@@ -32,7 +32,7 @@ use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::media::classify_raw;
 use crate::tl;
-use crate::updates::{MessageInfo, message_info};
+use crate::updates::{MessageInfo, message_info, service_message_text};
 
 /// The largest page Telegram will return from one history request.
 ///
@@ -256,7 +256,7 @@ impl Client {
 
         let messages: Vec<MessageInfo> = raw
             .iter()
-            .map(|raw| message_from_raw(raw, peer_id))
+            .filter_map(|raw| message_from_raw(raw, peer_id))
             .collect();
 
         // Reading history can migrate the datacenter or cache a peer, and that
@@ -311,26 +311,33 @@ impl Client {
 /// through a `DateTime` and take the timestamp back out, which is the same
 /// number for every value that conversion accepts — and does not abort on a
 /// value it does not.
-fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> MessageInfo {
-    let (id, text, date, is_outgoing, reply_to_msg_id, media) = match raw {
-        tl::enums::Message::Empty(message) => (message.id, "", 0, false, None, None),
+fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> Option<MessageInfo> {
+    let (id, text, date, is_outgoing, is_service, reply_to_msg_id, media) = match raw {
+        tl::enums::Message::Empty(message) => (message.id, "", 0, false, false, None, None),
         tl::enums::Message::Message(message) => (
             message.id,
             message.message.as_str(),
             message.date,
             message.out,
+            false,
             match &message.reply_to {
                 Some(tl::enums::MessageReplyHeader::Header(header)) => header.reply_to_msg_id,
                 _ => None,
             },
             classify_raw(message.media.as_ref()),
         ),
-        tl::enums::Message::Service(message) => {
-            (message.id, "", message.date, message.out, None, None)
-        }
+        tl::enums::Message::Service(message) => (
+            message.id,
+            service_message_text(&message.action)?,
+            message.date,
+            message.out,
+            true,
+            None,
+            None,
+        ),
     };
 
-    message_info(
+    let mut info = message_info(
         id,
         chat_peer_id,
         text,
@@ -338,7 +345,9 @@ fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> MessageInfo 
         is_outgoing,
         reply_to_msg_id,
         media,
-    )
+    );
+    info.is_service = is_service;
+    Some(info)
 }
 
 #[cfg(test)]
@@ -464,7 +473,8 @@ mod tests {
     /// that must not lose it.
     #[test]
     fn a_raw_message_reports_the_media_it_carries() {
-        let photo = message_from_raw(&raw_message(Some(media_photo())), 42);
+        let photo = message_from_raw(&raw_message(Some(media_photo())), 42)
+            .expect("ordinary message is retained");
 
         assert_eq!(
             photo.media,
@@ -474,7 +484,8 @@ mod tests {
         assert_eq!(photo.chat_peer_id, 42);
         assert_eq!(photo.id, 1);
 
-        let unknown = message_from_raw(&raw_message(Some(media_unmodelled())), 42);
+        let unknown = message_from_raw(&raw_message(Some(media_unmodelled())), 42)
+            .expect("ordinary message is retained");
 
         assert_eq!(
             unknown.media,
@@ -482,11 +493,50 @@ mod tests {
             "a kind this build does not model is still something the message carries"
         );
 
-        let bare = message_from_raw(&raw_message(Some(media_empty())), 42);
+        let bare = message_from_raw(&raw_message(Some(media_empty())), 42)
+            .expect("ordinary message is retained");
 
         assert_eq!(
             bare.media, None,
             "and a message that carries nothing is the only one that says so"
         );
+    }
+
+    fn service_message(action: tl::enums::MessageAction) -> tl::enums::Message {
+        tl::enums::Message::Service(tl::types::MessageService {
+            out: false,
+            mentioned: false,
+            media_unread: false,
+            reactions_are_possible: false,
+            silent: false,
+            post: false,
+            legacy: false,
+            id: 7,
+            from_id: None,
+            peer_id: tl::enums::Peer::User(tl::types::PeerUser { user_id: 42 }),
+            saved_peer_id: None,
+            reply_to: None,
+            date: 1_700_000_000,
+            action,
+            reactions: None,
+            ttl_period: None,
+        })
+    }
+
+    #[test]
+    fn contact_signup_is_a_readable_service_message() {
+        let message = message_from_raw(
+            &service_message(tl::enums::MessageAction::ContactSignUp),
+            42,
+        )
+        .expect("contact signup is supported");
+
+        assert_eq!(message.text, "joined Telegram");
+        assert!(message.is_service);
+    }
+
+    #[test]
+    fn unsupported_service_actions_are_dropped() {
+        assert!(message_from_raw(&service_message(tl::enums::MessageAction::Empty), 42).is_none());
     }
 }

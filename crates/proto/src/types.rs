@@ -98,6 +98,7 @@ pub(crate) struct ProtoMessage {
     pub text: String,
     pub timestamp: i64,
     pub is_outgoing: bool,
+    pub is_service: bool,
 
     /// Identifier of the message this one replies to, if it is a reply.
     ///
@@ -150,6 +151,7 @@ impl From<ProtoMessage> for Message {
             timestamp: message.timestamp,
             status: status_of(message.is_outgoing),
             is_outgoing: message.is_outgoing,
+            is_service: message.is_service,
             reply_to: message.reply_to,
             media: message.media,
             media_id: message.media_id,
@@ -212,6 +214,7 @@ impl From<MessageInfo> for ProtoMessage {
             text: message.text,
             timestamp: message.timestamp,
             is_outgoing: message.is_outgoing,
+            is_service: message.is_service,
             // Telegram reports a reply target as an `i32`; the domain counts in
             // `i64`, and widening here is what keeps the two spaces joined.
             reply_to: message.reply_to_msg_id.map(i64::from),
@@ -351,6 +354,7 @@ mod tests {
             text: "hello".to_owned(),
             timestamp: 1_700_000_000,
             is_outgoing,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,
@@ -557,6 +561,7 @@ mod live_tests {
             text: "hello".to_owned(),
             timestamp: 1_700_000_000,
             is_outgoing: false,
+            is_service: false,
             reply_to_msg_id: None,
             media: None,
             media_id: None,
@@ -572,6 +577,16 @@ mod live_tests {
         };
 
         assert_eq!(ProtoMessage::from(source).media_id, Some(9001));
+    }
+
+    #[test]
+    fn a_service_flag_reaches_the_domain_message() {
+        let mut source = message_info(42);
+        source.is_service = true;
+
+        let domain_message = Message::from(ProtoMessage::from(source));
+
+        assert!(domain_message.is_service);
     }
 
     #[test]

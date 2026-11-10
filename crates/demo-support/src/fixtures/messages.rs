@@ -43,6 +43,7 @@ pub(super) fn thread(
                     MessageStatus::Received
                 },
                 is_outgoing: outgoing,
+                is_service: false,
                 reply_to: (sequence == 7).then_some(id - 3),
                 media,
                 media_id: media.map(|_| 500_000 + id),

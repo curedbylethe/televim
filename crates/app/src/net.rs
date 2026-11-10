@@ -6861,6 +6861,7 @@ mod tests {
                 timestamp: id,
                 status: MessageStatus::Received,
                 is_outgoing: false,
+                is_service: false,
                 reply_to: None,
                 media: None,
                 media_id: None,
@@ -7274,6 +7275,7 @@ mod tests {
                 is_outgoing: false,
                 reply_to: None,
                 media: None,
+                is_service: false,
                 media_id: None,
             }
         }
@@ -14260,6 +14262,7 @@ mod media_tests {
             timestamp: id,
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media: kind,
             media_id: None,
@@ -14996,6 +14999,7 @@ mod media_tests {
             is_outgoing: true,
             reply_to: None,
             media: Some(MediaKind::Photo),
+            is_service: false,
             media_id: Some(8),
         };
 
@@ -15026,6 +15030,7 @@ mod media_tests {
             is_outgoing: true,
             reply_to: None,
             media: Some(MediaKind::Photo),
+            is_service: false,
             media_id: Some(8),
         };
 
@@ -15497,6 +15502,7 @@ mod notification_trigger_tests {
                 .expect("current Unix timestamp fits in i64"),
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,

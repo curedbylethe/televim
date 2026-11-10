@@ -32,6 +32,7 @@ fn message(id: i64) -> Message {
         is_outgoing: id % 3 == 0,
         reply_to: None,
         media: None,
+        is_service: false,
         media_id: None,
     }
 }

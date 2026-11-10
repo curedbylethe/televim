@@ -28,6 +28,7 @@ fn message(chat_id: i64, id: i64, text: &str, timestamp: i64, media: Option<Medi
         timestamp,
         status: MessageStatus::Received,
         is_outgoing: false,
+        is_service: false,
         reply_to: None,
         media,
         media_id: None,

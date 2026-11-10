@@ -62,6 +62,9 @@ pub struct Message {
     pub status: MessageStatus,
     pub is_outgoing: bool,
 
+    /// Whether Telegram created this as a service event rather than a chat message.
+    pub is_service: bool,
+
     /// Identifier of the message this one replies to, if it is a reply.
     ///
     /// The target is another message of the same conversation, named by the
@@ -126,6 +129,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Sent,
             is_outgoing: true,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,
@@ -141,6 +145,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media,
             media_id: None,
