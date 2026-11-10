@@ -73,10 +73,25 @@ match the compiler edition — both are `2024`.
     remains the native gate.
 12. **These files describe what exists.** If a change makes one of them wrong —
     a new dependency, a moved module, a feature that now works — update it in
-    the same commit.
+    the same commit. A new decision is a new entry in `docs/decisions.md`;
+    earlier entries are not rewritten, because a record of reasoning loses its
+    value once it is paraphrased.
 13. **Logs goes to a file beside the configuration and never the terminal**: this
     program draws on the terminal, and grammers logs at info as a matter of course,
     so a logger that shares the screen with the interface takes it apart on the first connection.
+
+14. **`design/` is a copy, and it must agree with the screens.** It mirrors the
+    OpenDesign project `televim-app` path for path, and `make design-check`
+    fails when the two differ. An edit made inside `design/` is not finished
+    until `make design-push` has sent it upstream. A change to what the screens
+    show updates `design/` and [`DESIGN.md`](./DESIGN.md) in the same commit.
+    The model is not a reference implementation: where its engine and the Rust
+    disagree, the Rust is right.
+15. **Release files are written by the release process.** Do not hand-edit
+    `CHANGELOG.md`, bump the workspace version, or create a tag: release-please
+    and git-cliff do all three on the release PR. A change reaches the changelog
+    only through its commit type (see [Commits, branches and pull
+    requests](#commits-branches-and-pull-requests)).
 
 ### Execution Efficiency Rules
 
@@ -99,11 +114,40 @@ Individual targets, and what each one proves, are in
 
 | Command | Why it exists |
 | :------ | :------------ |
+| `make check` | the fast loop: type-checks the whole workspace without a full build |
 | `make boundary` | checks root workspace for `grammers` outside `telegram-framework` |
 | `make wasm-boundary` | asserts the detached `web-demo` tree has no Telegram crates |
 | `make lint` | `clippy --all-targets --all-features -- -D warnings` |
 | `make test` | `test --all --all-features` |
-| `make design-check` | fails if `design/` and the OpenDesign project differ; **skips loudly** when there is no project on the machine |
+| `make design-check` | fails if `design/` and the OpenDesign project differ; **skips loudly** when there is no project on the machine, and a skip is not a pass |
+| `make design-push` | sends this repository's `design/` files to the OpenDesign project (rule 14) |
+
+**Not part of `make ci`**, and so not a per-commit gate: the memory budget
+(`make measure`, then `make measure-check`, against `docs/memory-baseline.json`
+and `scripts/memory/thresholds.json`), `make bench` (descriptive; it never fails
+on slowness), `make rtl-shots` (images a person reads), the self-hosted
+`.github/workflows/desktop.yml` (keyring round trip and live datacenter,
+`workflow_dispatch` only), and `crates/app/tests/proto_integration.rs`, which
+runs in no workflow. A check that exits zero because it has no baseline for the
+host is a recording, not a measurement. [`docs/testing.md`](./docs/testing.md)
+has the detail, and [`docs/memory.md`](./docs/memory.md) the budget.
+
+## Commits, branches and pull requests
+
+- **Commits are Conventional Commits:** `type(scope): lowercase imperative
+  subject`, with a body that says what changed and why. Scope is a crate (`app`,
+  `tui`, `domain`, `proto`, `telegram-framework`, `demo-support`, `web-demo`) or
+  an area (`design`, `ci`, `docs`, `memory`, `release`). Every commit leaves the
+  tree green.
+- **The type decides the changelog.** `feat`, `fix` and `perf` are listed in
+  release notes; `docs`, `build`, `test`, `chore`, `refactor` and `style` are
+  skipped on purpose (`cliff.toml`). Commit a user-visible change as `feat`,
+  `fix` or `perf`, or it never ships in the notes.
+- **Branches are `<prefix>/<short-slug>`**, with a prefix from `feature/`,
+  `fix/`, `chore/`, `refactor/`, `docs/`, `perf/`, `test/`, `build/`, `ci/`.
+- **Branch names, commit messages, and PR titles carry no issue number.** A
+  pull request body names the issue it resolves as `Closes #N`.
+- **A pull request that needs the memory budget** carries the `memory` label.
 
 ## Where the rest of it lives
 
