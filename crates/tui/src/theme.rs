@@ -9,7 +9,7 @@
 //! 1. `text` — the baseline everything starts from;
 //! 2. `match_hit` — a row a search found;
 //! 3. `selection_bg` — a slice of a row a selection covers;
-//! 4. `selection` — the cursor's `REVERSED` row, drawn by the list widget.
+//! 4. `selection` — the cursor's `REVERSED` item rows, drawn by list widgets.
 //!
 //! The fifth is a **caret**, and it is deliberately *not* a fifth patch.
 //! `caret_insert` and `caret_normal` say what a caret looks like on a row the
