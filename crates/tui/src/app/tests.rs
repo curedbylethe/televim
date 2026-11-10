@@ -4840,6 +4840,32 @@ fn service_messages_use_other_rows_after_day_separators() {
     assert!(!screen.contains("[them] joined Telegram"));
 }
 
+#[test]
+fn service_hint_starts_new_message_groups() {
+    const AT: i64 = 1_730_000_000;
+    let mut before = message(1, "before");
+    before.timestamp = AT;
+    let mut service = message(2, "joined Telegram");
+    service.timestamp = AT + 60;
+    service.is_service = true;
+    let mut after = message(3, "after");
+    after.timestamp = AT + 120;
+
+    let mut app = App::mock();
+    app.apply_latest(vec![before, service, after]);
+
+    let layout = app.row_layout();
+    assert!(layout.iter().any(|span| matches!(
+        &span.kind,
+        RowKind::Other { label } if label == "joined Telegram"
+    )));
+    assert!(rows::group_of(&app, 0).last);
+    assert!(rows::group_of(&app, 2).first);
+
+    let screen = frame_rows(&app).join("\n");
+    assert!(screen.contains("[them] after"));
+}
+
 /// Looking away and coming back leaves everything PR 8 derives from the window
 /// as it was, and restores the one thing the window does not carry (US-X1).
 ///
