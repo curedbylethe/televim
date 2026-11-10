@@ -5,6 +5,12 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.12.1] - 2026-11-10
+
+### Fixed
+
+- **tui:** Reverse every row of the cursor message
+
 ## [0.12.0] - 2026-11-09
 
 ### Added
