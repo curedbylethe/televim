@@ -2370,7 +2370,7 @@ fn session(paths: &SlotPaths, keys: Option<Arc<dyn KeyProvider>>) -> Session {
 /// The order is the whole policy. Neither being usable is not answered here with
 /// a third source — least of all with no key at all — but when the provider is
 /// first asked for a key, as [`key_trouble`].
-fn key_provider(
+pub(crate) fn key_provider(
     cfg: &Config,
     keyring: impl FnOnce() -> Arc<dyn KeyProvider>,
 ) -> Arc<dyn KeyProvider> {

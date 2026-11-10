@@ -148,7 +148,7 @@ pub(crate) fn slot_paths(config_path: &Path, cfg: &Config, account: Option<i64>)
 ///
 /// The one place the name is spelled, so the resolver, the description and
 /// [`SlotStore`] cannot disagree about which entry is an account's.
-fn session_name(slot: AccountSlot) -> String {
+pub(crate) fn session_name(slot: AccountSlot) -> String {
     match slot {
         AccountSlot::Legacy => "session".to_owned(),
         AccountSlot::Id(id) => format!("session-{id}"),

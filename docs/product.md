@@ -134,7 +134,7 @@ Working today:
   file is repaired to
   `0600`, or the launch refuses with `Unavailable` when the repair fails; Windows
   has no mode and relies on the profile ACL. By default it lives beside the
-  resolved config file; a configured relative path resolves against the working
+  resolved config file; a configured relative path resolves against the config
   directory. The default config lives under the OS local data directory, unless
   Televim adopts a legacy profile from the first launch's working directory.
 
@@ -148,6 +148,8 @@ Working today:
   to restore it, or to delete the session file and the key file and relaunch, and
   that the session file was left as it was.
 
+  A pre-0.12.0 keychain session migrates once to the configured file when its key
+  is available; a failed or corrupt keychain read leaves the old entry intact.
   The tradeoff is deliberate: the key sits beside the ciphertext, protected by
   `0600` and full-disk encryption rather than the OS credential store. A process
   running as the same user, and any backup that captures the key file with the

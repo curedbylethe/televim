@@ -4,7 +4,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use telegram_framework::{FileStore, KeyringStore, SessionError, SessionStore};
 
+use crate::accounts::{self, AccountSlot, SessionTarget};
 use crate::config::Config;
 
 pub fn migrate_derived_key(config_path: &Path, cfg: &Config) {
@@ -33,6 +35,126 @@ pub fn migrate_derived_key(config_path: &Path, cfg: &Config) {
             "could not migrate session key for {}: {error}",
             config_path.display()
         ),
+    }
+}
+
+pub(crate) fn migrate_legacy_session(config_path: &Path, cfg: &Config, slot: AccountSlot) {
+    let paths = accounts::slot_paths(config_path, cfg, slot.account());
+    let SessionTarget::File(path) = paths.session else {
+        return;
+    };
+    let legacy = KeyringStore::new("televim", accounts::session_name(slot));
+    let primary = FileStore::with_key_provider(path.clone(), crate::net::file_key_provider(cfg));
+    if let Err(error) = migrate_session(&primary, &legacy, path.exists()) {
+        tracing::warn!(
+            "could not migrate legacy session to {}: {error}",
+            path.display()
+        );
+    }
+}
+
+fn migrate_session(
+    primary: &dyn SessionStore,
+    legacy: &dyn SessionStore,
+    file_exists: bool,
+) -> Result<(), SessionError> {
+    if file_exists {
+        return Ok(());
+    }
+    let Some(session) = legacy.load()? else {
+        return Ok(());
+    };
+    primary.save(&session)?;
+    if let Err(error) = legacy.clear() {
+        tracing::warn!("could not clear migrated keychain session: {error}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use telegram_framework::{MemoryStore, SessionData};
+
+    struct Legacy {
+        inner: MemoryStore,
+        loads: AtomicUsize,
+        fail_load: bool,
+        fail_clear: bool,
+    }
+
+    impl SessionStore for Legacy {
+        fn load(&self) -> Result<Option<SessionData>, SessionError> {
+            self.loads.fetch_add(1, Ordering::Relaxed);
+            if self.fail_load {
+                return Err(SessionError::Corrupt("bad snapshot".into()));
+            }
+            self.inner.load()
+        }
+
+        fn save(&self, session: &SessionData) -> Result<(), SessionError> {
+            self.inner.save(session)
+        }
+
+        fn clear(&self) -> Result<(), SessionError> {
+            if self.fail_clear {
+                return Err(SessionError::Clear("denied".into()));
+            }
+            self.inner.clear()
+        }
+    }
+
+    fn legacy(session: Option<SessionData>) -> Legacy {
+        let inner = MemoryStore::new();
+        if let Some(session) = session {
+            inner.save(&session).expect("seed memory store");
+        }
+        Legacy {
+            inner,
+            loads: AtomicUsize::new(0),
+            fail_load: false,
+            fail_clear: false,
+        }
+    }
+
+    #[test]
+    fn migrates_then_clears_legacy_session() {
+        let old = legacy(Some(SessionData::default()));
+        let new = MemoryStore::new();
+        migrate_session(&new, &old, false).expect("migration succeeds");
+        assert_eq!(new.load().expect("new loads"), Some(SessionData::default()));
+        assert_eq!(old.inner.load().expect("old loads"), None);
+    }
+
+    #[test]
+    fn existing_file_skips_keychain_read() {
+        let old = legacy(Some(SessionData::default()));
+        migrate_session(&MemoryStore::new(), &old, true).expect("skip succeeds");
+        assert_eq!(old.loads.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn empty_or_corrupt_legacy_does_not_create_primary() {
+        let empty = legacy(None);
+        let new = MemoryStore::new();
+        migrate_session(&new, &empty, false).expect("empty is ignored");
+        assert_eq!(new.load().expect("new loads"), None);
+
+        let mut corrupt = legacy(None);
+        corrupt.fail_load = true;
+        assert!(migrate_session(&new, &corrupt, false).is_err());
+        assert_eq!(new.load().expect("new loads"), None);
+    }
+
+    #[test]
+    fn failed_clear_keeps_migrated_primary() {
+        let mut old = legacy(Some(SessionData::default()));
+        old.fail_clear = true;
+        let new = MemoryStore::new();
+        migrate_session(&new, &old, false).expect("clear failure is best effort");
+        assert_eq!(new.load().expect("new loads"), Some(SessionData::default()));
+        assert!(old.inner.load().expect("old loads").is_some());
     }
 }
 
