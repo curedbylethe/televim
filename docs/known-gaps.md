@@ -2,7 +2,7 @@
 
 Real, and named so they are not mistaken for oversights:
 
-- **G-13 — first launch from another directory cannot discover a legacy profile.**
+- **First launch from another directory cannot discover a legacy profile.**
   Adoption checks only the current directory on the first launch. If the old
   profile is elsewhere, launch once from its directory or pass `--config` with
   its path; after adoption, the pointer finds it from any directory.
@@ -395,7 +395,7 @@ Real, and named so they are not mistaken for oversights:
     Sign-out leaves the key file, as it leaves the keyring's `file-key`.
   - *The key file and its session files move as a pair.* Moving the key file
     without the files it sealed, or the reverse, opens nothing. A legacy file session whose key is held in the keychain migrates to the derived
-    key file without sign-in. Keychain-held session migration is a separate stage.
+    key file without sign-in.
   - *A missing, short or unreadable key file is a key error, not corruption.* It
     is `Load` or `Unavailable`, never `Corrupt`; the session is not discarded and
     no passphrase box opens. The `offline:` sentence names the key file and says
