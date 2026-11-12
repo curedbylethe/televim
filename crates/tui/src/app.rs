@@ -1704,6 +1704,12 @@ impl App {
         &self.list.list.chats
     }
 
+    /// The conversations in Telegram's archive folder.
+    #[must_use]
+    pub fn archived_chats(&self) -> &[Chat] {
+        self.list.archived()
+    }
+
     /// The display name used for a chat row, including a local name.
     #[must_use]
     pub fn chat_display_name(&self, chat_id: i64) -> Option<&str> {
@@ -2152,7 +2158,7 @@ impl App {
         coordinate::record_read_positions(&mut self.drafts, &mut self.conversation, chats);
     }
 
-    /// Installs a freshly fetched chat list while keeping the open conversation.
+    /// Installs a freshly fetched chat list while keeping the reader's selection.
     ///
     /// Delegates to [`coordinate::refresh_chats`].
     pub fn refresh_chats(&mut self, chats: Vec<Chat>) -> bool {

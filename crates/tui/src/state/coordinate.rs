@@ -116,11 +116,10 @@ pub(crate) fn set_chats(
 /// they were, because a re-fetch is not the reader changing conversations —
 /// so none of [`select_chat_none`]'s resets run here.
 ///
-/// The highlight is restored by the open conversation's own id, never by
-/// index: the list comes back ordered by recency, and an index means a
-/// different conversation on either side of the fetch. An id the new list
-/// does not hold falls back to the top and reports `false`, so the caller
-/// can say where the reader landed.
+/// The highlight is restored by the previously selected chat's id, never by
+/// index: the reader may be browsing while a fetch is in flight. An id absent
+/// from the new list falls back to the top. The return value reports whether
+/// the open conversation remains in the list.
 pub(crate) fn refresh_chats(
     list: &mut ChatListState,
     conversation: &mut ConversationState,

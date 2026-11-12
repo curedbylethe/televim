@@ -105,21 +105,23 @@ impl ChatListState {
 
     /// Installs a freshly fetched chat list while keeping the open conversation.
     ///
-    /// The highlight is restored by the open conversation's own id, never by
-    /// index: the list comes back ordered by recency, and an index means a
-    /// different conversation on either side of the fetch. An id the new list
-    /// does not hold falls back to the top and reports `false`, so the caller
-    /// can say where the reader landed.
+    /// The highlight is restored by the selected chat's id, never by index:
+    /// the list comes back ordered by recency, and an index means a different
+    /// conversation on either side of the fetch. An absent selection falls
+    /// back to the top. The return value reports whether `open` remains held.
     pub(crate) fn reinstall(&mut self, chats: Vec<Chat>, open: i64) -> bool {
+        let selected = self.list.chats.get(self.selected_chat).map(|chat| chat.id);
         self.list = ChatList::with_chats(chats);
 
-        if let Some(index) = self.list.chats.iter().position(|chat| chat.id == open) {
+        let open_is_held = self.list.chats.iter().any(|chat| chat.id == open);
+        if let Some(index) =
+            selected.and_then(|id| self.list.chats.iter().position(|chat| chat.id == id))
+        {
             self.selected_chat = index;
-            true
         } else {
             self.selected_chat = 0;
-            false
         }
+        open_is_held
     }
 
     /// Replaces the archived conversations, leaving the visible list alone.
@@ -261,17 +263,14 @@ mod tests {
     fn reinstall_keeps_the_highlight_on_the_chat_not_on_its_row() {
         let mut state = ChatListState::new();
         state.install(vec![chat(20, false), chat(30, false), chat(10, false)]);
-        state.select(0);
+        state.select(2);
 
         assert!(
             state.reinstall(vec![chat(30, false), chat(10, false), chat(20, false)], 20),
             "the wanted chat is still in the list"
         );
-        assert_eq!(
-            state.selected_chat, 2,
-            "the same chat moved from row 0 to row 2, and its id, not its old row, selects"
-        );
-        assert_eq!(state.list.chats[state.selected_chat].id, 20);
+        assert_eq!(state.selected_chat, 1);
+        assert_eq!(state.list.chats[state.selected_chat].id, 10);
 
         assert!(
             !state.reinstall(vec![chat(30, false), chat(50, false)], 20),
