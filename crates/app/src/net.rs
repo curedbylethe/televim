@@ -56,7 +56,7 @@ use domain::global_search::{GlobalHit, SearchSpec};
 use domain::history::ConversationView;
 use domain::message::{MediaKind, Message};
 use domain::search::SEARCH_MATCHES;
-use domain::updates::UpdateEvent;
+use domain::updates::{ChatList, UpdateEvent};
 use domain::user::UserCandidate;
 use proto::{
     HistoryCursor, LoginCode, PasswordChallenge, ProtoClient, ProtoError, SearchResults, SignIn,
@@ -943,6 +943,9 @@ pub struct State {
 
     /// The feed generation with a chat-list refresh in flight.
     chat_list_refresh: Option<u64>,
+
+    /// Arrivals for unknown chats that land while that refresh is in flight.
+    chat_list_refresh_arrivals: Vec<Message>,
 
     /// Whether a bring-up is in flight, so a second one is not started over it.
     ///
@@ -4082,8 +4085,21 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             if generation != state.feed_generation {
                 return;
             }
+            let arrivals = std::mem::take(&mut state.chat_list_refresh_arrivals);
             match result {
-                Ok(mut chats) => {
+                Ok(chats) => {
+                    let mut refreshed = ChatList::with_chats(chats);
+                    for message in arrivals {
+                        let last_id = refreshed
+                            .chats
+                            .iter()
+                            .find(|chat| chat.id == message.chat_id)
+                            .and_then(|chat| chat.last_message_id);
+                        if last_id.is_none_or(|last_id| message.id > last_id) {
+                            refreshed.apply_update(UpdateEvent::NewMessage(message));
+                        }
+                    }
+                    let mut chats = refreshed.chats;
                     app.apply_local_names(&mut chats);
                     app.record_read_positions(&chats);
                     app.refresh_chats(chats);
@@ -4133,7 +4149,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
             if refresh_chat_list {
-                request_chat_list_refresh(state);
+                if let UpdateEvent::NewMessage(message) = &event {
+                    request_chat_list_refresh(state, message);
+                }
             }
             if let UpdateEvent::NewMessage(message) = &event
                 && let Some(notice) = notice_for(app, state, message)
@@ -6283,18 +6301,21 @@ fn apply_feed_retrying(app: &mut App, retry: &FeedRetry) {
 fn chat_list_needs_refresh(app: &App, event: &UpdateEvent) -> bool {
     matches!(event, UpdateEvent::NewMessage(message)
         if !app.chats().iter().any(|chat| chat.id == message.chat_id)
-            && !app.archived_chats().iter().any(|chat| chat.id == message.chat_id))
+            && !app.archived_chats().iter().any(|chat| chat.id == message.chat_id && chat.muted))
 }
 
-fn request_chat_list_refresh(state: &mut State) {
+fn request_chat_list_refresh(state: &mut State, message: &Message) {
     let generation = state.feed_generation;
     if state.chat_list_refresh == Some(generation) {
+        state.chat_list_refresh_arrivals.push(message.clone());
         return;
     }
     let (Some(client), Some(tx)) = (state.client.clone(), state.tx.clone()) else {
         return;
     };
 
+    state.chat_list_refresh_arrivals.clear();
+    state.chat_list_refresh_arrivals.push(message.clone());
     state.chat_list_refresh = Some(generation);
     tokio::spawn(async move {
         let result = client.fetch_private_chats().await;
@@ -6413,7 +6434,12 @@ mod tests {
         assert!(!chat_list_needs_refresh(&app, &message(app.chats()[0].id)));
 
         app.set_archived_chats(vec![chat(8)]);
-        assert!(!chat_list_needs_refresh(&app, &message(8)));
+        assert!(chat_list_needs_refresh(&app, &message(8)));
+
+        let mut muted = chat(9);
+        muted.muted = true;
+        app.set_archived_chats(vec![muted]);
+        assert!(!chat_list_needs_refresh(&app, &message(9)));
     }
 
     #[test]
@@ -6421,8 +6447,20 @@ mod tests {
         let mut app = App::new();
         app.set_chats(vec![chat(7)]);
         let open = app.current_chat_id();
+        let arrival = |id, text| Message {
+            id,
+            chat_id: 999,
+            text: Cow::Borrowed(text),
+            timestamp: id,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+            media: None,
+            media_id: None,
+        };
         let mut state = State {
             chat_list_refresh: Some(0),
+            chat_list_refresh_arrivals: vec![arrival(1, "first"), arrival(2, "second")],
             ..State::default()
         };
 
@@ -6437,6 +6475,13 @@ mod tests {
 
         assert!(app.chats().iter().any(|chat| chat.id == 999));
         assert_eq!(app.current_chat_id(), open);
+        let added = app
+            .chats()
+            .iter()
+            .find(|chat| chat.id == 999)
+            .expect("the fetched unknown chat is present");
+        assert_eq!(added.unread_count, 2);
+        assert_eq!(added.last_message.as_deref(), Some("second"));
         assert_eq!(state.chat_list_refresh, None);
     }
 

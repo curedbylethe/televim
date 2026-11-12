@@ -108,19 +108,33 @@ impl ChatListState {
     /// The highlight is restored by the selected chat's id, never by index:
     /// the list comes back ordered by recency, and an index means a different
     /// conversation on either side of the fetch. An absent selection falls
-    /// back to the top. The return value reports whether `open` remains held.
+    /// back to the open chat, then the top. Newer local previews and unread
+    /// counts win over an older snapshot. The return value reports whether
+    /// `open` remains held.
     pub(crate) fn reinstall(&mut self, chats: Vec<Chat>, open: i64) -> bool {
         let selected = self.list.chats.get(self.selected_chat).map(|chat| chat.id);
+        let mut chats = chats;
+        for fetched in &mut chats {
+            let Some(local) = self.list.chats.iter().find(|chat| chat.id == fetched.id) else {
+                continue;
+            };
+            let newer = local.last_timestamp > fetched.last_timestamp
+                || (local.last_timestamp == fetched.last_timestamp
+                    && local.last_message_id > fetched.last_message_id);
+            if newer {
+                fetched.last_message = local.last_message.clone();
+                fetched.last_message_id = local.last_message_id;
+                fetched.last_timestamp = local.last_timestamp;
+                fetched.unread_count = local.unread_count;
+            }
+        }
         self.list = ChatList::with_chats(chats);
 
         let open_is_held = self.list.chats.iter().any(|chat| chat.id == open);
-        if let Some(index) =
-            selected.and_then(|id| self.list.chats.iter().position(|chat| chat.id == id))
-        {
-            self.selected_chat = index;
-        } else {
-            self.selected_chat = 0;
-        }
+        self.selected_chat = selected
+            .and_then(|id| self.list.chats.iter().position(|chat| chat.id == id))
+            .or_else(|| self.list.chats.iter().position(|chat| chat.id == open))
+            .unwrap_or(0);
         open_is_held
     }
 
@@ -272,11 +286,41 @@ mod tests {
         assert_eq!(state.selected_chat, 1);
         assert_eq!(state.list.chats[state.selected_chat].id, 10);
 
+        assert!(state.reinstall(vec![chat(30, false), chat(20, false)], 20));
+        assert_eq!(state.list.chats[state.selected_chat].id, 20);
+
         assert!(
             !state.reinstall(vec![chat(30, false), chat(50, false)], 20),
             "an absent chat says so, so the caller can say where the reader landed"
         );
         assert_eq!(state.selected_chat, 0, "and the highlight falls to the top");
+    }
+
+    #[test]
+    fn reinstall_keeps_newer_local_preview_and_unread_count() {
+        let mut local = chat(1, false);
+        local.last_message = Some(std::borrow::Cow::Borrowed("new preview"));
+        local.last_message_id = Some(11);
+        local.last_timestamp = Some(2_000);
+        local.unread_count = 3;
+        let mut state = ChatListState::new();
+        state.install(vec![local]);
+
+        let mut stale = chat(1, false);
+        stale.last_message = Some(std::borrow::Cow::Borrowed("old preview"));
+        stale.last_message_id = Some(10);
+        stale.last_timestamp = Some(1_000);
+        stale.unread_count = 2;
+
+        assert!(state.reinstall(vec![stale], 1));
+
+        assert_eq!(
+            state.list.chats[0].last_message.as_deref(),
+            Some("new preview")
+        );
+        assert_eq!(state.list.chats[0].last_message_id, Some(11));
+        assert_eq!(state.list.chats[0].last_timestamp, Some(2_000));
+        assert_eq!(state.list.chats[0].unread_count, 3);
     }
 
     #[test]
