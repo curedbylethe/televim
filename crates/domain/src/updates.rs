@@ -254,7 +254,11 @@ impl ChatList {
             }
         }
 
-        if !pinned {
+        let should_reorder = !pinned
+            && ((index > 0 && sorts_before(&self.chats[index], &self.chats[index - 1]))
+                || (index + 1 < self.chats.len()
+                    && sorts_before(&self.chats[index + 1], &self.chats[index])));
+        if should_reorder {
             let chat = self.chats.remove(index);
             let index = self
                 .chats
@@ -932,7 +936,7 @@ mod tests {
     fn equal_timestamp_arrivals_keep_existing_chat_order() {
         let mut list = ChatList::with_chats(vec![chat_at(1, 1_000), chat_at(2, 1_000)]);
 
-        applied(&mut list, arrival(2, 10, "same second", 1_000));
+        applied(&mut list, arrival(1, 10, "same second", 1_000));
 
         assert_eq!(ids(&list), vec![1, 2]);
     }
