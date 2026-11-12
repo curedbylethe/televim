@@ -118,8 +118,8 @@ pub(crate) fn set_chats(
 ///
 /// The highlight is restored by the previously selected chat's id, never by
 /// index: the reader may be browsing while a fetch is in flight. An id absent
-/// from the new list falls back to the top. The return value reports whether
-/// the open conversation remains in the list.
+/// from the new list falls back to the open chat, then the top. The return
+/// value reports whether the open conversation remains in the list.
 pub(crate) fn refresh_chats(
     list: &mut ChatListState,
     conversation: &mut ConversationState,
