@@ -56,7 +56,7 @@ use domain::global_search::{GlobalHit, SearchSpec};
 use domain::history::ConversationView;
 use domain::message::{MediaKind, Message};
 use domain::search::SEARCH_MATCHES;
-use domain::updates::{ChatList, UpdateEvent};
+use domain::updates::{ChatList, UpdateEvent, sorts_before};
 use domain::user::UserCandidate;
 use proto::{
     HistoryCursor, LoginCode, PasswordChallenge, ProtoClient, ProtoError, SearchResults, SignIn,
@@ -947,6 +947,9 @@ pub struct State {
     /// Arrivals for unknown chats that land while that refresh is in flight.
     chat_list_refresh_arrivals: Vec<Message>,
 
+    /// Chats absent from a successful refresh, until the next bring-up.
+    chat_list_refresh_missing: HashSet<i64>,
+
     /// Whether a bring-up is in flight, so a second one is not started over it.
     ///
     /// Set where a bring-up is *issued* rather than where it is wanted, because
@@ -1004,6 +1007,11 @@ pub struct State {
 }
 
 impl State {
+    fn start_feed(&mut self) {
+        self.feed_generation += 1;
+        self.chat_list_refresh_missing.clear();
+    }
+
     pub(crate) fn set_open_key(&mut self, pressed: Option<Instant>) {
         self.open_key = pressed;
     }
@@ -4087,7 +4095,36 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             }
             let arrivals = std::mem::take(&mut state.chat_list_refresh_arrivals);
             match result {
-                Ok(chats) => {
+                Ok(mut chats) => {
+                    for fetched in &mut chats {
+                        if let Some(local) = app.chats().iter().find(|chat| chat.id == fetched.id)
+                            && (local.last_timestamp > fetched.last_timestamp
+                                || (local.last_timestamp == fetched.last_timestamp
+                                    && local.last_message_id > fetched.last_message_id))
+                        {
+                            fetched.last_message.clone_from(&local.last_message);
+                            fetched.last_message_id = local.last_message_id;
+                            fetched.last_timestamp = local.last_timestamp;
+                            fetched.unread_count = local.unread_count;
+                        }
+                    }
+                    chats.sort_by(|a, b| {
+                        if sorts_before(a, b) {
+                            std::cmp::Ordering::Less
+                        } else if sorts_before(b, a) {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
+                    });
+                    state
+                        .chat_list_refresh_missing
+                        .retain(|id| !chats.iter().any(|chat| chat.id == *id));
+                    for message in &arrivals {
+                        if !chats.iter().any(|chat| chat.id == message.chat_id) {
+                            state.chat_list_refresh_missing.insert(message.chat_id);
+                        }
+                    }
                     let mut refreshed = ChatList::with_chats(chats);
                     for message in arrivals {
                         let last_id = refreshed
@@ -4096,12 +4133,19 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                             .find(|chat| chat.id == message.chat_id)
                             .and_then(|chat| chat.last_message_id);
                         if last_id.is_none_or(|last_id| message.id > last_id) {
-                            refreshed.apply_update(UpdateEvent::NewMessage(message));
+                            let _ = refreshed.apply_update(UpdateEvent::NewMessage(message));
                         }
                     }
                     let mut chats = refreshed.chats;
                     app.apply_local_names(&mut chats);
                     app.record_read_positions(&chats);
+                    let archived = app
+                        .archived_chats()
+                        .iter()
+                        .filter(|archived| !chats.iter().any(|chat| chat.id == archived.id))
+                        .cloned()
+                        .collect();
+                    app.set_archived_chats(archived);
                     app.refresh_chats(chats);
                 }
                 Err(error) => tracing::warn!(%error, "the chat list could not be refreshed"),
@@ -4144,14 +4188,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             {
                 state.read_owed = Some(message.chat_id);
             }
-            let refresh_chat_list = chat_list_needs_refresh(app, &event);
+            let refresh_chat_list = chat_list_needs_refresh(app, state, &event);
             // Whether it moved anything is not acted on: the loop redraws on
             // every pass, so the report has no decision to feed here.
             let _ = app.apply_update(&event);
-            if refresh_chat_list {
-                if let UpdateEvent::NewMessage(message) = &event {
-                    request_chat_list_refresh(state, message);
-                }
+            if refresh_chat_list && let UpdateEvent::NewMessage(message) = &event {
+                request_chat_list_refresh(state, message);
             }
             if let UpdateEvent::NewMessage(message) = &event
                 && let Some(notice) = notice_for(app, state, message)
@@ -5435,7 +5477,7 @@ fn apply_ready_to_screen_with_archive(
     // The client is up: connected, whatever the screen says underneath it.
     app.set_connection(ConnectionState::Connected);
     // A new client brings a new feed: pages asked of the old one are stale.
-    state.feed_generation += 1;
+    state.start_feed();
     app.end_fetch(FetchDirection::Older);
     app.end_fetch(FetchDirection::Newer);
     let no_session = matches!(&account, Err(reason) if reason.is_empty());
@@ -6298,9 +6340,10 @@ fn apply_feed_retrying(app: &mut App, retry: &FeedRetry) {
     app.set_connection(ConnectionState::Reconnecting);
 }
 
-fn chat_list_needs_refresh(app: &App, event: &UpdateEvent) -> bool {
+fn chat_list_needs_refresh(app: &App, state: &State, event: &UpdateEvent) -> bool {
     matches!(event, UpdateEvent::NewMessage(message)
         if !app.chats().iter().any(|chat| chat.id == message.chat_id)
+            && !state.chat_list_refresh_missing.contains(&message.chat_id)
             && !app.archived_chats().iter().any(|chat| chat.id == message.chat_id && chat.muted))
 }
 
@@ -6416,6 +6459,7 @@ mod tests {
     fn an_unknown_message_arrival_requests_a_chat_list_refresh() {
         let mut app = App::new();
         app.set_chats(vec![chat(7)]);
+        let state = State::default();
         let message = |chat_id| {
             UpdateEvent::NewMessage(Message {
                 id: 1,
@@ -6430,16 +6474,20 @@ mod tests {
             })
         };
 
-        assert!(chat_list_needs_refresh(&app, &message(999)));
-        assert!(!chat_list_needs_refresh(&app, &message(app.chats()[0].id)));
+        assert!(chat_list_needs_refresh(&app, &state, &message(999)));
+        assert!(!chat_list_needs_refresh(
+            &app,
+            &state,
+            &message(app.chats()[0].id)
+        ));
 
         app.set_archived_chats(vec![chat(8)]);
-        assert!(chat_list_needs_refresh(&app, &message(8)));
+        assert!(chat_list_needs_refresh(&app, &state, &message(8)));
 
         let mut muted = chat(9);
         muted.muted = true;
         app.set_archived_chats(vec![muted]);
-        assert!(!chat_list_needs_refresh(&app, &message(9)));
+        assert!(!chat_list_needs_refresh(&app, &state, &message(9)));
     }
 
     #[test]
@@ -6483,6 +6531,114 @@ mod tests {
         assert_eq!(added.unread_count, 2);
         assert_eq!(added.last_message.as_deref(), Some("second"));
         assert_eq!(state.chat_list_refresh, None);
+    }
+
+    #[test]
+    fn a_missing_chat_is_not_refetched_after_a_successful_refresh() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(7)]);
+        let message = Message {
+            id: 1,
+            chat_id: 999,
+            text: Cow::Borrowed("hello"),
+            timestamp: 1,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            reply_to: None,
+            media: None,
+            media_id: None,
+        };
+        let mut state = State {
+            chat_list_refresh: Some(0),
+            chat_list_refresh_arrivals: vec![message.clone()],
+            ..State::default()
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRefreshed {
+                generation: 0,
+                result: Ok(vec![chat(7)]),
+            },
+        );
+        assert!(!chat_list_needs_refresh(
+            &app,
+            &state,
+            &UpdateEvent::NewMessage(message.clone())
+        ));
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(7)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+        assert!(chat_list_needs_refresh(
+            &app,
+            &state,
+            &UpdateEvent::NewMessage(message)
+        ));
+    }
+
+    #[test]
+    fn a_chat_returned_to_the_main_list_leaves_the_archive() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(7)]);
+        app.set_archived_chats(vec![chat(8)]);
+        let mut state = State {
+            chat_list_refresh: Some(0),
+            ..State::default()
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRefreshed {
+                generation: 0,
+                result: Ok(vec![chat(7), chat(8)]),
+            },
+        );
+        assert!(app.archived_chats().is_empty());
+    }
+
+    #[test]
+    fn a_chat_list_refresh_reorders_after_merging_newer_local_state() {
+        let mut app = App::new();
+        let mut local = chat(7);
+        local.last_timestamp = Some(2_000);
+        local.last_message_id = Some(11);
+        local.last_message = Some(Cow::Borrowed("new"));
+        local.unread_count = 3;
+        app.set_chats(vec![local]);
+        let mut other = chat(8);
+        other.last_timestamp = Some(1_500);
+        let mut fetched = chat(7);
+        fetched.last_timestamp = Some(1_000);
+        fetched.last_message_id = Some(10);
+        fetched.unread_count = 2;
+        let mut pinned_first = chat(9);
+        pinned_first.pinned = true;
+        let mut pinned_second = chat(10);
+        pinned_second.pinned = true;
+        let mut state = State {
+            chat_list_refresh: Some(0),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRefreshed {
+                generation: 0,
+                result: Ok(vec![pinned_first, pinned_second, other, fetched]),
+            },
+        );
+
+        assert_eq!(
+            app.chats().iter().map(|chat| chat.id).collect::<Vec<_>>(),
+            vec![9, 10, 7, 8]
+        );
+        assert_eq!(app.chats()[2].last_message.as_deref(), Some("new"));
+        assert_eq!(app.chats()[2].unread_count, 3);
     }
 
     #[test]

@@ -108,26 +108,10 @@ impl ChatListState {
     /// The highlight is restored by the selected chat's id, never by index:
     /// the list comes back ordered by recency, and an index means a different
     /// conversation on either side of the fetch. An absent selection falls
-    /// back to the open chat, then the top. Newer local previews and unread
-    /// counts win over an older snapshot. The return value reports whether
+    /// back to the open chat, then the top. The return value reports whether
     /// `open` remains held.
     pub(crate) fn reinstall(&mut self, chats: Vec<Chat>, open: i64) -> bool {
         let selected = self.list.chats.get(self.selected_chat).map(|chat| chat.id);
-        let mut chats = chats;
-        for fetched in &mut chats {
-            let Some(local) = self.list.chats.iter().find(|chat| chat.id == fetched.id) else {
-                continue;
-            };
-            let newer = local.last_timestamp > fetched.last_timestamp
-                || (local.last_timestamp == fetched.last_timestamp
-                    && local.last_message_id > fetched.last_message_id);
-            if newer {
-                fetched.last_message = local.last_message.clone();
-                fetched.last_message_id = local.last_message_id;
-                fetched.last_timestamp = local.last_timestamp;
-                fetched.unread_count = local.unread_count;
-            }
-        }
         self.list = ChatList::with_chats(chats);
 
         let open_is_held = self.list.chats.iter().any(|chat| chat.id == open);
@@ -297,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn reinstall_keeps_newer_local_preview_and_unread_count() {
+    fn reinstall_accepts_the_fetched_preview_and_unread_count() {
         let mut local = chat(1, false);
         local.last_message = Some(std::borrow::Cow::Borrowed("new preview"));
         local.last_message_id = Some(11);
@@ -306,21 +290,21 @@ mod tests {
         let mut state = ChatListState::new();
         state.install(vec![local]);
 
-        let mut stale = chat(1, false);
-        stale.last_message = Some(std::borrow::Cow::Borrowed("old preview"));
-        stale.last_message_id = Some(10);
-        stale.last_timestamp = Some(1_000);
-        stale.unread_count = 2;
+        let mut fetched = chat(1, false);
+        fetched.last_message = Some(std::borrow::Cow::Borrowed("old preview"));
+        fetched.last_message_id = Some(10);
+        fetched.last_timestamp = Some(1_000);
+        fetched.unread_count = 2;
 
-        assert!(state.reinstall(vec![stale], 1));
+        assert!(state.reinstall(vec![fetched], 1));
 
         assert_eq!(
             state.list.chats[0].last_message.as_deref(),
-            Some("new preview")
+            Some("old preview")
         );
-        assert_eq!(state.list.chats[0].last_message_id, Some(11));
-        assert_eq!(state.list.chats[0].last_timestamp, Some(2_000));
-        assert_eq!(state.list.chats[0].unread_count, 3);
+        assert_eq!(state.list.chats[0].last_message_id, Some(10));
+        assert_eq!(state.list.chats[0].last_timestamp, Some(1_000));
+        assert_eq!(state.list.chats[0].unread_count, 2);
     }
 
     #[test]
