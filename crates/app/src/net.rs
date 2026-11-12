@@ -947,6 +947,9 @@ pub struct State {
     /// Arrivals for unknown chats that land while that refresh is in flight.
     chat_list_refresh_arrivals: Vec<Message>,
 
+    /// Chats whose unread count changed through a read during that refresh.
+    chat_list_refresh_reads: HashSet<i64>,
+
     /// Chats absent from a successful refresh, until the next bring-up.
     chat_list_refresh_missing: HashSet<i64>,
 
@@ -1010,6 +1013,13 @@ impl State {
     fn start_feed(&mut self) {
         self.feed_generation += 1;
         self.chat_list_refresh_missing.clear();
+        self.chat_list_refresh_reads.clear();
+    }
+
+    fn note_refresh_read(&mut self, chat_id: i64) {
+        if self.chat_list_refresh == Some(self.feed_generation) {
+            self.chat_list_refresh_reads.insert(chat_id);
+        }
     }
 
     pub(crate) fn set_open_key(&mut self, pressed: Option<Instant>) {
@@ -4094,18 +4104,25 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                 return;
             }
             let arrivals = std::mem::take(&mut state.chat_list_refresh_arrivals);
+            let reads = std::mem::take(&mut state.chat_list_refresh_reads);
             match result {
                 Ok(mut chats) => {
                     for fetched in &mut chats {
-                        if let Some(local) = app.chats().iter().find(|chat| chat.id == fetched.id)
-                            && (local.last_timestamp > fetched.last_timestamp
+                        if let Some(local) = app.chats().iter().find(|chat| chat.id == fetched.id) {
+                            let newer = local.last_timestamp > fetched.last_timestamp
                                 || (local.last_timestamp == fetched.last_timestamp
-                                    && local.last_message_id > fetched.last_message_id))
-                        {
-                            fetched.last_message.clone_from(&local.last_message);
-                            fetched.last_message_id = local.last_message_id;
-                            fetched.last_timestamp = local.last_timestamp;
-                            fetched.unread_count = local.unread_count;
+                                    && local.last_message_id > fetched.last_message_id);
+                            if newer {
+                                fetched.last_message.clone_from(&local.last_message);
+                                fetched.last_message_id = local.last_message_id;
+                                fetched.last_timestamp = local.last_timestamp;
+                                fetched.unread_count = local.unread_count;
+                            } else if reads.contains(&local.id)
+                                && local.last_message_id.is_some()
+                                && local.last_message_id == fetched.last_message_id
+                            {
+                                fetched.unread_count = fetched.unread_count.min(local.unread_count);
+                            }
                         }
                     }
                     chats.sort_by(|a, b| {
@@ -4163,6 +4180,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
 
         Event::ReadMarked { chat_id, max_id } => {
             state.read_acked = Some((chat_id, max_id));
+            state.note_refresh_read(chat_id);
             app.mark_chat_read(chat_id);
         }
 
@@ -4183,6 +4201,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // And the connection holds: a working feed is a connected one.
             app.set_connection(ConnectionState::Connected);
             state.remember_update(&event);
+            if let UpdateEvent::InboxRead { chat_id, .. } = &event {
+                state.note_refresh_read(*chat_id);
+            }
             if let UpdateEvent::NewMessage(message) = &event
                 && message.chat_id == app.conversation.conversation.window.chat_id
             {
@@ -4280,7 +4301,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             chat_id,
             unread,
             result,
-        } => apply_unread_mark(app, chat_id, unread, result),
+        } => {
+            if !unread && result.is_ok() {
+                state.note_refresh_read(chat_id);
+            }
+            apply_unread_mark(app, chat_id, unread, result);
+        }
 
         Event::Archived {
             chat_id,
@@ -6358,6 +6384,7 @@ fn request_chat_list_refresh(state: &mut State, message: &Message) {
     };
 
     state.chat_list_refresh_arrivals.clear();
+    state.chat_list_refresh_reads.clear();
     state.chat_list_refresh_arrivals.push(message.clone());
     state.chat_list_refresh = Some(generation);
     tokio::spawn(async move {
@@ -6598,6 +6625,91 @@ mod tests {
             },
         );
         assert!(app.archived_chats().is_empty());
+    }
+
+    #[test]
+    fn a_chat_list_refresh_keeps_reads_accepted_during_the_fetch() {
+        let mut app = App::new();
+        let mut first = chat(7);
+        first.last_message_id = Some(11);
+        first.last_timestamp = Some(1_000);
+        first.unread_count = 2;
+        let mut second = chat(8);
+        second.last_message_id = Some(12);
+        second.last_timestamp = Some(1_000);
+        second.unread_count = 5;
+        let mut third = chat(9);
+        third.last_message_id = Some(13);
+        third.last_timestamp = Some(1_000);
+        let mut fourth = chat(10);
+        fourth.last_message_id = Some(14);
+        fourth.last_timestamp = Some(1_000);
+        fourth.unread_count = 3;
+        let mut fifth = chat(11);
+        fifth.last_message_id = Some(15);
+        fifth.last_timestamp = Some(1_000);
+        fifth.unread_count = 2;
+        app.set_chats(vec![
+            first.clone(),
+            second.clone(),
+            third.clone(),
+            fourth.clone(),
+            fifth.clone(),
+        ]);
+        let mut state = State {
+            chat_list_refresh: Some(0),
+            ..State::default()
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::ReadMarked {
+                chat_id: 7,
+                max_id: 11,
+            },
+        );
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::InboxRead {
+                chat_id: 8,
+                unread_count: 1,
+            }),
+        );
+        apply(
+            &mut app,
+            &mut state,
+            Event::UnreadMarked {
+                chat_id: 10,
+                unread: false,
+                result: Ok(()),
+            },
+        );
+        apply(
+            &mut app,
+            &mut state,
+            Event::ReadMarked {
+                chat_id: 11,
+                max_id: 15,
+            },
+        );
+        third.unread_count = 2;
+        fifth.last_message_id = Some(16);
+        fifth.unread_count = 1;
+        apply(
+            &mut app,
+            &mut state,
+            Event::ChatListRefreshed {
+                generation: 0,
+                result: Ok(vec![first, second, third, fourth, fifth]),
+            },
+        );
+        assert_eq!(app.chats()[0].unread_count, 0);
+        assert_eq!(app.chats()[1].unread_count, 1);
+        assert_eq!(app.chats()[2].unread_count, 2);
+        assert_eq!(app.chats()[3].unread_count, 0);
+        assert_eq!(app.chats()[4].unread_count, 1);
+        assert!(state.chat_list_refresh_reads.is_empty());
     }
 
     #[test]
