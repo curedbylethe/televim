@@ -6281,7 +6281,9 @@ fn apply_feed_retrying(app: &mut App, retry: &FeedRetry) {
 }
 
 fn chat_list_needs_refresh(app: &App, event: &UpdateEvent) -> bool {
-    matches!(event, UpdateEvent::NewMessage(message) if !app.chats().iter().any(|chat| chat.id == message.chat_id))
+    matches!(event, UpdateEvent::NewMessage(message)
+        if !app.chats().iter().any(|chat| chat.id == message.chat_id)
+            && !app.archived_chats().iter().any(|chat| chat.id == message.chat_id))
 }
 
 fn request_chat_list_refresh(state: &mut State) {
@@ -6409,6 +6411,9 @@ mod tests {
 
         assert!(chat_list_needs_refresh(&app, &message(999)));
         assert!(!chat_list_needs_refresh(&app, &message(app.chats()[0].id)));
+
+        app.set_archived_chats(vec![chat(8)]);
+        assert!(!chat_list_needs_refresh(&app, &message(8)));
     }
 
     #[test]

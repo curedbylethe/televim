@@ -910,6 +910,34 @@ mod tests {
     }
 
     #[test]
+    fn an_arrival_does_not_reorder_pinned_chats() {
+        let mut list = ChatList::with_chats(vec![
+            Chat {
+                pinned: true,
+                ..chat_at(1, 1_000)
+            },
+            Chat {
+                pinned: true,
+                ..chat_at(2, 2_000)
+            },
+            chat_at(3, 500),
+        ]);
+
+        applied(&mut list, arrival(2, 10, "newer", 3_000));
+
+        assert_eq!(ids(&list), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn equal_timestamp_arrivals_keep_existing_chat_order() {
+        let mut list = ChatList::with_chats(vec![chat_at(1, 1_000), chat_at(2, 1_000)]);
+
+        applied(&mut list, arrival(2, 10, "same second", 1_000));
+
+        assert_eq!(ids(&list), vec![1, 2]);
+    }
+
+    #[test]
     fn the_window_holds_only_the_newest_messages() {
         let mut list = list();
         let overflow = MESSAGE_WINDOW + 5;

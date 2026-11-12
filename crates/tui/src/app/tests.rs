@@ -204,8 +204,8 @@ fn an_empty_fetch_closes_the_conversation() {
 
 /// A refresh installs a new list around the reader's place, rather than
 /// through the reset a chat switch runs: the conversation, the selection and
-/// the draft stay, and the highlight follows the open conversation's id into
-/// a list whose order has changed.
+/// the draft stay, and the highlight follows the selected chat's id into a
+/// list whose order has changed.
 #[test]
 fn a_refresh_keeps_the_conversation_selection_and_draft_purpose() {
     let mut app = App::mock();
@@ -215,6 +215,8 @@ fn a_refresh_keeps_the_conversation_selection_and_draft_purpose() {
         .reply_to
         .expect("the sample cursor is on a message");
     spanning(&mut app, 3, 5);
+    app.list.selected_chat = 2;
+    let highlighted = app.chats()[app.list.selected_chat].id;
 
     // The same conversations, reversed: an index would point at a different
     // one, so only restoring by id can keep the highlight where it was.
@@ -226,8 +228,7 @@ fn a_refresh_keeps_the_conversation_selection_and_draft_purpose() {
         "the open conversation is still in the fetched list"
     );
     assert_eq!(
-        app.current_chat_id(),
-        MOCK_CHAT,
+        app.conversation.conversation.window.chat_id, MOCK_CHAT,
         "the conversation on show is untouched"
     );
     assert!(
@@ -235,8 +236,9 @@ fn a_refresh_keeps_the_conversation_selection_and_draft_purpose() {
         "and so is its window"
     );
     assert_eq!(
-        app.list.selected_chat, 2,
-        "the highlight followed the id to the end of the reversed list"
+        app.chats()[app.list.selected_chat].id,
+        highlighted,
+        "the highlight stays on the same chat while the reader browses"
     );
     assert_eq!(
         app.input.line.purpose(),
