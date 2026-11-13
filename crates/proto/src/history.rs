@@ -124,20 +124,20 @@ impl HistoryCursor {
     /// Only the fetches move a cursor, so this exists whenever they do — and
     /// whenever the tests that pin the rule do.
     #[cfg(any(feature = "live", test))]
-    fn note_older(&mut self, page: &[Message], requested: usize) {
-        if let Some(oldest) = page.iter().map(|message| message.id).min() {
+    fn note_older(&mut self, raw_count: usize, oldest_id: Option<i64>, requested: usize) {
+        if let Some(oldest) = oldest_id {
             self.oldest_loaded_id = Some(oldest);
         }
-        self.exhausted_older = page.len() < requested;
+        self.exhausted_older = raw_count < requested;
     }
 
     /// Records a page that was appended, and whether it was short.
     #[cfg(any(feature = "live", test))]
-    fn note_newer(&mut self, page: &[Message], requested: usize) {
-        if let Some(newest) = page.iter().map(|message| message.id).max() {
+    fn note_newer(&mut self, raw_count: usize, newest_id: Option<i64>, requested: usize) {
+        if let Some(newest) = newest_id {
             self.newest_loaded_id = Some(newest);
         }
-        self.exhausted_newer = page.len() < requested;
+        self.exhausted_newer = raw_count < requested;
     }
 }
 
@@ -267,9 +267,12 @@ impl crate::ProtoClient {
         };
 
         let args = HistoryArgs::older(oldest, limit);
-        let page = self.inner().fetch_history(cursor.peer_id(), args).await?;
-        let messages = to_messages(cursor.peer_id(), page);
-        cursor.note_older(&messages, requested(args));
+        let page = self
+            .inner()
+            .fetch_history_page(cursor.peer_id(), args)
+            .await?;
+        let messages = to_messages(cursor.peer_id(), page.messages);
+        cursor.note_older(page.raw_count, page.oldest_id, requested(args));
 
         tracing::debug!(
             peer_id = cursor.peer_id(),
@@ -312,9 +315,12 @@ impl crate::ProtoClient {
         };
 
         let args = HistoryArgs::newer(newest, limit);
-        let page = self.inner().fetch_history(cursor.peer_id(), args).await?;
-        let messages = to_messages(cursor.peer_id(), page);
-        cursor.note_newer(&messages, requested(args));
+        let page = self
+            .inner()
+            .fetch_history_page(cursor.peer_id(), args)
+            .await?;
+        let messages = to_messages(cursor.peer_id(), page.messages);
+        cursor.note_newer(page.raw_count, page.newest_id, requested(args));
 
         tracing::debug!(
             peer_id = cursor.peer_id(),
@@ -423,6 +429,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         }
     }
@@ -447,7 +454,7 @@ mod tests {
     #[test]
     fn a_replaced_window_opens_both_directions_again() {
         let mut cursor = HistoryCursor::new(42);
-        cursor.note_newer(&page(&[13, 14]), 3);
+        cursor.note_newer(2, Some(14), 3);
         assert!(
             cursor.exhausted_newer(),
             "two of three asked for settles the direction"
@@ -482,14 +489,14 @@ mod tests {
         let mut cursor = HistoryCursor::new(42);
         cursor.reset_to(&page(&[10, 11, 12]));
 
-        cursor.note_older(&page(&[7, 8, 9]), 3);
+        cursor.note_older(3, Some(7), 3);
         assert!(
             !cursor.exhausted_older(),
             "a full page means there may be more"
         );
         assert_eq!(cursor.oldest_loaded_id(), Some(7));
 
-        cursor.note_older(&page(&[4, 5]), 3);
+        cursor.note_older(2, Some(4), 3);
         assert!(
             cursor.exhausted_older(),
             "two of three asked for means the end"
@@ -503,11 +510,26 @@ mod tests {
     }
 
     #[test]
+    fn dropped_service_rows_do_not_exhaust_a_full_history_page() {
+        let mut cursor = HistoryCursor::new(42);
+        cursor.reset_to(&page(&[200]));
+        cursor.note_older(50, Some(151), 50);
+
+        assert!(!cursor.exhausted_older());
+        assert_eq!(cursor.oldest_loaded_id(), Some(151));
+
+        cursor.note_older(50, Some(101), 50);
+
+        assert!(!cursor.exhausted_older());
+        assert_eq!(cursor.oldest_loaded_id(), Some(101));
+    }
+
+    #[test]
     fn a_newer_page_moves_only_the_newest_bound() {
         let mut cursor = HistoryCursor::new(42);
         cursor.reset_to(&page(&[10, 11, 12]));
 
-        cursor.note_newer(&page(&[13, 14]), 2);
+        cursor.note_newer(2, Some(14), 2);
 
         assert_eq!(cursor.newest_loaded_id(), Some(14));
         assert_eq!(cursor.oldest_loaded_id(), Some(10));
@@ -520,7 +542,7 @@ mod tests {
         let mut cursor = HistoryCursor::new(42);
         cursor.reset_to(&page(&[10, 11, 12]));
 
-        cursor.note_older(&[], 3);
+        cursor.note_older(0, None, 3);
         assert!(cursor.exhausted_older());
         assert_eq!(
             cursor.oldest_loaded_id(),
@@ -528,7 +550,7 @@ mod tests {
             "the bound stays where it was; nothing older arrived"
         );
 
-        cursor.note_newer(&[], 3);
+        cursor.note_newer(0, None, 3);
         assert!(cursor.exhausted_newer());
     }
 
@@ -539,14 +561,14 @@ mod tests {
         let mut cursor = HistoryCursor::new(42);
         cursor.reset_to(&page(&[10, 11, 12]));
 
-        cursor.note_older(&page(&[9, 8, 7]), 3);
+        cursor.note_older(3, Some(7), 3);
         assert_eq!(
             cursor.oldest_loaded_id(),
             Some(7),
             "the oldest of the page, not its first element"
         );
 
-        cursor.note_newer(&page(&[14, 13]), 2);
+        cursor.note_newer(2, Some(14), 2);
         assert_eq!(cursor.newest_loaded_id(), Some(14));
     }
 
@@ -557,12 +579,12 @@ mod tests {
         let mut cursor = HistoryCursor::new(42);
         cursor.reset_to(&page(&[10, 11, 12]));
 
-        cursor.note_older(&page(&[7, 8, 9]), 3);
-        cursor.note_older(&page(&[4, 5, 6]), 3);
+        cursor.note_older(3, Some(7), 3);
+        cursor.note_older(3, Some(4), 3);
         assert_eq!(cursor.oldest_loaded_id(), Some(4));
 
         cursor.reset_to(&page(&[100, 101]));
-        cursor.note_newer(&page(&[102, 103]), 2);
+        cursor.note_newer(2, Some(103), 2);
 
         assert_eq!(cursor.oldest_loaded_id(), Some(100));
         assert_eq!(cursor.newest_loaded_id(), Some(103));
@@ -578,7 +600,7 @@ mod tests {
         let copy = cursor;
         assert_eq!(copy, cursor, "a copy carries the same question to answer");
 
-        cursor.note_older(&page(&[7, 8, 9]), 3);
+        cursor.note_older(3, Some(7), 3);
         assert_ne!(
             copy, cursor,
             "and the two diverge once one of them is answered"
@@ -605,6 +627,7 @@ mod live_tests {
             text: format!("message {id}"),
             timestamp: 1_700_000_000 + id,
             is_outgoing,
+            is_service: false,
             reply_to_msg_id: None,
             media: None,
             media_id: None,

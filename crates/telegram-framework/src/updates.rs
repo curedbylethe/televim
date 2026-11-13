@@ -88,6 +88,9 @@ pub struct MessageInfo {
     /// Whether the logged-in account sent it.
     pub is_outgoing: bool,
 
+    /// Whether this is a Telegram service event.
+    pub is_service: bool,
+
     /// Identifier of the message this one replies to, if it is a reply.
     ///
     /// Telegram numbers a reply's target within the same conversation, so this
@@ -736,15 +739,22 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
     // filing it under an identifier that addresses nothing.
     let chat_peer_id = peer_id.bare_id()?;
 
-    Some(message_info(
+    let (text, is_service) = match &(**message).raw {
+        tl::enums::Message::Service(service) => (service_message_text(&service.action)?, true),
+        _ => (message.text(), false),
+    };
+
+    let mut info = message_info(
         message.id(),
         chat_peer_id,
-        message.text(),
+        text,
         message.date().timestamp(),
         message.outgoing(),
         message.reply_to_message_id(),
         classify_message(&(**message).raw),
-    ))
+    );
+    info.is_service = is_service;
+    Some(info)
 }
 
 /// Whether the conversation's peer is a bot, if the update disclosed it.
@@ -818,9 +828,32 @@ pub(crate) fn message_info(
         text: text.to_owned(),
         timestamp,
         is_outgoing,
+        is_service: false,
         reply_to_msg_id,
         media,
         media_id,
+    }
+}
+
+/// The readable text televim assigns to a service action, if it supports one.
+pub(crate) fn service_message_text(action: &tl::enums::MessageAction) -> Option<&'static str> {
+    matches!(action, tl::enums::MessageAction::ContactSignUp).then_some("joined Telegram")
+}
+
+#[cfg(test)]
+mod service_message_tests {
+    use super::service_message_text;
+
+    #[test]
+    fn only_contact_signup_has_supported_service_text() {
+        assert_eq!(
+            service_message_text(&crate::tl::enums::MessageAction::ContactSignUp),
+            Some("joined Telegram")
+        );
+        assert_eq!(
+            service_message_text(&crate::tl::enums::MessageAction::Empty),
+            None
+        );
     }
 }
 

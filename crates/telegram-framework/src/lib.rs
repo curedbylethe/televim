@@ -125,7 +125,7 @@ pub use client::{Client, ClientBuilder};
 #[cfg(feature = "live")]
 pub use dialogs::{DialogInfo, DialogKind};
 #[cfg(feature = "live")]
-pub use history::{HISTORY_LIMIT, HistoryArgs};
+pub use history::{HISTORY_LIMIT, HistoryArgs, HistoryPage};
 #[cfg(feature = "live")]
 pub use media::MediaKind;
 #[cfg(feature = "live")]

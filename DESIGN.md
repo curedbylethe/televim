@@ -468,6 +468,11 @@ file is the answer.
 
 ### Groups, day separators and read state
 
+A Telegram contact-signup event is one `RowKind::Other` row labelled
+`joined Telegram`, in the same separator style and without a sender label.
+It breaks message groups on both sides so the adjacent messages keep their
+sender labels and time footers. Other service actions have no row.
+
 A message is still as many rows as its text needs, the sender label still sits
 on its first row and a status still sits on its last. Three treatments sit on
 top of that and add no row kind a message already had. Every rule below is
@@ -1515,8 +1520,9 @@ regressing.
    quote has been jumped to (nothing changes on the row; the cursor moves). Also: first or
    later in a group (the label on the first only), last of a group (the time, and
    for an outgoing one `[delivered]` or `[read]` in place of nothing, `[sending…]`
-   or `[failed: …]` in place of both), and the **day separator** beside it, a row
-   that is not a message.
+   or `[failed: …]` in place of both), the **day separator** beside it, and a
+   service hint such as `joined Telegram`, a one-row `Other` row without a
+   sender label.
 3. **Mode label** — the four above, plus the line's own `VISUAL` and `NORMAL`,
    which are *different modes that share a word*. The label belongs to whichever
    mode the keys about to be pressed will mean, and a confirmation is a question

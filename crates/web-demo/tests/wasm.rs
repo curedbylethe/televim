@@ -136,6 +136,7 @@ fn sent_and_edited_effects_keep_chat_preview_message_cache() {
         timestamp: driver.sim.world.base_timestamp + 60,
         status: MessageStatus::Sent,
         is_outgoing: true,
+        is_service: false,
         reply_to: None,
         media: None,
         media_id: None,

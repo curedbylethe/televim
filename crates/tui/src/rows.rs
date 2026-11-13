@@ -319,7 +319,7 @@ impl Grouped {
 
 /// Whether `current` continues the group `previous` belongs to.
 ///
-/// The four rules, and all four together:
+/// The five rules, and all five together:
 ///
 /// - **same side.** Direction is the sender in a private conversation: there is
 ///   no other. A change of direction is a change of who is talking.
@@ -329,6 +329,7 @@ impl Grouped {
 ///   so a long run of quick messages is one group however long it is.
 /// - **not a reply.** A reply is a message about another message and reads as
 ///   its own turn whatever else is around it.
+/// - **not a service event.** A hint is not part of a speaker's turn.
 ///
 /// A message with no time never groups: `timestamp <= 0` is a send that has not
 /// been acknowledged yet, and it has no day and no gap to measure, so it stands
@@ -338,6 +339,8 @@ impl Grouped {
 #[must_use]
 pub fn continues(previous: &Message, current: &Message, offset: i64) -> bool {
     previous.is_outgoing == current.is_outgoing
+        && !previous.is_service
+        && !current.is_service
         && current.reply_to.is_none()
         && date::has_time(previous.timestamp)
         && date::has_time(current.timestamp)
@@ -942,6 +945,7 @@ mod tests {
                 is_outgoing: false,
                 reply_to: None,
                 media: None,
+                is_service: false,
                 media_id: None,
             };
             let len = message_rows(&app, &message, Grouped::alone(), width).len();
@@ -1013,6 +1017,7 @@ mod tests {
             is_outgoing: outgoing,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         }
     }
@@ -1673,6 +1678,7 @@ mod tests {
             is_outgoing: false,
             reply_to: None,
             media: Some(media),
+            is_service: false,
             media_id: None,
         }
     }
@@ -2047,6 +2053,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: Some(1),
             media: None,
             media_id: None,
@@ -2238,6 +2245,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Received,
             is_outgoing: false,
+            is_service: false,
             reply_to: None,
             media: None,
             media_id: None,
@@ -2249,6 +2257,7 @@ mod tests {
             timestamp: 0,
             status: MessageStatus::Received,
             is_outgoing: true,
+            is_service: false,
             reply_to: Some(90),
             media: None,
             media_id: None,

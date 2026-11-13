@@ -22,6 +22,7 @@ fn message(id: i64, text: &'static str) -> Message {
         is_outgoing: false,
         reply_to: None,
         media: None,
+        is_service: false,
         media_id: None,
     }
 }
@@ -1833,6 +1834,7 @@ fn conversation(turns: &[(i64, bool)]) -> App {
                 is_outgoing: *outgoing,
                 reply_to: None,
                 media: None,
+                is_service: false,
                 media_id: None,
             })
             .collect(),
@@ -4273,6 +4275,7 @@ fn a_read_acknowledgement_advances_the_open_conversation_and_moves_nothing_else(
             is_outgoing: true,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         },
         Message {
@@ -4284,6 +4287,7 @@ fn a_read_acknowledgement_advances_the_open_conversation_and_moves_nothing_else(
             is_outgoing: true,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         },
     ]);
@@ -4829,6 +4833,57 @@ fn grouping_separators_and_read_state_agree_in_one_window() {
     );
 }
 
+#[test]
+fn service_messages_use_other_rows_after_day_separators() {
+    let mut app = App::mock();
+    let first = message_on(1, (2024, 11, 1));
+    let mut service = message_on(2, (2024, 11, 2));
+    service.text = Cow::Borrowed("joined Telegram");
+    service.is_service = true;
+    app.apply_latest(vec![first, service]);
+
+    let layout = app.row_layout();
+    assert_eq!(layout.len(), 4, "two messages and two day separators");
+    assert!(matches!(&layout[2].kind, RowKind::Other { .. }));
+    assert_eq!(
+        layout[3].kind,
+        RowKind::Other {
+            label: "joined Telegram".into()
+        }
+    );
+    assert_eq!(layout[3].message_id, None);
+    assert_eq!(layout[3].len, 1);
+    let screen = frame_rows(&app).join("\n");
+    assert!(screen.contains("joined Telegram"));
+    assert!(!screen.contains("[them] joined Telegram"));
+}
+
+#[test]
+fn service_hint_starts_new_message_groups() {
+    const AT: i64 = 1_730_000_000;
+    let mut before = message(1, "before");
+    before.timestamp = AT;
+    let mut service = message(2, "joined Telegram");
+    service.timestamp = AT + 60;
+    service.is_service = true;
+    let mut after = message(3, "after");
+    after.timestamp = AT + 120;
+
+    let mut app = App::mock();
+    app.apply_latest(vec![before, service, after]);
+
+    let layout = app.row_layout();
+    assert!(layout.iter().any(|span| matches!(
+        &span.kind,
+        RowKind::Other { label } if label == "joined Telegram"
+    )));
+    assert!(rows::group_of(&app, 0).last);
+    assert!(rows::group_of(&app, 2).first);
+
+    let screen = frame_rows(&app).join("\n");
+    assert!(screen.contains("[them] after"));
+}
+
 /// Looking away and coming back leaves everything PR 8 derives from the window
 /// as it was, and restores the one thing the window does not carry (US-X1).
 ///
@@ -4883,6 +4938,7 @@ fn message_of_day(id: i64) -> Message {
         is_outgoing: true,
         reply_to: None,
         media: None,
+        is_service: false,
         media_id: None,
     }
 }
@@ -4934,6 +4990,7 @@ fn what_pr_eight_holds_is_bounded_by_the_window_and_the_conversation_count() {
                 is_outgoing: true,
                 reply_to: None,
                 media: None,
+                is_service: false,
                 media_id: None,
             }
         }));
@@ -5038,6 +5095,7 @@ fn a_group_of_three() -> Vec<Message> {
             is_outgoing: true,
             reply_to: None,
             media: None,
+            is_service: false,
             media_id: None,
         })
         .collect()

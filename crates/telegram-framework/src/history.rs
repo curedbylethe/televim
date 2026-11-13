@@ -32,7 +32,7 @@ use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::media::classify_raw;
 use crate::tl;
-use crate::updates::{MessageInfo, message_info};
+use crate::updates::{MessageInfo, message_info, service_message_text};
 
 /// The largest page Telegram will return from one history request.
 ///
@@ -63,6 +63,20 @@ pub struct HistoryArgs {
 
     /// How many messages to return.
     pub limit: i32,
+}
+
+/// A history page with cursor information from Telegram's unfiltered response.
+#[derive(Debug, Clone)]
+pub struct HistoryPage {
+    /// Messages this client can display.
+    pub messages: Vec<MessageInfo>,
+
+    /// Number of raw Telegram messages before unsupported service actions were dropped.
+    pub raw_count: usize,
+
+    /// Oldest and newest identifiers from the raw Telegram page.
+    pub oldest_id: Option<i64>,
+    pub newest_id: Option<i64>,
 }
 
 impl HistoryArgs {
@@ -205,6 +219,18 @@ impl Client {
         peer_id: i64,
         args: HistoryArgs,
     ) -> Result<Vec<MessageInfo>, FrameworkError> {
+        self.fetch_history_page(peer_id, args)
+            .await
+            .map(|page| page.messages)
+    }
+
+    /// Fetches a page and preserves raw paging metadata before unsupported
+    /// service actions are filtered out.
+    pub async fn fetch_history_page(
+        &self,
+        peer_id: i64,
+        args: HistoryArgs,
+    ) -> Result<HistoryPage, FrameworkError> {
         let Some(peer) = self.peer_ref(peer_id) else {
             tracing::warn!(
                 peer_id,
@@ -254,10 +280,7 @@ impl Client {
             }
         };
 
-        let messages: Vec<MessageInfo> = raw
-            .iter()
-            .map(|raw| message_from_raw(raw, peer_id))
-            .collect();
+        let page = history_page_from_raw(&raw, peer_id);
 
         // Reading history can migrate the datacenter or cache a peer, and that
         // only reaches the store if it is written back here.
@@ -269,11 +292,32 @@ impl Client {
             offset_date = args.offset_date,
             add_offset = args.add_offset,
             limit = args.limit,
-            returned = messages.len(),
+            returned = page.messages.len(),
+            raw = page.raw_count,
             "fetched a page of history"
         );
 
-        Ok(messages)
+        Ok(page)
+    }
+}
+
+fn raw_message_id(message: &tl::enums::Message) -> i32 {
+    match message {
+        tl::enums::Message::Empty(message) => message.id,
+        tl::enums::Message::Message(message) => message.id,
+        tl::enums::Message::Service(message) => message.id,
+    }
+}
+
+fn history_page_from_raw(raw: &[tl::enums::Message], chat_peer_id: i64) -> HistoryPage {
+    HistoryPage {
+        messages: raw
+            .iter()
+            .filter_map(|message| message_from_raw(message, chat_peer_id))
+            .collect(),
+        raw_count: raw.len(),
+        oldest_id: raw.iter().map(raw_message_id).min().map(i64::from),
+        newest_id: raw.iter().map(raw_message_id).max().map(i64::from),
     }
 }
 
@@ -311,26 +355,33 @@ impl Client {
 /// through a `DateTime` and take the timestamp back out, which is the same
 /// number for every value that conversion accepts — and does not abort on a
 /// value it does not.
-fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> MessageInfo {
-    let (id, text, date, is_outgoing, reply_to_msg_id, media) = match raw {
-        tl::enums::Message::Empty(message) => (message.id, "", 0, false, None, None),
+fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> Option<MessageInfo> {
+    let (id, text, date, is_outgoing, is_service, reply_to_msg_id, media) = match raw {
+        tl::enums::Message::Empty(message) => (message.id, "", 0, false, false, None, None),
         tl::enums::Message::Message(message) => (
             message.id,
             message.message.as_str(),
             message.date,
             message.out,
+            false,
             match &message.reply_to {
                 Some(tl::enums::MessageReplyHeader::Header(header)) => header.reply_to_msg_id,
                 _ => None,
             },
             classify_raw(message.media.as_ref()),
         ),
-        tl::enums::Message::Service(message) => {
-            (message.id, "", message.date, message.out, None, None)
-        }
+        tl::enums::Message::Service(message) => (
+            message.id,
+            service_message_text(&message.action)?,
+            message.date,
+            message.out,
+            true,
+            None,
+            None,
+        ),
     };
 
-    message_info(
+    let mut info = message_info(
         id,
         chat_peer_id,
         text,
@@ -338,7 +389,9 @@ fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> MessageInfo 
         is_outgoing,
         reply_to_msg_id,
         media,
-    )
+    );
+    info.is_service = is_service;
+    Some(info)
 }
 
 #[cfg(test)]
@@ -464,7 +517,8 @@ mod tests {
     /// that must not lose it.
     #[test]
     fn a_raw_message_reports_the_media_it_carries() {
-        let photo = message_from_raw(&raw_message(Some(media_photo())), 42);
+        let photo = message_from_raw(&raw_message(Some(media_photo())), 42)
+            .expect("ordinary message is retained");
 
         assert_eq!(
             photo.media,
@@ -474,7 +528,8 @@ mod tests {
         assert_eq!(photo.chat_peer_id, 42);
         assert_eq!(photo.id, 1);
 
-        let unknown = message_from_raw(&raw_message(Some(media_unmodelled())), 42);
+        let unknown = message_from_raw(&raw_message(Some(media_unmodelled())), 42)
+            .expect("ordinary message is retained");
 
         assert_eq!(
             unknown.media,
@@ -482,11 +537,81 @@ mod tests {
             "a kind this build does not model is still something the message carries"
         );
 
-        let bare = message_from_raw(&raw_message(Some(media_empty())), 42);
+        let bare = message_from_raw(&raw_message(Some(media_empty())), 42)
+            .expect("ordinary message is retained");
 
         assert_eq!(
             bare.media, None,
             "and a message that carries nothing is the only one that says so"
         );
+    }
+
+    fn service_message(id: i32, action: tl::enums::MessageAction) -> tl::enums::Message {
+        tl::enums::Message::Service(tl::types::MessageService {
+            out: false,
+            mentioned: false,
+            media_unread: false,
+            reactions_are_possible: false,
+            silent: false,
+            post: false,
+            legacy: false,
+            id,
+            from_id: None,
+            peer_id: tl::enums::Peer::User(tl::types::PeerUser { user_id: 42 }),
+            saved_peer_id: None,
+            reply_to: None,
+            date: 1_700_000_000,
+            action,
+            reactions: None,
+            ttl_period: None,
+        })
+    }
+
+    #[test]
+    fn contact_signup_is_a_readable_service_message() {
+        let message = message_from_raw(
+            &service_message(7, tl::enums::MessageAction::ContactSignUp),
+            42,
+        )
+        .expect("contact signup is supported");
+
+        assert_eq!(message.text, "joined Telegram");
+        assert!(message.is_service);
+    }
+
+    #[test]
+    fn unsupported_service_actions_are_dropped() {
+        assert!(
+            message_from_raw(&service_message(7, tl::enums::MessageAction::Empty), 42).is_none()
+        );
+    }
+
+    #[test]
+    fn history_page_keeps_raw_count_and_bounds_when_service_rows_are_dropped() {
+        let raw: Vec<_> = (1..=50)
+            .map(|id| {
+                let action = if id > 47 {
+                    tl::enums::MessageAction::Empty
+                } else {
+                    tl::enums::MessageAction::ContactSignUp
+                };
+                service_message(id, action)
+            })
+            .collect();
+
+        let page = history_page_from_raw(&raw, 42);
+
+        assert_eq!(page.messages.len(), 47);
+        assert_eq!(page.raw_count, 50);
+        assert_eq!(page.oldest_id, Some(1));
+        assert_eq!(page.newest_id, Some(50));
+
+        let raw: Vec<_> = (101..=150)
+            .map(|id| service_message(id, tl::enums::MessageAction::Empty))
+            .collect();
+        let page = history_page_from_raw(&raw, 42);
+        assert!(page.messages.is_empty());
+        assert_eq!(page.raw_count, 50);
+        assert_eq!(page.oldest_id, Some(101));
     }
 }
