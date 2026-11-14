@@ -559,3 +559,78 @@ fn a_cancelled_discard_keeps_the_draft() {
     t.wait_until(|s| s.contains("unsent words") && !s.contains("Discard this draft?"))
         .expect("draft restored");
 }
+
+/// Quits with `:q`, confirms, and waits for the process to exit cleanly.
+fn quit(t: &mut termlens::Terminal) {
+    t.send_str(":q").expect("type :q");
+    t.send(Key::Enter).expect("submit command");
+    t.wait_until(|s| s.contains("Quit televim?"))
+        .expect("quit confirmation shown");
+    t.send(Key::Char('y')).expect("confirm quit");
+    assert!(
+        t.wait_exit().expect("process exits").success(),
+        "televim exits cleanly on :q"
+    );
+}
+
+/// Types `text` into the open conversation and submits it.
+fn send_text(t: &mut termlens::Terminal, text: &str) {
+    t.send(Key::Char('i')).expect("enter insert mode");
+    t.wait_until(|s| s.contains("INSERT"))
+        .expect("INSERT mode shown");
+    t.send_str(text).expect("type the text");
+    t.send(Key::Enter).expect("submit the text");
+}
+
+/// A text sent with no connection is written to the outbox and shown as sending.
+/// After a quit and relaunch it is still there, still sending, from the file.
+#[test]
+fn an_offline_send_survives_a_restart() {
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    let mut t = common::spawn_offline(&sandbox);
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("Conversation (40/40)"))
+        .expect("the conversation opens pinned to the newest message");
+
+    send_text(&mut t, "still here");
+    t.wait_until(|s| s.contains("[sending…]"))
+        .expect("the queued row shows sending");
+    common::wait_for_outbox(&sandbox, "still here");
+    quit(&mut t);
+
+    let mut t = common::spawn_offline(&sandbox);
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("still here") && s.contains("[sending…]"))
+        .expect("the queued send is back after the relaunch");
+    quit(&mut t);
+}
+
+/// A failed send waits in the outbox with its reason. `:retry` requeues it, the
+/// file clears the failure, and the requeued send survives a relaunch.
+#[test]
+fn a_failed_send_is_retried_and_survives_a_restart() {
+    let sandbox = common::sandbox();
+    seeded_chat(&sandbox);
+    common::seed_outbox(
+        &sandbox,
+        r#"{"version":1,"account":null,"sends":[{"chat_id":1,"temp_id":-1,"text":"lost one","reply_to":null,"failure":"offline"}]}"#,
+    );
+    let mut t = common::spawn_offline(&sandbox);
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("[failed: offline]"))
+        .expect("the failed send shows its reason");
+
+    t.send_str(":retry").expect("type :retry");
+    t.send(Key::Enter).expect("submit :retry");
+    t.wait_until(|s| s.contains("[sending…]") && !s.contains("[failed"))
+        .expect("the failed send is requeued");
+    common::wait_for_outbox(&sandbox, "\"failure\":null");
+    quit(&mut t);
+
+    let mut t = common::spawn_offline(&sandbox);
+    open_conversation(&mut t);
+    t.wait_until(|s| s.contains("lost one") && s.contains("[sending…]"))
+        .expect("the requeued send is still there after the relaunch");
+    quit(&mut t);
+}

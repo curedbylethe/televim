@@ -243,3 +243,32 @@ struct SeedMessage<'a> {
     timestamp: i64,
     is_outgoing: bool,
 }
+
+/// The outbox file beside the sandbox configuration, the legacy slot's path.
+fn outbox_path(sandbox: &Sandbox) -> PathBuf {
+    sandbox.config.with_extension("outbox.json")
+}
+
+/// Writes an outbox file before the binary starts.
+pub fn seed_outbox(sandbox: &Sandbox, json: &str) {
+    std::fs::write(outbox_path(sandbox), json).expect("write seeded outbox.json");
+}
+
+/// The outbox file as it is on disk now, or empty if it does not exist yet.
+pub fn read_outbox(sandbox: &Sandbox) -> String {
+    std::fs::read_to_string(outbox_path(sandbox)).unwrap_or_default()
+}
+
+/// Waits until the outbox file on disk contains `needle`, polling for up to five
+/// seconds. The file is written on the loop's own tick, not by a key.
+pub fn wait_for_outbox(sandbox: &Sandbox, needle: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !read_outbox(sandbox).contains(needle) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "outbox.json never held {needle:?}; file was {:?}",
+            read_outbox(sandbox)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
