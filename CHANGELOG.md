@@ -5,6 +5,21 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.14.0] - 2026-11-14
+
+### Added
+
+- **domain:** Restore persisted send placeholders
+- **app:** Persist queued text sends across disconnects
+- **tui:** Re-queue failed text sends on retry
+- **app:** Add the reconnect command
+
+### Fixed
+
+- **app:** Move legacy keychain session migration off the launch path
+- **app:** Name the failing file in the shared write warning
+- **web-demo:** Answer :reconnect in the offline browser demo
+
 ## [0.13.0] - 2026-11-14
 
 ### Added
