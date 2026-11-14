@@ -538,6 +538,38 @@ impl ConversationView {
         id
     }
 
+    /// Restores a persisted text send without reusing its placeholder identifier.
+    pub fn push_pending(
+        &mut self,
+        temp_id: i64,
+        text: Cow<'static, str>,
+        reply_to: Option<i64>,
+        failure: Option<String>,
+    ) -> bool {
+        // Leave room for the next send and its identifier decrement.
+        if temp_id >= 0 || temp_id <= i64::MIN + 1 || self.message(temp_id).is_some() {
+            return false;
+        }
+
+        self.window.push_back(std::iter::once(Message {
+            id: temp_id,
+            chat_id: self.window.chat_id,
+            text,
+            timestamp: 0,
+            status: MessageStatus::Sending,
+            is_outgoing: true,
+            reply_to,
+            media: None,
+            is_service: false,
+            media_id: None,
+        }));
+        if let Some(reason) = failure {
+            self.fail_send(temp_id, reason);
+        }
+        self.next_temp_id = self.next_temp_id.min(temp_id - 1);
+        true
+    }
+
     /// Records the reader's outgoing attachment before the server acknowledges it.
     pub fn queue_media_send(&mut self, media: MediaKind, reply_to: Option<i64>) -> i64 {
         let id = self.take_temp_id();
@@ -1546,6 +1578,65 @@ mod tests {
             Some(5),
             "which is what a reader is told: everything up to here was read"
         );
+    }
+
+    #[test]
+    fn push_pending_rejects_invalid_and_duplicate_ids_without_changes() {
+        let mut view = view_with_a_message();
+        for id in [0, 1, i64::MAX, i64::MIN, i64::MIN + 1] {
+            assert!(!view.push_pending(id, Cow::Borrowed("invalid"), None, None));
+        }
+        assert_eq!(view.queue_send("first", None), -1);
+        assert!(!view.push_pending(-1, Cow::Borrowed("duplicate"), Some(7), None));
+        assert_eq!(view.message(-1).expect("queued message").text, "first");
+        assert_eq!(view.queue_send("second", None), -2);
+        assert_eq!(view.window.len(), 3);
+    }
+
+    #[test]
+    fn push_pending_restores_text_reply_and_failure() {
+        let mut view = ConversationView::new(42);
+        assert!(view.push_pending(-7, Cow::Borrowed("restored"), Some(5), None));
+        let pending = view.message(-7).expect("restored placeholder");
+        assert_eq!(pending.chat_id, 42);
+        assert_eq!(pending.text, "restored");
+        assert_eq!(pending.reply_to, Some(5));
+        assert_eq!(pending.timestamp, 0);
+        assert_eq!(pending.status, MessageStatus::Sending);
+        assert!(pending.is_outgoing);
+        assert!(!pending.is_service);
+        assert!(pending.media.is_none());
+        assert!(pending.media_id.is_none());
+
+        assert!(view.push_pending(
+            -8,
+            Cow::Borrowed("failed"),
+            None,
+            Some("network down".to_owned()),
+        ));
+        assert_eq!(
+            view.message(-8).expect("failed placeholder").status,
+            MessageStatus::Failed
+        );
+        assert_eq!(view.failure(-8), Some("network down"));
+    }
+
+    #[test]
+    fn push_pending_preserves_insertion_order_and_lowers_next_id() {
+        let mut view = ConversationView::new(42);
+        assert!(view.push_pending(-7, Cow::Borrowed("first"), None, None));
+        assert!(view.push_pending(-3, Cow::Borrowed("second"), None, None));
+        view.window.replace(page(42, &[2, 1]));
+        assert_eq!(ids(&view.window), vec![1, 2, -7, -3]);
+        assert_eq!(view.queue_send("new", None), -8);
+        assert_eq!(ids(&view.window), vec![1, 2, -7, -3, -8]);
+    }
+
+    #[test]
+    fn push_pending_accepts_the_lowest_id_with_room_for_a_new_send() {
+        let mut view = ConversationView::new(42);
+        assert!(view.push_pending(i64::MIN + 2, Cow::Borrowed("restored"), None, None));
+        assert_eq!(view.queue_send("new", None), i64::MIN + 1);
     }
 
     #[test]
