@@ -350,7 +350,7 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> bool {
         let _ = fs::remove_file(&temp);
     }
     if let Err(error) = result {
-        tracing::warn!(%error, "drafts file could not be written");
+        tracing::warn!(%error, path = %path.display(), "file could not be written");
         return false;
     }
     true
