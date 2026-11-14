@@ -52,6 +52,7 @@ ratatui = { workspace = true, features = ["crossterm"] }
 [dev-dependencies]
 # The integration tests keep their session in a scratch file, so a run never
 # touches the developer's own.
+keyring.workspace = true
 tempfile.workspace = true
 termlens.workspace = true
 
