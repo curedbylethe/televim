@@ -36,3 +36,4 @@ pub use app::{
     Mode, Pane, ProfileId, PromptKind, Register, SessionStore, SignIn, SignInFlow,
 };
 pub use state::connection::ConnectionState;
+pub use state::send_outbox::OutboxSend;

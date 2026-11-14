@@ -7,7 +7,7 @@ use domain::{
     presence::Presence,
     report::ReportReason,
 };
-use tui::{Action, App, LoginField, state::update};
+use tui::{Action, App, LoginField, OutboxSend, state::update};
 
 fn simulator() -> DemoSimulator {
     DemoSimulator::new(DemoWorld::new(1_730_000_000))
@@ -56,7 +56,7 @@ fn every_action_has_an_effect() {
     let mut actions = update_and_message_actions(chat_id, other_chat);
     actions.extend(search_actions(chat_id, peer_id));
     actions.extend(native_actions(chat_id, peer_id, sim.world.accounts[1].id));
-    assert_eq!(actions.len(), 38);
+    assert_eq!(actions.len(), 37);
     for action in actions {
         let effects = sim.dispatch(&app, action);
         assert!(!effects.is_empty(), "each action gets a result");
@@ -96,12 +96,6 @@ fn update_and_message_actions(chat_id: i64, other_chat: i64) -> Vec<Action> {
         Action::Update(update::Action::Restart),
         Action::Update(update::Action::InstalledLater),
         Action::Update(update::Action::Cancel),
-        Action::Send {
-            chat_id,
-            temp_id: -1,
-            text: "maple note".into(),
-            reply_to: None,
-        },
         Action::SendAttachment {
             chat_id,
             temp_id: -2,
@@ -220,36 +214,71 @@ fn native_actions(chat_id: i64, peer_id: i64, account_id: i64) -> Vec<Action> {
 #[test]
 fn send_success_and_failure_are_scheduled() {
     let mut sim = simulator();
-    let app = app_for(&sim);
     let chat_id = sim.world.active().default_chat;
-    let queued = sim.dispatch(
-        &app,
-        Action::Send {
-            chat_id,
-            temp_id: -1,
-            text: "maple note".into(),
-            reply_to: None,
-        },
-    );
+    let send = |chat_id, temp_id, text: &str| OutboxSend {
+        chat_id,
+        temp_id,
+        text: text.to_owned(),
+        reply_to: None,
+        failure: None,
+        sending: false,
+    };
+    let queued = sim.dispatch_send(send(chat_id, -1, "maple note"));
     assert!(matches!(queued.as_slice(), [Effect::Status(_)]));
     assert!(matches!(
         sim.advance(1_000).as_slice(),
         [Effect::Sent { temp_id: -1, .. }]
     ));
 
-    sim.dispatch(
-        &app,
-        Action::Send {
-            chat_id,
-            temp_id: -2,
-            text: "!fail".into(),
-            reply_to: None,
-        },
-    );
+    sim.dispatch_send(send(chat_id, -2, "!fail"));
     assert!(matches!(sim.advance(299).as_slice(), []));
     assert!(
         matches!(sim.advance(1).as_slice(), [Effect::SendFailed { reason, .. }] if reason.ends_with("failure."))
     );
+    assert!(matches!(
+        sim.dispatch_send(send(chat_id, -3, " ")).as_slice(),
+        [Effect::SendFailed { reason, .. }] if reason == "Message is empty; nothing was sent."
+    ));
+    assert!(matches!(
+        sim.dispatch_send(send(0, -4, "unknown chat")).as_slice(),
+        [Effect::SendFailed { reason, .. }] if reason == "That conversation is not in the demo."
+    ));
+}
+
+#[test]
+fn outbox_drain_keeps_one_send_in_flight_and_skips_failures() {
+    let mut sim = simulator();
+    let mut app = app_for(&sim);
+    let chat_id = app.current_chat_id();
+    app.enqueue_send(chat_id, -1, "!fail first".to_owned(), None);
+    app.enqueue_send(chat_id, -2, "second".to_owned(), Some(12));
+    assert!(!sim.drain_sends(&mut app).is_empty());
+    assert!(app.is_sending());
+    assert!(sim.drain_sends(&mut app).is_empty());
+    let Some(Effect::SendFailed {
+        chat_id,
+        temp_id,
+        reason,
+    }) = sim.advance(300).pop()
+    else {
+        panic!("first send fails");
+    };
+    app.end_send(temp_id);
+    assert!(app.settle_send_failure(chat_id, temp_id, reason));
+    assert!(!sim.drain_sends(&mut app).is_empty());
+    let Some(Effect::Sent {
+        chat_id,
+        temp_id,
+        message,
+    }) = sim.advance(1_000).pop()
+    else {
+        panic!("second send succeeds despite the failed entry");
+    };
+    assert_eq!(message.reply_to, Some(12));
+    app.end_send(temp_id);
+    assert!(app.settle_send_success(chat_id, temp_id, message));
+    assert_eq!(app.snapshot_sends().len(), 1);
+    assert!(app.next_queued_send().is_none());
 }
 
 #[test]

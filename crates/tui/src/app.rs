@@ -1120,24 +1120,6 @@ pub enum Action {
     /// Open or answer the stable release offer.
     Update(update::Action),
 
-    /// Send `text` to `chat_id` as a reply to `reply_to`, if any.
-    ///
-    /// `temp_id` is the placeholder the message is already rendered as, and is
-    /// what the outcome is matched back to.
-    Send {
-        /// The conversation to send to.
-        chat_id: i64,
-
-        /// The placeholder the message is rendered as.
-        temp_id: i64,
-
-        /// The text to send.
-        text: String,
-
-        /// The message to reply to, if this is a reply.
-        reply_to: Option<i64>,
-    },
-
     /// Upload and send a local photo or document.
     SendAttachment {
         chat_id: i64,
@@ -2875,6 +2857,60 @@ impl App {
     /// Delegates to [`Outbox::take_session_action`].
     pub fn take_session_action(&mut self) -> Option<Action> {
         self.outbox.take_session_action()
+    }
+
+    /// Adds a text send to the account's ordered outbox.
+    pub fn enqueue_send(
+        &mut self,
+        chat_id: i64,
+        temp_id: i64,
+        text: String,
+        reply_to: Option<i64>,
+    ) {
+        self.conversation
+            .enqueue_send(chat_id, temp_id, text, reply_to);
+    }
+
+    /// Restores the account's pending text sends with no request in flight.
+    pub fn install_sends(&mut self, sends: Vec<crate::OutboxSend>) {
+        self.conversation.install_sends(sends);
+    }
+
+    /// Copies pending text sends in insertion order for persistence.
+    pub fn snapshot_sends(&self) -> Vec<crate::OutboxSend> {
+        self.conversation.snapshot_sends()
+    }
+
+    /// Returns the oldest text send that is neither failed nor in flight.
+    pub fn next_queued_send(&self) -> Option<crate::OutboxSend> {
+        self.conversation.next_queued_send()
+    }
+
+    /// Marks the text send selected by the driver as in flight.
+    pub fn mark_send_sending(&mut self, chat_id: i64, temp_id: i64) {
+        self.conversation.mark_send_sending(chat_id, temp_id);
+    }
+
+    /// Whether a text or media send holds the shared in-flight gate.
+    pub fn is_sending(&self) -> bool {
+        self.conversation.is_sending()
+    }
+
+    /// Removes an acknowledged text send and confirms its visible placeholder.
+    pub fn settle_send_success(&mut self, chat_id: i64, temp_id: i64, real: Message) -> bool {
+        self.conversation
+            .settle_send_success(chat_id, temp_id, real)
+    }
+
+    /// Keeps a failed text send for manual retry, restoring its row if needed.
+    pub fn settle_send_failure(&mut self, chat_id: i64, temp_id: i64, reason: String) -> bool {
+        self.conversation
+            .settle_send_failure(chat_id, temp_id, reason)
+    }
+
+    /// Forgets pending text sends and releases the account's send gate.
+    pub fn clear_sends(&mut self) {
+        self.conversation.clear_sends();
     }
 
     /// Records that a send for `temp_id` is in flight.

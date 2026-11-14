@@ -11,6 +11,7 @@ pub mod outbox;
 pub mod pending;
 pub mod profile;
 pub(crate) mod search_query;
+pub mod send_outbox;
 pub mod session;
 pub mod ui;
 pub mod update;

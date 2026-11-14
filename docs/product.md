@@ -414,6 +414,18 @@ Working today:
   caret at its end.
   `:attach <path>` asks for confirmation and adds an optimistic media row before
   the upload starts.
+- **Text outbox:** `Enter` queues text even while offline and shows `[sending…]`.
+  Multiple messages can wait; the client sends one at a time when connected.
+  Each request has a 15-second timeout after it starts. An error or timeout
+  leaves `[failed: …]`; a failed entry does not block later queued messages.
+  Queued and failed text survives a restart in `televim.outbox.json` beside
+  the config (`televim.<id>.outbox.json` for an added account). The file is
+  plaintext JSON with `0600` permissions, replaced atomically when the queue
+  changes; a crash can lose the current 250 ms loop tick. Success removes the
+  entry, and `D` dismisses a failed row and its entry. Sign-out clears the file;
+  account switching saves the old account's queue and restores the target's.
+  A timeout can follow server acceptance, so sending the text again can duplicate
+  it. Media uploads keep their separate in-memory path.
 - **Text direction:** the draft in the bar is drawn by the same rules as an
   incoming message. The default `bidi = "auto"` selects `words` on kitty and
   `terminal` elsewhere; explicit values win. In `terminal` the row is emitted as
@@ -546,7 +558,8 @@ Working today:
   `offline:`, the cached list and the cached conversations stay readable and
   switchable, and the status line still says `offline:`. Text, the media *kind* and
   its Telegram media id are kept; media bytes, presence and unsent placeholders
-  never are. The file is tagged with the signed-in account's id and checked once `Ready`
+  never are. Queued and failed text belongs to the separate text outbox above.
+  The file is tagged with the signed-in account's id and checked once `Ready`
   names the account; another account's file is discarded. A page fetched under a
   feed that has since ended is dropped. The file is removed on sign-out and when a
   launch finds no session. A plaintext file from an older build is read once and

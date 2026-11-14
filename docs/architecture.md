@@ -48,7 +48,7 @@ televim/
     ├── demo-support/           # Fictional, deterministic offline demo fixtures
     ├── app/                    # Composition root & CLI binary
 │   ├── src/                # main, accounts, config, profile, draft_store,
-    │   │                       #   history_store, media_cache, net, notify, runtime
+    │   │                       #   outbox_store, history_store, media_cache, net, notify, runtime
     │   └── tests/              # proto_integration.rs, tui_e2e.rs
     └── web-demo/               # Detached browser workspace; own Cargo.lock
         ├── src/                # Ratzilla backend, browser bridge, offline driver
@@ -335,6 +335,7 @@ crates/tui/
 │   │   ├── profile.rs      # ProfileCard: the card's buffer and its keystrokes
 │   │   ├── chat_list.rs    # ChatListState: the chat list and its selection cursor
 │   │   ├── outbox.rs       # Outbox: queued actions, fetches in flight, the clipboard
+│   │   ├── send_outbox.rs  # SendOutbox: pending text sends, across conversations
 │   │   ├── pending.rs      # Pending: half-typed keys and deferred requests
 │   │   ├── conversation.rs # ConversationState: the open view, registers, searches
 │   │   ├── search_query.rs # The typed filters (media:/since:/until:) -> SearchSpec
@@ -430,7 +431,18 @@ availability indicator sits on the input bar's bottom border, leaving the
 status row for the current mode and its 69 key-hint cells. `:update` opens a
 known offer even when an automatic offer was postponed by activity.
 
-The media commands use the same outbox seam. `:attach <path>` checks the design's
+Text sends use `ConversationState::send_outbox` (`SendOutbox`), separately from
+`Outbox`'s bounded action queue. `submit_message` inserts a placeholder and an
+`OutboxSend`; opening a conversation restores its pending rows with their
+persisted negative ids. Cache seeding accepts a window containing only local
+placeholders, so cached history draws beneath them. Public `App` methods expose
+snapshots, the next queued send, the shared in-flight gate and settlement without
+exposing the queue's storage. The simulator's `drain_sends` uses that same API
+and `dispatch_send` schedules its existing effects; the browser driver drains
+once per tick and settles each effect against the queue. Neither demo adds
+another text queue or writes the native outbox file.
+
+The media commands use the action queue seam. `:attach <path>` checks the design's
 image and document extension allowlist, raises a confirmation, and captures the
 chat, path and media kind. Confirming queues a negative-id media placeholder
 before `Action::SendAttachment`; its row shows `[sending…]`, then upload progress
@@ -554,10 +566,11 @@ no library target.
 crates/app/
 ├── src/
 │   ├── main.rs         # Entry point, CLI parsing (clap: --config, --chat)
-│   ├── accounts.rs     # One resolver for an account's four paths, the
+│   ├── accounts.rs     # One resolver for an account's five paths, the
 │   │                   #   accounts index, and the session store over a slot
 │   ├── config.rs       # Load TOML + env
 │   ├── draft_store.rs  # The drafts file beside the config
+│   ├── outbox_store.rs # The durable text-send queue beside the config
 │   ├── history_store.rs # The history file beside the config: cached
 │   │                   #   messages per peer, the chat list, the merge
 │   ├── media_cache.rs  # The media directory beside the config: one file
@@ -578,15 +591,15 @@ archives, capped at 32 MiB, to `.televim-update-<pid>` beside the executable,
 then verifies `SHA256SUMS`, extracts only `televim`, and checks its version.
 The archive is never held in memory; hashing uses a fixed 64 KiB buffer.
 
-`accounts.rs` is the one resolver for the four artefacts that belong to an
-account: `slot_paths` derives the drafts file, the history file, the media
-directory and the session target from the configuration and its own path, so a
-run's files, its credential-store entry and the profile panel's description
+`accounts.rs` is the one resolver for the five artefacts that belong to an
+account: `slot_paths` derives the drafts file, the history file, the text outbox,
+the media directory and the session target from the configuration and its own
+path, so a run's files, its credential-store entry and the profile panel's description
 cannot disagree about whose they are. `AccountSlot::Legacy` is the slot every
 install has, and reproduces today's bytes exactly: `televim.drafts.json`,
-`televim.history.json`, `televim.media` (or `media_cache_dir`), and the `session`
-entry or the configured `session_path`. `AccountSlot::Id(id)` is an account added
-later, and its four paths are the same names with `.<id>` — the files and the
+`televim.history.json`, `televim.outbox.json`, `televim.media` (or
+`media_cache_dir`), and the `session` entry or the configured `session_path`. `AccountSlot::Id(id)` is an account added
+later, and its five paths are the same names with `.<id>` — the files and the
 media directory as `<stem>.<id>.*`, a configured session file with `.<id>` before
 its extension — and the credential-store entry `session-<id>`. `SlotPaths` is
 that set, `SessionTarget` is either `Keyring(name)` or `File(path)`, and
@@ -675,19 +688,20 @@ Adding an account is the one path that changes the slot under a running loop.
 `Action::AddAccount` — the self card's `add account` row and `:add-account` — is
 answered in `drive` before the client gate, because a switch is exactly when
 there is no client. `State::detach_account` returns at once if one is already
-switching; otherwise it flushes the drafts file while the file still names the
-account, drops the client `Arc` and with it the single-shot update relay, stops
-in-flight downloads, empties the screen's chats and history bookkeeping, and sets
-`switching`. Nothing is deleted: the first account's drafts, history, media,
+switching; otherwise it flushes drafts and the text outbox while their files
+still name the account. A failed outbox write refuses the switch so unsaved text
+stays in memory. A successful switch drops the client `Arc` and with it the
+single-shot update relay, stops in-flight downloads, empties the screen's chats and history bookkeeping, and sets
+`switching`. Nothing is deleted: the first account's drafts, history, outbox, media,
 session and paths stay where the resolver put them, and
-`runtime::persist_for_slot` writes nothing for either file while `switching` is
+`runtime::persist_for_slot` writes no account files while `switching` is
 set — the file the sync would reach for is the account that just left, and the
 words on screen are no longer its to keep. A history write already in flight at
 the detach finishes into the first account's own file, because it holds its own
 `HistoryFile`. The fresh bring-up opens through `Opening::Fresh`, whose
 `Target::Fresh` has no slot until the sign-in stores one; `adopt_slot` at the
-`Ready` that names the new account reopens that slot's drafts, history and media
-and points the panel at its store. `Action::LoginCancelled` while switching is
+`Ready` that names the new account reopens that slot's drafts, history, outbox
+and media and points the panel at its store. `Action::LoginCancelled` while switching is
 answered before the client gate too: `cancel_switch` drops the fresh client and
 login tokens, adopts the first slot again and brings it up, which is why `Esc` at
 the phone step queues the cancel as the code and password steps already did.
@@ -726,6 +740,18 @@ stored. `clear` bumps a generation, so a store that reserved before a clear remo
 its late file instead of indexing it, unless a newer reservation or entry holds its
 name; a reservation holds its name until it commits or its write fails. Sign-out
 never waits out a write.
+
+`outbox_store.rs` writes a versioned, account-tagged, plaintext JSON file using
+the drafts writer's atomic rename and `0600` permissions. It validates entries,
+leaves a future-version file untouched, and removes the file when the queue is
+empty. Runtime restores it before `open_from_cache`, then `persist_for_slot`
+compares snapshots on each loop pass, including exit; only a successful save
+advances the synced snapshot. Sign-out removes the file and clears pending sends.
+`net::State` owns `outbox_file` and `outbox_in_flight`; `drive` drains after the
+client gate only while connected and no text or media send is in flight. A
+15-second request timeout settles a failed entry instead of wedging the gate.
+Text completions carry a separate account generation, so a late reply from an
+account left behind cannot settle a new account's send with the same local id.
 
 Uploads and exports are orchestrated in `net::State`. A pending upload map holds
 each negative placeholder's local path, kind and cancellation flag. Upload tasks
@@ -793,8 +819,8 @@ removes the file behind any write still going. `seed_opened` runs on every open
 reader switching chats offline still sees cached rows — and only for an empty
 window the cursor does not yet name. **`tui`** takes the seed through
 `App::seed_from_cache` (`ConversationState::seed`, accepted only for the open
-chat while its window is empty) and marks the window `cached` until a page from
-the wire replaces it; `App::is_revalidating` is that flag together with a newest
+chat while its window has no numbered message) and marks the window `cached`
+until a page from the wire replaces it; `App::is_revalidating` is that flag together with a newest
 page in flight, and it is what puts `REVALIDATING_LABEL` on the status line.
 `wants_older` and `wants_newer` hold while the newest page is in flight, because
 a cached window is no longer the empty window that used to be the guard. `tui`

@@ -16,6 +16,7 @@ use crate::app::{ConfirmKind, Deletion, Register};
 use crate::bidi::{self, BidiMode};
 use crate::download::Downloads;
 use crate::jumplist::Jumplist;
+use crate::state::send_outbox::{OutboxSend, SendOutbox};
 use crate::sticker::StickerCache;
 
 /// What forwarding a selection would ask the server for.
@@ -121,6 +122,8 @@ pub struct ConversationState {
     /// no-op, and a duplicate result cannot release a later send's gate.
     pub sending: Option<i64>,
 
+    pub(crate) send_outbox: SendOutbox,
+
     /// The deletion waiting to be confirmed, if one is.
     pub confirm: Option<ConfirmKind>,
 
@@ -184,6 +187,7 @@ impl ConversationState {
             reply_to: None,
             editing: None,
             sending: None,
+            send_outbox: SendOutbox::default(),
             confirm: None,
             jumplist: Jumplist::default(),
             stickers: StickerCache::default(),
@@ -204,6 +208,104 @@ impl ConversationState {
         // who returns finds them fetched again rather than mislabelled.
         self.stickers.clear();
         self.row_stash.get_mut().clear();
+        self.restore_sends();
+    }
+
+    fn restore_sends(&mut self) {
+        for send in self.send_outbox.for_chat(self.conversation.window.chat_id) {
+            self.conversation.push_pending(
+                send.temp_id,
+                send.text.clone().into(),
+                send.reply_to,
+                send.failure.clone(),
+            );
+            if send.sending && self.sending.is_none() {
+                self.sending = Some(send.temp_id);
+            }
+        }
+    }
+
+    pub(crate) fn enqueue_send(
+        &mut self,
+        chat_id: i64,
+        temp_id: i64,
+        text: String,
+        reply_to: Option<i64>,
+    ) {
+        self.send_outbox.enqueue(OutboxSend {
+            chat_id,
+            temp_id,
+            text,
+            reply_to,
+            failure: None,
+            sending: false,
+        });
+    }
+
+    pub(crate) fn install_sends(&mut self, sends: Vec<OutboxSend>) {
+        for send in self.send_outbox.for_chat(self.conversation.window.chat_id) {
+            self.conversation.dismiss_failed(send.temp_id);
+        }
+        self.send_outbox.install(sends);
+        self.sending = None;
+        self.restore_sends();
+    }
+
+    pub(crate) fn snapshot_sends(&self) -> Vec<OutboxSend> {
+        self.send_outbox.snapshot()
+    }
+
+    pub(crate) fn next_queued_send(&self) -> Option<OutboxSend> {
+        self.send_outbox.next_queued()
+    }
+
+    pub(crate) fn mark_send_sending(&mut self, chat_id: i64, temp_id: i64) {
+        self.send_outbox.mark_sending(chat_id, temp_id);
+    }
+
+    pub(crate) fn is_sending(&self) -> bool {
+        self.sending.is_some()
+    }
+
+    pub(crate) fn settle_send_success(
+        &mut self,
+        chat_id: i64,
+        temp_id: i64,
+        real: Message,
+    ) -> bool {
+        if self.send_outbox.remove(chat_id, temp_id).is_none() {
+            return false;
+        }
+        if self.conversation.window.chat_id == chat_id {
+            self.confirm_sent(temp_id, real);
+        }
+        true
+    }
+
+    pub(crate) fn settle_send_failure(
+        &mut self,
+        chat_id: i64,
+        temp_id: i64,
+        reason: String,
+    ) -> bool {
+        let Some(send) = self
+            .send_outbox
+            .settle_failure(chat_id, temp_id, reason.clone())
+        else {
+            return false;
+        };
+        if self.conversation.window.chat_id == chat_id && !self.fail_send(temp_id, reason) {
+            let anchor = self.cursor_message_id();
+            self.conversation
+                .push_pending(temp_id, send.text.into(), send.reply_to, send.failure);
+            self.after_window_change(anchor);
+        }
+        true
+    }
+
+    pub(crate) fn clear_sends(&mut self) {
+        self.send_outbox.clear();
+        self.sending = None;
     }
 
     /// Sets the depth each conversation's jumplist keeps, from the
@@ -392,7 +494,7 @@ impl ConversationState {
     pub(crate) fn seed(&mut self, chat_id: i64, messages: Vec<Message>) -> bool {
         if !self.has_conversation()
             || self.conversation.window.chat_id != chat_id
-            || !self.conversation.window.is_empty()
+            || self.conversation.window.oldest_id().is_some()
         {
             return false;
         }
@@ -584,6 +686,7 @@ impl ConversationState {
 
         let anchor = self.cursor_message_id();
         if self.conversation.dismiss_failed(id) {
+            self.send_outbox.remove(chat_id, id);
             self.downloads.forget(chat_id, id);
             self.after_window_change(anchor);
             return (id < 0 && media.is_some()).then_some(id);
@@ -1075,6 +1178,86 @@ mod tests {
             "the seed lands in an empty window for the open chat"
         );
         state
+    }
+
+    fn queued(chat_id: i64, temp_id: i64, failure: Option<&str>) -> OutboxSend {
+        OutboxSend {
+            chat_id,
+            temp_id,
+            text: format!("send {temp_id}"),
+            reply_to: Some(1),
+            failure: failure.map(str::to_owned),
+            sending: false,
+        }
+    }
+
+    #[test]
+    fn installed_sends_rehydrate_only_the_open_chat_and_allow_cached_history() {
+        let mut state = ConversationState::new();
+        let mut send = queued(CHAT, -7, None);
+        send.sending = true;
+        state.install_sends(vec![send, queued(CHAT + 1, -1, Some("offline"))]);
+        state.open_conversation(CHAT);
+        assert_eq!(
+            state.conversation.message(-7).expect("queued row").reply_to,
+            Some(1)
+        );
+        assert!(state.conversation.message(-1).is_none());
+        assert!(!state.is_sending());
+        assert!(!state.next_queued_send().expect("installed send").sending);
+        assert!(state.seed(CHAT, vec![message(1)]));
+        assert!(state.conversation.message(1).is_some());
+        assert!(state.conversation.message(-7).is_some());
+        assert_eq!(state.conversation.queue_send("next", None), -8);
+
+        state.open_conversation(CHAT + 1);
+        assert!(state.conversation.message(-7).is_none());
+        assert_eq!(state.conversation.failure(-1), Some("offline"));
+    }
+
+    #[test]
+    fn settlement_survives_a_chat_switch_and_unknown_results_do_nothing() {
+        let mut state = opened(&[1]);
+        state.install_sends(vec![queued(CHAT, -7, None), queued(CHAT + 1, -1, None)]);
+        state.mark_send_sending(CHAT, -7);
+        state.begin_send(-7);
+        state.open_conversation(CHAT + 1);
+        assert!(state.is_sending());
+        state.end_send(-7);
+        let mut sent = message(10);
+        sent.is_outgoing = true;
+        assert!(state.settle_send_success(CHAT, -7, sent));
+        assert_eq!(state.snapshot_sends().len(), 1);
+        assert!(state.conversation.message(10).is_none());
+        assert!(!state.settle_send_failure(CHAT, -7, "late".to_owned()));
+        assert!(state.settle_send_failure(CHAT + 1, -1, "offline".to_owned()));
+        assert_eq!(state.conversation.failure(-1), Some("offline"));
+        assert!(state.next_queued_send().is_none());
+        state.clear_sends();
+        assert!(state.snapshot_sends().is_empty());
+        assert!(!state.is_sending());
+    }
+
+    #[test]
+    fn a_trimmed_failed_row_is_restored_on_settlement_and_dismissal_removes_its_send() {
+        let mut state = opened(&[1]);
+        state.install_sends((-9..=-1).map(|id| queued(CHAT, id, None)).collect());
+        for id in -9..=-1 {
+            assert!(state.settle_send_failure(CHAT, id, "offline".to_owned()));
+        }
+        assert!(state.conversation.message(-9).is_none());
+        assert!(state.settle_send_failure(CHAT, -9, "again".to_owned()));
+        assert_eq!(state.conversation.failure(-9), Some("again"));
+        let cursor = state
+            .conversation
+            .window
+            .iter()
+            .position(|row| row.id == -9)
+            .expect("restored row");
+        state.vim.set_cursor(cursor);
+        state.dismiss_failed_at_cursor();
+        assert!(state.conversation.message(-9).is_none());
+        assert!(!state.snapshot_sends().iter().any(|send| send.temp_id == -9));
     }
 
     /// A window change, generated as a page from either side or a replacement.

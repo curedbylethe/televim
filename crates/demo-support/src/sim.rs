@@ -9,7 +9,7 @@ use domain::{
     updates::UpdateEvent,
     user::rank_candidates,
 };
-use tui::{Action, App, app::FetchDirection, state::update};
+use tui::{Action, App, OutboxSend, app::FetchDirection, state::update};
 
 use crate::search::{self, GLOBAL_PAGE_SIZE, GlobalPage};
 use crate::{DemoWorld, Effect};
@@ -72,49 +72,6 @@ impl DemoSimulator {
             }
             Action::Update(update::Action::InstalledLater) => {
                 vec![Self::status("No update is installed in the offline demo.")]
-            }
-            Action::Send {
-                chat_id,
-                temp_id,
-                text,
-                reply_to,
-            } => {
-                if text.trim().is_empty() {
-                    return vec![Effect::SendFailed {
-                        chat_id,
-                        temp_id,
-                        reason: "Message is empty; nothing was sent.".into(),
-                    }];
-                }
-                if !self.has_chat(chat_id) {
-                    return vec![Self::status("That conversation is not in the demo.")];
-                }
-                if text.starts_with("!fail") {
-                    self.schedule(
-                        300,
-                        Effect::SendFailed {
-                            chat_id,
-                            temp_id,
-                            reason: "The demo simulated a send failure.".into(),
-                        },
-                    );
-                    return vec![Self::status(
-                        "The demo is preparing a simulated send failure.",
-                    )];
-                }
-                let message =
-                    self.new_message(chat_id, text, true, MessageStatus::Sent, reply_to, None);
-                let delay = 250 + (message.id.unsigned_abs() % 350);
-                self.push_message(&message);
-                self.schedule(
-                    delay,
-                    Effect::Sent {
-                        chat_id,
-                        temp_id,
-                        message,
-                    },
-                );
-                vec![Self::status("Message queued in the offline demo.")]
             }
             Action::SendAttachment {
                 chat_id,
@@ -534,6 +491,69 @@ impl DemoSimulator {
                 ]
             }
         }
+    }
+
+    /// Schedules one queued text send while the global send gate is clear.
+    pub fn drain_sends(&mut self, app: &mut App) -> Vec<Effect> {
+        if app.is_sending() {
+            return Vec::new();
+        }
+        let Some(send) = app.next_queued_send() else {
+            return Vec::new();
+        };
+        app.mark_send_sending(send.chat_id, send.temp_id);
+        app.begin_send(send.temp_id);
+        self.dispatch_send(send)
+    }
+
+    /// Simulates a text send using the same timing and failure vocabulary as media.
+    pub fn dispatch_send(&mut self, send: OutboxSend) -> Vec<Effect> {
+        let OutboxSend {
+            chat_id,
+            temp_id,
+            text,
+            reply_to,
+            ..
+        } = send;
+        if text.trim().is_empty() {
+            return vec![Effect::SendFailed {
+                chat_id,
+                temp_id,
+                reason: "Message is empty; nothing was sent.".into(),
+            }];
+        }
+        if !self.has_chat(chat_id) {
+            return vec![Effect::SendFailed {
+                chat_id,
+                temp_id,
+                reason: "That conversation is not in the demo.".into(),
+            }];
+        }
+        if text.starts_with("!fail") {
+            self.schedule(
+                300,
+                Effect::SendFailed {
+                    chat_id,
+                    temp_id,
+                    reason: "The demo simulated a send failure.".into(),
+                },
+            );
+            return vec![Self::status(
+                "The demo is preparing a simulated send failure.",
+            )];
+        }
+        let message = self.new_message(chat_id, text, true, MessageStatus::Sent, reply_to, None);
+        let delay = 250 + (message.id.unsigned_abs() % 350);
+        self.push_message(&message);
+        self.schedule(
+            delay,
+            Effect::Sent {
+                chat_id,
+                temp_id,
+                message,
+            },
+        );
+        vec![Self::status("Message queued in the offline demo.")]
     }
 
     pub fn schedule(&mut self, delay_ms: u64, effect: Effect) {

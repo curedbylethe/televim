@@ -4205,7 +4205,7 @@ mod tests {
         press(&mut app, KeyCode::Char('i'));
         type_text(&mut app, "hello");
         press(&mut app, KeyCode::Enter);
-        let id = app.conversation.sending.expect("the send is in flight");
+        let id = app.next_queued_send().expect("the send is queued").temp_id;
 
         let sending = screen(&app, 80, 24);
         assert!(

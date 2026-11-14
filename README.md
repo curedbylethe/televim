@@ -86,8 +86,8 @@ By default, Televim reads `televim.toml` under the operating system's local
 data directory (`~/Library/Application Support/televim` on macOS,
 `%LOCALAPPDATA%\televim` on Windows, or `$XDG_DATA_HOME/televim` on Linux;
 usually `~/.local/share/televim`). Use `--config <path>` to select another
-file. Logs, drafts, history, and the account list are stored beside it; the
-media cache can use a separate directory. On first launch, an existing profile
+file. Logs, drafts, history, the text outbox, and the account list are stored
+beside it; the media cache can use a separate directory. On first launch, an existing profile
 in the current directory is adopted in place and remembered for later launches.
 Stable release checks run in the background once per day. Set `updates = "off"`
 or `TELEVIM_UPDATES=off` to disable them; the default is `auto`.

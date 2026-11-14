@@ -38,6 +38,7 @@ use crate::history_store::{
 };
 use crate::media_cache::MediaCache;
 use crate::net;
+use crate::outbox_store::{OutboxEntry, OutboxFile, restore_outbox};
 use crate::profile;
 #[cfg(debug_assertions)]
 use crate::scenario;
@@ -894,6 +895,8 @@ async fn event_loop(
     // clear loses words, a false accept is corrected by park/resume.
     let draft_file = DraftFile::new(paths.drafts.clone());
     restore_drafts(&mut app, &draft_file, label.as_deref());
+    let outbox_file = OutboxFile::new(paths.outbox.clone());
+    restore_outbox(&mut app, &outbox_file, label.as_deref());
     // Nothing synced yet, so the first pass always writes: a discarded file
     // is overwritten rather than left behind, and a launch with nothing
     // stored settles the file (or its absence) at once.
@@ -945,6 +948,7 @@ async fn event_loop(
     net::push_known_accounts(&mut app, index);
     // And the drafts file, so signing out can remove it.
     network.set_draft_file(draft_file.clone());
+    network.set_outbox_file(outbox_file);
     // Opened beside the history file. A directory written for another account,
     // or for none, is cleared on the way in: the history's strict rule.
     network.set_media_cache(MediaCache::open(
@@ -1323,6 +1327,28 @@ fn sync_drafts(
     *last = Some((drafts, reads, subjects));
 }
 
+fn sync_outbox(
+    app: &App,
+    file: &OutboxFile,
+    last: &mut Option<Vec<OutboxEntry>>,
+    account: Option<&str>,
+) {
+    if file.foreign() {
+        return;
+    }
+    let sends: Vec<_> = app
+        .snapshot_sends()
+        .into_iter()
+        .map(OutboxEntry::from)
+        .collect();
+    if last.as_ref() == Some(&sends) {
+        return;
+    }
+    if file.save(&sends, account) {
+        *last = Some(sends);
+    }
+}
+
 /// What [`sync_drafts`] last wrote: the parked words and the read marks.
 type SyncedDrafts = (Vec<(i64, String)>, Vec<(i64, i64)>, Vec<(i64, bool, i64)>);
 
@@ -1333,11 +1359,16 @@ struct LoopSlot {
 
     /// What the last sync wrote.
     synced: Option<SyncedDrafts>,
+    synced_outbox: Option<Vec<OutboxEntry>>,
 }
 
 impl LoopSlot {
     fn new(slot: accounts::AccountSlot) -> Self {
-        Self { slot, synced: None }
+        Self {
+            slot,
+            synced: None,
+            synced_outbox: None,
+        }
     }
 }
 
@@ -1362,6 +1393,7 @@ fn persist_for_slot(
     if network.slot() != loop_slot.slot {
         loop_slot.slot = network.slot();
         loop_slot.synced = None;
+        loop_slot.synced_outbox = None;
         viewers.cache = network.media_cache();
     }
     if network.is_switching() {
@@ -1370,6 +1402,10 @@ fn persist_for_slot(
     if let Some(file) = network.draft_file() {
         let label = network.slot_label();
         sync_drafts(app, file, &mut loop_slot.synced, label.as_deref());
+    }
+    if let Some(file) = network.outbox_file() {
+        let label = network.slot_label();
+        sync_outbox(app, file, &mut loop_slot.synced_outbox, label.as_deref());
     }
     // Unlike the drafts, written off the loop's thread: the file is up to a
     // window per conversation, and it is a write behind the pages that already
@@ -2753,5 +2789,63 @@ mod tests {
             "one resume, no restart, no kill"
         );
         assert!(rx.try_recv().is_err(), "the wait reported exactly once");
+    }
+}
+
+#[cfg(test)]
+mod outbox_sync_tests {
+    use super::*;
+
+    #[test]
+    fn queued_text_syncs_restores_and_success_removes_the_file() {
+        let dir = tempfile::tempdir().expect("sandbox");
+        let path = dir.path().join("televim.outbox.json");
+        let file = OutboxFile::new(path.clone());
+        let mut app = App::new();
+        app.enqueue_send(7, -1, "persisted text".to_owned(), Some(2));
+        let mut last = None;
+        sync_outbox(&app, &file, &mut last, None);
+        assert!(last.is_some());
+        let mut restored = App::new();
+        restore_outbox(&mut restored, &file, None);
+        assert_eq!(restored.snapshot_sends()[0].text, "persisted text");
+        assert_eq!(restored.snapshot_sends()[0].reply_to, Some(2));
+        app.settle_send_success(
+            7,
+            -1,
+            domain::Message {
+                id: 5,
+                chat_id: 7,
+                text: "persisted text".into(),
+                timestamp: 1,
+                status: domain::MessageStatus::Sent,
+                is_outgoing: true,
+                is_service: false,
+                reply_to: Some(2),
+                media: None,
+                media_id: None,
+            },
+        );
+        sync_outbox(&app, &file, &mut last, None);
+        assert!(!path.exists());
+        assert_eq!(last, Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_failed_outbox_sync_is_retried_on_the_next_pass() {
+        let dir = tempfile::tempdir().expect("sandbox");
+        let parent = dir.path().join("missing");
+        std::fs::write(&parent, b"blocks the directory").expect("write blocker");
+        let file = OutboxFile::new(parent.join("televim.outbox.json"));
+        let mut app = App::new();
+        app.enqueue_send(7, -1, "retry disk write".to_owned(), None);
+        let mut last = None;
+        sync_outbox(&app, &file, &mut last, None);
+        assert!(last.is_none());
+        std::fs::remove_file(&parent).expect("remove blocker");
+        std::fs::create_dir(&parent).expect("make parent writable");
+        sync_outbox(&app, &file, &mut last, None);
+        assert!(last.is_some());
+        assert_eq!(file.load().sends[0].text, "retry disk write");
     }
 }

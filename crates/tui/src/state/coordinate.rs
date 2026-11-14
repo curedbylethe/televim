@@ -1563,25 +1563,19 @@ pub(crate) fn paste(
 /// Queues the composed message as a send, and shows it immediately.
 ///
 /// The placeholder is what the reader sees until the server answers, and its
-/// identifier is what the answer is matched against. One send is in flight at
-/// a time: Telegram throttles per conversation, and a second send would only
-/// earn a `FLOOD_WAIT` — but a silent no-op reads as a hang, so the refusal
-/// says so.
+/// identifier is what the answer is matched against. The account's text outbox
+/// keeps every queued send; the driver drains one at a time.
 ///
 /// A queued send clears the peer's parked entry, if there is one: the words
 /// are on their way, so there is no draft left to keep. Mirrors what
 /// [`park_draft`] does for empty lines.
 pub(crate) fn submit_message(
-    ui: &mut UiState,
+    _ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
-    outbox: &mut Outbox,
+    _outbox: &mut Outbox,
     drafts: &mut DraftStore,
 ) {
-    if conversation.sending.is_some() {
-        ui.flash("a message is already on its way");
-        return;
-    }
     if !conversation.has_conversation() || input.line.text().trim().is_empty() {
         return;
     }
@@ -1592,17 +1586,7 @@ pub(crate) fn submit_message(
     let temp_id = conversation
         .conversation
         .queue_send(&text, conversation.reply_to);
-    conversation.begin_send(temp_id);
-    queue_action(
-        &mut *outbox,
-        &mut *ui,
-        Action::Send {
-            chat_id,
-            temp_id,
-            text,
-            reply_to: conversation.reply_to,
-        },
-    );
+    conversation.enqueue_send(chat_id, temp_id, text, conversation.reply_to);
     conversation.after_window_change(anchor);
     drafts.drafts.remove(&chat_id);
 }

@@ -12,6 +12,7 @@ mod history_store;
 mod media_cache;
 mod net;
 mod notify;
+mod outbox_store;
 mod profile;
 mod runtime;
 #[cfg(debug_assertions)]
