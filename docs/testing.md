@@ -211,6 +211,8 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   queueing, one send in flight, failures, chat switches, trimmed rows and dismissal.
   Retry tests cover every chat in insertion order, trimmed-row restoration,
   connected send retries without a rebuild, and offline/no-failed bring-up retries.
+  PTY restart tests in `tui_e2e` prove an offline send, and a `:retry`ed failed
+  send, survive a quit and relaunch from `televim.outbox.json`.
   Reconnect tests cover the command flag, a live-feed cancel with the budget reset,
   a no-feed bring-up, the busy refusal, and a stored or dropped feed handle. The
   startup-window guard and the live wire path are not reproducible from the
