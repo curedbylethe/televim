@@ -1834,6 +1834,15 @@ pub(crate) fn request_retry(ui: &mut UiState, session: &mut SessionState) {
     ui.show_persistent("reconnecting");
 }
 
+/// Asks the network loop for a fresh connection, as `:reconnect`.
+///
+/// Shows the same sentence a retry does. The loop sets the connection state
+/// itself; the TUI never writes it.
+pub(crate) fn request_reconnect(ui: &mut UiState, session: &mut SessionState) {
+    session.request_reconnect();
+    ui.show_persistent("reconnecting");
+}
+
 /// The account is signed in: the surface has nothing left to say.
 ///
 /// The flow is dropped rather than left at its last step, so the conversation
@@ -3255,6 +3264,10 @@ pub(crate) fn run_command(
             } else {
                 request_retry(&mut *ui, &mut *session);
             }
+            false
+        }
+        "reconnect" => {
+            request_reconnect(&mut *ui, &mut *session);
             false
         }
         // The self card's `add account` row asks for the same thing. No client
