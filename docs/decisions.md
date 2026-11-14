@@ -1847,3 +1847,11 @@ are in [`../AGENTS.md`](../AGENTS.md).
   automatically. Account generations guard text completions independently of
   feed generations, so switching accounts invalidates late results without
   discarding valid results during a reconnect.
+
+- **Why `:retry` requeues failed text across all chats:** the outbox belongs to
+  the account, so an unsent message remains the reader's work after a chat switch.
+  Retry preserves insertion order and restores any failed row the bounded view
+  trimmed. A connected client drains the requeued sends without rebuilding; an
+  offline client, or a retry with no failed text, keeps the existing bring-up
+  behavior. Retrying does not start a second send or retry media uploads, and a
+  timeout remains a manual choice because the original may already be delivered.

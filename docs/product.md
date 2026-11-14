@@ -422,7 +422,9 @@ Working today:
   the config (`televim.<id>.outbox.json` for an added account). The file is
   plaintext JSON with `0600` permissions, replaced atomically when the queue
   changes; a crash can lose the current 250 ms loop tick. Success removes the
-  entry, and `D` dismisses a failed row and its entry. Sign-out clears the file;
+  entry, and `D` dismisses a failed row and its entry. `:retry` requeues every
+  failed text send across all chats in insertion order, including rows no longer
+  visible. Sign-out clears the file;
   account switching saves the old account's queue and restores the target's.
   A timeout can follow server acceptance, so sending the text again can duplicate
   it. Media uploads keep their separate in-memory path.
@@ -517,9 +519,12 @@ Working today:
   none is set) after a `y/n`, refuses a session that belongs to another account than the
   one signed in, and reconnects with it. The auth key travels inside the snapshot;
   the live session and the source are left as they were. The path is required.
-  `:retry` re-runs the bring-up — the client, the chat list, the feed — and is how
-  a launch that exhausted its three chat-list attempts is cleared without a
-  restart; while a bring-up is already in flight it says so and does nothing.
+  `:retry` requeues failed text sends across all chats. When connected with failed
+  text, it shows `retrying N sends` and lets the existing client send them without
+  rebuilding. When offline, or when no text send failed, it re-runs the bring-up
+  — the client, the chat list, the feed — so a launch that exhausted its three
+  chat-list attempts can recover without a restart. A bring-up already in flight
+  is not started again.
   `q` in the conversation and `:q`/`:quit` both raise `Quit televim? (y/n)` first
   — the same screen-wide confirmation a deletion uses — because `q` is one
   keystroke away from a key that types nothing else. `y` quits, `n` or `Esc`
