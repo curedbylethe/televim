@@ -104,9 +104,9 @@ impl std::ops::DerefMut for Scenario {
 
 /// A blank sealed session, unless a seeded one already sits there.
 ///
-/// Launch reads the OS keychain for a legacy session whenever the session file
-/// is absent, before the first frame. On macOS that read raises a prompt the
-/// PTY cannot show, so the launch blocks. An existing file skips the read.
+/// A bring-up reads the OS keychain for a legacy session whenever the session
+/// file is absent. On macOS that read can raise a prompt the PTY cannot show,
+/// so the test would wait on it. An existing file skips the read.
 fn ensure_session(sandbox: &Sandbox) {
     if sandbox.session.exists() {
         return;

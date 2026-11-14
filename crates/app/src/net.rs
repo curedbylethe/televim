@@ -76,6 +76,7 @@ use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, Histo
 use crate::media_cache::{ContentHasher, Key, MediaCache};
 use crate::notify::{DesktopNotifier, Notice, Notifier, body_line};
 use crate::outbox_store::{OutboxEntry, OutboxFile, restore_outbox};
+use crate::profile;
 use crate::runtime::AppEvent;
 use crate::update;
 
@@ -1867,6 +1868,7 @@ async fn bring_up(
     // stores, and the store is what puts the session there.
     let (store, keys, session_store) = match opening {
         Opening::Slot(slot) => {
+            migrate_slot(cfg, config_path, slot).await?;
             let paths = accounts::slot_paths(config_path, cfg, slot.account());
             let Session { store, keys } = session_store_shared(&paths, file_keys);
             (store, keys, session_description(&paths))
@@ -2426,6 +2428,21 @@ fn session_store_shared(paths: &SlotPaths, keys: Arc<dyn KeyProvider>) -> Sessio
         SessionTarget::File(_) => Some(keys),
     };
     session(paths, keys)
+}
+
+/// Moves an older keychain session and key into the slot's files.
+///
+/// Runs per bring-up on a blocking thread, not at launch: the keychain read can
+/// wait on a system prompt, and the first frame must not wait for it. A slot
+/// whose file already exists makes no keychain read at all.
+async fn migrate_slot(cfg: &Config, config_path: &Path, slot: AccountSlot) -> Result<()> {
+    let (cfg, config_path) = (cfg.clone(), config_path.to_path_buf());
+    tokio::task::spawn_blocking(move || {
+        profile::migrate_derived_key(&config_path, &cfg, slot);
+        profile::migrate_legacy_session(&config_path, &cfg, slot);
+    })
+    .await
+    .context("migrating the stored session")
 }
 
 /// [`session_store_shared`], with the OS-keyring key source passed in.
