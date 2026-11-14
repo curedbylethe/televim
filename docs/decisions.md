@@ -926,8 +926,7 @@ are in [`../AGENTS.md`](../AGENTS.md).
   reconnect — the retries run before any request, and only the rebuild the driver
   issues consumes it. The reader-visible failure is the existing `offline:` slot,
   recoverable with the existing `:retry`, which is not a budgeted attempt: no new
-  command (CUR-49, now `:reconnect`, below), no queue (CUR-47). The `●` indicator
-  (CUR-45) already ships. The persistent
+  command (CUR-49), no indicator (CUR-45), no queue (CUR-47). The persistent
   sentences — retrying, `reconnecting`, `offline:` — clear the flash deadline on
   the way in, because a sentence that ends in an event must not expire back to
   idle while what it reports is still true.
