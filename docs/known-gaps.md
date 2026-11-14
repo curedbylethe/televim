@@ -175,8 +175,8 @@ Real, and named so they are not mistaken for oversights:
   other: **CUR-45** owns a connection-state indicator (a `●` beside the ranked
   sentence — green while the feed delivers, yellow while a bring-up or a
   rebuild is under way, red once the budget is spent — while the sentences
-  keep saying what happened in words); **CUR-49** owns a manual `:reconnect` command
-  (there is none). Text sends now use a persistent outbox; `:retry` requeues
+  keep saying what happened in words); **CUR-49**'s manual `:reconnect` command is
+  delivered: it cancels a live feed or starts a bring-up when none is up. Text sends now use a persistent outbox; `:retry` requeues
   failed text across all chats without rebuilding a connected client. Media
   uploads still do not survive a relaunch. A text-send timeout can follow server acceptance,
   so sending it again can duplicate delivery. This is separate from the chat-list

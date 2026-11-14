@@ -926,7 +926,8 @@ are in [`../AGENTS.md`](../AGENTS.md).
   reconnect — the retries run before any request, and only the rebuild the driver
   issues consumes it. The reader-visible failure is the existing `offline:` slot,
   recoverable with the existing `:retry`, which is not a budgeted attempt: no new
-  command (CUR-49), no indicator (CUR-45), no queue (CUR-47). The persistent
+  command (CUR-49, now `:reconnect`, below), no queue (CUR-47). The `●` indicator
+  (CUR-45) already ships. The persistent
   sentences — retrying, `reconnecting`, `offline:` — clear the flash deadline on
   the way in, because a sentence that ends in an event must not expire back to
   idle while what it reports is still true.
@@ -1855,3 +1856,17 @@ are in [`../AGENTS.md`](../AGENTS.md).
   offline client, or a retry with no failed text, keeps the existing bring-up
   behavior. Retrying does not start a second send or retry media uploads, and a
   timeout remains a manual choice because the original may already be delivered.
+
+- **Why `:reconnect` cancels a live feed without recording its position:**
+  the position moves only through `UpdateStream::finish`, which the feed's own
+  end runs under a five-second bound. A manual cancel drops the stream without
+  it, so the session keeps the last position it recorded, and the rebuilt feed
+  replays updates the old one had not delivered. Recording the position on a
+  cancel could move it past updates that never reached the loop. A feed that
+  ends on its own still records its position. A feed that is replaced or
+  forgotten, as on sign-out or an account switch, reports nothing, because its
+  sender is dropped and its pump exits quietly. A send on a dead cancel handle
+  fails, which starts the bring-up directly. The command resets the automatic
+  budget for its own rebuild, and it never starts a second feed while one is
+  up: the window between `Ready` and the feed's start is refused with
+  `already trying to connect`.
