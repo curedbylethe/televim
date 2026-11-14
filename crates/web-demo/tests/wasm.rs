@@ -71,6 +71,22 @@ fn retry_command_reports_that_the_offline_demo_cannot_reconnect() {
 }
 
 #[wasm_bindgen_test]
+fn reconnect_command_reports_that_the_offline_demo_cannot_reconnect() {
+    let mut driver = Driver::new();
+    driver.handle_key(TuiKeyEvent::new(TuiKeyCode::Char(':'), KeyModifiers::NONE));
+    for ch in "reconnect".chars() {
+        driver.handle_key(TuiKeyEvent::new(TuiKeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    driver.handle_key(TuiKeyEvent::new(TuiKeyCode::Enter, KeyModifiers::NONE));
+    driver.tick();
+
+    assert_eq!(
+        driver.app.ui.status,
+        "Reconnect is unavailable: the offline demo has no Telegram connection."
+    );
+}
+
+#[wasm_bindgen_test]
 fn app_renders_fixture_into_test_backend() {
     let driver = Driver::new();
     let backend = TestBackend::new(80, 24);

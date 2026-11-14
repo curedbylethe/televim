@@ -60,7 +60,8 @@ list manual checks where needed.
 | Account | Add account or logout | `:add-account`, `:logout` | “The demo has a fixed cast. Use the account card to switch.” | impossible | `simulator::unsupported_native_actions_say_why` |
 | Session | Sign in and passphrase | `:signin`, `:unlock`, `:passphrase` | “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.”; “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest`; `simulator::unsupported_native_actions_say_why` |
 | Session | Import or export | `:import-session <path>`, `:export-session <path>` | “Session import is unavailable in the browser demo.”; “Session export is unavailable in the browser demo.” | impossible | `simulator::unsupported_native_actions_say_why` |
-| Connection | Retry | `:retry` | Reports that retry is unavailable because the offline demo has no Telegram connection | browser-adapted | `wasm::retry_command_reports_that_the_offline_demo_cannot_reconnect` |
+| Connection | Retry | `:retry` | Reports that retry is unavailable because the offline demo has no Telegram connection; failed text sends it requeues still drain through the local simulator | browser-adapted | `wasm::retry_command_reports_that_the_offline_demo_cannot_reconnect` |
+| Connection | Reconnect | `:reconnect` | Reports that reconnect is unavailable because the offline demo has no Telegram connection | browser-adapted | `wasm::reconnect_command_reports_that_the_offline_demo_cannot_reconnect` |
 | History | Older and newer pages | scroll to either edge | Deterministic local pages apply through native `App` paging APIs | simulated | `parity_secondary::history_pages_and_read_receipts_apply_to_real_app_state` |
 | Read state | Read receipt | open conversation | Scheduled receipt updates native message read state | simulated | `parity_secondary::history_pages_and_read_receipts_apply_to_real_app_state` |
 | Search | Global filters and pages | `:search <query>` | Native search state receives filtered results in stable 20-result pages | simulated | `parity_secondary::filtered_global_search_pages_append_to_real_search_state`; `simulator::search_filters_and_global_pages_are_deterministic` |
@@ -81,7 +82,7 @@ effect; refusal rows also use `simulator::unsupported_native_actions_say_why`.
 | Action variants | Demo outcome | Category | Evidence |
 | :--- | :--- | :--- | :--- |
 | `Update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
-| `Send`, `Edit`, `Delete`, `Forward` | Mutate fictional messages through the local simulator | simulated | `parity_core::send_and_reply_use_fixture_state`; `simulator::edit_delete_and_forward_mutate_world` |
+| `Edit`, `Delete`, `Forward` | Mutate fictional messages through the local simulator; text sends drain the outbox instead of an action (row “Send”) | simulated | `parity_core::send_and_reply_use_fixture_state`; `simulator::edit_delete_and_forward_mutate_world` |
 | `SendAttachment` | Browser file picker records a filename; bytes stay unread and unuploaded | browser-adapted | `simulator::selected_attachment_records_filename_without_claiming_file_bytes` |
 | `CancelUpload`, `RetryUpload`, `DismissUpload` | Cancel, retry or dismiss a local simulated upload | simulated | `simulator::cancelled_upload_retries_once_without_early_world_message`; `parity_core::send_failure_dismiss_and_attachment_retry_follow_native_actions` |
 | `FetchContact`, `FetchContacts`, `ResolveUser` | Read seeded profiles, contacts and candidates | simulated | `parity_secondary::contacts_profiles_blocks_reports_and_empty_results_use_seeded_data` |
@@ -126,7 +127,8 @@ Every command in the product list has a row here. Supported commands use native 
 | `:update` | “Updates are disabled in the offline demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `:signin` | “Sign-in is disabled in the offline demo. Switch seeded accounts from the account card.” | impossible | `simulator::unsupported_native_actions_say_why` |
 | `:add-account` | “The demo has a fixed cast. Use the account card to switch.” | impossible | `simulator::unsupported_native_actions_say_why` |
-| `:retry` | “Retry is unavailable: the offline demo has no Telegram connection.” | browser-adapted | `wasm::retry_command_reports_that_the_offline_demo_cannot_reconnect` |
+| `:retry` | “Retry is unavailable: the offline demo has no Telegram connection.” Failed text sends it requeues still drain. | browser-adapted | `wasm::retry_command_reports_that_the_offline_demo_cannot_reconnect` |
+| `:reconnect` | “Reconnect is unavailable: the offline demo has no Telegram connection.” | browser-adapted | `wasm::reconnect_command_reports_that_the_offline_demo_cannot_reconnect` |
 | `:unlock` | “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `:passphrase` | “There is no session passphrase in the demo.” | impossible | `parity_secondary::browser_only_actions_keep_offline_claims_honest` |
 | `:export-session <path>` | “Session export is unavailable in the browser demo.” | impossible | `simulator::unsupported_native_actions_say_why` |
