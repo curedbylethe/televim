@@ -668,7 +668,10 @@ reason, the wait and the count; past the bound the feed is ended the way a dead
 one is. When the update feed ends mid-session, `pump` records the position with
 `UpdateSubscription::finish` and reports `Event::FeedEnded`; `drive` then rebuilds
 the client from the stored session and takes a new feed in-process, through the
-same `state.bringing_up` single-flight guard `:retry` uses. The relay is
+same `state.bringing_up` single-flight guard `:retry` uses. `:reconnect`
+sends on the live feed's cancel sender (`Event::FeedStarted`): the pump then drops
+the stream without `finish` and reports `FeedEnded`, which takes the same rebuild;
+with no live feed it starts a bring-up directly. The relay is
 single-shot, so a rebuild is the only way to re-subscribe (see
 [`decisions.md`](./decisions.md)). One automatic reconnect is allowed per working
 feed, and the re-`Ready` is place-preserving — the open conversation and its

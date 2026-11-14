@@ -1870,3 +1870,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
   budget for its own rebuild, and it never starts a second feed while one is
   up: the window between `Ready` and the feed's start is refused with
   `already trying to connect`.
+
+- **Why the legacy keychain migrations run per bring-up, not at launch:** the
+  keychain read can raise a system prompt, and launch used to run it before the
+  first frame, leaving the terminal blank until the prompt was answered. The
+  migrations now run for the slot being opened, on a blocking thread, so the
+  loop keeps drawing. A slot whose session file already exists makes no keychain
+  read, so later bring-ups never prompt.
