@@ -75,6 +75,7 @@ use crate::draft_store::DraftFile;
 use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
 use crate::notify::{DesktopNotifier, Notice, Notifier, body_line};
+use crate::outbox_store::{OutboxEntry, OutboxFile, restore_outbox};
 use crate::runtime::AppEvent;
 use crate::update;
 
@@ -100,6 +101,8 @@ const RECONNECT_STABLE_FOR: Duration = Duration::from_secs(600);
 
 const RETRY: Duration = Duration::from_secs(5);
 
+const SEND_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How many times the launch chat-list fetch is asked for before the bring-up is
 /// called a failure.
 ///
@@ -112,6 +115,21 @@ const CHAT_LIST_ATTEMPTS: u8 = 3;
 
 /// Something that happened away from the keyboard.
 pub enum Event {
+    /// A durable text send settled under the account that started it.
+    OutboxSent {
+        generation: u64,
+        chat_id: i64,
+        temp_id: i64,
+        result: Result<Message, ProtoError>,
+    },
+
+    /// A durable text send did not answer within the send timeout.
+    SendTimedOut {
+        generation: u64,
+        chat_id: i64,
+        temp_id: i64,
+    },
+
     /// The machine carries no application credentials, so there is nothing to
     /// connect as.
     ///
@@ -867,6 +885,11 @@ pub struct State {
     /// `None` wherever no loop set one, which is every test.
     draft_file: Option<DraftFile>,
 
+    outbox_file: Option<OutboxFile>,
+    outbox_in_flight: Option<(i64, i64)>,
+    // Account changes invalidate completions even when local ids are reused.
+    outbox_generation: u64,
+
     /// The path the configuration was read from.
     ///
     /// The base every account-scoped path is derived from, and the base name of
@@ -1133,6 +1156,14 @@ impl State {
         self.draft_file = Some(file);
     }
 
+    pub(crate) fn set_outbox_file(&mut self, file: OutboxFile) {
+        self.outbox_file = Some(file);
+    }
+
+    pub(crate) fn outbox_file(&self) -> Option<&OutboxFile> {
+        self.outbox_file.as_ref()
+    }
+
     /// Points this state at an account: the slot it resolves paths and the
     /// session for, and where the index of known accounts goes.
     ///
@@ -1211,6 +1242,10 @@ impl State {
         if self.is_switching() {
             return;
         }
+        if !self.flush_outbox(app) {
+            app.flash("could not save queued sends; account was not switched");
+            return;
+        }
         let from = self.slot;
         // Taken before anything on the screen is cleared, because the screen is
         // the only place this fact lives — and the peer id rather than a row
@@ -1221,6 +1256,10 @@ impl State {
             followed: app.conversation.conversation.auto_follow(),
         });
         self.flush_drafts(app);
+        self.outbox_file = None;
+        self.outbox_in_flight = None;
+        self.outbox_generation += 1;
+        app.clear_sends();
 
         self.client = None;
         // Downloads still running belong to the account that is leaving: their
@@ -1300,6 +1339,9 @@ impl State {
         let draft_file = DraftFile::new(paths.drafts.clone());
         crate::runtime::restore_drafts(app, &draft_file, label.as_deref());
         self.draft_file = Some(draft_file);
+        let outbox_file = OutboxFile::new(paths.outbox);
+        restore_outbox(app, &outbox_file, label.as_deref());
+        self.outbox_file = Some(outbox_file);
 
         let history = HistoryFile::new(paths.history, self.file_keys());
         let (cache, tag) = crate::runtime::load_history(&history, label.as_deref());
@@ -1312,6 +1354,21 @@ impl State {
             label.as_deref(),
             cfg.media_cache_max_bytes,
         ))));
+    }
+
+    fn flush_outbox(&self, app: &App) -> bool {
+        let Some(file) = &self.outbox_file else {
+            return true;
+        };
+        if file.foreign() {
+            return app.snapshot_sends().is_empty();
+        }
+        let entries: Vec<_> = app
+            .snapshot_sends()
+            .into_iter()
+            .map(OutboxEntry::from)
+            .collect();
+        file.save(&entries, self.slot_label().as_deref())
     }
 
     /// Writes this slot's drafts, the live input line included, without ever
@@ -2725,6 +2782,10 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         return;
     };
 
+    if let Some(send) = begin_queued_send(app, state) {
+        spawn_text_send(&client, state.outbox_generation, send, tx);
+    }
+
     // A flood wait is the one failure with a time on it, and the reader is not
     // asked for a key once it has passed: the withheld page is asked for again.
     // This is the clock because it runs on every pass, the 250 ms tick included.
@@ -3300,6 +3361,51 @@ async fn lookup(client: &ProtoClient, query: &str) -> Result<Lookup, ProtoError>
     ))
 }
 
+fn begin_queued_send(app: &mut App, state: &mut State) -> Option<tui::OutboxSend> {
+    if state.outbox_in_flight.is_some()
+        || app.is_sending()
+        || app.connection() != ConnectionState::Connected
+    {
+        return None;
+    }
+    let send = app.next_queued_send()?;
+    state.outbox_in_flight = Some((send.chat_id, send.temp_id));
+    app.mark_send_sending(send.chat_id, send.temp_id);
+    app.begin_send(send.temp_id);
+    Some(send)
+}
+
+fn spawn_text_send(
+    client: &Arc<ProtoClient>,
+    generation: u64,
+    send: tui::OutboxSend,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let event = match tokio::time::timeout(
+            SEND_TIMEOUT,
+            client.send_message(send.chat_id, &send.text, send.reply_to),
+        )
+        .await
+        {
+            Ok(result) => Event::OutboxSent {
+                generation,
+                chat_id: send.chat_id,
+                temp_id: send.temp_id,
+                result,
+            },
+            Err(_) => Event::SendTimedOut {
+                generation,
+                chat_id: send.chat_id,
+                temp_id: send.temp_id,
+            },
+        };
+        let _ = tx.send(AppEvent::Net(event));
+    });
+}
+
 /// Performs the operation the reader asked for, and hands the answer back.
 ///
 /// The same shape as the two above, and for the same reason: a round trip in the
@@ -3665,20 +3771,6 @@ fn request_plain(
 
     tokio::spawn(async move {
         match action {
-            Action::Send {
-                chat_id,
-                temp_id,
-                text,
-                reply_to,
-            } => {
-                let result = client.send_message(chat_id, &text, reply_to).await;
-                let _ = tx.send(AppEvent::Net(Event::Sent {
-                    chat_id,
-                    temp_id,
-                    result,
-                }));
-            }
-
             Action::Edit {
                 chat_id,
                 message_id,
@@ -3936,6 +4028,12 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             // and aborts its runner when it goes, so the pump feeding this
             // screen ends with it.
             state.client = None;
+            if let Some(file) = &state.outbox_file {
+                file.clear();
+            }
+            app.clear_sends();
+            state.outbox_in_flight = None;
+            state.outbox_generation += 1;
             app.set_chats(Vec::new());
             // The words go with the account: a peer id can be reused by
             // another one, and the in-memory clear above already flows to the
@@ -3977,6 +4075,45 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
 #[allow(clippy::too_many_lines)]
 pub fn apply(app: &mut App, state: &mut State, event: Event) {
     match event {
+        Event::OutboxSent {
+            generation,
+            chat_id,
+            temp_id,
+            result,
+        } => {
+            if generation != state.outbox_generation
+                || state.outbox_in_flight != Some((chat_id, temp_id))
+            {
+                return;
+            }
+            if let Ok(message) = &result {
+                state.remember_sent(message);
+            }
+            settle_outbox(
+                app,
+                state,
+                chat_id,
+                temp_id,
+                result.map_err(|error| {
+                    if matches!(error, ProtoError::Framework(FrameworkError::UploadAborted)) {
+                        "cancelled".to_owned()
+                    } else {
+                        failure_reason(&error)
+                    }
+                }),
+            );
+        }
+        Event::SendTimedOut {
+            generation,
+            chat_id,
+            temp_id,
+        } => {
+            if generation == state.outbox_generation
+                && state.outbox_in_flight == Some((chat_id, temp_id))
+            {
+                settle_outbox(app, state, chat_id, temp_id, Err("timed out".to_owned()));
+            }
+        }
         Event::Ready {
             client,
             chats,
@@ -5767,6 +5904,28 @@ fn apply_login_refusal(app: &mut App, error: &ProtoError, used: u8) {
         None => error.to_string(),
     };
     app.login_refused(sentence, used);
+}
+
+fn settle_outbox(
+    app: &mut App,
+    state: &mut State,
+    chat_id: i64,
+    temp_id: i64,
+    result: Result<Message, String>,
+) {
+    state.outbox_in_flight = None;
+    app.end_send(temp_id);
+    match result {
+        Ok(message) => {
+            app.settle_send_success(chat_id, temp_id, message);
+        }
+        Err(reason) => {
+            app.settle_send_failure(chat_id, temp_id, reason.clone());
+            if app.conversation.conversation.window.chat_id == chat_id {
+                app.flash(reason);
+            }
+        }
+    }
 }
 
 /// Folds a send's answer into the conversation it was for.
@@ -11361,12 +11520,9 @@ mod tests {
         );
     }
 
-    /// One of the two things the temp-id reset in `App::select_chat` relies on:
-    /// a send in flight in the conversation the reader left holds the key, so the
-    /// next conversation cannot be handed the same placeholder id while the old
-    /// result is outstanding.
+    /// Composing in another chat queues text without releasing the active send.
     #[test]
-    fn a_send_in_flight_holds_the_key_across_a_conversation_change() {
+    fn a_send_in_flight_allows_queueing_after_a_conversation_change() {
         let mut app = app_with_a_conversation(CHAT, 3);
         let temp_id = app.conversation.conversation.queue_send("first", None);
         app.begin_send(temp_id);
@@ -11379,25 +11535,18 @@ mod tests {
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
+        assert_eq!(app.snapshot_sends().len(), 1);
         assert!(
-            app.conversation.conversation.window.is_empty(),
-            "the in-flight send holds the key, so the new conversation is not given the id"
+            app.conversation
+                .conversation
+                .window
+                .iter()
+                .any(|message| message.text == "second")
         );
-        assert!(
-            app.ui.status.contains("already on its way"),
-            "and the refusal is visible: {:?}",
-            app.ui.status
-        );
+        assert!(app.is_sending(), "the first send still owns the gate");
     }
 
-    /// The other thing: a result for a conversation the reader left is dropped by
-    /// `chat_id`, even when the open conversation has been handed the same
-    /// placeholder id.
-    ///
-    /// The state here is not reachable through the interface — the test above is
-    /// what keeps it unreachable — so this pins the rule rather than describing
-    /// behaviour. It is the only test that fails if the `chat_id` check is
-    /// removed as apparent dead code, which is the point of writing it at all.
+    /// A media result cannot confirm another chat's reused placeholder id.
     #[test]
     fn a_stale_result_does_not_confirm_a_placeholder_reissued_the_same_id() {
         let mut app = app_with_a_conversation(CHAT, 3);
@@ -11406,8 +11555,7 @@ mod tests {
         app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
         app.select_chat(1);
 
-        // Reaching past the gate is deliberate: without it, this is the
-        // collision the `chat_id` check has to survive.
+        // Different conversations may reuse the same local identifier.
         let new_temp = app.conversation.conversation.queue_send("second", None);
         app.begin_send(new_temp);
         assert_eq!(
@@ -13051,6 +13199,184 @@ mod tests {
             vec![(chat, 7)],
             "a failed fetch for this chat is re-requested on the next miss"
         );
+    }
+    #[test]
+    fn outbox_drain_waits_offline_and_allows_only_one_text_in_flight() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        app.enqueue_send(CHAT, -1, "first".to_owned(), None);
+        app.enqueue_send(CHAT, -2, "second".to_owned(), None);
+        let mut state = State::default();
+        app.set_connection(ConnectionState::Offline);
+        assert!(begin_queued_send(&mut app, &mut state).is_none());
+        app.set_connection(ConnectionState::Connected);
+        app.begin_send(-3);
+        assert!(begin_queued_send(&mut app, &mut state).is_none());
+        app.end_send(-3);
+        assert_eq!(
+            begin_queued_send(&mut app, &mut state)
+                .expect("first queued")
+                .temp_id,
+            -1
+        );
+        assert!(begin_queued_send(&mut app, &mut state).is_none());
+        assert_eq!(state.outbox_in_flight, Some((CHAT, -1)));
+        apply(
+            &mut app,
+            &mut state,
+            Event::SendTimedOut {
+                generation: 0,
+                chat_id: CHAT,
+                temp_id: -1,
+            },
+        );
+        assert_eq!(
+            app.snapshot_sends()[0].failure.as_deref(),
+            Some("timed out")
+        );
+        assert_eq!(
+            begin_queued_send(&mut app, &mut state)
+                .expect("failed first does not block")
+                .temp_id,
+            -2
+        );
+    }
+
+    #[test]
+    fn outbox_success_settles_a_chat_the_reader_left() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        app.enqueue_send(CHAT, -1, "first".to_owned(), None);
+        let mut state = State::default();
+        app.set_connection(ConnectionState::Connected);
+        assert!(begin_queued_send(&mut app, &mut state).is_some());
+        app.set_chats(vec![chat(CHAT), chat(CHAT + 1)]);
+        app.select_chat(1);
+        apply(
+            &mut app,
+            &mut state,
+            Event::OutboxSent {
+                generation: 0,
+                chat_id: CHAT,
+                temp_id: -1,
+                result: Ok(messages(CHAT, 9..=9).remove(0)),
+            },
+        );
+        assert!(app.snapshot_sends().is_empty());
+        assert!(!app.is_sending());
+        assert!(app.conversation.conversation.window.is_empty());
+    }
+
+    #[test]
+    fn outbox_failure_keeps_the_entry_and_its_reply_target() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let temp_id = app.conversation.conversation.queue_send("reply", Some(2));
+        app.enqueue_send(CHAT, temp_id, "reply".to_owned(), Some(2));
+        let mut state = State::default();
+        app.set_connection(ConnectionState::Connected);
+        assert!(begin_queued_send(&mut app, &mut state).is_some());
+        apply(
+            &mut app,
+            &mut state,
+            Event::OutboxSent {
+                generation: 0,
+                chat_id: CHAT,
+                temp_id,
+                result: Err(ProtoError::Framework(FrameworkError::UploadAborted)),
+            },
+        );
+        let sends = app.snapshot_sends();
+        assert_eq!(sends[0].reply_to, Some(2));
+        assert_eq!(sends[0].failure.as_deref(), Some("cancelled"));
+        assert_eq!(
+            app.conversation
+                .conversation
+                .message(temp_id)
+                .expect("failed row")
+                .status,
+            domain::MessageStatus::Failed
+        );
+        assert!(!app.is_sending());
+    }
+
+    #[test]
+    fn outbox_logout_clears_file_and_rejects_old_account_results() {
+        let dir = tempfile::tempdir().expect("sandbox");
+        let path = dir.path().join("televim.outbox.json");
+        let mut app = app_with_a_conversation(CHAT, 3);
+        app.enqueue_send(CHAT, -1, "old account".to_owned(), None);
+        let mut state = State::default();
+        state.set_outbox_file(OutboxFile::new(path.clone()));
+        state.flush_outbox(&app);
+        assert!(path.exists());
+        app.set_connection(ConnectionState::Connected);
+        assert!(begin_queued_send(&mut app, &mut state).is_some());
+        apply_logged_out(&mut app, &mut state, Ok(()));
+        assert!(!path.exists());
+        assert!(app.snapshot_sends().is_empty());
+        app.enqueue_send(CHAT, -1, "new account".to_owned(), None);
+        app.set_connection(ConnectionState::Connected);
+        assert!(begin_queued_send(&mut app, &mut state).is_some());
+        apply(
+            &mut app,
+            &mut state,
+            Event::OutboxSent {
+                generation: 0,
+                chat_id: CHAT,
+                temp_id: -1,
+                result: Ok(messages(CHAT, 9..=9).remove(0)),
+            },
+        );
+        apply(
+            &mut app,
+            &mut state,
+            Event::SendTimedOut {
+                generation: 0,
+                chat_id: CHAT,
+                temp_id: -1,
+            },
+        );
+        assert_eq!(app.snapshot_sends()[0].text, "new account");
+        assert!(app.snapshot_sends()[0].failure.is_none());
+        assert_eq!(state.outbox_in_flight, Some((CHAT, -1)));
+    }
+
+    #[test]
+    fn outbox_detach_keeps_the_account_when_its_flush_fails() {
+        let dir = tempfile::tempdir().expect("sandbox");
+        let parent = dir.path().join("blocked");
+        fs::write(&parent, b"not a directory").expect("write blocker");
+        let mut app = app_with_a_conversation(CHAT, 3);
+        app.enqueue_send(CHAT, -1, "keep my words".to_owned(), None);
+        let mut state = State::default();
+        state.set_outbox_file(OutboxFile::new(parent.join("outbox.json")));
+        state.detach_account(&mut app, Opening::Fresh);
+        assert!(!state.is_switching());
+        assert_eq!(app.snapshot_sends()[0].text, "keep my words");
+        assert!(state.outbox_file().is_some());
+    }
+
+    #[test]
+    fn outbox_detach_flushes_and_adopt_restores_slot_sends() {
+        let dir = tempfile::tempdir().expect("sandbox");
+        let config = dir.path().join("televim.toml");
+        let mut state = State {
+            cfg: Some(Config::default()),
+            config_path: config.clone(),
+            ..State::default()
+        };
+        let paths = accounts::slot_paths(&config, state.cfg.as_ref().expect("config"), None);
+        state.set_outbox_file(OutboxFile::new(paths.outbox.clone()));
+        let mut app = app_with_a_conversation(CHAT, 3);
+        app.enqueue_send(CHAT, -1, "preserved".to_owned(), None);
+        state.detach_account(&mut app, Opening::Fresh);
+        assert!(app.snapshot_sends().is_empty());
+        assert!(state.outbox_file().is_none());
+        assert_eq!(state.outbox_generation, 1);
+        assert_eq!(
+            OutboxFile::new(paths.outbox).load().sends[0].text,
+            "preserved"
+        );
+        state.adopt_slot(&mut app, AccountSlot::Legacy);
+        assert_eq!(app.snapshot_sends()[0].text, "preserved");
     }
 }
 

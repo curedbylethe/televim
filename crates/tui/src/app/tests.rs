@@ -435,7 +435,7 @@ fn a_draft_is_still_there_after_a_submit_that_sent_it() {
     );
 }
 
-/// Types `text` and submits it, leaving a placeholder in flight.
+/// Types `text` and submits it, leaving a queued placeholder.
 fn submit(app: &mut App, text: &str) {
     app.handle_key(press(KeyCode::Char('i')));
     type_text(app, text);
@@ -450,7 +450,7 @@ fn enter_shows_the_typed_message_while_it_is_on_its_way() {
     submit(&mut app, "ping");
 
     assert_eq!(app.conversation.conversation.window.len(), before + 1);
-    let id = app.conversation.sending.expect("the send is in flight");
+    let id = app.next_queued_send().expect("the send is queued").temp_id;
     assert_eq!(id, -1, "the first placeholder is minus one");
     assert_eq!(text_of(&app, id), Some("ping"));
     assert_eq!(
@@ -461,15 +461,22 @@ fn enter_shows_the_typed_message_while_it_is_on_its_way() {
     assert_eq!(app.ui.mode, Mode::Normal);
 
     assert_eq!(
-        app.take_action(),
-        Some(Action::Send {
+        app.next_queued_send(),
+        Some(crate::OutboxSend {
             chat_id: MOCK_CHAT,
             temp_id: id,
             text: "ping".to_owned(),
             reply_to: None,
+            failure: None,
+            sending: false,
         })
     );
-    assert_eq!(app.take_action(), None, "an action is taken once");
+    assert_eq!(
+        app.take_action(),
+        None,
+        "text sends bypass the action queue"
+    );
+    assert!(!app.is_sending(), "the driver starts a queued send");
 }
 
 #[test]
@@ -483,23 +490,28 @@ fn typing_with_no_conversation_open_composes_nothing() {
 }
 
 #[test]
-fn a_second_send_is_refused_while_one_is_on_its_way() {
+fn a_second_send_is_queued_while_one_is_on_its_way() {
     let mut app = App::mock();
     submit(&mut app, "first");
+    let first = app.next_queued_send().expect("the first send is queued");
+    app.mark_send_sending(first.chat_id, first.temp_id);
+    app.begin_send(first.temp_id);
     let before = app.conversation.conversation.window.len();
 
     submit(&mut app, "second");
 
     assert_eq!(
         app.conversation.conversation.window.len(),
-        before,
-        "the second message is not shown, because it was not queued"
+        before + 1,
+        "both messages keep their placeholders until the sender settles them"
     );
-    assert!(
-        app.ui.status.contains("already on its way"),
-        "a refusal has to say so: {:?}",
-        app.ui.status
+    assert_eq!(
+        app.next_queued_send().expect("the next send").text,
+        "second"
     );
+    assert_eq!(app.conversation.sending, Some(first.temp_id));
+    assert_eq!(app.snapshot_sends().len(), 2);
+    assert_eq!(app.take_action(), None);
 }
 
 /// Two requests made between two ticks are two requests. A single slot
@@ -2119,7 +2131,7 @@ fn a_selection_of_only_their_messages_counts_them() {
 fn a_selection_with_some_placeholders_skips_them_and_says_how_many() {
     let mut app = conversation(&[(1, false), (2, false), (3, false)]);
     submit(&mut app, "hi");
-    let placeholder = app.conversation.sending.expect("the send is in flight");
+    let placeholder = app.next_queued_send().expect("the send is queued").temp_id;
     go_to_top(&mut app);
     key(&mut app, 'V');
     cursor_onto(&mut app, placeholder);
@@ -2141,7 +2153,7 @@ fn a_selection_with_some_placeholders_skips_them_and_says_how_many() {
 fn a_selection_of_only_placeholders_is_refused() {
     let mut app = conversation(&[(1, false)]);
     submit(&mut app, "hi");
-    let placeholder = app.conversation.sending.expect("the send is in flight");
+    let placeholder = app.next_queued_send().expect("the send is queued").temp_id;
     go_to_top(&mut app);
     cursor_onto(&mut app, placeholder);
     key(&mut app, 'V');
@@ -2174,7 +2186,7 @@ fn a_selection_of_only_placeholders_is_refused() {
 fn a_selection_reaching_a_placeholder_covers_the_window_positions() {
     let mut app = App::mock();
     submit(&mut app, "hi");
-    let placeholder = app.conversation.sending.expect("the send is in flight");
+    let placeholder = app.next_queued_send().expect("the send is queued").temp_id;
     go_to_top(&mut app);
     key(&mut app, 'V');
     cursor_onto(&mut app, placeholder);
@@ -2240,7 +2252,7 @@ fn a_forward_covers_every_message_in_the_selection_oldest_first() {
 fn a_forward_leaves_out_placeholders_and_counts_them() {
     let mut app = App::mock();
     submit(&mut app, "hi");
-    let placeholder = app.conversation.sending.expect("the send is in flight");
+    let placeholder = app.next_queued_send().expect("the send is queued").temp_id;
     go_to_top(&mut app);
     key(&mut app, 'V');
     cursor_onto(&mut app, placeholder);
@@ -2262,7 +2274,7 @@ fn a_forward_leaves_out_placeholders_and_counts_them() {
 fn a_forward_of_nothing_but_placeholders_is_refused_with_the_reason() {
     let mut app = App::mock();
     submit(&mut app, "hi");
-    let placeholder = app.conversation.sending.expect("the send is in flight");
+    let placeholder = app.next_queued_send().expect("the send is queued").temp_id;
     app.set_selection(Selection::at(placeholder, None));
 
     let selection = *app.selection().expect("a selection is up");
@@ -2476,7 +2488,7 @@ fn keys_other_than_the_pickers_do_not_reach_the_selection_while_it_is_up() {
 fn a_forward_of_only_placeholders_opens_no_picker() {
     let mut app = App::mock();
     submit(&mut app, "hi");
-    let placeholder = app.conversation.sending.expect("the send is in flight");
+    let placeholder = app.next_queued_send().expect("the send is queued").temp_id;
     app.set_selection(Selection::at(placeholder, None));
     app.ui.set_mode(Mode::Visual);
 
@@ -2497,11 +2509,8 @@ fn a_forward_of_only_placeholders_opens_no_picker() {
 fn a_forward_leaves_placeholders_out_and_says_how_many() {
     let mut app = App::mock();
     submit(&mut app, "hi");
-    assert!(
-        matches!(app.take_action(), Some(Action::Send { .. })),
-        "the send itself is queued first, and is taken here"
-    );
-    let placeholder = app.conversation.sending.expect("the send is in flight");
+    assert_eq!(app.take_action(), None, "text sends use the outbox");
+    let placeholder = app.next_queued_send().expect("the send is queued").temp_id;
     go_to_top(&mut app);
     key(&mut app, 'V');
     cursor_onto(&mut app, placeholder);
@@ -2525,7 +2534,7 @@ fn a_forward_leaves_placeholders_out_and_says_how_many() {
 fn editing_a_message_that_has_not_been_sent_or_is_not_yours_is_refused() {
     let mut app = App::mock();
     submit(&mut app, "hi");
-    let id = app.conversation.sending.expect("the send is in flight");
+    let id = app.next_queued_send().expect("the send is queued").temp_id;
 
     app.handle_key(press(KeyCode::Char('e')));
     assert_eq!(app.ui.mode, Mode::Normal);
@@ -2576,12 +2585,14 @@ fn r_opens_a_reply_to_the_message_under_the_cursor() {
     app.handle_key(press(KeyCode::Enter));
 
     assert_eq!(
-        app.take_action(),
-        Some(Action::Send {
+        app.next_queued_send(),
+        Some(crate::OutboxSend {
             chat_id: MOCK_CHAT,
             temp_id: -1,
             text: "sure".to_owned(),
             reply_to: Some(9),
+            failure: None,
+            sending: false,
         })
     );
 }
@@ -2656,13 +2667,19 @@ fn cancelling_a_delete_leaves_no_side_effect() {
 fn the_dismiss_key_clears_a_failed_message() {
     let mut app = App::mock();
     submit(&mut app, "hi");
-    let id = app.conversation.sending.expect("the send is in flight");
+    let id = app.next_queued_send().expect("the send is queued").temp_id;
     app.fail_send(id, "boom".to_owned());
 
     app.handle_key(press(KeyCode::Char('D')));
 
     assert_eq!(app.conversation.conversation.window.len(), 10);
     assert!(app.conversation.conversation.message(id).is_none());
+    assert!(app.snapshot_sends().is_empty());
+    assert_eq!(
+        app.take_action(),
+        None,
+        "a text dismissal cannot cancel a media upload"
+    );
 }
 
 /// The row only has room for a short reason; the whole of it is on the
@@ -2671,7 +2688,7 @@ fn the_dismiss_key_clears_a_failed_message() {
 fn the_full_reason_a_send_failed_is_on_the_status_line() {
     let mut app = App::mock();
     submit(&mut app, "hi");
-    let id = app.conversation.sending.expect("the send is in flight");
+    let id = app.next_queued_send().expect("the send is queued").temp_id;
 
     app.fail_send(id, "flood wait, retry in 42s".to_owned());
 
@@ -3715,13 +3732,12 @@ fn sending_and_searching_in_one_tick_both_happen() {
     submit(&mut app, "ping");
     run_search_line(&mut app, "benchmarks");
 
-    let first = app.take_action().expect("the send is still queued");
-    let second = app.take_action().expect("and so is the search");
-    assert!(
-        matches!(first, Action::Send { .. }),
-        "the send goes out first"
+    assert_eq!(
+        app.next_queued_send().expect("the send is queued").text,
+        "ping"
     );
-    assert!(matches!(second, Action::Search { .. }));
+    assert!(matches!(app.take_action(), Some(Action::Search { .. })));
+    assert_eq!(app.take_action(), None);
 }
 
 #[test]
@@ -6579,12 +6595,14 @@ fn enter_accepts_the_candidate_and_the_next_enter_sends() {
     app.handle_key(press(KeyCode::Enter));
 
     assert_eq!(
-        app.take_action(),
-        Some(Action::Send {
+        app.next_queued_send(),
+        Some(crate::OutboxSend {
             chat_id: MOCK_CHAT,
             temp_id: -1,
             text: "😢".to_owned(),
             reply_to: None,
+            failure: None,
+            sending: false,
         })
     );
 }

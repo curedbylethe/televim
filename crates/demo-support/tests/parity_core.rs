@@ -155,33 +155,32 @@ fn send_failure_dismiss_and_attachment_retry_follow_native_actions() {
     press_char(&mut app, 'i');
     type_text(&mut app, "!fail demo send");
     press(&mut app, KeyCode::Enter);
-    let Some(Action::Send {
-        chat_id,
-        temp_id,
-        text,
-        reply_to,
-    }) = app.take_action()
-    else {
-        panic!("composer queues a send");
-    };
-    let effects = sim.dispatch(
-        &app,
-        Action::Send {
-            chat_id,
-            temp_id,
-            text,
-            reply_to,
-        },
+    assert!(
+        app.take_action().is_none(),
+        "text bypasses the action queue"
     );
+    let send = app.next_queued_send().expect("composer queues text");
+    let temp_id = send.temp_id;
+    assert_eq!(
+        app.conversation
+            .conversation
+            .message(temp_id)
+            .map(|message| message.status),
+        Some(MessageStatus::Sending)
+    );
+    let effects = sim.drain_sends(&mut app);
     assert!(matches!(effects.as_slice(), [Effect::Status(_)]));
     let failed = sim.advance(300);
     let Some(Effect::SendFailed {
-        temp_id, reason, ..
+        chat_id,
+        temp_id,
+        reason,
     }) = failed.into_iter().next()
     else {
         panic!("simulator returns the scheduled failure");
     };
-    assert!(app.fail_send(temp_id, reason));
+    app.end_send(temp_id);
+    assert!(app.settle_send_failure(chat_id, temp_id, reason));
     assert_eq!(
         app.conversation
             .conversation
@@ -191,6 +190,7 @@ fn send_failure_dismiss_and_attachment_retry_follow_native_actions() {
     );
     press_char(&mut app, 'D');
     assert!(app.conversation.conversation.message(temp_id).is_none());
+    assert!(app.snapshot_sends().is_empty());
     assert!(
         app.take_action().is_none(),
         "text failure needs no upload action"
@@ -230,31 +230,38 @@ fn send_and_reply_use_fixture_state() {
     press_char(&mut app, 'i');
     type_text(&mut app, "hello from the demo");
     press(&mut app, KeyCode::Enter);
-    let action = app.take_action().expect("composer queues send");
-    assert!(matches!(action, Action::Send { .. }));
-    let effects = sim.dispatch(&app, action);
+    assert!(app.take_action().is_none());
+    assert_eq!(
+        app.next_queued_send().expect("queued text").text,
+        "hello from the demo"
+    );
+    let effects = sim.drain_sends(&mut app);
     assert!(matches!(effects.as_slice(), [Effect::Status(_)]));
     let sent = sim.advance(1_000);
     let Some(Effect::Sent {
-        temp_id, message, ..
+        chat_id,
+        temp_id,
+        message,
     }) = sent.into_iter().next()
     else {
         panic!("simulator settles the send");
     };
-    assert!(app.confirm_sent(temp_id, message));
+    app.end_send(temp_id);
+    assert!(app.settle_send_success(chat_id, temp_id, message));
+    assert!(app.snapshot_sends().is_empty());
 
     let (_, mut app) = fixture();
     press_char(&mut app, 'r');
     assert_eq!(app.input.line.purpose(), PromptKind::Reply);
     type_text(&mut app, "a reply");
     press(&mut app, KeyCode::Enter);
-    assert!(matches!(
-        app.take_action(),
-        Some(Action::Send {
-            reply_to: Some(_),
-            ..
-        })
-    ));
+    assert!(app.take_action().is_none());
+    assert!(
+        app.next_queued_send()
+            .expect("queued reply")
+            .reply_to
+            .is_some()
+    );
 }
 
 #[test]

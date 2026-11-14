@@ -5,10 +5,7 @@ use ratzilla::{
     event::{KeyCode, KeyEvent},
     ratatui::{Terminal, backend::TestBackend},
 };
-use tui::{
-    app::Action,
-    key::{KeyCode as TuiKeyCode, KeyEvent as TuiKeyEvent, KeyModifiers},
-};
+use tui::key::{KeyCode as TuiKeyCode, KeyEvent as TuiKeyEvent, KeyModifiers};
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 use super::{DRIVER, driver::Driver, input};
@@ -95,34 +92,107 @@ fn app_renders_fixture_into_test_backend() {
 #[wasm_bindgen_test]
 fn simulator_send_applies_sent_effect_to_app() {
     let mut driver = Driver::new();
-    let chat_id = driver.app.current_chat_id();
-    let effects = driver.sim.dispatch(
-        &driver.app,
-        Action::Send {
-            chat_id,
-            temp_id: -700,
-            text: "wasm test message".to_owned(),
-            reply_to: None,
-        },
-    );
-    assert_eq!(effects.len(), 1);
-
-    for effect in driver.sim.advance(1_000) {
-        if let demo_support::Effect::Sent {
-            temp_id, message, ..
-        } = effect
-        {
-            driver.app.end_send(temp_id);
-            driver.app.confirm_sent(temp_id, message);
-        }
+    driver.handle_key(TuiKeyEvent::new(TuiKeyCode::Char('i'), KeyModifiers::NONE));
+    for ch in "wasm test message".chars() {
+        driver.handle_key(TuiKeyEvent::new(TuiKeyCode::Char(ch), KeyModifiers::NONE));
     }
+    driver.handle_key(TuiKeyEvent::new(TuiKeyCode::Enter, KeyModifiers::NONE));
+    assert!(driver.app.take_action().is_none());
+    let send = driver.app.next_queued_send().expect("composer queued text");
+    assert_eq!(
+        driver
+            .app
+            .conversation
+            .conversation
+            .message(send.temp_id)
+            .map(|message| message.status),
+        Some(MessageStatus::Sending)
+    );
+    driver.tick();
+    assert!(driver.app.is_sending(), "tick drains the text queue");
+    assert!(driver.sim.drain_sends(&mut driver.app).is_empty());
+    for effect in driver.sim.advance(1_000) {
+        driver.sim.schedule(0, effect);
+    }
+    driver.tick();
 
-    let rows = &driver.app.conversation.conversation.window;
-    let sent = rows
+    let sent = driver
+        .app
+        .conversation
+        .conversation
+        .window
         .iter()
         .find(|message| message.text == "wasm test message")
         .expect("simulated send appears in app history");
     assert_eq!(sent.status, MessageStatus::Sent);
+    assert!(driver.app.snapshot_sends().is_empty());
+    assert!(!driver.app.is_sending());
+}
+
+#[wasm_bindgen_test]
+fn media_effects_keep_the_original_send_settlement() {
+    let mut driver = Driver::new();
+    let chat_id = driver.open_chat_id();
+    let temp_id = driver
+        .app
+        .conversation
+        .conversation
+        .queue_media_send(domain::message::MediaKind::File, None);
+    driver.app.begin_send(temp_id);
+    driver.sim.schedule(
+        0,
+        demo_support::Effect::SendFailed {
+            chat_id,
+            temp_id,
+            reason: "upload failed".to_owned(),
+        },
+    );
+    driver.tick();
+    assert!(!driver.app.is_sending());
+    assert_eq!(
+        driver
+            .app
+            .conversation
+            .conversation
+            .message(temp_id)
+            .map(|message| message.status),
+        Some(MessageStatus::Failed)
+    );
+    let message = driver
+        .sim
+        .attachment_message(
+            chat_id,
+            "note.txt".to_owned(),
+            domain::message::MediaKind::File,
+        )
+        .expect("fixture chat exists");
+    let message_id = message.id;
+    driver.sim.schedule(
+        0,
+        demo_support::Effect::Sent {
+            chat_id,
+            temp_id,
+            message,
+        },
+    );
+    driver.tick();
+    assert!(
+        driver
+            .app
+            .conversation
+            .conversation
+            .message(temp_id)
+            .is_none()
+    );
+    assert_eq!(
+        driver
+            .app
+            .conversation
+            .conversation
+            .message(message_id)
+            .map(|message| message.status),
+        Some(MessageStatus::Sent)
+    );
 }
 
 #[wasm_bindgen_test]

@@ -387,7 +387,7 @@ checksum = "5729f5117e208430e437df2f4843f5e5952997175992d1414f94c57d61e270b4"
 
 [[package]]
 name = "demo-support"
-version = "0.9.1"
+version = "0.13.0"
 dependencies = [
  "domain",
  "tui",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.9.1"
+version = "0.13.0"
 dependencies = [
  "thiserror 2.0.21",
  "web-time",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "tui"
-version = "0.9.1"
+version = "0.13.0"
 dependencies = [
  "crossterm 0.28.1",
  "domain",

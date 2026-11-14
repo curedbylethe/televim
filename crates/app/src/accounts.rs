@@ -72,6 +72,7 @@ pub(crate) struct SlotPaths {
     pub(crate) slot: AccountSlot,
 
     pub(crate) drafts: PathBuf,
+    pub(crate) outbox: PathBuf,
     pub(crate) history: PathBuf,
     pub(crate) media: PathBuf,
     pub(crate) session: SessionTarget,
@@ -137,6 +138,10 @@ pub(crate) fn slot_paths(config_path: &Path, cfg: &Config, account: Option<i64>)
     SlotPaths {
         slot: AccountSlot::of(account),
         drafts,
+        outbox: config_path.with_extension(account.map_or_else(
+            || "outbox.json".to_owned(),
+            |id| format!("{id}.outbox.json"),
+        )),
         history,
         media,
         session,
@@ -551,6 +556,7 @@ mod tests {
 
         assert_eq!(paths.slot, AccountSlot::Legacy);
         assert_eq!(paths.drafts, dir.path().join("televim.drafts.json"));
+        assert_eq!(paths.outbox, dir.path().join("televim.outbox.json"));
         assert_eq!(paths.history, dir.path().join("televim.history.json"));
         assert_eq!(paths.media, dir.path().join("televim.media"));
         assert_eq!(paths.description, tui::SessionStore::Keyring);
@@ -761,6 +767,7 @@ mod tests {
         let paths = slot_paths(&config_path, &Config::default(), selected);
         assert_eq!(paths.slot, AccountSlot::Id(7));
         assert_eq!(paths.drafts, config_path.with_extension("7.drafts.json"));
+        assert_eq!(paths.outbox, config_path.with_extension("7.outbox.json"));
         assert_eq!(session_name_of(&config_path, selected), "session-7");
     }
 

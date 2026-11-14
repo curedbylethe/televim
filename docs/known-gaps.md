@@ -176,9 +176,10 @@ Real, and named so they are not mistaken for oversights:
   sentence — green while the feed delivers, yellow while a bring-up or a
   rebuild is under way, red once the budget is spent — while the sentences
   keep saying what happened in words); **CUR-49** owns a manual `:reconnect` command
-  (there is none); **CUR-47** owns queued in-flight sends (none are queued). This
-  is a separate request from the chat-list fetch, which is the one thing a launch
-  cannot start without.
+  (there is none). Text sends now use a persistent outbox; media uploads still
+  do not survive a relaunch. A text-send timeout can follow server acceptance,
+  so sending it again can duplicate delivery. This is separate from the chat-list
+  fetch, which is the one thing a launch cannot start without.
 - **Two sign-in hints in the Rust differ from the engine's text.** The bar's field
   hint is ` ⏎: send  Esc: cancel` and the waiting hint is
   ` Checking… — the request is in flight`, where the design model reuses its

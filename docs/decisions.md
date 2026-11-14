@@ -1828,3 +1828,22 @@ are in [`../AGENTS.md`](../AGENTS.md).
   automatically; the first launch must run there or use `--config`.
 
 - **Why legacy keychain sessions migrate to files:** when the resolved file is absent, Televim reads the previous build account entry and saves through the configured file key provider. It clears the old entry only after save succeeds; empty or failed reads leave it untouched.
+
+- **Why pending text uses a durable outbox** (supersedes the earlier no-queue
+  boundary): the four-entry action queue cannot retain every offline send.
+  `ConversationState::send_outbox` keeps queued and failed text in insertion order,
+  while native app persistence writes an account-tagged, versioned JSON file
+  beside the config with atomic replacement and `0600` permissions. Plaintext
+  follows the drafts precedent and allows restore before session access. Success,
+  dismissal and sign-out remove entries; account switching flushes the old queue
+  and restores the target's. A failed flush refuses the switch rather than losing
+  unsaved text. The simulator and browser drain the same public `App` API without
+  adding another queue or native persistence. Media uploads remain in memory.
+- **Why text sends time out after 15 seconds:** one shared in-flight gate needs
+  a bounded outcome. The timeout starts when the client dispatches the request,
+  marks the entry failed and leaves it on disk; a failed entry does not block
+  later queued sends. Telegram may accept a request before its reply is lost,
+  so sending timed-out text again can duplicate it. Failed sends are not retried
+  automatically. Account generations guard text completions independently of
+  feed generations, so switching accounts invalidates late results without
+  discarding valid results during a reconnect.

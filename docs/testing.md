@@ -206,6 +206,15 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   tests use `ratatui`'s `TestBackend`. Two layers sit in those same modules: the
   committed golden frames below, and the `proptest` properties in `domain` and
   `tui`.
+- **Text outbox tests:** domain tests restore negative placeholders without
+  collisions and retain them under cached history. TUI tests cover ordered
+  queueing, one send in flight, failures, chat switches, trimmed rows and dismissal.
+  App store tests cover account acceptance, invalid entries, atomic `0600` writes,
+  future versions, empty queues and failed-write preservation; network/runtime
+  tests cover settlement, timeout, account isolation and snapshot syncing.
+  `cargo test -p demo-support --all-features` covers the simulator drain and parity;
+  `make wasm-check`, `make wasm-test` and `make wasm-boundary` cover the detached
+  browser consumer, which native `make ci` does not compile.
 - **Golden tests:** `crates/tui/src/widgets/goldens/` holds two committed 80x24
   text frames, `conversation_frame.txt` and `chat_list_frame.txt`, drawn from
   `App::mock()` and compared one row at a time. They are text-only: the style
@@ -301,8 +310,8 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   (`a_ready_for_another_account_discards_the_cache_before_it_draws`) and a cache
   tagged with the signed-in account surviving a different configured phone, the draft surviving the `Ready`,
   a failed bring-up leaving the cache readable, and a cold cache launching as it
-  always has. `tui`'s half — the seed accepted only for an empty open window, the
-  revalidation sentence and its rank, paging held while the newest page is in
+  always has. `tui`'s half — the seed accepted only for an open window without
+  numbered messages, the revalidation sentence and its rank, paging held while the newest page is in
   flight — is in `tui/src/app/tests.rs` and the `TestBackend` tests of the
   conversation panel and the status bar.
 - **Session keys:** `sealed::tests` cover the key-file provider over a temp

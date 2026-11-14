@@ -124,6 +124,10 @@ impl Driver {
             self.app.flash("demo action loop stopped");
         }
 
+        for effect in self.sim.drain_sends(&mut self.app) {
+            self.apply_effect(effect);
+        }
+
         let elapsed = i64::try_from(self.started.elapsed().as_secs()).unwrap_or(i64::MAX);
         self.app.record_now(
             self.base_timestamp.saturating_add(elapsed),
@@ -256,14 +260,27 @@ impl Driver {
                 let _ = self
                     .app
                     .apply_update(&UpdateEvent::NewMessage(message.clone()));
-                if self.open_chat_id() == chat_id {
-                    self.app.confirm_sent(temp_id, message.clone());
+                if !self
+                    .app
+                    .settle_send_success(chat_id, temp_id, message.clone())
+                    && self.open_chat_id() == chat_id
+                {
+                    self.app.confirm_sent(temp_id, message);
                 }
             }
             Effect::SendFailed {
-                temp_id, reason, ..
+                chat_id,
+                temp_id,
+                reason,
             } => {
-                self.app.fail_send(temp_id, reason.clone());
+                self.app.end_send(temp_id);
+                if !self
+                    .app
+                    .settle_send_failure(chat_id, temp_id, reason.clone())
+                    && self.open_chat_id() == chat_id
+                {
+                    self.app.fail_send(temp_id, reason.clone());
+                }
                 self.app.flash(reason);
             }
             Effect::RequestFilePicker {

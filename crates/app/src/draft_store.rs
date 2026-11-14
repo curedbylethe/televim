@@ -326,7 +326,7 @@ pub(crate) fn drafts_acceptable(stored: Option<&str>, configured: Option<&str>) 
 /// the finished file. The temp has to be a rename rather than a copy for
 /// that, and it has to be in the same directory because a cross-filesystem
 /// rename is not atomic and would degrade to a non-atomic copy.
-fn write_atomically(path: &Path, bytes: &[u8]) {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> bool {
     let temp = temp_sibling(path);
 
     let result = (|| -> Result<()> {
@@ -351,7 +351,9 @@ fn write_atomically(path: &Path, bytes: &[u8]) {
     }
     if let Err(error) = result {
         tracing::warn!(%error, "drafts file could not be written");
+        return false;
     }
+    true
 }
 
 /// The temp file [`write_atomically`] writes through.
@@ -773,10 +775,11 @@ mod tests {
             LoadedDrafts::empty(),
             "the submit cleared the map entry, so the next sync wrote nothing left"
         );
-        assert!(
-            app.take_action().is_some(),
-            "and the send itself was queued, not swallowed by the test"
+        assert_eq!(
+            app.next_queued_send().expect("the send was queued").text,
+            "sending this"
         );
+        assert!(app.take_action().is_none());
     }
 
     #[test]
