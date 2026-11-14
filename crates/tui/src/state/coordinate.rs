@@ -1571,10 +1571,8 @@ pub(crate) fn paste(
 /// are on their way, so there is no draft left to keep. Mirrors what
 /// [`park_draft`] does for empty lines.
 pub(crate) fn submit_message(
-    _ui: &mut UiState,
     conversation: &mut ConversationState,
     input: &mut InputState,
-    _outbox: &mut Outbox,
     drafts: &mut DraftStore,
 ) {
     if !conversation.has_conversation() || input.line.text().trim().is_empty() {
@@ -3041,13 +3039,7 @@ pub(crate) fn submit(
 ) -> bool {
     let opened = match input.line.purpose() {
         PromptKind::Message | PromptKind::Reply => {
-            submit_message(
-                &mut *ui,
-                &mut *conversation,
-                &mut *input,
-                &mut *outbox,
-                &mut *drafts,
-            );
+            submit_message(&mut *conversation, &mut *input, &mut *drafts);
             false
         }
         PromptKind::Edit => {
