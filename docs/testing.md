@@ -209,6 +209,8 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
 - **Text outbox tests:** domain tests restore negative placeholders without
   collisions and retain them under cached history. TUI tests cover ordered
   queueing, one send in flight, failures, chat switches, trimmed rows and dismissal.
+  Retry tests cover every chat in insertion order, trimmed-row restoration,
+  connected send retries without a rebuild, and offline/no-failed bring-up retries.
   App store tests cover account acceptance, invalid entries, atomic `0600` writes,
   future versions, empty queues and failed-write preservation; network/runtime
   tests cover settlement, timeout, account isolation and snapshot syncing.
