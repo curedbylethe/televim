@@ -3679,6 +3679,7 @@ dependencies = [
  "domain",
  "dotenvy",
  "fs4",
+ "keyring",
  "notify-rust",
  "proto",
  "ratatui",

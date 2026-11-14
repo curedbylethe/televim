@@ -16989,3 +16989,167 @@ mod switch_tests {
         );
     }
 }
+
+/// `migrate_slot` against an in-memory keychain, so the real keychain read runs
+/// without the OS prompting. The keychain is process-wide, so the tests share a
+/// lock and each starts from an empty one.
+#[cfg(test)]
+mod migrate_slot_tests {
+    use std::any::Any;
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, MutexGuard, Once};
+
+    use telegram_framework::sealed::KeyFileProvider;
+    use telegram_framework::{KeyringStore, SessionData};
+
+    use super::*;
+
+    type Key = (String, String);
+
+    /// Every secret the test keychain holds, by service and user.
+    static ENTRIES: Mutex<BTreeMap<Key, Vec<u8>>> = Mutex::new(BTreeMap::new());
+    static LOCK: Mutex<()> = Mutex::new(());
+    static INSTALL: Once = Once::new();
+
+    /// One entry in the test keychain.
+    struct Entry(Key);
+
+    impl keyring::credential::CredentialApi for Entry {
+        fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+            ENTRIES
+                .lock()
+                .expect("test keychain lock")
+                .insert(self.0.clone(), secret.to_vec());
+            Ok(())
+        }
+
+        fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+            ENTRIES
+                .lock()
+                .expect("test keychain lock")
+                .get(&self.0)
+                .cloned()
+                .ok_or(keyring::Error::NoEntry)
+        }
+
+        fn delete_credential(&self) -> keyring::Result<()> {
+            ENTRIES
+                .lock()
+                .expect("test keychain lock")
+                .remove(&self.0)
+                .map(drop)
+                .ok_or(keyring::Error::NoEntry)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Builds entries that all share [`ENTRIES`].
+    struct Keychain;
+
+    impl keyring::credential::CredentialBuilderApi for Keychain {
+        fn build(
+            &self,
+            _target: Option<&str>,
+            service: &str,
+            user: &str,
+        ) -> keyring::Result<Box<keyring::Credential>> {
+            Ok(Box::new(Entry((service.to_owned(), user.to_owned()))))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Takes the lock, installs the test keychain once, and empties it.
+    fn keychain() -> MutexGuard<'static, ()> {
+        let guard = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        INSTALL.call_once(|| keyring::set_default_credential_builder(Box::new(Keychain)));
+        ENTRIES.lock().expect("test keychain lock").clear();
+        guard
+    }
+
+    /// A configuration whose session is a file under `dir`, sealed with a key
+    /// file rather than the keychain, so the only keychain touch is the legacy read.
+    fn file_session(dir: &Path) -> Config {
+        Config {
+            session_path: Some(dir.join("session")),
+            session_key_file: Some(dir.join("session.key")),
+            ..Config::default()
+        }
+    }
+
+    /// Puts a session in the keychain the way an older build left it.
+    fn legacy_session() {
+        KeyringStore::new("televim", accounts::session_name(AccountSlot::Legacy))
+            .save(&SessionData::default())
+            .expect("the test keychain takes the legacy session");
+    }
+
+    /// Runs the migration to completion on a runtime of its own. Synchronous, so
+    /// the keychain guard is never held across an await point.
+    fn migrate(cfg: &Config, config_path: &Path) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(migrate_slot(cfg, config_path, AccountSlot::Legacy))
+            .expect("migration runs");
+    }
+
+    #[test]
+    fn a_legacy_keychain_session_moves_into_the_slot_file_and_clears_the_keychain() {
+        let _guard = keychain();
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let cfg = file_session(dir.path());
+        legacy_session();
+
+        migrate(&cfg, &dir.path().join("televim.toml"));
+
+        let file = FileStore::with_key_provider(
+            dir.path().join("session"),
+            Arc::new(KeyFileProvider::new(dir.path().join("session.key"))),
+        );
+        assert_eq!(
+            file.load().expect("the slot file opens"),
+            Some(SessionData::default()),
+            "the keychain session is now in the slot's file"
+        );
+        assert_eq!(
+            KeyringStore::new("televim", accounts::session_name(AccountSlot::Legacy))
+                .load()
+                .expect("the test keychain answers"),
+            None,
+            "and the keychain copy is cleared once the file holds it"
+        );
+    }
+
+    #[test]
+    fn a_slot_whose_session_file_exists_makes_no_keychain_move() {
+        let _guard = keychain();
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let cfg = file_session(dir.path());
+        std::fs::write(dir.path().join("session"), b"already here").expect("slot file");
+        legacy_session();
+
+        migrate(&cfg, &dir.path().join("televim.toml"));
+
+        assert!(
+            KeyringStore::new("televim", accounts::session_name(AccountSlot::Legacy))
+                .load()
+                .expect("the test keychain answers")
+                .is_some(),
+            "a slot that already has its file leaves the keychain alone"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("session")).expect("slot file"),
+            b"already here",
+            "and the file is not overwritten"
+        );
+    }
+}
