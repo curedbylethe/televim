@@ -4496,9 +4496,8 @@ mod tests {
             (0..60 - FIRST_ROW).collect::<Vec<usize>>(),
             "and the second row's prefix, up to where the selection ends"
         );
-        assert_eq!(
-            selected_text_columns(&screen, ONLY + 2, ONLY),
-            vec![],
+        assert!(
+            selected_text_columns(&screen, ONLY + 2, ONLY).is_empty(),
             "a row the selection never reached is left alone"
         );
     }

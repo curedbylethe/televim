@@ -2913,6 +2913,11 @@ impl App {
         self.conversation.clear_sends();
     }
 
+    /// Requeues every failed text send, across conversations, in insertion order.
+    pub fn retry_failed_sends(&mut self) -> usize {
+        self.conversation.retry_failed_sends()
+    }
+
     /// Records that a send for `temp_id` is in flight.
     ///
     /// Delegates to [`ConversationState::begin_send`].

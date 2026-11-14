@@ -308,6 +308,20 @@ impl ConversationState {
         self.sending = None;
     }
 
+    pub(crate) fn retry_failed_sends(&mut self) -> usize {
+        let sends = self.send_outbox.retry_failed();
+        let retried = sends.len();
+        for send in sends {
+            if self.conversation.window.chat_id == send.chat_id
+                && !self.conversation.retry_send(send.temp_id)
+            {
+                self.conversation
+                    .push_pending(send.temp_id, send.text.into(), send.reply_to, None);
+            }
+        }
+        retried
+    }
+
     /// Sets the depth each conversation's jumplist keeps, from the
     /// configuration.
     ///

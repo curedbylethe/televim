@@ -88,6 +88,18 @@ impl SendOutbox {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
     }
+
+    pub(crate) fn retry_failed(&mut self) -> Vec<OutboxSend> {
+        self.entries
+            .iter_mut()
+            .filter(|send| send.failure.is_some())
+            .map(|send| {
+                send.failure = None;
+                send.sending = false;
+                send.clone()
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

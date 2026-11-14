@@ -53,6 +53,7 @@ use crate::state::ui::IDLE_STATUS;
 use crate::state::update::{Choice, Stage};
 
 use super::chat_list::ChatListState;
+use super::connection::ConnectionState;
 use super::conversation::ConversationState;
 use super::drafts::DraftStore;
 use super::input::InputState;
@@ -3247,7 +3248,13 @@ pub(crate) fn run_command(
             false
         }
         "retry" => {
-            request_retry(&mut *ui, &mut *session);
+            let retried = conversation.retry_failed_sends();
+            if retried > 0 && ui.connection == ConnectionState::Connected {
+                let noun = if retried == 1 { "send" } else { "sends" };
+                ui.flash(format!("retrying {retried} {noun}"));
+            } else {
+                request_retry(&mut *ui, &mut *session);
+            }
             false
         }
         // The self card's `add account` row asks for the same thing. No client
