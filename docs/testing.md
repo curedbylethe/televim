@@ -215,8 +215,8 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   send, survive a quit and relaunch from `televim.outbox.json`.
   Reconnect tests cover the command flag, a live-feed cancel with the budget reset,
   a no-feed bring-up, the busy refusal, and a stored or dropped feed handle. The
-  startup-window guard and the live wire path are not reproducible from the
-  repository, so they stay unit-untested.
+  startup-window guard is a pure predicate with its own branch test. The live
+  wire path is not reproducible from the repository, so it stays unit-untested.
   App store tests cover account acceptance, invalid entries, atomic `0600` writes,
   future versions, empty queues and failed-write preservation; network/runtime
   tests cover settlement, timeout, account isolation and snapshot syncing.

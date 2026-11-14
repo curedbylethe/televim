@@ -2724,6 +2724,14 @@ fn take_resumed_search(app: &mut App, state: &State, now: Instant) -> Option<Act
     Some(action)
 }
 
+/// Whether a client is up whose feed has not started yet, so a reconnect must
+/// wait for that feed rather than start a second one. A client with no feed
+/// and no pending end is that window; an Offline client is a spent budget, and
+/// it is rebuilt.
+fn feed_starting(has_client: bool, feed_ended: bool, connection: ConnectionState) -> bool {
+    has_client && !feed_ended && connection != ConnectionState::Offline
+}
+
 /// Starts a bring-up now, for a manual reconnect with no feed to cancel.
 ///
 /// Spends the automatic budget, so the feed-ended block does not start a second
@@ -2799,9 +2807,11 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             // `Ready` and the feed's start. A second feed there would run beside the
             // first, so the command waits for the feed that is coming. An Offline
             // client is one whose budget ran out, and it is rebuilt.
-            let starting = state.client.is_some()
-                && !state.reconnect_requested
-                && app.connection() != ConnectionState::Offline;
+            let starting = feed_starting(
+                state.client.is_some(),
+                state.reconnect_requested,
+                app.connection(),
+            );
             match state.feed_cancel.take() {
                 Some(cancel) => {
                     // The budget resets for this attempt, so the feed's end rebuilds.
@@ -10953,6 +10963,15 @@ mod tests {
 
         assert!(state.bringing_up, "the bring-up was issued at once");
         assert!(state.auto_reconnect_used, "and it is the one attempt");
+    }
+
+    /// The three states the startup-window guard tells apart.
+    #[test]
+    fn a_reconnect_waits_only_for_a_feed_that_is_starting() {
+        assert!(feed_starting(true, false, ConnectionState::Connected));
+        assert!(!feed_starting(true, true, ConnectionState::Reconnecting));
+        assert!(!feed_starting(true, false, ConnectionState::Offline));
+        assert!(!feed_starting(false, false, ConnectionState::Connected));
     }
 
     /// A bring-up already running is not stacked on: the command says so.
