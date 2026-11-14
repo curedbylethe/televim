@@ -493,7 +493,7 @@ Working today:
   card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
   `:discard`, `:attach <path>`, `:open`, `:save <path>`,
-  `:date <ISO>`, `:settings`, `:update`, `:signin`, `:add-account`, `:retry`, `:unlock`,
+  `:date <ISO>`, `:settings`, `:update`, `:signin`, `:add-account`, `:retry`, `:reconnect`, `:unlock`,
   `:passphrase`, `:export-session <path>`, `:import-session <path>`, and the
   eight chat and contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,
   `:rename [name]`, `:delete-chat [both]`, `:report [reason]`, `:contacts`).
@@ -539,6 +539,11 @@ Working today:
   arrives, the status line says `offline:` and `:retry` asks again. A `●` beside
   the sentence always shows which holds: green while the feed delivers, yellow
   while a bring-up or rebuild is under way, red once the budget is spent.
+  `:reconnect` forces the rebuild by hand, without quitting: it cancels a live
+  feed and rebuilds the client the same way, with a fresh automatic attempt for
+  that rebuild. With no live feed it starts a bring-up at once. While a bring-up
+  is already running it says `already trying to connect`. The cancelled feed
+  does not record its position, so the rebuild replays what it had not delivered.
   A switch of account carries far less: `:add-account` and picking a listed
   account on the self card keep the peer id of the
   open conversation, so the new account lands in that chat when its own list holds
