@@ -67,6 +67,7 @@ use telegram_framework::{
     PassphraseProvider, PreloadedStore, Refusal, RequestError, SessionError, SessionStore,
 };
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, JumpKind, LoginField};
 
 use crate::accounts::{self, AccountSlot, SessionTarget, SlotPaths, SlotStore};
@@ -103,6 +104,10 @@ const RECONNECT_STABLE_FOR: Duration = Duration::from_secs(600);
 const RETRY: Duration = Duration::from_secs(5);
 
 const SEND_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long a naturally ended feed may take to record its position. A manual
+/// reconnect does not wait on this: it drops the feed without recording it.
+const FEED_FINISH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How many times the launch chat-list fetch is asked for before the bring-up is
 /// called a failure.
@@ -277,6 +282,11 @@ pub enum Event {
     /// and only when that reconnect cannot be made — or the feed ends again
     /// before any update has arrived — does the reader see an `offline:`.
     FeedEnded,
+
+    /// A feed is up. Its pump is spawned after this event is sent, so the
+    /// sender is in place before any end of that feed can be read. Sending on
+    /// `cancel` ends the feed without recording its position.
+    FeedStarted(oneshot::Sender<()>),
 
     /// A page came back, or the fetch that asked for it failed.
     History {
@@ -1018,6 +1028,11 @@ pub struct State {
     /// otherwise rebuild the client, and re-read the keychain, at every death.
     auto_reconnect_at: Option<Instant>,
 
+    /// Cancels the live update feed. A manual `:reconnect` sends on it. A feed
+    /// that has already ended leaves a sender whose receiver is gone, and that
+    /// send fails, which is how the command knows to bring the client up itself.
+    feed_cancel: Option<oneshot::Sender<()>>,
+
     /// The conversation and newest message Telegram last accepted a read marker
     /// for. A conversation opened again at the same ceiling is not sent again.
     read_acked: Option<(i64, i64)>,
@@ -1260,6 +1275,8 @@ impl State {
         self.outbox_file = None;
         self.outbox_in_flight = None;
         self.outbox_generation += 1;
+        // Dropping the sender ends the old feed quietly: its pump reports nothing.
+        self.feed_cancel = None;
         app.clear_sends();
 
         self.client = None;
@@ -2004,7 +2021,11 @@ async fn bring_up(
     }));
     report_discarded(discarded, tx);
     report_resealed(resealed, tx);
-    tokio::spawn(pump(updates, tx.clone()));
+    // Sent before the pump is spawned, so the loop holds the cancel sender before
+    // any end of this feed can reach it.
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let _ = tx.send(AppEvent::Net(Event::FeedStarted(cancel_tx)));
+    tokio::spawn(pump(updates, tx.clone(), cancel_rx));
 
     Ok(())
 }
@@ -2593,14 +2614,26 @@ impl std::error::Error for KeyRequired {}
 /// past while the feed stays usable. Past the bound the feed is ended instead:
 /// the loop below records its position and reports it, which is the feed's end
 /// asking for the one rebuild.
-async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
+async fn pump(
+    mut updates: UpdateStream,
+    tx: UnboundedSender<AppEvent>,
+    mut cancel: oneshot::Receiver<()>,
+) {
     let mut errors_seen: u8 = 0;
-    while let Some(result) = updates.next().await {
+    // `Some(true)`: a manual reconnect asked for the end. `Some(false)`: the
+    // feed was replaced or forgotten, so nobody is waiting on its end. `None`:
+    // the feed ended on its own.
+    let stopped = loop {
+        let next = tokio::select! {
+            signal = &mut cancel => break Some(signal.is_ok()),
+            next = updates.next() => next,
+        };
+        let Some(result) = next else { break None };
         match result {
             Ok(event) => {
                 if tx.send(AppEvent::Net(Event::Update(event))).is_err() {
                     // The loop is gone, so there is nothing left to tell.
-                    break;
+                    break None;
                 }
             }
             Err(error) => {
@@ -2615,24 +2648,50 @@ async fn pump(mut updates: UpdateStream, tx: UnboundedSender<AppEvent>) {
                     };
                     if tx.send(AppEvent::Net(Event::FeedRetrying(retry))).is_err() {
                         // The loop is gone, so there is nothing left to tell.
-                        break;
+                        break None;
                     }
-                    tokio::time::sleep(delay).await;
+                    // A manual reconnect cancels the wait rather than sitting it out.
+                    let signal = tokio::select! {
+                        signal = &mut cancel => Some(signal.is_ok()),
+                        () = tokio::time::sleep(delay) => None,
+                    };
+                    if let Some(manual) = signal {
+                        break Some(manual);
+                    }
                 } else {
                     tracing::warn!(%error, "the update feed kept failing past its bound; ending it so the client is rebuilt");
-                    break;
+                    break None;
                 }
             }
         }
-    }
+    };
 
-    // The feed has been read to its end, so the position it reached is final.
-    // Recording it is an explicit call rather than something the drop does,
-    // because it has to be awaited, and the next launch resolves a gap against
-    // the stored position — so a session left pointing further back would replay
-    // every update in between.
-    if let Err(error) = updates.finish().await {
-        tracing::warn!(%error, "the update position could not be recorded");
+    match stopped {
+        // Dropped without recording the position, so the session keeps the
+        // position it last recorded and the rebuilt feed replays anything this
+        // one had not delivered. Recording it here could move the position past
+        // updates that never reached the loop.
+        Some(true) => {}
+        // Replaced or forgotten: the connection now belongs to someone else, so
+        // this feed reports nothing.
+        Some(false) => return,
+        // The feed ended on its own, so the position it reached is final.
+        // Recording it is an explicit call rather than something the drop does,
+        // because it has to be awaited, and the next launch resolves a gap
+        // against the stored position — so a session left pointing further back
+        // would replay every update in between. Bounded, so a stuck connection
+        // cannot hold the rebuild.
+        None => match tokio::time::timeout(FEED_FINISH_TIMEOUT, updates.finish()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "the update position could not be recorded");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "recording the update position timed out; the last recorded one stays"
+                );
+            }
+        },
     }
 
     // The end is reported **after** the position is recorded: the app rebuilds
@@ -2663,6 +2722,24 @@ fn take_resumed_search(app: &mut App, state: &State, now: Instant) -> Option<Act
 
     app.begin_global_search(&spec);
     Some(action)
+}
+
+/// Starts a bring-up now, for a manual reconnect with no feed to cancel.
+///
+/// Spends the automatic budget, so the feed-ended block does not start a second
+/// bring-up for the same request.
+fn bring_up_now(state: &mut State) {
+    if let (Some(cfg), Some(tx)) = (state.cfg_now(), state.tx.clone()) {
+        state.auto_reconnect_used = true;
+        state.bringing_up = true;
+        spawn_opening(
+            cfg,
+            &state.config_path,
+            state.opening(),
+            state.file_keys(),
+            tx,
+        );
+    }
 }
 
 /// Asks for whatever page the screen is about to need.
@@ -2708,6 +2785,36 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
                 state.file_keys(),
                 tx,
             );
+        }
+    }
+
+    // The reader's `:reconnect`, read beside the retry for the same reason: the
+    // state it is asked in may have no feed. A live feed is cancelled, and its end
+    // rebuilds through the block below; with no live feed, a bring-up starts now.
+    if app.take_reconnect_command() {
+        if state.bringing_up {
+            app.flash("already trying to connect");
+        } else {
+            // A client with no feed and no feed-ended pending is the window between
+            // `Ready` and the feed's start. A second feed there would run beside the
+            // first, so the command waits for the feed that is coming. An Offline
+            // client is one whose budget ran out, and it is rebuilt.
+            let starting = state.client.is_some()
+                && !state.reconnect_requested
+                && app.connection() != ConnectionState::Offline;
+            match state.feed_cancel.take() {
+                Some(cancel) => {
+                    // The budget resets for this attempt, so the feed's end rebuilds.
+                    state.auto_reconnect_used = false;
+                    app.set_connection(ConnectionState::Reconnecting);
+                    // A failed send means the feed already ended, and no rebuild is pending.
+                    if cancel.send(()).is_err() {
+                        bring_up_now(state);
+                    }
+                }
+                None if starting => app.flash("already trying to connect"),
+                None => bring_up_now(state),
+            }
         }
     }
 
@@ -3645,7 +3752,9 @@ async fn report_sign_in(
             };
             match client.subscribe_updates().await {
                 Ok(updates) => {
-                    tokio::spawn(pump(updates, tx.clone()));
+                    let (cancel_tx, cancel_rx) = oneshot::channel();
+                    let _ = tx.send(AppEvent::Net(Event::FeedStarted(cancel_tx)));
+                    tokio::spawn(pump(updates, tx.clone(), cancel_rx));
                 }
                 Err(error) => {
                     tracing::warn!(%error, "the update feed could not be taken after signing in");
@@ -4051,6 +4160,8 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             app.clear_sends();
             state.outbox_in_flight = None;
             state.outbox_generation += 1;
+            // Dropping the sender ends the old feed quietly: its pump reports nothing.
+            state.feed_cancel = None;
             app.set_chats(Vec::new());
             // The words go with the account: a peer id can be reused by
             // another one, and the in-memory clear above already flows to the
@@ -4331,6 +4442,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         }
 
         Event::FeedEnded => apply_feed_ended(app, state),
+        Event::FeedStarted(cancel) => state.feed_cancel = Some(cancel),
 
         Event::ReadMarked { chat_id, max_id } => {
             state.read_acked = Some((chat_id, max_id));
@@ -10785,6 +10897,101 @@ mod tests {
         assert!(
             !state.take_reconnect_request(),
             "the request was taken, so a second pass asks for nothing"
+        );
+    }
+
+    /// A manual reconnect on a live feed cancels it and waits for its end, which
+    /// rebuilds once, even though the automatic attempt was already spent.
+    #[tokio::test]
+    async fn a_reconnect_command_cancels_the_live_feed_and_rebuilds_once() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            feed_cancel: Some(cancel_tx),
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+
+        app.request_reconnect();
+        drive(&mut app, &mut state, &tx);
+
+        assert!(cancel_rx.try_recv().is_ok(), "the live feed was cancelled");
+        assert!(!state.bringing_up, "no bring-up before the feed has ended");
+        assert!(
+            !state.auto_reconnect_used,
+            "the budget reset for this attempt"
+        );
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        drive(&mut app, &mut state, &tx);
+
+        assert!(state.bringing_up, "the feed's end rebuilt the client");
+        assert!(
+            state.auto_reconnect_used,
+            "and that rebuild spent the budget"
+        );
+    }
+
+    /// With no feed and no client, `:reconnect` starts a bring-up at once, even
+    /// though the automatic attempt was already spent.
+    #[tokio::test]
+    async fn a_reconnect_command_with_no_feed_starts_a_bring_up_now() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            auto_reconnect_used: true,
+            ..State::default()
+        };
+
+        app.request_reconnect();
+        drive(&mut app, &mut state, &tx);
+
+        assert!(state.bringing_up, "the bring-up was issued at once");
+        assert!(state.auto_reconnect_used, "and it is the one attempt");
+    }
+
+    /// A bring-up already running is not stacked on: the command says so.
+    #[tokio::test]
+    async fn a_reconnect_command_during_a_bring_up_says_so_and_waits() {
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let mut state = State {
+            cfg: Some(Config::default()),
+            tx: Some(tx.clone()),
+            bringing_up: true,
+            feed_cancel: Some(cancel_tx),
+            ..State::default()
+        };
+
+        app.request_reconnect();
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(app.ui.status, "already trying to connect");
+        assert!(cancel_rx.try_recv().is_err(), "the live feed is left alone");
+    }
+
+    /// A feed that starts is stored, so a later reconnect can cancel it; sign-out
+    /// drops it, so the old feed ends quietly.
+    #[test]
+    fn a_started_feed_is_stored_and_sign_out_drops_it() {
+        let mut app = App::new();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        let mut state = State::default();
+
+        apply(&mut app, &mut state, Event::FeedStarted(cancel_tx));
+        assert!(state.feed_cancel.is_some(), "stored for a later reconnect");
+
+        apply_logged_out(&mut app, &mut state, Ok(()));
+        assert!(state.feed_cancel.is_none(), "sign-out drops it");
+        assert!(
+            cancel_rx.try_recv().is_err(),
+            "the dropped sender tells the old feed to stop quietly"
         );
     }
 

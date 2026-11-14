@@ -3659,6 +3659,19 @@ fn retry_command_restores_a_trimmed_failed_row() {
     assert_eq!(app.conversation.conversation.auto_follow(), following);
 }
 
+#[test]
+fn reconnect_command_asks_for_a_fresh_connection_once() {
+    let mut app = App::mock();
+
+    run_command_line(&mut app, "reconnect");
+    run_command_line(&mut app, "reconnect");
+
+    assert_eq!(app.ui.status, "reconnecting");
+    assert!(app.take_reconnect_command());
+    assert!(!app.take_reconnect_command(), "taken once, not stacked");
+    assert!(!app.take_retry_request(), "reconnect is not a retry");
+}
+
 /// One slot rather than a queue: a request taken is a request being carried out,
 /// so the pass after the one that took it finds nothing. What stops a *second*
 /// bring-up is not this slot — pressing `:retry` twice before either is taken

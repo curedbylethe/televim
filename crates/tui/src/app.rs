@@ -3189,6 +3189,16 @@ impl App {
         self.session.take_retry_request()
     }
 
+    /// Asks the loop for a fresh connection, as `:reconnect` does.
+    pub fn request_reconnect(&mut self) {
+        coordinate::request_reconnect(&mut self.ui, &mut self.session);
+    }
+
+    /// The `:reconnect` the reader asked for, once.
+    pub fn take_reconnect_command(&mut self) -> bool {
+        self.session.take_reconnect_command()
+    }
+
     /// Puts the sign-in flow up, with the phone field open and the configured
     /// number in it.
     ///

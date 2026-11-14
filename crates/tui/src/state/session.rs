@@ -82,6 +82,12 @@ pub struct SessionState {
     /// because a second retry while one is on its way is the same retry; the
     /// caller says so with a transient status rather than asking twice.
     pub(crate) retry_requested: bool,
+
+    /// The `:reconnect` command the reader asked for, not yet carried out.
+    ///
+    /// Named apart from the app's feed-ended flag: this one is the reader's
+    /// request, that one is the feed's end.
+    pub(crate) reconnect_command_requested: bool,
 }
 
 impl SessionState {
@@ -105,6 +111,7 @@ impl SessionState {
             // sign-in it accepts now would be a request nobody carries.
             client_available: false,
             retry_requested: false,
+            reconnect_command_requested: false,
         }
     }
 
@@ -166,6 +173,17 @@ impl SessionState {
     /// than a second bring-up.
     pub(crate) fn take_retry_request(&mut self) -> bool {
         std::mem::take(&mut self.retry_requested)
+    }
+
+    /// Records that the reader asked for a fresh connection.
+    pub(crate) fn request_reconnect(&mut self) {
+        self.reconnect_command_requested = true;
+    }
+
+    /// The `:reconnect` the reader asked for, once. A second command before the
+    /// first is taken is the same request, so the flag does not stack.
+    pub(crate) fn take_reconnect_command(&mut self) -> bool {
+        std::mem::take(&mut self.reconnect_command_requested)
     }
 
     /// The field the reader is filling in, which is whatever step the flow is at.
