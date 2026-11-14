@@ -460,13 +460,7 @@ mod tests {
         app.input
             .set_line(line(PromptKind::Message, "sending this"));
 
-        submit_message(
-            &mut app.ui,
-            &mut app.conversation,
-            &mut app.input,
-            &mut app.outbox,
-            &mut app.drafts,
-        );
+        submit_message(&mut app.conversation, &mut app.input, &mut app.drafts);
 
         assert!(
             !app.drafts.drafts.contains_key(&chat_id),
