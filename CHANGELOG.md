@@ -5,6 +5,26 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.13.0] - 2026-11-14
+
+### Added
+
+- **telegram-framework:** Surface contact signup messages
+- **tui:** Render service messages as hint rows
+
+### Fixed
+
+- **domain:** Reorder chats on message arrival
+- **tui:** Preserve highlight when chats reorder
+- **app:** Refresh chats for unknown arrivals
+- **app:** Avoid stale chat refresh behavior
+- **app:** Preserve chat-list state during refresh
+- **domain:** Keep tied chats stable on arrival
+- **app:** Reconcile chat-list refresh safely
+- **app:** Preserve reads during chat-list refresh
+- **proto:** Preserve history paging across service rows
+- **tui:** Isolate service hints from message groups
+
 ## [0.12.2] - 2026-11-10
 
 ### Fixed
