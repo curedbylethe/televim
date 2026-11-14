@@ -3546,6 +3546,119 @@ fn retry_command_asks_for_the_client_again() {
     );
 }
 
+#[test]
+fn retry_command_requeues_failed_text_without_rebuilding_a_healthy_client() {
+    let mut app = App::mock();
+    app.set_connection(ConnectionState::Connected);
+    submit(&mut app, "retry me");
+    let send = app.next_queued_send().expect("queued text");
+    assert!(app.settle_send_failure(send.chat_id, send.temp_id, "offline".to_owned()));
+    assert!(app.next_queued_send().is_none());
+
+    run_command_line(&mut app, "retry");
+
+    assert!(!app.take_retry_request());
+    let queued = app.next_queued_send().expect("failed text requeued");
+    assert_eq!(queued.temp_id, send.temp_id);
+    assert!(queued.failure.is_none());
+    assert!(!queued.sending);
+    assert_eq!(
+        app.conversation
+            .conversation
+            .message(send.temp_id)
+            .expect("placeholder")
+            .status,
+        MessageStatus::Sending
+    );
+    assert_eq!(app.conversation.conversation.failure(send.temp_id), None);
+    assert_eq!(app.ui.status, "retrying 1 send");
+    assert!(app.expire_status(Instant::now() + FLASH_FOR));
+    assert!(!app.is_sending());
+}
+
+#[test]
+fn retry_command_requeues_failed_text_and_requests_bringup_while_offline() {
+    let mut app = App::mock();
+    app.set_connection(ConnectionState::Offline);
+    submit(&mut app, "retry me");
+    let send = app.next_queued_send().expect("queued text");
+    assert!(app.settle_send_failure(send.chat_id, send.temp_id, "offline".to_owned()));
+
+    run_command_line(&mut app, "retry");
+
+    assert!(app.take_retry_request());
+    assert!(
+        app.next_queued_send()
+            .expect("requeued text")
+            .failure
+            .is_none()
+    );
+    assert_eq!(app.ui.status, "reconnecting");
+    assert!(!app.is_sending());
+}
+
+#[test]
+fn retry_requeues_failed_text_across_chats_in_insertion_order() {
+    let mut app = App::mock();
+    app.enqueue_send(MOCK_CHAT + 1, -1, "other chat first".to_owned(), None);
+    app.enqueue_send(MOCK_CHAT, -1, "open chat second".to_owned(), None);
+    assert!(app.settle_send_failure(MOCK_CHAT, -1, "failed first".to_owned()));
+    assert!(app.settle_send_failure(MOCK_CHAT + 1, -1, "failed second".to_owned()));
+
+    assert_eq!(app.retry_failed_sends(), 2);
+
+    let first = app.next_queued_send().expect("first failed entry");
+    assert_eq!(first.chat_id, MOCK_CHAT + 1);
+    app.mark_send_sending(first.chat_id, first.temp_id);
+    assert_eq!(
+        app.next_queued_send().expect("next failed entry").chat_id,
+        MOCK_CHAT
+    );
+    assert_eq!(app.retry_failed_sends(), 0);
+}
+
+#[test]
+fn retry_command_restores_a_trimmed_failed_row() {
+    let mut app = App::mock();
+    app.set_connection(ConnectionState::Connected);
+    app.install_sends(
+        (1..=9)
+            .map(|number| crate::OutboxSend {
+                chat_id: MOCK_CHAT,
+                temp_id: -number,
+                text: format!("failed {number}"),
+                reply_to: None,
+                failure: Some("offline".to_owned()),
+                sending: false,
+            })
+            .collect(),
+    );
+    assert!(app.conversation.conversation.message(-1).is_none());
+    let cursor = app.conversation.vim.cursor();
+    let following = app.conversation.conversation.auto_follow();
+
+    run_command_line(&mut app, "retry");
+
+    assert_eq!(
+        app.conversation
+            .conversation
+            .message(-1)
+            .expect("trimmed row restored")
+            .status,
+        MessageStatus::Sending
+    );
+    assert!(
+        app.snapshot_sends()
+            .iter()
+            .all(|send| send.failure.is_none() && !send.sending)
+    );
+    assert_eq!(app.snapshot_sends().len(), 9);
+    assert_eq!(app.ui.status, "retrying 9 sends");
+    assert!(!app.take_retry_request());
+    assert_eq!(app.conversation.vim.cursor(), cursor);
+    assert_eq!(app.conversation.conversation.auto_follow(), following);
+}
+
 /// One slot rather than a queue: a request taken is a request being carried out,
 /// so the pass after the one that took it finds nothing. What stops a *second*
 /// bring-up is not this slot — pressing `:retry` twice before either is taken
