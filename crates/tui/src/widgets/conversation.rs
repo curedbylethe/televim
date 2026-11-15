@@ -5648,30 +5648,4 @@ mod frame_dump {
             .collect::<Vec<_>>()
             .join("\n")
     }
-
-    #[test]
-    fn dump_the_translated_frame() {
-        let chat = App::mock().conversation.conversation.window.chat_id;
-        let mut app = App::mock();
-        let mut view = ConversationView::new(chat);
-        view.window.replace([
-            message(1, 0, true, "Packed the wire."),
-            message(2, 120, false, "השער הצדדי נסגר בשעה 21:30"),
-            message(3, 180, false, "Keep the ruler dry."),
-        ]);
-        app.conversation.conversation = view;
-        app.conversation.vim.set_total(3);
-        app.conversation.vim.set_cursor(1);
-        app.record_now(AT + 3_600, 0);
-
-        let _ = app.conversation.conversation.set_translation(
-            2,
-            Translation {
-                text: "The side gate shuts at 21:30.".to_owned(),
-                source: None,
-                target: "en".to_owned(),
-            },
-        );
-        println!("=== translated\n{}", frame(&app));
-    }
 }
