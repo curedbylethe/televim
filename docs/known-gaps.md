@@ -717,6 +717,18 @@ Real, and named so they are not mistaken for oversights:
   - *No revision carries a time.* The update has none, and a local arrival time
     would be a different fact under the same label, so only the current text is
     headed with an age; the older blocks wear `…`.
+- **A translation names its target, and the client cannot name its source.**
+  `messages.TranslatedText` answers with the translated text and says nothing about
+  the language it was translated from, so `t`'s marker reads `translated to <lang>`
+  — the language the reader configured — and never `translated from …`. The model's
+  `translated` scene draws a source language because the design was drawn before
+  that gap was known; the build cannot, and a guess printed under a message is the
+  one kind of error the marker exists to prevent. Two smaller consequences: the
+  marker names the configured code as it was written (`en`, `pt-BR`) rather than a
+  language's name, because this build carries no table of them; and a translation
+  is a rendering this client holds, so it is not persisted and is not in the history
+  cache — a relaunch, a chat switch or an edit to the message leaves the message
+  showing its own words.
 
 ## Browser demo
 

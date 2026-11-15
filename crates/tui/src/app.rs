@@ -2635,6 +2635,33 @@ impl App {
         self.open_chat().map(|chat| chat.title.as_str())
     }
 
+    /// The text a message draws, which is its translation while one is shown.
+    ///
+    /// The message's own text is never touched: the translation lives beside the
+    /// window, in the view, and this is the one place the two meet. Everything
+    /// that measures a message's body — the wrap, the drawn row, the width the
+    /// trailing note is pushed past — asks here, so a translated message is as
+    /// tall as its translation and not as tall as the text it replaced.
+    ///
+    /// An edited message has no translation to show, because the view drops the
+    /// entry when the text changes: a rendering of words that have been replaced
+    /// would be worse than no rendering at all.
+    #[must_use]
+    pub fn shown_body<'a>(&'a self, message: &'a Message) -> &'a str {
+        self.conversation
+            .conversation
+            .translation(message.id)
+            .map_or_else(|| message.display_body(), |translation| &translation.text)
+    }
+
+    /// The language `t` asks for, from the configuration.
+    ///
+    /// Delegates to [`ConversationState::translation_target`].
+    #[must_use]
+    pub fn translation_target(&self) -> &str {
+        self.conversation.translation_target()
+    }
+
     /// The message the cursor is on, if the window holds anything.
     ///
     /// Delegates to [`ConversationState::cursor_message`].
@@ -3615,8 +3642,8 @@ impl App {
     /// case where they disagree.
     ///
     /// A pure function of the window's messages, the reactions they carry, the
-    /// open draft, [`App::body_width`] and [`App::now`], and of nothing else: not
-    /// the cursor, not the mode, not when it was asked. A layout worked out before
+    /// translations they show, the open draft, [`App::body_width`] and
+    /// [`App::now`], and of nothing else: not the cursor, not the mode, not when it was asked. A layout worked out before
     /// a page lands is thrown away rather than kept, which is why a [`RowSpan`] is
     /// named by message id.
     ///
@@ -3665,14 +3692,19 @@ impl App {
                 )
             } else {
                 // The row's own slice and height never read bidi mode. The
-                // panel permutes the same logical rows at paint time.
-                let text = 0..message.display_body().len();
+                // panel permutes the same logical rows at paint time. The text
+                // is the one the message *draws*, which is its translation while
+                // one is shown, so every range below is a range of what is on
+                // the screen.
+                let text = 0..self.shown_body(message).len();
                 let rows = rows::message_rows(self, message, rows::group_of(self, index), width);
-                // Sticker rows follow its empty text and the reaction strip comes
-                // after both, so every height adds.
+                // The sticker rows follow its empty text, then the marker that
+                // says the body is a translation, then the reaction strip, so
+                // every height adds.
                 let block = rows::sticker_block_rows(message, &self.conversation.stickers);
+                let marker = usize::from(rows::has_translation(self, message));
                 let strip = usize::from(rows::has_reactions(self, message));
-                let len = rows.len() + block + strip;
+                let len = rows.len() + block + marker + strip;
                 self.conversation.stash_rows(message.id, rows);
                 (RowKind::Message { index }, len, text)
             };

@@ -857,6 +857,11 @@ async fn event_loop(
     // like the modes above: handed to `tui` as a plain number, so `tui` names no
     // configuration type. It caps both stacks of every conversation.
     app.conversation = app.conversation.with_jumplist_depth(cfg.jumplist_depth());
+    // The language `t` asks for, read once here and fixed for the run, like the
+    // modes above: `tui` names no configuration, so it is handed the string.
+    app.conversation = app
+        .conversation
+        .with_translation_target(cfg.translation_target());
     if let Some(id) = initial_chat {
         app.set_initial_chat(id);
     }

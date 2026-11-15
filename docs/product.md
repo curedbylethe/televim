@@ -483,6 +483,23 @@ Working today:
   current block carries a time: an older one wears `…`, because the update has no
   timestamp and a local arrival time would be a different fact under the same
   label. The limits are in [`known-gaps.md`](./known-gaps.md).
+- **Translation, on demand:** `t` shows the message under the cursor in the language
+  `[translation] to` names (`en` when it is not set), and `t` again puts the
+  message's own words back. The translated text takes the body's place at the body's
+  column, and one dim row under it says `translated to <lang>` — the language the
+  reader asked for, because the layer this build speaks reports a translation and
+  nothing about the source it came from. The marker is the point of the feature, not
+  decoration: a reader who mistakes a translation for the message has been told
+  something the sender did not write, so it is a word rather than a colour or a
+  glyph. The message itself is never rewritten — the translation is a rendering the
+  client holds beside the window — so clearing it is instant and costs no round trip,
+  and an edit drops it, since a rendering of words that have been replaced is worse
+  than none. Nothing is translated on arrival. The call is premium-gated
+  server-side and no field in this layer reports the entitlement, so a non-premium
+  account gets one dim sentence on the status row — `Translation is a premium
+  feature: this message was not translated.` — and nothing else changes; any other
+  failure says `translate: <reason>`. The source language is not available to the
+  client at all; see [`known-gaps.md`](./known-gaps.md).
 - **Reactions:** a message that carries them shows one row of chips under its text,
   in the body column: the emoji, then its count when more than one person reacted,
   two spaces between chips, and the strip stops at the body width rather than

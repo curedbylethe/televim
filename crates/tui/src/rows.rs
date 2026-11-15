@@ -532,7 +532,7 @@ pub fn message_rows(
     }
 
     let (prefix, suffix) = decoration_columns(app, message, grouped, width);
-    wrap_decorated(message.display_body(), prefix, suffix, width)
+    wrap_decorated(app.shown_body(message), prefix, suffix, width)
 }
 
 /// How many rows a decoded sticker message paints its picture on: none without
@@ -564,6 +564,20 @@ pub fn has_reactions(app: &App, message: &Message) -> bool {
         .conversation
         .reactions(message.id)
         .is_empty()
+}
+
+/// Whether a message draws the marker that says it is showing a translation.
+///
+/// AFTER [`message_rows`], [`sticker_block_rows`] and [`has_reactions`], and
+/// counted the same way: one row of the message's own, added to
+/// [`RowSpan::len`] so the panel, the slice and the scrollbar agree about the
+/// height. A message showing no translation has no row rather than a blank one.
+#[must_use]
+pub fn has_translation(app: &App, message: &Message) -> bool {
+    app.conversation
+        .conversation
+        .translation(message.id)
+        .is_some()
 }
 
 /// The rows of the window the layout holds, which is every row but a draft's.

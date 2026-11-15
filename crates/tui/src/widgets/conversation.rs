@@ -387,7 +387,7 @@ fn coverage(
     // a set of messages. `text_range` being `None` *is* the second case.
     match selection.text_range() {
         Some((id, range)) if id == message.id => Some(Coverage::Text(rows::byte_span(
-            message.display_body(),
+            app.shown_body(message),
             range,
         ))),
         Some(_) => None,
@@ -435,7 +435,7 @@ struct Draw {
 /// drawn and what the budget spent are one answer. At most `draw.room` rows —
 /// a message is drawn whole or not at all, and the panel decides the whole.
 fn message_items<'m>(
-    app: &App,
+    app: &'m App,
     message: &'m Message,
     index: usize,
     draw: &Draw,
@@ -455,9 +455,11 @@ fn message_items<'m>(
     }
     let coverage = coverage(app, message, index, covered);
     let cursor_here = app.conversation.vim.cursor() == index;
+    let marker = rows::has_translation(app, message);
     let strip = rows::has_reactions(app, message);
 
-    let mut items = Vec::with_capacity(wrapped.len() + block + usize::from(strip));
+    let mut items =
+        Vec::with_capacity(wrapped.len() + block + usize::from(marker) + usize::from(strip));
     let mut picture = None;
     for (row, range) in wrapped.iter().enumerate().skip(draw.skip) {
         if items.len() >= draw.room {
@@ -513,10 +515,15 @@ fn message_items<'m>(
         }
     }
 
-    // The strip is the message's last row, so it is drawn after the text and the
-    // picture and skipped with them: it is one row of the same message, not a row
-    // of its own in the layout.
-    if strip && draw.skip <= wrapped.len() + block && items.len() < draw.room {
+    // The marker and the strip are the message's last rows, drawn after the text
+    // and the picture and skipped with them: they are rows of the same message,
+    // not rows of their own in the layout. The marker comes first, because it is
+    // about the body above it, and a chip strip belongs under the whole message.
+    let after_body = wrapped.len() + block;
+    if marker && draw.skip <= after_body && items.len() < draw.room {
+        items.push(translation_marker(app, message, draw.width));
+    }
+    if strip && draw.skip <= after_body + usize::from(marker) && items.len() < draw.room {
         items.push(reaction_strip(app, message, coverage.as_ref(), draw.width));
     }
 
@@ -602,7 +609,7 @@ struct BlockPlace {
 /// the selection's colour and keeps only its `BOLD` rather than its own colour,
 /// which on a selection is close to invisible.
 fn message_row<'m>(
-    app: &App,
+    app: &'m App,
     message: &'m Message,
     place: &Place,
     range: &Range<usize>,
@@ -661,6 +668,12 @@ fn message_row<'m>(
     // same bytes. In [`BidiMode::Terminal`] there is no answer to ask for — the
     // terminal's shaper reverses a right-to-left run for us, and permuting here
     // would reverse it twice.
+    // The body is the message's own text, or its translation while one is shown:
+    // the message is not rewritten, only drawn from the text it displays. The
+    // placeholder ink is decided by what the sender wrote, not by what is shown:
+    // a message with no caption is the program's word for a photo whether or not
+    // something was made of it.
+    let body = app.shown_body(message);
     let placeholder = message.media.is_some() && message.text.is_empty();
     let row = text_row::TextRow {
         ink: if placeholder {
@@ -668,7 +681,7 @@ fn message_row<'m>(
         } else {
             text_row::Ink::readonly(&app.ui.theme)
         },
-        text: message.display_body(),
+        text: body,
         range: range.clone(),
         matched,
         selected: match covered {
@@ -687,14 +700,14 @@ fn message_row<'m>(
             // One direction for the whole message, one permutation per row: the
             // base level is the message's, and a row of an all-neutral message
             // carries no evidence of its own.
-            let base = bidi::base_direction(message.display_body());
+            let base = bidi::base_direction(body);
             // `visual_row_in`, and not `visual_row` over the row's own slice: the
             // chunks are slices of the **text**, and `spans_permuted` slices it
             // with them. Ranges counted from the row's start would be the wrong
             // bytes of every row that does not begin at zero — which is every row
             // of a wrapped message but the first, and the whole row would paint
             // nothing rather than paint itself wrong.
-            let pieces = bidi::permuted_in(app.bidi(), message.display_body(), range.clone(), base);
+            let pieces = bidi::permuted_in(app.bidi(), body, range.clone(), base);
             spans.extend(text_row::spans_permuted(&row, &pieces));
         }
     }
@@ -713,7 +726,7 @@ fn message_row<'m>(
         } else {
             0
         };
-        let drawn = prefix + drawn_cells(&message.display_body()[range.clone()]);
+        let drawn = prefix + drawn_cells(&app.shown_body(message)[range.clone()]);
         let gap = usize::from(width).saturating_sub(drawn + columns(&note));
         if gap > 0 {
             spans.push(Span::raw(" ".repeat(gap)));
@@ -736,6 +749,33 @@ fn message_row<'m>(
     }
 
     ListItem::new(Line::from(spans))
+}
+
+/// The line under a translated message that says the body is not the sender's
+/// words.
+///
+/// One row, in the body column, belonging to the message: `translated to en`,
+/// in the dim ink metadata takes. It names the language the reader **asked for**
+/// and not the one the message was in, because the layer this build speaks
+/// reports a translation and nothing about its source — and a marker with no
+/// language in it would be a colour, which is exactly what the design refuses
+/// here: a reader who mistakes a translation for the message has been told
+/// something the sender did not write.
+///
+/// Like the strip it is a row *about* the message, so it never takes the cursor's
+/// reverse video, and like the strip a Visual selection covers it.
+fn translation_marker<'m>(app: &App, message: &Message, width: u16) -> ListItem<'m> {
+    let Some(translation) = app.conversation.conversation.translation(message.id) else {
+        return ListItem::new("");
+    };
+
+    let room = usize::from(width).saturating_sub(rows::MARGIN_WHO_WIDTH);
+    let label = rows::truncate(&format!("translated to {}", translation.target), room);
+
+    ListItem::new(Line::from(vec![
+        Span::raw(" ".repeat(rows::MARGIN_WHO_WIDTH)),
+        Span::styled(label, app.ui.theme.text_dim),
+    ]))
 }
 
 /// The row of reaction chips under a message's body.
@@ -5071,6 +5111,15 @@ mod tests {
             .find(|y| body_row(buffer, *y).contains(needle))
     }
 
+    /// The column `needle` starts in on row `y`, in the panel's body.
+    fn column_of_text(buffer: &Buffer, y: u16, needle: &str) -> u16 {
+        let at = body_row(buffer, y)
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} is on row {y}"));
+
+        BODY_X + u16::try_from(at).expect("a column of the panel")
+    }
+
     /// The column `symbol` is drawn in on row `y`, in the panel's body.
     fn column_of(buffer: &Buffer, y: u16, symbol: &str) -> u16 {
         (usize::from(BODY_X)..usize::from(buffer.area.width) - 2)
@@ -5276,6 +5325,131 @@ mod tests {
         );
     }
 
+    // ---- a translated message --------------------------------------------
+
+    /// Gives the message `id` this translation, as the server's answer does.
+    fn translate(app: &mut App, id: i64, text: &str, target: &str) {
+        assert!(
+            app.conversation.conversation.set_translation(
+                id,
+                domain::message::Translation {
+                    text: text.to_owned(),
+                    source: None,
+                    target: target.to_owned(),
+                },
+            ),
+            "the translation was expected to land"
+        );
+    }
+
+    /// The body is the translation, and the row under it says so in the dim ink:
+    /// the marker is the whole point, since a reader who mistakes a translation
+    /// for the message has been told something the sender did not write.
+    #[test]
+    fn a_translated_message_draws_the_translation_and_a_marker_under_it() {
+        let mut app = showing(vec![at(1, 120, false, "השער הצדדי נסגר בשעה 21:30")]);
+        translate(&mut app, 1, "The side gate shuts at 21:30.", "en");
+
+        let screen = screen(&app, 80, 24);
+
+        let body = body_row_with(&screen, "The side gate").expect("the translation is drawn");
+        assert!(
+            body_row(&screen, body).starts_with(" [them] The side gate shuts at 21:30."),
+            "in the message's own place: {:?}",
+            body_row(&screen, body)
+        );
+        let marker = body_row_with(&screen, "translated to en").expect("the marker is drawn");
+        assert_eq!(
+            marker,
+            body + 1,
+            "one row under the body it belongs to: {marker} and {body}"
+        );
+        assert_eq!(
+            cell(
+                &screen,
+                column_of_text(&screen, marker, "translated to en"),
+                marker
+            )
+            .fg,
+            theme().text_dim.fg.expect("the dim ink is a foreground"),
+            "and it is dim, because it is furniture rather than the message"
+        );
+        assert_eq!(
+            column_of_text(&screen, marker, "translated to en"),
+            BODY_X + 8,
+            "it starts in the body column, like the strip under a message"
+        );
+        assert!(
+            body_row_with(&screen, "השער").is_none(),
+            "the message's own words are not drawn while the translation is"
+        );
+    }
+
+    /// The message is not rewritten: taking the translation away restores its own
+    /// words, and the marker goes with the translation.
+    #[test]
+    fn the_message_s_own_words_come_back_when_the_translation_goes() {
+        let mut app = showing(vec![at(1, 120, false, "השער הצדדי נסגר בשעה 21:30")]);
+        translate(&mut app, 1, "The side gate shuts at 21:30.", "en");
+        let _ = app.conversation.conversation.clear_translation(1);
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            body_row_with(&screen, "השער").is_some(),
+            "the message is drawn from its own text again"
+        );
+        assert!(
+            body_row_with(&screen, "translated to").is_none(),
+            "and no marker is left behind"
+        );
+    }
+
+    /// The marker is a row of the message, so the layout counts it: the panel and
+    /// the slice must not disagree about the message's height.
+    #[test]
+    fn the_marker_is_counted_in_the_message_s_own_height() {
+        let mut app = showing(vec![at(1, 120, false, "השער הצדדי נסגר בשעה 21:30")]);
+        let len_of = |app: &App| {
+            app.row_layout()
+                .iter()
+                .find(|span| span.message_id == Some(1))
+                .expect("the message is in the layout")
+                .len
+        };
+        let rows_before = len_of(&app);
+        translate(&mut app, 1, "The side gate shuts at 21:30.", "en");
+
+        assert_eq!(rows_before, 1, "the message's own text is one row");
+        assert_eq!(
+            len_of(&app),
+            rows_before + 1,
+            "one row for the marker, and the body is still one row"
+        );
+    }
+
+    /// A right-to-left message translated into a left-to-right language is drawn
+    /// in the direction of what is *shown*, not of what it replaced.
+    #[test]
+    fn a_translation_is_drawn_in_its_own_direction() {
+        let mut app = App::mock().with_bidi(BidiMode::Visual);
+        app.conversation.conversation.window.replace(vec![at(
+            1,
+            120,
+            false,
+            "השער הצדדי נסגר בשעה 21:30",
+        )]);
+        app.conversation.vim.set_total(1);
+        translate(&mut app, 1, "the gate shuts at nine", "en");
+
+        let screen = screen(&app, 80, 24);
+
+        assert!(
+            body_row_with(&screen, "the gate shuts at nine").is_some(),
+            "a left-to-right translation reads left to right"
+        );
+    }
+
     // ---- the pin marker --------------------------------------------------
 
     /// Marks the message `id` as pinned, through the view's own event: a pin
@@ -5429,5 +5603,75 @@ mod tests {
             ),
             include_str!("goldens/conversation_frame.txt"),
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_dump {
+    use super::*;
+    use domain::history::ConversationView;
+    use domain::message::{MediaKind, Message, MessageStatus, Translation};
+    use std::borrow::Cow;
+
+    const AT: i64 = 1_730_000_000;
+
+    fn message(id: i64, seconds: i64, outgoing: bool, text: &'static str) -> Message {
+        Message {
+            id,
+            chat_id: App::mock().conversation.conversation.window.chat_id,
+            text: Cow::Borrowed(text),
+            timestamp: AT + seconds,
+            status: MessageStatus::Received,
+            is_outgoing: outgoing,
+            reply_to: None,
+            media: None::<MediaKind>,
+            is_service: false,
+            media_id: None,
+        }
+    }
+
+    fn frame(app: &App) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).expect("backend");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("the frame draws");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn dump_the_translated_frame() {
+        let chat = App::mock().conversation.conversation.window.chat_id;
+        let mut app = App::mock();
+        let mut view = ConversationView::new(chat);
+        view.window.replace([
+            message(1, 0, true, "Packed the wire."),
+            message(2, 120, false, "השער הצדדי נסגר בשעה 21:30"),
+            message(3, 180, false, "Keep the ruler dry."),
+        ]);
+        app.conversation.conversation = view;
+        app.conversation.vim.set_total(3);
+        app.conversation.vim.set_cursor(1);
+        app.record_now(AT + 3_600, 0);
+
+        let _ = app.conversation.conversation.set_translation(
+            2,
+            Translation {
+                text: "The side gate shuts at 21:30.".to_owned(),
+                source: None,
+                target: "en".to_owned(),
+            },
+        );
+        println!("=== translated\n{}", frame(&app));
     }
 }

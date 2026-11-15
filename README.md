@@ -135,6 +135,7 @@ Use `televim --chat <id>` to open a chat directly.
 | `d` / `r` / `e` / `f` | Delete (confirms) / reply / edit / forward |
 | `+` | React to the message: one emoji, or `-` to take your own back |
 | `P` | Pin or unpin the message under the cursor |
+| `t` | Translate the message into the configured language, or take the translation away |
 | `/` / `n` / `N` | Search this chat / next / previous match |
 | `h` / `q` | Return to list / quit (confirms) |
 
