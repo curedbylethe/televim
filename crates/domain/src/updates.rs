@@ -30,7 +30,7 @@ use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 
 use crate::chat::{Chat, ChatKind};
-use crate::message::Message;
+use crate::message::{Message, ReactionCount};
 use crate::presence::Presence;
 
 /// Something that happened to a conversation.
@@ -153,6 +153,28 @@ pub enum UpdateEvent {
         /// The status the peer now reports.
         presence: Presence,
     },
+
+    /// The reactions on one message changed.
+    ///
+    /// The whole set rather than a delta, because that is what the protocol
+    /// carries: the update names every reaction the message has now, so
+    /// replacing what is held cannot drift from the server. An event naming no
+    /// reactions is a message whose last one was taken away.
+    ///
+    /// The reactions live beside the messages rather than on one — see
+    /// [`ConversationView`](crate::history::ConversationView) — because they
+    /// change without the message changing, and a page of history replaced by a
+    /// newer fetch must not take its reactions with it.
+    ReactionsChanged {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// Identifier of the message within that conversation.
+        message_id: i64,
+
+        /// Every reaction the message now carries.
+        reactions: Vec<ReactionCount>,
+    },
 }
 
 /// How many messages [`ChatList`] holds before the oldest is dropped.
@@ -221,8 +243,12 @@ impl ChatList {
             // not a message at all. Nothing here observes either, so nothing
             // changes — and storing a typing flag would mean deciding when it
             // lapses, which is a question for whoever draws the conversation and
-            // a clock this crate does not have.
-            UpdateEvent::ReadReceipt { .. } | UpdateEvent::PeerTyping { .. } => false,
+            // a clock this crate does not have. A reaction is the conversation's
+            // own state for the same reason: the list's preview does not carry
+            // one, so nothing here has anywhere to put it.
+            UpdateEvent::ReadReceipt { .. }
+            | UpdateEvent::PeerTyping { .. }
+            | UpdateEvent::ReactionsChanged { .. } => false,
         }
     }
 

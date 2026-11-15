@@ -24,7 +24,7 @@
 use std::borrow::Cow;
 
 use domain::chat::{Chat, ChatKind};
-use domain::message::{MediaKind, Message, MessageStatus};
+use domain::message::{MediaKind, Message, MessageStatus, Reaction, ReactionCount};
 #[cfg(feature = "live")]
 use domain::presence::Presence;
 #[cfg(feature = "live")]
@@ -119,6 +119,19 @@ pub(crate) struct ProtoMessage {
     /// Telegram's stable id for the media, if it carries one. Only the id:
     /// the framework never hands over an access hash or file reference.
     pub media_id: Option<i64>,
+
+    /// The reactions the message carries, in the order Telegram sent them.
+    ///
+    /// Beside the message rather than on it, which is the domain's own shape —
+    /// a reaction changes without its message changing, and nothing downstream
+    /// writes one into a message's text.
+    ///
+    /// `shortcut:` the counts stop here for now: `domain::Message` may not carry
+    /// them, and the conversation's side container is filled by the update feed
+    /// rather than by a page. Wire this field through the history fetch when
+    /// the strip has to be drawn before the first reaction arrives.
+    #[allow(dead_code)]
+    pub reactions: Vec<ReactionCount>,
 }
 
 impl From<ProtoChat> for Chat {
@@ -220,7 +233,39 @@ impl From<MessageInfo> for ProtoMessage {
             reply_to: message.reply_to_msg_id.map(i64::from),
             media: message.media.map(media_kind),
             media_id: message.media_id,
+            reactions: message
+                .reactions
+                .into_iter()
+                .map(to_reaction_count)
+                .collect(),
         }
+    }
+}
+
+/// Maps one framework reaction count onto the domain's.
+///
+/// Exhaustive on purpose: a reaction kind added to the framework stops the build
+/// here rather than arriving in `domain` as a silent default. The domain's copy
+/// of the taxonomy is the one the interface draws from, so a kind it has never
+/// heard of is a chip it cannot draw.
+#[cfg(feature = "live")]
+pub(crate) fn to_reaction_count(count: telegram_framework::ReactionCount) -> ReactionCount {
+    ReactionCount {
+        reaction: to_reaction(count.reaction),
+        count: count.count,
+        chosen: count.chosen,
+    }
+}
+
+/// Maps the framework's reaction taxonomy onto the domain's.
+#[cfg(feature = "live")]
+fn to_reaction(reaction: telegram_framework::Reaction) -> Reaction {
+    match reaction {
+        telegram_framework::Reaction::Emoticon(emoticon) => Reaction::Emoticon(emoticon),
+        telegram_framework::Reaction::CustomEmoji(document_id) => {
+            Reaction::CustomEmoji(document_id)
+        }
+        telegram_framework::Reaction::Paid => Reaction::Paid,
     }
 }
 
@@ -358,6 +403,7 @@ mod tests {
             reply_to: None,
             media: None,
             media_id: None,
+            reactions: Vec::new(),
         }
     }
 
@@ -565,7 +611,31 @@ mod live_tests {
             reply_to_msg_id: None,
             media: None,
             media_id: None,
+            reactions: Vec::new(),
         }
+    }
+
+    /// A reaction is described in the domain's own vocabulary before it leaves
+    /// this crate, count and "is it mine" included.
+    #[test]
+    fn a_reaction_count_reaches_the_dto() {
+        let mut source = message_info(42);
+        source.reactions = vec![telegram_framework::ReactionCount {
+            reaction: telegram_framework::Reaction::Emoticon("👍".to_owned()),
+            count: 2,
+            chosen: true,
+        }];
+
+        let message = ProtoMessage::from(source);
+
+        assert_eq!(
+            message.reactions,
+            vec![ReactionCount {
+                reaction: Reaction::Emoticon("👍".to_owned()),
+                count: 2,
+                chosen: true,
+            }]
+        );
     }
 
     #[test]

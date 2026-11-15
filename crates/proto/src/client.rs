@@ -98,6 +98,35 @@ impl ProtoClient {
             .map_err(ProtoError::from)
     }
 
+    /// Sets this account's own reaction to one message, or takes it back.
+    ///
+    /// `emoticon` is the reaction to leave, or `None` to remove the one this
+    /// account left. Nothing changes on screen here: the reaction that lands
+    /// arrives as a
+    /// [`ReactionsChanged`](domain::updates::UpdateEvent::ReactionsChanged)
+    /// event, so a chip the server refused is never drawn.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`] when the conversation is not in the
+    /// session's peer cache or Telegram refuses the request, and
+    /// [`ProtoError::MessageIdOutOfRange`] when `message_id` is outside the range
+    /// Telegram numbers messages in — nothing is sent in that case.
+    pub async fn set_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        emoticon: Option<&str>,
+    ) -> Result<(), ProtoError> {
+        let message_id = crate::messages::narrow_id(message_id, chat_id)?;
+
+        self.inner
+            .set_reaction(chat_id, message_id, emoticon)
+            .await?;
+
+        Ok(())
+    }
+
     /// Sets or clears Telegram's manual unread flag for one chat.
     pub async fn set_unread_mark(&self, chat_id: i64, unread: bool) -> Result<(), ProtoError> {
         self.inner

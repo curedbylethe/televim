@@ -12,7 +12,7 @@ use domain::updates::UpdateEvent;
 use telegram_framework::{MessageInfo, UpdateKind};
 
 use crate::error::ProtoError;
-use crate::types::{ProtoMessage, to_presence};
+use crate::types::{ProtoMessage, to_presence, to_reaction_count};
 
 /// A live feed of the updates for the conversations televim displays.
 ///
@@ -131,6 +131,19 @@ fn to_event(kind: UpdateKind) -> UpdateEvent {
             chat_id: chat_peer_id,
             presence: to_presence(presence),
         },
+
+        // The whole set is translated, not a delta: the framework's event
+        // carries every reaction the message has now, and switching each one to
+        // the domain's vocabulary is all that is left.
+        UpdateKind::ReactionsChanged {
+            chat_peer_id,
+            message_id,
+            reactions,
+        } => UpdateEvent::ReactionsChanged {
+            chat_id: chat_peer_id,
+            message_id,
+            reactions: reactions.into_iter().map(to_reaction_count).collect(),
+        },
     }
 }
 
@@ -166,6 +179,7 @@ mod tests {
             reply_to_msg_id: None,
             media: None,
             media_id: None,
+            reactions: Vec::new(),
         }
     }
 
@@ -336,5 +350,65 @@ mod tests {
             assert_eq!(chat_id, 42);
             assert_eq!(mapped, expected, "{presence:?}");
         }
+    }
+
+    /// Reactions reach the domain as its own vocabulary, and the whole set is
+    /// carried: kind, count, and whether the reader is one of the counters.
+    #[test]
+    fn a_reaction_update_becomes_the_message_and_its_chips() {
+        let event = to_event(UpdateKind::ReactionsChanged {
+            chat_peer_id: 42,
+            message_id: 7,
+            reactions: vec![
+                telegram_framework::ReactionCount {
+                    reaction: telegram_framework::Reaction::Emoticon("👍".to_owned()),
+                    count: 2,
+                    chosen: true,
+                },
+                telegram_framework::ReactionCount {
+                    reaction: telegram_framework::Reaction::CustomEmoji(5_000_000_000),
+                    count: 1,
+                    chosen: false,
+                },
+                telegram_framework::ReactionCount {
+                    reaction: telegram_framework::Reaction::Paid,
+                    count: 1,
+                    chosen: false,
+                },
+            ],
+        });
+
+        let UpdateEvent::ReactionsChanged {
+            chat_id,
+            message_id,
+            reactions,
+        } = event
+        else {
+            panic!("a reaction update is a message and its counts");
+        };
+
+        assert_eq!(chat_id, 42);
+        assert_eq!(message_id, 7);
+        assert_eq!(
+            reactions,
+            vec![
+                domain::message::ReactionCount {
+                    reaction: domain::message::Reaction::Emoticon("👍".to_owned()),
+                    count: 2,
+                    chosen: true,
+                },
+                domain::message::ReactionCount {
+                    reaction: domain::message::Reaction::CustomEmoji(5_000_000_000),
+                    count: 1,
+                    chosen: false,
+                },
+                domain::message::ReactionCount {
+                    reaction: domain::message::Reaction::Paid,
+                    count: 1,
+                    chosen: false,
+                },
+            ],
+            "every reaction kind has a domain twin"
+        );
     }
 }

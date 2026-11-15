@@ -1170,6 +1170,22 @@ pub enum Action {
         dest_chat_id: i64,
     },
 
+    /// Add this account's reaction to a message, or take it back.
+    ///
+    /// `emoticon` is the reaction to leave, or `None` to remove the one this
+    /// account left. Nothing is applied locally: the strip is redrawn from the
+    /// update the server sends back, so a chip it refused is never shown.
+    React {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message to react to.
+        message_id: i64,
+
+        /// The reaction to leave, or `None` to remove this account's own.
+        emoticon: Option<String>,
+    },
+
     /// Read the profile of the peer with this bare identifier.
     ///
     /// A question rather than a fetch, for the same reason as [`Action::Search`]:

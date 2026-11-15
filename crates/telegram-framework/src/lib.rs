@@ -15,6 +15,7 @@
 //!   [`Client::search_messages`], [`Client::send_message`],
 //!   [`Client::send_attachment`],
 //!   [`Client::edit_message`] and [`Client::delete_messages`],
+//!   [`Client::set_reaction`] for a message's reactions,
 //!   [`Client::download_media`] for a message's attachment, the
 //!   [`Client::subscribe_updates`] feed, and [`Client::invoke`] as a raw escape
 //!   hatch. These need `grammers`, so they sit behind the `live` feature.
@@ -95,6 +96,8 @@ pub mod messages;
 #[cfg(feature = "live")]
 pub mod raw;
 #[cfg(feature = "live")]
+pub mod reaction;
+#[cfg(feature = "live")]
 pub mod search;
 #[cfg(feature = "live")]
 pub mod updates;
@@ -130,6 +133,8 @@ pub use history::{HISTORY_LIMIT, HistoryArgs, HistoryPage};
 pub use media::MediaKind;
 #[cfg(feature = "live")]
 pub use messages::{TEXT_LIMIT, validate_text};
+#[cfg(feature = "live")]
+pub use reaction::{Reaction, ReactionCount};
 #[cfg(feature = "live")]
 pub use search::{
     GlobalFilter, GlobalHit, GlobalOffset, GlobalPeer, GlobalSearchArgs, GlobalSearchPage,

@@ -23,4 +23,4 @@ pub mod updates;
 pub mod user;
 pub mod vim;
 
-pub use message::{MediaKind, Message, MessageStatus};
+pub use message::{MediaKind, Message, MessageStatus, Reaction, ReactionCount};

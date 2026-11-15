@@ -441,6 +441,22 @@ pub enum Event {
         result: Result<(), ProtoError>,
     },
 
+    /// A reaction change came back, or the request failed.
+    ///
+    /// Nothing is applied on success: the reaction that landed arrives as a
+    /// [`ReactionsChanged`](domain::updates::UpdateEvent::ReactionsChanged)
+    /// update, which is the server's answer rather than this client's guess.
+    Reacted {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message the reaction was left on.
+        message_id: i64,
+
+        /// Nothing on success, or why Telegram refused.
+        result: Result<(), ProtoError>,
+    },
+
     /// A pin change came back, or the request failed.
     PinToggled {
         /// The chat whose pin was asked for.
@@ -3941,6 +3957,21 @@ fn request_plain(
                 let _ = tx.send(AppEvent::Net(event));
             }
 
+            Action::React {
+                chat_id,
+                message_id,
+                emoticon,
+            } => {
+                let result = client
+                    .set_reaction(chat_id, message_id, emoticon.as_deref())
+                    .await;
+                let _ = tx.send(AppEvent::Net(Event::Reacted {
+                    chat_id,
+                    message_id,
+                    result,
+                }));
+            }
+
             Action::TogglePin { chat_id, pinned } => {
                 let result = client.toggle_pin(chat_id, pinned).await;
                 let _ = tx.send(AppEvent::Net(Event::PinToggled {
@@ -4560,6 +4591,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             message_id,
             result,
         } => apply_edited(app, chat_id, message_id, result),
+
+        Event::Reacted {
+            chat_id,
+            message_id,
+            result,
+        } => apply_reacted(app, chat_id, message_id, result),
 
         Event::PinToggled {
             chat_id,
@@ -6144,6 +6181,26 @@ fn apply_edited(app: &mut App, chat_id: i64, message_id: i64, result: Result<(),
     }
 }
 
+/// Folds a reaction's answer in.
+///
+/// A success is silent: the chip line is redrawn by the update the server sends
+/// back, and a status line saying "reacted" would report a request rather than
+/// anything the reader can see. A failure has nothing to apply and one thing to
+/// say.
+fn apply_reacted(app: &mut App, chat_id: i64, message_id: i64, result: Result<(), ProtoError>) {
+    if app.conversation.conversation.window.chat_id != chat_id {
+        return;
+    }
+
+    match result {
+        Ok(()) => tracing::debug!(chat_id, message_id, "a reaction was accepted"),
+        Err(error) => {
+            tracing::debug!(chat_id, message_id, %error, "a reaction failed");
+            app.flash(format!("react: {}", failure_reason(&error)));
+        }
+    }
+}
+
 /// Folds a pin's answer in. The list moves and the status says so when Telegram
 /// agreed; the status says why not when it did not.
 fn apply_pin_toggled(app: &mut App, chat_id: i64, pinned: bool, result: Result<(), ProtoError>) {
@@ -7188,6 +7245,75 @@ mod tests {
         app.select_chat(0);
         app.apply_latest(messages(chat_id, 1..=count));
         app
+    }
+
+    /// A reaction the server refused reaches the status line as the one thing
+    /// the reader can act on, under the area's own name.
+    #[test]
+    fn a_refused_reaction_flashes_the_reason() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Reacted {
+                chat_id: CHAT,
+                message_id: 2,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert!(
+            app.status_text().starts_with("react: "),
+            "the failure belongs to reacting, not to whatever failed last: {}",
+            app.status_text()
+        );
+    }
+
+    /// A reaction the server accepted says nothing: the strip is redrawn from the
+    /// update the server sends back, and a status line would report a request the
+    /// reader already saw happen.
+    #[test]
+    fn an_accepted_reaction_is_silent() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Reacted {
+                chat_id: CHAT,
+                message_id: 2,
+                result: Ok(()),
+            },
+        );
+
+        assert!(
+            !app.status_text().starts_with("react: "),
+            "a success has nothing to explain: {}",
+            app.status_text()
+        );
+    }
+
+    /// A reaction for a conversation the reader has left is not worth a line on
+    /// the status of the one they are in.
+    #[test]
+    fn a_refused_reaction_in_another_conversation_is_not_flashed() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Reacted {
+                chat_id: CHAT + 1,
+                message_id: 2,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT + 1))),
+            },
+        );
+
+        assert!(!app.status_text().starts_with("react: "));
     }
 
     /// An application whose open conversation has unread messages in front of

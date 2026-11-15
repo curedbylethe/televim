@@ -31,6 +31,7 @@
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::media::classify_raw;
+use crate::reaction::reaction_counts;
 use crate::tl;
 use crate::updates::{MessageInfo, message_info, service_message_text};
 
@@ -391,6 +392,7 @@ fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> Option<Messa
         media,
     );
     info.is_service = is_service;
+    info.reactions = reaction_counts(raw);
     Some(info)
 }
 
