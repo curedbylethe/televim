@@ -1754,6 +1754,136 @@ async fn a_multiline_message_survives_the_send() {
         .expect("the message is deleted");
 }
 
+/// A reaction the account leaves on its own message, and then takes back.
+///
+/// Saved Messages again: the message has to be this account's for the reaction to
+/// be allowed, and a message it sent is the only one it can be sure of. Both
+/// answers are checked — the wire either carries the reaction or refuses it, and
+/// a call that silently did nothing would prove neither.
+#[tokio::test]
+async fn a_reaction_lands_and_can_be_taken_back() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+
+    let Some(self_id) = self_user_id(&client).await else {
+        eprintln!("skipped: telegram did not report the account's own identifier");
+        return;
+    };
+
+    let proto = ProtoClient::new(client);
+    let chats = proto
+        .fetch_private_chats()
+        .await
+        .expect("the chat list is fetched");
+    let Some(chat) = chats.iter().find(|chat| chat.id == self_id) else {
+        eprintln!(
+            "skipped: Saved Messages is not among the {} private conversation(s)",
+            chats.len()
+        );
+        return;
+    };
+
+    let marker = std::process::id();
+    let sent = proto
+        .send_message(chat.id, &format!("televim reaction {marker}"), None)
+        .await
+        .expect("the message is sent to Saved Messages");
+
+    proto
+        .set_reaction(chat.id, sent.id, Some("👍"))
+        .await
+        .expect("telegram accepts the reaction");
+
+    proto
+        .set_reaction(chat.id, sent.id, None)
+        .await
+        .expect("telegram accepts taking it back");
+
+    proto
+        .delete_messages(chat.id, &[sent.id])
+        .await
+        .expect("the message is deleted");
+}
+
+/// Translation answers with the text, or refuses because the account is not
+/// premium. Both are the unwrapped wire's real answers, so both are accepted;
+/// what is not accepted is a third outcome.
+#[tokio::test]
+async fn a_translation_is_answered_or_refused_as_premium() {
+    let Some(dc) = TestDc::from_env() else {
+        eprintln!("skipped: set TELEVIM_TEST_DC=1 to run against a real datacenter");
+        return;
+    };
+    if dc.login_credentials().is_none() {
+        eprintln!("skipped: set TELEVIM_TEST_PHONE and TELEVIM_TEST_CODE");
+        return;
+    }
+
+    let (_dir, path) = session_path();
+    let client = build_client(&dc, &path).await;
+    if !log_in(&client, &dc).await {
+        return;
+    }
+
+    let Some(self_id) = self_user_id(&client).await else {
+        eprintln!("skipped: telegram did not report the account's own identifier");
+        return;
+    };
+
+    let proto = ProtoClient::new(client);
+    let chats = proto
+        .fetch_private_chats()
+        .await
+        .expect("the chat list is fetched");
+    let Some(chat) = chats.iter().find(|chat| chat.id == self_id) else {
+        eprintln!(
+            "skipped: Saved Messages is not among the {} private conversation(s)",
+            chats.len()
+        );
+        return;
+    };
+
+    let marker = std::process::id();
+    let sent = proto
+        .send_message(chat.id, &format!("televim translation {marker}"), None)
+        .await
+        .expect("the message is sent to Saved Messages");
+
+    match proto.translate_message(chat.id, sent.id, "en").await {
+        Ok(translation) => {
+            assert!(
+                !translation.text.trim().is_empty(),
+                "an accepted translation carries text"
+            );
+            eprintln!(
+                "translated to {}: {:?}",
+                translation.target, translation.text
+            );
+        }
+        Err(ProtoError::Framework(FrameworkError::TranslationPremiumRequired)) => {
+            eprintln!("skipped: telegram refused the translation as a premium feature");
+        }
+        Err(other) => panic!("an unexpected translation failure: {other:?}"),
+    }
+
+    proto
+        .delete_messages(chat.id, &[sent.id])
+        .await
+        .expect("the message is deleted");
+}
+
 // ---- what the checks are worth --------------------------------------------
 //
 // Everything above needs a datacenter, so without one it proves nothing at all —
