@@ -343,7 +343,10 @@ impl DemoSimulator {
             Action::React { .. } => vec![Self::status(
                 "Reactions are unavailable in the offline demo.",
             )],
-            Action::PinMessage { .. } => vec![Self::status(
+            // The list is a fetch of its own, and the demo pins nothing: the same
+            // sentence `P` gives, so the two cannot disagree about what this world
+            // holds.
+            Action::PinMessage { .. } | Action::FetchPinned { .. } => vec![Self::status(
                 "Pinned messages are unavailable in the offline demo.",
             )],
             Action::SetUnreadMark { .. } => vec![Self::status(

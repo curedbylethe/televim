@@ -56,6 +56,21 @@ use crate::wrap::{columns, wrap_decorated};
 /// pins it.
 pub(crate) const WHO_WIDTH: usize = 7;
 
+/// The column a message's pin marker stands in, before its sender tag.
+///
+/// The design puts `⌖` in the panel's margin so that a pin costs no body column:
+/// its own frame has a column of pad inside the border, and the marker takes that
+/// pad rather than pushing the tag along. This panel had no such column — its
+/// rows began with the tag — so the marker would have been drawn over the `[` or
+/// every message would have begun a column further right than the one above it.
+/// The column is therefore reserved on the row that can carry the marker, which
+/// is the message's first; a message that is not pinned leaves it blank so that
+/// every first row's tag is in the same column.
+pub(crate) const MARGIN_WIDTH: usize = 1;
+
+/// The columns a marker and a sender tag take together, on a message's first row.
+pub(crate) const MARGIN_WHO_WIDTH: usize = MARGIN_WIDTH + WHO_WIDTH;
+
 /// The columns a draft row's sender is named in: `[you|draft] `.
 ///
 /// Wider than [`WHO_WIDTH`] because a draft says it is a draft. The layout takes
@@ -710,7 +725,7 @@ fn decoration_columns(
     grouped: Grouped,
     width: u16,
 ) -> (usize, usize) {
-    let prefix = WHO_WIDTH
+    let prefix = MARGIN_WHO_WIDTH
         + message
             .reply_to
             .map_or(0, |reply_to| columns(&reply_prefix(app, reply_to, width)));
@@ -2282,7 +2297,7 @@ mod tests {
         assert_eq!(suffix, 0, "a sent reply draws nothing behind it");
         assert_eq!(
             prefix,
-            WHO_WIDTH + columns(&reply_prefix(&app, 90, 40)),
+            MARGIN_WHO_WIDTH + columns(&reply_prefix(&app, 90, 40)),
             "and the quote is counted in cells, not characters"
         );
     }

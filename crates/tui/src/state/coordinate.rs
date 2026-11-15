@@ -394,6 +394,7 @@ pub(crate) fn select_chat_none(
     conversation.confirm = None;
     conversation.selection = None;
     conversation.register = Register::default();
+    conversation.pinned.close();
     input.line.forget_purpose();
 }
 
@@ -1280,6 +1281,38 @@ pub(crate) fn begin_forward(
     }
 
     conversation.open_forward(forwarding);
+}
+
+/// Handles a key while the pinned list is up.
+///
+/// The list owns `j`/`k`, `Enter` and `Esc` and lets everything else through, so
+/// `:` can still open the line: it is a place in the conversation rather than a
+/// mode. `Enter` moves the cursor to the pin and closes; a pin the window does
+/// not hold is not a move, so the list stays up with the row's own
+/// `[message not loaded]` as the answer.
+///
+/// Returns whether the key was the list's.
+fn pinned_key(conversation: &mut ConversationState, key: KeyEvent) -> bool {
+    let pins = conversation.conversation.pinned_newest_first();
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => conversation.pinned.move_selection(1, pins.len()),
+        KeyCode::Char('k') | KeyCode::Up => conversation.pinned.move_selection(-1, pins.len()),
+        KeyCode::Enter => {
+            let Some(id) = conversation.pinned.selected_id(&pins) else {
+                return true;
+            };
+            if let Some(index) = conversation.conversation.window.position_of(id) {
+                conversation.vim.set_cursor(index);
+                conversation.settle_follow();
+                conversation.pinned.close();
+            }
+        }
+        KeyCode::Esc => conversation.pinned.close(),
+        _ => return false,
+    }
+
+    true
 }
 
 /// Handles a key while the forward picker is up.
@@ -2691,7 +2724,57 @@ pub(crate) fn request_delete(ui: &mut UiState, conversation: &mut ConversationSt
     confirm_delete(&mut *ui, &mut *conversation);
 }
 
-/// Starts a selection at the cursor's message, character-wise or whole.    ///
+/// Queues a pin or an unpin of the message under the cursor, or nothing at all.
+///
+/// `P` says nothing either way: the marker appearing is the answer, and a flash
+/// saying `pinned` under a row that already carries one is the program repeating
+/// what the screen shows. Telegram's refusal is the net layer's to say, once.
+///
+/// A message still on its way out has no identifier to pin, so the key is a
+/// no-op rather than a request the server can only refuse.
+pub(crate) fn request_pin(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    outbox: &mut Outbox,
+) {
+    let Some(message) = conversation.cursor_message() else {
+        return;
+    };
+    if message.id <= 0 {
+        return;
+    }
+
+    let message_id = message.id;
+    let pin = !conversation.conversation.is_pinned(message_id);
+    queue_action(
+        &mut *outbox,
+        &mut *ui,
+        Action::PinMessage {
+            chat_id: conversation.conversation.window.chat_id,
+            message_id,
+            pin,
+        },
+    );
+}
+
+/// Opens `:pinned` over the conversation and asks for the pins.
+///
+/// The overlay is up before the answer, so a reader who asked for the list sees
+/// where they asked to be; the answer fills it where it stands. One ask per open:
+/// a refused fetch says why once and is not retried, because a retry that fails
+/// forever is a loop the reader did not ask for.
+pub(crate) fn open_pinned(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    outbox: &mut Outbox,
+) {
+    let chat_id = conversation.conversation.window.chat_id;
+    conversation.pinned.begin(chat_id);
+    queue_action(&mut *outbox, &mut *ui, Action::FetchPinned { chat_id });
+}
+
+/// Starts a selection at the cursor's message, character-wise or whole.
+///
 /// `Some(0)` is a charwise selection from the message's first character;
 /// `None` is the whole message, which is what `V` selects. Both set the mode,
 /// because this is the only way *into* Visual.
@@ -3493,6 +3576,17 @@ pub(crate) fn run_command(
                 list.close_archived();
                 conversation.contacts.begin();
                 queue_action(&mut *outbox, &mut *ui, Action::FetchContacts);
+            }
+            false
+        }
+        // `:pinned`: the open conversation's pins, fetched now. The overlay is up
+        // before the answer so the reader sees where they asked to be, and the
+        // answer fills it where it stands.
+        "pinned" => {
+            if !conversation.has_conversation() {
+                ui.flash(NOTHING_TO_ACT_ON);
+            } else if command_needs_client(&mut *ui, &*session) {
+                open_pinned(&mut *ui, &mut *conversation, &mut *outbox);
             }
             false
         }
@@ -4397,6 +4491,12 @@ pub(crate) fn handle_normal(
             start_react(&mut *ui, &mut *conversation, &mut *input, drafts);
             false
         }
+        // `P` pins the message under the cursor, or unpins it, and says nothing:
+        // the marker appearing is the answer.
+        'P' => {
+            request_pin(&mut *ui, &mut *conversation, &mut *outbox);
+            false
+        }
         // A plain `d`: the table reports nothing for it, so a `d` that does
         // not follow a `g` deletes here.
         'd' => {
@@ -5261,6 +5361,15 @@ fn intercept_key(
     // selection could change or drop what the picker is about to forward.
     if conversation.picking().is_some() {
         handle_forward_pick(&mut *ui, &*list, &mut *outbox, &mut *conversation, key);
+        return true;
+    }
+
+    // The pinned list owns its keys while it is up: `j`/`k` walk the pins,
+    // `Enter` goes to the one under the cursor and closes, `Esc` closes and
+    // leaves the reader where they were. Like the directory it is skipped while
+    // the line has the focus, so the same letters still type.
+    if ui.focus != Focus::Input && conversation.pinned.is_active() && pinned_key(conversation, key)
+    {
         return true;
     }
 

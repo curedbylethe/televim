@@ -441,6 +441,26 @@ Working today:
   reverse order, each one whole, so the words read in order and the letters still
   join.
   The stored text, and what is sent, are unchanged in every mode.
+- **Pinned messages:** `P` pins the message under the cursor, or unpins it if it is
+  pinned, and says nothing either way — the marker appearing is the answer, and a
+  refusal from Telegram is the one line the status row shows. A pinned message
+  wears `⌖` in the panel's margin before its `[you]`/`[them]` tag, dim on every row
+  but the cursor's, where it takes the row's ink like the rest of it; the marker
+  follows the server, from a page, from history or from a pin made on another
+  device, so nothing is applied optimistically. `:pinned` lists the chat's pins in
+  the conversation column, newest first: a number, the sender (`you` for the
+  account's own), one clipped line of the text, and the age at the far end, under
+  the title `Pinned messages · n`. `j`/`k` walk the list, `Enter` puts the cursor on
+  the message and closes the overlay, and `Esc` closes it without moving: opening
+  the list never moves the reader, and a list with no pins says
+  `No pinned message in this chat.` in the dim ink instead of showing an empty box.
+  **A pin can outlive its message.** The list is fetched when it opens, so a pin
+  older than the loaded window still lists with its sender, line and age, and one
+  Telegram still holds a pin for but no longer returns a message for is a row
+  reading `[message not loaded]`; `Enter` on either of those leaves the overlay up
+  and the reader where they were, because the cursor can only stand on a message the
+  window holds. A failed fetch is said once on the status row and leaves the rows
+  the reader already had; it is not retried.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
   which side the messages are from, and says how many were left out because they
@@ -512,7 +532,7 @@ Working today:
   block, delete and report ask `y/n` first; the contacts list opens a person's
   card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
-  `:discard`, `:attach <path>`, `:open`, `:save <path>`,
+  `:pinned`, `:discard`, `:attach <path>`, `:open`, `:save <path>`,
   `:date <ISO>`, `:settings`, `:update`, `:signin`, `:add-account`, `:retry`, `:reconnect`, `:unlock`,
   `:passphrase`, `:export-session <path>`, `:import-session <path>`, and the
   eight chat and contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,

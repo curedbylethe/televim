@@ -269,6 +269,27 @@ pub fn day_label(timestamp: i64, now: i64, offset: i64) -> Option<Cow<'static, s
     }
 }
 
+/// How long ago `at` was, in the shortest word that says it: `now`, `12m`, `3h`,
+/// `2d`, `5w`.
+///
+/// The age a list of messages shows beside each row, so it is a fact about the
+/// two timestamps and nothing else. `now` is passed in rather than read, for the
+/// same reason [`day_label`] takes it: a frame that read a clock could not be
+/// drawn twice the same way. A timestamp after `now`'s — an outgoing message
+/// whose clock is ahead — is `now` rather than a negative age.
+#[must_use]
+pub fn age(at: i64, now: i64) -> String {
+    let seconds = now.saturating_sub(at).max(0);
+
+    match seconds {
+        0..60 => "now".to_owned(),
+        60..3_600 => format!("{}m", seconds / 60),
+        3_600..86_400 => format!("{}h", seconds / 3_600),
+        86_400..604_800 => format!("{}d", seconds / 86_400),
+        _ => format!("{}w", seconds / 604_800),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,5 +689,21 @@ mod tests {
             Some(day - 1),
             "one second earlier is the day before"
         );
+    }
+
+    #[test]
+    fn the_age_steps_from_nothing_to_minutes_hours_days_and_weeks() {
+        let now = 1_730_000_000;
+
+        assert_eq!(age(now, now), "now", "the moment itself");
+        assert_eq!(age(now - 59, now), "now", "a minute has not passed");
+        assert_eq!(age(now - 60, now), "1m");
+        assert_eq!(age(now - 3_599, now), "59m");
+        assert_eq!(age(now - 3_600, now), "1h");
+        assert_eq!(age(now - 86_399, now), "23h");
+        assert_eq!(age(now - 86_400, now), "1d");
+        assert_eq!(age(now - 604_799, now), "6d");
+        assert_eq!(age(now - 604_800, now), "1w");
+        assert_eq!(age(now + 60, now), "now", "a clock that is ahead says now");
     }
 }

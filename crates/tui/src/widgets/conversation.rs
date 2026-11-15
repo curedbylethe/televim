@@ -44,6 +44,13 @@ use crate::wrap::{columns, drawn_cells};
 /// the reader.
 const MIN_BODY_WIDTH: u16 = 8;
 
+/// The glyph a pinned message wears in the panel's margin, one cell wide.
+///
+/// `⌖` and not a pin: a pin glyph is two cells in most fonts and the margin has
+/// one, and a crosshair is the mark a map puts on a place — which is what a pin
+/// is, a place in the conversation.
+const PIN_MARK: &str = "⌖";
+
 /// The panel, drawn from a layout the caller has.
 ///
 /// The layout is [`App::row_layout`]'s, and is passed in rather than asked for a
@@ -403,6 +410,12 @@ struct Place {
     /// The row with room for what stands behind the message.
     last: bool,
 
+    /// Whether the cursor stands on this message.
+    ///
+    /// The one thing the marker's ink reads: the pin is dim everywhere and takes
+    /// the row's own text ink under the cursor, where the row is reversed.
+    cursor: bool,
+
     /// What the message's group says of it.
     group: rows::Grouped,
 }
@@ -453,6 +466,7 @@ fn message_items<'m>(
         let place = Place {
             first: row == 0,
             last: block == 0 && row + 1 == wrapped.len(),
+            cursor: cursor_here,
             group: grouped,
         };
         let item = message_row(app, message, &place, range, coverage.as_ref(), draw.width);
@@ -598,6 +612,19 @@ fn message_row<'m>(
     let mut spans = Vec::new();
 
     if place.first {
+        // The margin comes before the tag, so a pin costs no column of the
+        // message's own and every first row's tag is in the same column — a row
+        // nobody pinned leaves the margin blank rather than shifting its tag. A
+        // pin is dim everywhere but the cursor's row, where it takes the row's
+        // text ink and is reversed with the rest of it.
+        let pinned = app.conversation.conversation.is_pinned(message.id);
+        let ink = if place.cursor {
+            app.ui.theme.text
+        } else {
+            app.ui.theme.text_dim
+        };
+        spans.push(Span::styled(if pinned { PIN_MARK } else { " " }, ink));
+
         if place.group.first {
             let who = if message.is_outgoing { "you" } else { "them" };
             spans.push(Span::styled(format!("[{who}] "), app.ui.theme.text_dim));
@@ -679,7 +706,7 @@ fn message_row<'m>(
         // so a group's time is at the same column on every group rather than
         // hanging after whichever text happened to end last.
         let prefix = if place.first {
-            rows::WHO_WIDTH
+            rows::MARGIN_WHO_WIDTH
                 + message.reply_to.map_or(0, |reply_to| {
                     columns(&rows::reply_prefix(app, reply_to, width))
                 })
@@ -744,8 +771,8 @@ fn reaction_strip<'m>(
         chips.reverse();
     }
 
-    let mut spans = vec![Span::raw(" ".repeat(rows::WHO_WIDTH))];
-    let room = usize::from(width).saturating_sub(rows::WHO_WIDTH);
+    let mut spans = vec![Span::raw(" ".repeat(rows::MARGIN_WHO_WIDTH))];
+    let room = usize::from(width).saturating_sub(rows::MARGIN_WHO_WIDTH);
     let mut drawn = 0;
     for (index, count) in chips.into_iter().enumerate() {
         let chip = chip_text(count);
@@ -821,6 +848,16 @@ fn sticker_block_row<'m>(
     let mut spans = Vec::new();
 
     if brow == 0 {
+        // The margin, then the tag, exactly as a text row draws them: the
+        // picture's first row is the message's first row.
+        let pinned = app.conversation.conversation.is_pinned(message.id);
+        let ink = if place.cursor_here {
+            app.ui.theme.text
+        } else {
+            app.ui.theme.text_dim
+        };
+        spans.push(Span::styled(if pinned { PIN_MARK } else { " " }, ink));
+
         if place.grouped.first {
             let who = if message.is_outgoing { "you" } else { "them" };
             spans.push(Span::styled(format!("[{who}] "), app.ui.theme.text_dim));
@@ -866,7 +903,7 @@ fn sticker_block_row<'m>(
         // left-aligned in it, so the note stands at the same column whatever
         // the picture's own width.
         let prefix = if brow == 0 {
-            rows::WHO_WIDTH
+            rows::MARGIN_WHO_WIDTH
                 + message.reply_to.map_or(0, |reply_to| {
                     columns(&rows::reply_prefix(app, reply_to, width))
                 })
@@ -2056,7 +2093,7 @@ mod tests {
 
         assert_eq!(
             (your_text, their_text),
-            (31, 32),
+            (32, 33),
             "`[you] ` is one column narrower than `[them] `, so its text begins one \
              column earlier — the row above is {:?} and the row below is {:?}",
             body_row(&screen, yours),
@@ -2436,7 +2473,11 @@ mod tests {
         assert_eq!(placed.len(), 1, "the one picture is recorded");
         let picture = placed[0];
         assert_eq!(picture.message_id, 1);
-        assert_eq!(picture.x, BODY_X + 7, "after the \"[them] \" tag");
+        assert_eq!(
+            picture.x,
+            BODY_X + 8,
+            "after the margin and the \"[them] \" tag"
+        );
         assert_eq!(picture.y, FIRST);
         assert_eq!(picture.cols, 4, "the fixture is four pixels wide");
         assert_eq!(picture.rows, 2, "three pixels take two terminal rows");
@@ -3599,17 +3640,17 @@ mod tests {
             "and one time, on the row that ends it"
         );
         assert!(
-            body_row(&screen, FIRST).starts_with("[them] one"),
-            "the first row names it: {:?}",
+            body_row(&screen, FIRST).starts_with(" [them] one"),
+            "the first row names it, after the margin: {:?}",
             body_row(&screen, FIRST)
         );
         assert!(
-            body_row(&screen, FIRST + 1).starts_with("       two"),
+            body_row(&screen, FIRST + 1).starts_with("        two"),
             "the one after it is a blank tag and its own text: {:?}",
             body_row(&screen, FIRST + 1)
         );
         assert!(
-            body_row(&screen, FIRST + 2).starts_with("       three"),
+            body_row(&screen, FIRST + 2).starts_with("        three"),
             "and so is the last: {:?}",
             body_row(&screen, FIRST + 2)
         );
@@ -4457,13 +4498,13 @@ mod tests {
     /// scrollbar's, and the first row also gives up seven columns to the sender's
     /// name. A message of nothing but `x` has no whitespace to break at, so its
     /// rows are cut at the edge and these are exact.
-    const FIRST_ROW: usize = 46;
+    const FIRST_ROW: usize = 45;
     const LATER_ROW: usize = 53;
 
     /// The body width the rows are laid out at, and the sender's name that comes
     /// off its first row.
     const BODY: u16 = 53;
-    const SENDER: usize = 7;
+    const SENDER: usize = 8;
 
     /// One application holding one long unbreakable message.
     fn one_long_message() -> App {
@@ -5054,21 +5095,21 @@ mod tests {
         let strip = body_row_with(&screen, "🔥").expect("the strip is drawn");
         assert_eq!(
             column_of(&screen, strip, "🔥"),
-            BODY_X + 7,
+            BODY_X + 8,
             "the chips start in the body column, under the text above them"
         );
         assert_eq!(
             column_of(&screen, strip, "3"),
-            BODY_X + 10,
+            BODY_X + 11,
             "a chip is the glyph, a space, then its count"
         );
         assert_eq!(
             column_of(&screen, strip, "👍"),
-            BODY_X + 13,
+            BODY_X + 14,
             "and two spaces separate chips"
         );
         assert!(
-            body_row(&screen, strip - 1).starts_with("[them] Are you coming tonight?"),
+            body_row(&screen, strip - 1).starts_with(" [them] Are you coming tonight?"),
             "the strip is under the message's own text: {:?}",
             body_row(&screen, strip - 1)
         );
@@ -5094,15 +5135,15 @@ mod tests {
         let screen = screen(&app, 80, 24);
 
         let strip = body_row_with(&screen, "👏").expect("the strip is drawn");
-        assert_eq!(column_of(&screen, strip, "👏"), BODY_X + 7);
+        assert_eq!(column_of(&screen, strip, "👏"), BODY_X + 8);
         assert_eq!(
             column_of(&screen, strip, "💚"),
-            BODY_X + 11,
+            BODY_X + 12,
             "the single chip is two cells and a gap, so no count was drawn after it"
         );
         assert_eq!(
             column_of(&screen, strip, "2"),
-            BODY_X + 14,
+            BODY_X + 15,
             "and the doubled chip carries its count"
         );
     }
@@ -5204,15 +5245,15 @@ mod tests {
         let strip = body_row_with(&screen, "💚").expect("the strip is drawn");
         assert_eq!(
             column_of(&screen, strip, "👍"),
-            BODY_X + 7,
+            BODY_X + 8,
             "the chip written first is drawn rightmost, so the last one comes first"
         );
         assert_eq!(
             column_of(&screen, strip, "💚"),
-            BODY_X + 11,
+            BODY_X + 12,
             "and each chip keeps the order it is written in: glyph, then count"
         );
-        assert_eq!(column_of(&screen, strip, "2"), BODY_X + 14);
+        assert_eq!(column_of(&screen, strip, "2"), BODY_X + 15);
     }
 
     /// A selection of whole messages takes the strip with it: the chips are part of
@@ -5232,6 +5273,76 @@ mod tests {
             cell(&screen, column_of(&screen, strip, "🔥"), strip).bg,
             selection_bg(),
             "the selection covers the chips along with the text"
+        );
+    }
+
+    // ---- the pin marker --------------------------------------------------
+
+    /// Marks the message `id` as pinned, through the view's own event: a pin
+    /// arrives as an identifier list, and the marker is a membership test.
+    fn pin(app: &mut App, id: i64) {
+        let _ = app
+            .conversation
+            .conversation
+            .apply_event(&UpdateEvent::PinChanged {
+                chat_id: mock_chat_id(),
+                message_ids: vec![id],
+                pinned: true,
+            });
+    }
+
+    /// The marker is the message's, not the row's: it stands before the tag on
+    /// the row the reader reaches the message by.
+    #[test]
+    fn a_pinned_message_wears_the_marker_before_its_tag() {
+        let mut app = showing(vec![
+            at(1, 0, true, "Packed the wire."),
+            at(2, 60, false, "And the 12-inch ruler."),
+        ]);
+        pin(&mut app, 2);
+
+        let screen = screen(&app, 80, 24);
+
+        let marked = body_row(&screen, message_row_of(&app, 1));
+        assert!(
+            marked.starts_with("⌖[them] And the 12-inch ruler."),
+            "the marker is in the margin, before the tag: {marked:?}"
+        );
+        assert!(
+            body_row(&screen, message_row_of(&app, 0)).starts_with(" [you]"),
+            "and a message nobody pinned leaves the margin blank"
+        );
+    }
+
+    /// Dim everywhere but the cursor's row, where it takes the row's text ink and
+    /// is reversed with the rest of it: the cursor marks a message, and the
+    /// marker is part of it.
+    #[test]
+    fn the_marker_is_dim_until_the_cursor_stands_on_the_message() {
+        use ratatui::style::Modifier;
+
+        let mut app = showing(vec![
+            at(1, 0, true, "Packed the wire."),
+            at(2, 60, false, "And the 12-inch ruler."),
+        ]);
+        pin(&mut app, 1);
+        pin(&mut app, 2);
+        let dim = theme().text_dim.fg.expect("the dim ink is a foreground");
+        let prose = theme().text.fg.expect("body text has an ink");
+
+        let screen = screen(&app, 80, 24);
+
+        let quiet = cell(&screen, BODY_X, message_row_of(&app, 0));
+        assert_eq!(quiet.symbol(), "⌖");
+        assert_eq!(quiet.fg, dim, "off the cursor the marker is dim");
+        assert!(!quiet.modifier.contains(Modifier::REVERSED));
+
+        let under = cell(&screen, BODY_X, message_row_of(&app, 1));
+        assert_eq!(under.symbol(), "⌖");
+        assert_eq!(under.fg, prose, "under the cursor it is the row's own ink");
+        assert!(
+            under.modifier.contains(Modifier::REVERSED),
+            "and the row's reverse video covers it"
         );
     }
 

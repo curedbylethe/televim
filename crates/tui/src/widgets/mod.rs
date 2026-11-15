@@ -7,6 +7,7 @@ pub mod forward_picker;
 pub mod global_list;
 pub mod input_bar;
 pub mod passphrase;
+pub mod pinned_list;
 pub mod profile;
 pub mod signin;
 pub mod status_bar;
