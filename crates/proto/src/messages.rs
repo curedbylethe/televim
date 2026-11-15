@@ -34,8 +34,7 @@ use crate::error::ProtoError;
 use crate::types::ProtoMessage;
 
 #[cfg(feature = "live")]
-use domain::message::Message;
-
+use domain::message::{Message, Translation};
 /// Narrows a message identifier to the range Telegram numbers messages with.
 ///
 /// A message identifier is an `i32` on the wire, so a value outside that range
@@ -232,6 +231,40 @@ impl crate::ProtoClient {
         self.inner().unpin_message(chat_id, message_id).await?;
 
         Ok(())
+    }
+
+    /// Translates one message into `to`.
+    ///
+    /// The answer is the text and the language it was asked for: Telegram reports
+    /// no source language in the layer this build speaks, so
+    /// [`Translation::source`](domain::message::Translation::source) stays `None`
+    /// and the target is what the interface can name. Nothing is applied here —
+    /// the caller owns where a translation is shown, and the message's own text is
+    /// never touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) when the
+    /// conversation is not in the session's peer cache, when the account has no
+    /// Telegram Premium
+    /// ([`FrameworkError::TranslationPremiumRequired`](telegram_framework::FrameworkError::TranslationPremiumRequired)),
+    /// when the answer carries no text, or when Telegram rejects the request; and
+    /// [`ProtoError::MessageIdOutOfRange`](crate::ProtoError::MessageIdOutOfRange)
+    /// when `message_id` is outside Telegram's range.
+    pub async fn translate_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        to: &str,
+    ) -> Result<Translation, ProtoError> {
+        let message_id = narrow_id(message_id, chat_id)?;
+
+        let answer = self
+            .inner()
+            .translate_message(chat_id, message_id, to)
+            .await?;
+
+        Ok(crate::types::translation(answer, to))
     }
 
     /// Forwards messages from one conversation into another, as new messages.

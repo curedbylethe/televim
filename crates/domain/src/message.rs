@@ -36,6 +36,28 @@ pub struct ReactionCount {
     pub chosen: bool,
 }
 
+/// A message's text in another language, as the conversation holds it.
+///
+/// Beside the message rather than on it: a translation is the answer to one
+/// request, not a version of the message, and writing it into
+/// [`Message::text`] would make the client's copy disagree with what the sender
+/// wrote — which an edit, a search and a notification all read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Translation {
+    /// The translated text, plain: formatting is not carried.
+    pub text: String,
+
+    /// The language the message was in, when the server names one.
+    ///
+    /// `None` with the layer this build speaks, which reports the translation and
+    /// nothing about its source. The interface names what it knows — the target
+    /// below — rather than inventing this.
+    pub source: Option<String>,
+
+    /// The language that was asked for, as the reader configured it.
+    pub target: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageStatus {
     Sending,

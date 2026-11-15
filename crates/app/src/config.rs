@@ -107,6 +107,39 @@ const KDF_LANES_RANGE: std::ops::RangeInclusive<u32> = 1..=4;
 /// is neither useless nor unbounded.
 const JUMPLIST_DEPTH_RANGE: std::ops::RangeInclusive<usize> = 1..=1_000;
 
+/// The language `t` translates into when the reader has not said.
+///
+/// English, because it is the one language code a Telegram client can count on
+/// being understood and the one an unconfigured reader is likeliest to want. It
+/// lives here rather than inline so the default and the refusals that quote it
+/// cannot disagree.
+const DEFAULT_TRANSLATION: &str = "en";
+
+/// The `[translation]` section: what `t` translates into.
+///
+/// Its own section rather than another top-level key, because it is a small
+/// group that will grow — a target per language pair, a tone — and the file is
+/// read by a person.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TranslationSettings {
+    /// The language code a message is translated into: `en`, `he`, `pt-BR`.
+    ///
+    /// Read once at launch and fixed for the run, like the display modes above.
+    /// A code Telegram does not know is refused by the server, not guessed at
+    /// here; an empty one is refused at launch, because a request for no
+    /// language is a request nobody meant.
+    pub to: String,
+}
+
+impl Default for TranslationSettings {
+    fn default() -> Self {
+        Self {
+            to: DEFAULT_TRANSLATION.to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -149,6 +182,12 @@ pub struct Config {
 
     /// Whether desktop notifications are enabled: `on` (default) or `off`.
     pub notifications: String,
+
+    /// How `t` translates a message: the `[translation]` section.
+    ///
+    /// One key today — the language a message is translated *into* — because a
+    /// reader picks their language once rather than per message.
+    pub translation: TranslationSettings,
 
     /// Whether to check for stable releases: `auto` or `off`.
     ///
@@ -276,6 +315,7 @@ impl Default for Config {
             stickers: STICKERS_INLINE.to_owned(),
             graphics: GRAPHICS_AUTO.to_owned(),
             notifications: "on".to_owned(),
+            translation: TranslationSettings::default(),
             updates: None,
             api_id: None,
             api_hash: None,
@@ -326,7 +366,8 @@ impl Config {
             .set_default("bidi", BIDI_AUTO)?
             .set_default("stickers", STICKERS_INLINE)?
             .set_default("graphics", GRAPHICS_AUTO)?
-            .set_default("notifications", "on")?;
+            .set_default("notifications", "on")?
+            .set_default("translation.to", DEFAULT_TRANSLATION)?;
 
         builder = with_compiled_credentials(
             builder,
@@ -365,6 +406,7 @@ impl Config {
         }
         cfg.validate_kdf()?;
         cfg.validate_jumplist_depth()?;
+        cfg.validate_translation()?;
         Ok(cfg)
     }
 
@@ -417,6 +459,21 @@ impl Config {
         Ok(())
     }
 
+    /// Refuses a translation target with no language in it.
+    ///
+    /// The value is a language code Telegram interprets, so this checks only that
+    /// there is one: a code the server does not know is the server's to refuse,
+    /// and a list of codes here would go stale the moment Telegram added one.
+    fn validate_translation(&self) -> Result<()> {
+        if self.translation.to.trim().is_empty() {
+            anyhow::bail!(
+                "translation.to is empty: set the language code a message is translated \
+                 into, such as \"{DEFAULT_TRANSLATION}\""
+            );
+        }
+        Ok(())
+    }
+
     /// Refuses a KDF cost a typo could make trivial or unbounded, naming the key.
     fn validate_kdf(&self) -> Result<()> {
         for (key, value, range) in [
@@ -463,6 +520,15 @@ impl Config {
     #[must_use]
     pub fn jumplist_depth(&self) -> usize {
         self.jumplist_depth.unwrap_or(DEFAULT_DEPTH)
+    }
+
+    /// The language `t` translates a message into.
+    ///
+    /// The reader's choice, once: handed to the interface at launch like the
+    /// display modes, so a keystroke never has to reach the configuration file.
+    #[must_use]
+    pub fn translation_target(&self) -> &str {
+        &self.translation.to
     }
 
     /// Whether the background stable-release check is enabled.
@@ -816,6 +882,35 @@ mod tests {
     /// A configuration with nothing set but the two required-by-nobody values.
     fn bare() -> Config {
         Config::default()
+    }
+
+    /// Translating needs a language, and English is the one an unconfigured
+    /// reader gets: the key is a choice, not a requirement.
+    #[test]
+    fn the_translation_target_defaults_to_english() {
+        assert_eq!(bare().translation_target(), "en");
+    }
+
+    /// The language is the reader's, read from the file's own section.
+    #[test]
+    fn a_configured_translation_target_is_used() {
+        let cfg = load_toml("translation-to", "[translation]\nto = \"pt-BR\"\n")
+            .expect("a language code loads");
+
+        assert_eq!(cfg.translation_target(), "pt-BR");
+    }
+
+    /// A translation into no language is a request nobody meant, so it is refused
+    /// at launch naming the key rather than sent to Telegram to fail.
+    #[test]
+    fn an_empty_translation_target_fails_the_launch_naming_the_key() {
+        let error = load_toml("translation-empty", "[translation]\nto = \"  \"\n")
+            .expect_err("an empty language is refused");
+
+        assert!(
+            error.to_string().contains("translation.to"),
+            "{error} names translation.to"
+        );
     }
 
     /// The environment is process-wide, so the two tests that write to it take

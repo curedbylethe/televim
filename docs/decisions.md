@@ -1929,3 +1929,22 @@ are in [`../AGENTS.md`](../AGENTS.md).
   a chat the reader was not looking at, a run that was closed — was never seen and
   so is not shown. The overlay is therefore the session's record of what changed
   in front of the reader, not "the message's history", and the copy says so.
+
+- **Why translation is one raw `messages.translateText` call and not a wrapper we
+  waited for:** `grammers` 0.10 has no translate at all, so the request is built
+  in `telegram-framework/src/translate.rs` and its answer read out of
+  `messages.TranslatedText` by a free function, the same shape `history` uses for
+  `GetHistory`. `proto` calls the wrapper, so `tl` stays inside the framework. The
+  premium gate is the one refusal the interface must recognise — a free account is
+  told `PREMIUM_ACCOUNT_REQUIRED` and no retry can change that — so it is mapped
+  once, in that module, to `FrameworkError::TranslationPremiumRequired` rather
+  than matched by name at three call sites. The marker is the other decision the
+  wire forced: the design asks for `translated from he`, but layer 227's answer
+  carries the translated text and no source language, so `Translation` keeps a
+  `source` for a later layer and carries the configured `target` — `translated to
+  en` is what this build can honestly draw, and inventing the source would be a
+  claim about the message the server never made. Nothing is written into
+  `Message.text`, nothing is persisted, and nothing translates on arrival: the
+  translation lives in a capped side table on `ConversationView`, next to the
+  reactions and the revisions, and is dropped with its message, when its message
+  is edited, and when the answer reads the same as the original.

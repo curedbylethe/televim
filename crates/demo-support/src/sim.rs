@@ -349,6 +349,9 @@ impl DemoSimulator {
             Action::PinMessage { .. } | Action::FetchPinned { .. } => vec![Self::status(
                 "Pinned messages are unavailable in the offline demo.",
             )],
+            Action::Translate { .. } => vec![Self::status(
+                "Translation is unavailable in the offline demo.",
+            )],
             Action::SetUnreadMark { .. } => vec![Self::status(
                 "Manual unread marks are unavailable in the offline demo.",
             )],

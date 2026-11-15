@@ -38,7 +38,7 @@
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 
-use crate::message::{MediaKind, Message, MessageStatus, ReactionCount};
+use crate::message::{MediaKind, Message, MessageStatus, ReactionCount, Translation};
 use crate::updates::UpdateEvent;
 
 /// How many messages the conversation on show holds before the far end is
@@ -103,6 +103,17 @@ pub const REVISIONS_PER_MESSAGE: usize = 5;
 /// a reader can walk `:edits` through in a sitting, and the journal that has been
 /// held longest is dropped to make room.
 pub const REVISION_JOURNALS: usize = 50;
+
+/// How many messages a conversation keeps a translation for.
+///
+/// A translation copies the message's text, so this is the same kind of ceiling
+/// as the revision journal's: a reader translates what they are reading, and a
+/// conversation is read one screenful at a time. Thirty-two messages is more than
+/// a reader translates in a sitting, and the translation held longest is dropped
+/// to make room. A translation is cleared when the reader asks for it back, when
+/// its message is deleted and when its message changes, so the table only ever
+/// holds what is actually on show.
+pub const TRANSLATION_ENTRIES: usize = 32;
 
 /// The messages of one conversation, oldest first.
 ///
@@ -522,6 +533,17 @@ pub struct ConversationView {
     /// Dropped with its message, and with the view: a chat switch replaces this
     /// one, so a revision does not outlive the conversation it belongs to.
     revisions: VecDeque<(i64, Vec<Cow<'static, str>>)>,
+
+    /// The translation of each message the reader asked for, bounded by
+    /// [`TRANSLATION_ENTRIES`].
+    ///
+    /// Beside the window, like the reactions and the revisions: a translation is
+    /// the answer to a request rather than a version of the message, and nothing
+    /// here writes it into [`Message::text`]. One per message — a second answer
+    /// for the same message replaces the first — and it is dropped with its
+    /// message, when the message's own text changes, and when the answer says the
+    /// same as the original.
+    translations: VecDeque<(i64, Translation)>,
 }
 
 impl ConversationView {
@@ -541,6 +563,7 @@ impl ConversationView {
             reactions: VecDeque::new(),
             pinned_ids: VecDeque::new(),
             revisions: VecDeque::new(),
+            translations: VecDeque::new(),
         }
     }
 
@@ -600,14 +623,17 @@ impl ConversationView {
                 message_ids,
                 pinned,
             } => chat_id == &self.window.chat_id && self.apply_pins(message_ids, *pinned),
-            // A deleted message takes its reactions and its revisions with it:
-            // both are about a message, and a message nothing can point at is not
-            // one to redraw chips for or to list revisions of. Its pin stays,
+            // A deleted message takes its reactions, its revisions and any
+            // translation with it: all three are about a message, and a message
+            // nothing can point at is not one to redraw chips for, to list
+            // revisions of, or to show a translation under. Its pin stays,
             // because the pinned list is Telegram's and a pin whose message is
             // gone is what that list reports.
             UpdateEvent::MessagesDeleted { message_ids } => {
                 self.reactions.retain(|(id, _)| !message_ids.contains(id));
                 self.revisions.retain(|(id, _)| !message_ids.contains(id));
+                self.translations
+                    .retain(|(id, _)| !message_ids.contains(id));
                 self.window.apply_event(event)
             }
             _ => self.window.apply_event(event),
@@ -634,6 +660,11 @@ impl ConversationView {
             && changed
         {
             self.record_revision(message_id, outgoing);
+            // The text changed under the translation, so the translation is no
+            // longer what the message says. Dropped rather than kept: showing a
+            // rendering of words that have been replaced would be worse than
+            // showing nothing.
+            self.clear_translation(message_id);
         }
 
         changed
@@ -688,6 +719,67 @@ impl ConversationView {
             .iter()
             .find(|(id, _)| *id == message_id)
             .map_or(&[], |(_, counts)| counts.as_slice())
+    }
+
+    /// The translation held for one message, if the reader asked for one.
+    ///
+    /// `None` is "nothing translated", which the interface draws as nothing at
+    /// all — not as an empty line. A message whose translation came back the same
+    /// as its own text has none, because there is nothing to show under it.
+    #[must_use]
+    pub fn translation(&self, message_id: i64) -> Option<&Translation> {
+        self.translations
+            .iter()
+            .find(|(id, _)| *id == message_id)
+            .map(|(_, translation)| translation)
+    }
+
+    /// Records the translation of one message, replacing any it had.
+    ///
+    /// Reports whether anything observable changed. Only a message in the window
+    /// takes one — a translation for a message that has scrolled out would be
+    /// drawn nowhere — and an answer that reads exactly as the message does is
+    /// dropped rather than stored: there is nothing to show under it, and the
+    /// interface's "translated" marker on an identical line would be a claim the
+    /// message did not make. One entry per message, so a second answer replaces
+    /// the first rather than stacking.
+    pub fn set_translation(&mut self, message_id: i64, translation: Translation) -> bool {
+        let Some(message) = self.message(message_id) else {
+            return false;
+        };
+
+        if translation.text == message.text {
+            return self.clear_translation(message_id);
+        }
+
+        if self.translation(message_id) == Some(&translation) {
+            return false;
+        }
+
+        self.clear_translation(message_id);
+        self.translations.push_back((message_id, translation));
+        self.trim_translations();
+
+        true
+    }
+
+    /// Forgets the translation of one message, reporting whether there was one.
+    ///
+    /// What `t` again does, and what an edit does to a translation that no longer
+    /// describes the message.
+    pub fn clear_translation(&mut self, message_id: i64) -> bool {
+        let before = self.translations.len();
+
+        self.translations.retain(|(id, _)| *id != message_id);
+
+        self.translations.len() != before
+    }
+
+    /// Drops the translations held longest until the bound holds.
+    fn trim_translations(&mut self) {
+        while self.translations.len() > TRANSLATION_ENTRIES {
+            self.translations.pop_front();
+        }
     }
 
     /// Replaces the reactions on one message, reporting whether anything
@@ -1143,6 +1235,14 @@ mod tests {
             chat_id,
             message_ids: message_ids.to_vec(),
             pinned,
+        }
+    }
+
+    fn translation(text: &str, target: &str) -> Translation {
+        Translation {
+            text: text.to_owned(),
+            source: None,
+            target: target.to_owned(),
         }
     }
 
@@ -2125,6 +2225,127 @@ mod tests {
             view.pinned_newest_first().len(),
             PINNED_IDS,
             "the set never holds more than the bound"
+        );
+    }
+
+    /// A translation is held for the message it was asked for, and a second
+    /// answer replaces it rather than stacking under the first.
+    #[test]
+    fn a_translation_is_replaced_by_the_next_answer() {
+        let mut view = view_with_a_message();
+
+        assert!(view.set_translation(5, translation("hola", "es")));
+        assert_eq!(
+            view.translation(5).map(|held| held.text.as_str()),
+            Some("hola")
+        );
+
+        assert!(
+            view.set_translation(5, translation("buenos días", "es")),
+            "a second answer for the same message replaces the first"
+        );
+        assert_eq!(
+            view.translation(5).map(|held| held.text.as_str()),
+            Some("buenos días")
+        );
+        assert!(
+            !view.set_translation(5, translation("buenos días", "es")),
+            "and the same answer again changes nothing on screen"
+        );
+    }
+
+    /// `t` again clears the line, and clearing what is not there is not a change.
+    #[test]
+    fn a_translation_can_be_cleared_and_clearing_twice_is_not_a_change() {
+        let mut view = view_with_a_message();
+        assert!(view.set_translation(5, translation("hola", "es")));
+
+        assert!(view.clear_translation(5));
+        assert!(view.translation(5).is_none());
+        assert!(!view.clear_translation(5), "there is nothing left to clear");
+    }
+
+    /// An answer that reads exactly as the message does is dropped: there is
+    /// nothing to show under it, and a marker over an identical line would claim
+    /// something the message did not say.
+    #[test]
+    fn a_translation_of_the_message_itself_is_dropped() {
+        let mut view = view_with_a_message();
+
+        assert!(!view.set_translation(5, translation("hello", "en")));
+
+        assert!(view.translation(5).is_none());
+    }
+
+    /// A message nothing can point at takes no translation, the same answer an
+    /// edit for it gives.
+    #[test]
+    fn a_translation_for_an_unknown_message_is_dropped() {
+        let mut view = view_with_a_message();
+
+        assert!(!view.set_translation(99, translation("hola", "es")));
+
+        assert!(view.translation(99).is_none());
+    }
+
+    /// A deleted message takes its translation with it: nothing is left to draw a
+    /// translated line under.
+    #[test]
+    fn a_deletion_drops_the_translation_of_its_messages() {
+        let mut view = view_with_a_message();
+        assert!(view.set_translation(5, translation("hola", "es")));
+
+        assert!(view.apply_event(&UpdateEvent::MessagesDeleted {
+            message_ids: vec![5],
+        }));
+
+        assert!(view.translation(5).is_none());
+    }
+
+    /// An edit replaces the text the translation was of, so the translation stops
+    /// describing the message and goes.
+    #[test]
+    fn an_edit_clears_the_translation_it_invalidates() {
+        let mut view = view_with_a_message();
+        assert!(view.set_translation(5, translation("hola", "es")));
+
+        assert!(view.apply_event(&UpdateEvent::MessageEdited {
+            chat_id: 42,
+            message_id: 5,
+            new_text: Cow::Borrowed("hello again"),
+        }));
+
+        assert!(
+            view.translation(5).is_none(),
+            "a rendering of words that have been replaced is worse than none"
+        );
+    }
+
+    /// The translations are bounded, and the one held longest goes first.
+    #[test]
+    fn the_translation_container_evicts_the_oldest_entry_at_the_cap() {
+        let ids: Vec<i64> = (1..=TRANSLATION_ENTRIES + 1)
+            .map(|id| i64::try_from(id).expect("the cap is a message count"))
+            .collect();
+        let mut view = ConversationView::new(42);
+        view.window
+            .replace(ids.iter().map(|id| message(42, *id, "text")));
+
+        for id in &ids {
+            assert!(view.set_translation(*id, translation("hola", "es")));
+        }
+
+        assert!(
+            view.translation(ids[0]).is_none(),
+            "the translation held longest was dropped to make room"
+        );
+        assert!(view.translation(ids[1]).is_some());
+        assert_eq!(
+            ids.iter()
+                .filter(|id| view.translation(**id).is_some())
+                .count(),
+            TRANSLATION_ENTRIES,
+            "the table never holds more than the bound"
         );
     }
 

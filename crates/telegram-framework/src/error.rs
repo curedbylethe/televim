@@ -219,6 +219,25 @@ pub enum FrameworkError {
     #[error("the account has frequent contacts switched off in Telegram's settings")]
     TopPeersDisabled,
 
+    /// Translating messages needs Telegram Premium, and this account has none.
+    ///
+    /// `messages.translateText` refuses a free account with an ordinary
+    /// `RPC_ERROR` named `PREMIUM_ACCOUNT_REQUIRED`, which says nothing about
+    /// itself. Its own variant because the interface's answer differs: one dim
+    /// sentence saying the feature is premium, not a failed request the reader
+    /// might retry. A retry cannot succeed, so nothing does one.
+    #[error("translating messages is a telegram premium feature")]
+    TranslationPremiumRequired,
+
+    /// Telegram answered a translation with no text, or with more than one.
+    ///
+    /// One request sends one message's text, so the answer is one translated
+    /// string. Anything else is an answer this build cannot read rather than a
+    /// message that translates to nothing, and it is reported rather than
+    /// handed to the interface as an empty line.
+    #[error("telegram answered the translation with no text this build can read")]
+    TranslationEmpty,
+
     /// The conversation is not in the session's peer cache.
     ///
     /// Addressing a peer takes the `access_hash` Telegram handed out for it, and
