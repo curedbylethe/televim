@@ -1310,13 +1310,7 @@ fn pinned_key(
                 return true;
             };
             conversation.pinned.close();
-            go_to(
-                &mut *pending,
-                &mut *conversation,
-                ui,
-                id,
-                JumpKind::Pinned,
-            );
+            go_to(&mut *pending, &mut *conversation, ui, id, JumpKind::Pinned);
         }
         KeyCode::Esc => conversation.pinned.close(),
         _ => return false,
