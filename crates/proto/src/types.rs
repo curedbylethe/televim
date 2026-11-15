@@ -24,7 +24,7 @@
 use std::borrow::Cow;
 
 use domain::chat::{Chat, ChatKind};
-use domain::message::{MediaKind, Message, MessageStatus, Reaction, ReactionCount};
+use domain::message::{MediaKind, Message, MessageStatus, Reaction, ReactionCount, Translation};
 #[cfg(feature = "live")]
 use domain::presence::Presence;
 #[cfg(feature = "live")]
@@ -283,6 +283,25 @@ fn to_reaction(reaction: telegram_framework::Reaction) -> Reaction {
             Reaction::CustomEmoji(document_id)
         }
         telegram_framework::Reaction::Paid => Reaction::Paid,
+    }
+}
+
+/// Puts a framework translation into the domain's, naming what was asked for.
+///
+/// The framework reports the text and — in a later layer — the language it was
+/// translated from; this build's answer names no source, so that stays `None`.
+/// The target is the caller's own argument and is carried so the interface can
+/// say what it asked for: `translated to <lang>` is the marker this build can
+/// honestly draw, and `translated from <lang>` waits on an answer that names one.
+#[cfg(feature = "live")]
+pub(crate) fn translation(
+    translation: telegram_framework::Translation,
+    target: &str,
+) -> Translation {
+    Translation {
+        text: translation.text,
+        source: translation.source,
+        target: target.to_owned(),
     }
 }
 
@@ -654,6 +673,26 @@ mod live_tests {
                 count: 2,
                 chosen: true,
             }]
+        );
+    }
+
+    /// A translation leaves this crate with the language it was asked for, which
+    /// is the only one the answer can be labelled with — the framework reports no
+    /// source.
+    #[test]
+    fn a_translation_carries_the_language_it_was_asked_for() {
+        let answer = telegram_framework::Translation {
+            text: "hola".to_owned(),
+            source: None,
+        };
+
+        let translation = translation(answer, "es");
+
+        assert_eq!(translation.text, "hola");
+        assert_eq!(translation.target, "es");
+        assert_eq!(
+            translation.source, None,
+            "the layer this build speaks names no source language"
         );
     }
 

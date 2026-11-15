@@ -17,6 +17,7 @@
 //!   [`Client::edit_message`] and [`Client::delete_messages`],
 //!   [`Client::set_reaction`] for a message's reactions,
 //!   [`Client::pin_message`] and [`Client::fetch_pinned`] for a chat's pins,
+//!   [`Client::translate_message`] for a message's text in another language,
 //!   [`Client::download_media`] for a message's attachment, the
 //!   [`Client::subscribe_updates`] feed, and [`Client::invoke`] as a raw escape
 //!   hatch. These need `grammers`, so they sit behind the `live` feature.
@@ -101,6 +102,8 @@ pub mod reaction;
 #[cfg(feature = "live")]
 pub mod search;
 #[cfg(feature = "live")]
+pub mod translate;
+#[cfg(feature = "live")]
 pub mod updates;
 #[cfg(feature = "live")]
 pub mod upload;
@@ -141,6 +144,8 @@ pub use search::{
     GlobalFilter, GlobalHit, GlobalOffset, GlobalPeer, GlobalSearchArgs, GlobalSearchPage,
     SEARCH_LIMIT, SearchArgs, SearchResults,
 };
+#[cfg(feature = "live")]
+pub use translate::Translation;
 #[cfg(feature = "live")]
 pub use updates::{MessageInfo, UpdateKind, UpdateSubscription, UserPresence};
 

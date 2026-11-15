@@ -383,6 +383,31 @@ message, so a message in a page and the same message arriving over the feed agre
 about it. Which pin is *newest* is the caller's ordering: the message's own time,
 and a later message wins a tie.
 
+## Translating
+
+`Client::translate_message(peer_id, message_id, to)` asks Telegram for one
+message's text in another language and returns a `Translation` — the text, plain,
+and the source language **when the server names one**. It does not in the layer
+this build speaks: `messages.translateText` answers
+`messages.translateResult { result: Vec<TextWithEntities> }` and no language
+field, so `Translation::source` is `None` and only the caller's own `to` can be
+named on screen.
+
+`grammers` 0.10 wraps no translate call, so the request is built here and the
+answer is read out of its enum by `translate`'s own matcher — the same shape
+`history` uses for `GetHistory`. If a later release gains a typed wrapper, the
+request and the matcher both go.
+
+**Translating is a Telegram Premium feature**, and an account without it is
+refused with an ordinary `RPC_ERROR` named `PREMIUM_ACCOUNT_REQUIRED`, which says
+nothing about itself. That one name is mapped to
+`FrameworkError::TranslationPremiumRequired` so a caller can answer it with a
+sentence rather than a failure; every other refusal keeps its code and name in
+`FrameworkError::Request`. A retry cannot make it succeed, and nothing here
+retries it. An answer carrying no text — or more than one, though one was asked
+for — reports `FrameworkError::TranslationEmpty` rather than handing back an
+empty line.
+
 ## Searching
 
 `Client::search_messages(peer_id, SearchArgs)` searches one conversation and

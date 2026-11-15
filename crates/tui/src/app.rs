@@ -1210,6 +1210,24 @@ pub enum Action {
         pin: bool,
     },
 
+    /// Translate a message into `lang`, or ask for its translation again.
+    ///
+    /// `lang` is the language the reader configured, carried here so the request
+    /// needs nothing but the action: the language is chosen once, and a keystroke
+    /// is not where it is read. Nothing is applied locally — the translation is
+    /// the server's answer, and it is shown under the message rather than written
+    /// into it.
+    Translate {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message to translate.
+        message_id: i64,
+
+        /// The language to translate into, as configured.
+        lang: String,
+    },
+
     /// Read the profile of the peer with this bare identifier.
     ///
     /// A question rather than a fetch, for the same reason as [`Action::Search`]:

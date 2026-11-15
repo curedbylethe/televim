@@ -54,7 +54,7 @@ use anyhow::{Context, Result};
 use domain::chat::Chat;
 use domain::global_search::{GlobalHit, SearchSpec};
 use domain::history::ConversationView;
-use domain::message::{MediaKind, Message, ReactionCount};
+use domain::message::{MediaKind, Message, ReactionCount, Translation};
 use domain::search::SEARCH_MATCHES;
 use domain::updates::{ChatList, UpdateEvent, sorts_before};
 use domain::user::UserCandidate;
@@ -497,6 +497,22 @@ pub enum Event {
 
         /// Nothing on success, or why Telegram refused.
         result: Result<(), ProtoError>,
+    },
+
+    /// A translation came back, or the request failed.
+    ///
+    /// Its own event rather than a status line from the request: what arrived is
+    /// text that has to be stored beside the message it belongs to, in the
+    /// conversation on show and nowhere else.
+    Translated {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message that was translated.
+        message_id: i64,
+
+        /// The translation, or why there is not one.
+        result: Result<Translation, ProtoError>,
     },
 
     /// A pin change came back, or the request failed.
@@ -1181,6 +1197,18 @@ impl State {
             cfg.session_passphrase = Some(crate::config::Secret::from(typed.to_string()));
         }
         Some(cfg)
+    }
+
+    /// The language this run translates into.
+    ///
+    /// The configuration's own answer, or its default when no configuration has
+    /// been read yet: a translation asked for before the launch reached the file
+    /// is still a translation into the reader's language rather than into none.
+    fn translation_target(&self) -> String {
+        self.cfg_now()
+            .unwrap_or_default()
+            .translation_target()
+            .to_owned()
     }
 
     /// Points every bring-up at `keys`: the session file's and the history
@@ -3607,6 +3635,55 @@ fn spawn_text_send(
 /// a `proto` token rather than a value the reader typed: the code and the
 /// two-factor challenge are `proto` types `tui` may not name, so they are spent
 /// here. Both are taken **before** the task is spawned, because a task that
+/// Asks for a message's text in another language, and hands the answer back.
+///
+/// Its own task for the same reason as every request here: a round trip must not
+/// stop the reader's keystrokes being read. The language travels with the action,
+/// so nothing here reads the configuration.
+fn request_translate(
+    client: &Arc<ProtoClient>,
+    chat_id: i64,
+    message_id: i64,
+    lang: String,
+    tx: &UnboundedSender<AppEvent>,
+) {
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+
+    tokio::spawn(async move {
+        let result = client.translate_message(chat_id, message_id, &lang).await;
+        let _ = tx.send(AppEvent::Net(Event::Translated {
+            chat_id,
+            message_id,
+            result,
+        }));
+    });
+}
+
+/// The translation an action asks for, with the language to ask it in.
+///
+/// `None` for every other action. The action carries the language when the
+/// interface has it; a request that names none takes the configured target rather
+/// than sending an empty one Telegram would refuse.
+fn translate_request(state: &State, action: &Action) -> Option<(i64, i64, String)> {
+    let Action::Translate {
+        chat_id,
+        message_id,
+        lang,
+    } = action
+    else {
+        return None;
+    };
+
+    let lang = if lang.is_empty() {
+        state.translation_target()
+    } else {
+        lang.clone()
+    };
+
+    Some((*chat_id, *message_id, lang))
+}
+
 /// borrowed them would outlive this function and neither token can be copied.
 /// Asks for the page the stored cursor starts after.
 ///
@@ -3640,6 +3717,9 @@ fn request_more_global(
     });
 }
 
+// One arm of dispatch per action, in the order the sign-in gate and the state
+// have to be consulted: splitting it would only move the arms apart.
+#[allow(clippy::too_many_lines)]
 fn request_action(
     client: &Arc<ProtoClient>,
     state: &mut State,
@@ -3691,6 +3771,13 @@ fn request_action(
     // starts after.
     if let Action::MoreGlobal { spec } = &action {
         request_more_global(client, state, spec, tx);
+        return;
+    }
+
+    // A translation needs a language, and the configuration is where one is
+    // chosen, so it is answered here rather than in `request_plain`.
+    if let Some((chat_id, message_id, lang)) = translate_request(state, &action) {
+        request_translate(client, chat_id, message_id, lang, tx);
         return;
     }
 
@@ -4167,7 +4254,9 @@ fn request_plain(
             // Unreachable rather than wrong: a value is one of the three, never
             // two.
             // The cancel is answered by `request_action`, which holds the flag;
-            // nothing is asked of the network for it either.
+            // nothing is asked of the network for it either. A translation is
+            // answered there too: it needs the configured language, which lives
+            // in `State`.
             Action::AddAccount
             | Action::MarkAllRead
             | Action::SwitchAccount { .. }
@@ -4175,6 +4264,7 @@ fn request_plain(
             | Action::LoginCancelled
             | Action::Logout
             | Action::MoreGlobal { .. }
+            | Action::Translate { .. }
             | Action::SetLocalName { .. }
             | Action::ExportSession { .. }
             | Action::ImportSession { .. }
@@ -4704,6 +4794,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             result,
         } => apply_pinned(app, chat_id, message_id, pin, result),
 
+        Event::Translated {
+            chat_id,
+            message_id,
+            result,
+        } => apply_translated(app, chat_id, message_id, result),
+
         Event::PinToggled {
             chat_id,
             pinned,
@@ -4886,6 +4982,15 @@ struct MediaJob {
 /// The status sentence for an open whose message is not on the screen, so its
 /// kind, and so its file name, is not known.
 const MEDIA_NOT_LOADED: &str = "that message's media is not loaded; nothing was downloaded";
+
+/// What the status row says when translating is refused for want of Premium.
+///
+/// The design's own sentence, and a whole answer rather than a reason: the gate
+/// is not a failure the reader can retry, so it is told what the feature is and
+/// that nothing happened — not a `translate:` reason it could act on. Kept here
+/// so the wording and the check that chooses it cannot drift apart.
+const PREMIUM_TRANSLATION_SENTENCE: &str =
+    "Translation is a premium feature: this message was not translated.";
 
 /// The kind of the media on `message_id` in `chat_id`, when the conversation on
 /// show holds that message with media.
@@ -6349,6 +6454,51 @@ fn apply_pinned(
     }
 }
 
+/// Folds a translation's answer in.
+///
+/// A translation is stored beside the message it belongs to, in the conversation
+/// on show — never in the message's text, and never for a chat the reader has
+/// left, which is what the guard refuses. A failure owes one line: the premium
+/// gate reads as the sentence the design fixed, because it is not a failed
+/// request and a retry cannot succeed; everything else says what went wrong under
+/// its own area name.
+fn apply_translated(
+    app: &mut App,
+    chat_id: i64,
+    message_id: i64,
+    result: Result<Translation, ProtoError>,
+) {
+    if app.conversation.conversation.window.chat_id != chat_id {
+        return;
+    }
+
+    match result {
+        Ok(translation) => {
+            tracing::debug!(
+                chat_id,
+                message_id,
+                target = translation.target.as_str(),
+                "a translation was accepted"
+            );
+            let _ = app
+                .conversation
+                .conversation
+                .set_translation(message_id, translation);
+        }
+        Err(error) => {
+            tracing::debug!(chat_id, message_id, %error, "a translation failed");
+            if matches!(
+                error,
+                ProtoError::Framework(FrameworkError::TranslationPremiumRequired)
+            ) {
+                app.flash(PREMIUM_TRANSLATION_SENTENCE);
+            } else {
+                app.flash(format!("translate: {}", failure_reason(&error)));
+            }
+        }
+    }
+}
+
 /// Folds a pin's answer in. The list moves and the status says so when Telegram
 /// agreed; the status says why not when it did not.
 fn apply_pin_toggled(app: &mut App, chat_id: i64, pinned: bool, result: Result<(), ProtoError>) {
@@ -7589,6 +7739,117 @@ mod tests {
         );
 
         assert!(!app.status_text().starts_with("pin message: "));
+    }
+
+    fn translation(text: &str) -> Translation {
+        Translation {
+            text: text.to_owned(),
+            source: None,
+            target: "en".to_owned(),
+        }
+    }
+
+    /// A translation is stored beside the message it was asked for, and the
+    /// message's own text is untouched: the client's copy still says what the
+    /// sender wrote.
+    #[test]
+    fn an_answer_lands_beside_the_message_it_translates() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Translated {
+                chat_id: CHAT,
+                message_id: 2,
+                result: Ok(translation("hola")),
+            },
+        );
+
+        assert_eq!(
+            app.conversation
+                .conversation
+                .translation(2)
+                .map(|held| held.text.as_str()),
+            Some("hola")
+        );
+        assert_eq!(
+            app.conversation
+                .conversation
+                .message(2)
+                .map(|message| message.text.as_ref()),
+            Some("text"),
+            "and the message still says what it said"
+        );
+    }
+
+    /// An answer for a conversation the reader has left is refused: the chat that
+    /// owns it asks again when it is opened, and a translation held here would be
+    /// drawn under a message it never described.
+    #[test]
+    fn a_translation_for_another_conversation_is_refused() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Translated {
+                chat_id: CHAT + 1,
+                message_id: 2,
+                result: Ok(translation("hola")),
+            },
+        );
+
+        assert!(app.conversation.conversation.translation(2).is_none());
+    }
+
+    /// A refusal says what failed under its own area name, and leaves the message
+    /// as it was — a translation that did not arrive changes nothing.
+    #[test]
+    fn a_refused_translation_flashes_the_reason() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Translated {
+                chat_id: CHAT,
+                message_id: 2,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert!(
+            app.status_text().starts_with("translate: "),
+            "the failure belongs to translating: {}",
+            app.status_text()
+        );
+        assert!(app.conversation.conversation.translation(2).is_none());
+    }
+
+    /// The premium gate is not a failed request — it cannot succeed on retry — so
+    /// it reads as the design's one sentence instead of a `translate:` reason.
+    #[test]
+    fn a_premium_refusal_reads_as_its_own_sentence() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Translated {
+                chat_id: CHAT,
+                message_id: 2,
+                result: Err(ProtoError::Framework(
+                    FrameworkError::TranslationPremiumRequired,
+                )),
+            },
+        );
+
+        assert_eq!(app.status_text(), PREMIUM_TRANSLATION_SENTENCE);
     }
 
     /// An application whose open conversation has unread messages in front of
