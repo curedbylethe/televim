@@ -3040,6 +3040,28 @@ fn translated(app: &mut App, id: i64, text: &str, target: &str) {
     );
 }
 
+/// A charwise selection over a translated message moves through the words on the
+/// screen, and copies them: the translation is what the reader is pointing at.
+#[test]
+fn a_charwise_selection_over_a_translation_reads_the_shown_text() {
+    let mut app = App::mock();
+    go_to_top(&mut app);
+    let shown = "The side gate shuts at 21:30.";
+    translated(&mut app, 1, shown, "en");
+
+    key(&mut app, 'v');
+    key(&mut app, '$');
+    key(&mut app, 'y');
+
+    assert_eq!(
+        yanked(&app),
+        vec!["The side gate shuts at 21:30".to_owned()],
+        "`$` reaches the end of the translation, and the yank starts where the \
+         selection did — not at the original's ninth character"
+    );
+    assert_eq!(app.selection(), None, "and the yank ends the selection");
+}
+
 /// `t` asks for the cursor's message in the configured language, and names it in
 /// the request so nothing else has to guess.
 #[test]
