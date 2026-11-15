@@ -1888,9 +1888,10 @@ are in [`../AGENTS.md`](../AGENTS.md).
   replaces rather than merges; an empty set and a deletion both remove the entry,
   and an identifier the window does not hold is a no-op, the same answer an edit
   for a scrolled-out message gives. The cost is that reactions are not persisted
-  (`HistoryCache` ignores the event) and that a fresh page carries no counts
-  until an update arrives; the alternative was a second per-message window that
-  the memory budget would have to pay for twice.
+  (`HistoryCache` ignores the event); a page's counts are seeded from the page
+  itself and a later update replaces them, so a fresh page is not a page without
+  chips. The alternative was a second per-message window that the memory budget
+  would have to pay for twice.
 
 - **Why a chat's pins are held as identifiers rather than as messages:**
   `updatePinnedMessages` names identifiers and nothing else — no message, no
