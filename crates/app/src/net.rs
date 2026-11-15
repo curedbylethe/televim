@@ -3626,15 +3626,6 @@ fn spawn_text_send(
     });
 }
 
-/// Performs the operation the reader asked for, and hands the answer back.
-///
-/// The same shape as the two above, and for the same reason: a round trip in the
-/// event loop would stop the reader's keystrokes from being read while it runs.
-///
-/// It takes the state because the sign-in is the one operation whose *input* is
-/// a `proto` token rather than a value the reader typed: the code and the
-/// two-factor challenge are `proto` types `tui` may not name, so they are spent
-/// here. Both are taken **before** the task is spawned, because a task that
 /// Asks for a message's text in another language, and hands the answer back.
 ///
 /// Its own task for the same reason as every request here: a round trip must not
@@ -3684,7 +3675,6 @@ fn translate_request(state: &State, action: &Action) -> Option<(i64, i64, String
     Some((*chat_id, *message_id, lang))
 }
 
-/// borrowed them would outlive this function and neither token can be copied.
 /// Asks for the page the stored cursor starts after.
 ///
 /// Answered before `request_plain` because the cursor lives in `State`, which
@@ -3716,6 +3706,17 @@ fn request_more_global(
         }));
     });
 }
+
+/// Performs the operation the reader asked for, and hands the answer back.
+///
+/// The same shape as the two above, and for the same reason: a round trip in the
+/// event loop would stop the reader's keystrokes from being read while it runs.
+///
+/// It takes the state because the sign-in is the one operation whose *input* is
+/// a `proto` token rather than a value the reader typed: the code and the
+/// two-factor challenge are `proto` types `tui` may not name, so they are spent
+/// here. Both are taken **before** the task is spawned, because a task that
+/// borrowed them would outlive this function and neither token can be copied.
 
 // One arm of dispatch per action, in the order the sign-in gate and the state
 // have to be consulted: splitting it would only move the arms apart.
