@@ -2698,6 +2698,22 @@ fn plus_opens_a_reaction_line_for_the_message_under_the_cursor() {
     );
 }
 
+/// `+` on a message still on its way out opens nothing: a placeholder has no
+/// identifier Telegram knows, so the request could only be refused.
+#[test]
+fn plus_on_an_unsent_message_opens_nothing() {
+    let mut app = conversation(&[(1, false)]);
+    submit(&mut app, "hi");
+    let placeholder = app.next_queued_send().expect("the send is queued").temp_id;
+    go_to_top(&mut app);
+    cursor_onto(&mut app, placeholder);
+
+    key(&mut app, '+');
+
+    assert_eq!(app.ui.focus, Focus::Conversation, "the line stays shut");
+    assert_eq!(app.take_action(), None, "and nothing is asked for");
+}
+
 /// The prompt belongs to the message it opened on, not to the cursor: the row list
 /// can move under an open line.
 #[test]
