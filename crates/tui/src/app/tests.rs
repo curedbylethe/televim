@@ -2964,11 +2964,11 @@ fn enter_on_a_pinned_row_jumps_to_the_message_and_closes() {
     assert!(!app.conversation.pinned.is_active(), "and the list is gone");
 }
 
-/// A pin whose message the window does not hold is a row the cursor cannot be
-/// put on: the list stays up and the reader does not move, because the row
-/// already says the message is not loaded.
+/// A pin older than the window is the pin the list exists for: Enter asks for a
+/// page around it and closes, rather than doing nothing because the message is
+/// not already loaded.
 #[test]
-fn enter_on_a_pin_the_window_does_not_hold_moves_nothing() {
+fn enter_on_a_pin_the_window_does_not_hold_fetches_the_page_around_it() {
     let mut app = App::mock();
     pinned(&mut app, &[900]);
     run_command_line(&mut app, "pinned");
@@ -2976,11 +2976,16 @@ fn enter_on_a_pin_the_window_does_not_hold_moves_nothing() {
 
     app.handle_key(press(KeyCode::Enter));
 
-    assert_eq!(reading(&app), place, "the reader is where they were");
-    assert!(
-        app.conversation.pinned.is_active(),
-        "and the list is still up: nothing was chosen that could be shown"
+    assert_eq!(
+        app.pending_jump().map(|jump| (jump.target_id, jump.kind)),
+        Some((900, JumpKind::Pinned)),
+        "the page is asked for around the pin"
     );
+    assert!(
+        !app.conversation.pinned.is_active(),
+        "and the list is gone: the reader chose"
+    );
+    assert_eq!(reading(&app), place, "the cursor moves when the page lands");
 }
 
 /// `j`/`k` walk the pins, `Esc` closes and leaves the reader where they were: the
