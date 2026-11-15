@@ -2655,12 +2655,13 @@ impl App {
     /// An edited message has no translation to show, because the view drops the
     /// entry when the text changes: a rendering of words that have been replaced
     /// would be worse than no rendering at all.
+    ///
+    /// Delegates to [`ConversationState::shown_body`], which the motions and the
+    /// yank read too, so what is drawn and what a selection moves through are one
+    /// answer.
     #[must_use]
     pub fn shown_body<'a>(&'a self, message: &'a Message) -> &'a str {
-        self.conversation
-            .conversation
-            .translation(message.id)
-            .map_or_else(|| message.display_body(), |translation| &translation.text)
+        self.conversation.shown_body(message)
     }
 
     /// The language `t` asks for, from the configuration.

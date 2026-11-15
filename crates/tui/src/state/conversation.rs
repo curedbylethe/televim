@@ -754,6 +754,18 @@ impl ConversationState {
         None
     }
 
+    /// The text a message draws, which is its translation while one is shown.
+    ///
+    /// Every motion, yank and clamp that counts characters asks here rather than
+    /// at the message's own text, so a selection made over a translated message
+    /// moves through the words on the screen and copies those. The view holds the
+    /// entry; the message keeps its own text untouched.
+    pub(crate) fn shown_body<'a>(&'a self, message: &'a Message) -> &'a str {
+        self.conversation
+            .translation(message.id)
+            .map_or_else(|| message.display_body(), |translation| &translation.text)
+    }
+
     /// Applies a character motion to the focus's position within its message.
     ///
     /// Nothing happens without a character position to move: a linewise selection
@@ -762,7 +774,7 @@ impl ConversationState {
     /// message until the focus moves to another one, so that a charwise selection
     /// does not drag the viewport along with every character.
     pub(crate) fn move_focus(&mut self, motion: CharMotion) {
-        let Some(selection) = &mut self.selection else {
+        let Some(selection) = &self.selection else {
             return;
         };
         let Some(at) = selection.focus.char else {
@@ -773,8 +785,11 @@ impl ConversationState {
         let Some(message) = self.conversation.window.iter().find(|m| m.id == id) else {
             return;
         };
+        let focus = char_motion(self.shown_body(message), at, motion);
 
-        selection.focus.char = Some(char_motion(message.display_body(), at, motion));
+        if let Some(selection) = &mut self.selection {
+            selection.focus.char = Some(focus);
+        }
     }
 
     /// Records the wrap the layout pass drew for message `id`.
@@ -799,7 +814,7 @@ impl ConversationState {
         let Some(message) = self.conversation.window.iter().find(|m| m.id == id) else {
             return;
         };
-        let text = message.display_body();
+        let text = self.shown_body(message);
         if text.is_ascii() {
             self.move_focus(CharMotion::Step { forward: right });
             return;
@@ -859,7 +874,7 @@ impl ConversationState {
         };
 
         let id = message.id;
-        let last = message.display_body().chars().count().saturating_sub(1);
+        let last = self.shown_body(message).chars().count().saturating_sub(1);
         let char = focus.char.map(|at| at.min(last));
 
         if let Some(selection) = &mut self.selection {
@@ -1068,7 +1083,7 @@ impl ConversationState {
                 return Vec::new();
             };
 
-            let body = message.display_body();
+            let body = self.shown_body(message);
             return vec![body[crate::rows::byte_span(body, range)].to_owned()];
         }
 
@@ -1078,7 +1093,7 @@ impl ConversationState {
             .iter()
             .skip(covered.start)
             .take(covered.len())
-            .map(|message| message.display_body().to_owned())
+            .map(|message| self.shown_body(message).to_owned())
             .collect()
     }
 
