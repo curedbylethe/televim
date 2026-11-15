@@ -54,13 +54,13 @@ use anyhow::{Context, Result};
 use domain::chat::Chat;
 use domain::global_search::{GlobalHit, SearchSpec};
 use domain::history::ConversationView;
-use domain::message::{MediaKind, Message};
+use domain::message::{MediaKind, Message, ReactionCount};
 use domain::search::SEARCH_MATCHES;
 use domain::updates::{ChatList, UpdateEvent, sorts_before};
 use domain::user::UserCandidate;
 use proto::{
-    HistoryCursor, LoginCode, PasswordChallenge, ProtoClient, ProtoError, SearchResults, SignIn,
-    UpdateStream,
+    HistoryCursor, HistoryPage, LoginCode, PasswordChallenge, ProtoClient, ProtoError,
+    SearchResults, SignIn, UpdateStream,
 };
 use telegram_framework::{
     ClientBuilder, FileStore, FrameworkError, KeyProvider, KeyringKeyProvider, PASSWORD_ATTEMPTS,
@@ -316,8 +316,9 @@ pub enum Event {
         /// reconnect missed, so it must not mark a cached run current.
         generation: u64,
 
-        /// The page, oldest first, or why there is not one.
-        result: Result<Vec<Message>, ProtoError>,
+        /// The page — its messages, oldest first, and the reactions they carry —
+        /// or why there is not one.
+        result: Result<HistoryPage, ProtoError>,
     },
 
     /// A page came back around a message the reader jumped to, or the fetch that
@@ -338,7 +339,7 @@ pub enum Event {
         cursor: HistoryCursor,
 
         /// The page, oldest first, or why there is not one.
-        result: Result<Vec<Message>, ProtoError>,
+        result: Result<HistoryPage, ProtoError>,
     },
 
     /// A contact's profile came back, or the read failed.
@@ -5580,7 +5581,7 @@ fn apply_jumped(
     state: &mut State,
     jump: Jump,
     mut cursor: HistoryCursor,
-    result: Result<Vec<Message>, ProtoError>,
+    result: Result<HistoryPage, ProtoError>,
 ) {
     // However it ended, the jump is over — unless a later one has taken
     // its place, in which case that one is still on its way and must not
@@ -5599,15 +5600,19 @@ fn apply_jumped(
 
     match result {
         Ok(page) => {
+            let chat_id = cursor.peer_id();
+            let reactions = page.reactions;
+
             // Cached whether or not the window takes it: the page is what the
             // wire said about that stretch either way, and the merge decides
             // for itself whether it joins what is cached.
-            state.remember_page(cursor.peer_id(), &page, PageKind::Around);
+            state.remember_page(chat_id, &page.messages, PageKind::Around);
             // Only a page the window took is worth telling the cursor
             // about: a jump the reader abandoned leaves it describing
             // what is still on screen.
-            if app.apply_jump(&page, jump.target_id) {
-                cursor.reset_to(&page);
+            if app.apply_jump(&page.messages, jump.target_id) {
+                cursor.reset_to(&page.messages);
+                seed_reactions(app, chat_id, reactions);
                 settle(app, cursor);
                 state.history.cursor = Some(cursor);
             }
@@ -5640,7 +5645,7 @@ fn apply_history(
     anchor: Option<i64>,
     mut cursor: HistoryCursor,
     generation: u64,
-    result: Result<Vec<Message>, ProtoError>,
+    result: Result<HistoryPage, ProtoError>,
 ) {
     // A page asked of a client whose feed has since ended knows nothing of what
     // the reconnect missed. The peer guard below cannot tell it apart when the
@@ -5658,14 +5663,21 @@ fn apply_history(
 
     match result {
         Ok(page) => {
-            let rows = page.len();
-            if let Some(kind) = page_kind(direction, anchor, cursor, page.len()) {
-                state.remember_page(cursor.peer_id(), &page, kind);
+            let rows = page.messages.len();
+            let chat_id = cursor.peer_id();
+            let reactions = page.reactions;
+
+            if let Some(kind) = page_kind(direction, anchor, cursor, rows) {
+                state.remember_page(chat_id, &page.messages, kind);
             }
             if direction == FetchDirection::Latest {
-                cursor.reset_to(&page);
+                cursor.reset_to(&page.messages);
             }
-            apply_page(app, direction, page);
+            apply_page(app, direction, page.messages);
+            // After the messages are in the window, not before: the view takes a
+            // count only for a message it holds, and a page is where a chat that
+            // has just been opened learns that any of them carries one.
+            seed_reactions(app, chat_id, reactions);
             // The newest page moved the cursor to the end. A search hit that
             // the cache landed on is put back on: if the page does not hold it,
             // `go_to_search_hit` asks for it as a jump, as it would have had
@@ -6625,6 +6637,31 @@ fn apply_page(app: &mut App, direction: FetchDirection, page: Vec<Message>) {
     }
 }
 
+/// Seeds a page's reaction counts into the conversation on show.
+///
+/// A page is the only place a conversation that has just been opened learns what
+/// its messages carry, so the counts travel with it and are folded in through the
+/// same event the feed sends — one code path, so a strip drawn from a page and one
+/// redrawn from an update cannot disagree.
+///
+/// The view drops a count for a message it does not hold, which is what makes a
+/// page that was refused, or a chat the reader has left, harmless to call this
+/// with: nothing lands where there is no message to draw under.
+fn seed_reactions(app: &mut App, chat_id: i64, reactions: Vec<(i64, Vec<ReactionCount>)>) {
+    for (message_id, reactions) in reactions {
+        // Whether it landed is not acted on: a count for a message the window
+        // does not hold is an ordinary outcome, and the loop redraws either way.
+        let _ = app
+            .conversation
+            .conversation
+            .apply_event(&UpdateEvent::ReactionsChanged {
+                chat_id,
+                message_id,
+                reactions,
+            });
+    }
+}
+
 /// Which stretch of the conversation a page that came back was fetched from,
 /// in the cache's terms.
 ///
@@ -7227,6 +7264,14 @@ mod tests {
             .collect()
     }
 
+    /// A fetched page of `messages`, carrying no reactions.
+    fn history_page(messages: Vec<Message>) -> HistoryPage {
+        HistoryPage {
+            messages,
+            reactions: Vec::new(),
+        }
+    }
+
     /// The conversation the forwards are sent to in these tests.
     const DEST: i64 = 9;
 
@@ -7500,7 +7545,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(messages(CHAT, 16..=20)),
+                result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
 
@@ -7549,7 +7594,7 @@ mod tests {
             Event::Jumped {
                 jump: replied,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(messages(CHAT, 16..=20)),
+                result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
 
@@ -7581,7 +7626,7 @@ mod tests {
             Event::Jumped {
                 jump: back,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(messages(CHAT, 1..=8)),
+                result: Ok(history_page(messages(CHAT, 1..=8))),
             },
         );
 
@@ -7651,7 +7696,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(messages(CHAT, 16..=20)),
+                result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
 
@@ -7738,7 +7783,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(page),
+                result: Ok(history_page(page)),
             },
         );
 
@@ -8857,7 +8902,7 @@ mod tests {
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
                 generation: 0,
-                result: Ok(messages(CHAT, -1..=0)),
+                result: Ok(history_page(messages(CHAT, -1..=0))),
             },
         );
 
@@ -8889,7 +8934,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(messages(CHAT, 16..=20)),
+                result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
 
@@ -8988,7 +9033,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(messages(CHAT, 16..=20)),
+                result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
 
@@ -9026,7 +9071,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(messages(CHAT, 16..=20)),
+                result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
 
@@ -9061,7 +9106,7 @@ mod tests {
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
                 generation: 0,
-                result: Ok(messages(CHAT, 1..=2)),
+                result: Ok(history_page(messages(CHAT, 1..=2))),
             },
         );
 
@@ -9242,9 +9287,91 @@ mod tests {
                 anchor,
                 cursor: HistoryCursor::new(CHAT),
                 generation,
-                result: Ok(page),
+                result: Ok(history_page(page)),
             },
         );
+    }
+
+    fn reaction(emoticon: &str, count: u32) -> ReactionCount {
+        ReactionCount {
+            reaction: domain::message::Reaction::Emoticon(emoticon.to_owned()),
+            count,
+            chosen: false,
+        }
+    }
+
+    /// A chat opened fresh learns about reactions from its first page: the counts
+    /// travel with it, so the strip is drawn before any update arrives.
+    #[test]
+    fn a_fetched_page_seeds_the_reactions_it_carries() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        app.select_chat(0);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                generation: 0,
+                result: Ok(HistoryPage {
+                    messages: messages(CHAT, 1..=3),
+                    reactions: vec![(2, vec![reaction("👍", 3)])],
+                }),
+            },
+        );
+
+        assert_eq!(
+            app.conversation.conversation.reactions(2),
+            vec![reaction("👍", 3)],
+            "the page's counts are on screen without waiting for an update"
+        );
+        assert!(
+            app.conversation.conversation.reactions(1).is_empty(),
+            "and a message the page says nothing about carries nothing"
+        );
+    }
+
+    /// A page asked of a feed that has since ended knows nothing of what the
+    /// reconnect missed, so it is dropped whole — its reaction counts with it.
+    #[test]
+    fn a_stale_page_seeds_no_reactions() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        app.select_chat(0);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+        // The page below was asked under generation 0, and the feed has moved on.
+        state.feed_generation = 1;
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                generation: 0,
+                result: Ok(HistoryPage {
+                    messages: messages(CHAT, 1..=3),
+                    reactions: vec![(2, vec![reaction("👍", 3)])],
+                }),
+            },
+        );
+
+        assert!(
+            app.conversation.conversation.reactions(2).is_empty(),
+            "a page the reconnect has overtaken must not seed a strip"
+        );
+        assert_eq!(app.conversation.conversation.window.len(), 0);
     }
 
     /// An instant a full window past every one this has handed out, so a pass
@@ -9925,7 +10052,7 @@ mod tests {
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT + 1),
                 generation: 0,
-                result: Ok(messages(CHAT + 1, 1..=2)),
+                result: Ok(history_page(messages(CHAT + 1, 1..=2))),
             },
         );
         assert!(app.is_fetching(FetchDirection::Latest));
@@ -9955,7 +10082,7 @@ mod tests {
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
                 generation: 0,
-                result: Ok(messages(CHAT, 1..=2)),
+                result: Ok(history_page(messages(CHAT, 1..=2))),
             },
         );
         assert!(app.is_fetching(FetchDirection::Latest));
@@ -10073,7 +10200,7 @@ mod tests {
                     anchor: Some(1),
                     cursor: HistoryCursor::new(CHAT),
                     generation: old_generation,
-                    result: Ok(messages(CHAT, 1..=1)),
+                    result: Ok(history_page(messages(CHAT, 1..=1))),
                 },
             );
             assert!(
@@ -10114,7 +10241,7 @@ mod tests {
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
                 generation: asked_under,
-                result: Ok(messages(CHAT, 4..=6)),
+                result: Ok(history_page(messages(CHAT, 4..=6))),
             },
         );
 
@@ -10161,7 +10288,7 @@ mod tests {
                 anchor: None,
                 cursor: HistoryCursor::new(CHAT),
                 generation,
-                result: Ok(messages(CHAT, 4..=6)),
+                result: Ok(history_page(messages(CHAT, 4..=6))),
             },
         );
 
@@ -12821,7 +12948,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
-                result: Ok(messages(CHAT, 16..=20)),
+                result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
 
