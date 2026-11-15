@@ -3717,7 +3717,6 @@ fn request_more_global(
 /// two-factor challenge are `proto` types `tui` may not name, so they are spent
 /// here. Both are taken **before** the task is spawned, because a task that
 /// borrowed them would outlive this function and neither token can be copied.
-
 // One arm of dispatch per action, in the order the sign-in gate and the state
 // have to be consulted: splitting it would only move the arms apart.
 #[allow(clippy::too_many_lines)]
