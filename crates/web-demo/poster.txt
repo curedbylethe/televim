@@ -21,4 +21,4 @@
 ┌ Input ───────────────────────────────────────────────────────────────────────┐
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
- NORMAL  ●  i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct
+ NORMAL  ●  i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  t:trans

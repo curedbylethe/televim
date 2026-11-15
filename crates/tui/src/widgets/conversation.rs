@@ -27,7 +27,7 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
-use domain::message::{MediaKind, Message};
+use domain::message::{MediaKind, Message, Reaction, ReactionCount};
 
 use crate::app::{App, FetchDirection, Focus};
 use crate::bidi::{self, BidiMode};
@@ -442,8 +442,9 @@ fn message_items<'m>(
     }
     let coverage = coverage(app, message, index, covered);
     let cursor_here = app.conversation.vim.cursor() == index;
+    let strip = rows::has_reactions(app, message);
 
-    let mut items = Vec::with_capacity(wrapped.len() + block);
+    let mut items = Vec::with_capacity(wrapped.len() + block + usize::from(strip));
     let mut picture = None;
     for (row, range) in wrapped.iter().enumerate().skip(draw.skip) {
         if items.len() >= draw.room {
@@ -496,6 +497,13 @@ fn message_items<'m>(
             }
             items.push(item);
         }
+    }
+
+    // The strip is the message's last row, so it is drawn after the text and the
+    // picture and skipped with them: it is one row of the same message, not a row
+    // of its own in the layout.
+    if strip && draw.skip <= wrapped.len() + block && items.len() < draw.room {
+        items.push(reaction_strip(app, message, coverage.as_ref(), draw.width));
     }
 
     (items, picture)
@@ -701,6 +709,90 @@ fn message_row<'m>(
     }
 
     ListItem::new(Line::from(spans))
+}
+
+/// The row of reaction chips under a message's body.
+///
+/// One row, in the body column, belonging to the message: a chip is the glyph and
+/// then its count, and a count of one is not drawn — `👍` alone, `👍 12` when
+/// twelve people reacted. Two spaces separate chips, the same gap the hint row
+/// uses between pairs, and the strip stops at the body's width rather than
+/// wrapping: it is a summary, and the prompt is where the full set is answered.
+///
+/// The chip this account reacted with takes the reverse video every other surface
+/// marks it with, so the mark is not a colour and not a glyph the palette would
+/// have to invent; every other chip is dim, count included. The strip is the one
+/// thing on a message that never takes the **cursor's** reverse video — reverse
+/// video belongs to the cursor, and the cursor is on a message, not on its chips —
+/// but a Visual selection covers it, because a yank would take it.
+fn reaction_strip<'m>(
+    app: &App,
+    message: &Message,
+    covered: Option<&Coverage>,
+    width: u16,
+) -> ListItem<'m> {
+    let reactions = app.conversation.conversation.reactions(message.id);
+
+    // In a right-to-left message the strip takes the row's visual order: the chips
+    // run right to left as the sentence does, and each chip keeps the order it is
+    // written in, so the glyph stays before its count. Terminal mode is left alone
+    // for the same reason a body row is: the terminal's shaper does the reversing.
+    let mut chips: Vec<&ReactionCount> = reactions.iter().collect();
+    if app.bidi().is_visual()
+        && bidi::base_direction(message.display_body()) == bidi::Direction::Rtl
+    {
+        chips.reverse();
+    }
+
+    let mut spans = vec![Span::raw(" ".repeat(rows::WHO_WIDTH))];
+    let room = usize::from(width).saturating_sub(rows::WHO_WIDTH);
+    let mut drawn = 0;
+    for (index, count) in chips.into_iter().enumerate() {
+        let chip = chip_text(count);
+        let gap = if index == 0 { 0 } else { 2 };
+        // Whole chips or none: half a chip is a different reaction.
+        if drawn + gap + columns(&chip) > room {
+            break;
+        }
+        drawn += gap + columns(&chip);
+        if gap > 0 {
+            spans.push(Span::raw(" ".repeat(gap)));
+        }
+        let ink = if count.chosen {
+            app.ui.theme.selection
+        } else {
+            app.ui.theme.text_dim
+        };
+        spans.push(Span::styled(chip, ink));
+    }
+
+    if let Some(Coverage::Whole) = covered {
+        for span in &mut spans {
+            span.style = span.style.patch(app.ui.theme.selection_bg);
+        }
+    }
+
+    ListItem::new(Line::from(spans))
+}
+
+/// One chip, as it is drawn: the glyph, then the count when more than one person
+/// reacted.
+///
+/// A custom emoji is a document this build does not fetch and a paid reaction
+/// carries no glyph at all, so both are drawn as the bracketed token a caption
+/// with no picture gets. Dropped instead, they would undercount the message — the
+/// count would say three and the strip would show two.
+fn chip_text(count: &ReactionCount) -> String {
+    let glyph = match &count.reaction {
+        Reaction::Emoticon(emoticon) => emoticon.clone(),
+        Reaction::CustomEmoji(_) => "[emoji]".to_owned(),
+        Reaction::Paid => "[paid]".to_owned(),
+    };
+    if count.count > 1 {
+        format!("{glyph} {}", count.count)
+    } else {
+        glyph
+    }
 }
 
 /// One row of a decoded sticker's picture: the pair of picture rows `brow`
@@ -4902,6 +4994,244 @@ mod tests {
             lit_borders(Focus::Input),
             [false, false, true],
             "the bar is not a pane that takes the focus visually, it is the focus"
+        );
+    }
+
+    // ---- the reaction strip ----------------------------------------------
+
+    /// Puts a strip on the message `id`: `(emoticon, count, whether this account
+    /// is one of the readers who reacted)`.
+    ///
+    /// Through the view's own event rather than a field, because that is how a
+    /// strip ever arrives: history fills it and the live update replaces it, and a
+    /// test that reached past both would pass on a strip nothing can produce.
+    fn react(app: &mut App, id: i64, counts: &[(&str, u32, bool)]) {
+        let _ = app
+            .conversation
+            .conversation
+            .apply_event(&UpdateEvent::ReactionsChanged {
+                chat_id: mock_chat_id(),
+                message_id: id,
+                reactions: counts
+                    .iter()
+                    .map(|(emoticon, count, chosen)| ReactionCount {
+                        reaction: Reaction::Emoticon((*emoticon).to_owned()),
+                        count: *count,
+                        chosen: *chosen,
+                    })
+                    .collect(),
+            });
+    }
+
+    /// The panel's body row carrying `needle`, if one does.
+    fn body_row_with(buffer: &Buffer, needle: &str) -> Option<u16> {
+        message_rows(buffer)
+            .into_iter()
+            .find(|y| body_row(buffer, *y).contains(needle))
+    }
+
+    /// The column `symbol` is drawn in on row `y`, in the panel's body.
+    fn column_of(buffer: &Buffer, y: u16, symbol: &str) -> u16 {
+        (usize::from(BODY_X)..usize::from(buffer.area.width) - 2)
+            .map(|x| x as u16)
+            .find(|x| cell(buffer, *x, y).symbol() == symbol)
+            .unwrap_or_else(|| panic!("{symbol:?} is on row {y}: {:?}", row(buffer, y)))
+    }
+
+    /// One row under the message, in the body column: the tag gutter, then the
+    /// chips.
+    ///
+    /// Measured in columns rather than compared as a string: a wide glyph is one
+    /// cell and the cell after it is blank, so the row read as text has a space
+    /// per emoji that is not a layout the test is asking about.
+    #[test]
+    fn a_message_with_reactions_draws_one_row_of_chips_under_its_text() {
+        let mut app = showing(vec![at(1, 0, false, "Are you coming tonight?")]);
+        react(&mut app, 1, &[("🔥", 3, false), ("👍", 12, true)]);
+
+        let screen = screen(&app, 80, 24);
+
+        let strip = body_row_with(&screen, "🔥").expect("the strip is drawn");
+        assert_eq!(
+            column_of(&screen, strip, "🔥"),
+            BODY_X + 7,
+            "the chips start in the body column, under the text above them"
+        );
+        assert_eq!(
+            column_of(&screen, strip, "3"),
+            BODY_X + 10,
+            "a chip is the glyph, a space, then its count"
+        );
+        assert_eq!(
+            column_of(&screen, strip, "👍"),
+            BODY_X + 13,
+            "and two spaces separate chips"
+        );
+        assert!(
+            body_row(&screen, strip - 1).starts_with("[them] Are you coming tonight?"),
+            "the strip is under the message's own text: {:?}",
+            body_row(&screen, strip - 1)
+        );
+
+        let layout = app.row_layout();
+        let span = layout
+            .iter()
+            .find(|span| span.message_id == Some(1))
+            .expect("the message is in the layout");
+        assert_eq!(
+            span.len, 2,
+            "the strip is counted in the message's own height, or the slice and the scrollbar would disagree"
+        );
+    }
+
+    /// A count of one is not a count: nobody doubled the reaction, so the chip is
+    /// the glyph alone.
+    #[test]
+    fn a_chip_with_one_reader_is_the_glyph_and_no_number() {
+        let mut app = showing(vec![at(1, 0, false, "Are you coming tonight?")]);
+        react(&mut app, 1, &[("👏", 1, true), ("💚", 2, false)]);
+
+        let screen = screen(&app, 80, 24);
+
+        let strip = body_row_with(&screen, "👏").expect("the strip is drawn");
+        assert_eq!(column_of(&screen, strip, "👏"), BODY_X + 7);
+        assert_eq!(
+            column_of(&screen, strip, "💚"),
+            BODY_X + 11,
+            "the single chip is two cells and a gap, so no count was drawn after it"
+        );
+        assert_eq!(
+            column_of(&screen, strip, "2"),
+            BODY_X + 14,
+            "and the doubled chip carries its count"
+        );
+    }
+
+    /// The reader's own chip is marked by the reverse video every other surface
+    /// uses, and the rest are dim — the count travels with its chip.
+    #[test]
+    fn the_chip_this_account_reacted_with_is_reversed_and_the_rest_are_dim() {
+        use ratatui::style::Modifier;
+
+        let mut app = showing(vec![at(1, 0, false, "Are you coming tonight?")]);
+        react(&mut app, 1, &[("🔥", 3, false), ("👍", 12, true)]);
+
+        let screen = screen(&app, 80, 24);
+
+        let strip = body_row_with(&screen, "🔥").expect("the strip is drawn");
+        let dim = theme().text_dim.fg.expect("the dim ink is a foreground");
+        let theirs = cell(&screen, column_of(&screen, strip, "🔥"), strip);
+        let mine = cell(&screen, column_of(&screen, strip, "👍"), strip);
+        let count = cell(&screen, column_of(&screen, strip, "1"), strip);
+
+        assert_eq!(theirs.fg, dim, "a chip this account did not choose is dim");
+        assert!(
+            !theirs.modifier.contains(Modifier::REVERSED),
+            "and it is not the reader's own"
+        );
+        assert!(
+            mine.modifier.contains(Modifier::REVERSED),
+            "the reader's own chip is reversed"
+        );
+        assert!(
+            count.modifier.contains(Modifier::REVERSED),
+            "and its count goes with it"
+        );
+        assert!(
+            !cell(&screen, BODY_X, strip)
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the strip never takes the cursor's reverse video, though the cursor is on this message"
+        );
+    }
+
+    /// The strip is a summary: a message with more reactions than fit shows the
+    /// first chips that do rather than wrapping onto a second row.
+    #[test]
+    fn the_strip_stops_at_the_body_width_and_drops_the_chips_that_do_not_fit() {
+        let mut app = showing(vec![at(1, 0, false, "The tickets are in the folder.")]);
+        react(
+            &mut app,
+            1,
+            &[
+                ("🔥", 3, false),
+                ("👍", 12, false),
+                ("😂", 2, false),
+                ("🎉", 4, false),
+                ("👏", 5, false),
+                ("🎯", 6, false),
+                ("💯", 7, false),
+                ("🚀", 8, false),
+            ],
+        );
+
+        let screen = screen(&app, 80, 24);
+
+        let strip = body_row_with(&screen, "🔥").expect("the strip is drawn");
+        assert!(
+            body_row(&screen, strip).contains("🎯"),
+            "the chips that fit"
+        );
+        assert!(
+            !body_row(&screen, strip).contains("🚀"),
+            "a chip past the body's width is dropped rather than wrapped: {:?}",
+            body_row(&screen, strip)
+        );
+        assert_eq!(
+            message_rows(&screen)
+                .into_iter()
+                .filter(|y| body_row(&screen, *y).contains("🔥"))
+                .count(),
+            1,
+            "and the strip is still one row"
+        );
+    }
+
+    /// A right-to-left message's strip takes the row's visual order: the first
+    /// chip written is the rightmost drawn, and each chip keeps its own order.
+    #[test]
+    fn a_right_to_left_message_lays_its_chips_out_in_the_row_s_visual_order() {
+        let mut app = App::mock().with_bidi(BidiMode::Visual);
+        app.conversation
+            .conversation
+            .window
+            .replace(vec![at(1, 0, false, "תודה רבה")]);
+        app.conversation.vim.set_total(1);
+        react(&mut app, 1, &[("💚", 2, false), ("👍", 1, true)]);
+
+        let screen = screen(&app, 80, 24);
+
+        let strip = body_row_with(&screen, "💚").expect("the strip is drawn");
+        assert_eq!(
+            column_of(&screen, strip, "👍"),
+            BODY_X + 7,
+            "the chip written first is drawn rightmost, so the last one comes first"
+        );
+        assert_eq!(
+            column_of(&screen, strip, "💚"),
+            BODY_X + 11,
+            "and each chip keeps the order it is written in: glyph, then count"
+        );
+        assert_eq!(column_of(&screen, strip, "2"), BODY_X + 14);
+    }
+
+    /// A selection of whole messages takes the strip with it: the chips are part of
+    /// the message a yank would name, even though the cursor's own reverse video is
+    /// not the strip's.
+    #[test]
+    fn a_selection_of_whole_messages_covers_the_strip() {
+        let mut app = showing(vec![at(1, 0, false, "Are you coming tonight?")]);
+        react(&mut app, 1, &[("🔥", 3, false)]);
+        assert!(app.select(1, None));
+        app.ui.set_mode(crate::app::Mode::Visual);
+
+        let screen = screen(&app, 80, 24);
+
+        let strip = body_row_with(&screen, "🔥").expect("the strip is drawn");
+        assert_eq!(
+            cell(&screen, column_of(&screen, strip, "🔥"), strip).bg,
+            selection_bg(),
+            "the selection covers the chips along with the text"
         );
     }
 

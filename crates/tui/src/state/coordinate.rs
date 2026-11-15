@@ -1180,6 +1180,31 @@ pub(crate) fn start_edit(
     conversation.set_reply_to(None);
 }
 
+/// Opens the line to react to the message under the cursor.
+///
+/// The message is taken now and kept as the line's subject: the row list can move
+/// under an open line, and a prompt that reacted to whatever the cursor had
+/// reached by the time `Enter` was pressed would react to a message the reader
+/// never chose.
+///
+/// A draft is parked rather than refused, the way `/` and `:` park one: a reaction
+/// is one glyph and replaces nothing, so there is no half-written message to lose.
+pub(crate) fn start_react(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    drafts: &mut DraftStore,
+) {
+    let Some(id) = conversation.cursor_message_id() else {
+        return;
+    };
+
+    park_draft(conversation, input, drafts);
+    ui.set_focus(Focus::Input);
+    input.line.open(PromptKind::React);
+    input.line.set_subject(Some(id));
+}
+
 /// Opens the line to find a person to talk to, with `query` already in it.
 ///
 /// The one opener for this prompt, from `/` on the chat list and from
@@ -1624,6 +1649,67 @@ pub(crate) fn submit_edit(
         },
     );
     drafts.drafts.remove(&chat_id);
+}
+
+/// Reads the reaction line: one glyph adds, and a hyphen takes this account's back.
+///
+/// The submitted text is read as one grapheme cluster, so a family emoji of six
+/// code points is one glyph and a flag is one glyph. Anything else — nothing at
+/// all, or two glyphs — is refused, because a reaction is one reaction.
+///
+/// Nothing is applied here: the strip is redrawn from the update the server sends
+/// back, so a chip it refused is never shown. A `-` on a message this account has
+/// not reacted to is refused before the round trip, because the answer is already
+/// known and the wire would only repeat it.
+///
+/// The line is left as it is when something is refused — the prompt stays open with
+/// the glyph in it, and the refusal goes to the status line.
+pub(crate) fn submit_reaction(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    input: &mut InputState,
+    outbox: &mut Outbox,
+) {
+    let Some(message_id) = input.line.subject() else {
+        return;
+    };
+    if !conversation.has_conversation() {
+        return;
+    }
+
+    let chat_id = conversation.conversation.window.chat_id;
+    let typed = input.line.text().trim().to_owned();
+
+    let emoticon = if typed == "-" {
+        let mine = conversation
+            .conversation
+            .reactions(message_id)
+            .iter()
+            .any(|count| count.chosen);
+        if !mine {
+            ui.flash("You have not reacted to this message.");
+            return;
+        }
+        None
+    } else {
+        let mut glyphs = crate::grapheme::clusters(&typed);
+        let Some((_, glyph)) = glyphs.next().filter(|_| glyphs.next().is_none()) else {
+            ui.flash("Type one emoji to react.");
+            return;
+        };
+        Some(glyph.to_owned())
+    };
+
+    queue_action(
+        &mut *outbox,
+        &mut *ui,
+        Action::React {
+            chat_id,
+            message_id,
+            emoticon,
+        },
+    );
+    input.line.take();
 }
 
 /// Starts a search for a person, purely locally.
@@ -3052,6 +3138,10 @@ pub(crate) fn submit(
             );
             false
         }
+        PromptKind::React => {
+            submit_reaction(&mut *ui, &mut *conversation, &mut *input, &mut *outbox);
+            false
+        }
         PromptKind::Command => {
             let cmd = input.line.take();
             let card = ui.pane;
@@ -3117,10 +3207,14 @@ pub(crate) fn submit(
     // `:unlock` and `:passphrase` leave a passphrase line open, for the same reason.
     // A refused global search reopens its prompt with the typed line, so the
     // reader can correct it; the reset below would take that line away again.
+    // A refused reaction is the same: the refusal is the status line's, and the
+    // line stays open with the glyph in it. An accepted one has reset the line to
+    // a message by now, so the purpose is still `React` only when it refused.
     if session.signin_field().is_some()
         || session.pass.is_some()
         || input.line.purpose() == PromptKind::NewChat
         || input.line.purpose() == PromptKind::GlobalSearch
+        || input.line.purpose() == PromptKind::React
     {
         conversation.set_reply_to(None);
         conversation.set_editing(None);
@@ -4295,6 +4389,12 @@ pub(crate) fn handle_normal(
         }
         'e' => {
             start_edit(&mut *ui, &mut *conversation, &mut *input, drafts);
+            false
+        }
+        // `+` reacts to the message under the cursor. `p` stays paste and `P` is
+        // the pin, so neither is touched.
+        '+' => {
+            start_react(&mut *ui, &mut *conversation, &mut *input, drafts);
             false
         }
         // A plain `d`: the table reports nothing for it, so a `d` that does

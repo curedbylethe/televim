@@ -133,6 +133,7 @@ Use `televim --chat <id>` to open a chat directly.
 | `i` / `a` | Write a message |
 | `v` / `V` / `y` | Select text or messages; copy with `y` in Visual mode |
 | `d` / `r` / `e` / `f` | Delete (confirms) / reply / edit / forward |
+| `+` | React to the message: one emoji, or `-` to take your own back |
 | `/` / `n` / `N` | Search this chat / next / previous match |
 | `h` / `q` | Return to list / quit (confirms) |
 

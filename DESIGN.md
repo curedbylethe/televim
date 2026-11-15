@@ -208,7 +208,7 @@ has one cell height and the reader chose the cell.
   `MODE_LABEL_WIDTH = 9` — the widest label is `NORMAL`, and a `Confirm` never
   shares the row with a hint, so it is one number rather than a case per label.
   `ASSUMED_WIDTH = 80` — every hint must fit an 80-column terminal less the
-  label and its gap, which leaves 71. `ALL_HINTS` is the array of all fourteen,
+  label and its gap, which leaves 71. `ALL_HINTS` is the array of all nineteen,
   and a test iterates it, so a hint left out of the array is a hint the check
   never sees. **A hint that does not fit fails the build; the fix is a shorter
   sentence, not a wider budget.**
@@ -236,10 +236,10 @@ has one cell height and the reader chose the cell.
 
 ### The hint rows
 
-`ALL_HINTS` is the array a test iterates: eighteen entries, the sign-in and
+`ALL_HINTS` is the array a test iterates: nineteen entries, the sign-in and
 passphrase rows among them. The model's `HINT` draws twenty-two, among them the contacts,
-archived, pinned and edit-history lists' key help and the reaction prompt's row,
-none of which the build draws (below). These are the rows the screens
+archived, pinned and edit-history lists' key help, none of which the build draws
+(below). These are the rows the screens
 above reach, verbatim, with the width each one measures. The width is
 `chars().count()`, the same count the test makes, and the array is the
 authority: the numbers below were re-measured from it.
