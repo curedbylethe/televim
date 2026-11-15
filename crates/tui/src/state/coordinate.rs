@@ -1296,8 +1296,8 @@ pub(crate) fn begin_forward(
 /// mode. `Enter` goes to the pin and closes, through the same [`go_to`] every
 /// other jump uses — a pin the window holds is a cursor move, and one older than
 /// the window is a page fetched around it, because a buried pin is the reason the
-/// list exists. A deleted message has no id to fetch, so its row's
-/// `[message not loaded]` is the answer and the list stays up.
+/// list exists. A pin whose message is gone has nothing to land on: the page comes
+/// back empty and the status row says the message is no longer available.
 ///
 /// Returns whether the key was the list's.
 fn pinned_key(

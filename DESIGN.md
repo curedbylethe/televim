@@ -712,6 +712,7 @@ code.
 | `Jumping back…` `Jumping forward…` | `Ctrl-o` / `Ctrl-i` to a position whose message is no longer loaded | `JUMP_BACK_LABEL` / `JUMP_FORWARD_LABEL` |
 | `Jumping to <day>…` | a day or date jump (`[N]gg` / `[N]G` / `:date <ISO>`) whose target day is not loaded — `<day>` in the day-separator vocabulary (`Today`, `Yesterday`, `Sep 26, 2026`) | `App::jump_label` (falls back to `JUMP_DAY_LABEL` when no clock stands) |
 | `Jumping to the match…` | an `n`/`N` search jump whose match is outside the loaded window (criterion 3): own label, not the first-unread one | `JUMP_MATCH_LABEL` |
+| `Jumping to the pinned message…` | `Enter` in `:pinned` on a pin outside the loaded window: own label, so the reader is told which jump is in flight | `JUMP_PIN_LABEL` |
 | `Not a reply: gd jumps to the message a reply quotes.` | `gd` on a message with no quote: a refusal, a `flash` | `NOT_A_REPLY` |
 | `That message is no longer available.` | `gd` on a reply whose target the client does not hold at all | `JUMP_UNAVAILABLE` |
 | `attach image vacation.jpg? (y/n)` | `:attach <path>` on an image: a screen-wide confirmation naming the kind and the file's name, not its path | `attachCmd` |
