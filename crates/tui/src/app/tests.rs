@@ -2833,6 +2833,190 @@ fn plus_with_no_message_opens_nothing_and_p_is_still_paste() {
     assert_eq!(app.input.line.purpose(), PromptKind::Message);
 }
 
+// ---- pinning a message ---------------------------------------------
+
+/// Marks the messages `ids` as pinned in the conversation, as the server's
+/// update does, and hands back nothing: the marker and the list are drawn from
+/// this set.
+fn pinned(app: &mut App, ids: &[i64]) {
+    let _ = app
+        .conversation
+        .conversation
+        .apply_event(&UpdateEvent::PinChanged {
+            chat_id: MOCK_CHAT,
+            message_ids: ids.to_vec(),
+            pinned: true,
+        });
+}
+
+/// `P` pins the message under the cursor and says nothing: the marker appearing
+/// is the answer.
+#[test]
+fn p_pins_the_message_under_the_cursor_without_a_word() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(reading(&app), Some(9));
+
+    app.handle_key(press(KeyCode::Char('P')));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::PinMessage {
+            chat_id: MOCK_CHAT,
+            message_id: 9,
+            pin: true,
+        })
+    );
+    assert_eq!(app.ui.status, IDLE_STATUS, "the key says nothing");
+    assert!(
+        !app.conversation.conversation.is_pinned(9),
+        "and nothing is applied locally: the marker waits for the server"
+    );
+}
+
+/// The same key unpins a message that is pinned: one key, one toggle.
+#[test]
+fn p_unpins_a_message_that_is_already_pinned() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('k')));
+    pinned(&mut app, &[9]);
+
+    app.handle_key(press(KeyCode::Char('P')));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::PinMessage {
+            chat_id: MOCK_CHAT,
+            message_id: 9,
+            pin: false,
+        })
+    );
+    assert_eq!(app.ui.status, IDLE_STATUS);
+}
+
+/// A window with nothing in it has no message to pin, so the key is a no-op
+/// rather than a request the server could only refuse — and `p` is still paste.
+#[test]
+fn p_with_no_message_asks_for_nothing_and_p_is_still_paste() {
+    let mut app = App::mock();
+    app.conversation.conversation.window.replace(Vec::new());
+    app.conversation.vim.set_total(0);
+
+    app.handle_key(press(KeyCode::Char('P')));
+
+    assert_eq!(app.take_action(), None);
+    assert_eq!(app.ui.status, IDLE_STATUS);
+
+    app.handle_key(press(KeyCode::Char('p')));
+    assert_eq!(app.input.line.purpose(), PromptKind::Message, "p is paste");
+}
+
+/// `:pinned` opens the overlay for the open chat and asks for its pins, one ask
+/// and no retry.
+#[test]
+fn the_pinned_command_opens_the_list_and_asks_for_it_once() {
+    let mut app = App::mock();
+
+    run_command_line(&mut app, "pinned");
+
+    assert!(app.conversation.pinned.is_active());
+    assert_eq!(
+        app.take_action(),
+        Some(Action::FetchPinned { chat_id: MOCK_CHAT })
+    );
+    assert_eq!(app.take_action(), None, "one ask, not a loop");
+    assert_eq!(
+        app.status_text(),
+        crate::widgets::input_bar::PINNED_HINT,
+        "and the row names the list's keys"
+    );
+}
+
+/// `:pinned` with nothing open says so rather than opening an empty box.
+#[test]
+fn the_pinned_command_needs_an_open_conversation() {
+    let mut app = App::mock();
+    app.conversation.conversation = domain::history::ConversationView::new(0);
+
+    run_command_line(&mut app, "pinned");
+
+    assert!(!app.conversation.pinned.is_active());
+    assert_eq!(app.take_action(), None);
+    assert!(
+        app.ui.status.contains("nothing"),
+        "the refusal says what is missing: {:?}",
+        app.ui.status
+    );
+}
+
+/// Enter puts the cursor on the pin under it and closes the list: the list is a
+/// place in the conversation, so choosing from it is a move.
+#[test]
+fn enter_on_a_pinned_row_jumps_to_the_message_and_closes() {
+    let mut app = App::mock();
+    pinned(&mut app, &[9]);
+    run_command_line(&mut app, "pinned");
+    assert_eq!(reading(&app), Some(10), "the reader starts at the newest");
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(reading(&app), Some(9), "the cursor is on the pin");
+    assert!(!app.conversation.pinned.is_active(), "and the list is gone");
+}
+
+/// A pin whose message the window does not hold is a row the cursor cannot be
+/// put on: the list stays up and the reader does not move, because the row
+/// already says the message is not loaded.
+#[test]
+fn enter_on_a_pin_the_window_does_not_hold_moves_nothing() {
+    let mut app = App::mock();
+    pinned(&mut app, &[900]);
+    run_command_line(&mut app, "pinned");
+    let place = reading(&app);
+
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(reading(&app), place, "the reader is where they were");
+    assert!(
+        app.conversation.pinned.is_active(),
+        "and the list is still up: nothing was chosen that could be shown"
+    );
+}
+
+/// `j`/`k` walk the pins, `Esc` closes and leaves the reader where they were: the
+/// list is a place in the conversation, so opening it never moved them.
+#[test]
+fn the_pinned_keys_walk_and_close_without_moving_the_reader() {
+    let mut app = App::mock();
+    pinned(&mut app, &[8, 9]);
+    run_command_line(&mut app, "pinned");
+    let place = reading(&app);
+
+    key(&mut app, 'j');
+    assert_eq!(app.conversation.pinned.selected(), 1);
+
+    app.handle_key(press(KeyCode::Esc));
+
+    assert!(!app.conversation.pinned.is_active());
+    assert_eq!(reading(&app), place, "Esc left the cursor where it was");
+}
+
+/// A pin made while the list is open is a row it draws: the rows are the
+/// conversation's, not a copy taken when the list opened.
+#[test]
+fn a_pin_made_while_the_list_is_open_is_a_row() {
+    let mut app = App::mock();
+    run_command_line(&mut app, "pinned");
+
+    pinned(&mut app, &[7]);
+
+    assert_eq!(
+        app.conversation.conversation.pinned_newest_first(),
+        vec![7],
+        "the list reads the conversation's pins"
+    );
+}
+
 // ---- confirming, dismissing, and the status line -------------------
 
 #[test]

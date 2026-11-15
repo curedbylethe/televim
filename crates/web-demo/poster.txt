@@ -1,21 +1,21 @@
 ┌ Chats (5) ───────────┐┌ Conversation (8/8) ──────────────────────────────────┐
 │📌  Juniper Reed       ││─────────────────── Oct 27, 2024 ──────────────────── │
-│Rowan Hale (4)        ││[them] The paper map marks a quiet path past the old  │
-│Ibis North            ││station.                                        03:26 │
-│Cedar Vale            ││[you] The paper map marks a quiet path past the old   │
-│Moss Bell             ││station.                                        03:27 │
-│                      ││[them] The paper map marks a quiet path past the old  │
-│                      ││station.                                              │
-│                      ││       The paper map marks a quiet path past the old  │
-│                      ││station.                                              │
-│                      ││       The paper map marks a quiet path past the old  │
-│                      ││station.                                        03:30 │
-│                      ││[you] The paper map marks a quiet path past the old   │
-│                      ││station.                                        03:31 │
-│                      ││[them] The paper map marks a quiet path past the old  │
-│                      ││station.                                        03:32 │
-│                      ││[you] The paper map marks a quiet path past the old   │
-│                      ││station.                                        03:33 │
+│Rowan Hale (4)        ││ [them] The paper map marks a quiet path past the     │
+│Ibis North            ││old station.                                    03:26 │
+│Cedar Vale            ││ [you] The paper map marks a quiet path past the      │
+│Moss Bell             ││old station.                                    03:27 │
+│                      ││ [them] The paper map marks a quiet path past the     │
+│                      ││old station.                                          │
+│                      ││        The paper map marks a quiet path past the     │
+│                      ││old station.                                          │
+│                      ││        The paper map marks a quiet path past the     │
+│                      ││old station.                                    03:30 │
+│                      ││ [you] The paper map marks a quiet path past the      │
+│                      ││old station.                                    03:31 │
+│                      ││ [them] The paper map marks a quiet path past the     │
+│                      ││old station.                                    03:32 │
+│                      ││ [you] The paper map marks a quiet path past the      │
+│                      ││old station.                                    03:33 │
 │                      ││                                                      │
 └──────────────────────┘└──────────────────────────────────────────────────────┘
 ┌ Input ───────────────────────────────────────────────────────────────────────┐

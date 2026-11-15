@@ -134,6 +134,7 @@ Use `televim --chat <id>` to open a chat directly.
 | `v` / `V` / `y` | Select text or messages; copy with `y` in Visual mode |
 | `d` / `r` / `e` / `f` | Delete (confirms) / reply / edit / forward |
 | `+` | React to the message: one emoji, or `-` to take your own back |
+| `P` | Pin or unpin the message under the cursor |
 | `/` / `n` / `N` | Search this chat / next / previous match |
 | `h` / `q` | Return to list / quit (confirms) |
 
@@ -145,7 +146,7 @@ Use `televim --chat <id>` to open a chat directly.
 | `Esc` | Return to Normal mode; press again to leave the line |
 | Arrow keys | Move the caret |
 
-Type `:` in a conversation or profile card for `:chat`, `:new`, `:search`, `:attach`, `:save`, `:retry`, `:reconnect`, `:update`, and `:q`; see the full [command list](docs/product.md#feature-set).
+Type `:` in a conversation or profile card for `:chat`, `:new`, `:search`, `:pinned`, `:attach`, `:save`, `:retry`, `:reconnect`, `:update`, and `:q`; see the full [command list](docs/product.md#feature-set).
 
 ## Troubleshooting
 

@@ -1229,6 +1229,18 @@ pub enum Action {
     /// answer fills the contacts list that is already on show.
     FetchContacts,
 
+    /// Fetch the messages pinned in one conversation.
+    ///
+    /// The list is short and is drawn rather than paged through, so the whole
+    /// messages come back rather than identifiers: a row shows a sender, a line
+    /// and an age, and a pin whose message has left the window still has all
+    /// three. A question rather than an operation on the conversation: it moves
+    /// nothing and the answer goes to the overlay that asked.
+    FetchPinned {
+        /// The conversation whose pins are wanted.
+        chat_id: i64,
+    },
+
     /// Search `chat_id` for `query`.
     ///
     /// A question rather than a fetch: it does not touch the window or the
@@ -3512,6 +3524,10 @@ impl App {
         // The forward picker is drawn over the conversation column it forwards
         // from, above the messages and the bar, and below the status line.
         widgets::forward_picker::render(self, horizontal[1], frame);
+        // The pinned list is drawn in the same column, and a reader can have only
+        // one of the two up: the picker is a question about a selection, the list
+        // about a chat.
+        widgets::pinned_list::render(self, horizontal[1], frame);
         // The global search covers the body, rows above the status line, so the
         // panes are not drawn behind it: it is given the whole frame.
         widgets::global_list::render(self, area, frame);
@@ -3900,6 +3916,11 @@ impl App {
         // reader is answering, and the note would describe the selection only.
         if self.conversation.picking().is_some() {
             return widgets::input_bar::FORWARD_PICKER_HINT.to_owned();
+        }
+        // The pinned list names its own keys for the reason the picker does: it is
+        // what the next key will act on.
+        if self.conversation.pinned.is_active() {
+            return widgets::input_bar::PINNED_HINT.to_owned();
         }
         // An open overlay owns the line, above the selection and every search: it is what the next key will act on,
         // and a flash from before it was opened would be about another surface.

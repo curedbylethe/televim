@@ -74,6 +74,12 @@ pub struct ConversationState {
     /// I know", not "who matches this query", and it stays until it is closed.
     pub contacts: crate::state::contacts::ContactListState,
 
+    /// The open conversation's pins, as `:pinned` draws them.
+    ///
+    /// The identifiers stay on the view — a pin is a membership test, and the
+    /// marker reads the same set — while this holds the fetch the overlay owns.
+    pub pinned: crate::state::pinned::PinnedListState,
+
     /// Set by a global search: the query, the messages found in every private
     /// chat, and where the reader is among them.
     ///
@@ -180,6 +186,7 @@ impl ConversationState {
             search: SearchState::default(),
             user_search: UserSearchState::default(),
             contacts: crate::state::contacts::ContactListState::default(),
+            pinned: crate::state::pinned::PinnedListState::default(),
             global_search: GlobalSearchState::default(),
             register: Register::default(),
             selection: None,
@@ -204,6 +211,9 @@ impl ConversationState {
     pub(crate) fn open_conversation(&mut self, chat_id: i64) {
         self.conversation = ConversationView::new(chat_id);
         self.cached = false;
+        // A pin list is about the chat it was opened in, so it goes with the one
+        // being left rather than listing another's rows.
+        self.pinned.close();
         // The pictures belong to the chat on show, as the marks do: a reader
         // who returns finds them fetched again rather than mislabelled.
         self.stickers.clear();

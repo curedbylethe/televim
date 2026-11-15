@@ -89,6 +89,13 @@ use crate::update;
 /// whether a direction has run out.
 const PAGE: usize = 100;
 
+/// How many pinned messages one conversation is asked for.
+///
+/// The same bound the view keeps its identifiers under — a pin the list could
+/// never mark is a row the marker would disagree with — and the list is drawn, so
+/// more than this is a list nobody scrolls to the end of.
+const PINNED_LIMIT: usize = domain::history::PINNED_IDS;
+
 /// Catch-up replay older than this cannot interrupt the reader.
 const NOTIFY_FRESH_SECS: i64 = 120;
 
@@ -361,6 +368,20 @@ pub enum Event {
     /// asked is the only one that can be on show when the answer lands.
     Contacts {
         result: Result<Vec<UserCandidate>, ProtoError>,
+    },
+
+    /// One conversation's pinned messages came back, or the fetch failed.
+    ///
+    /// The chat travels with it: the reader can leave a conversation while the
+    /// list is on its way, and an answer about another chat is not the list on
+    /// show — which is checked where it is applied, because only the screen knows
+    /// which overlay is up.
+    PinnedList {
+        /// The conversation whose pins were asked for.
+        chat_id: i64,
+
+        /// The pinned messages, newest first, or why there are none.
+        result: Result<Vec<Message>, ProtoError>,
     },
 
     /// An archive change came back, or the request failed.
@@ -4052,6 +4073,14 @@ fn request_plain(
                 let _ = tx.send(AppEvent::Net(Event::Contacts { result }));
             }
 
+            // The pinned list is a plain fetch, not a page: the caller drew the
+            // overlay before it asked, and the whole messages come back because a
+            // row shows a sender, a line and an age.
+            Action::FetchPinned { chat_id } => {
+                let result = client.fetch_pinned(chat_id, PINNED_LIMIT).await;
+                let _ = tx.send(AppEvent::Net(Event::PinnedList { chat_id, result }));
+            }
+
             Action::SetArchived { chat_id, archived } => {
                 let result = client.set_archived(chat_id, archived).await;
                 let _ = tx.send(AppEvent::Net(Event::Archived {
@@ -4435,6 +4464,37 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                 app.conversation.contacts.adopt(people);
             }
             Err(error) => app.conversation.contacts.fail(failure_reason(&error)),
+        },
+
+        // The pinned list, for the chat it was asked about. An answer for a chat
+        // the reader has left — or for a list they have closed — is not the list
+        // on show, and is dropped rather than drawn under another title. A
+        // failure is said once and leaves the rows the reader already had: a
+        // refetch that failed must not empty a list, and it is not retried.
+        Event::PinnedList { chat_id, result } => match result {
+            Ok(messages) => {
+                let ids = messages.iter().map(|message| message.id).collect();
+                if app.conversation.pinned.adopt(chat_id, messages) {
+                    // The answer is the set as well as the rows: a pin whose
+                    // message is older than the window is still pinned, and the
+                    // rows are the conversation's identifiers rather than this
+                    // list's. Nothing is removed here — the update stream owns
+                    // that, and the fetch is capped.
+                    let _ = app
+                        .conversation
+                        .conversation
+                        .apply_event(&UpdateEvent::PinChanged {
+                            chat_id,
+                            message_ids: ids,
+                            pinned: true,
+                        });
+                }
+            }
+            Err(error) => {
+                if app.conversation.pinned.fail(chat_id) {
+                    app.flash(format!("pinned: {}", failure_reason(&error)));
+                }
+            }
         },
 
         Event::Offline(reason) => apply_offline(app, state, &reason),
@@ -17612,5 +17672,191 @@ mod migrate_slot_tests {
             b"already here",
             "and the file is not overwritten"
         );
+    }
+}
+
+/// The pinned list's answer, applied where the overlay is.
+///
+/// Its own module because it needs a conversation open and a list begun, and the
+/// modules above are about operations rather than about one overlay's fetch.
+#[cfg(test)]
+mod pinned_list_tests {
+    use std::borrow::Cow;
+
+    use domain::chat::ChatKind;
+    use domain::message::MessageStatus;
+
+    use super::*;
+
+    const CHAT: i64 = 7;
+    const OTHER: i64 = 8;
+
+    fn chat(id: i64) -> Chat {
+        Chat {
+            id,
+            title: format!("chat-{id}"),
+            kind: ChatKind::Private,
+            last_message: None,
+            unread_count: 0,
+            last_message_id: None,
+            last_timestamp: None,
+            pinned: false,
+            muted: false,
+            unread_mark: false,
+            presence: None,
+            deleted: false,
+            read_outbox_max_id: None,
+        }
+    }
+
+    fn message(id: i64, chat_id: i64) -> Message {
+        Message {
+            id,
+            chat_id,
+            text: Cow::Borrowed("a pin"),
+            timestamp: 1_730_000_000 + id,
+            status: MessageStatus::Received,
+            is_outgoing: false,
+            is_service: false,
+            reply_to: None,
+            media: None,
+            media_id: None,
+        }
+    }
+
+    /// The application with `CHAT` open and its pinned list up, as `:pinned`
+    /// leaves them while the fetch is on its way.
+    fn listing() -> (App, State) {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT), chat(OTHER)]);
+        assert!(app.select_chat_by_id(CHAT));
+        assert!(app.apply_latest(vec![message(1, CHAT)]));
+        app.conversation.pinned.begin(CHAT);
+
+        (app, State::default())
+    }
+
+    fn answer(chat_id: i64, messages: Vec<Message>) -> Event {
+        Event::PinnedList {
+            chat_id,
+            result: Ok(messages),
+        }
+    }
+
+    #[test]
+    fn the_answer_fills_the_list_and_marks_what_it_names() {
+        let (mut app, mut state) = listing();
+
+        apply(&mut app, &mut state, answer(CHAT, vec![message(9, CHAT)]));
+
+        assert!(!app.conversation.pinned.is_fetching(), "the fetch landed");
+        assert!(
+            app.conversation.pinned.fetched(9).is_some(),
+            "the message is there for a row the window does not hold"
+        );
+        assert!(
+            app.conversation.conversation.is_pinned(9),
+            "and the marker follows: the answer is the pinned set as well as the rows"
+        );
+        assert_eq!(app.ui.status, "televim", "a fetch that landed says nothing");
+    }
+
+    /// A pin whose message is older than the window is a row, and the fetch is
+    /// what makes it one: the id alone would have no text to draw.
+    #[test]
+    fn a_pin_the_window_never_held_still_has_a_row() {
+        let (mut app, mut state) = listing();
+
+        apply(
+            &mut app,
+            &mut state,
+            answer(CHAT, vec![message(1, CHAT), message(900, CHAT)]),
+        );
+
+        assert!(
+            app.conversation.conversation.is_pinned(900),
+            "the id is known as pinned"
+        );
+        assert_eq!(
+            app.conversation.pinned.fetched(900).map(|m| m.id),
+            Some(900)
+        );
+    }
+
+    /// An answer about a chat that is not the one the list was opened in is
+    /// dropped: the rows would otherwise be drawn under another chat's title.
+    #[test]
+    fn another_chats_answer_is_refused() {
+        let (mut app, mut state) = listing();
+
+        apply(&mut app, &mut state, answer(OTHER, vec![message(9, OTHER)]));
+
+        assert!(app.conversation.pinned.is_fetching(), "still waiting");
+        assert!(app.conversation.pinned.fetched(9).is_none());
+        assert!(!app.conversation.conversation.is_pinned(9));
+    }
+
+    /// A list the reader has closed wants nothing, even if the chat is the same.
+    #[test]
+    fn an_answer_for_a_closed_list_is_refused() {
+        let (mut app, mut state) = listing();
+        app.conversation.pinned.close();
+
+        apply(&mut app, &mut state, answer(CHAT, vec![message(9, CHAT)]));
+
+        assert!(app.conversation.pinned.fetched(9).is_none());
+        assert!(!app.conversation.conversation.is_pinned(9));
+    }
+
+    /// A failure is said once, leaves the rows the reader had, and is not
+    /// retried.
+    #[test]
+    fn a_refused_fetch_says_why_and_keeps_the_rows() {
+        let (mut app, mut state) = listing();
+        apply(&mut app, &mut state, answer(CHAT, vec![message(9, CHAT)]));
+
+        app.conversation.pinned.begin(CHAT);
+        apply(
+            &mut app,
+            &mut state,
+            Event::PinnedList {
+                chat_id: CHAT,
+                result: Err(ProtoError::Framework(
+                    telegram_framework::FrameworkError::UnknownPeer(CHAT),
+                )),
+            },
+        );
+
+        assert!(
+            app.ui.status.starts_with("pinned: "),
+            "the refusal is named: {:?}",
+            app.ui.status
+        );
+        assert!(
+            app.conversation.pinned.fetched(9).is_some(),
+            "and the rows the reader already had are not taken away"
+        );
+        assert!(!app.conversation.pinned.is_fetching());
+    }
+
+    /// A refusal for a list that is not on show says nothing: it is about another
+    /// screen, and a flash would be read as an answer about this one.
+    #[test]
+    fn a_refusal_for_another_chat_says_nothing() {
+        let (mut app, mut state) = listing();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::PinnedList {
+                chat_id: OTHER,
+                result: Err(ProtoError::Framework(
+                    telegram_framework::FrameworkError::UnknownPeer(CHAT),
+                )),
+            },
+        );
+
+        assert_eq!(app.ui.status, "televim");
+        assert!(app.conversation.pinned.is_fetching());
     }
 }
