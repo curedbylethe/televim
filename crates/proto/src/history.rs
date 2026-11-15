@@ -25,7 +25,7 @@
 #[cfg(feature = "live")]
 use telegram_framework::{HistoryArgs, MessageInfo};
 
-use domain::message::Message;
+use domain::message::{Message, ReactionCount};
 
 /// Where the loaded part of a conversation ends.
 ///
@@ -141,26 +141,64 @@ impl HistoryCursor {
     }
 }
 
-/// Turns a page the framework described into the domain's messages.
+/// One page of a conversation's history, as the domain takes it.
+///
+/// The messages are what a window applies. `reactions` is what the same
+/// response said about them, for the messages that carry any: a page is the
+/// only place a chat that has just been opened learns about reactions, so the
+/// counts have to travel with it or they wait for an update that may never
+/// come.
+///
+/// The two belong to one response, so an identifier in `reactions` is always one
+/// `messages` holds, in the same oldest-first order. A message with no entry has
+/// no reactions.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryPage {
+    /// The page's messages, oldest first.
+    pub messages: Vec<Message>,
+
+    /// The reactions each of those messages carries, oldest first, for the
+    /// messages that have any.
+    pub reactions: Vec<(i64, Vec<ReactionCount>)>,
+}
+
+/// Turns a page the framework described into this crate's page.
 ///
 /// The trip goes through `ProtoMessage` rather than straight across, and it has
 /// to: neither crate can implement the conversion on its own. The middleware is
 /// the one place the two can meet, which is why it is the seam the rest of this
-/// crate uses too.
+/// crate uses too — and the counters are taken back out of it here, because the
+/// domain's message cannot hold them.
 #[cfg(feature = "live")]
-fn to_messages(peer_id: i64, page: Vec<MessageInfo>) -> Vec<Message> {
-    let mut messages: Vec<Message> = page
-        .into_iter()
-        .map(|info| Message::from(crate::types::ProtoMessage::from(info)))
+fn to_page(peer_id: i64, page: Vec<MessageInfo>) -> HistoryPage {
+    let mut messages = Vec::with_capacity(page.len());
+    let mut reactions = Vec::new();
+
+    for info in page {
+        let (message, counts) = crate::types::ProtoMessage::from(info).into_parts();
+
         // A page is fetched for one conversation, so a message naming another
         // cannot belong to it. Cheap, and it keeps a mixed page from being
         // spliced into one window.
-        .filter(|message| message.chat_id == peer_id)
-        .collect();
+        if message.chat_id != peer_id {
+            continue;
+        }
 
-    // Telegram answers newest first; a window is read oldest first.
+        if !counts.is_empty() {
+            reactions.push((message.id, counts));
+        }
+        messages.push(message);
+    }
+
+    // Telegram answers newest first; a window is read oldest first, and the
+    // counts follow the same order so the two run together.
     messages.reverse();
-    messages
+    reactions.reverse();
+
+    HistoryPage {
+        messages,
+        reactions,
+    }
 }
 
 /// How many messages `args` will actually ask Telegram for.
@@ -199,7 +237,7 @@ fn narrow(id: i64, peer_id: i64) -> Option<i32> {
 
 /// The history operations, which need the framework's client.
 ///
-/// Every one of them returns the domain's messages or this crate's error, so a
+/// Every one of them returns a [`HistoryPage`] or this crate's error, so a
 /// caller needs no knowledge of Telegram's paging arguments. A flood wait
 /// arrives as a [`RequestError::Rpc`](telegram_framework::RequestError::Rpc)
 /// carrying the delay in its `value`; backing off is the caller's job, because
@@ -222,7 +260,7 @@ impl crate::ProtoClient {
         &self,
         peer_id: i64,
         limit: usize,
-    ) -> Result<Vec<Message>, crate::ProtoError> {
+    ) -> Result<HistoryPage, crate::ProtoError> {
         let args = HistoryArgs::latest(limit);
         let page = self.inner().fetch_history(peer_id, args).await?;
 
@@ -232,7 +270,7 @@ impl crate::ProtoClient {
             "fetched the newest page of a conversation"
         );
 
-        Ok(to_messages(peer_id, page))
+        Ok(to_page(peer_id, page))
     }
 
     /// Fetches the `limit` messages in front of the oldest one loaded.
@@ -250,9 +288,9 @@ impl crate::ProtoClient {
         &self,
         cursor: &mut HistoryCursor,
         limit: usize,
-    ) -> Result<Vec<Message>, crate::ProtoError> {
+    ) -> Result<HistoryPage, crate::ProtoError> {
         if cursor.exhausted_older {
-            return Ok(Vec::new());
+            return Ok(HistoryPage::default());
         }
 
         let Some(oldest) = cursor.oldest_loaded_id else {
@@ -260,28 +298,28 @@ impl crate::ProtoClient {
                 peer_id = cursor.peer_id(),
                 "older history was asked for before anything was loaded"
             );
-            return Ok(Vec::new());
+            return Ok(HistoryPage::default());
         };
         let Some(oldest) = narrow(oldest, cursor.peer_id()) else {
-            return Ok(Vec::new());
+            return Ok(HistoryPage::default());
         };
 
         let args = HistoryArgs::older(oldest, limit);
-        let page = self
+        let fetched = self
             .inner()
             .fetch_history_page(cursor.peer_id(), args)
             .await?;
-        let messages = to_messages(cursor.peer_id(), page.messages);
-        cursor.note_older(page.raw_count, page.oldest_id, requested(args));
+        let page = to_page(cursor.peer_id(), fetched.messages);
+        cursor.note_older(fetched.raw_count, fetched.oldest_id, requested(args));
 
         tracing::debug!(
             peer_id = cursor.peer_id(),
-            returned = messages.len(),
+            returned = page.messages.len(),
             exhausted = cursor.exhausted_older(),
             "fetched an older page of a conversation"
         );
 
-        Ok(messages)
+        Ok(page)
     }
 
     /// Fetches the `limit` messages behind the newest one loaded.
@@ -298,9 +336,9 @@ impl crate::ProtoClient {
         &self,
         cursor: &mut HistoryCursor,
         limit: usize,
-    ) -> Result<Vec<Message>, crate::ProtoError> {
+    ) -> Result<HistoryPage, crate::ProtoError> {
         if cursor.exhausted_newer {
-            return Ok(Vec::new());
+            return Ok(HistoryPage::default());
         }
 
         let Some(newest) = cursor.newest_loaded_id else {
@@ -308,28 +346,28 @@ impl crate::ProtoClient {
                 peer_id = cursor.peer_id(),
                 "newer history was asked for before anything was loaded"
             );
-            return Ok(Vec::new());
+            return Ok(HistoryPage::default());
         };
         let Some(newest) = narrow(newest, cursor.peer_id()) else {
-            return Ok(Vec::new());
+            return Ok(HistoryPage::default());
         };
 
         let args = HistoryArgs::newer(newest, limit);
-        let page = self
+        let fetched = self
             .inner()
             .fetch_history_page(cursor.peer_id(), args)
             .await?;
-        let messages = to_messages(cursor.peer_id(), page.messages);
-        cursor.note_newer(page.raw_count, page.newest_id, requested(args));
+        let page = to_page(cursor.peer_id(), fetched.messages);
+        cursor.note_newer(fetched.raw_count, fetched.newest_id, requested(args));
 
         tracing::debug!(
             peer_id = cursor.peer_id(),
-            returned = messages.len(),
+            returned = page.messages.len(),
             exhausted = cursor.exhausted_newer(),
             "fetched a newer page of a conversation"
         );
 
-        Ok(messages)
+        Ok(page)
     }
 
     /// Fetches a page of `limit` messages centred on `message_id`.
@@ -348,9 +386,9 @@ impl crate::ProtoClient {
         peer_id: i64,
         message_id: i64,
         limit: usize,
-    ) -> Result<Vec<Message>, crate::ProtoError> {
+    ) -> Result<HistoryPage, crate::ProtoError> {
         let Some(target) = narrow(message_id, peer_id) else {
-            return Ok(Vec::new());
+            return Ok(HistoryPage::default());
         };
 
         let args = HistoryArgs::around(target, limit);
@@ -363,7 +401,7 @@ impl crate::ProtoClient {
             "fetched a page of a conversation around a message"
         );
 
-        Ok(to_messages(peer_id, page))
+        Ok(to_page(peer_id, page))
     }
 
     /// Fetches a page of `limit` messages centred on the day `unix_date` starts.
@@ -386,7 +424,7 @@ impl crate::ProtoClient {
         peer_id: i64,
         unix_date: i64,
         limit: usize,
-    ) -> Result<Vec<Message>, crate::ProtoError> {
+    ) -> Result<HistoryPage, crate::ProtoError> {
         // A unix second the wire's `int` cannot name is a day Telegram holds no
         // messages for, so there is no page to ask for — the same answer `narrow`
         // gives an identifier outside a message's range, and what the jump reads
@@ -397,7 +435,7 @@ impl crate::ProtoClient {
                 unix_date,
                 "a date outside telegram's timestamp range cannot be paged from"
             );
-            return Ok(Vec::new());
+            return Ok(HistoryPage::default());
         };
 
         let args = HistoryArgs::around_date(unix_date, limit);
@@ -410,7 +448,7 @@ impl crate::ProtoClient {
             "fetched a page of a conversation around a date"
         );
 
-        Ok(to_messages(peer_id, page))
+        Ok(to_page(peer_id, page))
     }
 }
 
@@ -616,7 +654,7 @@ mod tests {
 #[cfg(all(test, feature = "live"))]
 mod live_tests {
     use super::*;
-    use domain::message::MessageStatus;
+    use domain::message::{MessageStatus, Reaction};
     use telegram_framework::MessageInfo;
 
     /// A message as the framework describes one.
@@ -641,7 +679,7 @@ mod live_tests {
     fn a_page_comes_out_oldest_first() {
         let page = vec![info(3, 42, false), info(2, 42, false), info(1, 42, false)];
 
-        let messages = to_messages(42, page);
+        let messages = to_page(42, page).messages;
 
         assert_eq!(
             messages
@@ -662,7 +700,7 @@ mod live_tests {
 
     #[test]
     fn a_page_is_translated_field_for_field() {
-        let messages = to_messages(42, vec![info(7, 42, true)]);
+        let messages = to_page(42, vec![info(7, 42, true)]).messages;
 
         let message = &messages[0];
         assert_eq!(message.id, 7);
@@ -680,16 +718,89 @@ mod live_tests {
     /// the window on show.
     #[test]
     fn a_message_naming_another_conversation_is_not_part_of_the_page() {
-        let messages = to_messages(42, vec![info(1, 42, false), info(2, 99, false)]);
+        let mut stranger = info(2, 99, false);
+        stranger.reactions = vec![telegram_framework::ReactionCount {
+            reaction: telegram_framework::Reaction::Paid,
+            count: 1,
+            chosen: false,
+        }];
+
+        let page = to_page(42, vec![info(1, 42, false), stranger]);
 
         assert_eq!(
-            messages
+            page.messages
                 .iter()
                 .map(|message| message.id)
                 .collect::<Vec<_>>(),
             vec![1],
             "the page belongs to conversation 42"
         );
+        assert!(
+            page.reactions.is_empty(),
+            "and a stranger's reactions do not come with it"
+        );
+    }
+
+    /// The counts a page carries run with the messages they belong to, oldest
+    /// first, and only for the messages that have any. A chat opened fresh
+    /// learns about reactions here, before any update arrives.
+    #[test]
+    fn a_page_carries_the_reactions_of_its_messages() {
+        let mut reacted = info(2, 42, false);
+        reacted.reactions = vec![telegram_framework::ReactionCount {
+            reaction: telegram_framework::Reaction::Emoticon("👍".to_owned()),
+            count: 2,
+            chosen: true,
+        }];
+        let mut paid = info(3, 42, false);
+        paid.reactions = vec![telegram_framework::ReactionCount {
+            reaction: telegram_framework::Reaction::Paid,
+            count: 1,
+            chosen: false,
+        }];
+
+        // Newest first, as Telegram answers.
+        let page = to_page(42, vec![paid, reacted, info(1, 42, false)]);
+
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            page.reactions,
+            vec![
+                (
+                    2,
+                    vec![ReactionCount {
+                        reaction: Reaction::Emoticon("👍".to_owned()),
+                        count: 2,
+                        chosen: true,
+                    }],
+                ),
+                (
+                    3,
+                    vec![ReactionCount {
+                        reaction: Reaction::Paid,
+                        count: 1,
+                        chosen: false,
+                    }],
+                ),
+            ],
+            "one entry per reacted message, in the same order as the messages"
+        );
+    }
+
+    /// A page nobody reacted to carries no entries at all, rather than one empty
+    /// one per message.
+    #[test]
+    fn a_page_without_reactions_carries_none() {
+        let page = to_page(42, vec![info(2, 42, false), info(1, 42, false)]);
+
+        assert_eq!(page.messages.len(), 2);
+        assert!(page.reactions.is_empty());
     }
 
     /// The page size the framework really sent is what "was the page short?" is

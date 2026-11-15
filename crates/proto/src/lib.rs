@@ -78,7 +78,7 @@ pub mod client;
 pub mod stream;
 
 pub use error::ProtoError;
-pub use history::HistoryCursor;
+pub use history::{HistoryCursor, HistoryPage};
 pub use search::SearchResults;
 pub use search::{GlobalCursor, GlobalPeer, GlobalSearchRequest, GlobalSearchResults};
 

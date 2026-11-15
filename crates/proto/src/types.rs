@@ -124,14 +124,23 @@ pub(crate) struct ProtoMessage {
     ///
     /// Beside the message rather than on it, which is the domain's own shape —
     /// a reaction changes without its message changing, and nothing downstream
-    /// writes one into a message's text.
-    ///
-    /// `shortcut:` the counts stop here for now: `domain::Message` may not carry
-    /// them, and the conversation's side container is filled by the update feed
-    /// rather than by a page. Wire this field through the history fetch when
-    /// the strip has to be drawn before the first reaction arrives.
-    #[allow(dead_code)]
+    /// writes one into a message's text. [`ProtoMessage::into_parts`] is where
+    /// they are handed on: a page keeps them, and the message joins a window
+    /// without them.
     pub reactions: Vec<ReactionCount>,
+}
+
+impl ProtoMessage {
+    /// Splits the DTO into the message and the reactions that travel beside it.
+    ///
+    /// One call rather than two because the DTO owns both, and the domain's
+    /// message has nowhere to put the counts: whoever converts a message keeps
+    /// them, and a caller with no room for them drops what this returns.
+    pub(crate) fn into_parts(mut self) -> (Message, Vec<ReactionCount>) {
+        let reactions = std::mem::take(&mut self.reactions);
+
+        (Message::from(self), reactions)
+    }
 }
 
 impl From<ProtoChat> for Chat {

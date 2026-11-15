@@ -436,7 +436,8 @@ async fn a_media_message_downloads_through_the_client() {
     let page = proto
         .fetch_latest(chat.id, PAGE)
         .await
-        .expect("the newest page is fetched");
+        .expect("the newest page is fetched")
+        .messages;
 
     let Some(media_message) = page.iter().find(|message| message.media.is_some()) else {
         eprintln!(
@@ -784,7 +785,8 @@ async fn walk_backwards(
         let page = proto
             .fetch_older(cursor, PAGE)
             .await
-            .expect("an older page is fetched");
+            .expect("an older page is fetched")
+            .messages;
 
         if page.is_empty() {
             assert!(
@@ -864,7 +866,8 @@ async fn walk_forwards(
         let page = proto
             .fetch_newer(cursor, PAGE)
             .await
-            .expect("a newer page is fetched");
+            .expect("a newer page is fetched")
+            .messages;
 
         if page.is_empty() {
             assert!(
@@ -909,7 +912,8 @@ async fn page_around(proto: &ProtoClient, chat_id: i64, target: i64) -> Vec<Mess
     let around = proto
         .fetch_around(chat_id, target, PAGE)
         .await
-        .expect("a page around a message is fetched");
+        .expect("a page around a message is fetched")
+        .messages;
 
     assert_ascending(&around);
     assert!(
@@ -937,7 +941,8 @@ async fn page_around_the_unread(proto: &ProtoClient, chat: &Chat) -> Option<Vec<
     let around = proto
         .fetch_around(chat.id, target, PAGE)
         .await
-        .expect("a page around the unread estimate is fetched");
+        .expect("a page around the unread estimate is fetched")
+        .messages;
 
     assert_ascending(&around);
     assert!(
@@ -1009,7 +1014,8 @@ async fn history_pages_through_a_conversation_without_gaps_or_repeats() {
     let latest = proto
         .fetch_latest(chat.id, PAGE)
         .await
-        .expect("the newest page is fetched");
+        .expect("the newest page is fetched")
+        .messages;
 
     if latest.is_empty() {
         eprintln!(
@@ -1219,7 +1225,8 @@ async fn a_sent_message_is_found_by_its_text_and_landed_on() {
     let around = proto
         .fetch_around(chat.id, sent.id, PAGE)
         .await
-        .expect("a page around the match is fetched");
+        .expect("a page around the match is fetched")
+        .messages;
     assert!(
         around.iter().any(|message| message.id == sent.id),
         "a page around the matched identifier has to contain it"
