@@ -321,6 +321,12 @@ pub const JUMP_SEARCH_LABEL: &str = "Jumping…";
 /// ([`JUMP_LABEL`]): its own sentence says which of the three is in flight.
 pub const JUMP_MATCH_LABEL: &str = "Jumping to the match…";
 
+/// What is said while a jump to a message the pinned list holds is on its way.
+///
+/// A pin may be older than the loaded window — that is usually why the reader
+/// went looking for it — so the fetch is a jump like any other and says so.
+pub const JUMP_PIN_LABEL: &str = "Jumping to the pinned message…";
+
 /// What is said while a day or date jump is on its way, when the day cannot be
 /// named.
 ///
@@ -364,6 +370,8 @@ pub enum JumpKind {
     Match,
     /// A day or date jump, whose target is the day's first unix second.
     Date,
+    /// A pin the `:pinned` list holds, which the window may not.
+    Pinned,
 }
 
 impl JumpKind {
@@ -382,6 +390,7 @@ impl JumpKind {
             Self::Search => JUMP_SEARCH_LABEL,
             Self::Match => JUMP_MATCH_LABEL,
             Self::Date => JUMP_DAY_LABEL,
+            Self::Pinned => JUMP_PIN_LABEL,
         }
     }
 }

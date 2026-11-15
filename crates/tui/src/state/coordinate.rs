@@ -1287,12 +1287,19 @@ pub(crate) fn begin_forward(
 ///
 /// The list owns `j`/`k`, `Enter` and `Esc` and lets everything else through, so
 /// `:` can still open the line: it is a place in the conversation rather than a
-/// mode. `Enter` moves the cursor to the pin and closes; a pin the window does
-/// not hold is not a move, so the list stays up with the row's own
-/// `[message not loaded]` as the answer.
+/// mode. `Enter` goes to the pin and closes, through the same [`go_to`] every
+/// other jump uses — a pin the window holds is a cursor move, and one older than
+/// the window is a page fetched around it, because a buried pin is the reason the
+/// list exists. A deleted message has no id to fetch, so its row's
+/// `[message not loaded]` is the answer and the list stays up.
 ///
 /// Returns whether the key was the list's.
-fn pinned_key(conversation: &mut ConversationState, key: KeyEvent) -> bool {
+fn pinned_key(
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    ui: &mut UiState,
+    key: KeyEvent,
+) -> bool {
     let pins = conversation.conversation.pinned_newest_first();
 
     match key.code {
@@ -1302,11 +1309,14 @@ fn pinned_key(conversation: &mut ConversationState, key: KeyEvent) -> bool {
             let Some(id) = conversation.pinned.selected_id(&pins) else {
                 return true;
             };
-            if let Some(index) = conversation.conversation.window.position_of(id) {
-                conversation.vim.set_cursor(index);
-                conversation.settle_follow();
-                conversation.pinned.close();
-            }
+            conversation.pinned.close();
+            go_to(
+                &mut *pending,
+                &mut *conversation,
+                ui,
+                id,
+                JumpKind::Pinned,
+            );
         }
         KeyCode::Esc => conversation.pinned.close(),
         _ => return false,
@@ -1344,13 +1354,18 @@ fn edits_key(conversation: &mut ConversationState, key: KeyEvent) -> bool {
 /// opens a command and the same letters still type.
 ///
 /// Returns whether the key was an overlay's.
-fn overlay_key(ui: &UiState, conversation: &mut ConversationState, key: KeyEvent) -> bool {
+fn overlay_key(
+    ui: &mut UiState,
+    pending: &mut Pending,
+    conversation: &mut ConversationState,
+    key: KeyEvent,
+) -> bool {
     if ui.focus == Focus::Input {
         return false;
     }
 
     if conversation.pinned.is_active() {
-        return pinned_key(conversation, key);
+        return pinned_key(pending, conversation, ui, key);
     }
 
     conversation.edit_history.is_active() && edits_key(conversation, key)
@@ -5480,7 +5495,7 @@ fn intercept_key(
     // The overlays that sit in the conversation column own the few keys they list
     // — the pinned list walks and jumps, the revision list walks — and are skipped
     // while the line has the focus, so the same letters still type.
-    if overlay_key(&*ui, &mut *conversation, key) {
+    if overlay_key(&mut *ui, &mut *pending, &mut *conversation, key) {
         return true;
     }
 
