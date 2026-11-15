@@ -537,6 +537,20 @@ pub fn sticker_block_rows(message: &Message, cache: &StickerCache) -> usize {
     }
 }
 
+/// Whether a message draws a reaction strip: the row of chips under its body.
+///
+/// AFTER [`message_rows`] and [`sticker_block_rows`], like the block: the strip
+/// is the message's last row, and [`RowSpan::len`] counts it so the panel, the
+/// slice and the scrollbar agree about the height. A message nobody reacted to
+/// has no row at all rather than an empty one — the strip is absent, not blank.
+#[must_use]
+pub fn has_reactions(app: &App, message: &Message) -> bool {
+    !app.conversation
+        .conversation
+        .reactions(message.id)
+        .is_empty()
+}
+
 /// The rows of the window the layout holds, which is every row but a draft's.
 ///
 /// A draft is drawn after the last message and is not part of what the reader

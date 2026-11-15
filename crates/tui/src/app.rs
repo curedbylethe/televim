@@ -685,6 +685,13 @@ pub enum PromptKind {
     GlobalSearch,
     Reply,
     Edit,
+    /// The reaction line `+` opens on the message under the cursor.
+    ///
+    /// Not a buffer: a reaction is one glyph rather than text the reader is
+    /// writing, so the line takes no Normal mode and keeps no draft. The message
+    /// it is for is the line's subject, taken when `+` was pressed, because the
+    /// row list can move under an open line.
+    React,
     Phone,
     Code,
     Password,
@@ -3553,10 +3560,11 @@ impl App {
     /// again, because two measurements of one thing is a bug waiting for the
     /// case where they disagree.
     ///
-    /// A pure function of the window's messages, the open draft, [`App::body_width`]
-    /// and [`App::now`], and of nothing else: not the cursor, not the mode, not when
-    /// it was asked. A layout worked out before a page lands is thrown away
-    /// rather than kept, which is why a [`RowSpan`] is named by message id.
+    /// A pure function of the window's messages, the reactions they carry, the
+    /// open draft, [`App::body_width`] and [`App::now`], and of nothing else: not
+    /// the cursor, not the mode, not when it was asked. A layout worked out before
+    /// a page lands is thrown away rather than kept, which is why a [`RowSpan`] is
+    /// named by message id.
     ///
     /// The entries are the window's messages and the day separators in front of
     /// them: a separator takes a row of the screen between two days and is
@@ -3606,9 +3614,11 @@ impl App {
                 // panel permutes the same logical rows at paint time.
                 let text = 0..message.display_body().len();
                 let rows = rows::message_rows(self, message, rows::group_of(self, index), width);
-                // Sticker rows follow its empty text, so both heights add.
+                // Sticker rows follow its empty text and the reaction strip comes
+                // after both, so every height adds.
                 let block = rows::sticker_block_rows(message, &self.conversation.stickers);
-                let len = rows.len() + block;
+                let strip = usize::from(rows::has_reactions(self, message));
+                let len = rows.len() + block + strip;
                 self.conversation.stash_rows(message.id, rows);
                 (RowKind::Message { index }, len, text)
             };
@@ -3764,6 +3774,7 @@ impl App {
             PromptKind::Message
             | PromptKind::Reply
             | PromptKind::Edit
+            | PromptKind::React
             | PromptKind::Phone
             | PromptKind::Code
             | PromptKind::Password
@@ -3835,6 +3846,12 @@ impl App {
                     return self.ui.status.clone();
                 }
                 return GLOBAL_SEARCH_FILTERS.to_owned();
+            }
+            // The reaction prompt's refusal outranks its own hint, the way a
+            // sign-in refusal does: it is an answer about the glyph just typed, and
+            // a reader who cannot see it types the same one again.
+            if self.input.line.purpose() == PromptKind::React && self.ui.status_until.is_some() {
+                return self.ui.status.clone();
             }
             return widgets::input_bar::hint(self).to_owned();
         }

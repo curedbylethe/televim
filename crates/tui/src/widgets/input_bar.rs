@@ -59,38 +59,35 @@ pub const INPUT_MAX_ROWS: usize = 6;
 /// meant shortening the mode keys rather than letting the line run past the bar
 /// and be clipped.
 ///
-/// The row was exactly full — seventy columns, all seventy of the budget — when
-/// the account's profile took `D:dismiss` out and `S:acct` in. `D` dismisses a
-/// *failed* send, which is a refusal, and a refusal is the status line's to say
-/// rather than the hint's: the row has no room for why.
-///
-/// **`q:quit` is what pays for `A:card`.** A hint is the only place a reader
-/// learns a key the rest of the screen is silent about, and `A` is one — it opens
-/// the contact the highlight is on, which is the difference between a card about
-/// yourself and a card about somebody. `q` is the only one of the three keys used
-/// most here — `e:edit`, `v:vis`, `q:quit` — with a second route to the same
-/// action: `:q` and `:quit` reach it and `::cmd` is named on this very row. `e`
-/// and `v` have no other mention anywhere on screen, so they keep theirs. The cost
-/// is real and a reader who has not learned `q` now has to learn `:q`. `DESIGN.md`
-/// carries the arithmetic and what else the row has paid for.
-const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct";
+/// **The three message affordances are what the row spends its columns on now.**
+/// `+:react`, `P:pin` and `t:trans` are named here and on no other row, so each
+/// one is a key a reader learns here or not at all — which is the whole reason a
+/// hint exists. `dd:del` paid, because the Visual row names the same deletion as
+/// `d: delete`; `A:card` and `S:acct` paid, because the chat list names both
+/// (`A:card`, `S:you`) and is one `Tab` away. `::cmd` did not pay: `:pinned` and
+/// `:edits` are commands, and a row that hid `:` would hide both from the reader
+/// who has not learned it. `DESIGN.md` carries the arithmetic and what each pair
+/// cost.
+const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  t:trans";
 
 /// The hint while the chat list has the focus.
 ///
-/// The same two card keys as the conversation's row, and `S` spelled **differently**
-/// here on purpose — which is the one place in the hints where one key has two
-/// words, so it is worth saying why. `S` opens your own profile from either pane
-/// and, like `A`, only a hint names it. The chat list spells it among the people,
-/// where you are one of them, so `S:you`; the conversation spells it for the
-/// account the card is about, so `S:acct`. A reader meets the second spelling and
-/// has to reconcile it with the first, so both are named deliberately and neither
-/// is renamed to match the other. `DESIGN.md` says so where a reader of the spec
-/// finds it.
+/// The two card keys are named here and nowhere else: `A` opens the contact the
+/// highlight is on and `S` your own card, and both work from the conversation too,
+/// which is one `Tab` away. `S` is spelled among the people, where you are one of
+/// them, so `S:you`. `DESIGN.md` says so where a reader of the spec finds it.
 const CHAT_LIST_HINT: &str =
     " j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin";
 
 /// The hint while a selection is being made over the messages.
 const VISUAL_HINT: &str = " d: delete  y: yank  s: forward  r: reply  Esc: cancel";
+
+/// The hint while the reaction line is open.
+///
+/// Two answers and a way out, and nothing else: the line is one glyph, so it needs
+/// no editor keys, and `Esc` is how the reader changes their mind without sending
+/// anything.
+const REACT_HINT: &str = " ⏎: add  -: remove  Esc: cancel";
 
 /// The status line while the forward picker is up over a selection.
 pub const FORWARD_PICKER_HINT: &str = "VISUAL  j/k: choose  ⏎: forward  Esc: cancel";
@@ -231,13 +228,14 @@ const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
 ///
-/// Eighteen entries: the design's hints and the sign-in rows. A string that is
+/// Nineteen entries: the design's hints and the sign-in rows. A string that is
 /// width-checked by a test and displayed by nothing is the defect this list
 /// exists to prevent, and it is why the count is written out rather than derived.
 #[cfg(test)]
-const ALL_HINTS: [&str; 18] = [
+const ALL_HINTS: [&str; 19] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
+    REACT_HINT,
     VISUAL_HINT,
     CARD_SELF_HINT,
     CARD_CONTACT_HINT,
@@ -288,6 +286,9 @@ pub fn hint(app: &App) -> &'static str {
         // Above the mode hints it specialises: while a completion is up, the
         // keys it takes mean something else, and the row has to say so.
         (Focus::Input, _) if app.completion().is_some() => COMPLETION_HINT,
+        // The reaction line names the two things `Enter` can mean there, because
+        // `Enter` is the one key whose meaning changes with the prompt.
+        (Focus::Input, _) if app.input.line.purpose() == PromptKind::React => REACT_HINT,
         (Focus::Input, _) if app.input.line.purpose().is_buffer() => {
             match app.input.line.status() {
                 "VISUAL" => LINE_VISUAL_HINT,
@@ -400,6 +401,7 @@ pub fn title(app: &App) -> String {
             },
             (Focus::Input, PromptKind::Reply, _) => " Reply ".to_owned(),
             (Focus::Input, PromptKind::Edit, _) => " Edit ".to_owned(),
+            (Focus::Input, PromptKind::React, _) => " Reaction ".to_owned(),
             (Focus::Input, PromptKind::Command, _) => " Command ".to_owned(),
             (Focus::Input, PromptKind::Search, _) => " Find ".to_owned(),
             (Focus::Input, PromptKind::NewChat, _) => " New chat ".to_owned(),
@@ -717,18 +719,16 @@ mod tests {
         }
     }
 
-    /// The two card keys are bound on **both** the chat list and the conversation,
-    /// and a hint is the only place either is named — so both rows have to name
-    /// both. This is the defect no width check catches: a hint that fits perfectly
-    /// and is silent about a key the reader just bound.
+    /// The two card keys are bound on **both** panes and named on the chat list's
+    /// row alone: the conversation's row spends its columns on the keys nothing
+    /// else on the screen names — `+:react`, `P:pin`, `t:trans` — and the list is
+    /// one `Tab` away. [`DESIGN.md`] holds the arithmetic. A hint that fits
+    /// perfectly and is silent about a key the reader just bound is what no width
+    /// check catches, so the row that does name them is asserted.
     #[test]
-    fn a_key_bound_on_both_panes_is_named_on_both() {
-        for hint in [NORMAL_HINT, CHAT_LIST_HINT] {
-            assert!(hint.contains("A:card"), "the contact's card: {hint:?}");
-            assert!(
-                hint.contains("S:acct") || hint.contains("S:you"),
-                "your own card, whichever of the two words this row uses: {hint:?}"
-            );
+    fn the_chat_list_names_the_card_keys_that_work_on_both_panes() {
+        for key in ["A:card", "S:you"] {
+            assert!(CHAT_LIST_HINT.contains(key), "{key:?} is missing from it");
         }
     }
 
@@ -790,6 +790,29 @@ mod tests {
 
         press(&mut app, KeyCode::Esc);
         assert_eq!(hint(&app), INSERT_HINT, "and the row goes back");
+    }
+
+    /// A reaction line's `Enter` is not the message's `Enter`, so the row says what
+    /// it means here. The refusal is the status line's and takes the row while the
+    /// line stays open — the pair the reader has to see together.
+    #[test]
+    fn the_reaction_line_names_its_two_answers() {
+        let mut app = App::mock();
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(hint(&app), REACT_HINT);
+        assert_eq!(
+            title(&app),
+            " Reaction ",
+            "and the bar is titled for what it is for"
+        );
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.status_text(), "Type one emoji to react.");
+        assert_eq!(
+            hint(&app),
+            REACT_HINT,
+            "the hint is what the refusal's row goes back to"
+        );
     }
 
     /// An operator waiting for its motion is still editing, so the bar keeps

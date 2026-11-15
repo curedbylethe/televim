@@ -1,5 +1,7 @@
 use super::*;
 
+use domain::message::{Reaction, ReactionCount};
+
 #[test]
 fn focus_report_defaults_to_undetected_and_not_focused() {
     assert_eq!(
@@ -2629,6 +2631,208 @@ fn e_opens_the_cursor_s_own_message_for_editing() {
     assert!(text.starts_with("No pressure then :)"), "got {text:?}");
 }
 
+// ---- reacting to a message -----------------------------------------
+
+/// The chip this account's own reaction adds, so the strip has one to take back
+/// and one it did not choose.
+fn reaction(emoticon: &str, count: u32, chosen: bool) -> ReactionCount {
+    ReactionCount {
+        reaction: Reaction::Emoticon(emoticon.to_owned()),
+        count,
+        chosen,
+    }
+}
+
+/// Gives the open conversation's message `id` these reactions, through the view's
+/// own event: the strip is filled by history and replaced by the live update, and
+/// a test that reached past both would pass on a state nothing can produce.
+fn carrying(app: &mut App, id: i64, reactions: Vec<ReactionCount>) {
+    let _ = app
+        .conversation
+        .conversation
+        .apply_event(&UpdateEvent::ReactionsChanged {
+            chat_id: MOCK_CHAT,
+            message_id: id,
+            reactions,
+        });
+}
+
+/// `+` opens the reaction line for the message under the cursor, and `Enter` hands
+/// the glyph to the caller. Nothing is applied locally: the strip waits for the
+/// server's echo.
+#[test]
+fn plus_opens_a_reaction_line_for_the_message_under_the_cursor() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(reading(&app), Some(9));
+
+    app.handle_key(press(KeyCode::Char('+')));
+
+    assert_eq!(app.ui.focus, Focus::Input, "the line has the keys");
+    assert_eq!(app.input.line.purpose(), PromptKind::React);
+    assert_eq!(
+        crate::widgets::input_bar::title(&app),
+        " Reaction ",
+        "and the bar names what it is for"
+    );
+    assert!(
+        app.conversation.conversation.reactions(9).is_empty(),
+        "the strip is not written here: the server's echo fills it"
+    );
+
+    type_text(&mut app, "👍");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::React {
+            chat_id: MOCK_CHAT,
+            message_id: 9,
+            emoticon: Some("👍".to_owned()),
+        })
+    );
+    assert_eq!(
+        app.ui.focus,
+        Focus::Conversation,
+        "and the line gives the screen back"
+    );
+}
+
+/// The prompt belongs to the message it opened on, not to the cursor: the row list
+/// can move under an open line.
+#[test]
+fn the_reaction_line_belongs_to_the_message_it_opened_on() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('k')));
+    app.handle_key(press(KeyCode::Char('+')));
+    assert_eq!(reading(&app), Some(9));
+
+    // A page landing under the open line moves the cursor, and the line is still
+    // the reader's answer to the message they pressed `+` on.
+    app.conversation.vim.set_cursor(0);
+    assert_eq!(reading(&app), Some(1));
+
+    type_text(&mut app, "🔥");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::React {
+            chat_id: MOCK_CHAT,
+            message_id: 9,
+            emoticon: Some("🔥".to_owned()),
+        })
+    );
+}
+
+/// A hyphen takes this account's own reaction back, and only when it has one.
+#[test]
+fn a_hyphen_removes_the_reaction_this_account_left() {
+    let mut app = App::mock();
+    carrying(&mut app, 10, vec![reaction("👍", 2, true)]);
+
+    app.handle_key(press(KeyCode::Char('+')));
+    type_text(&mut app, "-");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::React {
+            chat_id: MOCK_CHAT,
+            message_id: 10,
+            emoticon: None,
+        }),
+        "removal is the absence of an emoticon, and the count drops from the echo"
+    );
+}
+
+/// Both refusals are the status line's, and both leave the line open with the text
+/// in it: the reader has just typed something the prompt would not take.
+#[test]
+fn a_reaction_line_takes_one_glyph_and_refuses_anything_else() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('+')));
+
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(
+        app.status_text(),
+        "Type one emoji to react.",
+        "nothing typed"
+    );
+    assert_eq!(app.take_action(), None, "and nothing was sent");
+    assert_eq!(
+        app.input.line.purpose(),
+        PromptKind::React,
+        "the line stays open on its own refusal"
+    );
+
+    type_text(&mut app, "👍🔥");
+    app.handle_key(press(KeyCode::Enter));
+    assert_eq!(
+        app.status_text(),
+        "Type one emoji to react.",
+        "two glyphs are two reactions"
+    );
+    assert_eq!(app.take_action(), None);
+}
+
+#[test]
+fn a_hyphen_with_no_chip_of_the_reader_s_own_is_refused() {
+    let mut app = App::mock();
+    carrying(&mut app, 10, vec![reaction("👍", 2, false)]);
+
+    app.handle_key(press(KeyCode::Char('+')));
+    type_text(&mut app, "-");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.status_text(),
+        "You have not reacted to this message.",
+        "the answer is known, so the wire is not asked"
+    );
+    assert_eq!(app.take_action(), None);
+}
+
+/// A family emoji of six code points is one glyph, so the line reads it as one
+/// reaction rather than as six.
+#[test]
+fn a_reaction_can_be_a_grapheme_of_several_code_points() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('+')));
+
+    type_text(&mut app, "👨‍👩‍👧");
+    app.handle_key(press(KeyCode::Enter));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::React {
+            chat_id: MOCK_CHAT,
+            message_id: 10,
+            emoticon: Some("👨‍👩‍👧".to_owned()),
+        })
+    );
+}
+
+/// `+` with no message under the cursor opens nothing, and `p` is still paste.
+#[test]
+fn plus_with_no_message_opens_nothing_and_p_is_still_paste() {
+    let mut app = App::mock();
+    app.conversation.conversation.window.replace(Vec::new());
+    app.conversation.vim.set_total(0);
+
+    app.handle_key(press(KeyCode::Char('+')));
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert_eq!(app.take_action(), None);
+
+    app.handle_key(press(KeyCode::Char('p')));
+    assert_eq!(
+        app.ui.focus,
+        Focus::Conversation,
+        "paste has nothing to paste"
+    );
+    assert_eq!(app.input.line.purpose(), PromptKind::Message);
+}
+
 // ---- confirming, dismissing, and the status line -------------------
 
 #[test]
@@ -3061,14 +3265,14 @@ fn the_profile_opens_from_the_chat_list_too() {
 fn the_profile_has_its_own_hint() {
     let mut app = App::mock();
     assert!(
-        app.status_text().contains("dd:del"),
+        app.status_text().contains("i:ins"),
         "the conversation's row"
     );
 
     app.handle_key(press(KeyCode::Char('S')));
     let hint = app.status_text();
     assert!(hint.contains("j/k: row"), "{hint}");
-    assert!(!hint.contains("dd:del"), "the conversation's keys: {hint}");
+    assert!(!hint.contains("i:ins"), "the conversation's keys: {hint}");
 }
 
 /// `d` on a row with nothing to do must change nothing at all: no mode, no

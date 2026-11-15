@@ -447,6 +447,26 @@ Working today:
   are placeholders. Delete removes for both sides. More than a hundred messages is
   several requests with a pause between them, and a failure part-way through is
   reported as how many went through rather than as a plain failure.
+- **Reactions:** a message that carries them shows one row of chips under its text,
+  in the body column: the emoji, then its count when more than one person reacted,
+  two spaces between chips, and the strip stops at the body width rather than
+  wrapping. The chip this account chose is the only one in reverse video; every
+  other is dim, count and all. In a right-to-left message the chips follow the
+  row's visual order under `bidi = "visual"`, and each chip keeps the order it is
+  written in, the glyph before its count. `+` opens a one-line prompt titled
+  `Reaction` (` ⏎: add  -: remove  Esc: cancel`) for the message under the cursor,
+  and the prompt keeps that message even if the cursor moves while it is open.
+  `Enter` reads the line as one grapheme cluster — a family emoji is one glyph, a
+  flag is one glyph — so a glyph the message already carries takes this account and
+  gains one, and any other glyph starts a chip at one; a lone `-` takes this
+  account's chip down one and removes the chip at zero. A line that is empty or
+  holds two glyphs answers `Type one emoji to react.`, and a `-` on a message this
+  account has not reacted to answers `You have not reacted to this message.`; both
+  are the status line's and both leave the line open. Nothing is applied
+  optimistically: the strip is redrawn from the update the server sends back, so a
+  chip it refused is never shown. A custom emoji and a paid reaction are drawn as
+  `[emoji]` and `[paid]`, the token a caption with no picture gets, because this
+  build fetches neither; dropping them would undercount the message.
 - **Forward:** `f` in Normal forwards the message under the cursor, or the current
   selection if there is one; `s` in Visual forwards the selection. Either raises a
   picker of your chats over the conversation. `j`/`k` or the arrows choose a chat,
