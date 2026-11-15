@@ -1190,6 +1190,9 @@ pub(crate) fn start_edit(
 ///
 /// A draft is parked rather than refused, the way `/` and `:` park one: a reaction
 /// is one glyph and replaces nothing, so there is no half-written message to lose.
+///
+/// A message still on its way out has no identifier to react to, so the key is a
+/// no-op rather than a request the server can only refuse.
 pub(crate) fn start_react(
     ui: &mut UiState,
     conversation: &mut ConversationState,
@@ -1199,6 +1202,9 @@ pub(crate) fn start_react(
     let Some(id) = conversation.cursor_message_id() else {
         return;
     };
+    if id <= 0 {
+        return;
+    }
 
     park_draft(conversation, input, drafts);
     ui.set_focus(Focus::Input);
