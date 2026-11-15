@@ -83,7 +83,7 @@ use crate::error::{FrameworkError, RequestError};
 use crate::media::classify_message;
 use crate::reaction::reaction_counts;
 use crate::tl;
-use crate::updates::{MessageInfo, message_info};
+use crate::updates::{MessageInfo, message_info, pinned_flag};
 
 /// The most characters Telegram accepts in one message.
 ///
@@ -281,6 +281,7 @@ impl Client {
             classify_message(&message.raw),
         );
         info.reactions = reaction_counts(&message.raw);
+        info.pinned = pinned_flag(&message.raw);
 
         Ok(info)
     }
@@ -326,6 +327,75 @@ impl Client {
         self.flush_session();
 
         tracing::debug!(peer_id, message_id, "edited a message");
+
+        Ok(())
+    }
+
+    /// Pins a message in its conversation.
+    ///
+    /// The pin is **silent**, because that is the request `grammers` builds
+    /// (`silent: true`, `unpin: false`): Telegram notifies nobody, and the
+    /// marker on the message is the whole of the answer. The pin that lands
+    /// arrives over the feed as
+    /// [`UpdateKind::PinnedMessages`](crate::UpdateKind::PinnedMessages) — on
+    /// this client and on the account's others, which is also how a pin made
+    /// elsewhere reaches this one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] when the conversation is not in
+    /// the session's peer cache, and [`FrameworkError::Request`] when Telegram
+    /// refuses the pin — a conversation where this account may not pin, or a
+    /// message in another chat — or the connection fails.
+    pub async fn pin_message(&self, peer_id: i64, message_id: i32) -> Result<(), FrameworkError> {
+        self.update_pinned(peer_id, message_id, true).await
+    }
+
+    /// Unpins a message from its conversation.
+    ///
+    /// The same request as [`Client::pin_message`] with `unpin` set, and the
+    /// same silence. Nothing is asserted about the message: Telegram accepts an
+    /// unpin for a message that was not pinned, so a caller that repeats one is
+    /// not told it did nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Client::pin_message`].
+    pub async fn unpin_message(&self, peer_id: i64, message_id: i32) -> Result<(), FrameworkError> {
+        self.update_pinned(peer_id, message_id, false).await
+    }
+
+    /// Sets or clears one message's pin, in one request.
+    ///
+    /// One body for the pair above because the wire has one request with an
+    /// `unpin` flag: a second copy of the peer lookup and the error mapping
+    /// would be the same code under two names.
+    async fn update_pinned(
+        &self,
+        peer_id: i64,
+        message_id: i32,
+        pin: bool,
+    ) -> Result<(), FrameworkError> {
+        let Some(peer) = self.peer_ref(peer_id) else {
+            tracing::warn!(
+                peer_id,
+                "a pin was asked of a conversation that is not in the peer cache"
+            );
+            return Err(FrameworkError::UnknownPeer(peer_id));
+        };
+
+        let result = if pin {
+            self.inner().pin_message(peer, message_id).await
+        } else {
+            self.inner().unpin_message(peer, message_id).await
+        };
+
+        result.map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?;
+
+        // A pin can cache a peer or move the datacenter, as every request can.
+        self.flush_session();
+
+        tracing::debug!(peer_id, message_id, pin, "changed a message's pin");
 
         Ok(())
     }

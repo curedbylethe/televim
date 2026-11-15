@@ -196,6 +196,44 @@ impl crate::ProtoClient {
         Ok(())
     }
 
+    /// Pins a message in its conversation.
+    ///
+    /// Nothing is applied locally: the pin that lands arrives as a
+    /// [`PinChanged`](domain::updates::UpdateEvent::PinChanged) event, on this
+    /// client and on the account's other ones, so a marker the server refused is
+    /// never drawn.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) when the
+    /// conversation is not in the session's peer cache or Telegram refuses the
+    /// pin, and
+    /// [`ProtoError::MessageIdOutOfRange`](crate::ProtoError::MessageIdOutOfRange)
+    /// when `message_id` is outside the range Telegram numbers messages in.
+    pub async fn pin_message(&self, chat_id: i64, message_id: i64) -> Result<(), ProtoError> {
+        let message_id = narrow_id(message_id, chat_id)?;
+
+        self.inner().pin_message(chat_id, message_id).await?;
+
+        Ok(())
+    }
+
+    /// Unpins a message from its conversation.
+    ///
+    /// The other half of [`ProtoClient::pin_message`], with the same silence and
+    /// the same event.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`ProtoClient::pin_message`].
+    pub async fn unpin_message(&self, chat_id: i64, message_id: i64) -> Result<(), ProtoError> {
+        let message_id = narrow_id(message_id, chat_id)?;
+
+        self.inner().unpin_message(chat_id, message_id).await?;
+
+        Ok(())
+    }
+
     /// Forwards messages from one conversation into another, as new messages.
     ///
     /// Returns how many landed. Telegram may decline one message while taking

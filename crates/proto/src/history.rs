@@ -147,11 +147,14 @@ impl HistoryCursor {
 /// response said about them, for the messages that carry any: a page is the
 /// only place a chat that has just been opened learns about reactions, so the
 /// counts have to travel with it or they wait for an update that may never
-/// come.
+/// come. `pinned` is the same fact about the pins: the identifiers a page says
+/// are pinned, which is what puts the marker on a message before any update
+/// arrives.
 ///
-/// The two belong to one response, so an identifier in `reactions` is always one
-/// `messages` holds, in the same oldest-first order. A message with no entry has
-/// no reactions.
+/// All three belong to one response, so an identifier in `reactions` or `pinned`
+/// is always one `messages` holds, in the same oldest-first order. A message with
+/// no entry has no reactions, and a page that names no pins is a page with
+/// nothing pinned in it.
 #[derive(Debug, Clone, Default)]
 pub struct HistoryPage {
     /// The page's messages, oldest first.
@@ -160,6 +163,9 @@ pub struct HistoryPage {
     /// The reactions each of those messages carries, oldest first, for the
     /// messages that have any.
     pub reactions: Vec<(i64, Vec<ReactionCount>)>,
+
+    /// The identifiers of the page's messages that are pinned, oldest first.
+    pub pinned: Vec<i64>,
 }
 
 /// Turns a page the framework described into this crate's page.
@@ -167,15 +173,18 @@ pub struct HistoryPage {
 /// The trip goes through `ProtoMessage` rather than straight across, and it has
 /// to: neither crate can implement the conversion on its own. The middleware is
 /// the one place the two can meet, which is why it is the seam the rest of this
-/// crate uses too — and the counters are taken back out of it here, because the
-/// domain's message cannot hold them.
+/// crate uses too — and the counters and the pin flag are taken back out of it
+/// here, because the domain's message cannot hold either.
 #[cfg(feature = "live")]
 fn to_page(peer_id: i64, page: Vec<MessageInfo>) -> HistoryPage {
     let mut messages = Vec::with_capacity(page.len());
     let mut reactions = Vec::new();
+    let mut pinned = Vec::new();
 
     for info in page {
-        let (message, counts) = crate::types::ProtoMessage::from(info).into_parts();
+        let dto = crate::types::ProtoMessage::from(info);
+        let is_pinned = dto.pinned;
+        let (message, counts) = dto.into_parts();
 
         // A page is fetched for one conversation, so a message naming another
         // cannot belong to it. Cheap, and it keeps a mixed page from being
@@ -187,17 +196,22 @@ fn to_page(peer_id: i64, page: Vec<MessageInfo>) -> HistoryPage {
         if !counts.is_empty() {
             reactions.push((message.id, counts));
         }
+        if is_pinned {
+            pinned.push(message.id);
+        }
         messages.push(message);
     }
 
-    // Telegram answers newest first; a window is read oldest first, and the
-    // counts follow the same order so the two run together.
+    // Telegram answers newest first; a window is read oldest first, and the two
+    // side lists follow the same order so the three run together.
     messages.reverse();
     reactions.reverse();
+    pinned.reverse();
 
     HistoryPage {
         messages,
         reactions,
+        pinned,
     }
 }
 
@@ -238,12 +252,39 @@ fn narrow(id: i64, peer_id: i64) -> Option<i32> {
 /// The history operations, which need the framework's client.
 ///
 /// Every one of them returns a [`HistoryPage`] or this crate's error, so a
-/// caller needs no knowledge of Telegram's paging arguments. A flood wait
+/// caller needs no knowledge of Telegram's paging arguments — except
+/// [`ProtoClient::fetch_pinned`], which returns the pinned messages themselves
+/// because that list is drawn rather than paged through. A flood wait
 /// arrives as a [`RequestError::Rpc`](telegram_framework::RequestError::Rpc)
 /// carrying the delay in its `value`; backing off is the caller's job, because
 /// only the caller knows what it was scrolling towards.
 #[cfg(feature = "live")]
 impl crate::ProtoClient {
+    /// Fetches the messages pinned in a conversation, newest first.
+    ///
+    /// The whole messages, not a page: a pinned list shows a sender, a line of
+    /// the text and an age, and it is a short list — `limit` bounds it. Nothing
+    /// is remembered here: the caller owns the list, and a pin made while it is
+    /// in flight arrives over the feed like any other.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Framework`](crate::ProtoError::Framework) when the
+    /// conversation is not in the session's peer cache, when Telegram rejects
+    /// the search, or when the answer cannot be decoded.
+    pub async fn fetch_pinned(
+        &self,
+        chat_id: i64,
+        limit: usize,
+    ) -> Result<Vec<Message>, crate::ProtoError> {
+        let pinned = self.inner().fetch_pinned(chat_id, limit).await?;
+
+        Ok(pinned
+            .into_iter()
+            .map(|info| Message::from(crate::types::ProtoMessage::from(info)))
+            .collect())
+    }
+
     /// Fetches the newest `limit` messages of a conversation, oldest first.
     ///
     /// This is what opening a conversation asks for. The result replaces the
@@ -670,6 +711,7 @@ mod live_tests {
             media: None,
             media_id: None,
             reactions: Vec::new(),
+            pinned: false,
         }
     }
 
@@ -801,6 +843,31 @@ mod live_tests {
 
         assert_eq!(page.messages.len(), 2);
         assert!(page.reactions.is_empty());
+        assert!(page.pinned.is_empty(), "and nothing pinned either");
+    }
+
+    /// A page names the messages in it that are pinned, in the same order as the
+    /// messages, so a chat opened fresh marks them before any update arrives.
+    #[test]
+    fn a_page_names_the_messages_that_are_pinned() {
+        let mut pinned = info(2, 42, false);
+        pinned.pinned = true;
+
+        // Newest first, as Telegram answers.
+        let page = to_page(42, vec![info(3, 42, false), pinned, info(1, 42, false)]);
+
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            page.pinned,
+            vec![2],
+            "only the pinned message is named, in the page's own order"
+        );
     }
 
     /// The page size the framework really sent is what "was the page short?" is

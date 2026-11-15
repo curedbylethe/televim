@@ -360,6 +360,29 @@ same function the update feed uses, so a message read from a page and the same
 message arriving over the feed are described identically — the rule the two
 windows already share.
 
+## Pinning
+
+`Client::pin_message(peer_id, message_id)` pins a message in its conversation and
+`unpin_message` takes the pin away. Both are silent by Telegram's own design —
+the request `grammers` builds sets `silent: true`, so nobody is notified — and
+neither applies anything locally: the pin that landed arrives as
+`UpdateKind::PinnedMessages`, on this client and on the account's other ones,
+which is also how a pin made elsewhere reaches this one.
+
+`Client::fetch_pinned(peer_id, limit)` lists a chat's pins, newest first, as whole
+`MessageInfo`s. Telegram has no "list the pins" call that returns messages, so
+this is the *pinned* filter of `messages.search` — and `grammers`' `SearchIter`
+has no limit: it buffers a page and asks for the next one as it is walked. The
+walk therefore stops after `limit` messages and the iterator is dropped, so a
+handler with nothing to page never asks for more. A text search returns places
+rather than messages; this is the one search that returns them, because a pinned
+list is drawn — sender, a line of text, an age — rather than jumped to.
+
+The pin flag itself travels on `MessageInfo::pinned`, read out of the raw
+message, so a message in a page and the same message arriving over the feed agree
+about it. Which pin is *newest* is the caller's ordering: the message's own time,
+and a later message wins a tie.
+
 ## Searching
 
 `Client::search_messages(peer_id, SearchArgs)` searches one conversation and
@@ -516,6 +539,14 @@ Three things are known gaps rather than deliberate scope cuts:
   was taken away. The counts are the same ones a fetched message carries — see
   reactions below — so a strip drawn from a page and one redrawn from this cannot
   disagree.
+- **Pins are read out of the raw bucket, as identifiers.** `grammers` models no
+  named update for `updatePinnedMessages` either, so it arrives in `Update::Raw`
+  and becomes `UpdateKind::PinnedMessages { chat_peer_id, message_ids, pinned }`:
+  the messages a pin or an unpin touched, and which way it went. Identifiers and
+  nothing else, because that is all the update carries — a pin is a fact about
+  the conversation's list, and `MessageInfo::pinned` is the other half of it on a
+  message read from a page. A channel's pins come as
+  `updatePinnedChannelMessages`, which is dropped with a channel's other traffic.
 - **`check_password` takes the password as `&str`.** Its bytes stay in memory for
   as long as the caller's buffer does. Zeroising our own copy would not help —
   `grammers` holds the value across the SRP exchange — so this needs a decision

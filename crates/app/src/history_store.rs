@@ -574,15 +574,17 @@ impl HistoryCache {
                 new_text,
             } => self.edit(*chat_id, *message_id, new_text),
             UpdateEvent::MessagesDeleted { message_ids } => self.delete(message_ids),
-            // A reaction is not part of a row: the cache holds what was said,
-            // and a reaction is the conversation's live state rather than the
-            // message's text. Nothing is persisted, which is why reopening a
-            // conversation asks the server again rather than replaying a cache.
+            // Reactions and pins are not part of a row: the cache holds what was
+            // said, and a reaction or a pin is the conversation's live state
+            // rather than the message's text. Neither is persisted, which is why
+            // reopening a conversation asks the server again rather than
+            // replaying a cache.
             UpdateEvent::ReadReceipt { .. }
             | UpdateEvent::InboxRead { .. }
             | UpdateEvent::PeerTyping { .. }
             | UpdateEvent::PeerStatus { .. }
-            | UpdateEvent::ReactionsChanged { .. } => false,
+            | UpdateEvent::ReactionsChanged { .. }
+            | UpdateEvent::PinChanged { .. } => false,
         }
     }
 

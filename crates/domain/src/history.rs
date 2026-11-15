@@ -75,6 +75,16 @@ pub const FAILED_REASONS: usize = 8;
 /// left the window already.
 pub const REACTION_ENTRIES: usize = 64;
 
+/// How many pinned message identifiers a conversation keeps.
+///
+/// Pins arrive as identifiers and nothing else — the update carries no message —
+/// so the view holds the ids and answers "is this one pinned" by membership. The
+/// bound is a memory ceiling rather than a preference: an update stream that
+/// repeated ids, or a long life of pins and unpins, must not grow the set without
+/// one. A hundred identifiers is a few hundred bytes; a conversation that
+/// somehow held more would lose its oldest mark rather than grow past this.
+pub const PINNED_IDS: usize = 100;
+
 /// The messages of one conversation, oldest first.
 ///
 /// Every mutation keeps two invariants: the deque is ordered oldest first, and it
@@ -323,7 +333,8 @@ impl ConversationWindow {
             | UpdateEvent::InboxRead { .. }
             | UpdateEvent::PeerTyping { .. }
             | UpdateEvent::PeerStatus { .. }
-            | UpdateEvent::ReactionsChanged { .. } => false,
+            | UpdateEvent::ReactionsChanged { .. }
+            | UpdateEvent::PinChanged { .. } => false,
         }
     }
 
@@ -464,6 +475,21 @@ pub struct ConversationView {
     /// Insertion-ordered, so "the oldest entry" is the first one pushed rather
     /// than a timestamp this crate has no clock to compare.
     reactions: VecDeque<(i64, Vec<ReactionCount>)>,
+
+    /// The identifiers of the messages pinned in this conversation, oldest pin
+    /// first, bounded by [`PINNED_IDS`].
+    ///
+    /// Identifiers rather than messages, because that is what a pin arrives as:
+    /// `updatePinnedMessages` names ids and nothing else, and a message in the
+    /// window is marked by a membership test rather than by rewriting it. Kept
+    /// beside the window rather than on [`Message`] for the same reason the
+    /// reactions are: a pin changes without the message changing, and a page
+    /// that replaces the window must not take the pins with it.
+    ///
+    /// An id whose message is deleted or has left the window stays: the pinned
+    /// list is Telegram's and reports a pin whose message is gone rather than
+    /// silently forgetting it.
+    pinned_ids: VecDeque<i64>,
 }
 
 impl ConversationView {
@@ -481,6 +507,7 @@ impl ConversationView {
             read_watermark: None,
             next_temp_id: -1,
             reactions: VecDeque::new(),
+            pinned_ids: VecDeque::new(),
         }
     }
 
@@ -514,7 +541,9 @@ impl ConversationView {
     /// where the messages live; the acknowledgement is folded here instead,
     /// because the watermark is the view's state and outlives the page on show —
     /// a chat switch replaces the window, and how far that conversation has been
-    /// read does not change because the reader looked away.
+    /// read does not change because the reader looked away. The reactions and the
+    /// pins are folded here for the same reason, and they are the two facts a
+    /// page cannot rewrite.
     #[must_use]
     pub fn apply_event(&mut self, event: &UpdateEvent) -> bool {
         match event {
@@ -527,9 +556,15 @@ impl ConversationView {
                 chat_id == &self.window.chat_id
                     && self.set_reactions(*message_id, reactions.clone())
             }
+            UpdateEvent::PinChanged {
+                chat_id,
+                message_ids,
+                pinned,
+            } => chat_id == &self.window.chat_id && self.apply_pins(message_ids, *pinned),
             // A deleted message takes its reactions with it: the entry is about
             // a message, and a message nothing can point at is not one to redraw
-            // chips for.
+            // chips for. Its pin stays, because the pinned list is Telegram's and
+            // a pin whose message is gone is what that list reports.
             UpdateEvent::MessagesDeleted { message_ids } => {
                 self.reactions.retain(|(id, _)| !message_ids.contains(id));
                 self.window.apply_event(event)
@@ -589,6 +624,77 @@ impl ConversationView {
     fn trim_reactions(&mut self) {
         while self.reactions.len() > REACTION_ENTRIES {
             self.reactions.pop_front();
+        }
+    }
+
+    /// Whether the message with this identifier is pinned in this conversation.
+    ///
+    /// The marker beside a message is this test and nothing else: a pin is a fact
+    /// about the conversation's list, not a field a message carries.
+    #[must_use]
+    pub fn is_pinned(&self, message_id: i64) -> bool {
+        self.pinned_ids.contains(&message_id)
+    }
+
+    /// The pinned identifiers, newest pin first, as the pinned list reads.
+    ///
+    /// Newest is the message whose own time is newest — the edited time when this
+    /// model comes to carry one, and the sent time until then — and a later
+    /// message wins a tie, which is what makes two pins in the same second read
+    /// in the order they were said. An identifier the window does not hold has no
+    /// time to be compared by, so it sorts after the ones that do, by identifier.
+    /// Every pinned id is in the answer: this orders the set, it does not filter
+    /// it.
+    #[must_use]
+    pub fn pinned_newest_first(&self) -> Vec<i64> {
+        let mut ids: Vec<i64> = self.pinned_ids.iter().copied().collect();
+
+        ids.sort_by_key(|a| std::cmp::Reverse(self.pin_key(*a)));
+
+        ids
+    }
+
+    /// What a pin is ordered by: its message's time, then its identifier.
+    ///
+    /// `None` for a message the window does not hold, and the sort above puts
+    /// those after the ones it does.
+    fn pin_key(&self, message_id: i64) -> (Option<i64>, i64) {
+        (
+            self.message(message_id).map(|message| message.timestamp),
+            message_id,
+        )
+    }
+
+    /// Adds or removes pinned identifiers, reporting whether anything changed.
+    ///
+    /// Set semantics rather than a list: a duplicate makes no second entry, which
+    /// is what keeps the update stream — which may repeat an id it already sent —
+    /// from growing the list. An unpin of an id that was never pinned is not a
+    /// change. The bound drops the oldest pin.
+    fn apply_pins(&mut self, message_ids: &[i64], pinned: bool) -> bool {
+        let mut changed = false;
+
+        for id in message_ids {
+            if pinned {
+                if !self.pinned_ids.contains(id) {
+                    self.pinned_ids.push_back(*id);
+                    changed = true;
+                }
+            } else if let Some(index) = self.pinned_ids.iter().position(|held| held == id) {
+                self.pinned_ids.remove(index);
+                changed = true;
+            }
+        }
+
+        self.trim_pins();
+
+        changed
+    }
+
+    /// Drops the oldest pins until the bound holds.
+    fn trim_pins(&mut self) {
+        while self.pinned_ids.len() > PINNED_IDS {
+            self.pinned_ids.pop_front();
         }
     }
 
@@ -925,6 +1031,14 @@ mod tests {
             chat_id,
             message_id,
             reactions: counts,
+        }
+    }
+
+    fn pins(chat_id: i64, message_ids: &[i64], pinned: bool) -> UpdateEvent {
+        UpdateEvent::PinChanged {
+            chat_id,
+            message_ids: message_ids.to_vec(),
+            pinned,
         }
     }
 
@@ -1782,6 +1896,131 @@ mod tests {
             view.reactions(ids[REACTION_ENTRIES]).len(),
             1,
             "the newest one is the reason room was made"
+        );
+    }
+
+    /// A pin marks the message it names, and an unpin takes the mark away.
+    #[test]
+    fn a_pin_event_marks_the_message_it_names() {
+        let mut view = view_with_a_message();
+
+        assert!(view.apply_event(&pins(42, &[5], true)));
+        assert!(view.is_pinned(5));
+
+        assert!(view.apply_event(&pins(42, &[5], false)));
+        assert!(!view.is_pinned(5));
+        assert!(
+            !view.apply_event(&pins(42, &[5], false)),
+            "unpinning what is not pinned changes nothing"
+        );
+    }
+
+    /// The pinned list is Telegram's, so a pin for a message the window does not
+    /// hold is kept: the marker appears when its page does.
+    #[test]
+    fn a_pin_for_a_message_the_window_does_not_hold_is_kept() {
+        let mut view = view_with_a_message();
+
+        assert!(view.apply_event(&pins(42, &[99], true)));
+
+        assert!(view.is_pinned(99));
+        assert_eq!(view.pinned_newest_first(), vec![99]);
+    }
+
+    /// An id that arrives twice is one pin: the marker tests the set, and an
+    /// update stream that repeats an id must not grow it.
+    #[test]
+    fn a_repeated_pin_makes_no_second_entry() {
+        let mut view = view_with_a_message();
+
+        assert!(view.apply_event(&pins(42, &[5, 5], true)));
+        assert!(
+            !view.apply_event(&pins(42, &[5], true)),
+            "the same id again is not a change"
+        );
+        assert_eq!(view.pinned_newest_first(), vec![5]);
+    }
+
+    /// A pin event for another conversation is not this view's business.
+    #[test]
+    fn a_pin_event_names_the_conversation_it_belongs_to() {
+        let mut view = view_with_a_message();
+
+        assert!(!view.apply_event(&pins(43, &[5], true)));
+        assert!(!view.is_pinned(5));
+    }
+
+    /// A deleted message keeps its pin: the list reports what Telegram holds, and
+    /// a pin whose message is gone is the overlay's to explain.
+    #[test]
+    fn a_deletion_does_not_remove_a_pin() {
+        let mut view = view_with_a_message();
+        assert!(view.apply_event(&pins(42, &[5], true)));
+
+        assert!(view.apply_event(&UpdateEvent::MessagesDeleted {
+            message_ids: vec![5],
+        }));
+
+        assert!(view.is_pinned(5), "the pin outlives the message it names");
+        assert!(view.message(5).is_none(), "and the message is gone");
+    }
+
+    /// The pinned list reads newest first by each message's own time, a later
+    /// message winning a tie, and an id with no message after the ones with one.
+    #[test]
+    fn the_pinned_ids_read_newest_first_by_their_message_time() {
+        let mut view = ConversationView::new(42);
+
+        let mut first = message(42, 1, "first");
+        first.timestamp = 100;
+        let mut third = message(42, 2, "third");
+        third.timestamp = 300;
+        let mut second = message(42, 3, "second");
+        second.timestamp = 200;
+        // The same second as `second`, and a later message: it wins the tie.
+        let mut tied = message(42, 4, "tie");
+        tied.timestamp = 200;
+
+        view.window.replace([second, first, tied, third]);
+        assert!(view.apply_event(&pins(42, &[1, 2, 3, 4, 99], true)));
+
+        assert_eq!(
+            view.pinned_newest_first(),
+            vec![2, 4, 3, 1, 99],
+            "newest time first, a later message winning a tie, and a message the \
+             window does not hold last"
+        );
+    }
+
+    /// The pins are bounded, and the oldest goes first.
+    #[test]
+    fn the_pin_container_evicts_the_oldest_pin_at_the_cap() {
+        let ids: Vec<i64> = (1..=PINNED_IDS)
+            .map(|id| i64::try_from(id).expect("the cap is a message count"))
+            .collect();
+        let overflow = ids[PINNED_IDS - 1] + 1;
+        let mut view = ConversationView::new(42);
+        view.window.replace(
+            ids.iter()
+                .chain(std::iter::once(&overflow))
+                .map(|id| message(42, *id, "text")),
+        );
+
+        for id in &ids {
+            assert!(view.apply_event(&pins(42, &[*id], true)));
+        }
+        assert!(view.apply_event(&pins(42, &[overflow], true)));
+
+        assert!(
+            !view.is_pinned(1),
+            "the oldest pin was dropped to make room"
+        );
+        assert!(view.is_pinned(2), "and the one behind it is still there");
+        assert!(view.is_pinned(overflow));
+        assert_eq!(
+            view.pinned_newest_first().len(),
+            PINNED_IDS,
+            "the set never holds more than the bound"
         );
     }
 

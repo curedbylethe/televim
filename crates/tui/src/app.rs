@@ -1193,6 +1193,23 @@ pub enum Action {
         emoticon: Option<String>,
     },
 
+    /// Pin a message in its conversation, or unpin it.
+    ///
+    /// A message pin, not a chat pin — [`Action::TogglePin`] is the other one,
+    /// and the two are different facts with different keys. Nothing is applied
+    /// locally: the marker is drawn from the update the server sends back, which
+    /// is also how a pin made on another device reaches this one.
+    PinMessage {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message to pin or unpin.
+        message_id: i64,
+
+        /// Whether to pin it (`true`) or unpin it (`false`).
+        pin: bool,
+    },
+
     /// Read the profile of the peer with this bare identifier.
     ///
     /// A question rather than a fetch, for the same reason as [`Action::Search`]:

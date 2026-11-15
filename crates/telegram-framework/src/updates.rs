@@ -125,6 +125,15 @@ pub struct MessageInfo {
     /// see [`reaction`](crate::reaction). Empty means nobody has reacted, or the
     /// message cannot be reacted to, and the two are the same thing to draw.
     pub reactions: Vec<ReactionCount>,
+
+    /// Whether the message is pinned in its conversation.
+    ///
+    /// A flag rather than a position in a list: Telegram pins messages, not
+    /// places, and [`Client::fetch_pinned`](crate::Client::fetch_pinned) is how
+    /// the list of them is asked for. Read out of the raw message, the same way
+    /// its reactions are, so a message in a page and the same message arriving
+    /// over the feed cannot disagree about it.
+    pub pinned: bool,
 }
 
 /// What Telegram says about a person's online state.
@@ -277,6 +286,30 @@ pub enum UpdateKind {
         /// Every reaction the message now carries.
         reactions: Vec<ReactionCount>,
     },
+
+    /// Messages were pinned in a conversation, or unpinned from it.
+    ///
+    /// The identifiers and a flag, because that is what the update carries:
+    /// `updatePinnedMessages` names the messages a pin or an unpin touched and
+    /// nothing about them, so what was pinned is a set of identifiers rather
+    /// than a list of messages. A pinned flag on a message read from a page is
+    /// the other half of the fact — see [`MessageInfo::pinned`].
+    ///
+    /// Read from the raw update for the same reason as the receipts above:
+    /// `grammers` models no named update for it, so it arrives as
+    /// `Update::Raw`. A channel's pins arrive as `updatePinnedChannelMessages`
+    /// and are dropped, because a channel is not a conversation this client
+    /// renders.
+    PinnedMessages {
+        /// The conversation the messages belong to.
+        chat_peer_id: i64,
+
+        /// Identifiers of the messages the change touched.
+        message_ids: Vec<i64>,
+
+        /// Whether they were pinned (`true`) or unpinned (`false`).
+        pinned: bool,
+    },
 }
 
 impl Client {
@@ -357,6 +390,11 @@ impl Client {
     ///             message_id,
     ///             reactions,
     ///         } => println!("{chat_peer_id}/{message_id}: {} reactions", reactions.len()),
+    ///         UpdateKind::PinnedMessages {
+    ///             chat_peer_id,
+    ///             message_ids,
+    ///             pinned,
+    ///         } => println!("{chat_peer_id}: pinned={pinned} {message_ids:?}"),
     ///     }
     /// }
     ///
@@ -708,6 +746,18 @@ fn read_raw(raw: &grammers_client::update::Raw) -> Option<UpdateKind> {
                 reactions: counts_from(&update.reactions),
             })
         }
+        // A pin or an unpin, as identifiers. The peer decides the conversation
+        // as everywhere else; the channel form lands in the catch-all below and
+        // is dropped with the rest of a channel's traffic.
+        tl::enums::Update::PinnedMessages(update) => {
+            let chat_peer_id = read_peer(&update.peer)?;
+
+            Some(UpdateKind::PinnedMessages {
+                chat_peer_id,
+                message_ids: update.messages.iter().copied().map(i64::from).collect(),
+                pinned: update.pinned,
+            })
+        }
         // Everything else grammers does not model. None of it is a message in a
         // private conversation, which is all this feed carries.
         _ => None,
@@ -802,6 +852,7 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
     );
     info.is_service = is_service;
     info.reactions = reaction_counts(&(**message).raw);
+    info.pinned = pinned_flag(&(**message).raw);
     Some(info)
 }
 
@@ -883,6 +934,19 @@ pub(crate) fn message_info(
         // Filled by the caller that holds the raw message: the counts are only
         // there, and the extractor is the same one an update uses.
         reactions: Vec::new(),
+        // And the pin flag the same way — see `pinned_flag`.
+        pinned: false,
+    }
+}
+
+/// Whether the raw message carries Telegram's pinned flag.
+///
+/// Only an ordinary message can be pinned: the wire gives a service message no
+/// such field, so it is unpinned by construction rather than by a choice here.
+pub(crate) fn pinned_flag(raw: &tl::enums::Message) -> bool {
+    match raw {
+        tl::enums::Message::Message(message) => message.pinned,
+        tl::enums::Message::Service(_) | tl::enums::Message::Empty(_) => false,
     }
 }
 
@@ -1325,6 +1389,57 @@ mod tests {
                 reactions,
             },
         ))
+    }
+
+    /// A pin or an unpin, as the raw bucket hands it over: a peer, the
+    /// identifiers it touched, and which way the change went.
+    fn raw_pinned(
+        peer: tl::enums::Peer,
+        messages: &[i32],
+        pinned: bool,
+    ) -> grammers_client::update::Raw {
+        raw_update(tl::enums::Update::PinnedMessages(
+            tl::types::UpdatePinnedMessages {
+                pinned,
+                peer,
+                messages: messages.to_vec(),
+                pts: 1,
+                pts_count: 1,
+            },
+        ))
+    }
+
+    /// A pin and an unpin are the same update with the flag the other way, and
+    /// both name their messages by identifier.
+    #[test]
+    fn a_pin_update_becomes_the_messages_it_names() {
+        for pinned in [true, false] {
+            let event = read_raw(&raw_pinned(user(42), &[9, 7], pinned));
+
+            let Some(UpdateKind::PinnedMessages {
+                chat_peer_id,
+                message_ids,
+                pinned: flag,
+            }) = event
+            else {
+                panic!("a pin update names a conversation and its messages");
+            };
+
+            assert_eq!(chat_peer_id, 42);
+            assert_eq!(
+                message_ids,
+                vec![9, 7],
+                "the order telegram sent is the order kept"
+            );
+            assert_eq!(flag, pinned);
+        }
+    }
+
+    /// A pin in a group is a group's traffic, and a group is not a conversation
+    /// this client renders.
+    #[test]
+    fn a_pin_update_in_a_group_is_dropped() {
+        assert!(read_raw(&raw_pinned(group(-20), &[9], true)).is_none());
     }
 
     /// A read acknowledgement as `grammers` hands it over: in the catch-all
