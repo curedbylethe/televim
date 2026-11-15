@@ -337,6 +337,29 @@ its own: the caller decides what an accepted marker means for the screen. The
 application sends it when a conversation is opened and clears the unread count
 only on success, so a refused marker is not a state the screen has to undo.
 
+## Reactions
+
+`Client::set_reaction(peer_id, message_id, emoticon)` leaves an emoticon as this
+account's reaction to a message, and `None` removes the one this account left.
+The peer is resolved through the session's peer cache like everything else here.
+Nothing comes back and nothing is applied locally: the reaction that landed is
+the server's, and it reaches the caller as an `UpdateKind::ReactionsChanged`
+event. `grammers`' `Client::send_reactions` does the request; this wrapper exists
+so the peer's `access_hash` is resolved in one place and the error type is the
+crate's own.
+
+Reading is the other half, and it has to go around the accessors.
+`Message::reaction_count()` is a **total**, and a strip of chips needs the count
+per emoticon and which of them is the reader's own, so `Reaction` and
+`ReactionCount` are read straight out of `Message.raw` and travel on
+`MessageInfo::reactions`. `Reaction` names an emoticon, a custom emoji's document
+id, or a paid reaction; only the emoticon can be **sent** through this crate,
+because a custom emoji would need its document resolved first and a paid reaction
+is bought rather than chosen. `reaction_counts` is that extractor, and it is the
+same function the update feed uses, so a message read from a page and the same
+message arriving over the feed are described identically — the rule the two
+windows already share.
+
 ## Searching
 
 `Client::search_messages(peer_id, SearchArgs)` searches one conversation and
@@ -456,8 +479,8 @@ Three things are known gaps rather than deliberate scope cuts:
   the discard is never silent. The channel therefore cannot grow without bound,
   and nothing is lost either: the session's update position only advances while a
   feed is running, so `catch_up` replays from wherever it stopped. What the feed
-  does not model — reactions, pins — is discarded by the same filter, and what it
-  does read out of that bucket it reads in one place: see the two entries below.
+  does not model — pins — is discarded by the same filter, and what it
+  does read out of that bucket it reads in one place: see the entries below.
 - **A peer's typing is read out of the raw bucket, and is momentary.**
   `grammers` models no named update for `updateUserTyping` either, so it arrives
   in `Update::Raw` and is matched alongside the read acknowledgement. A composing
@@ -484,6 +507,15 @@ Three things are known gaps rather than deliberate scope cuts:
   arrives for a read made here and for one made on another device, so the count
   converges on the server's figure rather than on what this client assumed. A
   group or channel is dropped as elsewhere.
+- **Reactions are read out of the raw bucket, as a whole set.** `grammers` models
+  no named update for `updateMessageReactions` either, so it arrives in
+  `Update::Raw` and becomes `UpdateKind::ReactionsChanged { chat_peer_id,
+  message_id, reactions }`. The event carries every reaction the message has now
+  rather than a delta, which is what lets a caller replace what it holds instead
+  of merging into it; a set with nothing in it is a message whose last reaction
+  was taken away. The counts are the same ones a fetched message carries — see
+  reactions below — so a strip drawn from a page and one redrawn from this cannot
+  disagree.
 - **`check_password` takes the password as `&str`.** Its bytes stay in memory for
   as long as the caller's buffer does. Zeroising our own copy would not help —
   `grammers` holds the value across the SRP exchange — so this needs a decision

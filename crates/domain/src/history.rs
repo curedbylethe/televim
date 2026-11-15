@@ -38,7 +38,7 @@
 use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 
-use crate::message::{MediaKind, Message, MessageStatus};
+use crate::message::{MediaKind, Message, MessageStatus, ReactionCount};
 use crate::updates::UpdateEvent;
 
 /// How many messages the conversation on show holds before the far end is
@@ -62,6 +62,18 @@ pub const CONVERSATION_WINDOW: usize = 200;
 /// oldest is dropped to make room — and its message is dismissed with it, so a
 /// `Failed` message is never left without the reason that explains it.
 pub const FAILED_REASONS: usize = 8;
+
+/// How many messages a conversation keeps reaction counts for.
+///
+/// Reactions are per-message state that arrives on its own, so it is stored
+/// beside the messages rather than on one — see [`ConversationView`]. The bound
+/// is what keeps that side table from growing with every message the account
+/// ever receives, and it is named rather than inlined because reaching it is a
+/// memory decision: 64 messages is far more than a screenful of a conversation
+/// shows a chip on, and the whole table costs a few kilobytes. The oldest entry
+/// is dropped to make room, which is the one whose message is likeliest to have
+/// left the window already.
+pub const REACTION_ENTRIES: usize = 64;
 
 /// The messages of one conversation, oldest first.
 ///
@@ -305,10 +317,13 @@ impl ConversationWindow {
             // in it — which is what lets it outlive the page on show — and a peer
             // composing one is not a message. Nothing here expires a typing flag
             // either: the update that says the peer stopped is what clears it.
+            // A message's reactions are kept beside the window for the same
+            // reason, by the view that holds both.
             UpdateEvent::ReadReceipt { .. }
             | UpdateEvent::InboxRead { .. }
             | UpdateEvent::PeerTyping { .. }
-            | UpdateEvent::PeerStatus { .. } => false,
+            | UpdateEvent::PeerStatus { .. }
+            | UpdateEvent::ReactionsChanged { .. } => false,
         }
     }
 
@@ -434,6 +449,21 @@ pub struct ConversationView {
     /// never collide with a real identifier: Telegram numbers messages with
     /// positive `i32` values.
     next_temp_id: i64,
+
+    /// The reactions each message carries, keyed by message identifier and
+    /// bounded by [`REACTION_ENTRIES`].
+    ///
+    /// Beside the window rather than on [`Message`], and that is the point: a
+    /// reaction changes without its message changing, an edit or a fetch
+    /// rewrites whole messages, and this client never writes a reaction into a
+    /// message's text. Replacing a page therefore leaves this untouched, and a
+    /// message that has scrolled out of the window keeps its counts until the
+    /// bound drops them — which is cheaper than trying to keep two windows in
+    /// step.
+    ///
+    /// Insertion-ordered, so "the oldest entry" is the first one pushed rather
+    /// than a timestamp this crate has no clock to compare.
+    reactions: VecDeque<(i64, Vec<ReactionCount>)>,
 }
 
 impl ConversationView {
@@ -450,6 +480,7 @@ impl ConversationView {
             failures: Vec::new(),
             read_watermark: None,
             next_temp_id: -1,
+            reactions: VecDeque::new(),
         }
     }
 
@@ -488,7 +519,76 @@ impl ConversationView {
     pub fn apply_event(&mut self, event: &UpdateEvent) -> bool {
         match event {
             UpdateEvent::ReadReceipt { chat_id, max_id } => self.apply_read(*chat_id, *max_id),
+            UpdateEvent::ReactionsChanged {
+                chat_id,
+                message_id,
+                reactions,
+            } => {
+                chat_id == &self.window.chat_id
+                    && self.set_reactions(*message_id, reactions.clone())
+            }
+            // A deleted message takes its reactions with it: the entry is about
+            // a message, and a message nothing can point at is not one to redraw
+            // chips for.
+            UpdateEvent::MessagesDeleted { message_ids } => {
+                self.reactions.retain(|(id, _)| !message_ids.contains(id));
+                self.window.apply_event(event)
+            }
             _ => self.window.apply_event(event),
+        }
+    }
+
+    /// The reactions one message carries, empty when it has none.
+    ///
+    /// A message the view holds no count for reads as one nobody reacted to,
+    /// which is the same answer the wire gives for a message that carries no
+    /// reactions.
+    #[must_use]
+    pub fn reactions(&self, message_id: i64) -> &[ReactionCount] {
+        self.reactions
+            .iter()
+            .find(|(id, _)| *id == message_id)
+            .map_or(&[], |(_, counts)| counts.as_slice())
+    }
+
+    /// Replaces the reactions on one message, reporting whether anything
+    /// changed.
+    ///
+    /// Replaced rather than merged, because the event carries the whole set.
+    /// Only a message in the window takes them: a reaction for one that has
+    /// scrolled out is dropped the same way an edit for it is, since nothing
+    /// would draw it. An empty set removes the entry instead of keeping an
+    /// empty one, which is what "the last reaction was taken away" looks like.
+    fn set_reactions(&mut self, message_id: i64, counts: Vec<ReactionCount>) -> bool {
+        if self.message(message_id).is_none() {
+            return false;
+        }
+
+        let held = self.reactions(message_id);
+
+        if held == counts.as_slice() {
+            return false;
+        }
+
+        self.forget_reactions(message_id);
+
+        if !counts.is_empty() {
+            self.reactions.push_back((message_id, counts));
+            self.trim_reactions();
+        }
+
+        true
+    }
+
+    /// Forgets any reaction count held for a message.
+    fn forget_reactions(&mut self, message_id: i64) {
+        self.reactions.retain(|(id, _)| *id != message_id);
+    }
+
+    /// Drops the oldest reaction entries until the bound holds.
+    fn trim_reactions(&mut self) {
+        while self.reactions.len() > REACTION_ENTRIES {
+            self.reactions.pop_front();
         }
     }
 
@@ -758,7 +858,7 @@ pub fn unread_target(last_message_id: Option<i64>, unread_count: u32) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::MessageStatus;
+    use crate::message::{MessageStatus, Reaction};
 
     /// A message with nothing but the fields under test filled in.
     fn message(chat_id: i64, id: i64, text: &'static str) -> Message {
@@ -810,6 +910,22 @@ mod tests {
 
     fn arrival(chat_id: i64, id: i64, text: &'static str) -> UpdateEvent {
         UpdateEvent::NewMessage(message(chat_id, id, text))
+    }
+
+    fn emoji(emoticon: &str, count: u32) -> ReactionCount {
+        ReactionCount {
+            reaction: Reaction::Emoticon(emoticon.to_owned()),
+            count,
+            chosen: false,
+        }
+    }
+
+    fn reactions(chat_id: i64, message_id: i64, counts: Vec<ReactionCount>) -> UpdateEvent {
+        UpdateEvent::ReactionsChanged {
+            chat_id,
+            message_id,
+            reactions: counts,
+        }
     }
 
     // ---- the window ----------------------------------------------------
@@ -1560,6 +1676,113 @@ mod tests {
             max_id: 3
         }));
         assert_eq!(view.read_watermark(), Some(3));
+    }
+
+    /// The whole set replaces what the message carried rather than adding to it:
+    /// the update carries the whole answer.
+    #[test]
+    fn a_reaction_event_replaces_what_the_message_carried() {
+        let mut view = view_with_a_message();
+
+        assert!(view.apply_event(&reactions(42, 5, vec![emoji("👍", 2)])));
+        assert_eq!(view.reactions(5), vec![emoji("👍", 2)]);
+
+        assert!(
+            view.apply_event(&reactions(42, 5, vec![emoji("👍", 3)])),
+            "a higher count on the same reaction is a change"
+        );
+        assert_eq!(
+            view.reactions(5),
+            vec![emoji("👍", 3)],
+            "replaced, not appended"
+        );
+
+        assert!(
+            !view.apply_event(&reactions(42, 5, vec![emoji("👍", 3)])),
+            "the same set again changes nothing on screen"
+        );
+    }
+
+    /// A message whose last reaction was taken away has no chip line at all, so
+    /// the entry goes rather than staying behind empty.
+    #[test]
+    fn an_empty_reaction_set_takes_the_entry_away() {
+        let mut view = view_with_a_message();
+        assert!(view.apply_event(&reactions(42, 5, vec![emoji("👍", 2)])));
+
+        assert!(view.apply_event(&reactions(42, 5, Vec::new())));
+
+        assert!(view.reactions(5).is_empty());
+        assert!(
+            !view.apply_event(&reactions(42, 5, Vec::new())),
+            "and an empty set for a message that has none moves nothing"
+        );
+    }
+
+    /// A deletion takes the reactions with the message: nothing is left to draw
+    /// a chip line under.
+    #[test]
+    fn a_deletion_drops_the_reactions_of_its_messages() {
+        let mut view = view_with_a_message();
+        assert!(view.apply_event(&reactions(42, 5, vec![emoji("👍", 2)])));
+
+        assert!(view.apply_event(&UpdateEvent::MessagesDeleted {
+            message_ids: vec![5],
+        }));
+
+        assert!(view.reactions(5).is_empty());
+    }
+
+    /// A reaction for a message the window does not hold is dropped, the same
+    /// way an edit for one is: the reader is not looking at it.
+    #[test]
+    fn a_reaction_for_an_unknown_message_changes_nothing() {
+        let mut view = view_with_a_message();
+
+        assert!(!view.apply_event(&reactions(42, 99, vec![emoji("👍", 2)])));
+        assert!(view.reactions(99).is_empty());
+    }
+
+    /// A reaction in another conversation is not this view's business.
+    #[test]
+    fn a_reaction_event_names_the_conversation_it_belongs_to() {
+        let mut view = view_with_a_message();
+
+        assert!(
+            !view.apply_event(&reactions(43, 5, vec![emoji("👍", 2)])),
+            "the message is here, but the event belongs to another chat"
+        );
+        assert!(view.reactions(5).is_empty());
+    }
+
+    /// The side table is bounded, and the oldest entry goes first.
+    #[test]
+    fn the_reaction_container_evicts_the_oldest_entry_at_the_cap() {
+        let ids: Vec<i64> = (0..=REACTION_ENTRIES)
+            .map(|id| i64::try_from(id).expect("the cap is a message count"))
+            .collect();
+        let mut view = ConversationView::new(42);
+        view.window
+            .replace(ids.iter().map(|id| message(42, *id, "text")));
+
+        for id in &ids {
+            assert!(view.apply_event(&reactions(42, *id, vec![emoji("👍", 1)])));
+        }
+
+        assert!(
+            view.reactions(ids[0]).is_empty(),
+            "the oldest entry was dropped to make room"
+        );
+        assert_eq!(
+            view.reactions(ids[1]),
+            vec![emoji("👍", 1)],
+            "and the one behind it is still there"
+        );
+        assert_eq!(
+            view.reactions(ids[REACTION_ENTRIES]).len(),
+            1,
+            "the newest one is the reason room was made"
+        );
     }
 
     /// A watermark older than the page on show is still the right answer for the

@@ -2,6 +2,40 @@
 
 use std::borrow::Cow;
 
+/// One reaction someone can leave on a message.
+///
+/// The variants mirror what Telegram can report rather than what this build can
+/// send, because the interface has to draw all of them: a strip that dropped a
+/// custom emoji's chip would undercount the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reaction {
+    /// A standard emoji, as the emoticon it is drawn from.
+    Emoticon(String),
+
+    /// A custom emoji, as the document that carries it.
+    CustomEmoji(i64),
+
+    /// A paid reaction, which carries no emoticon at all.
+    Paid,
+}
+
+/// How many people left one reaction on a message, and whether the reader did.
+///
+/// Counts rather than the people behind them: a message's reaction strip shows
+/// a number per chip, and who reacted is a list the protocol fetches separately
+/// and this client does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionCount {
+    /// Which reaction this counts.
+    pub reaction: Reaction,
+
+    /// How many left it.
+    pub count: u32,
+
+    /// Whether the logged-in account is one of them.
+    pub chosen: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageStatus {
     Sending,

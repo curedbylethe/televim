@@ -81,6 +81,7 @@ use grammers_client::session::types::PeerRef;
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::media::classify_message;
+use crate::reaction::reaction_counts;
 use crate::tl;
 use crate::updates::{MessageInfo, message_info};
 
@@ -270,7 +271,7 @@ impl Client {
         // The text is validated as text above, so a message sent through here
         // carries no media — but it is read rather than assumed, so that the
         // description cannot drift from the message if that ever changes.
-        Ok(message_info(
+        let mut info = message_info(
             message.id(),
             peer_id,
             message.text(),
@@ -278,7 +279,10 @@ impl Client {
             message.outgoing(),
             message.reply_to_message_id(),
             classify_message(&message.raw),
-        ))
+        );
+        info.reactions = reaction_counts(&message.raw);
+
+        Ok(info)
     }
 
     /// Replaces the text of a message the account wrote.

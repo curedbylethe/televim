@@ -55,6 +55,7 @@ use crate::client::Client;
 use crate::dialogs::DialogKind;
 use crate::error::{FrameworkError, RequestError};
 use crate::media::{MediaKind, classify_message};
+use crate::reaction::{ReactionCount, counts_from, reaction_counts};
 use crate::session::StoreSession;
 use crate::tl;
 
@@ -117,6 +118,13 @@ pub struct MessageInfo {
     /// another chat. Only the id is carried: the access hash and file reference
     /// are not, because they go stale.
     pub media_id: Option<i64>,
+
+    /// The reactions the message carries, in the order Telegram sent them.
+    ///
+    /// Read out of the raw message, because `grammers` exposes only a total —
+    /// see [`reaction`](crate::reaction). Empty means nobody has reacted, or the
+    /// message cannot be reacted to, and the two are the same thing to draw.
+    pub reactions: Vec<ReactionCount>,
 }
 
 /// What Telegram says about a person's online state.
@@ -248,6 +256,27 @@ pub enum UpdateKind {
         /// The peer's presence as Telegram reported it.
         presence: UserPresence,
     },
+
+    /// The reactions on one message changed.
+    ///
+    /// The whole set, not a delta: `updateMessageReactions` carries every
+    /// reaction the message has now, so a caller that replaces what it holds
+    /// cannot drift from the server by missing one. An event naming no
+    /// reactions is a message whose last one was taken away.
+    ///
+    /// Read from the raw update for the same reason as the receipts above:
+    /// `grammers` models no named update for it, so it arrives as
+    /// `Update::Raw`.
+    ReactionsChanged {
+        /// The conversation the message belongs to.
+        chat_peer_id: i64,
+
+        /// Identifier of the message within that conversation.
+        message_id: i64,
+
+        /// Every reaction the message now carries.
+        reactions: Vec<ReactionCount>,
+    },
 }
 
 impl Client {
@@ -323,6 +352,11 @@ impl Client {
     ///         UpdateKind::PeerStatus { chat_peer_id, presence } => {
     ///             println!("{chat_peer_id} is {presence:?}")
     ///         }
+    ///         UpdateKind::ReactionsChanged {
+    ///             chat_peer_id,
+    ///             message_id,
+    ///             reactions,
+    ///         } => println!("{chat_peer_id}/{message_id}: {} reactions", reactions.len()),
     ///     }
     /// }
     ///
@@ -661,6 +695,19 @@ fn read_raw(raw: &grammers_client::update::Raw) -> Option<UpdateKind> {
                 still_unread_count: u32::try_from(read.still_unread_count).unwrap_or(0),
             })
         }
+        // Reactions on a message in a conversation, named by the peer they
+        // belong to and the message's own identifier. The counts come out of
+        // the same extractor a fetched message uses, so a strip redrawn from
+        // this and one drawn from a page cannot disagree.
+        tl::enums::Update::MessageReactions(update) => {
+            let chat_peer_id = read_peer(&update.peer)?;
+
+            Some(UpdateKind::ReactionsChanged {
+                chat_peer_id,
+                message_id: i64::from(update.msg_id),
+                reactions: counts_from(&update.reactions),
+            })
+        }
         // Everything else grammers does not model. None of it is a message in a
         // private conversation, which is all this feed carries.
         _ => None,
@@ -754,6 +801,7 @@ fn private_message(message: &Message) -> Option<MessageInfo> {
         classify_message(&(**message).raw),
     );
     info.is_service = is_service;
+    info.reactions = reaction_counts(&(**message).raw);
     Some(info)
 }
 
@@ -832,6 +880,9 @@ pub(crate) fn message_info(
         reply_to_msg_id,
         media,
         media_id,
+        // Filled by the caller that holds the raw message: the counts are only
+        // there, and the extractor is the same one an update uses.
+        reactions: Vec::new(),
     }
 }
 
@@ -1192,6 +1243,88 @@ mod tests {
 
     fn user(id: i64) -> tl::enums::Peer {
         tl::enums::Peer::User(tl::types::PeerUser { user_id: id })
+    }
+
+    fn group(id: i64) -> tl::enums::Peer {
+        tl::enums::Peer::Chat(tl::types::PeerChat { chat_id: id })
+    }
+
+    /// A reaction update carries the whole set for one message, which is what
+    /// lets a strip be replaced rather than merged into.
+    #[test]
+    fn a_reaction_update_becomes_the_message_and_its_counts() {
+        let reactions = tl::enums::MessageReactions::Reactions(tl::types::MessageReactions {
+            min: false,
+            can_see_list: false,
+            reactions_as_tags: false,
+            results: vec![tl::enums::ReactionCount::Count(tl::types::ReactionCount {
+                chosen_order: Some(0),
+                reaction: tl::enums::Reaction::Emoji(tl::types::ReactionEmoji {
+                    emoticon: "👍".to_owned(),
+                }),
+                count: 2,
+            })],
+            recent_reactions: None,
+            top_reactors: None,
+        });
+
+        let event = read_raw(&raw_reactions(user(42), 9, reactions));
+
+        let Some(UpdateKind::ReactionsChanged {
+            chat_peer_id,
+            message_id,
+            reactions,
+        }) = event
+        else {
+            panic!("a reaction update names a message and its counts");
+        };
+
+        assert_eq!(chat_peer_id, 42);
+        assert_eq!(message_id, 9);
+        assert_eq!(
+            reactions,
+            vec![ReactionCount {
+                reaction: crate::Reaction::Emoticon("👍".to_owned()),
+                count: 2,
+                chosen: true,
+            }],
+            "the update's counts are the ones a message read from a page carries"
+        );
+    }
+
+    /// A reaction in a group is a group's traffic, and a group is not a
+    /// conversation this client renders.
+    #[test]
+    fn a_reaction_update_in_a_group_is_dropped() {
+        let reactions = tl::enums::MessageReactions::Reactions(tl::types::MessageReactions {
+            min: false,
+            can_see_list: false,
+            reactions_as_tags: false,
+            results: Vec::new(),
+            recent_reactions: None,
+            top_reactors: None,
+        });
+
+        assert!(
+            read_raw(&raw_reactions(group(-20), 9, reactions)).is_none(),
+            "the same peer filter the rest of the feed applies"
+        );
+    }
+
+    fn raw_reactions(
+        peer: tl::enums::Peer,
+        msg_id: i32,
+        reactions: tl::enums::MessageReactions,
+    ) -> grammers_client::update::Raw {
+        raw_update(tl::enums::Update::MessageReactions(
+            tl::types::UpdateMessageReactions {
+                peer,
+                msg_id,
+                top_msg_id: None,
+                saved_peer_id: None,
+                reactions,
+            },
+        ))
     }
 
     /// A read acknowledgement as `grammers` hands it over: in the catch-all

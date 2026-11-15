@@ -340,6 +340,9 @@ impl DemoSimulator {
                     "Mute settings are unavailable in the offline demo.",
                 )]
             }
+            Action::React { .. } => vec![Self::status(
+                "Reactions are unavailable in the offline demo.",
+            )],
             Action::SetUnreadMark { .. } => vec![Self::status(
                 "Manual unread marks are unavailable in the offline demo.",
             )],

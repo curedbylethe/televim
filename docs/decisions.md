@@ -1876,3 +1876,18 @@ are in [`../AGENTS.md`](../AGENTS.md).
   migrations now run for the slot being opened, on a blocking thread, so the
   loop keeps drawing. A slot whose session file already exists makes no keychain
   read, so later bring-ups never prompt.
+
+- **Why a message's reactions live beside the window instead of on `Message`:**
+  a reaction changes without its message changing, and every path that rewrites
+  messages — an edit, a page, a jump — would have to carry counts it does not
+  own. Putting them on `Message` would also invite writing them into a message's
+  text, which the derived-text rule forbids. Instead `ConversationView` keeps a
+  side table keyed by message identifier, next to the read watermark and the
+  failed reasons, bounded by `REACTION_ENTRIES` (`domain/src/history.rs`) with
+  the oldest entry evicted first. The event carries the whole set, so a caller
+  replaces rather than merges; an empty set and a deletion both remove the entry,
+  and an identifier the window does not hold is a no-op, the same answer an edit
+  for a scrolled-out message gives. The cost is that reactions are not persisted
+  (`HistoryCache` ignores the event) and that a fresh page carries no counts
+  until an update arrives; the alternative was a second per-message window that
+  the memory budget would have to pay for twice.

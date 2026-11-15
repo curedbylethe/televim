@@ -631,6 +631,7 @@ mod live_tests {
             reply_to_msg_id: None,
             media: None,
             media_id: None,
+            reactions: Vec::new(),
         }
     }
 
