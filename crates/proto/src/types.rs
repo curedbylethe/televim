@@ -128,6 +128,13 @@ pub(crate) struct ProtoMessage {
     /// they are handed on: a page keeps them, and the message joins a window
     /// without them.
     pub reactions: Vec<ReactionCount>,
+
+    /// Whether the message is pinned in its conversation.
+    ///
+    /// A fact about the conversation's list rather than about the message, which
+    /// is why the domain keeps pins beside the window too: a page hands its
+    /// pinned identifiers on, and the marker is a membership test.
+    pub pinned: bool,
 }
 
 impl ProtoMessage {
@@ -247,6 +254,7 @@ impl From<MessageInfo> for ProtoMessage {
                 .into_iter()
                 .map(to_reaction_count)
                 .collect(),
+            pinned: message.pinned,
         }
     }
 }
@@ -413,6 +421,7 @@ mod tests {
             media: None,
             media_id: None,
             reactions: Vec::new(),
+            pinned: false,
         }
     }
 
@@ -621,6 +630,7 @@ mod live_tests {
             media: None,
             media_id: None,
             reactions: Vec::new(),
+            pinned: false,
         }
     }
 

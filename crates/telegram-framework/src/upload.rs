@@ -20,7 +20,7 @@ use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
 use crate::media::{MediaKind, classify_message};
 use crate::reaction::reaction_counts;
-use crate::updates::{MessageInfo, message_info};
+use crate::updates::{MessageInfo, message_info, pinned_flag};
 
 impl Client {
     /// Uploads and sends a local photo or document to a conversation.
@@ -99,6 +99,7 @@ impl Client {
             classify_message(&message.raw),
         );
         info.reactions = reaction_counts(&message.raw);
+        info.pinned = pinned_flag(&message.raw);
 
         Ok(info)
     }

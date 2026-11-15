@@ -175,6 +175,30 @@ pub enum UpdateEvent {
         /// Every reaction the message now carries.
         reactions: Vec<ReactionCount>,
     },
+
+    /// Messages were pinned in a conversation, or unpinned from it.
+    ///
+    /// The *conversation's* list of pinned identifiers, not a change to a
+    /// message: the update names ids and nothing else, so what is known is that
+    /// these are pinned and the marker is a membership test. A pinned flag on a
+    /// message that arrives in a page is the other half of the same fact, and
+    /// [`ConversationView::apply_event`](crate::history::ConversationView::apply_event)
+    /// is where both meet.
+    ///
+    /// The ids are kept even when the message has been deleted or has left the
+    /// window: Telegram lists a chat's pins from its own records, and a pin whose
+    /// message is gone is a fact the pinned list reports rather than quietly
+    /// forgets.
+    PinChanged {
+        /// The conversation the messages belong to.
+        chat_id: i64,
+
+        /// Identifiers of the messages the change touched.
+        message_ids: Vec<i64>,
+
+        /// Whether they were pinned (`true`) or unpinned (`false`).
+        pinned: bool,
+    },
 }
 
 /// How many messages [`ChatList`] holds before the oldest is dropped.
@@ -248,7 +272,8 @@ impl ChatList {
             // one, so nothing here has anywhere to put it.
             UpdateEvent::ReadReceipt { .. }
             | UpdateEvent::PeerTyping { .. }
-            | UpdateEvent::ReactionsChanged { .. } => false,
+            | UpdateEvent::ReactionsChanged { .. }
+            | UpdateEvent::PinChanged { .. } => false,
         }
     }
 

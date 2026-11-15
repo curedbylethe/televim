@@ -459,6 +459,26 @@ pub enum Event {
     },
 
     /// A pin change came back, or the request failed.
+    ///
+    /// A success says nothing at all — `P` is silent by design, and the marker
+    /// appearing is the answer — while a failure owes the reader a line. The
+    /// marker itself arrives as a
+    /// [`PinChanged`](domain::updates::UpdateEvent::PinChanged) update.
+    Pinned {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The message that was pinned or unpinned.
+        message_id: i64,
+
+        /// Whether a pin was asked for, so a failure can say which way it failed.
+        pin: bool,
+
+        /// Nothing on success, or why Telegram refused.
+        result: Result<(), ProtoError>,
+    },
+
+    /// A pin change came back, or the request failed.
     PinToggled {
         /// The chat whose pin was asked for.
         chat_id: i64,
@@ -3973,6 +3993,24 @@ fn request_plain(
                 }));
             }
 
+            Action::PinMessage {
+                chat_id,
+                message_id,
+                pin,
+            } => {
+                let result = if pin {
+                    client.pin_message(chat_id, message_id).await
+                } else {
+                    client.unpin_message(chat_id, message_id).await
+                };
+                let _ = tx.send(AppEvent::Net(Event::Pinned {
+                    chat_id,
+                    message_id,
+                    pin,
+                    result,
+                }));
+            }
+
             Action::TogglePin { chat_id, pinned } => {
                 let result = client.toggle_pin(chat_id, pinned).await;
                 let _ = tx.send(AppEvent::Net(Event::PinToggled {
@@ -4598,6 +4636,13 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             message_id,
             result,
         } => apply_reacted(app, chat_id, message_id, result),
+
+        Event::Pinned {
+            chat_id,
+            message_id,
+            pin,
+            result,
+        } => apply_pinned(app, chat_id, message_id, pin, result),
 
         Event::PinToggled {
             chat_id,
@@ -5602,6 +5647,7 @@ fn apply_jumped(
         Ok(page) => {
             let chat_id = cursor.peer_id();
             let reactions = page.reactions;
+            let pinned = page.pinned;
 
             // Cached whether or not the window takes it: the page is what the
             // wire said about that stretch either way, and the merge decides
@@ -5613,6 +5659,7 @@ fn apply_jumped(
             if app.apply_jump(&page.messages, jump.target_id) {
                 cursor.reset_to(&page.messages);
                 seed_reactions(app, chat_id, reactions);
+                seed_pins(app, chat_id, pinned);
                 settle(app, cursor);
                 state.history.cursor = Some(cursor);
             }
@@ -5666,6 +5713,7 @@ fn apply_history(
             let rows = page.messages.len();
             let chat_id = cursor.peer_id();
             let reactions = page.reactions;
+            let pinned = page.pinned;
 
             if let Some(kind) = page_kind(direction, anchor, cursor, rows) {
                 state.remember_page(chat_id, &page.messages, kind);
@@ -5676,8 +5724,10 @@ fn apply_history(
             apply_page(app, direction, page.messages);
             // After the messages are in the window, not before: the view takes a
             // count only for a message it holds, and a page is where a chat that
-            // has just been opened learns that any of them carries one.
+            // has just been opened learns that any of them carries one — or is
+            // pinned.
             seed_reactions(app, chat_id, reactions);
+            seed_pins(app, chat_id, pinned);
             // The newest page moved the cursor to the end. A search hit that
             // the cache landed on is put back on: if the page does not hold it,
             // `go_to_search_hit` asks for it as a jump, as it would have had
@@ -6213,6 +6263,32 @@ fn apply_reacted(app: &mut App, chat_id: i64, message_id: i64, result: Result<()
     }
 }
 
+/// Folds a message pin's answer in.
+///
+/// A success is silent: `P` says nothing, the marker arriving from the server's
+/// own update is the answer, and a status line would report a request rather
+/// than anything the reader asked to be told about. A failure owes one line, in
+/// the area's own words, so it cannot be mistaken for the chat-list pin.
+fn apply_pinned(
+    app: &mut App,
+    chat_id: i64,
+    message_id: i64,
+    pin: bool,
+    result: Result<(), ProtoError>,
+) {
+    if app.conversation.conversation.window.chat_id != chat_id {
+        return;
+    }
+
+    match result {
+        Ok(()) => tracing::debug!(chat_id, message_id, pin, "a pin change was accepted"),
+        Err(error) => {
+            tracing::debug!(chat_id, message_id, pin, %error, "a pin change failed");
+            app.flash(format!("pin message: {}", failure_reason(&error)));
+        }
+    }
+}
+
 /// Folds a pin's answer in. The list moves and the status says so when Telegram
 /// agreed; the status says why not when it did not.
 fn apply_pin_toggled(app: &mut App, chat_id: i64, pinned: bool, result: Result<(), ProtoError>) {
@@ -6660,6 +6736,28 @@ fn seed_reactions(app: &mut App, chat_id: i64, reactions: Vec<(i64, Vec<Reaction
                 reactions,
             });
     }
+}
+
+/// Seeds a page's pinned identifiers into the conversation on show.
+///
+/// A page says which of its messages Telegram holds pinned, so a chat opened
+/// fresh is marked before any pin update arrives. One event for the whole page,
+/// because that is the shape the update has too: adding is all a page can do — a
+/// page cannot say a message is *not* pinned — and the domain's rule for an id it
+/// already holds is to leave it once.
+fn seed_pins(app: &mut App, chat_id: i64, pinned: Vec<i64>) {
+    if pinned.is_empty() {
+        return;
+    }
+
+    let _ = app
+        .conversation
+        .conversation
+        .apply_event(&UpdateEvent::PinChanged {
+            chat_id,
+            message_ids: pinned,
+            pinned: true,
+        });
 }
 
 /// Which stretch of the conversation a page that came back was fetched from,
@@ -7264,11 +7362,12 @@ mod tests {
             .collect()
     }
 
-    /// A fetched page of `messages`, carrying no reactions.
+    /// A fetched page of `messages`, carrying no reactions and no pins.
     fn history_page(messages: Vec<Message>) -> HistoryPage {
         HistoryPage {
             messages,
             reactions: Vec::new(),
+            pinned: Vec::new(),
         }
     }
 
@@ -7359,6 +7458,77 @@ mod tests {
         );
 
         assert!(!app.status_text().starts_with("react: "));
+    }
+
+    /// A refused pin owes the reader a line, under its own area name so it
+    /// cannot be mistaken for the chat-list pin.
+    #[test]
+    fn a_refused_pin_flashes_the_reason() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Pinned {
+                chat_id: CHAT,
+                message_id: 2,
+                pin: true,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
+            },
+        );
+
+        assert!(
+            app.status_text().starts_with("pin message: "),
+            "the failure belongs to pinning a message: {}",
+            app.status_text()
+        );
+    }
+
+    /// `P` says nothing when it worked: the marker arriving from the server is
+    /// the answer, and a status line would report the request instead.
+    #[test]
+    fn an_accepted_pin_is_silent() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Pinned {
+                chat_id: CHAT,
+                message_id: 2,
+                pin: true,
+                result: Ok(()),
+            },
+        );
+
+        assert!(
+            !app.status_text().starts_with("pin message: "),
+            "a success has nothing to explain: {}",
+            app.status_text()
+        );
+    }
+
+    /// A pin for a conversation the reader has left is not worth a line on the
+    /// status of the one they are in.
+    #[test]
+    fn a_refused_pin_in_another_conversation_is_not_flashed() {
+        let mut app = app_with_a_conversation(CHAT, 3);
+        let mut state = State::default();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Pinned {
+                chat_id: CHAT + 1,
+                message_id: 2,
+                pin: false,
+                result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT + 1))),
+            },
+        );
+
+        assert!(!app.status_text().starts_with("pin message: "));
     }
 
     /// An application whose open conversation has unread messages in front of
@@ -9323,6 +9493,7 @@ mod tests {
                 result: Ok(HistoryPage {
                     messages: messages(CHAT, 1..=3),
                     reactions: vec![(2, vec![reaction("👍", 3)])],
+                    pinned: Vec::new(),
                 }),
             },
         );
@@ -9336,6 +9507,42 @@ mod tests {
             app.conversation.conversation.reactions(1).is_empty(),
             "and a message the page says nothing about carries nothing"
         );
+    }
+
+    /// A page says which of its messages are pinned, so a chat opened fresh is
+    /// marked before any pin update arrives — and an unpin never has to be
+    /// replayed by a page, because a page can only add.
+    #[test]
+    fn a_fetched_page_seeds_the_pins_it_carries() {
+        let mut app = App::new();
+        app.set_chats(vec![chat(CHAT)]);
+        app.select_chat(0);
+        let mut state = State {
+            history: opened(CHAT),
+            ..State::default()
+        };
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                generation: 0,
+                result: Ok(HistoryPage {
+                    messages: messages(CHAT, 1..=3),
+                    reactions: Vec::new(),
+                    pinned: vec![2],
+                }),
+            },
+        );
+
+        assert!(
+            app.conversation.conversation.is_pinned(2),
+            "the page's pinned message is marked without waiting for an update"
+        );
+        assert!(!app.conversation.conversation.is_pinned(1));
     }
 
     /// A page asked of a feed that has since ended knows nothing of what the
@@ -9363,6 +9570,7 @@ mod tests {
                 result: Ok(HistoryPage {
                     messages: messages(CHAT, 1..=3),
                     reactions: vec![(2, vec![reaction("👍", 3)])],
+                    pinned: Vec::new(),
                 }),
             },
         );

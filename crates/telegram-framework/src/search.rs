@@ -2,10 +2,15 @@
 //!
 //! `grammers` stops at this module's private functions. A search hands back
 //! **places** — message identifiers and a total — rather than the messages
-//! themselves, so the only thing that ever leaves here is a `Vec<i32>` and a
-//! number. There is no `MessageInfo` in this module, and that is the guarantee
-//! rather than a habit: a caller that walks a search never holds the body of a
-//! message it is not showing.
+//! themselves, so the only thing that ever leaves a text search is a `Vec<i32>`
+//! and a number. A caller that walks a search never holds the body of a message
+//! it is not showing.
+//!
+//! The one exception is [`Client::fetch_pinned`], which asks the same request
+//! with the *pinned* filter and hands back whole messages. A pinned list is
+//! drawn rather than jumped to — it shows a sender, a line of text and an age —
+//! so the places a text search returns would be a round trip each, and the
+//! filter route is the only complete way to ask for a chat's pins.
 //!
 //! # Why not `search_messages`
 //!
@@ -45,9 +50,10 @@ use grammers_client::session::types::PeerInfo;
 
 use crate::client::Client;
 use crate::error::{FrameworkError, RequestError};
-use crate::history::clamp_limit;
+use crate::history::{clamp_limit, message_from_raw};
 use crate::media::{MediaKind, classify_raw};
 use crate::tl;
+use crate::updates::MessageInfo;
 
 /// One message a global search matched: where it is, and what it says.
 ///
@@ -296,6 +302,84 @@ pub struct SearchResults {
 }
 
 impl Client {
+    /// Fetches the messages pinned in a conversation, newest first.
+    ///
+    /// Telegram has no "list this chat's pins" call that returns the messages,
+    /// so the pinned filter of `messages.search` is the complete way to ask —
+    /// the latest-pin-only request answers a different question. `grammers`'
+    /// `SearchIter` is the only handle on it, and **that iterator has no
+    /// limit**: it buffers a page and asks for the next one as it is walked. So
+    /// the walk is bounded here — `limit` messages, then the iterator is dropped,
+    /// which sends nothing further.
+    ///
+    /// Whole messages come back, unlike a text search's places: a pinned list is
+    /// drawn (a sender, one line of the text, an age), and the marker on a
+    /// message in the window is its identifier. A service message this crate has
+    /// no reading for is skipped, so `limit` bounds the walk rather than the
+    /// answer.
+    ///
+    /// # Peer cache
+    ///
+    /// Addressing a peer takes the `access_hash` Telegram handed out for it, and
+    /// only [`Client::fetch_dialogs`](crate::Client::fetch_dialogs) discloses
+    /// those: a conversation this client has never seen is
+    /// [`FrameworkError::UnknownPeer`] rather than a request Telegram would
+    /// reject.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameworkError::UnknownPeer`] when the conversation is not in
+    /// the session's peer cache, and [`FrameworkError::Request`] when Telegram
+    /// rejects the search or the connection fails.
+    pub async fn fetch_pinned(
+        &self,
+        peer_id: i64,
+        limit: usize,
+    ) -> Result<Vec<MessageInfo>, FrameworkError> {
+        let Some(peer) = self.peer_ref(peer_id) else {
+            tracing::warn!(
+                peer_id,
+                "the pinned messages were asked of a conversation that is not in the peer cache"
+            );
+            return Err(FrameworkError::UnknownPeer(peer_id));
+        };
+
+        let mut found = Vec::new();
+        let mut search = self
+            .inner()
+            .search_messages(peer)
+            .filter(tl::enums::MessagesFilter::InputMessagesFilterPinned);
+
+        while found.len() < limit {
+            let Some(message) = search
+                .next()
+                .await
+                .map_err(|error| FrameworkError::from(RequestError::from_invocation(&error)))?
+            else {
+                break;
+            };
+
+            // The same reader the history fetch uses, so a pinned message found
+            // here is described exactly as it is in a page: same text, same
+            // media, same pin flag.
+            if let Some(info) = message_from_raw(&message.raw, peer_id) {
+                found.push(info);
+            }
+        }
+
+        // A search can cache a peer or move the datacenter, as `search_messages`
+        // notes: the write-back is what lets that reach the store.
+        self.flush_session();
+
+        tracing::debug!(
+            peer_id,
+            returned = found.len(),
+            "fetched a conversation's pinned messages"
+        );
+
+        Ok(found)
+    }
+
     /// Searches a conversation for messages matching `args`.
     ///
     /// `peer_id` is the conversation's *bare* identifier — the same number a

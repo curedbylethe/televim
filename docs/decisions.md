@@ -1891,3 +1891,21 @@ are in [`../AGENTS.md`](../AGENTS.md).
   (`HistoryCache` ignores the event) and that a fresh page carries no counts
   until an update arrives; the alternative was a second per-message window that
   the memory budget would have to pay for twice.
+
+- **Why a chat's pins are held as identifiers rather than as messages:**
+  `updatePinnedMessages` names identifiers and nothing else — no message, no
+  text, and no place in a window that may not even hold it — so
+  `ConversationView` keeps `pinned_ids` beside the window, next to the read
+  watermark, the failed reasons and the reactions table. The marker on a message
+  is a membership test, which is also why `Message` gains no `pinned` field: a pin
+  changes without the message changing, and a page that replaces the window must
+  not take the pins with it. The list is Telegram's, so an id survives its
+  message's deletion — the pinned list reports a pin whose message is gone rather
+  than quietly forgetting it — and an id the window does not hold is kept for the
+  same reason. The set is bounded by `PINNED_IDS`, oldest pin evicted first, so a
+  repeated update cannot grow it; the reader-facing order (newest first, a later
+  message winning a tie) is computed from the window's own times rather than
+  stored, because a stored order would have to be rewritten on every arrival. A
+  history page carries the pinned ids it saw, so a chat opened fresh is marked
+  before any update arrives — an addition only, since a page cannot say a message
+  is *not* pinned.

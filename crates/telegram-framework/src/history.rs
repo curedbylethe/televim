@@ -33,7 +33,7 @@ use crate::error::{FrameworkError, RequestError};
 use crate::media::classify_raw;
 use crate::reaction::reaction_counts;
 use crate::tl;
-use crate::updates::{MessageInfo, message_info, service_message_text};
+use crate::updates::{MessageInfo, message_info, pinned_flag, service_message_text};
 
 /// The largest page Telegram will return from one history request.
 ///
@@ -350,13 +350,15 @@ fn history_page_from_raw(raw: &[tl::enums::Message], chat_peer_id: i64) -> Histo
 ///
 /// A message read out of a conversation and the same message arriving over the
 /// feed are therefore still described identically, which is what lets the two
-/// be deduplicated against each other.
+/// be deduplicated against each other. The pinned search reads its results
+/// through this function too, so a pinned message found there is described the
+/// same way it is in a page.
 ///
 /// The date is widened straight from the raw `i32`. `grammers` would route it
 /// through a `DateTime` and take the timestamp back out, which is the same
 /// number for every value that conversion accepts — and does not abort on a
 /// value it does not.
-fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> Option<MessageInfo> {
+pub(crate) fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> Option<MessageInfo> {
     let (id, text, date, is_outgoing, is_service, reply_to_msg_id, media) = match raw {
         tl::enums::Message::Empty(message) => (message.id, "", 0, false, false, None, None),
         tl::enums::Message::Message(message) => (
@@ -393,6 +395,7 @@ fn message_from_raw(raw: &tl::enums::Message, chat_peer_id: i64) -> Option<Messa
     );
     info.is_service = is_service;
     info.reactions = reaction_counts(raw);
+    info.pinned = pinned_flag(raw);
     Some(info)
 }
 
@@ -545,6 +548,30 @@ mod tests {
         assert_eq!(
             bare.media, None,
             "and a message that carries nothing is the only one that says so"
+        );
+    }
+
+    /// A pinned message read out of a page says so; that flag is what the marker
+    /// beside the message is drawn from.
+    #[test]
+    fn a_pinned_message_carries_its_flag_out_of_a_page() {
+        let mut raw = raw_message(None);
+        let tl::enums::Message::Message(message) = &mut raw else {
+            panic!("the fixture is an ordinary message");
+        };
+        message.pinned = true;
+
+        assert!(
+            message_from_raw(&raw, 42)
+                .expect("a message is described")
+                .pinned,
+            "the pin flag travels with the message it belongs to"
+        );
+        assert!(
+            !message_from_raw(&raw_message(None), 42)
+                .expect("a message is described")
+                .pinned,
+            "and a message nobody pinned does not claim to be"
         );
     }
 

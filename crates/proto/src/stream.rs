@@ -144,6 +144,18 @@ fn to_event(kind: UpdateKind) -> UpdateEvent {
             message_id,
             reactions: reactions.into_iter().map(to_reaction_count).collect(),
         },
+
+        // A rename of the conversation and of the flag: the identifiers are the
+        // domain's own unit already.
+        UpdateKind::PinnedMessages {
+            chat_peer_id,
+            message_ids,
+            pinned,
+        } => UpdateEvent::PinChanged {
+            chat_id: chat_peer_id,
+            message_ids,
+            pinned,
+        },
     }
 }
 
@@ -180,6 +192,7 @@ mod tests {
             media: None,
             media_id: None,
             reactions: Vec::new(),
+            pinned: false,
         }
     }
 
@@ -410,5 +423,31 @@ mod tests {
             ],
             "every reaction kind has a domain twin"
         );
+    }
+
+    /// A pin reaches the domain as its own event: the conversation, the
+    /// identifiers it touched, and which way the change went.
+    #[test]
+    fn a_pin_update_becomes_the_conversation_and_its_messages() {
+        for pinned in [true, false] {
+            let event = to_event(UpdateKind::PinnedMessages {
+                chat_peer_id: 42,
+                message_ids: vec![9, 7],
+                pinned,
+            });
+
+            let UpdateEvent::PinChanged {
+                chat_id,
+                message_ids,
+                pinned: flag,
+            } = event
+            else {
+                panic!("a pin update is a conversation and identifiers");
+            };
+
+            assert_eq!(chat_id, 42);
+            assert_eq!(message_ids, vec![9, 7]);
+            assert_eq!(flag, pinned);
+        }
     }
 }

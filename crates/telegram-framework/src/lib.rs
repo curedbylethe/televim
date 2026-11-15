@@ -16,6 +16,7 @@
 //!   [`Client::send_attachment`],
 //!   [`Client::edit_message`] and [`Client::delete_messages`],
 //!   [`Client::set_reaction`] for a message's reactions,
+//!   [`Client::pin_message`] and [`Client::fetch_pinned`] for a chat's pins,
 //!   [`Client::download_media`] for a message's attachment, the
 //!   [`Client::subscribe_updates`] feed, and [`Client::invoke`] as a raw escape
 //!   hatch. These need `grammers`, so they sit behind the `live` feature.
