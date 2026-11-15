@@ -80,6 +80,13 @@ pub struct ConversationState {
     /// marker reads the same set — while this holds the fetch the overlay owns.
     pub pinned: crate::state::pinned::PinnedListState,
 
+    /// The message whose revisions `:edits` lists.
+    ///
+    /// Nothing is fetched and nothing is copied: the revisions are the view's,
+    /// and this is only which message the reader asked about and where in its
+    /// blocks they are.
+    pub edit_history: crate::state::edit_history::EditHistoryState,
+
     /// Set by a global search: the query, the messages found in every private
     /// chat, and where the reader is among them.
     ///
@@ -187,6 +194,7 @@ impl ConversationState {
             user_search: UserSearchState::default(),
             contacts: crate::state::contacts::ContactListState::default(),
             pinned: crate::state::pinned::PinnedListState::default(),
+            edit_history: crate::state::edit_history::EditHistoryState::default(),
             global_search: GlobalSearchState::default(),
             register: Register::default(),
             selection: None,
@@ -212,8 +220,10 @@ impl ConversationState {
         self.conversation = ConversationView::new(chat_id);
         self.cached = false;
         // A pin list is about the chat it was opened in, so it goes with the one
-        // being left rather than listing another's rows.
+        // being left rather than listing another's rows; so is a revision list,
+        // and its journal has gone with the view it belonged to.
         self.pinned.close();
+        self.edit_history.close();
         // The pictures belong to the chat on show, as the marks do: a reader
         // who returns finds them fetched again rather than mislabelled.
         self.stickers.clear();

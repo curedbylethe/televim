@@ -85,6 +85,25 @@ pub const REACTION_ENTRIES: usize = 64;
 /// somehow held more would lose its oldest mark rather than grow past this.
 pub const PINNED_IDS: usize = 100;
 
+/// How many revisions of one message's text the journal keeps.
+///
+/// A revision is the text a message had before an edit this session saw go by —
+/// the wire carries the new text and nothing about the old one, so nothing else
+/// can recover it. Five is enough to show what changed in a message that was
+/// corrected a few times, and the bound is what keeps a chat being edited faster
+/// than it is read from growing without one: the oldest revision of that message
+/// is dropped to make room.
+pub const REVISIONS_PER_MESSAGE: usize = 5;
+
+/// How many messages a conversation keeps revisions for.
+///
+/// The other half of the same ceiling: a journal copies text, so a window of two
+/// hundred messages each edited once is more than a screenful's worth of bytes to
+/// hold for a panel that shows one message at a time. Fifty messages is more than
+/// a reader can walk `:edits` through in a sitting, and the journal that has been
+/// held longest is dropped to make room.
+pub const REVISION_JOURNALS: usize = 50;
+
 /// The messages of one conversation, oldest first.
 ///
 /// Every mutation keeps two invariants: the deque is ordered oldest first, and it
@@ -490,6 +509,19 @@ pub struct ConversationView {
     /// list is Telegram's and reports a pin whose message is gone rather than
     /// silently forgetting it.
     pinned_ids: VecDeque<i64>,
+
+    /// The text each edited message carried before its edits, newest first,
+    /// bounded per message by [`REVISIONS_PER_MESSAGE`] and in all by
+    /// [`REVISION_JOURNALS`].
+    ///
+    /// Beside the window rather than on [`Message`], like the reactions: an edit
+    /// rewrites the message, and a revision is a fact about what it used to say.
+    /// Nothing else can supply one — Telegram keeps no edit history this client
+    /// can ask for — so this is a record of what *arrived here*, and the copy it
+    /// costs is the price of the only version of the feature the protocol allows.
+    /// Dropped with its message, and with the view: a chat switch replaces this
+    /// one, so a revision does not outlive the conversation it belongs to.
+    revisions: VecDeque<(i64, Vec<Cow<'static, str>>)>,
 }
 
 impl ConversationView {
@@ -508,6 +540,7 @@ impl ConversationView {
             next_temp_id: -1,
             reactions: VecDeque::new(),
             pinned_ids: VecDeque::new(),
+            revisions: VecDeque::new(),
         }
     }
 
@@ -543,11 +576,17 @@ impl ConversationView {
     /// a chat switch replaces the window, and how far that conversation has been
     /// read does not change because the reader looked away. The reactions and the
     /// pins are folded here for the same reason, and they are the two facts a
-    /// page cannot rewrite.
+    /// page cannot rewrite. An edit is the third: the journal keeps the text it
+    /// replaces, which is the only place that text exists.
     #[must_use]
     pub fn apply_event(&mut self, event: &UpdateEvent) -> bool {
         match event {
             UpdateEvent::ReadReceipt { chat_id, max_id } => self.apply_read(*chat_id, *max_id),
+            UpdateEvent::MessageEdited {
+                chat_id,
+                message_id,
+                new_text,
+            } => self.apply_edit(*chat_id, *message_id, new_text.as_ref()),
             UpdateEvent::ReactionsChanged {
                 chat_id,
                 message_id,
@@ -561,16 +600,81 @@ impl ConversationView {
                 message_ids,
                 pinned,
             } => chat_id == &self.window.chat_id && self.apply_pins(message_ids, *pinned),
-            // A deleted message takes its reactions with it: the entry is about
-            // a message, and a message nothing can point at is not one to redraw
-            // chips for. Its pin stays, because the pinned list is Telegram's and
-            // a pin whose message is gone is what that list reports.
+            // A deleted message takes its reactions and its revisions with it:
+            // both are about a message, and a message nothing can point at is not
+            // one to redraw chips for or to list revisions of. Its pin stays,
+            // because the pinned list is Telegram's and a pin whose message is
+            // gone is what that list reports.
             UpdateEvent::MessagesDeleted { message_ids } => {
                 self.reactions.retain(|(id, _)| !message_ids.contains(id));
+                self.revisions.retain(|(id, _)| !message_ids.contains(id));
                 self.window.apply_event(event)
             }
             _ => self.window.apply_event(event),
         }
+    }
+
+    /// Replaces a message's text, keeping the text it had.
+    ///
+    /// The outgoing text is copied *before* the window is written, because after
+    /// that write it is gone: the update carries the new text alone, so a
+    /// revision nobody copied here is a revision nobody has. The journal entry is
+    /// dropped when the window refuses the edit — another chat's message, an
+    /// identifier the window does not hold, or a text that is already the one on
+    /// screen — so a repeat of an edit that changed nothing records nothing.
+    fn apply_edit(&mut self, chat_id: i64, message_id: i64, new_text: &str) -> bool {
+        let outgoing = self
+            .message(message_id)
+            .filter(|message| message.text != new_text)
+            .map(|message| message.text.clone());
+
+        let changed = self.window.apply_edit(chat_id, message_id, new_text);
+
+        if let Some(outgoing) = outgoing
+            && changed
+        {
+            self.record_revision(message_id, outgoing);
+        }
+
+        changed
+    }
+
+    /// Adds the text `message_id` used to carry, newest first.
+    ///
+    /// Pushed onto the front rather than the back: the list is read newest first,
+    /// so the newest revision is the one a reader sees first, and the bound drops
+    /// the oldest — the one nearest the text the sender first wrote.
+    fn record_revision(&mut self, message_id: i64, text: Cow<'static, str>) {
+        if let Some((_, held)) = self.revisions.iter_mut().find(|(id, _)| *id == message_id) {
+            held.insert(0, text);
+            held.truncate(REVISIONS_PER_MESSAGE);
+            return;
+        }
+
+        self.revisions.push_back((message_id, vec![text]));
+        self.trim_revisions();
+    }
+
+    /// Drops the journals held longest until the bound holds.
+    fn trim_revisions(&mut self) {
+        while self.revisions.len() > REVISION_JOURNALS {
+            self.revisions.pop_front();
+        }
+    }
+
+    /// The text one message carried before the edits this session saw, newest
+    /// first.
+    ///
+    /// Empty for a message edited nowhere this session — including one that
+    /// arrived already edited, because the protocol reports the new text and
+    /// nothing of what it replaced. It is this session's record, not the
+    /// message's history.
+    #[must_use]
+    pub fn revisions(&self, message_id: i64) -> &[Cow<'static, str>] {
+        self.revisions
+            .iter()
+            .find(|(id, _)| *id == message_id)
+            .map_or(&[], |(_, held)| held.as_slice())
     }
 
     /// The reactions one message carries, empty when it has none.
@@ -2240,6 +2344,158 @@ mod tests {
         }
 
         assert_eq!(view.window.len(), CONVERSATION_WINDOW);
+    }
+
+    // ---- the revision journal ------------------------------------------
+
+    /// A conversation holding `ids`, every message reading `text`.
+    fn view_with(ids: &[i64]) -> ConversationView {
+        let mut view = ConversationView::new(42);
+        view.window
+            .replace(ids.iter().map(|id| message(42, *id, "text")));
+        view
+    }
+
+    /// Edits `message_id` to `text`, through the view.
+    fn edit(view: &mut ConversationView, message_id: i64, text: &'static str) -> bool {
+        view.apply_event(&UpdateEvent::MessageEdited {
+            chat_id: 42,
+            message_id,
+            new_text: Cow::Borrowed(text),
+        })
+    }
+
+    /// The revisions of `message_id`, newest first, as they read.
+    fn revisions(view: &ConversationView, message_id: i64) -> Vec<&str> {
+        view.revisions(message_id).iter().map(Cow::as_ref).collect()
+    }
+
+    /// One edit gives one revision, and the text that arrived is the one the
+    /// message shows: the journal holds what the message *used* to say.
+    #[test]
+    fn an_edit_keeps_the_text_it_replaced() {
+        let mut view = view_with(&[10]);
+
+        assert!(edit(&mut view, 10, "after"));
+
+        assert_eq!(revisions(&view, 10), vec!["text"]);
+        assert_eq!(
+            view.message(10).map(|message| message.text.as_ref()),
+            Some("after"),
+            "and the message carries the new text"
+        );
+    }
+
+    /// Two edits give two revisions, newest first, with the current text still
+    /// the message's own.
+    #[test]
+    fn a_second_edit_puts_its_revision_in_front_of_the_first() {
+        let mut view = view_with(&[10]);
+
+        assert!(edit(&mut view, 10, "middle"));
+        assert!(edit(&mut view, 10, "latest"));
+
+        assert_eq!(revisions(&view, 10), vec!["middle", "text"]);
+        assert_eq!(
+            view.message(10).map(|message| message.text.as_ref()),
+            Some("latest")
+        );
+    }
+
+    /// The per-message bound drops the revision nearest the text the sender first
+    /// wrote, because that is the one furthest from what the reader is reading.
+    #[test]
+    fn the_oldest_revision_of_one_message_is_evicted_at_the_bound() {
+        let mut view = view_with(&[10]);
+
+        for text in ["one", "two", "three", "four", "five", "six", "seven"] {
+            assert!(edit(&mut view, 10, text), "{text} lands");
+        }
+
+        let held = revisions(&view, 10);
+        assert_eq!(held.len(), REVISIONS_PER_MESSAGE, "the bound holds");
+        assert_eq!(
+            held[0], "six",
+            "the newest revision is the one just replaced"
+        );
+        assert!(
+            !held.contains(&"text") && !held.contains(&"one"),
+            "the oldest revisions went: {held:?}"
+        );
+        assert_eq!(held[REVISIONS_PER_MESSAGE - 1], "two");
+    }
+
+    /// The other half of the ceiling: journals are dropped oldest first, so a long
+    /// life of edits in one conversation cannot grow without a bound.
+    #[test]
+    fn the_journal_held_longest_is_evicted_at_the_total_bound() {
+        let mut view = view_with(&[1, 2, 3]);
+        let first = 1001;
+        let bound = i64::try_from(REVISION_JOURNALS).expect("the bound fits an identifier");
+        let last = first + bound + 2;
+
+        for id in first..=last {
+            view.window
+                .push_back(std::iter::once(message(42, id, "text")));
+            assert!(edit(&mut view, id, "after"), "{id} is journalled");
+        }
+
+        let held = (first..=last)
+            .filter(|id| !revisions(&view, *id).is_empty())
+            .count();
+        assert_eq!(held, REVISION_JOURNALS, "the bound holds");
+        assert!(
+            revisions(&view, first).is_empty() && revisions(&view, first + 2).is_empty(),
+            "the journals held longest went"
+        );
+        assert!(
+            !revisions(&view, first + 3).is_empty(),
+            "and the newest ones stayed"
+        );
+    }
+
+    /// A deleted message takes its journal with it: the panel lists revisions of a
+    /// message the conversation holds, and there is no message left to list.
+    #[test]
+    fn a_deleted_message_takes_its_revisions_with_it() {
+        let mut view = view_with(&[10, 11]);
+        assert!(edit(&mut view, 11, "after"));
+        assert_eq!(revisions(&view, 11), vec!["text"]);
+
+        let _ = view.apply_event(&UpdateEvent::MessagesDeleted {
+            message_ids: vec![11],
+        });
+
+        assert!(revisions(&view, 11).is_empty());
+        assert!(view.revisions(11).is_empty());
+    }
+
+    /// An edit the view cannot attribute records nothing: another chat's message,
+    /// an unknown identifier, and a text the message already has.
+    #[test]
+    fn an_edit_that_changes_nothing_records_no_revision() {
+        let mut view = view_with(&[10]);
+
+        assert!(!view.apply_event(&UpdateEvent::MessageEdited {
+            chat_id: 99,
+            message_id: 10,
+            new_text: Cow::Borrowed("after"),
+        }));
+        assert!(!edit(&mut view, 999, "after"));
+        assert!(!edit(&mut view, 10, "text"), "the text it already has");
+
+        assert!(revisions(&view, 10).is_empty());
+    }
+
+    /// Only this session's edits are known. A message that arrived already edited
+    /// has no revision, because the wire reports the new text and nothing about
+    /// what it replaced — which is the whole limit of the feature.
+    #[test]
+    fn a_message_that_arrived_edited_has_no_revision() {
+        let mut view = ConversationView::new(42);
+        let _ = view.apply_event(&arrival(42, 10, "already edited"));
+
+        assert!(revisions(&view, 10).is_empty());
     }
 
     // ---- properties ----------------------------------------------------

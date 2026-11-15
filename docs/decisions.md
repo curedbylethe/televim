@@ -1909,3 +1909,23 @@ are in [`../AGENTS.md`](../AGENTS.md).
   history page carries the pinned ids it saw, so a chat opened fresh is marked
   before any update arrives — an addition only, since a page cannot say a message
   is *not* pinned.
+
+- **Why a message's revisions are a local journal rather than a protocol
+  feature:** Telegram has no edit-history call to make. `messages.getEditHistory`
+  does not exist in the schema, the live `updateEditMessage` carries the new text
+  and nothing of the text it replaced, and `Message.edit_date` records only that
+  an edit happened. A feature built on a call that does not exist would be one
+  that never returns; a feature built on `edit_date` would have a timestamp for a
+  revision it still could not show. So `ConversationView` journals what it
+  actually saw: `apply_edit` copies the outgoing text before the window writes the
+  new one, newest first, freed with its message and with the view. The caps are
+  two named constants beside `FAILED_REASONS`, `REACTION_ENTRIES` and `PINNED_IDS`
+  — `REVISIONS_PER_MESSAGE` (5) and `REVISION_JOURNALS` (50) — because a journal
+  copies text and the memory budget counts only `Message.text`. `Message` gains no
+  field, for the same reason it gains none for a reaction: an edit rewrites the
+  message, and a revision is a fact about what it used to say. The cost is stated
+  where the reader will meet it: nothing is persisted, so a chat switch or a
+  relaunch loses the journal, and an edit that landed elsewhere — another device,
+  a chat the reader was not looking at, a run that was closed — was never seen and
+  so is not shown. The overlay is therefore the session's record of what changed
+  in front of the reader, not "the message's history", and the copy says so.

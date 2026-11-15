@@ -3017,6 +3017,152 @@ fn a_pin_made_while_the_list_is_open_is_a_row() {
     );
 }
 
+// ---- a message's revisions ------------------------------------------
+
+/// Edits the message `id` to `text`, as the update from the server does.
+fn edited(app: &mut App, id: i64, text: &'static str) {
+    let _ = app
+        .conversation
+        .conversation
+        .apply_event(&UpdateEvent::MessageEdited {
+            chat_id: MOCK_CHAT,
+            message_id: id,
+            new_text: std::borrow::Cow::Borrowed(text),
+        });
+}
+
+/// `:edits` opens the overlay on the cursor's message, with the blocks the
+/// overlay draws counted in its title.
+#[test]
+fn the_edits_command_opens_the_revision_list_of_the_cursor_s_message() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(reading(&app), Some(9));
+    edited(&mut app, 9, "middle");
+    edited(&mut app, 9, "latest");
+
+    run_command_line(&mut app, "edits");
+
+    assert!(app.conversation.edit_history.is_active());
+    assert_eq!(app.conversation.edit_history.message_id(), Some(9));
+    assert_eq!(
+        app.conversation
+            .edit_history
+            .len(&app.conversation.conversation),
+        3,
+        "the current text and the two revisions"
+    );
+    assert_eq!(
+        app.status_text(),
+        crate::widgets::input_bar::EDITS_HINT,
+        "and the row names the list's keys"
+    );
+}
+
+/// A message no revision was seen for still opens: "no revision was recorded" is
+/// the answer, and a flash for it would leave the reader with nothing to read.
+#[test]
+fn the_edits_command_opens_on_a_message_with_no_revision() {
+    let mut app = App::mock();
+
+    run_command_line(&mut app, "edits");
+
+    assert!(app.conversation.edit_history.is_active());
+    assert_eq!(
+        app.conversation
+            .edit_history
+            .len(&app.conversation.conversation),
+        0,
+        "nothing to walk, and the panel says why"
+    );
+}
+
+/// With no message under the cursor there is nothing to list, so the command is a
+/// refusal and opens nothing.
+#[test]
+fn the_edits_command_with_no_message_refuses_and_opens_nothing() {
+    let mut app = App::mock();
+    app.conversation.conversation.window.replace(Vec::new());
+    app.conversation.vim.set_total(0);
+
+    run_command_line(&mut app, "edits");
+
+    assert!(!app.conversation.edit_history.is_active());
+    assert!(
+        app.ui.status.contains("no edits seen"),
+        "the refusal says what is missing: {:?}",
+        app.ui.status
+    );
+}
+
+/// `j`/`k` walk the blocks and `Esc` closes, without moving the reader.
+#[test]
+fn the_revision_keys_walk_and_close_without_moving_the_reader() {
+    let mut app = App::mock();
+    edited(&mut app, 10, "middle");
+    edited(&mut app, 10, "latest");
+    run_command_line(&mut app, "edits");
+    let place = reading(&app);
+
+    key(&mut app, 'j');
+    key(&mut app, 'j');
+    key(&mut app, 'j');
+    assert_eq!(
+        app.conversation.edit_history.selected(),
+        2,
+        "three blocks, and the cursor stops at the last"
+    );
+
+    key(&mut app, 'k');
+    assert_eq!(app.conversation.edit_history.selected(), 1);
+
+    app.handle_key(press(KeyCode::Esc));
+
+    assert!(!app.conversation.edit_history.is_active());
+    assert_eq!(reading(&app), place, "Esc left the cursor where it was");
+}
+
+/// The overlay lists what it is given: an edit that lands while it is open is a
+/// block it draws, because the revisions are the conversation's and not a copy.
+#[test]
+fn an_edit_that_lands_while_the_list_is_open_is_a_block() {
+    let mut app = App::mock();
+    edited(&mut app, 10, "middle");
+    run_command_line(&mut app, "edits");
+    let before = app
+        .conversation
+        .edit_history
+        .len(&app.conversation.conversation);
+
+    edited(&mut app, 10, "latest");
+
+    assert_eq!(
+        app.conversation
+            .edit_history
+            .len(&app.conversation.conversation),
+        before + 1,
+        "the revision that just arrived is one more block"
+    );
+}
+
+/// One overlay at a time in the conversation column: opening the pinned list puts
+/// the revision list away, and the other way round.
+#[test]
+fn only_one_overlay_holds_the_conversation_column() {
+    let mut app = App::mock();
+    edited(&mut app, 10, "middle");
+    run_command_line(&mut app, "edits");
+    assert!(app.conversation.edit_history.is_active());
+
+    run_command_line(&mut app, "pinned");
+    assert!(app.conversation.pinned.is_active());
+    assert!(!app.conversation.edit_history.is_active());
+
+    run_command_line(&mut app, "edits");
+    assert!(app.conversation.edit_history.is_active());
+    assert!(!app.conversation.pinned.is_active());
+}
+
 // ---- confirming, dismissing, and the status line -------------------
 
 #[test]

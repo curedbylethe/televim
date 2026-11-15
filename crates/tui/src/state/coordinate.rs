@@ -1315,6 +1315,47 @@ fn pinned_key(conversation: &mut ConversationState, key: KeyEvent) -> bool {
     true
 }
 
+/// Handles a key while the edit-history overlay is up.
+///
+/// `j`/`k` walk the blocks and `Esc` closes; everything else passes through, so
+/// `:` can still open the line. There is no `Enter`: the blocks are read, not
+/// chosen, and a key that closed on the way to nowhere would be the reader's
+/// place in the conversation moving for nothing.
+///
+/// Returns whether the key was the overlay's.
+fn edits_key(conversation: &mut ConversationState, key: KeyEvent) -> bool {
+    let len = conversation.edit_history.len(&conversation.conversation);
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => conversation.edit_history.move_selection(1, len),
+        KeyCode::Char('k') | KeyCode::Up => conversation.edit_history.move_selection(-1, len),
+        KeyCode::Esc => conversation.edit_history.close(),
+        _ => return false,
+    }
+
+    true
+}
+
+/// Handles a key while one of the conversation column's overlays is up.
+///
+/// The pinned list and the revision list cannot both be open — opening either
+/// puts the other away — so this is one question, asked once: which of them owns
+/// the key, and did it take it. Skipped while the line has the focus, so `:` still
+/// opens a command and the same letters still type.
+///
+/// Returns whether the key was an overlay's.
+fn overlay_key(ui: &UiState, conversation: &mut ConversationState, key: KeyEvent) -> bool {
+    if ui.focus == Focus::Input {
+        return false;
+    }
+
+    if conversation.pinned.is_active() {
+        return pinned_key(conversation, key);
+    }
+
+    conversation.edit_history.is_active() && edits_key(conversation, key)
+}
+
 /// Handles a key while the forward picker is up.
 ///
 /// The picker owns every key for as long as it is up, so that nothing the
@@ -2769,8 +2810,26 @@ pub(crate) fn open_pinned(
     outbox: &mut Outbox,
 ) {
     let chat_id = conversation.conversation.window.chat_id;
+    conversation.edit_history.close();
     conversation.pinned.begin(chat_id);
     queue_action(&mut *outbox, &mut *ui, Action::FetchPinned { chat_id });
+}
+
+/// Opens `:edits` over the conversation, on the message under the cursor.
+///
+/// Nothing is fetched and nothing is refused but the absence of a message: a
+/// message no revision was seen for still opens, because "no revision was
+/// recorded" is the answer the panel exists to give — and a flash for it would
+/// leave the reader with nothing to read. The overlay and the pinned list share
+/// one column, so opening either puts the other away.
+pub(crate) fn open_edits(ui: &mut UiState, conversation: &mut ConversationState) {
+    let Some(message_id) = conversation.cursor_message_id() else {
+        ui.flash("no edits seen for this message");
+        return;
+    };
+
+    conversation.pinned.close();
+    conversation.edit_history.begin(message_id);
 }
 
 /// Starts a selection at the cursor's message, character-wise or whole.
@@ -3588,6 +3647,13 @@ pub(crate) fn run_command(
             } else if command_needs_client(&mut *ui, &*session) {
                 open_pinned(&mut *ui, &mut *conversation, &mut *outbox);
             }
+            false
+        }
+        // `:edits`: what the message under the cursor used to say, as far as this
+        // session saw it. Nothing is fetched — there is nothing to ask — so the
+        // command needs no client and opens at once.
+        "edits" => {
+            open_edits(&mut *ui, &mut *conversation);
             false
         }
         "archive" => {
@@ -5364,12 +5430,10 @@ fn intercept_key(
         return true;
     }
 
-    // The pinned list owns its keys while it is up: `j`/`k` walk the pins,
-    // `Enter` goes to the one under the cursor and closes, `Esc` closes and
-    // leaves the reader where they were. Like the directory it is skipped while
-    // the line has the focus, so the same letters still type.
-    if ui.focus != Focus::Input && conversation.pinned.is_active() && pinned_key(conversation, key)
-    {
+    // The overlays that sit in the conversation column own the few keys they list
+    // — the pinned list walks and jumps, the revision list walks — and are skipped
+    // while the line has the focus, so the same letters still type.
+    if overlay_key(&*ui, &mut *conversation, key) {
         return true;
     }
 

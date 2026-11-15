@@ -3528,6 +3528,9 @@ impl App {
         // one of the two up: the picker is a question about a selection, the list
         // about a chat.
         widgets::pinned_list::render(self, horizontal[1], frame);
+        // The edit-history overlay is the third in that column: one message's
+        // revisions, opened from the conversation they belong to.
+        widgets::edit_history::render(self, horizontal[1], frame);
         // The global search covers the body, rows above the status line, so the
         // panes are not drawn behind it: it is given the whole frame.
         widgets::global_list::render(self, area, frame);
@@ -3921,6 +3924,10 @@ impl App {
         // what the next key will act on.
         if self.conversation.pinned.is_active() {
             return widgets::input_bar::PINNED_HINT.to_owned();
+        }
+        // The revision list names its own keys for the same reason.
+        if self.conversation.edit_history.is_active() {
+            return widgets::input_bar::EDITS_HINT.to_owned();
         }
         // An open overlay owns the line, above the selection and every search: it is what the next key will act on,
         // and a flash from before it was opened would be about another surface.

@@ -98,6 +98,12 @@ pub const FORWARD_PICKER_HINT: &str = "VISUAL  j/k: choose  ⏎: forward  Esc: c
 /// cursor, and `Esc` leaves the reader where they were.
 pub const PINNED_HINT: &str = " j/k: pin  ⏎: jump  Esc: close";
 
+/// The hint while `:edits` is up over the conversation.
+///
+/// The same two motions and the same way out, and no `Enter`: a revision is read,
+/// not chosen.
+pub const EDITS_HINT: &str = " j/k: revision  Esc: close";
+
 /// The hint while the profile panel has the focus.
 ///
 /// Its own row, and the reason is not cosmetic: `hint()` matches on
@@ -234,15 +240,16 @@ const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
 ///
-/// Twenty entries: the design's hints and the sign-in rows. A string that is
+/// Twenty-one entries: the design's hints and the sign-in rows. A string that is
 /// width-checked by a test and displayed by nothing is the defect this list
 /// exists to prevent, and it is why the count is written out rather than derived.
 #[cfg(test)]
-const ALL_HINTS: [&str; 20] = [
+const ALL_HINTS: [&str; 21] = [
     NORMAL_HINT,
     CHAT_LIST_HINT,
     REACT_HINT,
     PINNED_HINT,
+    EDITS_HINT,
     VISUAL_HINT,
     CARD_SELF_HINT,
     CARD_CONTACT_HINT,

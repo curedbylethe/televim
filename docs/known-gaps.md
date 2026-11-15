@@ -694,6 +694,29 @@ Real, and named so they are not mistaken for oversights:
   of more than 100 conversations shows the newest 100 (pinned first) and the
   rest cannot be reached, or unarchived, from `:archived`. Paging needs an
   offset peer built from the last row.
+- **A message's revisions are what this session saw, and nothing more.** Telegram
+  keeps no edit history a client can ask for: the live update carries the new text
+  and none of the old one, `messages.getEditHistory` does not exist, and
+  `edit_date` records only that an edit happened. `:edits` therefore lists the
+  revisions televim journalled as their updates arrived, and everything it cannot
+  show follows from that:
+  - *Five revisions per message, fifty messages in all.* Past five edits the
+    oldest revision of that message is dropped, which is the one nearest the text
+    the sender first wrote; past fifty messages with a journal the one held
+    longest goes. Both bounds are constants beside the other side-table caps in
+    `domain/src/history.rs`.
+  - *Gone when the chat is left, and with the process.* Nothing is written to
+    disk: leaving a conversation replaces the view and its journal with it, and a
+    relaunch starts with none. A pin can still be shown for a message the window
+    has lost because the server holds the pin; a revision has no such source to
+    ask again.
+  - *Nothing is known about an edit that happened before the reader opened the
+    chat* — made on another device, made while another conversation was open, or
+    made while televim was closed. A message that arrived already edited has no
+    revision at all, and `:edits` says so in a sentence rather than inventing one.
+  - *No revision carries a time.* The update has none, and a local arrival time
+    would be a different fact under the same label, so only the current text is
+    headed with an age; the older blocks wear `…`.
 
 ## Browser demo
 
