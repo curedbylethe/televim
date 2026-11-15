@@ -629,15 +629,28 @@ dim ink metadata uses. **This model presents the history; it records nothing**, 
 the fixture is an account's own past edits.
 
 **`t` translates in place.** The translated text takes the body's place, at the
-body's column, and the row under it says `translated from he` in dim ink. The marker
-is a word rather than a colour or a glyph because the risk here is specific: a reader
-who mistakes a translation for the message has been told something the sender did not
-write. `t` again restores the original and the marker goes with it. A message with no
+body's column, and the row under it says `translated to en` in dim ink. The marker
+names the language the reader **asked for**, not the one the message was in:
+`messages.TranslatedText` answers with the translation and says nothing about its
+source, so `translated from he` would be a claim this client cannot make. The rule is
+unchanged — name the language, in a word, on one line, in the dim ink metadata uses —
+and only the side of the translation it names had to move with what the protocol
+reports. A marker at all, rather than a colour or a glyph, is the point: a reader who
+mistakes a translation for the message has been told something the sender did not
+write. `t` again restores the original and the marker goes with it, and so does an
+edit to the message, because a rendering of words that have been replaced would be
+worse than none. A message with no
 stored translation is the premium case, and it answers with one dim sentence on the
 status row — `Translation is a premium feature: this message was not translated.` It
 is dim, not the bright refusal an input answers with, and it is a sentence on the
 status row rather than a dialog, because a dialog would take the reader off the
 message it is about, and the reader has to be able to keep reading.
+
+**The language is chosen once, in the configuration.** `[translation] to` names the
+target every `t` asks for, and `en` when it is not set, so the key costs one keystroke
+and never asks a question. Nothing is translated on arrival: a screen that translated
+by itself would be answering a question nobody asked, and the account that pays for
+the feature is not one this client can recognise before the server refuses.
 
 | State | The conversation shows |
 | :---- | :--------------------- |
@@ -648,7 +661,7 @@ message it is about, and the reader has to be able to keep reading.
 | `:pinned`, chat with none | `No pinned message in this chat.`, dim |
 | `:edits`, message with revisions | current first, then revisions down to the original |
 | `:edits`, message never edited | `No recorded revision: this text is the only version.`, dim |
-| `t`, message with a translation | the translation in the body, `translated from he` beneath |
+| `t`, message with a translation | the translation in the body, `translated to en` beneath |
 | `t`, message without one | the body unchanged, one dim sentence on the status row |
 
 Scenes: `reactions`, `pinned`, `edits` and `translated` in the engine, eighteen frames
@@ -1557,17 +1570,20 @@ card with the three action rows, rename from the card and from the command line,
 both delete questions, a report naming its reason, an unknown-reason refusal, and
 the contacts list with a person who has no chat.
 
-**The model is behind the build in five places**, recorded rather than hidden:
+**The model is behind the build in six places**, recorded rather than hidden:
 the model's `archiveChat` leaves the conversation open where the build closes it;
 its unarchive splices the chat back at the index it remembered where the build
 puts it in the list's own order; an empty `:archived` opens in the model where
 the build refuses it with `archived — 0`; while a list is up the model
 draws its key help (`j/k: contact  ⏎: card  Esc: close`, and the archive's
 equivalent) on the status row where the build draws the label, `contacts — {n}`
-or `archived — {n}`, because an open list owns that row; and a switch in the
+or `archived — {n}`, because an open list owns that row; a switch in the
 model finds the carried chat by the correspondent's name where the build finds
-it by peer id, because the model's chats have no ids. The frames show the
-model's behaviour in those five, and the build's is the one this document
+it by peer id, because the model's chats have no ids; and the `translated` scene
+draws `translated from he` where the build draws `translated to en`, because
+`messages.TranslatedText` names no source language and a `from` this client
+cannot know is the one claim the marker exists to prevent. The frames show the
+model's behaviour in those six, and the build's is the one this document
 describes.
 
 ## Updating televim: a notice, an offer, and one opt-in step

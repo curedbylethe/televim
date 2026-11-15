@@ -1,6 +1,6 @@
 use super::*;
 
-use domain::message::{Reaction, ReactionCount};
+use domain::message::{Reaction, ReactionCount, Translation};
 
 #[test]
 fn focus_report_defaults_to_undetected_and_not_focused() {
@@ -3015,6 +3015,152 @@ fn a_pin_made_while_the_list_is_open_is_a_row() {
         vec![7],
         "the list reads the conversation's pins"
     );
+}
+
+// ---- translating a message -------------------------------------------
+
+/// Gives the open conversation's message `id` this translation, as the answer
+/// from the server does.
+fn translated(app: &mut App, id: i64, text: &str, target: &str) {
+    assert!(
+        app.conversation.conversation.set_translation(
+            id,
+            Translation {
+                text: text.to_owned(),
+                source: None,
+                target: target.to_owned(),
+            },
+        ),
+        "the translation was expected to land"
+    );
+}
+
+/// `t` asks for the cursor's message in the configured language, and names it in
+/// the request so nothing else has to guess.
+#[test]
+fn t_asks_for_the_cursor_s_message_in_the_configured_language() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(reading(&app), Some(9));
+
+    app.handle_key(press(KeyCode::Char('t')));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Translate {
+            chat_id: MOCK_CHAT,
+            message_id: 9,
+            lang: "en".to_owned(),
+        })
+    );
+    assert_eq!(
+        app.ui.status, IDLE_STATUS,
+        "the key says nothing either way"
+    );
+    assert!(
+        app.conversation.conversation.translation(9).is_none(),
+        "and nothing is drawn until the answer lands"
+    );
+}
+
+/// The language is the reader's, not the build's: whatever the configuration
+/// said is what the request carries.
+#[test]
+fn the_translation_language_is_the_one_that_was_configured() {
+    let mut app = App::mock();
+    app.conversation = app.conversation.with_translation_target("pt-BR");
+
+    app.handle_key(press(KeyCode::Char('t')));
+
+    assert_eq!(
+        app.take_action(),
+        Some(Action::Translate {
+            chat_id: MOCK_CHAT,
+            message_id: 10,
+            lang: "pt-BR".to_owned(),
+        })
+    );
+}
+
+/// `t` again on a message already showing a translation takes it away, and asks
+/// the server for nothing: the rendering is this client's.
+#[test]
+fn t_again_takes_the_translation_away_without_a_round_trip() {
+    let mut app = App::mock();
+    translated(&mut app, 10, "Bring the wire too.", "en");
+
+    app.handle_key(press(KeyCode::Char('t')));
+
+    assert!(
+        app.conversation.conversation.translation(10).is_none(),
+        "the message is back to its own words"
+    );
+    assert_eq!(app.take_action(), None, "and the wire was not asked");
+}
+
+/// `t` with no message under the cursor is a no-op, like `+` and `P`.
+#[test]
+fn t_with_no_message_asks_for_nothing() {
+    let mut app = App::mock();
+    app.conversation.conversation.window.replace(Vec::new());
+    app.conversation.vim.set_total(0);
+
+    app.handle_key(press(KeyCode::Char('t')));
+
+    assert_eq!(app.take_action(), None);
+    assert_eq!(app.ui.status, IDLE_STATUS);
+}
+
+/// The body draws the translation and the model keeps the message's own words:
+/// toggling back is a matter of the view forgetting the answer, not of undoing a
+/// write.
+#[test]
+fn the_message_keeps_its_own_text_through_a_translation() {
+    let mut app = App::mock();
+    let own = text_of(&app, 10).map(ToOwned::to_owned).expect("a message");
+
+    translated(&mut app, 10, "Bring the wire too.", "en");
+
+    let message = app
+        .conversation
+        .conversation
+        .message(10)
+        .expect("the message is in the window");
+    assert_eq!(
+        app.shown_body(message),
+        "Bring the wire too.",
+        "the body is the translation while it is shown"
+    );
+    assert_eq!(
+        text_of(&app, 10),
+        Some(own.as_str()),
+        "and the message is untouched"
+    );
+}
+
+/// An edit drops the translation, because the words it rendered are gone: the
+/// body falls back to the message's own new text.
+#[test]
+fn an_edit_puts_the_message_s_own_words_back() {
+    let mut app = App::mock();
+    translated(&mut app, 10, "Bring the wire too.", "en");
+
+    let _ = app
+        .conversation
+        .conversation
+        .apply_event(&UpdateEvent::MessageEdited {
+            chat_id: MOCK_CHAT,
+            message_id: 10,
+            new_text: std::borrow::Cow::Borrowed("edited after the translation"),
+        });
+
+    assert!(app.conversation.conversation.translation(10).is_none());
+    let message = app
+        .conversation
+        .conversation
+        .message(10)
+        .expect("the message is in the window");
+    assert_eq!(app.shown_body(message), "edited after the translation");
 }
 
 // ---- a message's revisions ------------------------------------------

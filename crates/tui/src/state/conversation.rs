@@ -87,6 +87,12 @@ pub struct ConversationState {
     /// blocks they are.
     pub edit_history: crate::state::edit_history::EditHistoryState,
 
+    /// The language `t` translates into, from the configuration.
+    ///
+    /// The configuration's own default until the caller says otherwise, so an
+    /// application built without one behaves like a configuration with no key.
+    translation_target: String,
+
     /// Set by a global search: the query, the messages found in every private
     /// chat, and where the reader is among them.
     ///
@@ -209,6 +215,7 @@ impl ConversationState {
             downloads: Downloads::default(),
             cached: false,
             row_stash: RefCell::new(HashMap::new()),
+            translation_target: "en".to_owned(),
         }
     }
 
@@ -352,6 +359,25 @@ impl ConversationState {
     pub fn with_jumplist_depth(mut self, depth: usize) -> Self {
         self.jumplist = Jumplist::new(depth);
         self
+    }
+
+    /// Sets the language `t` asks for, from the configuration.
+    ///
+    /// A plain string rather than a configuration type, for the same reason as
+    /// the jumplist's depth: `tui` names no configuration, and the caller
+    /// resolves the value once. Carried on the conversation state because the
+    /// key is pressed there, and every request names it, so a translation is
+    /// never asked for in a language the reader did not pick.
+    #[must_use]
+    pub fn with_translation_target(mut self, target: impl Into<String>) -> Self {
+        self.translation_target = target.into();
+        self
+    }
+
+    /// The language `t` asks for.
+    #[must_use]
+    pub fn translation_target(&self) -> &str {
+        &self.translation_target
     }
 
     /// Replaces the selection outright.

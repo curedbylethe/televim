@@ -2832,9 +2832,49 @@ pub(crate) fn open_edits(ui: &mut UiState, conversation: &mut ConversationState)
     conversation.edit_history.begin(message_id);
 }
 
-/// Starts a selection at the cursor's message, character-wise or whole.
+/// Translates the message under the cursor, or takes its translation away.
 ///
-/// `Some(0)` is a charwise selection from the message's first character;
+/// One key, two answers, and the screen says which: a message already showing a
+/// translation goes back to its own text, and one showing nothing is asked for.
+/// The clearing is local — the translation is a rendering this client holds, not
+/// a fact the server keeps — so `t` again costs no round trip. The request names
+/// the configured language, and nothing else about the message, so a translation
+/// is never asked for in a language the reader did not choose.
+///
+/// Nothing is drawn optimistically: the body changes when the answer lands, and a
+/// refusal is the net layer's one sentence. A message still on its way out has no
+/// identifier to translate, so the key is a no-op rather than a request the
+/// server can only refuse.
+pub(crate) fn request_translation(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    outbox: &mut Outbox,
+) {
+    let Some(message) = conversation.cursor_message() else {
+        return;
+    };
+
+    let message_id = message.id;
+    if conversation.conversation.translation(message_id).is_some() {
+        let _ = conversation.conversation.clear_translation(message_id);
+        return;
+    }
+    if message_id <= 0 {
+        return;
+    }
+
+    let lang = conversation.translation_target().to_owned();
+    queue_action(
+        &mut *outbox,
+        &mut *ui,
+        Action::Translate {
+            chat_id: conversation.conversation.window.chat_id,
+            message_id,
+            lang,
+        },
+    );
+}
+
 /// `None` is the whole message, which is what `V` selects. Both set the mode,
 /// because this is the only way *into* Visual.
 ///
@@ -4561,6 +4601,13 @@ pub(crate) fn handle_normal(
         // the marker appearing is the answer.
         'P' => {
             request_pin(&mut *ui, &mut *conversation, &mut *outbox);
+            false
+        }
+        // `t` shows the message in the configured language, and `t` again puts
+        // the message's own words back. Nothing here is automatic: a screen that
+        // translated on arrival would be answering a question nobody asked.
+        't' => {
+            request_translation(&mut *ui, &mut *conversation, &mut *outbox);
             false
         }
         // A plain `d`: the table reports nothing for it, so a `d` that does
