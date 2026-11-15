@@ -2,6 +2,7 @@ pub mod archived_list;
 pub mod chat_list;
 pub mod contact_list;
 pub mod conversation;
+pub mod edit_history;
 pub mod emoji_popup;
 pub mod forward_picker;
 pub mod global_list;

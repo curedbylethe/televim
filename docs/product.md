@@ -467,6 +467,22 @@ Working today:
   are placeholders. Delete removes for both sides. More than a hundred messages is
   several requests with a pause between them, and a failure part-way through is
   reported as how many went through rather than as a plain failure.
+- **Edit history, as far as this session saw it:** `:edits` lists the revisions of
+  the text under the cursor, newest first, in the conversation column: a heading
+  and then the text that revision carried, wrapped and indented two columns rather
+  than cut. The first block is the text the message shows now, headed `2d  current`
+  with its age; the ones televim journalled follow as `…  revision` down to the
+  one the sender first wrote, `…  original`. `j`/`k` walk the blocks, the selected
+  block is reverse video whole, `Esc` closes, and a message no revision was seen
+  for says `No recorded revision: this text is the only version.` in the dim ink
+  rather than opening an empty box. **This is the session's record, not Telegram's
+  history**: there is no edit-history call to make, the update carries the new text
+  and none of the old, so five revisions per message and fifty messages are kept,
+  nothing is persisted, and an edit made on another device, in a chat the reader
+  was not looking at, or before the chat was opened is not recoverable. Only the
+  current block carries a time: an older one wears `…`, because the update has no
+  timestamp and a local arrival time would be a different fact under the same
+  label. The limits are in [`known-gaps.md`](./known-gaps.md).
 - **Reactions:** a message that carries them shows one row of chips under its text,
   in the body column: the emoji, then its count when more than one person reacted,
   two spaces between chips, and the strip stops at the body width rather than
@@ -532,7 +548,7 @@ Working today:
   block, delete and report ask `y/n` first; the contacts list opens a person's
   card, which carries `rename`, `block`/`unblock` and `report` rows.
 - **Commands:** `:q`/`:quit`, `:chat <id>`, `:new <query>`, `:search <query>`,
-  `:pinned`, `:discard`, `:attach <path>`, `:open`, `:save <path>`,
+  `:pinned`, `:edits`, `:discard`, `:attach <path>`, `:open`, `:save <path>`,
   `:date <ISO>`, `:settings`, `:update`, `:signin`, `:add-account`, `:retry`, `:reconnect`, `:unlock`,
   `:passphrase`, `:export-session <path>`, `:import-session <path>`, and the
   eight chat and contact actions above (`:archive`, `:archived`, `:block`, `:unblock`,

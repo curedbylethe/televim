@@ -6,6 +6,7 @@ pub mod contacts;
 pub mod conversation;
 pub mod coordinate;
 pub mod drafts;
+pub mod edit_history;
 pub mod input;
 pub mod outbox;
 pub mod pending;
