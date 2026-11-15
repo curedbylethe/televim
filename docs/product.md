@@ -457,10 +457,13 @@ Working today:
   **A pin can outlive its message.** The list is fetched when it opens, so a pin
   older than the loaded window still lists with its sender, line and age, and one
   Telegram still holds a pin for but no longer returns a message for is a row
-  reading `[message not loaded]`; `Enter` on either of those leaves the overlay up
-  and the reader where they were, because the cursor can only stand on a message the
-  window holds. A failed fetch is said once on the status row and leaves the rows
-  the reader already had; it is not retried.
+  reading `[message not loaded]`. `Enter` goes to the pin either way: one the
+  window holds is a cursor move, one outside it is a page fetched around it, and
+  the status row says `Jumping to the pinned message…` while that page comes. A
+  row whose message is gone lands on the nearest message after it, and a page that
+  comes back empty leaves the reader where they were with
+  `That message is no longer available.` A failed fetch is said once on the status
+  row and leaves the rows the reader already had; it is not retried.
 - **Send / edit / delete:** one message with `d`, or every message a selection
   covers in Visual, with a confirmation before deleting. The prompt counts, says
   which side the messages are from, and says how many were left out because they
