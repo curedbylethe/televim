@@ -42,21 +42,37 @@
     <b>Insert</b> i or a, then Esc for the line's Normal, Esc again to leave with the draft kept.
     <b>Select</b> v, then j/k. <b>Find</b> / then n/N. <b>Command</b> : (:settings, :signin, :q). <b>Attach</b> :attach &lt;path&gt;, then y; Esc cancels the upload. <b>Media</b> o or :open, :save &lt;path&gt;. <b>Chat state</b> :mute, :unmute, :mark-unread, :mark-all-read, from the chat list.
     <b>Delete</b> dd, or d in Visual. <b>Also</b> r reply, e edit, D dismiss, q quit.
+    <b>On a message</b> + reacts (one emoji, or a lone - to take yours back), P pins it, t translates it in place, and :pinned and :edits raise the two lists.
     Sign-in demo: the configured phone is filled in, code 42424, password hunter2!. Tab or Ctrl+w pauses the flow and brings it back. Ctrl+w may be taken by the browser: use the key strip.
   </p>
 
+  <p class="legend" data-od-id="legend-message-affordances">
+    <b>Four things a message carries.</b> A reaction strip is one row under the body, and each chip is the
+    emoji, then a count only when the count is above one, two spaces between chips; the chip this account
+    reacted with takes reverse video, so the mark is not a colour. A pinned message wears
+    <code>⌖</code> in the panel's one-cell margin, before the sender tag, and <code>:pinned</code> lists the
+    chat's pins newest first — sender, one clipped line, age — with Enter jumping to the row. A translation
+    replaces the body in place and is followed by a dim <code>translated from he</code> row, so the reader is
+    never looking at the true text without being told; a message the account may not translate answers with
+    one dim status sentence rather than a dialog. Metadata is dim ink in every case, and no meaning rests on
+    colour: the strip's own reaction is reverse video, the pin's is a glyph, the translation's is a word.
+  </p>
+
   <div class="note" data-od-id="hint-budget">
-    <p><b>The hint row is a budget, not a sentence.</b> The status line is <code>NORMAL</code> plus one space, then the hint, on eighty columns. The hint gets 71, counted with <code>chars().count()</code>, and a test iterates every hint and fails the build on one that does not fit. The conversation's row starts from the binary's 67, not the 70 an earlier note quoted, and <code>A:card</code> costs eight; one of the three keys the reader uses most has to pay for it:</p>
+    <p><b>The hint row is a budget, not a sentence.</b> The status line is <code>NORMAL</code> plus one space, then the hint, on eighty columns. The hint gets 71, counted in cells by <code>TV.chars()</code>, and a test iterates every hint and fails the build on one that does not fit. Three pairs arrived for the message affordances, and three left to pay for them:</p>
 <pre data-od-id="hint-subtraction">
-  conversation, Normal   " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  q:quit  S:acct"   67
-  remove  q:quit        q is the only one of the three with a second route to the same action:
-                        :q and :quit reach it, and "::cmd" is named on the same row. e:edit and
-                        v:vis have no other mention on screen.                            − 8
-  add     A:card                                                                            + 8
-                                                                                          = 67 of 71
+  conversation, Normal   " i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct"   70
+  remove  dd:del        the Visual row names the same delete as " d: delete".                − 7
+  remove  A:card        the chat list names it as "A:card", and l opens a card from here.   − 7
+  remove  S:acct        the chat list names it as "S:you", where you are one of the people. − 7
+  add     +:react  P:pin  t:trans       three pairs, nineteen columns with the separators. + 19
+                                                                                        = 68 of 71
+  reaction prompt        " ⏎: add  -: remove  Esc: cancel"                                   31
+  pinned list            " j/k: pin  ⏎: jump  Esc: close"                                    30
+  edit history           " j/k: revision  Esc: close"                                        26
   chat list              " j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin"      69
 </pre>
-    <p>The row is three columns shorter than an earlier note assumed: <code>D:dismiss</code> is gone, because dismissing a failed send is a refusal and the status line owns the reason, and <code>S:acct</code> is present. So the arithmetic is four columns spare, not one. What is tight is the pair of keys: <code>A:card</code> and <code>S:acct</code> are both named, and neither may be dropped for the other. <code>S</code> is one key with two spellings, <code>S:acct</code> on the conversation's row and <code>S:you</code> on the chat list's, which a reader has to reconcile, and neither is renamed to match. The two card rows differ because their rows differ, and each names only keys its own card answers.</p>
+    <p><code>::cmd</code> is the pair that stayed, and it had to: <code>:pinned</code> and <code>:edits</code> are commands, and a row that hides <code>:</code> hides both overlays from a reader who has not learned it. <code>p</code> keeps one meaning per pane — paste in the conversation, the chat's pin in the chat list — because <code>P</code> takes the message's pin and the two panes never show both keys at once. Each new overlay brings its own row rather than editing the Normal one: a list's keys are its own, and it says so while it is up. What the conversation's row lost is named elsewhere on screen or reachable by a route the row still names, so no key it dropped is a key the reader cannot find.</p>
   </div>
 
   <p class="legend" data-od-id="reserved-colour">

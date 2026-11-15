@@ -12,7 +12,13 @@
 
   /* the hints a reader can see, each of which fits. ALL_HINTS is what the column check iterates. */
   const HINT = {
-    normal: ' i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct',
+    /* Four message affordances arrived and the bar is 71 cells, so three entries left it:
+       dd:del, A:card and S:acct. The list bar still names the two cards, the Visual bar
+       still names delete, and `dd` still works — it is no longer named on this row.
+       `+` opens the reaction prompt, `P` pins the message (`p` is paste and stays the
+       chat-list pin), `t` translates in place. `::cmd` stays because the two overlays are
+       commands, `:pinned` and `:edits`, and a reader who cannot see `:` cannot reach them. */
+    normal: ' i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  t:trans',
     list: ' j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin',
     visual: ' d: delete  y: yank  s: forward  r: reply  Esc: cancel',
     /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
@@ -34,6 +40,12 @@
        are theirs alone: neither adds a key to the list behind it. */
     contacts: ' j/k: contact  ⏎: card  Esc: close',
     archived: ' j/k: chat  ⏎: unarchive  Esc: close',
+    /* the two message overlays: each opens as a command over the conversation column and
+       closes on Esc, so every hint names the way out it actually answers. */
+    pinned: ' j/k: pin  ⏎: jump  Esc: close',
+    history: ' j/k: revision  Esc: close',
+    /* the reaction prompt: one emoji adds a chip, a hyphen takes the reader's own chip back */
+    react: ' ⏎: add  -: remove  Esc: cancel',
     /* the status line while the forward picker is up: the picker's own hint, which the Rust
        names FORWARD_PICKER_HINT and which carries the mode's name, unlike the rest. */
     forward: 'VISUAL  j/k: choose  ⏎: forward  Esc: cancel',
@@ -534,6 +546,17 @@
     return MONTH[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();
   }
   const clock = (m) => { const d = new Date(m * 60000); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); };
+  /* How long ago a message was sent, in three cells or fewer, for the pinned list's right edge.
+     A fact about the message, not a new kind of note: the row already sets its time in `d`. */
+  function age(m) {
+    if (m == null || !isFinite(m)) return '';
+    const min = Math.max(0, NOW - m);
+    if (min < 1) return 'now';
+    if (min < 60) return min + 'm';
+    if (min < 60 * 24) return Math.floor(min / 60) + 'h';
+    if (min < 60 * 24 * 7) return Math.floor(min / (60 * 24)) + 'd';
+    return Math.floor(min / (60 * 24 * 7)) + 'w';
+  }
   /* does b continue a's group? Same side, same calendar day, within the window, and b is not a reply. */
   const joins = (a, b) => !!(a && b && a.at != null && b.at != null && a.from === b.from && !b.reply
     && dayOf(a.at) === dayOf(b.at) && b.at - a.at <= GROUP_MIN);
@@ -558,14 +581,20 @@
         t('The one by the window.', { reply: { quote: 'Save me a seat.', to: 102 } }),
         t('Bring the tickets, the tickets are in the blue folder.'),
         y('Which tickets? I have the train ones and the concert ones.'),
-        t('The concert tickets. The train ones can stay on the fridge.'),
-        y('Tickets are under the lamp. Folder found.'),
-        t('Sorry, I missed your earlier message.', { reply: { unloaded: true, to: 94 } }),
+        t('The concert tickets. The train ones can stay on the fridge.', { rx: [{ k: '\u{1F525}', n: 3 }, { k: '\u{1F44D}', n: 12, me: true }, { k: '\u{1F602}', n: 2 }] }),
+        y('Tickets are under the lamp. Folder found.', { rx: [{ k: '\u{1F389}', n: 2 }] }),
+        t('Sorry, I missed your earlier message.', { reply: { unloaded: true, to: 94 }, rx: [{ k: '\u{1F440}', n: 1, me: true }] }),
         t('Doors open at eight, and the side gate is shut after nine, so do not be later.'),
         y('Did that go through?', { status: 'failed: no route' }),
         y('On my way, ten minutes.', { status: 'sending…' }),
         t('I will keep your seat.'),
-        t('The side gate locks at nine. If you miss it, ring twice and wait by the lamp.'),
+        t('The side gate locks at nine. If you miss it, ring twice and wait by the lamp.', {
+          eat: at(2, '19:52'),
+          revs: [
+            { at: at(2, '19:37'), text: 'The side gate locks at nine.' },
+            { at: at(2, '19:41'), text: 'The side gate locks at nine. Ring twice and wait by the lamp.' }
+          ]
+        }),
         y('Twice. I have both tickets in the blue folder, concert on top.'),
         t('Leave the train ones on the fridge. I only need the concert pair tonight.'),
         y('Understood. Saving the seat was the whole of the favour.')
@@ -590,11 +619,11 @@
         t('Volume four is on the bench.', { at: at(3, '18:02') }),
         t('The index still needs a pass.', { at: at(3, '18:03') }),
         y('Index tonight, I promise.', { at: at(3, '18:20'), rcpt: 'read' }),
-        t('The nanosecond wire is on my desk again.', { at: at(1, '20:11') }),
+        t('The nanosecond wire is on my desk again.', { at: at(1, '20:11'), pin: true }),
         y('Bring it Thursday.', { at: at(1, '20:13'), rcpt: 'read' }),
         t('Thursday it is.', { at: at(1, '20:14') }),
         y('Packed the wire.', { at: at(0, '21:02'), rcpt: 'read' }),
-        y('And the 12-inch ruler.', { at: at(0, '21:04'), rcpt: 'read' }),
+        y('And the 12-inch ruler.', { at: at(0, '21:04'), rcpt: 'read', pin: true }),
         t('Keep the ruler dry.', { at: at(0, '21:05'), reply: { quote: 'And the 12-inch ruler.' } }),
         y('Leaving now.', { at: at(0, '21:09'), rcpt: 'read' }),
         y('Platform, no train yet.', { at: at(0, '21:16'), rcpt: 'delivered' }),
@@ -629,9 +658,20 @@
       C('Noa Friedman', 2, [
         t('הכרטיסים בתיק הכחול', { at: at(2, '18:04') }),
         y('הבנתי, תודה.', { at: at(2, '18:06'), rcpt: 'read' }),
-        t('השער הצדדי נסגר בשעה 21:30', { at: at(0, '20:12') }),
+        /* `tr` is the translation the reader asked for, in the language the message was
+           written in: `t` swaps the body for it and puts the marker under the row. The stored
+           text never changes, so the marker is the only thing that says which is showing. */
+        t('השער הצדדי נסגר בשעה 21:30', {
+          at: at(0, '20:12'),
+          eat: at(0, '20:24'),
+          tr: { lang: 'he', text: 'The side gate shuts at 21:30.' },
+          revs: [
+            { at: at(0, '20:12'), text: 'השער נסגר בשעה 21:30' },
+            { at: at(0, '20:18'), text: 'השער הצדדי נסגר בשעה 21:30' }
+          ]
+        }),
         t('(המקום שלך שמור)', { at: at(0, '20:13'), reply: { quote: 'הכרטיסים בתיק הכחול' } }),
-        t('תודה רבה! \u{1F468}‍\u{1F469}‍\u{1F467}', { at: at(0, '20:14') }),
+        t('תודה רבה! \u{1F468}‍\u{1F469}‍\u{1F467}', { at: at(0, '20:14'), rx: [{ k: '\u{1F49A}', n: 2 }, { k: '\u{1F44D}', n: 1, me: true }] }),
         y('אני בדרך.', { at: at(0, '21:40'), status: 'sending…' })
       ], { cur: 2 })
     ];
@@ -725,6 +765,9 @@
          key is the name the peer gave rather than the one the reader sees. */
       local: {}, blocked: {},
       contacts: null, archived: { items: [], sel: 0 },
+      /* the two message overlays, and the dim sentence a refusal of the premium kind writes:
+         a flash is bright and answers the reader's own input, a note is a state of the message */
+      pins: null, edits: null, note: '',
       /* The accounts this machine knows, as the index holds them: an id, the phone the
          index kept (an older entry may have none), which one is signed in, and — for the
          model only — that account's own profile and list, since a switch draws the new
@@ -882,12 +925,14 @@
         return s;   /* the sign-in is paused; only Tab, : and q answer */
       }
     }
-    s.flash = '';
+    s.flash = ''; s.note = '';
     if (s.line) { lineKey(s, k); return s; }
     const p = s.pend; s.pend = '';
     if (s.view === 'nocreds') { common(s, k); return s; }
     if (s.focus === 'contacts') contactsKey(s, k, p);
     else if (s.focus === 'archived') archivedKey(s, k, p);
+    else if (s.focus === 'pinned') pinnedKey(s, k);
+    else if (s.focus === 'edits') editsKey(s, k);
     else if (s.focus === 'settings') settingsKey(s, k, p);
     else if (s.focus === 'profile') cardKey(s, k, p);
     else if (s.focus === 'newchat') newchatKey(s, k, p);
@@ -1132,6 +1177,8 @@
       case '/': openNewChat(s, ''); break;
       case 'A': openCard(s, 'person'); break;
       case 'S': openCard(s, 'self'); break;
+      /* the chat-list pin the hint has always named: it moves the row three cells and nothing else */
+      case 'p': { const c = s.chats[s.chat]; if (c) c.pin = !c.pin; break; }
     }
   }
 
@@ -1241,6 +1288,12 @@
       case '/': openLine(s, { kind: 'find' }); break;
       case 'n': case 'N': stepSearch(s, k === 'n' ? 1 : -1); break;
       case 'o': openMedia(s); break;
+      /* four facts about one message, each on one key: the chips under it, the pin in its margin,
+         its translation in place, and its revisions as a command. None of them is a mode, and
+         `p` stays paste and stays the chat-list pin. */
+      case '+': openReactPrompt(s); break;
+      case 'P': togglePin(s); break;
+      case 't': toggleTranslation(s); break;
       case 'Escape': { const u = liveUpload(s); if (u) cancelUpload(u); else s.search = null; break; }
       case 'Tab': case 'h': togglePane(s); break;
       case 'l': openCard(s, 'person'); break;
@@ -1279,6 +1332,75 @@
         break;
       }
     }
+  }
+
+  /* ---------- reactions, pins, revisions, translation ----------
+     Four facts about one message: its chips, its pin, the revisions an overlay lists, and a
+     translation behind a key. The three that are not a reaction change what is drawn, never
+     what was sent: this model shows presentation only. */
+  function openReactPrompt(s) {
+    const c = chat(s), m = c.msgs[c.cur];
+    if (!m) return;
+    openLine(s, { kind: 'react', ref: { idx: c.cur } });
+  }
+
+  function toggleTranslation(s) {
+    const m = chat(s).msgs[chat(s).cur];
+    if (!m) return;
+    /* a message with no stored translation is the premium refusal: one dim sentence on the
+       status row, because a dialog would take the reader away from the message it is about */
+    if (!m.tr) { s.note = 'Translation is a premium feature: this message was not translated.'; return; }
+    m.trOn = !m.trOn;
+  }
+
+  function togglePin(s) {
+    const m = chat(s).msgs[chat(s).cur];
+    if (!m) return;
+    m.pin = !m.pin;
+  }
+
+  /* the chat's pinned messages, newest first: a pin is a place in the conversation, so the list
+     sorts on the time the message carries and Enter only moves the cursor — nothing is fetched,
+     so nothing can arrive wrong. */
+  function pinsOf(c) {
+    const out = [];
+    c.msgs.forEach((m, i) => { if (m.pin) out.push({ mi: i, at: m.eat != null ? m.eat : m.at != null ? m.at : null }); });
+    /* a message with no time has no age to print, so it sorts last rather than claiming a date */
+    return out.sort((a, b) => ((b.at == null ? -Infinity : b.at) - (a.at == null ? -Infinity : a.at)) || (b.mi - a.mi));
+  }
+  function openPins(s) {
+    s.pins = { sel: 0 };
+    s.focus = 'pinned';
+  }
+  function pinnedKey(s, k) {
+    if (common(s, k)) return;
+    const c = chat(s), at = pinsOf(c);
+    if (k === 'Escape' || !at.length) { s.focus = 'conv'; s.pins = null; return; }
+    const P = s.pins;
+    if (k === 'j' || k === 'Down') P.sel = (P.sel + 1) % at.length;
+    else if (k === 'k' || k === 'Up') P.sel = (P.sel + at.length - 1) % at.length;
+    else if (k === 'Enter') { c.cur = at[clamp(P.sel, 0, at.length - 1)].mi; s.focus = 'conv'; s.pins = null; }
+  }
+
+  /* one message's revisions newest first: the text it shows now, then the stored edits down to
+     the one the sender first wrote, which is the original. */
+  function revsOf(m) {
+    if (!m || !m.revs || !m.revs.length) return [];
+    const out = [{ at: m.eat != null ? m.eat : m.at, text: m.text, current: true }];
+    for (let i = m.revs.length - 1; i >= 0; i--) out.push({ at: m.revs[i].at, text: m.revs[i].text, original: i === 0 });
+    return out;
+  }
+  function openEdits(s) {
+    s.edits = { sel: 0 };
+    s.focus = 'edits';
+  }
+  function editsKey(s, k) {
+    if (common(s, k)) return;
+    const n = revsOf(chat(s).msgs[chat(s).cur]).length;
+    if (k === 'Escape' || !n) { s.focus = 'conv'; s.edits = null; return; }
+    /* revisions are one message's sequence, so the selection stops at both ends */
+    if (k === 'j' || k === 'Down') s.edits.sel = Math.min(n - 1, s.edits.sel + 1);
+    else if (k === 'k' || k === 'Up') s.edits.sel = Math.max(0, s.edits.sel - 1);
   }
 
   function askDelete(s, idxs) {
@@ -1561,7 +1683,12 @@
       case 'Escape': L.mode = 'normal'; if (L.pos > 0 && b[L.pos - 1] !== '\n') L.pos--; L.pos = clamp(L.pos, 0, Math.max(0, b.length - 1)); return;
       case 'Enter': submit(s); return;
       case 'S-Enter': case 'C-j': if (MULTI[L.kind]) { L.buf = b.slice(0, L.pos) + '\n' + b.slice(L.pos); L.pos++; } return;
-      case 'Backspace': if (L.pos > 0) { L.buf = b.slice(0, L.pos - 1) + b.slice(L.pos); L.pos--; } return;
+      case 'Backspace': {
+        /* an emoji is two code units: stepping back one would leave half a glyph in the line */
+        const step = L.pos > 1 && /[\uDC00-\uDFFF]/.test(b[L.pos - 1]) && /[\uD800-\uDBFF]/.test(b[L.pos - 2]) ? 2 : 1;
+        if (L.pos > 0) { L.buf = b.slice(0, L.pos - step) + b.slice(L.pos); L.pos -= step; }
+        return;
+      }
       case 'Delete': L.buf = b.slice(0, L.pos) + b.slice(L.pos + 1); return;
       case 'Left': L.pos = Math.max(0, L.pos - 1); return;
       case 'Right': L.pos = Math.min(b.length, L.pos + 1); return;
@@ -1569,7 +1696,8 @@
       case 'End': L.pos = lineEnd(b, L.pos); return;
       case 'Up': case 'Down': vert(L, k === 'Up' ? -1 : 1); return;
     }
-    if (k.length === 1) { L.buf = b.slice(0, L.pos) + k + b.slice(L.pos); L.pos++; }
+    /* one code point is text: an emoji is a single press, and every named key is a word */
+    if (Array.from(k).length === 1) { L.buf = b.slice(0, L.pos) + k + b.slice(L.pos); L.pos += k.length; }
     syncComp(L);
   }
   function vert(L, d) {
@@ -1631,6 +1759,31 @@
         c.msgs.push(m); c.cur = c.msgs.length - 1; s.draft = null; s.vis = null; closeLine(s); return;
       }
       case 'edit': chat(s).msgs[L.ref.idx].text = buf; s.draft = null; closeLine(s); return;
+      /* a reaction is one glyph on the message the prompt opened from, so a reader who moved the
+         cursor after pressing `+` still reacts to the message they pressed it on. `-` takes the
+         reader's own chip back; Enter on any other glyph adds one. */
+      case 'react': {
+        const c = chat(s), m = c.msgs[L.ref ? L.ref.idx : c.cur];
+        if (!m) { closeLine(s); return; }
+        const t = buf.trim();
+        if (t === '-') {
+          const rx = m.rx || [], at = rx.findIndex((x) => x.me);
+          if (at < 0) return refuse(s, 'You have not reacted to this message.');
+          rx[at].n -= 1;
+          /* the account's own mark goes with its count: a chip left reversed would say the
+             reader still holds a reaction they just took back */
+          delete rx[at].me;
+          if (!rx[at].n) rx.splice(at, 1);
+          closeLine(s); return;
+        }
+        const glyph = clusters(t)[0];
+        if (!glyph || !t) return refuse(s, 'Type one emoji to react.');
+        const rx = m.rx || (m.rx = []);
+        const at = rx.findIndex((x) => x.k === glyph);
+        if (at >= 0) { if (!rx[at].me) { rx[at].me = true; rx[at].n += 1; } }
+        else rx.push({ k: glyph, n: 1, me: true });
+        closeLine(s); return;
+      }
       case 'find': closeLine(s); runSearch(s, buf); return;
       case 'newchat': runNewChat(s, buf); return;
       case 'command': {
@@ -1647,6 +1800,8 @@
         else if (c === 'mark-unread') markUnread(s);
         else if (c === 'mark-all-read') markAllRead(s);
         else if (c === 'archived') openArchived(s);
+        else if (c === 'pinned') openPins(s);
+        else if (c === 'edits') openEdits(s);
         else if (c === 'block') blockPerson(s, true);
         else if (c === 'unblock') blockPerson(s, false);
         else if (c === 'rename') renameTo(s, subject(s), '');
@@ -1975,7 +2130,7 @@
   /* ---------- the bar ---------- */
   function kindTitle(s, L) {
     if (L.kind === 'message') { const c = chat(s); return 'Message to ' + (c ? localName(s, c.name) : ''); }
-    return { reply: 'Reply', edit: 'Edit', command: 'Command', find: 'Find', newchat: 'New chat', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password', passphrase: 'Passphrase', newpass: 'New passphrase', repeat: 'Repeat passphrase' }[L.kind];
+    return { reply: 'Reply', edit: 'Edit', react: 'Reaction', command: 'Command', find: 'Find', newchat: 'New chat', name: 'Name', username: 'Username', bio: 'Bio', phone: 'Phone', code: 'Login code', pw: 'Password', passphrase: 'Passphrase', newpass: 'New passphrase', repeat: 'Repeat passphrase' }[L.kind];
   }
   /* App::prompt_prefix: a person search and a message search are both queries, so they share `/ `;
      the status label tells them apart. */
@@ -2076,6 +2231,10 @@
     if (s.pass) return { t: HINT.passDone, a: 'd' };
     if (L && A && A.out && A.step === 0 && L.from === 'signin') return { t: ' ' + SIGNED_OUT, a: 'd' };
     if (L) {
+      /* the prompt's own refusal outranks its hint, the way a sign-in refusal does: a reader who
+         typed something the prompt would not take has to see why before the key help */
+      if (L.kind === 'react' && s.flash) return { t: ' ' + s.flash, a: 't' };
+      if (L.kind === 'react') return { t: HINT.react, a: 'd' };
       if (L.mode === 'insert' && activeComp(L)) return { t: HINT.complete, a: 'd' };
       return { t: L.mode === 'insert' ? HINT.typing : L.mode === 'normal' ? HINT.lnormal : HINT.lvisual, a: 'd' };
     }
@@ -2085,6 +2244,8 @@
     if (s.focus === 'forward' && s.fwd) return { t: HINT.forward, a: 'd' };
     if (s.focus === 'contacts' && s.contacts) return { t: HINT.contacts, a: 'd' };
     if (s.focus === 'archived') return { t: HINT.archived, a: 'd' };
+    if (s.focus === 'pinned') return { t: HINT.pinned, a: 'd' };
+    if (s.focus === 'edits') return { t: HINT.history, a: 'd' };
     if (s.vis && s.focus === 'conv') {
       const [lo, hi] = range(s);
       return { t: ' ' + (hi - lo + 1) + ' message(s) selected — Esc clears', a: 't' };
@@ -2099,6 +2260,7 @@
     const c = chat(s), m = c && c.msgs[c.cur];
     if (m && m.status && m.status.startsWith('failed')) return { t: ' [' + m.status + ']', a: 't' };
     if (s.flash) return { t: ' ' + s.flash, a: 't' };
+    if (s.note) return { t: ' ' + s.note, a: 'd' };
     /* below everything written to the status, above the resting hint */
     if (c && c.revalidating) return { t: ' ' + REVALIDATING, a: 't' };
     if (s.view === 'nocreds') return { t: HINT.cardReading, a: 'd' };
@@ -2154,6 +2316,29 @@
 
   /* ---------- conversation ---------- */
   const CW = 45; /* body columns after the 7-column tag, inside a 56-column panel */
+  /* A pinned message is marked in the panel's one spare column, so its tag and its body columns do
+     not move for it; the chat list keeps 📌 for a pinned chat, where the margin is a glyph wide. */
+  const PIN_MARK = '\u2316';
+  /* A chip is the glyph, a count only when the count is above one, and reverse video when this
+     account is one of the readers who reacted. On the cursor row the row is already reversed, so
+     the chip inverts against it instead — one bit either way, and never colour alone. */
+  const chipAttr = (x, mod) => (x.me ? 'tr' : 'd' + mod);
+  function drawChips(g, x, y, rx, mod, rtl) {
+    /* an RTL strip takes the row's visual order, which is the chips reversed, and each chip keeps
+       the order it is written in: the same rule the message body follows */
+    const seq = rtl ? rx.slice().reverse() : rx;
+    let col = 0;
+    for (let i = 0; i < seq.length && col < CW; i++) {
+      const c = seq[i];
+      const t = (i ? '  ' : '') + c.k + (c.n > 1 ? ' ' + c.n : '');
+      const a = chipAttr(c, mod);
+      if (rtl) {
+        for (const pc of visualPieces(t, 'rtl')) put(g, x + col + cells(t.slice(0, pc.s)), y, t.slice(pc.s, pc.e), a);
+      } else put(g, x + col, y, t, a);
+      col += cells(t);
+    }
+    return col;
+  }
   function convRows(s, c) {
     const rows = [], q = s.search ? s.search.q.toLowerCase() : '';
     if (c.older) rows.push({ load: 'Loading older…', mi: -1 });
@@ -2166,8 +2351,11 @@
       const head = !joins(prev, m), tail = !joins(m, next);
       let qp = '';
       if (m.reply) qp = '> ' + (m.reply.unloaded ? '[message not loaded]' : trunc(m.reply.quote, 18)) + ' ‖ ';
-      const full = qp + m.text, mask = new Array(full.length).fill(false);
-      if (q) { const lt = m.text.toLowerCase(); for (let i = lt.indexOf(q); i >= 0; i = lt.indexOf(q, i + q.length)) for (let j = 0; j < q.length; j++) mask[qp.length + i + j] = true; }
+      /* `t` swaps the body for the stored translation; the row model then breaks and orders the
+         translation, and the marker row below says what it was translated from. */
+      const shown = m.tr && m.trOn ? m.tr.text : m.text;
+      const full = qp + shown, mask = new Array(full.length).fill(false);
+      if (q) { const lt = shown.toLowerCase(); for (let i = lt.indexOf(q); i >= 0; i = lt.indexOf(q, i + q.length)) for (let j = 0; j < q.length; j++) mask[qp.length + i + j] = true; }
       const first = rows.length;
       /* the last row of a message carries its own status; the last row of a group also carries
          the peer's read state (outgoing only, never beside a status) and the group's time. The
@@ -2185,7 +2373,7 @@
          says `שלום` is right-to-left, and the neutrals at the top cannot outvote
          it. A row of the message then inherits that base — a row of an all-neutral
          message carries no evidence of its own. */
-      const base = baseDir(m.text);
+      const base = baseDir(shown);
       /* the sender label is the group's, so only its first row carries it */
       if (m.art && m.inline) {
         /* An inline sticker paints its picture instead of its token: one row per art
@@ -2203,6 +2391,15 @@
         if (cells(last.full.slice(last.s, last.e)) + need <= CW) Object.assign(last, { suf, sufA, tm, tok });
         else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, suf, sufA, tm, tok });
       }
+      /* Under the message, in the order the message is: what the body was translated from, then
+         the reactions. Both rows carry `mi`, so the cursor's reverse video and the Visual
+         selection take them in, and neither is body text: yank, reply and search still read
+         `m.text`, and the chips are a count, not something the reader wrote. */
+      if (m.tr && m.trOn) rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, tr: 'translated from ' + m.tr.lang });
+      if (m.rx && m.rx.length) rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, rx: m.rx });
+      /* one cell in the margin, which is the only interior column the tag gutter never uses, so a
+         pinned row's tag and body stay where every other row's are */
+      rows[first].pin = !!m.pin;
       rows[first].hasStart = true;
     });
     if (c.newer) rows.push({ load: 'Loading newer…', mi: -1 });
@@ -2237,9 +2434,13 @@
         return;
       }
       const cur = r.mi === c.cur, sel = !cur && r.mi >= lo && r.mi <= hi;
-      const mod = cur ? 'r' : sel ? 's' : '';
+      /* a strip and a translation marker are rows about the message, not the message: the cursor
+         reverses the text it is on, and these follow only a selection */
+      const meta = !!r.rx || !!r.tr;
+      const mod = cur && !meta ? 'r' : sel ? 's' : '';
       fill(g, x0 + 1, y, w - 2, 't' + mod);
       if (r.lab) put(g, x0 + 2, y, r.from === 'you' ? '[you]' : '[them]', (cur ? 't' : 'd') + mod);
+      if (r.pin) put(g, x0 + 1, y, PIN_MARK, (cur ? 't' : 'd') + mod);
       /* The row is still one string laid out left to right from the tag gutter,
          whatever direction it reads — GAPS G12 reading (a): the sentence starts
          at the right of its own run, and the block is not right-aligned to the
@@ -2252,7 +2453,13 @@
       /* a placeholder is the program's word for what the sender did not write, so it is dim like
          the quote and the tag; a match still wins, and the cursor row is reversed whole */
       const ink = (j) => (r.mask[j] ? 'm' : (!cur && (j < r.qlen || r.ph) ? 'd' : 't')) + mod;
-      if (r.base === 'rtl' && s.bidi === 'visual') {
+      if (r.tr) {
+        /* the marker is the program's note about the body above it, so it takes the dim ink a
+           quote or a placeholder takes, and starts at the body column like any other row */
+        put(g, x0 + 9, y, r.tr, 'd' + mod);
+      } else if (r.rx) {
+        drawChips(g, x0 + 9, y, r.rx, mod, r.base === 'rtl' && s.bidi === 'visual');
+      } else if (r.base === 'rtl' && s.bidi === 'visual') {
         /* The quoted prefix is the conversation's own chrome and is left where the
            program leaves it — drawn first, as its own span, ahead of the text it
            introduces — so only the message's own text is permuted. */
@@ -2800,6 +3007,69 @@
     });
   }
 
+  /* The two message overlays take the conversation column, the way the forward picker does: the
+     column is where the message they are about is drawn, and the chat list stays readable while
+     they are up. `drawPanel` clears the column so a row underneath cannot read as an overlay row,
+     and returns the interior a list draws in. */
+  function drawPanel(g, h, title) {
+    const bw = RW, bh = h;
+    box(g, LW, 0, bw, bh, title, false);
+    for (let r = 1; r < bh - 1; r++) fill(g, LW + 1, r, bw - 2, 't');
+    return { x: LW + 2, w: bw - 4, rows: Math.max(0, bh - 2) };
+  }
+  /* the window over a list whose selection must stay inside it: both overlays hold a handful of
+     rows, so the start is derived from the selection on every draw and nothing is remembered */
+  function windowed(selAt, lastAt, n, avail) {
+    if (n <= avail) return 0;
+    let start = clamp(selAt - 1, 0, n - avail);
+    if (lastAt >= start + avail) start = clamp(lastAt - avail + 1, 0, n - avail);
+    return start;
+  }
+  function drawPins(g, s, h) {
+    const P = s.pins;
+    if (s.focus !== 'pinned' || !P) return;
+    const c = chat(s), at = pinsOf(c), p = drawPanel(g, h, 'Pinned messages · ' + at.length);
+    if (!at.length) { put(g, p.x, 1, 'No pinned message in this chat.', 'd'); return; }
+    const start = windowed(P.sel, P.sel, at.length, p.rows);
+    at.slice(start, start + p.rows).forEach((it, i) => {
+      const m = c.msgs[it.mi], on = start + i === P.sel, y = 1 + i;
+      const base = on ? 'tr' : 't', quiet = on ? 'tr' : 'd';
+      fill(g, LW + 1, y, RW - 2, base);
+      const n = put(g, p.x, y, String(start + i + 1) + '.', quiet);
+      const head = ' ' + (m.from === 'you' ? 'you' : localName(s, c.name)) + '  ';
+      const tail = age(it.at) ? '  ' + age(it.at) : '';
+      const room = p.w - n - cells(head) - cells(tail);
+      const col = put(g, p.x + n, y, head, base);
+      put(g, p.x + n + col, y, trunc(m.text, Math.max(1, room)), base);
+      if (tail) put(g, LW + RW - 2 - cells(tail), y, tail, quiet);
+    });
+  }
+  function drawEdits(g, s, h) {
+    const E = s.edits;
+    if (s.focus !== 'edits' || !E) return;
+    const c = chat(s), M = c.msgs[c.cur], revs = revsOf(M);
+    const p = drawPanel(g, h, 'Edit history · ' + revs.length);
+    /* a message that was never edited still opens: the overlay says so in the ink metadata has,
+       which is a state of the message and not a refusal of the reader's key */
+    if (!revs.length) { put(g, p.x, 1, 'No recorded revision: this text is the only version.', 'd'); return; }
+    /* one block a revision: the timestamp and which revision it is, then the text it carried,
+       wrapped to the panel so a long edit is read in the order it was written */
+    const lines = [];
+    revs.forEach((r, i) => {
+      const on = i === E.sel;
+      lines.push({ t: (r.at != null ? age(r.at) : 'no time') + '  ' + (r.current ? 'current' : r.original ? 'original' : 'revision'), a: on ? 'tr' : 'd', on });
+      for (const x of wrap(r.text, p.w - 2, p.w - 2, false)) lines.push({ t: '  ' + r.text.slice(x.s, x.e), a: on ? 'tr' : 't', on });
+    });
+    const first = lines.findIndex((l) => l.on);
+    const last = lines.reduce((n, l, i) => (l.on ? i : n), 0);
+    const start = windowed(first, last, lines.length, p.rows);
+    lines.slice(start, start + p.rows).forEach((l, i) => {
+      const y = 1 + i;
+      if (l.on) fill(g, LW + 1, y, RW - 2, 'tr');
+      put(g, p.x, y, trunc(l.t, p.w), l.a);
+    });
+  }
+
   function render(s) {
     const g = newGrid();
     if (s.line) syncComp(s.line);
@@ -2820,6 +3090,8 @@
     drawForward(g, s, top);
     drawContacts(g, s, top);
     drawArchived(g, s, top);
+    drawPins(g, s, top);
+    drawEdits(g, s, top);
     drawBar(g, s, b, top);
     drawStatus(g, s);
     return g;
@@ -2884,16 +3156,20 @@
   const PEER_SAYS = 'The side gate is open.';
   const TOK = { Esc: 'Escape', CR: 'Enter', Tab: 'Tab', BS: 'Backspace', 'C-j': 'C-j', 'C-w': 'C-w', 'C-o': 'C-o', 'C-i': 'C-i', 'S-CR': 'S-Enter' };
   function feed(s, script) {
-    for (let i = 0; i < script.length; i++) {
-      if (script[i] === '<') {
-        const e = script.indexOf('>', i), name = script.slice(i + 1, e);
+    /* a key is a code point: an emoji is one press, and every token below is ASCII */
+    const a = Array.from(script);
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] === '<') {
+        let e = i + 1;
+        while (e < a.length && a[e] !== '>') e++;
+        const name = a.slice(i + 1, e).join('');
         if (name === 'wait') answer(s);
         else if (name === 'typing') peerTyping(s);
         else if (name === 'peer') peerSays(s, PEER_SAYS);
         else if (name === 'cached') revalidate(s);
         else key(s, TOK[name]);
         i = e;
-      } else key(s, script[i]);
+      } else key(s, a[i]);
     }
     return s;
   }
@@ -3155,7 +3431,34 @@
       { name: ':mark-all-read: a mark with no count goes too', keys: '<Tab>jjj:mark-unread<CR>:mark-all-read<CR>' },
       { name: ':mark-all-read: a failed request keeps count and mark', start: 'readFails', keys: '<Tab>jjjjjjjjj:mark-unread<CR>gg:mark-all-read<CR>' },
       { name: ':mute follows the card\'s subject, and a person with no chat is refused', keys: ':contacts<CR>' + 'j'.repeat(13) + '<CR>:mute<CR>' },
-      { name: ':mark-all-read: one request failed, its count stays', start: 'readFails', keys: '<Tab>:mark-all-read<CR>' }] }
+      { name: ':mark-all-read: one request failed, its count stays', start: 'readFails', keys: '<Tab>:mark-all-read<CR>' }] },
+    /* The four message affordances. A strip sits under the body it belongs to, in the message's
+       own order; a pin lives in the row's one-cell margin and its list is a command; one message's
+       revisions are a command too; and a translation swaps the body in place behind one key. Every
+       frame is reached with the keys a reader presses: `<Tab>` to the list, one `j` a row, `l` back
+       into the conversation, which is how the rtl scene walks to Noa at row 12. */
+    { id: 'reactions', name: 'Reactions: the strip under a message', variants: [
+      { name: 'Three chips: two readers, and a count above one', keys: '' },
+      { name: 'The prompt: one emoji, or a hyphen to take yours back', keys: '+' },
+      { name: 'Added: a chip whose count is one, so the count is not drawn', keys: '+👏<CR>' },
+      { name: 'Taken back: the count drops by one and the chip stays', keys: '+-<CR>' },
+      { name: 'RTL: the strip takes the row\'s visual order', bidi: 'visual', keys: RTL_WALK + 'ljj' }] },
+    { id: 'pinned', name: 'Pinned messages: the margin and the list', variants: [
+      { name: 'Pinned: a marker in the row\'s margin', keys: 'P' },
+      { name: 'Unpinned: the marker goes, the row does not move', keys: 'PP' },
+      { name: 'The list: newest first, with its authors', keys: '<Tab>jl:pinned<CR>' },
+      { name: 'j to the older pin, ⏎ jumps to it', keys: '<Tab>jl:pinned<CR>j<CR>' },
+      { name: 'No pin in this chat: the overlay has nothing to list', keys: ':pinned<CR>' }] },
+    { id: 'edits', name: 'Edit history: one message\'s revisions', variants: [
+      { name: 'Newest first: the text the row shows now', keys: 'j'.repeat(7) + ':edits<CR>' },
+      { name: 'The original: the text the sender first wrote', keys: 'j'.repeat(7) + ':edits<CR>jj' },
+      { name: 'Never edited: the overlay says so in the dim ink', keys: 'gg:edits<CR>' },
+      { name: 'RTL: a right-to-left message\'s revisions', bidi: 'visual', keys: RTL_WALK + 'l:edits<CR>' }] },
+    { id: 'translated', name: 'Translation: in place, and marked', variants: [
+      { name: 'Translated: the body swaps, the marker names the language', keys: RTL_WALK + 'lt' },
+      { name: 'Toggled back: the original, and no marker', keys: RTL_WALK + 'ltt' },
+      { name: 'Premium: one dim sentence, and no dialog', keys: RTL_WALK + 'lkt' },
+      { name: 'Visual mode: the same translated row, permuted', bidi: 'visual', keys: RTL_WALK + 'lt' }] }
   ];
   function scene(si, vi) {
     const sc = SCENES[si], v = sc.variants[vi], s = fresh(v.start || sc.start, v.bidi);
