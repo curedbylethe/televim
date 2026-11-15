@@ -237,16 +237,20 @@ has one cell height and the reader chose the cell.
 ### The hint rows
 
 `ALL_HINTS` is the array a test iterates: eighteen entries, the sign-in and
-passphrase rows among them. The model's `HINT` draws nineteen, among them the
-contacts and archived lists' key help, which the build does not draw (below). These are the rows the screens
+passphrase rows among them. The model's `HINT` draws twenty-two, among them the contacts,
+archived, pinned and edit-history lists' key help and the reaction prompt's row,
+none of which the build draws (below). These are the rows the screens
 above reach, verbatim, with the width each one measures. The width is
 `chars().count()`, the same count the test makes, and the array is the
 authority: the numbers below were re-measured from it.
 
 | Shown when | Text | Columns |
 | :--------- | :--- | ------: |
-| conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct` | 67 |
+| conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  t:trans` | 68 |
 | chat list has the focus | ` j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin` | 69 |
+| the reaction prompt is up | ` ⏎: add  -: remove  Esc: cancel` | 31 |
+| `:pinned` has the focus | ` j/k: pin  ⏎: jump  Esc: close` | 30 |
+| `:edits` has the focus | ` j/k: revision  Esc: close` | 26 |
 | conversation, Visual | ` d: delete  y: yank  s: forward  r: reply  Esc: cancel` | 54 |
 | the forward picker is up | `VISUAL  j/k: choose  ⏎: forward  Esc: cancel` | 44 |
 | a deletion is confirmed | ` y: delete  n/Esc: cancel` | 24 |
@@ -315,6 +319,20 @@ Notes, because they are the answers to questions a reader will have:
 - **`^J` before `shift+⏎`**, because `^J` works in every terminal and needs no
   protocol, and a shifted `Enter` is only distinguishable where the terminal
   volunteers it.
+- **Three pairs arrived and three left, and one pair stayed for its own reason.**
+  `+`, `P` and `t` are the message affordances, and no row anywhere else names them,
+  so they are named here. `dd:del`, `A:card` and `S:acct` paid: the Visual row names
+  the same delete as `d: delete`, and the chat list names `A:card` and `S:you` and is
+  one `Tab` away, so a key is unnamed only when no row on any pane names it. `::cmd`
+  did not pay, because `:pinned` and `:edits` are commands: a row that hides `:` hides
+  both overlays from the reader who has not learned it. The three new rows — the
+  reaction prompt, `:pinned` and `:edits` — are the lists' and the prompt's own, drawn
+  while they are up, and none of them edits the Normal row.
+- **`p` keeps one meaning per pane, and the pane decides which.** In the conversation
+  `p` is paste and `P` is the message's pin; in the chat list `p` is that chat's pin.
+  The two keys never appear on the same row, so `P:pin` in one pane and `p:pin` in the
+  other are the same instruction at two scales rather than a collision. The list row
+  advertised `p:pin` before the model answered it; it answers now.
 
 ### Text direction
 
@@ -541,6 +559,106 @@ date past the week: `Sep 20, 2026`.
   on the first message of a day, the separator above it is kept in view.
 - **Group boundaries and separators agree.** A separator is always a group break,
   because a day boundary is.
+
+## Reactions, pins, edit history and translation
+
+Four message affordances, and every one of them reuses a part that already existed:
+the strip and the translation marker are rows below a message, the pin is a glyph in
+the panel's one-cell margin, and the two lists are overlays over the conversation
+column, drawn in the same box `:contacts` raises over the chat list. No new colour
+enters the palette, no glyph beyond `⌖` (one cell), and no size or gap the rows did
+not already use.
+
+**A reaction strip is one row under the last row of a message's text**, set in the
+body column and belonging to that message: it follows the cursor's `mi` for the fill
+and the selection, and it is the one thing on a message that never takes the cursor's
+reverse video, because reverse video belongs to the cursor and the cursor is on a
+message, not on its chips.
+
+- **A chip is the emoji, then its count, and the count appears only above one.** A
+  reaction nobody has doubled is the emoji alone, two cells wide, not `1`; a chip with
+  twelve reads `👍 12`. Two spaces separate chips — the same gap the hint row uses
+  between pairs — and the strip stops at the body width, so a message with more
+  reactions than fit shows the first that do rather than wrapping: a strip is a
+  summary, and the prompt is where the full set is answered.
+- **The chip this account reacted with is reverse video, and every other chip is
+  dim.** The count travels with its chip, so it is bright on the reversed one and dim
+  on the rest, and the count alone never carries the fact: the reader's own reaction
+  is marked by the reverse video every surface already uses, not by a colour and not by
+  a glyph the palette would have to invent.
+- **In a right-to-left message the strip takes the row's visual order**: in visual
+  mode the chips are laid out right to left as the sentence is, and each chip keeps
+  the order it is written in, so the emoji stays before its count. In terminal mode
+  the row is written left to right as everything else is.
+
+**The prompt is one line, and its title is `Reaction`.** `+` opens it in Insert mode,
+the bar says ` ⏎: add  -: remove  Esc: cancel`, and Enter commits.
+
+- **One emoji, or a hyphen.** The submitted text is read as one grapheme cluster, so
+  a family emoji of six code points is one glyph and a flag is one glyph; a glyph the
+  message already carries takes this account and gains one, and any other glyph is a
+  new chip at one. A single `-` takes this account's chip down one and removes the
+  chip at zero, and a message with no chip of the reader's own answers `You have not
+  reacted to this message.` Empty input answers `Type one emoji to react.` Both are the
+  status line's bright refusal, because both are answers to something the reader typed.
+- **The prompt belongs to the message it opened on**, not to the cursor: the row list
+  can move under an open line, so the index is taken when `+` is pressed.
+
+**A pinned message wears `⌖` in the one-cell margin**, before the `[you]`/`[them]`
+tag, in the panel's first column. It is dim on every row but the cursor's, where it
+takes the row's own text ink, and it costs no body column: the margin was empty. `P`
+pins and unpins the message under the cursor and says nothing, because the marker
+appearing is the answer.
+
+**`:pinned` lists the chat's pins newest first**, in the conversation column: a
+number, the sender (`you` for the account's own), one clipped line of the text, and
+the age right-aligned — `1. you  And the 12-inch ruler.  36m`. Newest is the message
+whose own time is newest, which is the edited time when the message was edited, and a
+later message wins a tie. `j`/`k` walk the list, Enter puts the cursor on the message
+and closes the overlay, Esc closes it and leaves the cursor where it was: the list is
+a place in the conversation, so opening it never moves the reader.
+
+**`:edits` shows one message's revisions newest first.** The first block is the text
+the message shows now, headed `2d  current`; the stored revisions follow down to the
+one the sender first wrote, headed `…  revision` and `…  original`. A block is the
+header and then the outgoing text, wrapped to the panel's width and indented two
+columns, because a revision is read and not scanned. The selected block takes reverse
+video as a whole. A message with no recorded revision is not an error and not an empty
+box: the overlay says `No recorded revision: this text is the only version.` in the
+dim ink metadata uses. **This model presents the history; it records nothing**, and
+the fixture is an account's own past edits.
+
+**`t` translates in place.** The translated text takes the body's place, at the
+body's column, and the row under it says `translated from he` in dim ink. The marker
+is a word rather than a colour or a glyph because the risk here is specific: a reader
+who mistakes a translation for the message has been told something the sender did not
+write. `t` again restores the original and the marker goes with it. A message with no
+stored translation is the premium case, and it answers with one dim sentence on the
+status row — `Translation is a premium feature: this message was not translated.` It
+is dim, not the bright refusal an input answers with, and it is a sentence on the
+status row rather than a dialog, because a dialog would take the reader off the
+message it is about, and the reader has to be able to keep reading.
+
+| State | The conversation shows |
+| :---- | :--------------------- |
+| a message with reactions, cursor elsewhere | one dim strip under the body, own chip reversed |
+| the reaction prompt open | the bar's line, titled `Reaction`, and the prompt's own hint |
+| a pinned message | `⌖` in the margin, dim; text ink on the cursor's row |
+| `:pinned`, chat with pins | numbered rows, newest first, age right-aligned |
+| `:pinned`, chat with none | `No pinned message in this chat.`, dim |
+| `:edits`, message with revisions | current first, then revisions down to the original |
+| `:edits`, message never edited | `No recorded revision: this text is the only version.`, dim |
+| `t`, message with a translation | the translation in the body, `translated from he` beneath |
+| `t`, message without one | the body unchanged, one dim sentence on the status row |
+
+Scenes: `reactions`, `pinned`, `edits` and `translated` in the engine, eighteen frames
+at 80×24, in that order after the existing ones: the strip under Ada Lovelace's
+concert message, the prompt, an added emoji, one taken back, and the strip in a
+right-to-left chat in visual order; a pinned row, the pin removed, Grace Hopper's
+list, a jump from it, an empty list; the edit history, the original revision, a
+message never edited, and Noa Friedman's revisions in visual order; a translation in
+place, the original back, the premium sentence, and the translation in a
+right-to-left chat.
 
 ## Vocabulary
 
@@ -810,7 +928,7 @@ and the note on a row of their own, below the placeholder, and the placeholder n
 moves. A settled upload shows no receipt until the peer answers, so its row is the
 bare time, like any outgoing message nobody has answered. While an upload is in
 flight `Esc` cancels it and does nothing else, the way `Esc` drops a jump in
-flight, and no hint row changes: the conversation's hint is 67 of 71 columns and
+flight, and no hint row changes: the conversation's hint is 68 of 71 columns and
 has no room to name a key that is only live for a few seconds. The status line
 carries no percentage for an upload either; the row is where the reader is
 already looking.
