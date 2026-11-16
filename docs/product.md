@@ -204,7 +204,9 @@ Working today:
   chat list, `l` opens the highlighted chat from the list, and `Tab` cycles focus;
   `Ctrl+w` steps back out of the line. `Ctrl+b`, from any pane, hides the chat
   list so the conversation takes the whole body, and shows it again; the choice
-  is kept for the session. While the list is hidden `Tab` and `h` skip it and
+  is kept for the session, and `chat_list = "hidden"` (or
+  `TELEVIM_CHAT_LIST=hidden`) starts the program that way; the default is
+  `shown`, and a word it does not know shows the list. While the list is hidden `Tab` and `h` skip it and
   stay in the conversation, and the new-chat, directory and archive lists are
   drawn over the body. A sign-in flow shows the list again, and `Ctrl+b` does
   nothing until the flow ends.

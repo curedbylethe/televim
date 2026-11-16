@@ -1992,3 +1992,26 @@ are in [`../AGENTS.md`](../AGENTS.md).
   client holds no audio stream. The three crates are named by `app` alone, and
   `make boundary` and `make wasm-boundary` keep them out of `tui`, `domain` and
   the browser demo.
+
+- **Why the chat list hides with one flag, `Ctrl-b`, and no strip:** the issue
+  asks for the conversation to take the full width on a narrow terminal, so
+  `UiState::chat_list_hidden` hides the column entirely: the body split keeps its
+  two rects with the first at `Length(0)`, so every later `horizontal[1]` stays
+  valid under `panic = "abort"`. A narrow strip still costs columns and needs its
+  own unread-mark design, and a new `Focus` or `Pane` variant would touch every
+  match on both. The three overlays drawn over the list column (new chat,
+  directory, archive) take the body rect while it is hidden, because a zero-width
+  column would erase them. Focus is kept off the hidden pane at the choke point,
+  `set_focus`, which turns a request for the list into the conversation, so `h`,
+  `Ctrl-w h` and the sign-in surface need no case of their own, and `cycle_focus`
+  leaves the pane out of its walk. The sign-in flow and its paused surface live on
+  that column, so a flow shows the list again and
+  `Ctrl-b` does nothing while one runs, rather than moving the surface. `Ctrl-b`
+  is answered with the other pane keys, so it works from every pane, and it is the
+  one free `Ctrl`-letter that does not collide with the `Ctrl-w` prefix or the
+  second forward key. The choice is persisted as `chat_list = "shown" | "hidden"`,
+  read once at construction like `bidi` and `stickers`, because the reader this is
+  for is on a narrow terminal permanently and a toggle reset at every launch would
+  fail exactly them; a session-only flag was rejected for that reason. An
+  unknown word shows the list, because a value the program cannot read must not
+  take the list away.

@@ -102,6 +102,10 @@ recovery](docs/installing.md#if-the-keychain-keeps-asking).
 
 Use `televim --chat <id>` to open a chat directly.
 
+On a narrow terminal, `Ctrl-b` hides the chat list so the conversation takes the
+full width. Set `chat_list = "hidden"` (or `TELEVIM_CHAT_LIST=hidden`) to start
+that way; the default is `shown`.
+
 - Desktop notifications are on by default (`notifications = "off"` disables
   them). Televim suppresses them for the open or muted chat, outgoing messages,
   stale arrivals, and while a reported terminal has focus.
