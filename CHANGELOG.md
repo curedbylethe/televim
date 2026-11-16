@@ -5,6 +5,13 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.14.1] - 2026-11-16
+
+### Fixed
+
+- **tui:** Ask to quit on q from the chat list
+- **app:** Withhold the read marker while the terminal is unfocused
+
 ## [0.14.0] - 2026-11-14
 
 ### Added
