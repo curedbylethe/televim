@@ -601,7 +601,7 @@ Working today:
   — the client, the chat list, the feed — so a launch that exhausted its three
   chat-list attempts can recover without a restart. A bring-up already in flight
   is not started again.
-  `q` in the conversation and `:q`/`:quit` both raise `Quit televim? (y/n)` first
+  `q` in the conversation or on the chat list and `:q`/`:quit` both raise `Quit televim? (y/n)` first
   — the same screen-wide confirmation a deletion uses — because `q` is one
   keystroke away from a key that types nothing else. `y` quits, `n` or `Esc`
   stays. `Ctrl-C` does **not** ask: it is the way out when the program is wedged,
