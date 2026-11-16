@@ -11586,3 +11586,83 @@ fn cancelling_discard_restores_the_reply_subject() {
     assert_eq!(app.input.line.purpose(), PromptKind::Reply);
     assert_eq!(app.conversation.reply_to, Some(target));
 }
+
+// ---- a hidden chat list ----------------------------------------------
+
+/// Whether the frame's row `y` is a border that runs from column 0 to the
+/// last column, which only a panel as wide as the body does.
+fn spans_the_frame(rows: &[String], y: usize) -> bool {
+    rows[y].starts_with('┌') && rows[y].ends_with('┐') && rows[y].matches('┌').count() == 1
+}
+
+#[test]
+fn a_hidden_chat_list_gives_the_conversation_the_whole_body() {
+    let mut app = App::mock();
+    let shown = frame_rows(&app);
+    assert!(!spans_the_frame(&shown, 0), "the list shares the top row");
+
+    app.ui.chat_list_hidden = true;
+    let rows = frame_rows(&app);
+
+    assert!(
+        spans_the_frame(&rows, 0),
+        "the conversation panel runs from column 0 to 79: {rows:#?}"
+    );
+}
+
+#[test]
+fn the_new_chat_overlay_is_drawn_over_the_body_while_the_list_is_hidden() {
+    let mut app = App::mock();
+    start_user_search(&mut app, "ada");
+    assert!(app.apply_users(
+        "ada",
+        vec![UserCandidate {
+            user_id: MOCK_CHAT + 900,
+            display_name: "Ada Byron".to_owned(),
+            username: Some("abyron".to_owned()),
+        }]
+    ));
+    app.ui.chat_list_hidden = true;
+
+    let rows = frame_rows(&app);
+    let top =
+        row_of(&rows, "New chat").unwrap_or_else(|| panic!("the overlay is drawn: {rows:#?}"));
+
+    assert!(rows[top].starts_with("┌ New chat"), "{rows:#?}");
+    assert!(spans_the_frame(&rows, top), "{rows:#?}");
+}
+
+#[test]
+fn the_directory_overlay_is_drawn_over_the_body_while_the_list_is_hidden() {
+    let mut app = App::mock();
+    app.conversation.contacts.begin();
+    app.conversation.contacts.adopt(vec![UserCandidate {
+        user_id: 9_999,
+        display_name: "Zed Zeta".to_owned(),
+        username: Some("zed".to_owned()),
+    }]);
+    app.ui.chat_list_hidden = true;
+
+    let rows = frame_rows(&app);
+    let top =
+        row_of(&rows, "Contacts · 1").unwrap_or_else(|| panic!("the overlay is drawn: {rows:#?}"));
+
+    assert!(rows[top].starts_with("┌ Contacts"), "{rows:#?}");
+    assert!(spans_the_frame(&rows, top), "{rows:#?}");
+}
+
+#[test]
+fn the_archive_overlay_is_drawn_over_the_body_while_the_list_is_hidden() {
+    let mut app = App::mock();
+    let archived = app.chats()[1].clone();
+    app.list.install_archived(vec![archived]);
+    app.list.open_archived();
+    app.ui.chat_list_hidden = true;
+
+    let rows = frame_rows(&app);
+    let top =
+        row_of(&rows, "Archived · 1").unwrap_or_else(|| panic!("the overlay is drawn: {rows:#?}"));
+
+    assert!(rows[top].starts_with("┌ Archived"), "{rows:#?}");
+    assert!(spans_the_frame(&rows, top), "{rows:#?}");
+}
