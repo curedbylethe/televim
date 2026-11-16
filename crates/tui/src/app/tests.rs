@@ -11666,3 +11666,106 @@ fn the_archive_overlay_is_drawn_over_the_body_while_the_list_is_hidden() {
     assert!(rows[top].starts_with("┌ Archived"), "{rows:#?}");
     assert!(spans_the_frame(&rows, top), "{rows:#?}");
 }
+
+/// The focus after each of `n` presses of `key`.
+fn focus_after(app: &mut App, key: KeyCode, n: usize) -> Vec<Focus> {
+    (0..n)
+        .map(|_| {
+            app.handle_key(press(key));
+            app.ui.focus
+        })
+        .collect()
+}
+
+#[test]
+fn ctrl_b_hides_the_chat_list_and_gives_the_conversation_the_whole_body() {
+    let mut app = App::mock();
+    assert!(!app.ui.chat_list_hidden);
+
+    app.handle_key(press_ctrl('b'));
+    assert!(app.ui.chat_list_hidden);
+    assert!(
+        spans_the_frame(&frame_rows(&app), 0),
+        "the panel reaches both edges"
+    );
+
+    app.handle_key(press_ctrl('b'));
+    assert!(!app.ui.chat_list_hidden);
+    let rows = frame_rows(&app);
+    assert!(!spans_the_frame(&rows, 0));
+    assert_eq!(rows[0].matches('┌').count(), 2, "the list is back");
+}
+
+#[test]
+fn ctrl_b_from_the_chat_list_lands_on_the_conversation() {
+    let mut app = on_the_chat_list();
+
+    app.handle_key(press_ctrl('b'));
+
+    assert!(app.ui.chat_list_hidden);
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert_eq!(app.ui.mode, Mode::Normal);
+}
+
+#[test]
+fn tab_skips_the_hidden_chat_list() {
+    let mut app = App::mock();
+    app.handle_key(press_ctrl('b'));
+
+    assert_eq!(
+        focus_after(&mut app, KeyCode::Tab, 3),
+        [Focus::Input, Focus::Conversation, Focus::Input]
+    );
+    app.handle_key(press_ctrl('w'));
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert_eq!(
+        focus_after(&mut app, KeyCode::BackTab, 3),
+        [Focus::Input, Focus::Conversation, Focus::Input]
+    );
+}
+
+#[test]
+fn h_stays_in_the_conversation_while_the_list_is_hidden() {
+    let mut app = App::mock();
+    app.handle_key(press_ctrl('b'));
+
+    app.handle_key(press(KeyCode::Char('h')));
+
+    assert_eq!(app.ui.focus, Focus::Conversation);
+    assert_eq!(app.ui.mode, Mode::Normal);
+}
+
+#[test]
+fn ctrl_w_h_on_a_card_stays_in_the_conversation_while_the_list_is_hidden() {
+    let mut app = profile();
+    app.handle_key(press_ctrl('b'));
+
+    app.handle_key(press_ctrl('w'));
+    app.handle_key(press(KeyCode::Char('h')));
+
+    assert_eq!(app.ui.focus, Focus::Conversation);
+}
+
+#[test]
+fn the_hidden_list_stays_hidden_across_a_chat_change() {
+    let mut app = App::mock();
+    app.handle_key(press_ctrl('b'));
+
+    app.select_chat(1);
+
+    assert!(app.ui.chat_list_hidden);
+    assert!(spans_the_frame(&frame_rows(&app), 0));
+}
+
+#[test]
+fn a_half_written_line_survives_two_toggles() {
+    let mut app = App::mock();
+    app.handle_key(press(KeyCode::Char('i')));
+    type_text(&mut app, "half a th");
+
+    app.handle_key(press_ctrl('b'));
+    app.handle_key(press_ctrl('b'));
+
+    assert_eq!(app.input.line.text(), "half a th");
+    assert_eq!(app.ui.focus, Focus::Input);
+}

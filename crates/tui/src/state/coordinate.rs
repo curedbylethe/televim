@@ -760,6 +760,14 @@ pub(crate) fn set_focus(
     profile: &mut ProfileCard,
     focus: Focus,
 ) {
+    // A hidden list is not a place the focus can rest: every path that asks
+    // for it — `h`, `Ctrl-w h`, the sign-in surface, the search origin —
+    // lands on the conversation instead, so none needs a case of its own.
+    let focus = if ui.chat_list_hidden && focus == Focus::ChatList {
+        Focus::Conversation
+    } else {
+        focus
+    };
     if focus != Focus::Conversation {
         ui.set_mode(Mode::Normal);
         conversation.clear_selection();
@@ -781,7 +789,8 @@ pub(crate) fn set_focus(
 /// Moves the focus one pane on, in the direction given, wrapping.
 ///
 /// The order is the order the panes are drawn in, so `Tab` walks the screen
-/// rather than an arbitrary list of them.
+/// rather than an arbitrary list of them. A hidden chat list is not drawn, so
+/// it is not walked.
 pub(crate) fn cycle_focus(
     ui: &mut UiState,
     conversation: &mut ConversationState,
@@ -790,16 +799,21 @@ pub(crate) fn cycle_focus(
     forward: bool,
 ) {
     const PANES: [Focus; 3] = [Focus::ChatList, Focus::Conversation, Focus::Input];
-    let step = if forward { 1 } else { PANES.len() - 1 };
+    let panes = if ui.chat_list_hidden {
+        &PANES[1..]
+    } else {
+        &PANES[..]
+    };
+    let step = if forward { 1 } else { panes.len() - 1 };
 
-    let at = PANES.iter().position(|pane| *pane == ui.focus).unwrap_or(0);
+    let at = panes.iter().position(|pane| *pane == ui.focus).unwrap_or(0);
 
     set_focus(
         &mut *ui,
         &mut *conversation,
         &mut *input,
         &mut *profile,
-        PANES[(at + step) % PANES.len()],
+        panes[(at + step) % panes.len()],
     );
 }
 
@@ -5649,6 +5663,7 @@ fn handle_pane_key(
     conversation: &mut ConversationState,
     input: &mut InputState,
     profile: &mut ProfileCard,
+    signin_open: bool,
     key: KeyEvent,
 ) -> bool {
     // Pane movement is the one thing every pane answers the same way, so it
@@ -5672,6 +5687,25 @@ fn handle_pane_key(
                 &mut *profile,
                 false,
             );
+            true
+        }
+        // `Ctrl-b` hides the chat list, or brings it back. It changes no focus
+        // unless the focus was on the column it hides, so a half-written line
+        // survives the toggle. A sign-in flow lives on that column, so while
+        // one runs the key is answered and does nothing.
+        _ if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') => {
+            if !signin_open {
+                ui.chat_list_hidden = !ui.chat_list_hidden;
+                if ui.chat_list_hidden && ui.focus == Focus::ChatList {
+                    set_focus(
+                        &mut *ui,
+                        &mut *conversation,
+                        &mut *input,
+                        &mut *profile,
+                        Focus::Conversation,
+                    );
+                }
+            }
             true
         }
         // `Ctrl-w` is the input line's way out, and a card's prefix for pane
@@ -5939,6 +5973,7 @@ pub(crate) fn handle_key(
         &mut *conversation,
         &mut *input,
         &mut *profile,
+        session.signin.is_some(),
         key,
     ) {
         return false;
