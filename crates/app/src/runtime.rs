@@ -1045,6 +1045,7 @@ async fn event_loop(
         persist_for_slot(&app, &mut network, &mut viewers, &mut loop_slot);
     }
 
+    network.stop_playback();
     network.finish_history(app.chats()).await;
     // The client throttles its own session writes; a clean exit owes the rest.
     if let Some(client) = network.client()

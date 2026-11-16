@@ -69,6 +69,7 @@ use telegram_framework::{
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, JumpKind, LoginField};
+use tui::state::playback::NowPlaying;
 
 use crate::accounts::{self, AccountSlot, SessionTarget, SlotPaths, SlotStore};
 use crate::config::Config;
@@ -77,6 +78,7 @@ use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, Histo
 use crate::media_cache::{ContentHasher, Key, MediaCache};
 use crate::notify::{DesktopNotifier, Notice, Notifier, body_line};
 use crate::outbox_store::{OutboxEntry, OutboxFile, restore_outbox};
+use crate::player::{Playback, Player};
 use crate::profile;
 use crate::runtime::AppEvent;
 use crate::update;
@@ -1011,6 +1013,17 @@ pub struct State {
     /// cancel sets. Settling a download removes its entry.
     media_cancel: Vec<MediaCancel>,
 
+    /// The voice note player. Lives on the loop's thread and holds the audio
+    /// device only while a note is held.
+    player: Player,
+
+    /// The note the player holds, and the file pinned in the media cache for it.
+    playing: Option<Playing>,
+
+    /// The voice message whose download will start playback when it lands, so
+    /// the file goes to the player instead of the viewer queue.
+    play_pending: Option<(i64, i64)>,
+
     /// Local paths kept for pending and failed attachment sends, keyed by their
     /// negative placeholder ids so a failed upload can be retried.
     pending_uploads: HashMap<i64, PendingAttachment>,
@@ -1557,7 +1570,14 @@ impl State {
     }
 
     /// Drops the cached media of deleted messages, in any chat.
-    fn forget_media_messages(&self, message_ids: &[i64]) {
+    fn forget_media_messages(&mut self, message_ids: &[i64]) {
+        if self
+            .playing
+            .as_ref()
+            .is_some_and(|now| message_ids.contains(&now.message_id))
+        {
+            self.stop_playback();
+        }
         if let Some(cache) = &self.media_cache {
             cache
                 .lock()
@@ -1744,6 +1764,110 @@ impl State {
             }
             _ => file.clear(),
         }
+    }
+
+    /// Answers a reader's play or pause of a voice message.
+    ///
+    /// The note already playing is paused or resumed. Otherwise a cached file
+    /// starts at once, with no client needed, and an uncached one is answered
+    /// with the download action that will start it when the file lands.
+    fn toggle_playback(&mut self, app: &mut App, chat_id: i64, message_id: i64) -> Option<Action> {
+        if self
+            .playing
+            .as_ref()
+            .is_some_and(|now| (now.chat_id, now.message_id) == (chat_id, message_id))
+        {
+            self.player.toggle_pause();
+            return None;
+        }
+        if self.play_pending == Some((chat_id, message_id)) {
+            return None;
+        }
+        let view = &app.conversation.conversation;
+        let kind = open_media_kind(view, chat_id, message_id)?;
+        if kind != MediaKind::Voice {
+            return None;
+        }
+        let cache = self.media_cache.clone()?;
+        let media_id = open_media_id(view, chat_id, message_id);
+        if let Some(Event::MediaSaved { path, .. }) =
+            cached_media(&cache, chat_id, message_id, media_id, kind)
+        {
+            self.start_playback(app, chat_id, message_id, path);
+            return None;
+        }
+        if self.client.is_none() {
+            app.flash("this voice message is not downloaded and there is no connection");
+            return None;
+        }
+        self.play_pending = Some((chat_id, message_id));
+        Some(Action::OpenMedia {
+            chat_id,
+            message_id,
+        })
+    }
+
+    /// Plays the file at `path` for the message, replacing any note playing.
+    fn start_playback(&mut self, app: &mut App, chat_id: i64, message_id: i64, path: PathBuf) {
+        self.stop_playback();
+        self.pin(&path);
+        match self.player.start(&path) {
+            Ok(()) => {
+                self.playing = Some(Playing {
+                    chat_id,
+                    message_id,
+                    path,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "a voice message could not be played");
+                self.unpin(&path);
+                app.flash(format!("cannot play this voice message: {error}"));
+            }
+        }
+    }
+
+    /// Stops the note and unpins its file. The screen's record is cleared by the
+    /// next [`drive`] pass.
+    pub(crate) fn stop_playback(&mut self) {
+        self.player.stop();
+        if let Some(now) = self.playing.take() {
+            self.unpin(&now.path);
+        }
+    }
+
+    fn pin(&self, path: &Path) {
+        if let Some(cache) = &self.media_cache {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .hold_for_viewer(path);
+        }
+    }
+
+    fn unpin(&self, path: &Path) {
+        if let Some(cache) = &self.media_cache {
+            cache
+                .lock()
+                .expect("the media cache lock is not poisoned")
+                .release_viewer(path);
+        }
+    }
+
+    /// Ends the note when it has run out or the reader has left its
+    /// conversation, and reports what the player says of one that goes on.
+    fn playback_report(&mut self, open_chat: i64) -> Option<(i64, Playback)> {
+        let now = self.playing.as_ref()?;
+        let message_id = now.message_id;
+        let report = if now.chat_id == open_chat {
+            self.player.snapshot().filter(|report| !report.finished)
+        } else {
+            None
+        };
+        if report.is_none() {
+            self.stop_playback();
+        }
+        report.map(|report| (message_id, report))
     }
 
     /// Takes every saved media path, oldest first, for the loop to hand to the
@@ -2851,6 +2975,11 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // state an event set, and the loop's tick is the only thing that can take it
     // back, because a frame is drawn from a shared reference.
     app.expire_typing(Instant::now());
+    // The note's position advances on the player's own thread; this pass is
+    // where the screen's record catches up, and where a note that ended, or
+    // whose conversation was left, is let go.
+    let report = state.playback_report(app.conversation.conversation.window.chat_id);
+    apply_playback(app, report);
 
     // Nothing is open, so there is no conversation for a cursor to describe —
     // nor a jump to be waiting on, because closing a conversation forgets one.
@@ -2981,6 +3110,18 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             }
             _ => {}
         }
+        // A play is answered here, ahead of the client gate, so a cached note
+        // plays offline; a miss goes on as the open that downloads it.
+        let action = match action {
+            Action::TogglePlayback {
+                chat_id,
+                message_id,
+            } => match state.toggle_playback(app, chat_id, message_id) {
+                Some(download) => download,
+                None => continue,
+            },
+            action => action,
+        };
         let Some(client) = state.client.clone() else {
             // Nothing to answer with: the action waits, in order, for the client
             // that comes up.
@@ -4290,6 +4431,7 @@ fn request_plain(
             | Action::CancelUpload { .. }
             | Action::RetryUpload { .. }
             | Action::DismissUpload { .. }
+            | Action::TogglePlayback { .. }
             | Action::CancelMediaDownload { .. } => {}
 
             // The download is the network's and the file it leaves is the
@@ -4976,6 +5118,14 @@ struct MediaCancel {
     flag: Arc<AtomicBool>,
 }
 
+/// The voice note the player holds.
+struct Playing {
+    chat_id: i64,
+    message_id: i64,
+    /// Pinned in the media cache until playback stops.
+    path: PathBuf,
+}
+
 /// An attachment upload the reader may retry, with the path kept only in this
 /// process and the flag shared with the transfer task.
 struct PendingAttachment {
@@ -5614,6 +5764,35 @@ fn apply_media_exported(
     }
 }
 
+/// Forgets that a download was to start playback, once it has settled.
+fn forget_play_pending(state: &mut State, chat_id: i64, message_id: i64) {
+    if state.play_pending == Some((chat_id, message_id)) {
+        state.play_pending = None;
+    }
+}
+
+/// Brings the screen's playback record in line with what the player reports.
+///
+/// Writes only when the record differs, so a held note costs nothing per pass.
+fn apply_playback(app: &mut App, report: Option<(i64, Playback)>) {
+    let record = &mut app.conversation.playback;
+    let Some((message_id, report)) = report else {
+        if record.current().is_some() {
+            record.clear();
+        }
+        return;
+    };
+    let now = NowPlaying {
+        message_id,
+        position: report.position,
+        total: report.total,
+        paused: report.paused,
+    };
+    if record.current() != Some(&now) {
+        record.set(now);
+    }
+}
+
 /// Settles a media download: a saved file is queued for the viewer and said on
 /// the status line, and a failed one is said there and queues nothing.
 fn apply_media(app: &mut App, state: &mut State, event: Event) {
@@ -5658,6 +5837,7 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
             message_id,
         } => {
             app.conversation.downloads.forget(chat_id, message_id);
+            forget_play_pending(state, chat_id, message_id);
             tracing::debug!(chat_id, message_id, "media download cancelled");
         }
         Event::MediaSaved {
@@ -5667,6 +5847,15 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
             kind,
         } => {
             app.conversation.downloads.forget(chat_id, message_id);
+            if state.play_pending == Some((chat_id, message_id)) {
+                state.play_pending = None;
+                // The reader may have left while it downloaded; the file stays
+                // cached, and nothing plays in a conversation not on show.
+                if app.conversation.conversation.window.chat_id == chat_id {
+                    state.start_playback(app, chat_id, message_id, path);
+                }
+                return;
+            }
             tracing::debug!(chat_id, message_id, path = %path.display(), "media saved");
             app.flash(format!("media saved to {}", path.display()));
             state.media.push(path, kind);
@@ -5677,6 +5866,7 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
             reason,
         } => {
             tracing::warn!(chat_id, message_id, %reason, "a media download failed");
+            forget_play_pending(state, chat_id, message_id);
             app.conversation
                 .downloads
                 .fail(chat_id, message_id, reason.clone());
@@ -15813,6 +16003,157 @@ mod media_tests {
         assert_eq!(open_media_kind(&view, CHAT, 2), None, "carries no media");
         assert_eq!(open_media_kind(&view, CHAT, 3), None, "not on show");
         assert_eq!(open_media_kind(&view, CHAT + 1, 1), None, "another chat");
+    }
+
+    /// An app on `CHAT` holding one voice message, and a state with an empty
+    /// media cache and no client.
+    fn voice_setup(dir: &Path) -> (App, State) {
+        let mut app = app_for_chat(CHAT);
+        app.conversation.conversation.window.replace([media_message(
+            CHAT,
+            1,
+            Some(MediaKind::Voice),
+        )]);
+        let mut state = State::default();
+        state.set_media_cache(MediaCache::open(dir.to_path_buf(), None, None));
+        (app, state)
+    }
+
+    /// A voice message that is not cached and has no client to fetch it is
+    /// refused out loud, and nothing is left waiting on a download.
+    #[test]
+    fn a_play_with_nothing_cached_and_no_client_says_so() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (mut app, mut state) = voice_setup(dir.path());
+
+        assert_eq!(state.toggle_playback(&mut app, CHAT, 1), None);
+
+        assert!(app.ui.status.contains("no connection"));
+        assert_eq!(state.play_pending, None);
+        assert!(state.playing.is_none());
+    }
+
+    /// Only a voice note is played: other media, and a message not on show, are
+    /// ignored without a download.
+    #[test]
+    fn a_play_of_anything_but_a_voice_note_does_nothing() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (mut app, mut state) = voice_setup(dir.path());
+        app.conversation.conversation.window.replace([media_message(
+            CHAT,
+            2,
+            Some(MediaKind::Photo),
+        )]);
+
+        let status = app.ui.status.clone();
+
+        assert_eq!(state.toggle_playback(&mut app, CHAT, 2), None);
+        assert_eq!(state.toggle_playback(&mut app, CHAT, 1), None);
+        assert_eq!(state.play_pending, None);
+        assert_eq!(app.ui.status, status, "nothing was said");
+    }
+
+    /// A download that was to start playback goes to the player and not to the
+    /// viewer queue; with the reader gone from the chat it goes nowhere.
+    #[test]
+    fn a_play_download_that_lands_elsewhere_is_not_opened_in_a_viewer() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (mut app, mut state) = voice_setup(dir.path());
+        app.conversation.conversation.window.replace([]);
+        state.play_pending = Some((CHAT, 1));
+
+        apply_media(
+            &mut app,
+            &mut state,
+            Event::MediaSaved {
+                chat_id: CHAT,
+                message_id: 1,
+                path: dir.path().join("note.ogg"),
+                kind: MediaKind::Voice,
+            },
+        );
+
+        assert_eq!(state.play_pending, None);
+        assert!(state.take_media().is_empty(), "the viewer got nothing");
+        assert!(state.playing.is_none());
+    }
+
+    /// A failed or cancelled download forgets that it was to start playback.
+    #[test]
+    fn a_failed_play_download_stops_waiting() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (mut app, mut state) = voice_setup(dir.path());
+
+        state.play_pending = Some((CHAT, 1));
+        apply_media(
+            &mut app,
+            &mut state,
+            Event::MediaFailed {
+                chat_id: CHAT,
+                message_id: 1,
+                reason: "offline".to_owned(),
+            },
+        );
+        assert_eq!(state.play_pending, None);
+
+        state.play_pending = Some((CHAT, 1));
+        apply_media(
+            &mut app,
+            &mut state,
+            Event::MediaCancelled {
+                chat_id: CHAT,
+                message_id: 1,
+            },
+        );
+        assert_eq!(state.play_pending, None);
+    }
+
+    /// A message deleted while its note plays ends the note, and the next pass
+    /// clears the screen's record.
+    #[test]
+    fn deleting_the_playing_message_stops_it() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (mut app, mut state) = voice_setup(dir.path());
+        state.playing = Some(Playing {
+            chat_id: CHAT,
+            message_id: 1,
+            path: dir.path().join("note.ogg"),
+        });
+
+        state.forget_media_messages(&[2]);
+        assert!(state.playing.is_some(), "another message's deletion");
+
+        state.forget_media_messages(&[1]);
+        assert!(state.playing.is_none());
+        assert_eq!(state.playback_report(CHAT), None);
+        apply_playback(&mut app, None);
+        assert_eq!(app.conversation.playback.current(), None);
+    }
+
+    /// The record follows the player's report and is cleared when there is none.
+    #[test]
+    fn the_playback_record_follows_the_report() {
+        let mut app = app_for_chat(CHAT);
+        let report = Playback {
+            position: Duration::from_secs(2),
+            total: Some(Duration::from_secs(9)),
+            paused: true,
+            finished: false,
+        };
+
+        apply_playback(&mut app, Some((4, report)));
+        assert_eq!(
+            app.conversation.playback.current(),
+            Some(&NowPlaying {
+                message_id: 4,
+                position: Duration::from_secs(2),
+                total: Some(Duration::from_secs(9)),
+                paused: true,
+            })
+        );
+
+        apply_playback(&mut app, None);
+        assert_eq!(app.conversation.playback.current(), None);
     }
 
     /// A miss stores the download and answers with its file; the next open of the

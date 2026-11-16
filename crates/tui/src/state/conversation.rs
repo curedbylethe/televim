@@ -16,6 +16,7 @@ use crate::app::{ConfirmKind, Deletion, Register};
 use crate::bidi::{self, BidiMode};
 use crate::download::Downloads;
 use crate::jumplist::Jumplist;
+use crate::state::playback::PlaybackState;
 use crate::state::send_outbox::{OutboxSend, SendOutbox};
 use crate::sticker::StickerCache;
 
@@ -165,6 +166,14 @@ pub struct ConversationState {
     /// download outlives a switch without being shown in the wrong chat.
     pub downloads: Downloads,
 
+    /// The voice note being played in the open conversation.
+    ///
+    /// Written by the app, which owns the player; [`select_chat_none`] clears it
+    /// on a switch, and the app stops the sound on the same transition.
+    ///
+    /// [`select_chat_none`]: crate::state::coordinate::select_chat_none
+    pub playback: PlaybackState,
+
     /// Whether the window on show came from the local cache rather than from the
     /// wire.
     ///
@@ -213,6 +222,7 @@ impl ConversationState {
             jumplist: Jumplist::default(),
             stickers: StickerCache::default(),
             downloads: Downloads::default(),
+            playback: PlaybackState::default(),
             cached: false,
             row_stash: RefCell::new(HashMap::new()),
             translation_target: "en".to_owned(),

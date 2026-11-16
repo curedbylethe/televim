@@ -83,10 +83,6 @@ struct Active {
 }
 
 impl Player {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Stops any note that is playing and starts the file at `path`.
     ///
     /// Opening the file and the output device is quick but is not free; the

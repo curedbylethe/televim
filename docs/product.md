@@ -382,6 +382,12 @@ Working today:
   `:save` expand a leading `~` or `~/`.
   `:attach` has no caption argument; edit the sent message to add a caption.
   Albums and voice recordings have no send command.
+  `Space` on a voice message plays it in the program, with no viewer: a note in the
+  cache starts at once, even offline, and one that is not is downloaded first. `Space`
+  again pauses it and resumes it; `Space` on another voice message stops the first and
+  plays that one. Playback stops when the conversation changes, when the message is
+  deleted and when the program quits. `o` on a voice message still opens it in the
+  viewer.
   The viewer is set per kind of media: `viewer_image` (photos and stickers),
   `viewer_video` (videos and GIFs) and `viewer_audio` (voice messages), each also read
   from `TELEVIM_VIEWER_IMAGE`, `TELEVIM_VIEWER_VIDEO` and `TELEVIM_VIEWER_AUDIO`.

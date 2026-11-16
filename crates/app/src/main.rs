@@ -13,9 +13,6 @@ mod media_cache;
 mod net;
 mod notify;
 mod outbox_store;
-// Nothing calls the player until the playback key is wired in; that change
-// removes this attribute.
-#[expect(dead_code, reason = "no caller until the playback key lands")]
 mod player;
 mod profile;
 mod runtime;
