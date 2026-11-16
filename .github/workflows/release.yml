@@ -203,7 +203,7 @@ jobs:
       contents: read
     steps:
       - name: system dependencies
-        run: apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates python3 build-essential pkg-config libdbus-1-dev
+        run: apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates python3 build-essential pkg-config libdbus-1-dev libasound2-dev
 
       - uses: actions/checkout@v7
         with:

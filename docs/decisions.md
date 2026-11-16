@@ -1964,3 +1964,31 @@ are in [`../AGENTS.md`](../AGENTS.md).
   emits `FocusLost`, so this is not a "the window is hidden" test. A new
   `State` field or re-setting a flag after a refused send was rejected because
   the card's retention already costs nothing.
+
+- **Why a voice note plays through `ogg`, `opus-rs` and `rodio`, with `rodio`
+  held on its 0.22 series:** a voice note is Ogg/Opus, and the in-app player has
+  three jobs that no single permissively licensed crate does together. `ogg`
+  reads the container a packet at a time. `opus-rs` decodes each packet in pure
+  Rust, so no CMake, C compiler or system libopus enters the build on any
+  platform, which is what `symphonia` (no Opus decoder, MPL-2.0) and the libopus
+  bindings (`opus`, `audiopus`) could not offer. `rodio` owns
+  the output device, pause and position, which `cpal` alone would leave to be
+  written. The decoder sits behind one type, `OpusSource`, because `opus-rs` is
+  young: `opus-decoder` is the drop-in replacement, correct against the RFC 8251
+  vectors but about seventy times slower, which is still ample for a voice note.
+  A note's length is the last Ogg page's granule position less the stream's
+  pre-skip, not the sum of the decoded packets, which overstates it by the
+  pre-skip; the protocol carries a duration the framework discards, but reading
+  it from the stream keeps `domain::Message` and the history cache untouched, at
+  the cost that a note's length is unknown until it is first opened. `rodio` is
+  held on 0.22 because 0.23 moves to `cpal` 0.18, which raises the macOS floor to
+  14.2, and this program names no macOS floor today and ships both
+  `aarch64-apple-darwin` and `x86_64-apple-darwin`; raising one is a decision
+  someone should make on purpose, not a side effect of a dependency bump. Revisit
+  when 0.23 settles. The cost on Linux is that `cpal` links ALSA, so the build
+  needs `libasound2-dev` and the binary needs the ALSA runtime library to start,
+  even on a machine with no sound card; macOS and Windows gain nothing. The
+  device is opened when a note starts and released when it stops, so an idle
+  client holds no audio stream. The three crates are named by `app` alone, and
+  `make boundary` and `make wasm-boundary` keep them out of `tui`, `domain` and
+  the browser demo.

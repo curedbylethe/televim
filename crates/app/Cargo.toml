@@ -49,6 +49,12 @@ base64.workspace = true
 crossterm.workspace = true
 ratatui = { workspace = true, features = ["crossterm"] }
 
+# Voice playback, in `player.rs`: the container, the codec and the output device.
+ogg.workspace = true
+opus-rs.workspace = true
+rodio.workspace = true
+thiserror.workspace = true
+
 [dev-dependencies]
 # The integration tests keep their session in a scratch file, so a run never
 # touches the developer's own.

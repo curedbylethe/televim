@@ -733,6 +733,16 @@ Real, and named so they are not mistaken for oversights:
   cache — a relaunch, a chat switch or an edit to the message leaves the message
   showing its own words.
 
+- **In-app voice playback needs a working audio device, and no automated check
+  ever has one.** The player opens the default output device when a note starts,
+  so a machine with no sound card, or one whose device another program holds,
+  gets an error rather than sound. On Linux the binary also links ALSA, so the
+  library must be installed even where there is no device. CI and the test suite
+  run without a device: they cover the length of a note, the rejection of the
+  container's header packets and a decode round trip, but not the sound itself.
+  That check is made by hand: play a downloaded voice note, then pause, resume
+  and stop it.
+
 ## Browser demo
 
 - **The browser demo is not a Telegram client.** Its fictional simulator has no
