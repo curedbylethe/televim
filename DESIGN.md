@@ -919,7 +919,7 @@ status ranking.
 **A voice note that plays draws a token beside its placeholder.** Rule 5 keeps duration
 out of the placeholder's own wording; this token is a transient one beside it, never
 replacing the body, on the message's last row and in `text-dim`. **DESIGN-TBD:** built to
-this vocabulary, not designed; a dedicated row above the status line was weighed and
+this vocabulary, not designed (the model in `design/` draws it, with Space to start and pause); a dedicated row above the status line was weighed and
 not chosen, because it would change the three-row layout.
 
 | State | The last row |
@@ -927,7 +927,7 @@ not chosen, because it would change the three-row layout.
 | inactive, or another message plays | `[voice]`, no token, no mark, no bar |
 | playing | `[voice]  [voice ▸ ▍▍▍▍▁▁▁▁ 0:12/0:24]` |
 | paused | `[voice]  [voice ‖ ▍▍▍▍▁▁▁▁ 0:12/0:24]`, the bar frozen where it stopped |
-| length not yet known | `[voice ▸ ▁▁▁▁▁▁▁▁ 0:05/--:--]` |
+| length not yet known | `[voice]  [voice ▸ ▁▁▁▁▁▁▁▁ 0:05/--:--]` |
 
 The bar is eight cells: `▍` for each eighth of the note played, `▁` for the rest, none
 filled while the length is unknown. The clock is `m:ss`, or `h:mm:ss` from an hour, with

@@ -1288,6 +1288,7 @@
       case '/': openLine(s, { kind: 'find' }); break;
       case 'n': case 'N': stepSearch(s, k === 'n' ? 1 : -1); break;
       case 'o': openMedia(s); break;
+      case ' ': togglePlay(s); break;
       /* four facts about one message, each on one key: the chips under it, the pin in its margin,
          its translation in place, and its revisions as a command. None of them is a mode, and
          `p` stays paste and stays the chat-list pin. */
@@ -1460,6 +1461,29 @@
     refuse(s, 'Nothing to ' + verb + (!m || !m.kind ? ': this message carries no media.'
       : m.up && m.up.on ? ' yet: the upload is still running.' : ': the file is not here.'));
   }
+  /* Space plays a voice note in the program and pauses and resumes it; on anything but a voice
+     message it does nothing. The model has no audio: a note is PLAY_TOTAL seconds long and each
+     <wait> turn is PLAY_STEP of them, until the note runs out and the token goes. Leaving the
+     conversation, which the program stops the note for, is not modelled. */
+  const PLAY_TOTAL = 24, PLAY_STEP = 12;
+  function togglePlay(s) {
+    const c = chat(s), m = c && c.msgs[c.cur];
+    if (!m || m.kind !== 'Voice' || m.up) return;
+    if (m.play) { m.play.paused = !m.play.paused; return; }
+    for (const x of c.msgs) delete x.play;
+    m.play = { pos: 0, total: PLAY_TOTAL, paused: false };
+  }
+  const playingNote = (s) => { const c = s.chats && s.chats[s.chat]; return c && c.msgs.find((m) => m.play); };
+  function playStep(m) {
+    if (m.play.paused) return;
+    m.play.pos += PLAY_STEP;
+    if (m.play.pos >= m.play.total) delete m.play;
+  }
+  const playClock = (n) => (n < 3600 ? Math.floor(n / 60) + ':' : Math.floor(n / 3600) + ':' + String(Math.floor(n % 3600 / 60)).padStart(2, '0') + ':') + String(n % 60).padStart(2, '0');
+  const playToken = (p) => {
+    const on = p.total ? Math.min(8, Math.floor(p.pos * 8 / p.total)) : 0;
+    return '[voice ' + (p.paused ? '‖' : '▸') + ' ' + '▍'.repeat(on) + '▁'.repeat(8 - on) + ' ' + playClock(p.pos) + '/' + playClock(p.total) + ']';
+  };
   /* `o` and `:open`: a failed upload is tried again, which is what `(o retries)` promises; media on
      hand opens in the viewer; anything else is refused with the reason it cannot. */
   function openMedia(s) {
@@ -1919,6 +1943,8 @@
     if (s.jump) return landJump(s);
     const up = liveUpload(s);
     if (up) { uploadStep(up); return s; }
+    const note = playingNote(s);
+    if (note) { playStep(note); return s; }
     if (s.pass && s.pass.checking) return passAnswer(s);
     const A = s.signin, p = A && A.pending;
     if (!A || !A.checking || !p) return s;
@@ -2365,7 +2391,7 @@
       const tm = tail && m.at != null ? clock(m.at) : '';
       /* an upload in flight draws its progress beside the placeholder, on the last row, in the
          download's token; it is not text, so search, yank and reply never see it */
-      const tok = m.up && m.up.on ? '[' + kindWord(m) + '… ' + Math.min(100, m.up.pct) + '%]' : '';
+      const tok = m.up && m.up.on ? '[' + kindWord(m) + '… ' + Math.min(100, m.up.pct) + '%]' : m.play ? playToken(m.play) : '';
       const note = cells(suf) + (suf && tm ? 1 : 0) + cells(tm);
       const need = note + (tok ? 1 + cells(tok) + (note ? 1 : 0) : 0);   /* a space before the token, one after */
       /* Which way this message reads is one answer for the whole message, asked
@@ -3223,6 +3249,11 @@
       { name: '[file]', keys: 'kkkk' },
       { name: 'A caption replaces the placeholder', keys: 'kkk' },
       { name: 'Wrapped: the placeholder row yields its status to the next row', keys: '' },
+      { name: '[voice] playing: Space starts it, the bar is empty', keys: 'kkkkkk ' },
+      { name: '[voice] playing: one turn on, half the bar', keys: 'kkkkkk <wait>' },
+      { name: '[voice] paused: the bar stays where it stopped', keys: 'kkkkkk <wait> ' },
+      { name: '[voice] ended: the placeholder alone again', keys: 'kkkkkk <wait><wait>' },
+      { name: 'Space on a photo does nothing', keys: 'kkkkkkkk ' },
       { name: 'Visual: [voice] selected, [file] under the cursor', keys: 'kkkkkkvjj' },
       { name: 'Visual, yanked: the placeholder is text', keys: 'kkkkkkvjjy' },
       { name: 'All five kinds in one window', keys: 'kk' }] },
