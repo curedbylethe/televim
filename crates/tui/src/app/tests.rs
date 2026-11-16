@@ -8709,6 +8709,73 @@ fn with_media(id: i64, text: &'static str, media: domain::message::MediaKind) ->
     }
 }
 
+/// Space on a voice message queues its play, and a second Space queues the same
+/// action again: the app decides between pausing and resuming.
+#[test]
+fn space_on_a_voice_message_queues_the_toggle_each_press() {
+    let mut app = App::mock();
+    app.apply_latest(vec![
+        message(1, "text"),
+        with_media(2, "", domain::message::MediaKind::Voice),
+        message(3, "text"),
+    ]);
+    app.handle_key(press(KeyCode::Char('k')));
+    assert_eq!(
+        reading(&app),
+        Some(2),
+        "the voice message is under the cursor"
+    );
+
+    key(&mut app, ' ');
+    key(&mut app, ' ');
+
+    let toggle = Action::TogglePlayback {
+        chat_id: MOCK_CHAT,
+        message_id: 2,
+    };
+    assert_eq!(app.take_action(), Some(toggle.clone()));
+    assert_eq!(app.take_action(), Some(toggle));
+    assert_eq!(app.take_action(), None);
+}
+
+/// Switching conversation drops the playback record: the bar belongs to the
+/// conversation on show.
+#[test]
+fn switching_conversation_clears_the_playback_record() {
+    let mut app = App::mock();
+    app.select_chat(1);
+    app.conversation
+        .playback
+        .set(crate::state::playback::NowPlaying {
+            message_id: 2,
+            position: std::time::Duration::from_secs(1),
+            total: None,
+            paused: false,
+        });
+
+    app.select_chat(0);
+
+    assert_eq!(app.conversation.playback.current(), None);
+}
+
+/// Space on text, or on media that is not a voice note, queues nothing.
+#[test]
+fn space_on_text_or_other_media_queues_nothing() {
+    let mut app = App::mock();
+    app.apply_latest(vec![
+        message(1, "text"),
+        with_media(2, "", domain::message::MediaKind::Photo),
+        with_media(3, "", domain::message::MediaKind::Video),
+    ]);
+
+    for id in [3, 2, 1] {
+        assert_eq!(reading(&app), Some(id));
+        key(&mut app, ' ');
+        assert_eq!(app.take_action(), None, "message {id}");
+        app.handle_key(press(KeyCode::Char('k')));
+    }
+}
+
 /// `o` on a message with media queues one open, carrying the cursor
 /// message's conversation and identifier, and nothing else.
 #[test]

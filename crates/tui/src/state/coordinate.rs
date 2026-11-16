@@ -394,6 +394,7 @@ pub(crate) fn select_chat_none(
     conversation.confirm = None;
     conversation.selection = None;
     conversation.register = Register::default();
+    conversation.playback.clear();
     conversation.pinned.close();
     input.line.forget_purpose();
 }
@@ -4649,6 +4650,10 @@ pub(crate) fn handle_normal(
             request_open_media(&mut *ui, &mut *conversation, &mut *outbox);
             false
         }
+        ' ' => {
+            request_toggle_playback(&mut *ui, &mut *conversation, &mut *outbox);
+            false
+        }
         'v' => {
             begin_selection(&mut *ui, &mut *conversation, Some(0));
             false
@@ -4780,6 +4785,30 @@ pub(crate) fn request_open_media(
     let action = Action::OpenMedia {
         chat_id,
         message_id,
+    };
+    queue_action(&mut *outbox, &mut *ui, action);
+}
+
+/// Queues the play or pause of the voice note on the cursor message.
+///
+/// Nothing for any other message: Space on text or on other media does nothing.
+/// A voice note still sending has no id the network knows, so it is skipped too.
+/// The app decides between starting and toggling, so repeated presses queue the
+/// same action.
+fn request_toggle_playback(
+    ui: &mut UiState,
+    conversation: &mut ConversationState,
+    outbox: &mut Outbox,
+) {
+    let Some(message) = conversation.cursor_message() else {
+        return;
+    };
+    if message.id < 0 || message.media != Some(MediaKind::Voice) {
+        return;
+    }
+    let action = Action::TogglePlayback {
+        chat_id: message.chat_id,
+        message_id: message.id,
     };
     queue_action(&mut *outbox, &mut *ui, action);
 }

@@ -11,6 +11,7 @@ pub mod input;
 pub mod outbox;
 pub mod pending;
 pub mod pinned;
+pub mod playback;
 pub mod profile;
 pub(crate) mod search_query;
 pub mod send_outbox;

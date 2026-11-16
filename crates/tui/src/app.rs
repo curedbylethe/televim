@@ -1438,6 +1438,19 @@ pub enum Action {
         message_id: i64,
     },
 
+    /// Play the voice note on `message_id`, or pause or resume it when it is
+    /// the note already playing.
+    ///
+    /// The player is the app's, so `tui` only records which message the reader
+    /// asked for. Only queued for a voice message, by the key that asks for it.
+    TogglePlayback {
+        /// The conversation the message belongs to.
+        chat_id: i64,
+
+        /// The voice message to play or pause.
+        message_id: i64,
+    },
+
     /// Save the media on `message_id` to the reader's chosen path.
     SaveMedia {
         chat_id: i64,
