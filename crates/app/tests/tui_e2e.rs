@@ -151,15 +151,7 @@ fn insert_mode_echoes_typing() {
     let sandbox = common::sandbox();
     common::seed_history(&sandbox, &[(1, "Ada")], &[]);
     let mut t = common::spawn_offline(&sandbox);
-    t.wait_until(|s| s.contains("NORMAL"))
-        .expect("ready in NORMAL mode");
-
-    // With no credentials the sign-in sentence answers only `q` and `:`, so
-    // `i` does nothing until a command line has cleared it.
-    t.send_str(":").expect("open command line");
-    t.send(Key::Esc).expect("close command line");
-    t.wait_until(|s| !s.contains("Sign in to Telegram"))
-        .expect("sign-in card cleared");
+    open_conversation(&mut t);
 
     t.send(Key::Char('i')).expect("enter insert mode");
     t.wait_until(|s| s.contains("INSERT"))
@@ -180,14 +172,7 @@ fn i_on_the_draft_row_resumes_the_draft() {
     let sandbox = common::sandbox();
     common::seed_history(&sandbox, &[(1, "Ada")], &[(1, vec!["hi", "are you there"])]);
     let mut t = common::spawn_offline(&sandbox);
-    t.wait_until(|s| s.contains("NORMAL"))
-        .expect("ready in NORMAL mode");
-
-    // The G7 prelude: clear the sign-in card so the conversation takes keys.
-    t.send_str(":").expect("open command line");
-    t.send(Key::Esc).expect("close command line");
-    t.wait_until(|s| !s.contains("Sign in to Telegram"))
-        .expect("sign-in card cleared");
+    open_conversation(&mut t);
 
     t.send(Key::Char('i')).expect("enter insert mode");
     t.wait_until(|s| s.contains("INSERT"))
@@ -220,7 +205,7 @@ fn i_on_the_draft_row_resumes_the_draft() {
 fn command_prompt_quits() {
     let sandbox = common::sandbox();
     let mut t = common::spawn_offline(&sandbox);
-    t.wait_until(|s| s.contains("NORMAL"))
+    t.wait_until(|s| s.contains("NORMAL") && s.contains("no application credentials"))
         .expect("ready in NORMAL mode");
 
     t.send_str(":q").expect("type :q");
@@ -241,7 +226,7 @@ fn command_prompt_quits() {
 fn contacts_offline_is_refused_by_name() {
     let sandbox = common::sandbox();
     let mut t = common::spawn_offline(&sandbox);
-    t.wait_until(|s| s.contains("NORMAL"))
+    t.wait_until(|s| s.contains("NORMAL") && s.contains("no application credentials"))
         .expect("ready in NORMAL mode");
 
     t.send_str(":contacts").expect("type :contacts");
@@ -260,14 +245,7 @@ fn scrolling_up_and_down_moves_the_visible_slice() {
     let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
     common::seed_history(&sandbox, &[(1, "Ada")], &[(1, texts)]);
     let mut t = common::spawn_offline(&sandbox);
-    t.wait_until(|s| s.contains("NORMAL"))
-        .expect("ready in NORMAL mode");
-
-    // The G7 prelude: clear the sign-in card so the conversation takes keys.
-    t.send_str(":").expect("open command line");
-    t.send(Key::Esc).expect("close command line");
-    t.wait_until(|s| !s.contains("Sign in to Telegram"))
-        .expect("sign-in card cleared");
+    open_conversation(&mut t);
 
     // Scrolling up from the newest message moves the slice to the older end.
     t.send(Key::Ctrl('u')).expect("scroll up");
