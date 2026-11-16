@@ -1957,6 +1957,83 @@ fn n_and_esc_keep_the_program_running() {
     }
 }
 
+#[test]
+fn q_asks_before_quitting_from_the_chat_list() {
+    let mut app = on_the_chat_list();
+
+    key(&mut app, 'q');
+
+    assert_eq!(app.ui.mode, Mode::Confirm);
+    assert_eq!(app.conversation.confirm, Some(ConfirmKind::Quit));
+    assert!(!app.ui.should_quit);
+    assert_eq!(app.status_text(), QUIT_PROMPT);
+}
+
+#[test]
+fn y_on_the_quit_prompt_quits_from_the_chat_list() {
+    let mut app = on_the_chat_list();
+
+    key(&mut app, 'q');
+    key(&mut app, 'y');
+
+    assert!(app.ui.should_quit);
+    assert_eq!(app.conversation.confirm, None);
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert!(app.outbox.actions.is_empty());
+}
+
+#[test]
+fn n_and_esc_cancel_quit_from_the_chat_list() {
+    for answer in [
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    ] {
+        let mut app = on_the_chat_list();
+
+        key(&mut app, 'q');
+        app.handle_key(answer);
+
+        assert!(!app.ui.should_quit, "{answer:?} quit");
+        assert_eq!(
+            app.conversation.confirm, None,
+            "{answer:?} left the prompt up"
+        );
+        assert_eq!(app.ui.mode, Mode::Normal, "{answer:?} left the mode alone");
+    }
+}
+
+#[test]
+fn q_on_the_input_line_types_without_asking_to_quit() {
+    let mut app = App::mock();
+    key(&mut app, 'i');
+    assert_eq!(app.ui.focus, Focus::Input);
+
+    key(&mut app, 'q');
+
+    assert_eq!(app.input.line.text(), "q");
+    assert_eq!(app.ui.mode, Mode::Normal);
+    assert_eq!(app.conversation.confirm, None);
+    assert!(!app.ui.should_quit);
+}
+
+#[test]
+fn q_from_the_chat_list_clears_a_pending_g() {
+    let mut app = on_the_chat_list();
+
+    app.handle_key(press(KeyCode::Char('G')));
+    app.handle_key(press(KeyCode::Char('g')));
+    app.handle_key(press(KeyCode::Char('q')));
+    app.handle_key(press(KeyCode::Char('n')));
+    app.handle_key(press(KeyCode::Char('g')));
+    assert_eq!(
+        app.list.selected_chat, 2,
+        "the `g` after dismissing `q` starts a sequence rather than finishing one"
+    );
+
+    app.handle_key(press(KeyCode::Char('g')));
+    assert_eq!(app.list.selected_chat, 0);
+}
+
 /// The one key that does not ask, and the reason it is not asked about.
 #[test]
 fn ctrl_c_still_quits_at_once() {

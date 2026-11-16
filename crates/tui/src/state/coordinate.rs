@@ -4966,6 +4966,12 @@ pub(crate) fn handle_chat_list(
             )
         }
 
+        KeyCode::Char('q') => {
+            pending.set_g(false);
+            request_quit(&mut *ui, &mut *conversation);
+            false
+        }
+
         // Any other key ends the sequence, so a lone `g` does not become a
         // jump to the top the next time one is pressed.
         _ => {
