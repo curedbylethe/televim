@@ -8,7 +8,11 @@
      n  caret-normal   the hollow cell: the line's own Normal mode, and a card's inline position */
 (function (root) {
   'use strict';
-  const W = 80, H = 24, LW = 24, RW = 56, BAR_MAX = 6, LABEL = 9, HINT_W = 71, MIN_BODY_WIDTH = 8;
+  const W = 80, H = 24, BAR_MAX = 6, LABEL = 9, HINT_W = 71, MIN_BODY_WIDTH = 8;
+  /* The two body columns, and the width a list-column overlay takes. render() sets them from
+     `s.listHidden` before it draws: a hidden chat list gives the right column the whole body and
+     the overlays raised over the list column the body's width, never a zero-width box. */
+  let LW = 24, RW = 56, OW = 24;
 
   /* the hints a reader can see, each of which fits. ALL_HINTS is what the column check iterates. */
   const HINT = {
@@ -19,7 +23,11 @@
        chat-list pin), `t` translates in place. `::cmd` stays because the two overlays are
        commands, `:pinned` and `:edits`, and a reader who cannot see `:` cannot reach them. */
     normal: ' i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  t:trans',
-    list: ' j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin',
+    list: ' j/k: chat  ⏎: open  Tab: pane  h: conv  A:card  S:you  p:pin  ^B:hide',
+    /* the conversation's row while the chat list is hidden: `^B:list` takes the place of `t:trans`,
+       seven cells for seven, so the row is as wide as `normal`. It is the one key that brings the
+       list back, and the list row that named it is not on screen. */
+    normalHidden: ' i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  ^B:list',
     visual: ' d: delete  y: yank  s: forward  r: reply  Esc: cancel',
     /* a confirmation outranks every hint, so a confirm hint has no state to be shown in. */
     draft: ' ⏎ draft — i to continue, :discard',
@@ -757,7 +765,7 @@
 
   function fresh(view, bidi) {
     const s = {
-      view: 'chat', right: 'conv', focus: 'conv', chat: 0, chats: makeChats(),
+      view: 'chat', right: 'conv', focus: 'conv', chat: 0, chats: makeChats(), listHidden: false,
       vis: null, search: null, newchat: null, fwd: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
       sset: 0, signin: null, card: null, count: 0,
       /* what the reader has said about a person, keyed by the peer's own name: the local
@@ -778,6 +786,8 @@
       profile: { name: 'Noor Haddad', id: '1480276305', username: 'noorh', bio: 'Night shift. Log first, news later.', phone: '+44 7700 900142', birthday: 'Oct 19, 2001 (24 years old)' }
     };
     if (view === 'signin') beginSignin(s);
+    /* the chat list hidden: the conversation takes the whole body */
+    else if (view === 'hiddenList') s.listHidden = true;
     /* launch with no key: the cached list stays on show, and the passphrase is asked over the right column */
     else if (view === 'passphrase') beginUnlock(s);
     else if (view === 'passphraseEmpty') { s.chats = []; beginUnlock(s); }
@@ -900,6 +910,8 @@
     /* leaving a conversation closes it, and a closed conversation is no longer being typed in */
     const was = s.chats && s.chats[s.chat];
     keyIn(s, k);
+    /* a hidden list is not a place the focus can rest: one coercion for every path that sets it */
+    if (s.listHidden && s.focus === 'list') s.focus = 'conv';
     if (was && s.chats[s.chat] !== was) was.typing = 0;
     return s;
   }
@@ -909,6 +921,9 @@
     /* a fetch is in flight: Esc drops it and every other key waits for the answer */
     if (s.jump) { if (k === 'Escape') s.jump = null; return s; }
     if (s.pass) return passKey(s, k);
+    /* Ctrl-b hides the chat list or brings it back, from any pane; a sign-in flow lives on the
+       list, so while one runs the key is answered and does nothing. */
+    if (k === 'C-b') { if (s.view !== 'signin' && s.view !== 'nocreds') s.listHidden = !s.listHidden; return s; }
     if (s.view === 'signin') {
       const A = s.signin;
       /* a request is in flight: the first ⏎ is refused, and every later key does nothing. */
@@ -1877,6 +1892,7 @@
     s.focus = 'input';
   }
   function beginSignin(s) {
+    s.listHidden = false;   /* the flow's paused surface lives on the list */
     s.view = 'signin'; s.right = 'conv'; s.confirm = null; s.vis = null; s.search = null; s.draft = null;
     s.chats = []; s.chat = 0; /* no client until credentials arrive, so no chats */
     const out = !!(s.signin && s.signin.out);
@@ -1902,6 +1918,7 @@
     s.flash = '';
   }
   function beginNoCreds(s) {
+    s.listHidden = false;
     /* no api_id and no api_hash: there is nothing to sign in with, so this is not a form. */
     s.view = 'nocreds'; s.right = 'conv'; s.confirm = null; s.vis = null; s.search = null; s.draft = null;
     s.chats = []; s.chat = 0; s.line = null; s.focus = 'nocreds';
@@ -2301,7 +2318,7 @@
     }
     if (s.focus === 'list') return { t: HINT.list, a: 'd' };
     if (s.draft && s.draft.ctx === ctx(s)) return { t: HINT.draft, a: 'd' };
-    return { t: HINT.normal, a: 'd' };
+    return { t: s.listHidden ? HINT.normalHidden : HINT.normal, a: 'd' };
   }
   const LABEL_ATTR = { NORMAL: 'N', INSERT: 'I', VISUAL: 'V', CONFIRM: 'X' };
   function drawStatus(g, s) {
@@ -2972,7 +2989,7 @@
     if (s.focus !== 'newchat' || !n || n.pending || !n.hits.length) return;
     const rows = Math.min(n.hits.length, Math.max(0, y0 - 2)); /* the column is only so tall */
     if (!rows) return;
-    const bw = LW, bh = rows + 2, y = y0 - bh;
+    const bw = OW, bh = rows + 2, y = y0 - bh;
     if (y < 0) return;
     box(g, 0, y, bw, bh, 'New chat', false);
     const byU = n.q[0] === '@', frag = byU ? n.q.slice(1) : n.q;
@@ -3001,7 +3018,7 @@
      is, and the keys are the one thing the screen would otherwise not say. Neither list is a
      panel and neither is a mode: Esc puts it away and the column is what it was. */
   function overlay(g, y0, title, n, row) {
-    const rows = Math.min(n, Math.max(0, y0 - 2)), bw = LW, bh = rows + 2, y = y0 - bh;
+    const rows = Math.min(n, Math.max(0, y0 - 2)), bw = OW, bh = rows + 2, y = y0 - bh;
     if (!rows || y < 0) return;
     box(g, 0, y, bw, bh, title, false);
     for (let i = 0; i < rows; i++) row(i, y + 1 + i);
@@ -3012,14 +3029,14 @@
     overlay(g, y0, 'Contacts · ' + C.items.length, C.items.length, (i, y) => {
       const name = C.items[i], on = i === C.sel, base = on ? 'tr' : 't', quiet = on ? 'tr' : 'd';
       const stand = s.chats.concat(s.archived.items.map((it) => it.c)).some((c) => c.name === name) ? 'chat' : 'new';
-      const sw = cells(stand), budget = LW - 4 - sw;   /* the name's field, less the standing */
-      fill(g, 1, y, LW - 2, base);
+      const sw = cells(stand), budget = OW - 4 - sw;   /* the name's field, less the standing */
+      fill(g, 1, y, OW - 2, base);
       const col = put(g, 2, y, trunc(localName(s, name), budget), base);
       const handle = (PERSON[name] && PERSON[name].username) ? ' @' + PERSON[name].username : '';
       /* the handle only when it fits WHOLE: a truncated @name is a name the reader cannot
          search for and a row that lies about how much of it there is */
       if (handle && cells(handle) <= budget - col) put(g, 2 + col, y, handle, quiet);
-      put(g, LW - 1 - sw, y, stand, quiet);
+      put(g, OW - 1 - sw, y, stand, quiet);
     });
   }
   function drawArchived(g, s, y0) {
@@ -3027,9 +3044,9 @@
     if (s.focus !== 'archived') return;
     overlay(g, y0, 'Archived · ' + A.items.length, A.items.length, (i, y) => {
       const c = A.items[i].c, on = i === A.sel, a = on ? 'tr' : 't', u = c.unread ? String(c.unread) : '';
-      fill(g, 1, y, LW - 2, a);
+      fill(g, 1, y, OW - 2, a);
       put(g, 2, y, trunc(localName(s, c.name), u ? 16 : 20), a);
-      if (u) put(g, LW - 3 - u.length + 1, y, u, on ? 'tr' : 'd');
+      if (u) put(g, OW - 3 - u.length + 1, y, u, on ? 'tr' : 'd');
     });
   }
 
@@ -3098,12 +3115,13 @@
 
   function render(s) {
     const g = newGrid();
+    LW = s.listHidden ? 0 : 24; RW = W - LW; OW = s.listHidden ? W : 24;
     if (s.line) syncComp(s.line);
     if (s.view === 'quit') {
       put(g, 0, 0, '$ televim', 't'); put(g, 0, 1, '$ ', 't'); g[1][2] = [' ', 'tn']; return g;
     }
     const b = bar(s), top = H - 1 - (b.n + 2);
-    drawList(g, s, top);
+    if (!s.listHidden) drawList(g, s, top);
     if (s.view === 'signin' && s.signin.out && s.signin.away) drawCard(g, s, LW, top);
     else if (s.view === 'signin') drawSignin(g, s, LW, top);
     else if (s.view === 'nocreds') drawNoCreds(g, s, LW, top);
@@ -3180,7 +3198,7 @@
 
   /* ---------- scripted starts: real keystrokes through the real handler ---------- */
   const PEER_SAYS = 'The side gate is open.';
-  const TOK = { Esc: 'Escape', CR: 'Enter', Tab: 'Tab', BS: 'Backspace', 'C-j': 'C-j', 'C-w': 'C-w', 'C-o': 'C-o', 'C-i': 'C-i', 'S-CR': 'S-Enter' };
+  const TOK = { Esc: 'Escape', CR: 'Enter', Tab: 'Tab', BS: 'Backspace', 'C-j': 'C-j', 'C-w': 'C-w', 'C-b': 'C-b', 'C-o': 'C-o', 'C-i': 'C-i', 'S-CR': 'S-Enter' };
   function feed(s, script) {
     /* a key is a code point: an emoji is one press, and every token below is ASCII */
     const a = Array.from(script);
@@ -3236,6 +3254,16 @@
       { name: 'gg: the page arrived, the cursor rests on the first unread', start: 'unreadFar', keys: 'gg<wait>' },
       { name: 'gg: the first unread is loaded, only the cursor moves', start: 'unreadNear', keys: 'gg' }] },
     /* a window painted from the cache, with the newest page still on its way (rank 9 of the status line) */
+    /* the chat list hidden: the right column is the whole body, and :contacts and :archived are
+       still drawn, over the body, because the column they were raised over is the body now */
+    { id: 'hidden', name: 'Chat list hidden', start: 'hiddenList', variants: [
+      { name: 'The conversation takes the whole body', keys: '' },
+      { name: 'Ctrl-b hides the list; the conversation takes the body', start: 'chat', keys: '<C-b>' },
+      { name: 'Ctrl-b again: the list is back', start: 'chat', keys: '<C-b><C-b>' },
+      { name: 'Ctrl-b on the list: focus moves to the conversation', start: 'chat', keys: '<Tab><C-b>' },
+      { name: 'Tab and h skip the hidden list', keys: '<Tab>h' },
+      { name: 'Contacts: the directory is drawn over the body', keys: ':contacts<CR>' },
+      { name: 'Archived: the archive is drawn over the body', keys: ':archive<CR>:archived<CR>' }] },
     { id: 'cached', name: 'Cached conversation', variants: [
       { name: 'The newest page is on its way', keys: '<cached>' },
       { name: 'The page arrived: the hint is back', keys: '<cached><wait>' }] },
