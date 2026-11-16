@@ -415,6 +415,9 @@ at all used to be its insert mode, until the line grew a normal mode and a
 visual one, and one enum could no longer describe a conversation being
 selected in *and* a half-written line waiting. `Tab` and `BackTab` walk the
 panes in the order they are drawn, `h`/`l` step between the two panes,
+and `Ctrl+b` hides the chat list (`UiState::chat_list_hidden`): the body split
+keeps two rects with the first at zero width, `cycle_focus` leaves the pane
+out of its walk, and `set_focus` turns a request for it into the conversation,
 `Ctrl+w` leaves the line from any of its modes without throwing anything away,
 and the focused pane's block is drawn in `Theme::border_focused`. The per-peer
 draft map and the read receipts live on `DraftStore` (`state/drafts.rs`): each
