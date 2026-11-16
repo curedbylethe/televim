@@ -2939,10 +2939,13 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         }
     }
 
-    // An arrival under a card is kept rather than spent: the marker it is owed
-    // is refused for as long as the card covers the conversation, and the pass
-    // after the reader backs out of it asks again.
-    let arrived = !card_covers_conversation(app) && state.read_owed.take().is_some();
+    // An arrival under a card or a blur is kept rather than spent: the marker
+    // it is owed is refused for as long as the card covers the conversation or
+    // the terminal reports itself unfocused, and the pass after the reader
+    // backs out of the card or returns focus asks again.
+    let arrived = !card_covers_conversation(app)
+        && !focus_withholds_read(app)
+        && state.read_owed.take().is_some();
     // Before the client is looked up, like the retry: these touch the stored
     // session and the history file, and no client is the state a reader needs
     // them in.
@@ -3254,13 +3257,14 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
 /// open, if one should be sent.
 ///
 /// Only the conversation on show is considered, and only while its list entry
-/// still has unread messages. The ceiling is the newest message the list knows
-/// of (`last_message_id`), not the window's end. A missing or non-positive id is
-/// never sent, because it names no message the server holds. A ceiling already
-/// accepted is not sent again.
+/// still has unread messages. A profile card covering the conversation, or a
+/// terminal that has reported itself unfocused, withholds the marker. The
+/// ceiling is the newest message the list knows of (`last_message_id`), not the
+/// window's end. A missing or non-positive id is never sent, because it names
+/// no message the server holds. A ceiling already accepted is not sent again.
 fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
     let open = app.conversation.conversation.window.chat_id;
-    if open == 0 || card_covers_conversation(app) {
+    if open == 0 || card_covers_conversation(app) || focus_withholds_read(app) {
         return None;
     }
     let chat = app.chats().iter().find(|chat| chat.id == open)?;
@@ -3305,13 +3309,15 @@ fn bulk_read_sentence(done: u32, failed: u32) -> String {
 
 /// The read marker a Latest page asks for, or none.
 ///
-/// A card that covers the conversation refuses the marker, so the conversation
-/// is owed it: [`State::read_owed`] keeps it for the pass after the reader backs
-/// out, which asks again through [`read_target`].
+/// A card that covers the conversation, or a terminal that has reported itself
+/// unfocused, refuses the marker, so the conversation is owed it:
+/// [`State::read_owed`] keeps it for the pass after the card or the blur, which
+/// asks again through [`read_target`].
 fn latest_read(app: &App, state: &mut State) -> Option<(i64, i64)> {
     let target = read_target(app, state);
     let open = app.conversation.conversation.window.chat_id;
-    if target.is_none() && card_covers_conversation(app) && open != 0 {
+    if target.is_none() && (card_covers_conversation(app) || focus_withholds_read(app)) && open != 0
+    {
         state.read_owed = Some(open);
     }
     target
@@ -3326,6 +3332,15 @@ fn latest_read(app: &App, state: &mut State) -> Option<(i64, i64)> {
 /// again.
 fn card_covers_conversation(app: &App) -> bool {
     matches!(app.ui.pane, tui::app::Pane::Profile(_))
+}
+
+/// Whether the terminal's focus report withholds the automatic read marker.
+///
+/// True only once the terminal has reported at least one focus event and the
+/// most recent one was a blur; a terminal that never reports focus events keeps
+/// sending the marker on open and on arrival.
+fn focus_withholds_read(app: &App) -> bool {
+    app.focus.reported && !app.focus.focused
 }
 
 /// Whether the reader can currently see this conversation's messages.
@@ -9113,6 +9128,154 @@ mod tests {
 
         assert_eq!(latest_read(&app, &mut state), Some((CHAT, 20)));
         assert_eq!(state.read_owed, None);
+    }
+
+    #[test]
+    fn a_reported_unfocused_terminal_refuses_the_marker_for_an_open() {
+        let mut app = listed(2, Some(20));
+        app.focus.reported = true;
+        app.focus.focused = false;
+        let state = State::default();
+
+        assert_eq!(
+            read_target(&app, &state),
+            None,
+            "a blurred terminal withholds the marker"
+        );
+    }
+
+    #[test]
+    fn the_marker_a_blur_withheld_is_owed_and_taken_on_the_first_focused_pass() {
+        let mut app = listed(2, Some(20));
+        app.focus.reported = true;
+        app.focus.focused = false;
+        let mut state = State::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 21..=21).remove(0))),
+        );
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "no marker is sent while blurred");
+        assert_eq!(read_target(&app, &state), None, "the blur refuses it");
+        assert_eq!(
+            state.read_owed,
+            Some(CHAT),
+            "a blurred pass does not spend it"
+        );
+
+        app.focus.focused = true;
+        assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
+
+        drive(&mut app, &mut state, &tx);
+        assert_eq!(state.read_owed, None, "the flag is taken on the pass");
+    }
+
+    #[test]
+    fn an_unreported_terminal_still_marks_an_arrival_read() {
+        let mut app = listed(2, Some(20));
+        let mut state = State::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 21..=21).remove(0))),
+        );
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "nothing is sent with no client");
+        assert_eq!(state.read_owed, None, "the flag is taken on the pass");
+        assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
+    }
+
+    #[test]
+    fn a_latest_page_on_a_blurred_terminal_owes_its_marker() {
+        let mut app = listed(2, Some(20));
+        app.focus.reported = true;
+        app.focus.focused = false;
+        let mut state = State::default();
+
+        assert_eq!(latest_read(&app, &mut state), None, "the blur refuses it");
+        assert_eq!(state.read_owed, Some(CHAT), "the marker is owed");
+
+        app.focus.focused = true;
+
+        // The pass after focus returns: the arrival gating drive uses.
+        let arrived = !card_covers_conversation(&app) && state.read_owed.take().is_some();
+        assert!(arrived);
+        assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
+    }
+
+    #[test]
+    fn a_card_over_a_blurred_terminal_neither_sends_nor_loses_the_marker() {
+        let mut app = listed(2, Some(20));
+        app.focus.reported = true;
+        app.focus.focused = false;
+        card_over_the_open_chat(&mut app);
+        let mut state = State::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 21..=21).remove(0))),
+        );
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "card and blur send nothing");
+        assert_eq!(state.read_owed, Some(CHAT), "owed under card and blur");
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        drive(&mut app, &mut state, &tx);
+
+        assert!(rx.try_recv().is_err(), "blur alone still sends nothing");
+        assert_eq!(
+            state.read_owed,
+            Some(CHAT),
+            "backing out of the card while blurred keeps the marker owed"
+        );
+        assert_eq!(read_target(&app, &state), None);
+
+        app.focus.focused = true;
+        assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
+        drive(&mut app, &mut state, &tx);
+
+        assert_eq!(
+            state.read_owed, None,
+            "the first focused pass takes the marker"
+        );
+    }
+
+    #[test]
+    fn a_focused_terminal_still_marks_the_open_conversation_read() {
+        let mut app = listed(2, Some(20));
+        app.focus.reported = true;
+        app.focus.focused = true;
+
+        assert_eq!(read_target(&app, &State::default()), Some((CHAT, 20)));
+    }
+
+    #[test]
+    fn focus_withholds_read_only_after_a_reported_blur() {
+        for (reported, focused, expected) in [
+            (false, true, false),
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let mut app = App::new();
+            app.focus.reported = reported;
+            app.focus.focused = focused;
+            assert_eq!(
+                focus_withholds_read(&app),
+                expected,
+                "reported={reported}, focused={focused}"
+            );
+        }
     }
 
     // ---- what a failure costs -------------------------------------------
