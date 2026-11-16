@@ -3045,7 +3045,7 @@
     overlay(g, y0, 'Archived · ' + A.items.length, A.items.length, (i, y) => {
       const c = A.items[i].c, on = i === A.sel, a = on ? 'tr' : 't', u = c.unread ? String(c.unread) : '';
       fill(g, 1, y, OW - 2, a);
-      put(g, 2, y, trunc(localName(s, c.name), u ? 16 : 20), a);
+      put(g, 2, y, trunc(localName(s, c.name), OW - (u ? 8 : 4)), a);
       if (u) put(g, OW - 3 - u.length + 1, y, u, on ? 'tr' : 'd');
     });
   }
