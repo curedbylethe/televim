@@ -659,7 +659,7 @@ up (build, fetch the chat list, take the feed — it does **not** sign in; see
 [`decisions.md`](./decisions.md)), asks for a page whenever the conversation on
 show is near one
 of its ends, sends a read marker when a conversation is opened with unread
-messages (`read_target` picks it and refuses while a profile card covers the window, `request_read` sends it, and
+messages (`read_target` picks it and refuses while a profile card covers the window or the terminal has reported itself unfocused, `request_read` sends it, and
 `Event::ReadMarked` clears the count only once it is accepted), drives the sign-in flow the panel asks for, and folds in whatever
 arrives. A live message for a chat missing from the list triggers an async list
 refresh. A recoverable feed read failure is waited out in the pump's task up to

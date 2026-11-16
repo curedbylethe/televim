@@ -555,6 +555,9 @@ Real, and named so they are not mistaken for oversights:
   for the keyboard flags again. Whether a given terminal reports focus, and whether
   it resets the flags on blur, is not checked: nothing has run in one. Suspend
   (`SIGTSTP`/`SIGCONT`) is not handled; it is job control, not a window blur.
+  - *A minimized window is only gated where the terminal emits `FocusLost`.* A
+    terminal silent on minimize still marks messages read while it is out of view,
+    and nothing has run in a real terminal to prove which terminals report it.
 - **A worst-case history-cache write peaks above the 50 MB budget.** The byte
   bound counts JSON-encoded text, so the serialised text is at most 8 MiB; but the
   in-crate worst-case test (6,400 rows of control characters, release) measured a
