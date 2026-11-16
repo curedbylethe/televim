@@ -1949,3 +1949,18 @@ are in [`../AGENTS.md`](../AGENTS.md).
   translation lives in a capped side table on `ConversationView`, next to the
   reactions and the revisions, and is dropped with its message, when its message
   is edited, and when the answer reads the same as the original.
+
+- **Why the read marker waits when the terminal reports itself unfocused:**
+  `focus_withholds_read` withholds the marker only when the terminal has
+  reported a focus event and the last one was a loss; a terminal that never
+  reports keeps sending, for the reason the notice entry already gives ("Why
+  focus suppresses notices only after a reported focus event"). The marker is
+  held, not dropped: `State::read_owed` is spent only by a pass that may send,
+  the same short-circuit the profile card uses, so a blur delays the marker
+  instead of losing it. The rule sits in `read_target`, the one function both
+  an arrival and a `Latest` page pass through, so the read-policy modes (#112)
+  add their condition there rather than bypassing it — ghost mode excepted,
+  since it never marks. A minimized window is gated only where the terminal
+  emits `FocusLost`, so this is not a "the window is hidden" test. A new
+  `State` field or re-setting a flag after a refused send was rejected because
+  the card's retention already costs nothing.

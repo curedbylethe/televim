@@ -190,7 +190,9 @@ Working today:
   newest message the list knows of, and the count clears once Telegram accepts
   that; a refused marker leaves the count where it was, and the next open asks
   again. While any card covers the conversation nothing is marked: the mark waits
-  for the card to be confirmed or closed. A message that arrives in the
+  for the card to be confirmed or closed. While the terminal has reported itself
+  unfocused nothing is marked either: the mark waits, and it goes up on the
+  first pass after focus returns. A message that arrives in the
   conversation on show is marked read the same way, and one that arrives under a
   card is kept and marked on the pass after `Esc`; a read
   done on another device sets the count to whatever Telegram still counts as
