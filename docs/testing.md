@@ -145,8 +145,9 @@ baseline is committed.
 An ordinary pull request runs `changes` and the `lint` job's steps, and nothing
 else; the `release` job carries the release build and the budget.
 
-`libdbus-1-dev` and `pkg-config` are installed first in both jobs, because
-`keyring`'s Linux backend links against DBus at build time.
+`libdbus-1-dev`, `libasound2-dev` and `pkg-config` are installed first in both
+jobs, because `keyring`'s Linux backend links against DBus at build time and
+`cpal`, under the in-app voice player, links against ALSA.
 
 `.github/workflows/release.yml` is separate from the CI gate and has no
 pull-request trigger. Pushes to `main` run release-please and write the release

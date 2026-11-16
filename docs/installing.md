@@ -263,6 +263,13 @@ package for your distribution:
 - Fedora: `dbus-libs`
 - Arch Linux: `dbus`
 
+They also link to ALSA, which plays voice messages in the app. The library must
+be present for the program to start, even on a machine with no sound card:
+
+- Debian or Ubuntu: `libasound2` (`libasound2t64` on Ubuntu 24.04 and newer)
+- Fedora: `alsa-lib`
+- Arch Linux: `alsa-lib`
+
 Install a Secret Service provider, such as GNOME Keyring or KWallet, and make a
 D-Bus session available. The archive preserves the executable bit. If a manual
 copy lost it, run `chmod +x ~/.local/bin/televim`.
@@ -370,6 +377,8 @@ requires manually removing the encrypted session file; Televim cannot recover it
   Alpine are unsupported.
 - **`libdbus-1.so.3: cannot open shared object file`:** install your distribution's
   DBus runtime package from the Linux section.
+- **`libasound.so.2: cannot open shared object file`:** install your
+  distribution's ALSA runtime package from the Linux section.
 - **`Bad CPU type` or wrong architecture:** download the archive matching your
   OS and architecture.
 - **macOS blocks the binary:** confirm you trust the download, then use the
@@ -391,7 +400,8 @@ requires manually removing the encrypted session file; Televim cannot recover it
 ## Building from source
 
 See [`README.md`'s building section](../README.md#building). Use Rust 1.98.1.
-On Linux, install `libdbus-1-dev` and `pkg-config` before building. Run
+On Linux, install `libdbus-1-dev`, `libasound2-dev` (`alsa-lib-devel` on
+Fedora, `alsa-lib` on Arch) and `pkg-config` before building. Run
 `make build-release` or `cargo build --release -p televim`. A source build has no
 compiled Telegram application credentials; configure your own as described in
 [`README.md`'s credentials section](../README.md#credentials).

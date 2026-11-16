@@ -62,7 +62,7 @@ The checksum detects a broken download, not a compromised release; see the
 
 Upgrade with `:update`; installed updates require restarting televim. See [upgrading](docs/installing.md#upgrading).
 
-On Linux, install DBus (`libdbus-1-3` on Debian or Ubuntu) and a Secret Service provider. See [platform details](docs/installing.md#linux).
+On Linux, install DBus (`libdbus-1-3` on Debian or Ubuntu), ALSA (`libasound2`) and a Secret Service provider. See [platform details](docs/installing.md#linux).
 
 ## First run
 

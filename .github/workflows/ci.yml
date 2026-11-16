@@ -72,10 +72,11 @@ jobs:
           components: rustfmt, clippy
 
       # `keyring`'s Linux backend talks to the Secret Service over DBus, which
-      # `libdbus-sys` links against at build time.
+      # `libdbus-sys` links against at build time. Voice playback's `cpal` links
+      # ALSA the same way, so its headers are needed to build on Linux.
       - name: system dependencies
         if: needs.changes.outputs.rust == 'true'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev libasound2-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.outputs.rust == 'true'
@@ -213,9 +214,10 @@ jobs:
           components: rustfmt, clippy
 
       # `keyring`'s Linux backend talks to the Secret Service over DBus, which
-      # `libdbus-sys` links against at build time.
+      # `libdbus-sys` links against at build time. Voice playback's `cpal` links
+      # ALSA the same way, so its headers are needed to build on Linux.
       - name: system dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev libasound2-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
 
