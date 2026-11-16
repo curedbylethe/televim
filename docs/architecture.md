@@ -91,7 +91,7 @@ in one direction and wider in another:
 | `web-demo` (detached) | `domain`, `tui`, `demo-support`, Ratzilla and browser bindings; no `app`, `proto`, or `telegram-framework` |
 | `telegram-framework` | `thiserror`, `tracing`, `tokio`, `serde`, `serde_json`, `keyring`, `aes-gcm-siv`, `argon2`, `getrandom`, `zeroize`, and behind `live` the `grammers-*` crates. The four after `keyring` are `sealed`'s, and they are always compiled. |
 | `proto` | `domain`, `telegram-framework`, `thiserror`, `tracing` |
-| `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `dotenvy`, `serde`, `serde_json`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64`, `time` |
+| `app` | `proto`, `telegram-framework`, `domain`, `tui`, `tokio`, `anyhow`, `clap`, `config`, `dotenvy`, `serde`, `serde_json`, `tracing`, `tracing-subscriber`, `crossterm`, `ratatui`, `base64`, `time`, `thiserror`, and for voice playback `ogg`, `opus-rs`, `rodio` |
 
 `tui` uses `ratatui` with default features disabled. `crossterm` is a native-only
 target dependency; `tui::key` is the backend-neutral key event type shared with
@@ -341,6 +341,7 @@ crates/tui/
 │   │   ├── search_query.rs # The typed filters (media:/since:/until:) -> SearchSpec
 │   │   ├── input.rs        # InputState: the live line and the emoji popup
 │   │   ├── drafts.rs       # DraftStore: per-peer parked drafts and read receipts
+│   │   ├── playback.rs     # PlaybackState: the voice note being played, as plain data
 │   │   ├── ui.rs           # UiState, FrameMetrics: mode, focus, the frame's cells, each peer's presence
 │   │   └── update.rs       # Stable release offer and its consent state
 │   ├── card.rs         # One profile panel over two subjects: the row model, the
@@ -452,6 +453,13 @@ path. `:open` otherwise opens the highlighted message's cached or downloaded
 attachment. `:save <path>` reuses that download path, then copies the cache file
 to the reader's destination off the event loop. `tui` owns neither upload I/O nor
 filesystem access.
+
+`Space` on a selected voice message queues `Action::TogglePlayback`, the one media
+action that plays inside the program. `net` answers it before the connection gate:
+a cached file starts at once, and a miss reuses the `o` download and starts when the
+file lands. The `Player` (`player.rs`) lives on the loop's thread, and the loop
+writes the note's position into `PlaybackState` once a pass; `tui` holds that plain
+record and draws it, and owns no audio.
 
 The new-conversation search is the second prompt-driven surface. `/` on the chat
 list opens it (the conversation's `/` still searches messages), `:new <query>`
@@ -579,6 +587,7 @@ crates/app/
 │   ├── net.rs          # Client bring-up, the account's profile, history
 │   │                   #   fetches, update pump
 │   ├── notify.rs       # Best-effort desktop notification delivery (Notifier seam)
+│   ├── player.rs       # In-app Ogg/Opus voice player: decode, device, pause, position
 │   └── runtime.rs      # Tokio runtime setup, channel wiring, event loop
 ├── tests/
 │   ├── proto_integration.rs  # Opt-in, against a real datacenter
