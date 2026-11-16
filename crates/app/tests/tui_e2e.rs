@@ -121,6 +121,28 @@ fn a_session_written_before_an_update_opens_after_it() {
     assert!(!text.contains("Passphrase"), "no passphrase prompt");
 }
 
+/// The `chat_list` key reaches the screen, and `Ctrl-b` still toggles from
+/// there: a key that is read and never used would ship green in the unit tests.
+#[test]
+fn a_hidden_chat_list_setting_starts_the_list_hidden() {
+    let sandbox = common::sandbox();
+    common::seed_session(&sandbox);
+    common::configure_hidden_chat_list(&sandbox);
+    let mut t = common::spawn_offline(&sandbox);
+
+    let screen = t
+        .snapshot_after(|s| s.contains("NORMAL") && s.contains("Conversation"))
+        .expect("the account shell draws");
+    assert!(
+        !screen.full_text().contains("Chats ("),
+        "the list starts hidden"
+    );
+
+    t.send(Key::Ctrl('b')).expect("show the list");
+    t.wait_until(|s| s.contains("Chats ("))
+        .expect("Ctrl-b brings the list back");
+}
+
 #[test]
 fn dead_update_endpoint_does_not_delay_launch() {
     let sandbox = common::sandbox();

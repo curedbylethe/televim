@@ -1695,6 +1695,15 @@ impl App {
         self
     }
 
+    /// The same application, with the chat list hidden or shown to begin with.
+    ///
+    /// The setting is a plain `bool`: `tui` names no configuration type.
+    #[must_use]
+    pub fn with_chat_list(mut self, hidden: bool) -> Self {
+        self.ui.chat_list_hidden = hidden;
+        self
+    }
+
     /// The same application, drawing `[sticker]` where a picture would go.
     ///
     /// Delegates to [`UiState::with_stickers`].

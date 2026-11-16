@@ -11697,6 +11697,13 @@ fn ctrl_b_hides_the_chat_list_and_gives_the_conversation_the_whole_body() {
 }
 
 #[test]
+fn the_builder_starts_the_chat_list_hidden() {
+    let app = App::new().with_chat_list(true);
+    assert!(app.ui.chat_list_hidden);
+    assert!(!App::new().ui.chat_list_hidden, "and shown by default");
+}
+
+#[test]
 fn ctrl_b_from_the_chat_list_lands_on_the_conversation() {
     let mut app = on_the_chat_list();
 
