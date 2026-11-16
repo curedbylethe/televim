@@ -11769,3 +11769,28 @@ fn a_half_written_line_survives_two_toggles() {
     assert_eq!(app.input.line.text(), "half a th");
     assert_eq!(app.ui.focus, Focus::Input);
 }
+
+#[test]
+fn a_sign_in_flow_draws_the_chat_list_even_when_it_was_hidden() {
+    let mut app = App::mock();
+    app.session.credentials_configured = true;
+    app.handle_key(press_ctrl('b'));
+
+    app.begin_signin();
+
+    assert!(!app.ui.chat_list_hidden);
+    assert!(
+        !spans_the_frame(&frame_rows(&app), 0),
+        "the column is drawn"
+    );
+    // The flow's paused surface is on the list, so the key that would hide
+    // the list is answered and does nothing while the flow runs.
+    app.handle_key(press_ctrl('b'));
+    assert!(!app.ui.chat_list_hidden);
+    app.handle_key(press_ctrl('w'));
+    assert_eq!(
+        app.ui.focus,
+        Focus::ChatList,
+        "the paused flow is reachable"
+    );
+}

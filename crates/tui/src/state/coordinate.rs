@@ -1960,6 +1960,9 @@ pub(crate) fn begin_signin(
     input: &mut InputState,
     profile: &mut ProfileCard,
 ) {
+    // The flow, and the paused surface it leaves on the chat list, live on
+    // that column: a hidden list would leave them nowhere to be reached.
+    ui.chat_list_hidden = false;
     if !session.credentials_configured {
         begin_no_credentials(
             &mut *ui,
@@ -1996,6 +1999,7 @@ pub(crate) fn begin_no_credentials(
     input: &mut InputState,
     profile: &mut ProfileCard,
 ) {
+    ui.chat_list_hidden = false;
     ui.set_pane(Pane::Conversation);
     ui.set_mode(Mode::Normal);
     session.begin_signin(SignIn::NoCredentials);
