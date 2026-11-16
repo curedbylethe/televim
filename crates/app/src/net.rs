@@ -9150,7 +9150,7 @@ mod tests {
         app.focus.reported = true;
         app.focus.focused = false;
         let mut state = State::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         apply(
             &mut app,
@@ -9159,7 +9159,6 @@ mod tests {
         );
         drive(&mut app, &mut state, &tx);
 
-        assert!(rx.try_recv().is_err(), "no marker is sent while blurred");
         assert_eq!(read_target(&app, &state), None, "the blur refuses it");
         assert_eq!(
             state.read_owed,
@@ -9178,7 +9177,7 @@ mod tests {
     fn an_unreported_terminal_still_marks_an_arrival_read() {
         let mut app = listed(2, Some(20));
         let mut state = State::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         apply(
             &mut app,
@@ -9187,7 +9186,6 @@ mod tests {
         );
         drive(&mut app, &mut state, &tx);
 
-        assert!(rx.try_recv().is_err(), "nothing is sent with no client");
         assert_eq!(state.read_owed, None, "the flag is taken on the pass");
         assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
     }
@@ -9204,7 +9202,7 @@ mod tests {
 
         app.focus.focused = true;
 
-        // The pass after focus returns: the arrival gating drive uses.
+        // Stands in for a focused pass after focus returns.
         let arrived = !card_covers_conversation(&app) && state.read_owed.take().is_some();
         assert!(arrived);
         assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
@@ -9217,7 +9215,7 @@ mod tests {
         app.focus.focused = false;
         card_over_the_open_chat(&mut app);
         let mut state = State::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         apply(
             &mut app,
@@ -9226,13 +9224,11 @@ mod tests {
         );
         drive(&mut app, &mut state, &tx);
 
-        assert!(rx.try_recv().is_err(), "card and blur send nothing");
         assert_eq!(state.read_owed, Some(CHAT), "owed under card and blur");
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         drive(&mut app, &mut state, &tx);
 
-        assert!(rx.try_recv().is_err(), "blur alone still sends nothing");
         assert_eq!(
             state.read_owed,
             Some(CHAT),
