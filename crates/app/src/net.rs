@@ -1024,6 +1024,11 @@ pub struct State {
     /// the file goes to the player instead of the viewer queue.
     play_pending: Option<(i64, i64)>,
 
+    /// Every download a play asked for that has not settled. Such a file goes to
+    /// the player or nowhere, never to the viewer, even when `play_pending` has
+    /// moved on to another message.
+    play_downloads: Vec<(i64, i64)>,
+
     /// Local paths kept for pending and failed attachment sends, keyed by their
     /// negative placeholder ids so a failed upload can be retried.
     pending_uploads: HashMap<i64, PendingAttachment>,
@@ -1398,6 +1403,8 @@ impl State {
         // The account's files, not this program's to open until it knows which
         // account the new session belongs to. `adopt_slot` puts them back.
         self.history_file = None;
+        // The note holds a pin in the cache that is about to be let go.
+        self.forget_playback(|_, _| true);
         self.media_cache = None;
         self.draft_file = None;
         self.session_store = None;
@@ -1546,7 +1553,8 @@ impl State {
     /// that does finish is still refused when it stores, so it leaves no file
     /// behind; the next launch under another account, or none, clears the
     /// directory anyway ([`MediaCache::open`]).
-    fn forget_media(&self) {
+    fn forget_media(&mut self) {
+        self.forget_playback(|_, _| true);
         for cancel in &self.media_cancel {
             cancel.flag.store(true, Ordering::Relaxed);
         }
@@ -1560,7 +1568,8 @@ impl State {
 
     /// Drops a message's cached media after an edit: the message may now carry
     /// different media, so its cached file is no longer its answer.
-    fn forget_media_message(&self, chat_id: i64, message_id: i64) {
+    fn forget_media_message(&mut self, chat_id: i64, message_id: i64) {
+        self.forget_playback(|chat, id| (chat, id) == (chat_id, message_id));
         if let Some(cache) = &self.media_cache {
             cache
                 .lock()
@@ -1571,13 +1580,7 @@ impl State {
 
     /// Drops the cached media of deleted messages, in any chat.
     fn forget_media_messages(&mut self, message_ids: &[i64]) {
-        if self
-            .playing
-            .as_ref()
-            .is_some_and(|now| message_ids.contains(&now.message_id))
-        {
-            self.stop_playback();
-        }
+        self.forget_playback(|_, id| message_ids.contains(&id));
         if let Some(cache) = &self.media_cache {
             cache
                 .lock()
@@ -1780,7 +1783,8 @@ impl State {
             self.player.toggle_pause();
             return None;
         }
-        if self.play_pending == Some((chat_id, message_id)) {
+        if self.play_downloads.contains(&(chat_id, message_id)) {
+            self.play_pending = Some((chat_id, message_id));
             return None;
         }
         let view = &app.conversation.conversation;
@@ -1801,6 +1805,7 @@ impl State {
             return None;
         }
         self.play_pending = Some((chat_id, message_id));
+        self.play_downloads.push((chat_id, message_id));
         Some(Action::OpenMedia {
             chat_id,
             message_id,
@@ -1809,6 +1814,8 @@ impl State {
 
     /// Plays the file at `path` for the message, replacing any note playing.
     fn start_playback(&mut self, app: &mut App, chat_id: i64, message_id: i64, path: PathBuf) {
+        // Whatever was waited for is superseded by this note.
+        self.play_pending = None;
         self.stop_playback();
         self.pin(&path);
         match self.player.start(&path) {
@@ -1836,6 +1843,21 @@ impl State {
         }
     }
 
+    /// Lets go of the note and of the wait for a download, for each that `hit`
+    /// names by its chat and message.
+    fn forget_playback(&mut self, hit: impl Fn(i64, i64) -> bool) {
+        if self.play_pending.is_some_and(|(chat, id)| hit(chat, id)) {
+            self.play_pending = None;
+        }
+        if self
+            .playing
+            .as_ref()
+            .is_some_and(|now| hit(now.chat_id, now.message_id))
+        {
+            self.stop_playback();
+        }
+    }
+
     fn pin(&self, path: &Path) {
         if let Some(cache) = &self.media_cache {
             cache
@@ -1857,6 +1879,9 @@ impl State {
     /// Ends the note when it has run out or the reader has left its
     /// conversation, and reports what the player says of one that goes on.
     fn playback_report(&mut self, open_chat: i64) -> Option<(i64, Playback)> {
+        if self.play_pending.is_some_and(|(chat, _)| chat != open_chat) {
+            self.play_pending = None;
+        }
         let now = self.playing.as_ref()?;
         let message_id = now.message_id;
         let report = if now.chat_id == open_chat {
@@ -2975,12 +3000,6 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // state an event set, and the loop's tick is the only thing that can take it
     // back, because a frame is drawn from a shared reference.
     app.expire_typing(Instant::now());
-    // The note's position advances on the player's own thread; this pass is
-    // where the screen's record catches up, and where a note that ended, or
-    // whose conversation was left, is let go.
-    let report = state.playback_report(app.conversation.conversation.window.chat_id);
-    apply_playback(app, report);
-
     // Nothing is open, so there is no conversation for a cursor to describe —
     // nor a jump to be waiting on, because closing a conversation forgets one.
     if app.conversation.conversation.window.chat_id == 0 {
@@ -3135,6 +3154,13 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         let media = media_job(&action, app, state);
         request_action(&client, state, action, media, tx);
     }
+
+    // The note's position advances on the player's own thread; this pass is
+    // where the screen's record catches up, and where a note that ended, or
+    // whose conversation was left, is let go. After the actions, so a play the
+    // reader just asked for is on the screen this pass and not the next.
+    let report = state.playback_report(app.conversation.conversation.window.chat_id);
+    apply_playback(app, report);
 
     let Some(client) = state.client.clone() else {
         // No client, so nothing is asked for — but a conversation opened
@@ -5029,6 +5055,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                 app.remove_conversation(chat_id);
                 state.cached.messages.remove(chat_id);
                 state.cached.dirty = true;
+                state.forget_playback(|chat, _| chat == chat_id);
                 if let Some(cache) = state.media_cache.as_ref()
                     && let Ok(mut cache) = cache.lock()
                 {
@@ -5766,6 +5793,9 @@ fn apply_media_exported(
 
 /// Forgets that a download was to start playback, once it has settled.
 fn forget_play_pending(state: &mut State, chat_id: i64, message_id: i64) {
+    state
+        .play_downloads
+        .retain(|key| *key != (chat_id, message_id));
     if state.play_pending == Some((chat_id, message_id)) {
         state.play_pending = None;
     }
@@ -5847,11 +5877,15 @@ fn apply_media(app: &mut App, state: &mut State, event: Event) {
             kind,
         } => {
             app.conversation.downloads.forget(chat_id, message_id);
-            if state.play_pending == Some((chat_id, message_id)) {
-                state.play_pending = None;
-                // The reader may have left while it downloaded; the file stays
-                // cached, and nothing plays in a conversation not on show.
-                if app.conversation.conversation.window.chat_id == chat_id {
+            if state.play_downloads.contains(&(chat_id, message_id)) {
+                let wanted = state.play_pending == Some((chat_id, message_id));
+                forget_play_pending(state, chat_id, message_id);
+                // Only the note last asked for plays, and only if it is still on
+                // show; any other file stays cached, and none goes to the viewer.
+                if wanted
+                    && open_media_kind(&app.conversation.conversation, chat_id, message_id)
+                        == Some(MediaKind::Voice)
+                {
                     state.start_playback(app, chat_id, message_id, path);
                 }
                 return;
@@ -16061,6 +16095,7 @@ mod media_tests {
         let (mut app, mut state) = voice_setup(dir.path());
         app.conversation.conversation.window.replace([]);
         state.play_pending = Some((CHAT, 1));
+        state.play_downloads = vec![(CHAT, 1)];
 
         apply_media(
             &mut app,
@@ -16128,6 +16163,114 @@ mod media_tests {
         assert_eq!(state.playback_report(CHAT), None);
         apply_playback(&mut app, None);
         assert_eq!(app.conversation.playback.current(), None);
+    }
+
+    fn saved(message_id: i64, dir: &Path) -> Event {
+        Event::MediaSaved {
+            chat_id: CHAT,
+            message_id,
+            path: dir.join("note.ogg"),
+            kind: MediaKind::Voice,
+        }
+    }
+
+    /// A download the reader asked to play, overtaken by a second play, still
+    /// goes to no viewer when it lands, and does not take the second's place.
+    #[test]
+    fn an_overtaken_play_download_reaches_no_viewer_and_no_player() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (mut app, mut state) = voice_setup(dir.path());
+        state.play_downloads = vec![(CHAT, 1), (CHAT, 2)];
+        state.play_pending = Some((CHAT, 2));
+
+        apply_media(&mut app, &mut state, saved(1, dir.path()));
+
+        assert!(state.take_media().is_empty(), "the viewer got nothing");
+        assert_eq!(
+            state.play_pending,
+            Some((CHAT, 2)),
+            "the second still waits"
+        );
+        assert_eq!(state.play_downloads, vec![(CHAT, 2)]);
+        assert!(state.playing.is_none());
+    }
+
+    /// Playing another note drops the wait for a download, so a late file does
+    /// not cut the note off.
+    #[test]
+    fn starting_a_note_drops_the_wait_for_a_download() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (mut app, mut state) = voice_setup(dir.path());
+        state.play_pending = Some((CHAT, 1));
+
+        state.start_playback(&mut app, CHAT, 2, dir.path().join("missing.ogg"));
+
+        assert_eq!(state.play_pending, None);
+    }
+
+    /// Leaving the chat drops the wait, with no note playing to notice it.
+    #[test]
+    fn leaving_the_chat_drops_the_wait_for_a_download() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (_app, mut state) = voice_setup(dir.path());
+        state.play_pending = Some((CHAT, 1));
+
+        assert_eq!(state.playback_report(CHAT), None);
+        assert_eq!(state.play_pending, Some((CHAT, 1)), "still in the chat");
+        assert_eq!(state.playback_report(CHAT + 1), None);
+        assert_eq!(state.play_pending, None);
+    }
+
+    /// A message deleted while its download runs is not played when it lands.
+    #[test]
+    fn a_deleted_message_is_not_played_when_its_download_lands() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (mut app, mut state) = voice_setup(dir.path());
+        state.play_downloads = vec![(CHAT, 1)];
+        state.play_pending = Some((CHAT, 1));
+
+        state.forget_media_messages(&[1]);
+        assert_eq!(state.play_pending, None);
+
+        // And with the wait still set, a message that has left the window is
+        // not played either.
+        state.play_pending = Some((CHAT, 1));
+        app.conversation.conversation.window.replace([]);
+        apply_media(&mut app, &mut state, saved(1, dir.path()));
+        assert!(state.playing.is_none());
+        assert!(state.take_media().is_empty());
+    }
+
+    /// Every way the media cache is dropped or edited out from under a note lets
+    /// the note go first, so its pin is released against the cache that holds it.
+    #[test]
+    fn dropping_the_cache_stops_the_note_it_holds() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let (_app, mut state) = voice_setup(dir.path());
+        let play = |state: &mut State| {
+            state.playing = Some(Playing {
+                chat_id: CHAT,
+                message_id: 1,
+                path: dir.path().join("note.ogg"),
+            });
+            state.play_pending = Some((CHAT, 2));
+        };
+
+        play(&mut state);
+        state.forget_media();
+        assert!(state.playing.is_none() && state.play_pending.is_none());
+
+        play(&mut state);
+        state.forget_media_message(CHAT, 2);
+        assert!(state.playing.is_some(), "another message was edited");
+        state.forget_media_message(CHAT, 1);
+        assert!(state.playing.is_none());
+
+        play(&mut state);
+        state.forget_playback(|chat, _| chat == CHAT + 1);
+        assert!(state.playing.is_some(), "another chat was deleted");
+        state.forget_playback(|chat, _| chat == CHAT);
+        assert!(state.playing.is_none() && state.play_pending.is_none());
     }
 
     /// The record follows the player's report and is cleared when there is none.
