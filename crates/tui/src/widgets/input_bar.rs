@@ -70,14 +70,23 @@ pub const INPUT_MAX_ROWS: usize = 6;
 /// cost.
 const NORMAL_HINT: &str = " i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  t:trans";
 
+/// The conversation's hint while the chat list is hidden.
+///
+/// `^B:list` takes the place of `t:trans`, seven cells for seven: it is the one
+/// key that brings the list back, and the chat-list row that names it is not on
+/// screen. `t` still translates; this row just does not say so.
+const NORMAL_HIDDEN_HINT: &str =
+    " i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  ^B:list";
+
 /// The hint while the chat list has the focus.
 ///
 /// The two card keys are named here and nowhere else: `A` opens the contact the
 /// highlight is on and `S` your own card, and both work from the conversation too,
 /// which is one `Tab` away. `S` is spelled among the people, where you are one of
 /// them, so `S:you`. `DESIGN.md` says so where a reader of the spec finds it.
+/// `^B:hide` is the one key that hides this column; `h: conv` gave it the room.
 const CHAT_LIST_HINT: &str =
-    " j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin";
+    " j/k: chat  ⏎: open  Tab: pane  h: conv  A:card  S:you  p:pin  ^B:hide";
 
 /// The hint while a selection is being made over the messages.
 const VISUAL_HINT: &str = " d: delete  y: yank  s: forward  r: reply  Esc: cancel";
@@ -240,12 +249,13 @@ const ASSUMED_WIDTH: usize = 80;
 
 /// Every hint, in one list, so the width test cannot forget one.
 ///
-/// Twenty-one entries: the design's hints and the sign-in rows. A string that is
+/// Twenty-two entries: the design's hints and the sign-in rows. A string that is
 /// width-checked by a test and displayed by nothing is the defect this list
 /// exists to prevent, and it is why the count is written out rather than derived.
 #[cfg(test)]
-const ALL_HINTS: [&str; 21] = [
+const ALL_HINTS: [&str; 22] = [
     NORMAL_HINT,
+    NORMAL_HIDDEN_HINT,
     CHAT_LIST_HINT,
     REACT_HINT,
     PINNED_HINT,
@@ -330,6 +340,7 @@ pub fn hint(app: &App) -> &'static str {
         },
         (Focus::Conversation, Mode::Visual) => VISUAL_HINT,
         (Focus::Conversation, Mode::Normal) if !app.open_draft_text().is_empty() => DRAFT_HINT,
+        (Focus::Conversation, Mode::Normal) if app.ui.chat_list_hidden => NORMAL_HIDDEN_HINT,
         (Focus::Conversation, Mode::Normal) => NORMAL_HINT,
         // The two states that say nothing, and both say it for the same reason.
         // A confirmation outranks every hint on the status line, so the prompt's
@@ -762,6 +773,19 @@ mod tests {
         for key in ["y", "d", "Esc"] {
             assert!(LINE_VISUAL_HINT.contains(key), "{key:?} is missing from it");
         }
+    }
+
+    /// The key that brings a hidden list back is named on the row the reader
+    /// is looking at, and the shown list's row names the key that hides it.
+    #[test]
+    fn the_hide_key_is_named_on_the_row_of_the_pane_it_changes() {
+        let mut app = App::mock();
+        assert_eq!(hint(&app), NORMAL_HINT);
+
+        app.ui.chat_list_hidden = true;
+        assert_eq!(hint(&app), NORMAL_HIDDEN_HINT);
+        assert!(NORMAL_HIDDEN_HINT.contains("^B:list"));
+        assert!(CHAT_LIST_HINT.contains("^B:hide"));
     }
 
     #[test]
