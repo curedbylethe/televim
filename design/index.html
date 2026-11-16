@@ -70,7 +70,7 @@
   reaction prompt        " ⏎: add  -: remove  Esc: cancel"                                   31
   pinned list            " j/k: pin  ⏎: jump  Esc: close"                                    30
   edit history           " j/k: revision  Esc: close"                                        26
-  chat list              " j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin"      69
+  chat list              " j/k: chat  ⏎: open  Tab: pane  h: conv  A:card  S:you  p:pin  ^B:hide"        70
 </pre>
     <p><code>::cmd</code> is the pair that stayed, and it had to: <code>:pinned</code> and <code>:edits</code> are commands, and a row that hides <code>:</code> hides both overlays from a reader who has not learned it. <code>p</code> keeps one meaning per pane — paste in the conversation, the chat's pin in the chat list — because <code>P</code> takes the message's pin and the two panes never show both keys at once. Each new overlay brings its own row rather than editing the Normal one: a list's keys are its own, and it says so while it is up. What the conversation's row lost is named elsewhere on screen or reachable by a route the row still names, so no key it dropped is a key the reader cannot find.</p>
   </div>

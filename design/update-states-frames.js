@@ -10,7 +10,7 @@
 
   const HINT = {
     normal: ' i:ins  r:rep  e:edit  dd:del  v:vis  /:find  ::cmd  A:card  S:acct',
-    list: ' j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin',
+    list: ' j/k: chat  ⏎: open  Tab: pane  h: conv  A:card  S:you  p:pin  ^B:hide',
     typing: ' ⏎: send  ^J: newline  shift+⏎: newline where supported',
     draft: ' ⏎ draft — i to continue, ^J/⏎ to discard',
     offer: ' h/l: choose  ⏎: confirm  Esc: later',

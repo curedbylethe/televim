@@ -208,7 +208,7 @@ has one cell height and the reader chose the cell.
   `MODE_LABEL_WIDTH = 9` — the widest label is `NORMAL`, and a `Confirm` never
   shares the row with a hint, so it is one number rather than a case per label.
   `ASSUMED_WIDTH = 80` — every hint must fit an 80-column terminal less the
-  label and its gap, which leaves 71. `ALL_HINTS` is the array of all twenty-one,
+  label and its gap, which leaves 71. `ALL_HINTS` is the array of all twenty-two,
   and a test iterates it, so a hint left out of the array is a hint the check
   never sees. **A hint that does not fit fails the build; the fix is a shorter
   sentence, not a wider budget.**
@@ -236,8 +236,8 @@ has one cell height and the reader chose the cell.
 
 ### The hint rows
 
-`ALL_HINTS` is the array a test iterates: twenty-one entries, the sign-in and
-passphrase rows among them. The model's `HINT` draws twenty-two, among them the contacts
+`ALL_HINTS` is the array a test iterates: twenty-two entries, the sign-in and
+passphrase rows among them. The model's `HINT` draws twenty-three, among them the contacts
 and archived lists' key help, neither of which the build draws
 (below). These are the rows the screens
 above reach, verbatim, with the width each one measures. The width is
@@ -247,7 +247,8 @@ authority: the numbers below were re-measured from it.
 | Shown when | Text | Columns |
 | :--------- | :--- | ------: |
 | conversation, Normal, bar empty | ` i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  t:trans` | 68 |
-| chat list has the focus | ` j/k: chat  ⏎: open  Tab: pane  h: conversation  A:card  S:you  p:pin` | 69 |
+| conversation, Normal, bar empty, chat list hidden | ` i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  ^B:list` | 68 |
+| chat list has the focus | ` j/k: chat  ⏎: open  Tab: pane  h: conv  A:card  S:you  p:pin  ^B:hide` | 70 |
 | the reaction prompt is up | ` ⏎: add  -: remove  Esc: cancel` | 31 |
 | `:pinned` has the focus | ` j/k: pin  ⏎: jump  Esc: close` | 30 |
 | `:edits` has the focus | ` j/k: revision  Esc: close` | 26 |
@@ -267,6 +268,12 @@ authority: the numbers below were re-measured from it.
 
 Notes, because they are the answers to questions a reader will have:
 
+- **`^B` is named on the row of the pane it changes, and each row paid for it.**
+  The chat-list row gave `h: conversation` up for `h: conv` (eight columns) and
+  took `  ^B:hide` (nine): 69 to 70 of 71. The conversation's row, drawn only while
+  the list is hidden, swaps `t:trans` for `^B:list`, seven columns for seven: 68 of
+  71. `t` still translates on that row; the row just does not say so, because it
+  is the one key that brings the list back and the row that named it is not drawn.
 - **The subtraction starts from the binary's 67, not the 70 this document once
   quoted.** The row it used to print carried `D:dismiss` and did not carry
   `S:acct`. `D:dismiss` is gone — dismissing a failed send is a *refusal*, and a
@@ -439,6 +446,12 @@ file is the answer.
 
 - **30 / 70 by percentage, three rows.** The top region is `Min(3)`, the bar is
   `Length(2 + rows)`, the status line is `Length(1)`.
+- **The chat list can be hidden.** Hidden, the list column is a zero-width rect
+  and the right column spans the whole 80-cell body (`Constraint::Length(0)`
+  beside `Min(0)`: the split still has two rects, so nothing indexes past it).
+  The new-chat, directory and archive overlays, which are drawn over the list
+  column, are drawn over the body instead, the body's full width. The model's
+  `Chat list hidden` scene shows the conversation, the directory and the archive.
 - **The right column holds two contents.** The conversation and a profile card
   are the same region: `l` (or `A`) swaps the card in, `Esc` swaps it back, and
   the chat list gives up nothing. `Tab` and `Ctrl-w h`/`Ctrl-w l` walk the two
