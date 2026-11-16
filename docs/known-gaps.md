@@ -743,11 +743,19 @@ Real, and named so they are not mistaken for oversights:
   That check is made by hand: play a downloaded voice note, then pause, resume
   and stop it.
 
+- **Voice playback has no seek and no volume.** A note plays from the start to
+  the end, or until `Space` pauses it; there is no key to jump within it or to
+  change its loudness, which is the system's. The bar on its row shows how far it
+  has come and is not a control. The total reads `--:--` until the player has
+  opened the note, because Telegram's length is not carried on the message.
+
 ## Browser demo
 
 - **The browser demo is not a Telegram client.** Its fictional simulator has no
   login, session import/export, Telegram updates, or server-side calls. Sign-in,
   session and update commands return explicit offline-demo messages.
+- **The browser demo plays no voice notes.** It has no audio output, so `Space` on
+  a voice message says so and the row stays inactive, with no bar, clock or mark.
 - **Browser state lasts only until reload or Reset.** The demo has no
   `localStorage`, IndexedDB, or native history/media cache. A reset restores the
   seeded cast and discards local changes.
