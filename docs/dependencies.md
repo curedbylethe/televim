@@ -6,12 +6,57 @@ manifests inherit with `workspace = true`. The detached browser demo has its own
 workspace dependencies and lockfile under `crates/web-demo/`. This file records
 *why* a dependency is there, what it is pinned against, and what breaks when it
 moves.
+Version numbers appear in this file only in the deferred table, because that
+table is a work item and not a rationale.
 
 ## Changing one
 
 Edit only `[workspace.dependencies]` in the root `Cargo.toml`, then
 `cargo update -p <crate>` if the lockfile needs to follow. If the crate is
 `glass_pumpkin`, use `--precise 2.0.0-rc0` — see below for why.
+
+## Keeping them current
+
+### Cadence
+
+A nightly report lists the updates pending in the native workspace and opens no
+pull request. It covers the native workspace only: the detached `crates/web-demo`
+workspace has its own lockfile and its own `make wasm-*` targets. The nightly run
+measures major releases too, because it installs `cargo outdated` before running;
+a local run without that tool is degraded and reports what it did not measure.
+Patch updates are applied in one batch on the first working day of each month,
+with `make outdated` before it and `make ci` green after it.
+
+### Patch, minor and major
+
+| class | who | evidence | outcome |
+| :--- | :--- | :--- | :--- |
+| patch | any maintainer | `make outdated`, then `make ci` green | taken in the monthly batch |
+| minor | maintainer | the crate's changelog or release notes; its `rust-version` at or below `1.98.1`; `make ci` green | taken, or deferred with a row |
+| major | maintainer | changelog read for breaking changes; MSRV check; `make ci` green; `make measure` then `make measure-check`; one `docs/decisions.md` entry naming what breaks and why now | taken, or refused, recorded in that entry |
+
+A bump that needs a compiler newer than `1.98.1` is refused unless the toolchain
+pin is bumped by that same decision.
+
+### Never moved by a bulk update
+
+| crate | hold | rule that owns it |
+| :--- | :--- | :--- |
+| `glass_pumpkin` | `2.0.0-rc0` in `Cargo.lock`; `make update` re-pins it after `cargo update` | AGENTS.md rule 10; `docs/dependencies.md:31-35` |
+| the `grammers` crates | crates.io source only — no `tag =`, no `rev =`; a build failure is suspected upstream first | AGENTS.md rule 9; `docs/dependencies.md:20-29` |
+| the toolchain and MSRV | `1.98.1` in `rust-toolchain.toml` and `rust-version` in `Cargo.toml`; a dependency whose MSRV exceeds it is refused or the pin is bumped by decision | AGENTS.md, "Toolchain"; `Cargo.toml:14-15` |
+| `vim-line` | `7.7`, behind the `tui::line` wrapper, whose four routed-around defects are documented | AGENTS.md rule 8; `docs/dependencies.md:42-43` |
+
+### Deferred
+
+Deferred bumps live here, not in a prose note a reader can miss:
+
+| crate | locked version | version deferred to | why | revisit by |
+| :--- | :--- | :--- | :--- | :--- |
+| *(none yet)* | — | — | — | — |
+
+The table is empty as of this writing. An entry is removed only when the bump is
+taken or refused; the nightly report re-surfaces every entry.
 
 ## Why each dependency is here
 
