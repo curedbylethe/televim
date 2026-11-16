@@ -17,7 +17,7 @@
 //! no audio stream open.
 
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
 
@@ -272,11 +272,40 @@ fn parse_head(data: &[u8]) -> Result<OpusHead, PlayerError> {
     })
 }
 
+/// How much of the file's end is read to find its last page: two pages of the
+/// largest size Ogg allows, so one of them is whole however the end falls.
+const TAIL: u64 = 2 * 65_307;
+
 /// The note's length from the last Ogg page's granule position, minus the
 /// pre-skip. Summing decoded packets instead would overstate it by the pre-skip.
+/// Only the file's tail is read, so a long note costs no more than a short one.
 /// `None` when the stream carries no audio or cannot be read to its end.
-fn total_duration<R: Read + Seek>(reader: R, pre_skip: u16) -> Option<Duration> {
-    let mut reader = PacketReader::new(reader);
+fn total_duration<R: Read + Seek>(mut reader: R, pre_skip: u16) -> Option<Duration> {
+    let len = reader.seek(SeekFrom::End(0)).ok()?;
+    reader
+        .seek(SeekFrom::Start(len.saturating_sub(TAIL)))
+        .ok()?;
+    let mut tail = Vec::new();
+    reader.take(TAIL).read_to_end(&mut tail).ok()?;
+    // The tail starts anywhere, so try each place a page could begin. A false
+    // match inside audio fails the page checksum and the next one is tried.
+    let last = (0..tail.len().saturating_sub(3))
+        .filter(|&at| tail[at..].starts_with(b"OggS"))
+        .find_map(|at| last_granule(&tail[at..]))?;
+    let samples = last.saturating_sub(u64::from(pre_skip));
+    (samples > 0).then(|| {
+        Duration::from_secs(samples / RATE)
+            + Duration::from_nanos(samples % RATE * 1_000_000_000 / RATE)
+    })
+}
+
+/// The granule position of the last page that has one, reading `bytes` as a
+/// stream of whole pages. `None` if any page fails to parse.
+fn last_granule(bytes: &[u8]) -> Option<u64> {
+    let mut reader = PacketReader::new(Cursor::new(bytes));
+    // A seek tells the reader that the stream is not read from its start, so it
+    // accepts a first page that is not the stream's own.
+    reader.seek_bytes(SeekFrom::Start(0)).ok()?;
     let mut last = None;
     loop {
         match reader.read_packet() {
@@ -287,15 +316,10 @@ fn total_duration<R: Read + Seek>(reader: R, pre_skip: u16) -> Option<Duration> 
                     last = Some(granule);
                 }
             }
-            Ok(None) => break,
+            Ok(None) => return last,
             Err(_) => return None,
         }
     }
-    let samples = last?.saturating_sub(u64::from(pre_skip));
-    (samples > 0).then(|| {
-        Duration::from_secs(samples / RATE)
-            + Duration::from_nanos(samples % RATE * 1_000_000_000 / RATE)
-    })
 }
 
 #[cfg(test)]
@@ -354,6 +378,38 @@ mod tests {
         let bytes = stream(0, &[vec![0xFC; 4]], 48_024);
         let total = total_duration(Cursor::new(bytes), 0);
         assert_eq!(total, Some(Duration::from_micros(1_000_500)));
+    }
+
+    /// A note longer than the tail that is read still gets its length from the
+    /// last page, and the walk reads no more of the file than that tail.
+    #[test]
+    fn duration_of_a_long_note_comes_from_the_tail() {
+        struct Counting(Cursor<Vec<u8>>, std::rc::Rc<std::cell::Cell<usize>>);
+        impl Read for Counting {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.0.read(buf)?;
+                self.1.set(self.1.get() + n);
+                Ok(n)
+            }
+        }
+        impl Seek for Counting {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.0.seek(pos)
+            }
+        }
+
+        let audio = vec![vec![0xFC; 400]; 2_000];
+        let bytes = stream(312, &audio, 312 + 96_000);
+        assert!(
+            bytes.len() as u64 > 2 * TAIL,
+            "the fixture outgrows the tail"
+        );
+
+        let read = std::rc::Rc::new(std::cell::Cell::new(0));
+        let total = total_duration(Counting(Cursor::new(bytes), read.clone()), 312);
+
+        assert_eq!(total, Some(Duration::from_secs(2)));
+        assert!(read.get() as u64 <= TAIL, "read {} bytes", read.get());
     }
 
     #[test]
