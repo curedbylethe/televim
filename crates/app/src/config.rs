@@ -86,6 +86,10 @@ const BIDI_AUTO: &str = "auto";
 const BIDI_VISUAL: &str = "visual";
 const BIDI_WORDS: &str = "words";
 
+/// Whether the chat-list column is drawn, named as the `chat_list` key spells it.
+const CHAT_LIST_SHOWN: &str = "shown";
+const CHAT_LIST_HIDDEN: &str = "hidden";
+
 /// What a sticker message draws: its picture, or its token.
 ///
 /// The two the `stickers` key knows, named as the configuration spells them.
@@ -158,6 +162,13 @@ pub struct Config {
     /// value stays per machine, so an ssh hop keeps it. `tmux` multiplexes one
     /// value over every pane.
     pub bidi: String,
+
+    /// Whether the chat-list column is drawn: `shown` (default) or `hidden`.
+    ///
+    /// `hidden` gives the conversation the whole width, which is what a narrow
+    /// terminal wants. `Ctrl-b` toggles it while the program runs; this key is
+    /// where it starts, and the environment spells it `TELEVIM_CHAT_LIST`.
+    pub chat_list: String,
 
     /// Whether a decoded sticker draws its picture: `inline` or `off`.
     ///
@@ -312,6 +323,7 @@ impl Default for Config {
             log_level: "info".to_owned(),
             theme: "default".to_owned(),
             bidi: BIDI_AUTO.to_owned(),
+            chat_list: CHAT_LIST_SHOWN.to_owned(),
             stickers: STICKERS_INLINE.to_owned(),
             graphics: GRAPHICS_AUTO.to_owned(),
             notifications: "on".to_owned(),
@@ -364,6 +376,7 @@ impl Config {
             .set_default("log_level", "info")?
             .set_default("theme", "default")?
             .set_default("bidi", BIDI_AUTO)?
+            .set_default("chat_list", CHAT_LIST_SHOWN)?
             .set_default("stickers", STICKERS_INLINE)?
             .set_default("graphics", GRAPHICS_AUTO)?
             .set_default("notifications", "on")?
@@ -577,6 +590,17 @@ impl Config {
             BIDI_AUTO if kitty_words_terminal(lookup) => BidiMode::Words,
             _ => BidiMode::Terminal,
         }
+    }
+
+    /// Whether the chat list starts hidden, from [`Config::chat_list`].
+    ///
+    /// Only the exact word `hidden` hides it. Anything else — including a
+    /// spelling this program does not know — shows it, because a value it
+    /// cannot read that guessed `hidden` would take the list away from a reader
+    /// who never asked for that. Case-sensitive, like [`Config::bidi_mode`].
+    #[must_use]
+    pub fn chat_list_hidden(&self) -> bool {
+        self.chat_list == CHAT_LIST_HIDDEN
     }
 
     /// Whether a decoded sticker draws its picture, from [`Config::stickers`].
@@ -1327,6 +1351,33 @@ mod tests {
         let mut cfg = bare();
         cfg.stickers = "off".to_owned();
         assert_eq!(cfg.sticker_mode(), StickerMode::Token);
+    }
+
+    #[test]
+    fn a_missing_chat_list_setting_shows_the_list() {
+        assert!(!bare().chat_list_hidden());
+    }
+
+    #[test]
+    fn a_hidden_chat_list_setting_reads_back() {
+        let mut cfg = bare();
+        cfg.chat_list = "hidden".to_owned();
+        assert!(cfg.chat_list_hidden());
+
+        let loaded = load_toml("chat-list", "chat_list = \"hidden\"\n").expect("the file loads");
+        assert!(
+            loaded.chat_list_hidden(),
+            "and the file's word survives load"
+        );
+    }
+
+    #[test]
+    fn an_unknown_chat_list_setting_shows_the_list() {
+        let mut cfg = bare();
+        for word in ["collapsed", "Hidden", ""] {
+            cfg.chat_list = word.to_owned();
+            assert!(!cfg.chat_list_hidden(), "{word:?} is not the word");
+        }
     }
 
     /// A spelling the configuration does not know keeps the pictures: taking

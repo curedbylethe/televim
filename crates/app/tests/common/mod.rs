@@ -48,6 +48,15 @@ pub fn configure_offline_credentials(sandbox: &Sandbox) {
         .expect("write offline test credentials");
 }
 
+/// The same credentials, with `chat_list = "hidden"` beside them.
+pub fn configure_hidden_chat_list(sandbox: &Sandbox) {
+    std::fs::write(
+        &sandbox.config,
+        "api_id = 1234\napi_hash = \"test\"\nchat_list = \"hidden\"\n",
+    )
+    .expect("write offline test credentials with a hidden chat list");
+}
+
 /// Spawn the `televim` binary with no credentials, 80x24, in `sandbox`.
 pub fn spawn_offline(sandbox: &Sandbox) -> Terminal {
     spawn(sandbox, None, None)
