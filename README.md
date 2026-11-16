@@ -114,6 +114,7 @@ Use `televim --chat <id>` to open a chat directly.
 | :--- | :--- |
 | `?` / `:` | Search chats / open commands from a conversation or profile card |
 | `Esc` / `Ctrl-C` | Cancel or step back / quit immediately |
+| `Ctrl-b` | Hide or show the chat list; the conversation takes the full width |
 
 **Chat list**
 

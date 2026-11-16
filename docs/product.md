@@ -202,7 +202,12 @@ Working today:
   unpins it; the pin is kept by Telegram, so it survives a restart, and pinned
   chats lead the list in Telegram's own pin order, and the rest follow newest first. The focused pane's border is drawn in `Theme::border_focused`; `h` moves to the
   chat list, `l` opens the highlighted chat from the list, and `Tab` cycles focus;
-  `Ctrl+w` steps back out of the line.
+  `Ctrl+w` steps back out of the line. `Ctrl+b`, from any pane, hides the chat
+  list so the conversation takes the whole body, and shows it again; the choice
+  is kept for the session. While the list is hidden `Tab` and `h` skip it and
+  stay in the conversation, and the new-chat, directory and archive lists are
+  drawn over the body. A sign-in flow shows the list again, and `Ctrl+b` does
+  nothing until the flow ends.
 - **Starting a conversation with someone new:** `/` on the chat list finds a
   *person* rather than a message — there is no open conversation for it to
   search, so it does not borrow the conversation's meaning — and `:new <query>`
