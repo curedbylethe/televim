@@ -125,6 +125,11 @@ pub struct UiState {
     /// `Focus` says where a keystroke lands. See [`Pane`].
     pub pane: Pane,
 
+    /// Whether the chat-list column is hidden, so the right-hand column takes
+    /// the whole body. Session state: it outlives every screen and is seeded
+    /// once at construction.
+    pub chat_list_hidden: bool,
+
     pub status: String,
     pub should_quit: bool,
 
@@ -217,6 +222,7 @@ impl UiState {
             focus: Focus::Conversation,
             theme: Theme::default(),
             pane: Pane::Conversation,
+            chat_list_hidden: false,
             status: IDLE_STATUS.to_string(),
             should_quit: false,
             connection: ConnectionState::Connecting,

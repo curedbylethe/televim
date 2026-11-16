@@ -3557,16 +3557,29 @@ impl App {
             ])
             .split(area);
 
+        // A hidden chat list keeps its rect, at zero width, so every
+        // `horizontal[1]` below stays valid: the conversation takes the body.
+        let hidden = self.ui.chat_list_hidden;
+        let columns = if hidden {
+            [Constraint::Length(0), Constraint::Min(0)]
+        } else {
+            [Constraint::Percentage(30), Constraint::Percentage(70)]
+        };
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .constraints(columns)
             .split(vertical[0]);
+        // The overlays drawn over the list column take the body while it is
+        // hidden, which is the rectangle the reader sees.
+        let list_column = if hidden { vertical[0] } else { horizontal[0] };
 
-        widgets::chat_list::render(self, horizontal[0], frame);
+        if !hidden {
+            widgets::chat_list::render(self, horizontal[0], frame);
+        }
         // The right-hand column, whichever of the two is in it — or the sign-in
         // surface over it, which is an overlay and not a pane: the flow outlives
         // the card that named it. The chat list is not in the match: it is the
-        // other column and it is always there.
+        // other column, drawn unless the reader hid it.
         match self.session.signin.as_ref() {
             Some(signin) => widgets::signin::render(self, signin, horizontal[1], frame),
             None if self.session.pass.is_some() => {
@@ -3584,11 +3597,11 @@ impl App {
         // The new-conversation choices are drawn over the chat list they were
         // asked from, and above it — the `Clear` inside the widget is what makes
         // the list a panel rather than a smear of two lists.
-        widgets::user_list::render(self, horizontal[0], frame);
+        widgets::user_list::render(self, list_column, frame);
         // The directory and the archive are drawn over the same column, and in
         // that order: a reader who opened one cannot have the other up.
-        widgets::contact_list::render(self, horizontal[0], frame);
-        widgets::archived_list::render(self, horizontal[0], frame);
+        widgets::contact_list::render(self, list_column, frame);
+        widgets::archived_list::render(self, list_column, frame);
         // The forward picker is drawn over the conversation column it forwards
         // from, above the messages and the bar, and below the status line.
         widgets::forward_picker::render(self, horizontal[1], frame);
