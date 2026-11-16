@@ -385,7 +385,10 @@ Working today:
   `Space` on a voice message plays it in the program, with no viewer: a note in the
   cache starts at once, even offline, and one that is not is downloaded first. `Space`
   again pauses it and resumes it; `Space` on another voice message stops the first and
-  plays that one. Playback stops when the conversation changes, when the message is
+  plays that one. While a note plays or is paused, its row shows
+  `[voice ▸ ▍▍▍▍▁▁▁▁ 0:12/0:24]` beside the placeholder: a play mark (`‖` when paused),
+  an eight-cell bar, the time played and the length, which reads `--:--` until the
+  player knows it. Playback stops when the conversation changes, when the message is
   deleted and when the program quits. `o` on a voice message still opens it in the
   viewer.
   The viewer is set per kind of media: `viewer_image` (photos and stickers),

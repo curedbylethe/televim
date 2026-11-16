@@ -8758,6 +8758,57 @@ fn switching_conversation_clears_the_playback_record() {
     assert_eq!(app.conversation.playback.current(), None);
 }
 
+/// The 80x24 frame row that carries a voice note's placeholder, with `now` as the
+/// playback record (or none).
+fn voice_row(now: Option<crate::state::playback::NowPlaying>) -> String {
+    let mut app = App::mock();
+    app.apply_latest(vec![with_media(2, "", domain::message::MediaKind::Voice)]);
+    if let Some(now) = now {
+        app.conversation.playback.set(now);
+    }
+    frame_rows(&app)
+        .into_iter()
+        .find(|row| row.contains("[voice]"))
+        .unwrap_or_else(|| panic!("no voice row drawn"))
+}
+
+fn playing(message_id: i64, paused: bool) -> crate::state::playback::NowPlaying {
+    crate::state::playback::NowPlaying {
+        message_id,
+        position: std::time::Duration::from_secs(12),
+        total: Some(std::time::Duration::from_secs(24)),
+        paused,
+    }
+}
+
+/// Playing: the bar, both clocks and the play mark sit beside the placeholder.
+#[test]
+fn a_playing_voice_row_draws_the_bar_clocks_and_play_mark() {
+    let row = voice_row(Some(playing(2, false)));
+    assert!(row.contains("[voice]"), "{row}");
+    assert!(row.contains("[voice ▸ ▍▍▍▍▁▁▁▁ 0:12/0:24]"), "{row}");
+}
+
+/// Paused: the same bar frozen, with the pause mark.
+#[test]
+fn a_paused_voice_row_draws_the_pause_mark() {
+    let row = voice_row(Some(playing(2, true)));
+    assert!(row.contains("[voice ‖ ▍▍▍▍▁▁▁▁ 0:12/0:24]"), "{row}");
+}
+
+/// Inactive, and a note playing under another message, draw the bare label only.
+#[test]
+fn an_inactive_voice_row_is_unchanged() {
+    for now in [None, Some(playing(7, false))] {
+        let row = voice_row(now);
+        assert!(!row.contains("0:"), "{row}");
+        assert!(
+            !row.contains('▍') && !row.contains('▸') && !row.contains('‖'),
+            "{row}"
+        );
+    }
+}
+
 /// Space on text, or on media that is not a voice note, queues nothing.
 #[test]
 fn space_on_text_or_other_media_queues_nothing() {

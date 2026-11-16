@@ -30,6 +30,7 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::time::Duration;
 
 use domain::history::ConversationWindow;
 use domain::message::{MediaKind, Message, MessageStatus};
@@ -38,6 +39,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::app::App;
 use crate::date;
 use crate::download::Outcome;
+use crate::state::playback::NowPlaying;
 use crate::sticker::{STICKER_FIT_ROWS, StickerCache};
 use crate::wrap::{columns, wrap_decorated};
 
@@ -828,6 +830,13 @@ pub(crate) fn reply_prefix(app: &App, reply_to: i64, width: u16) -> String {
 /// once, on the row with room for it. The gap in front of it belongs to
 /// [`trailing_note`], which is what puts it there.
 pub(crate) fn status_suffix(app: &App, message: &Message) -> Option<String> {
+    // The note being played is what its row is about, beside its placeholder.
+    if let Some(now) = app.conversation.playback.current()
+        && now.message_id == message.id
+    {
+        return Some(playback_token(now));
+    }
+
     // A download of a received message is what its row is about while it runs
     // or after it has failed. A send's status is never in the table: a message
     // is one or the other.
@@ -858,6 +867,42 @@ pub(crate) fn status_suffix(app: &App, message: &Message) -> Option<String> {
             ))
         }
         MessageStatus::Sent | MessageStatus::Received => None,
+    }
+}
+
+/// Cells in the playback bar; fixed, so the row's width arithmetic does not move.
+const PLAYBACK_BAR_CELLS: u128 = 8;
+
+/// The token a playing or paused voice note is drawn as on its message's row.
+///
+/// `[voice ▸ ▍▍▍▍▁▁▁▁ 0:07/0:23]`, with `‖` for the mark when paused. The
+/// total reads `--:--` while the player does not know it, and the bar is empty.
+fn playback_token(now: &NowPlaying) -> String {
+    let mark = if now.paused { '‖' } else { '▸' };
+    let filled = match now.total {
+        Some(total) if !total.is_zero() => (now.position.as_millis() * PLAYBACK_BAR_CELLS
+            / total.as_millis())
+        .min(PLAYBACK_BAR_CELLS),
+        _ => 0,
+    };
+    let bar: String = (0..PLAYBACK_BAR_CELLS)
+        .map(|cell| if cell < filled { '▍' } else { '▁' })
+        .collect();
+    let total = now.total.map_or_else(|| "--:--".to_owned(), clock);
+
+    format!("[voice {mark} {bar} {}/{total}]", clock(now.position))
+}
+
+/// A length of time as a player shows it: `m:ss` under an hour, `h:mm:ss` from
+/// one, with the seconds truncated rather than rounded.
+fn clock(time: Duration) -> String {
+    let seconds = time.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -971,6 +1016,39 @@ pub(crate) fn clip(selected: &Range<usize>, row: &Range<usize>) -> (usize, usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `m:ss` under an hour, `h:mm:ss` from one, seconds truncated.
+    #[test]
+    fn the_clock_reads_like_a_player() {
+        let ms = Duration::from_millis;
+        assert_eq!(clock(ms(0)), "0:00");
+        assert_eq!(clock(ms(7_999)), "0:07");
+        assert_eq!(clock(ms(59_999)), "0:59");
+        assert_eq!(clock(ms(60_000)), "1:00");
+        assert_eq!(clock(ms(3_599_999)), "59:59");
+        assert_eq!(clock(ms(3_600_000)), "1:00:00");
+        assert_eq!(clock(ms(3_725_000)), "1:02:05");
+    }
+
+    /// The bar fills by `position / total * 8`, clamps, and stays empty while the
+    /// total is unknown or zero.
+    #[test]
+    fn the_bar_fills_in_eighths_and_clamps() {
+        let at = |secs: u64, total: Option<u64>| {
+            playback_token(&NowPlaying {
+                message_id: 1,
+                position: Duration::from_secs(secs),
+                total: total.map(Duration::from_secs),
+                paused: false,
+            })
+        };
+        assert_eq!(at(0, Some(16)), "[voice ▸ ▁▁▁▁▁▁▁▁ 0:00/0:16]");
+        assert_eq!(at(7, Some(16)), "[voice ▸ ▍▍▍▁▁▁▁▁ 0:07/0:16]");
+        assert_eq!(at(16, Some(16)), "[voice ▸ ▍▍▍▍▍▍▍▍ 0:16/0:16]");
+        assert_eq!(at(99, Some(16)), "[voice ▸ ▍▍▍▍▍▍▍▍ 1:39/0:16]");
+        assert_eq!(at(5, None), "[voice ▸ ▁▁▁▁▁▁▁▁ 0:05/--:--]");
+        assert_eq!(at(5, Some(0)), "[voice ▸ ▁▁▁▁▁▁▁▁ 0:05/0:00]");
+    }
 
     /// The rows messages with these texts occupy, in window order.
     fn layout_of(texts: &[&str], width: u16) -> Vec<RowSpan> {

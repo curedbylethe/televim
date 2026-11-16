@@ -693,6 +693,7 @@ code.
 | `[failed: no route]` | ditto, with the reason, truncated to the room | `rows::status_suffix` |
 | `[image… 42%]` | a download in flight: the kind's own placeholder with the percentage inside, drawn beside the placeholder and never replacing the body | `rows::download_token` |
 | `[image… 2.0 MB]` | ditto when Telegram declared no size: the megabytes so far stand in for the percentage | ditto |
+| `[voice ▸ ▍▍▍▍▁▁▁▁ 0:12/0:24]` | a voice note playing, beside its placeholder; `‖` in place of `▸` when paused, `--:--` for a length not yet known | `rows::playback_token` |
 | `[failed: reason] (o retries)` | a download that failed: the reason, then the hint that `o` tries again; the reason wins truncation, so a narrow row clips the hint first | ditto |
 | `[image… 42%]` `[file… 42%]` | an **upload** in flight: the download's own token, beside the placeholder on the message's last row, with `[sending…]` and the time still at the right edge | `convRows` (`tok`) |
 | `[failed: cancelled] (o retries)` | `Esc` on an upload in flight; any failed transfer draws the same token, so `o` is one verb for both | `cancelUpload` |
@@ -914,6 +915,26 @@ is capped at 100. The failure token's reason is truncated to the room and wins o
 hint: a row too narrow for both is clipped at its right edge, which takes `(o retries)`
 and leaves the reason. The status line carries no percentage; see rank 8 under the
 status ranking.
+
+**A voice note that plays draws a token beside its placeholder.** Rule 5 keeps duration
+out of the placeholder's own wording; this token is a transient one beside it, never
+replacing the body, on the message's last row and in `text-dim`. **DESIGN-TBD:** built to
+this vocabulary, not designed; a dedicated row above the status line was weighed and
+not chosen, because it would change the three-row layout.
+
+| State | The last row |
+| :---- | :----------- |
+| inactive, or another message plays | `[voice]`, no token, no mark, no bar |
+| playing | `[voice]  [voice ▸ ▍▍▍▍▁▁▁▁ 0:12/0:24]` |
+| paused | `[voice]  [voice ‖ ▍▍▍▍▁▁▁▁ 0:12/0:24]`, the bar frozen where it stopped |
+| length not yet known | `[voice ▸ ▁▁▁▁▁▁▁▁ 0:05/--:--]` |
+
+The bar is eight cells: `▍` for each eighth of the note played, `▁` for the rest, none
+filled while the length is unknown. The clock is `m:ss`, or `h:mm:ss` from an hour, with
+seconds truncated. There is no percentage, spinner or countdown, and the bar is not a
+control. The token is a status like the download's, so it takes that token's place and the
+row's width is measured with it. It is gone when the note ends or is stopped. The
+browser demo has no audio and never draws it.
 
 **An upload draws the same token.** `:attach` sends an image or a document, and the
 message that appears is the kind's own placeholder, `[image]` or `[file]`: the
