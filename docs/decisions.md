@@ -2015,3 +2015,5 @@ are in [`../AGENTS.md`](../AGENTS.md).
   fail exactly them; a session-only flag was rejected for that reason. An
   unknown word shows the list, because a value the program cannot read must not
   take the list away.
+
+- **Why dependency updates are a scheduled report with a written rule, not a bot:** a nightly report leaves the decision with the maintainer and needs no bot service, no new configuration and no review queue. The `glass_pumpkin`, `grammers` and toolchain pins are exactly what a bot's `ignore` list cannot be trusted to encode, because the reason for each lives in a rule rather than in a version string. Applying patches in one monthly batch bounds the diff to what a single `make ci` run can check.
