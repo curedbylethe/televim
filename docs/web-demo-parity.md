@@ -36,7 +36,7 @@ list manual checks where needed.
 | Scrolling | Mouse wheel | Mouse wheel | Browser scroll input reaches the focused terminal | browser-adapted | browser manual: mouse scrolling |
 | Selection | Character selection and yank | `v`, motion, `y` | Native selection; yank text goes through clipboard bridge | browser-adapted | `parity_core::selection_yank_and_quit_set_native_state`; browser manual: clipboard |
 | Selection | Line selection | `V`, motion, `y` | Native line selection and clipboard bridge | browser-adapted | `parity_core::selection_yank_and_quit_set_native_state`; browser manual: clipboard |
-| Confirm | Quit conversation | `q`, then `y` / `n` / `Esc` | Native confirmation; `y` routes to shell quit event | browser-adapted | browser manual: quit and reset |
+| Confirm | Quit | `q`, then `y` / `n` / `Esc` | Native confirmation; `y` routes to shell quit event | browser-adapted | browser manual: quit and reset |
 | Confirm | Delete messages | `d`, then `y` / `n` / `Esc` | Native confirmation and local simulated delete | simulated | `parity_core::invalid_count_clears_and_visual_delete_asks_for_confirmation`; `parity_core::delete_uses_fixture_state` |
 | Confirm | Discard draft | `:discard`, then confirm | Native confirmation | simulated | `parity_core::discard_command_confirms_and_clears_the_draft` |
 | Drafts | Edit and switch chats | `i`, type, `Esc`, switch away and back | Native in-memory draft store | simulated | `parity_core::emoji_completion_and_draft_survive_chat_switch` |

@@ -122,6 +122,7 @@ Use `televim --chat <id>` to open a chat directly.
 | `j` / `k` / `gg` / `G` | Move highlight; jump to first / last chat |
 | `l` / `Enter` | Open chat / profile card |
 | `/` / `p` | Start chat / pin or unpin the highlighted chat |
+| `q` | Quit (confirms) |
 
 **Conversation**
 
