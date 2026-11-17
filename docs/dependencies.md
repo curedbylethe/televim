@@ -1,7 +1,7 @@
 # Dependencies
 
-**Version numbers appear in this file only in the hold table and the deferred
-table.** Native versions, features and defaults are canonical in
+**The hold and deferred tables name the versions a decision depends on.**
+Native versions, features and defaults are canonical in
 `[workspace.dependencies]` in the root `Cargo.toml`; crate manifests inherit with
 `workspace = true`. The detached browser demo has its own workspace dependencies
 and lockfile under `crates/web-demo/`. This file records *why* a dependency is
