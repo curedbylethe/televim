@@ -9403,17 +9403,27 @@ mod tests {
         app.focus.reported = true;
         app.focus.focused = false;
         let mut state = State::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::NewMessage(messages(CHAT, 21..=21).remove(0))),
+        );
+        drive(&mut app, &mut state, &tx);
 
         assert_eq!(read_target(&app, &state), None, "the blur refuses it");
-        assert_eq!(latest_read(&app, &mut state), None, "the blur refuses it");
-        assert_eq!(state.read_owed, Some(CHAT), "the marker is owed");
+        assert_eq!(
+            state.read_owed,
+            Some(CHAT),
+            "a blurred pass does not spend it"
+        );
 
         app.focus.key_proves_focus();
+        assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
 
-        // Stands in for a focused pass after the key proves focus.
-        let arrived = !card_covers_conversation(&app) && state.read_owed.take().is_some();
-        assert!(arrived);
-        assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
+        drive(&mut app, &mut state, &tx);
+        assert_eq!(state.read_owed, None, "the key lets the pass take it");
     }
 
     #[test]
