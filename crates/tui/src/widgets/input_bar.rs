@@ -515,7 +515,16 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
 /// background lands where the caret is drawn. The emitted order is the row as
 /// stored under [`BidiMode::Terminal`], and the words in reverse order under
 /// [`BidiMode::Words`]; under the terminal's own base direction, left-to-right.
-fn emitted_caret(text: &str, range: &Range<usize>, at: usize, mode: BidiMode) -> usize {
+fn emitted_caret(
+    text: &str,
+    range: &Range<usize>,
+    at: usize,
+    mode: BidiMode,
+    whole_run: bool,
+) -> usize {
+    if whole_run {
+        return mirrored_caret(text, range, at);
+    }
     let column = line::caret_visual_column(text, range, at, mode, bidi::base_direction(text));
     let emitted = match mode {
         BidiMode::Words => bidi::permuted_in(mode, text, range.clone(), bidi::base_direction(text)),
@@ -539,6 +548,48 @@ fn emitted_caret(text: &str, range: &Range<usize>, at: usize, mode: BidiMode) ->
         }
     }
     range.end
+}
+
+/// Boundaries between the row's clusters, in `text` coordinates, with the row's
+/// end appended so a caret or a selection one past the last cluster has an index.
+fn cluster_boundaries(text: &str, range: &Range<usize>) -> Vec<usize> {
+    let mut boundaries: Vec<usize> = crate::grapheme::clusters(&text[range.clone()])
+        .map(|(offset, _)| range.start + offset)
+        .collect();
+    boundaries.push(range.end);
+    boundaries
+}
+
+/// Where the caret's style goes when the focused right-to-left row is emitted as
+/// one run. A `·` does not end a run on kitty, so the terminal reverses the whole
+/// row: cluster `i` is drawn in the cell of emitted cluster `n - 1 - i`, and a
+/// style laid on the text's own byte lands on a different letter. Mirror the
+/// cluster index so the style follows the glyph the caret is on. Assumes the
+/// one-cell clusters Arabic and Persian use.
+fn mirrored_caret(text: &str, range: &Range<usize>, at: usize) -> usize {
+    let boundaries = cluster_boundaries(text, range);
+    let n = boundaries.len() - 1;
+    let i = boundaries
+        .iter()
+        .rposition(|&start| start <= at)
+        .unwrap_or(0);
+    boundaries[n.saturating_sub(1).saturating_sub(i)]
+}
+
+/// A selection's style has the same problem as the caret's: kitty leaves it on
+/// the emitted cell while the glyph moves. Selected clusters `[a, z)` are drawn
+/// in emitted clusters `[n - z, n - a)`, so mirror the range too.
+fn mirrored_selection(text: &str, range: &Range<usize>, selected: &Range<usize>) -> Range<usize> {
+    let boundaries = cluster_boundaries(text, range);
+    let n = boundaries.len() - 1;
+    let index = |at: usize| {
+        boundaries
+            .iter()
+            .rposition(|&start| start <= at)
+            .unwrap_or(0)
+    };
+    boundaries[n.saturating_sub(index(selected.end))]
+        ..boundaries[n.saturating_sub(index(selected.start))]
 }
 
 /// One row of the draft.
@@ -578,20 +629,35 @@ fn body_row<'a>(
         spans.push(Span::styled(lead, app.ui.theme.text_dim));
     }
 
+    // The focused bar draws `·` for spaces, which does not end a right-to-left
+    // run on kitty: the whole row is one run and the terminal reverses it. The
+    // caret and a selection must then be mirrored onto the emitted cells, the
+    // same way the words themselves are. An unfocused draft keeps real spaces
+    // and so keeps the per-run, per-word mapping.
+    let whole_run =
+        focused && mode == BidiMode::Terminal && bidi::base_direction(text) == bidi::Direction::Rtl;
+
     let row = text_row::TextRow {
         text,
         range: range.clone(),
         // A draft is not a search result: `/` searches the window and the server,
         // never the line the reader is typing in.
         matched: false,
-        selected: app.input.line.selection(),
+        selected: if whole_run {
+            app.input
+                .line
+                .selection()
+                .map(|selected| mirrored_selection(text, range, &selected))
+        } else {
+            app.input.line.selection()
+        },
         // The bar is never reversed, so the caret is its own style rather than a
         // hole in a row of reverse video. It needs the focus as well as the row:
         // a caret on a draft nobody is typing into is a promise the program does
         // not keep.
         caret: (focused && caret_row).then(|| match mode {
             BidiMode::Terminal | BidiMode::Words => {
-                emitted_caret(text, range, app.input.line.caret(), mode)
+                emitted_caret(text, range, app.input.line.caret(), mode, whole_run)
             }
             BidiMode::Visual => text_row::visual_caret(text, range, app.input.line.caret()),
         }),
@@ -1514,6 +1580,11 @@ mod tests {
         assert_eq!(cells(1, 4), "سلام", "the first word stays first");
         assert_eq!(cells(5, 5), "·", "the space between them");
         assert_eq!(cells(6, 9), "خوبی", "and the second word stays last");
+        assert_eq!(
+            carets(&buffer, top)[0].0,
+            1,
+            "the end caret sits on the left edge of the reversed run"
+        );
     }
 
     /// A draft nobody is typing in keeps its spaces, which end a run, so `Words`
@@ -1535,11 +1606,10 @@ mod tests {
     }
 
     /// A caret inside the first word of two, before the `ا` of `سلام` (typed
-    /// around, since `Left` steps by painted column and not by character). A terminal that reverses each word in place (kitty)
-    /// draws that word's `ا` second from the left under `terminal`. The focused
-    /// bar draws `words` as `terminal` (see
-    /// `a_focused_words_draft_is_emitted_as_stored_because_the_dot_joins_the_run`),
-    /// so both land on the same cell; checked on kitty with `make rtl-shots`
+    /// around, since `Left` steps by painted column and not by character). The
+    /// focused bar draws one right-to-left run, so its caret is mirrored onto
+    /// the emitted cell that carries the letter: `ا` is drawn in cell 7 of nine.
+    /// Checked on kitty 0.50.0 on macOS 27.0.1, 2026-11-17, with `make rtl-shots`
     /// (`draft_caret_mid`, `draft_caret_mid_words`).
     #[test]
     fn a_caret_inside_a_word_is_painted_on_the_cell_its_letter_is_drawn_in() {
@@ -1556,14 +1626,25 @@ mod tests {
 
         assert_eq!(
             caret_x(BidiMode::Terminal),
-            2,
-            "second cell of the first word"
+            7,
+            "the focused bar draws one right-to-left run"
         );
         assert_eq!(
             caret_x(BidiMode::Words),
-            2,
+            7,
             "the focused bar draws words as terminal"
         );
+    }
+
+    /// The selection's ink is mirrored like the caret's: kitty leaves the style
+    /// on the emitted cell while the whole run reverses, so selecting `سلام`
+    /// styles the cells that end up drawing `خوبی`.
+    #[test]
+    fn a_focused_selection_is_mirrored_onto_the_reversed_run() {
+        let text = "سلام خوبی";
+        let range = 0..text.len();
+        assert_eq!(super::mirrored_selection(text, &range, &(0..8)), 9..17);
+        assert_eq!(super::mirrored_selection(text, &range, &(9..17)), 0..8);
     }
 
     /// A half-space (ZWNJ, U+200C) is zero width: the terminal draws it on the cell
