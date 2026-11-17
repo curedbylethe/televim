@@ -306,19 +306,22 @@ Real, and named so they are not mistaken for oversights:
   tests beside them, which cannot tell a shaper's reorder from no reorder at all.
   The caret tests
   after an Arabic draft run in both modes and check cell positions, not glyph shape.
-  The reversed modes rest on one observed behaviour: kitty 0.49.2 keeps a cell's
+  The reversed modes rest on one observed behaviour: kitty keeps a cell's
   background on its emitted column while it reverses the glyphs, so `emitted_caret`
   styles the emitted cell whose index is the caret's visual column. Checked by eye
   on kitty (`make rtl-shots`) at the start and end of an Arabic draft, in `terminal`
   and `words`; a middle position and any other shaping terminal are not checked.
   `words` is written for a terminal that reverses each word on its own, and is wrong
   on one that reverses the whole line, where the words would be reversed twice;
-  `auto` selects it only on kitty. This default still rests on the manual layer:
-  repository tests cannot prove how kitty shapes or orders emitted bytes.
-  Checked on kitty 0.49.2 on macOS 27.0.1, 2026-11-08, through
-  `scripts/rtl/kitty_shots.py messages_terminal draft_two_words` with no
-  `televim.toml` and no `TELEVIM_BIDI`. In both the conversation and input bar,
-  `سلام` is the rightmost word and `خوبی` is left of it. The `.txt` and `.png`
+  `auto` selects it only on kitty. The focused input bar is the exception: it draws
+  a `·` for each space, kitty does not end a run at a `·`, so the bar is handed the
+  row as stored (`terminal`) whatever `words` says. This default still rests on the
+  manual layer: repository tests cannot prove how kitty shapes or orders emitted
+  bytes. Checked on kitty 0.50.0 on macOS 27.0.1, 2026-11-17, through
+  `scripts/rtl/kitty_shots.py messages_terminal draft_two_words draft_and_messages`
+  with no `televim.toml` and no `TELEVIM_BIDI`: kitty still reverses each
+  right-to-left run on its own, so before the bar change the conversation read
+  `سلام` rightmost and the focused bar read it leftmost. The `.txt` and `.png`
   files are local artifacts under `target/rtl-shots/` and are not committed.
   This is an observation, not a repository assertion; tests cannot prove how
   kitty shapes or orders emitted bytes.

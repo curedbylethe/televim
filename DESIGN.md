@@ -396,7 +396,10 @@ a missed kitty probe falls back to `Terminal`. Whole-line bidi is not detected,
 because it is a terminal setting rather than an identity — `wezterm` ships
 `bidi_enabled=false`, VTE needs `CSI ? 2501 h` — and detection breaks under
 `tmux` and `ssh`. Kitty is the narrow exception: its per-run reversing is a
-shaper behavior, not a bidi setting, so `auto` selects `Words` there. If kitty
+shaper behavior, not a bidi setting, so `auto` selects `Words` there. The focused
+input bar is the one place `Words` does not apply: it draws a `·` for each space,
+kitty does not end a run at a `·`, and the whole row would be reversed a second
+time, so the focused bar is handed the row as stored, as `Terminal` does. If kitty
 starts applying bidi to whole lines or gains a whole-line setting, remove that
 kitty branch. The mode is read once from configuration at start-up, never while
 a frame is being drawn.

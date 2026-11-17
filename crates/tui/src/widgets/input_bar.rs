@@ -444,7 +444,7 @@ pub fn render(app: &App, area: Rect, frame: &mut Frame<'_>) {
     let width = area.width.saturating_sub(2).max(1);
     let height = usize::from(area.height).saturating_sub(2).max(1);
 
-    let mode = app.bidi();
+    let mode = app.ui.input_bidi();
     let prefix = app.prompt_prefix();
     // The prefix sits in front of the first row, so the rows are cut for the
     // columns that are left over once it is drawn.
@@ -1494,11 +1494,12 @@ mod tests {
         assert_eq!("中".len(), 3);
     }
 
-    /// Under `Words` a two-word draft reaches the terminal with its words in
-    /// reverse order and each word whole, so the terminal joins each one. The
-    /// caret at the end sits on the leftmost cell, where the next letter goes.
+    /// While the line has the focus the bar draws a `·` for each space, and kitty
+    /// does not end a right-to-left run at one: the whole row is a single run and
+    /// the terminal reverses all of it. So under `Words` the focused bar hands
+    /// the row over as stored, and the caret at the end sits on the last cell.
     #[test]
-    fn a_words_draft_is_emitted_with_its_words_in_reverse_order() {
+    fn a_focused_words_draft_is_emitted_as_stored_because_the_dot_joins_the_run() {
         let mut app = App::mock().with_bidi(BidiMode::Words);
         press(&mut app, KeyCode::Char('i'));
         type_text(&mut app, "سلام خوبی");
@@ -1510,22 +1511,35 @@ mod tests {
             (from..=to).map(|x| buffer[(x, body)].symbol()).collect()
         };
 
-        assert_eq!(cells(1, 4), "خوبی", "the second word comes first");
+        assert_eq!(cells(1, 4), "سلام", "the first word stays first");
         assert_eq!(cells(5, 5), "·", "the space between them");
+        assert_eq!(cells(6, 9), "خوبی", "and the second word stays last");
+    }
+
+    /// A draft nobody is typing in keeps its spaces, which end a run, so `Words`
+    /// still emits its words in reverse order there.
+    #[test]
+    fn an_unfocused_words_draft_is_emitted_with_its_words_in_reverse_order() {
+        let mut app = App::mock().with_bidi(BidiMode::Words);
+        drafted(&mut app, "سلام خوبی");
+
+        let buffer = screen(&app, 80, 24);
+        let rows = rows_of(&buffer);
+        let body = draft_top(&rows) as u16 + 1;
+        let cells = |from: u16, to: u16| -> String {
+            (from..=to).map(|x| buffer[(x, body)].symbol()).collect()
+        };
+
+        assert_eq!(cells(1, 4), "خوبی", "the second word comes first");
         assert_eq!(cells(6, 9), "سلام", "and the first word last");
-        assert_eq!(
-            carets(&buffer, top)[0].0,
-            1,
-            "the caret is on the leftmost cell"
-        );
     }
 
     /// A caret inside the first word of two, before the `ا` of `سلام` (typed
     /// around, since `Left` steps by painted column and not by character). A terminal that reverses each word in place (kitty)
-    /// draws that word's `ا` second from the left under `terminal`, and
-    /// second from the left of the *last* word under `words`, which has put it
-    /// there. The style goes on the emitted cell the glyph is moved onto, not on
-    /// the glyph's own cell; checked on kitty with `make rtl-shots`
+    /// draws that word's `ا` second from the left under `terminal`. The focused
+    /// bar draws `words` as `terminal` (see
+    /// `a_focused_words_draft_is_emitted_as_stored_because_the_dot_joins_the_run`),
+    /// so both land on the same cell; checked on kitty with `make rtl-shots`
     /// (`draft_caret_mid`, `draft_caret_mid_words`).
     #[test]
     fn a_caret_inside_a_word_is_painted_on_the_cell_its_letter_is_drawn_in() {
@@ -1547,8 +1561,8 @@ mod tests {
         );
         assert_eq!(
             caret_x(BidiMode::Words),
-            7,
-            "second cell of the word moved last"
+            2,
+            "the focused bar draws words as terminal"
         );
     }
 
