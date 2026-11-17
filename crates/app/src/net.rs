@@ -9408,7 +9408,7 @@ mod tests {
         assert_eq!(latest_read(&app, &mut state), None, "the blur refuses it");
         assert_eq!(state.read_owed, Some(CHAT), "the marker is owed");
 
-        assert!(app.focus.key_proves_focus());
+        app.focus.key_proves_focus();
 
         // Stands in for a focused pass after the key proves focus.
         let arrived = !card_covers_conversation(&app) && state.read_owed.take().is_some();
@@ -17647,7 +17647,7 @@ mod notification_trigger_tests {
         arrive(&mut app, &mut state, message(OTHER, "before"));
         assert_eq!(notices(&notifier).len(), 1, "a blurred terminal notices");
 
-        assert!(app.focus.key_proves_focus());
+        app.focus.key_proves_focus();
 
         arrive(&mut app, &mut state, message(OTHER, "after"));
         assert_eq!(notices(&notifier).len(), 1, "the key restores suppression");

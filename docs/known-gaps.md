@@ -560,7 +560,7 @@ Real, and named so they are not mistaken for oversights:
     and nothing has run in a real terminal to prove which terminals report it.
   - *A missed `FocusGained` now recovers on the next key.* A terminal that emits
     `FocusLost` and drops `FocusGained` is treated as focused on the next key press
-    or repeat, which re-pushes the keyboard flags; a terminal that then goes
+    or repeat; a terminal that then goes
     unfocused without reporting it stays treated as focused until the next focus
     event, and no evidence from a real terminal backs any of this.
 - **A worst-case history-cache write peaks above the 50 MB budget.** The byte

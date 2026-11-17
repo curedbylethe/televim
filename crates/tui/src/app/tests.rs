@@ -19,7 +19,7 @@ fn a_key_after_a_reported_blur_proves_focus() {
         reported: false,
         focused: false,
     };
-    assert!(!unreported.key_proves_focus());
+    unreported.key_proves_focus();
     assert_eq!(
         unreported,
         FocusReport {
@@ -32,7 +32,7 @@ fn a_key_after_a_reported_blur_proves_focus() {
         reported: true,
         focused: true,
     };
-    assert!(!focused.key_proves_focus());
+    focused.key_proves_focus();
     assert_eq!(
         focused,
         FocusReport {
@@ -45,7 +45,7 @@ fn a_key_after_a_reported_blur_proves_focus() {
         reported: true,
         focused: false,
     };
-    assert!(blurred.key_proves_focus());
+    blurred.key_proves_focus();
     assert_eq!(
         blurred,
         FocusReport {

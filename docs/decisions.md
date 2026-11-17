@@ -2024,7 +2024,6 @@ are in [`../AGENTS.md`](../AGENTS.md).
   unfocused") and stop suppressing notices ("Why focus suppresses notices only
   after a reported focus event") for the rest of the session. A key whose whole
   sequence is delivered to this window is evidence the window has focus, so it
-  restores the focused state and re-pushes the keyboard enhancement flags the
-  blur may have reset. The cost is that a terminal reporting a real blur and then
+  restores the focused state. The cost is that a terminal reporting a real blur and then
   sending keys is treated as focused; the terminal's own next focus report
   corrects it.
