@@ -2,6 +2,10 @@
 
 use domain::message::{MediaKind, Message};
 
+#[cfg(any(target_os = "macos", test))]
+const MACOS_SCRIPT: &str =
+    "on run argv\ndisplay notification (item 1 of argv) with title (item 2 of argv)\nend run";
+
 /// One desktop notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Notice {
@@ -26,15 +30,46 @@ impl Notifier for DesktopNotifier {
         };
 
         drop(runtime.spawn_blocking(move || {
-            let mut notification = notify_rust::Notification::new();
-            notification.summary(&notice.title).body(&notice.body);
-            #[cfg(target_os = "linux")]
-            notification.id(replacement_id(notice.chat_id));
-            if let Err(error) = notification.show() {
-                tracing::debug!(%error, "desktop notification was not shown");
-            }
+            #[cfg(target_os = "macos")]
+            post_macos(&notice);
+            #[cfg(not(target_os = "macos"))]
+            post_notify_rust(notice);
         }));
     }
+}
+
+#[cfg(target_os = "macos")]
+fn post_macos(notice: &Notice) {
+    match std::process::Command::new("osascript")
+        .args(osascript_args(notice))
+        .output()
+    {
+        Ok(output) => {
+            tracing::debug!(status = %output.status, "desktop notification posted via osascript");
+        }
+        Err(error) => tracing::debug!(%error, "desktop notification was not shown"),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn post_notify_rust(notice: Notice) {
+    let mut notification = notify_rust::Notification::new();
+    notification.summary(&notice.title).body(&notice.body);
+    #[cfg(target_os = "linux")]
+    notification.id(replacement_id(notice.chat_id));
+    if let Err(error) = notification.show() {
+        tracing::debug!(%error, "desktop notification was not shown");
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn osascript_args(notice: &Notice) -> Vec<String> {
+    vec![
+        "-e".to_owned(),
+        MACOS_SCRIPT.to_owned(),
+        notice.body.clone(),
+        notice.title.clone(),
+    ]
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -130,5 +165,27 @@ mod tests {
         let largest = replacement_id(i64::MAX);
         assert_ne!(negative, large);
         assert_ne!(large, largest);
+    }
+
+    #[test]
+    fn osascript_argv_requests_a_display_notification() {
+        let title = "a \"title\" \\ ünicode";
+        let body = "body with 'quotes' \\ and 日本語";
+        let notice = Notice {
+            chat_id: 7,
+            title: title.to_owned(),
+            body: body.to_owned(),
+        };
+
+        assert_eq!(
+            osascript_args(&notice),
+            vec![
+                "-e".to_owned(),
+                MACOS_SCRIPT.to_owned(),
+                body.to_owned(),
+                title.to_owned(),
+            ]
+        );
+        assert!(MACOS_SCRIPT.contains("display notification"));
     }
 }
