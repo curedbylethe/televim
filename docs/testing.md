@@ -23,7 +23,7 @@
 | `make check` | `check --all-targets`, faster than a build |
 | `make build-release` | the optimized binary |
 | `make run` / `watch` | run it, or under `cargo-watch` |
-| `make audit` | `cargo audit` (needs `cargo-audit` installed) |
+| `make audit` | `cargo audit` (needs `cargo-audit` installed; the nightly job installs it) |
 | `make bench` | A/B compare of the criterion micro-benches; writes `target/bench-compare.json` and `.md`. `BENCH_MODE=smoke` (default) or `full`; `BENCH_ARGS="--save-baseline NAME"` or `"--baseline NAME"`. Reports deltas and never fails on slowness |
 | `make outdated` | print pending updates as patch / minor / major counts with direct rows; `cargo-outdated` broadens the major bucket; outside `make ci` |
 | `make update` | `cargo update`, then re-pin `glass_pumpkin` at `2.0.0-rc0`; see Dependency Notes |
@@ -55,6 +55,15 @@ job is not a required branch-protection check until maintainers mark it required
 and pull request. `release` is gated at the job level to a push to `main` that
 changes code, the nightly schedule, and a pull request labelled `memory`; an
 ordinary pull request does not start it.
+
+A `deps` job runs only on the nightly `schedule` and needs the `changes` job. It
+installs `cargo-outdated` and `cargo-audit`, which are not on a developer
+machine, prints the report into the workflow log and uploads it as the
+`deps-report` artefact. A red `deps` run means an advisory from `make audit`, not
+a pending update — a pending update is information and the job stays green for
+it. The same report runs locally with `make outdated`; a local run without
+`cargo-outdated` reports majors as unmeasured. The job is not part of `make ci`;
+the update policy lives in [`docs/dependencies.md`](./dependencies.md).
 
 `.github/workflows/pages.yml` builds and deploys `/televim/` only on `main` or
 manual dispatch. The build can read the repository and configure Pages; only the
