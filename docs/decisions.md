@@ -2017,3 +2017,14 @@ are in [`../AGENTS.md`](../AGENTS.md).
   take the list away.
 
 - **Why dependency updates are a scheduled report with a written rule, not a bot:** a nightly report leaves the decision with the maintainer and needs no bot service, no new configuration and no review queue. The `glass_pumpkin`, `grammers` and toolchain pins are exactly what a bot's `ignore` list cannot be trusted to encode, because the reason for each lives in a rule rather than in a version string. Applying patches in one monthly batch bounds the diff to what a single `make ci` run can check.
+
+- **Why a key event is proof of focus:** a terminal that reports `FocusLost` may
+  never send the `FocusGained` it owes, and without a gain it would withhold the
+  read marker ("Why the read marker waits when the terminal reports itself
+  unfocused") and stop suppressing notices ("Why focus suppresses notices only
+  after a reported focus event") for the rest of the session. A key whose whole
+  sequence is delivered to this window is evidence the window has focus, so it
+  restores the focused state and re-pushes the keyboard enhancement flags the
+  blur may have reset. The cost is that a terminal reporting a real blur and then
+  sending keys is treated as focused; the terminal's own next focus report
+  corrects it.

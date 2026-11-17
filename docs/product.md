@@ -192,7 +192,8 @@ Working today:
   again. While any card covers the conversation nothing is marked: the mark waits
   for the card to be confirmed or closed. While the terminal has reported itself
   unfocused nothing is marked either: the mark waits, and it goes up on the
-  first pass after focus returns. A message that arrives in the
+  first pass after focus returns, which a key press or repeat proves even when
+  the terminal never sends the `FocusGained` it owes. A message that arrives in the
   conversation on show is marked read the same way, and one that arrives under a
   card is kept and marked on the pass after `Esc`; a read
   done on another device sets the count to whatever Telegram still counts as
