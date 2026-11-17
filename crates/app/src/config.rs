@@ -157,6 +157,10 @@ pub struct Config {
     /// `terminal` emits the row in logical order for a terminal that shapes it.
     /// `visual` permutes here for a terminal that does neither (xterm, alacritty).
     /// `words` reverses the words, each whole, for kitty's per-word reversal.
+    /// While the input has the focus the bar draws a `·` for each space, which
+    /// joins the row into one right-to-left run for kitty, so even `words`
+    /// hands the focused row over as stored (`terminal`). The conversation
+    /// keeps real spaces and keeps `words`.
     ///
     /// The default is resolved once from the launch environment. An explicit
     /// value stays per machine, so an ssh hop keeps it. `tmux` multiplexes one
