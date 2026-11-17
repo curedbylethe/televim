@@ -25,7 +25,8 @@
 | `make run` / `watch` | run it, or under `cargo-watch` |
 | `make audit` | `cargo audit` (needs `cargo-audit` installed) |
 | `make bench` | A/B compare of the criterion micro-benches; writes `target/bench-compare.json` and `.md`. `BENCH_MODE=smoke` (default) or `full`; `BENCH_ARGS="--save-baseline NAME"` or `"--baseline NAME"`. Reports deltas and never fails on slowness |
-| `make update` | `cargo update` — **drops the `glass_pumpkin` pin**; see Dependency Notes |
+| `make outdated` | print pending updates as patch / minor / major counts with direct rows; `cargo-outdated` broadens the major bucket; outside `make ci` |
+| `make update` | `cargo update`, then re-pin `glass_pumpkin` at `2.0.0-rc0`; see Dependency Notes |
 | `make wasm-check` | type-check detached `web-demo` for `wasm32-unknown-unknown` |
 | `make wasm-build` | build the static browser demo with pinned Trunk |
 | `make wasm-test` | run wasm-bindgen tests in headless Chrome; needs `wasm-pack` and ChromeDriver |

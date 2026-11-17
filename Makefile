@@ -184,6 +184,12 @@ ci: fmt-check lint boundary test design-check build-release ## Run all checks re
 clean: ## Remove the target directory
 	$(CARGO) clean
 
+.PHONY: outdated
+outdated: ## List pending updates in patch, minor and major buckets (report only)
+	scripts/deps/outdated.sh
+
+# Drop the second command when a grammers release compiles without the pin.
 .PHONY: update
-update: ## Update dependencies
+update: ## Update dependencies, keeping the glass_pumpkin pin
 	$(CARGO) update
+	$(CARGO) update -p glass_pumpkin --precise 2.0.0-rc0
