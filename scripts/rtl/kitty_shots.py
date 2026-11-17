@@ -20,6 +20,7 @@ first: it holds the cells kitty drew and is not affected by what is on top.
 """
 
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -111,6 +112,9 @@ SCENES = {
         ],
         "wait": "·",
     },
+    # While the bar has focus, `words` resolves to `terminal`, so this scene
+    # draws the same focused row as `draft_caret_mid`; it does not isolate a
+    # focused `words` path. Unfocused drafts still keep the configured `words`.
     "draft_caret_mid_words": {
         "env": {"TELEVIM_BIDI": "words"},
         "chats": [(1, "Ada")],
@@ -261,6 +265,8 @@ SCENES = {
     # The same two words with Arabic drawn in Geeza Pro instead of the fallback
     # (Courier New, which gives every letter a full cell). Compare the gap after
     # the alef with `draft_two_words`.
+    # A focused bar ignores `words` (it resolves to `terminal`), so this scene
+    # isolates the font's shaping, not a focused `words` path.
     "draft_two_words_geeza": {
         "kitty_conf": "symbol_map U+0600-U+06FF Geeza Pro\n",
         "env": {"TELEVIM_BIDI": "words"},
@@ -286,12 +292,27 @@ SCENES = {
 }
 
 
+def key_file(sock):
+    """Where the scene's child publishes the inner kitty's public key."""
+    return pathlib.Path(str(sock).rsplit(".", 1)[0] + ".key")
+
+
 def kitty(sock, *args, check=True):
     """Run a `kitty @` command against this scene's socket."""
+    # Each inner kitty generates its own key and exports it to its children.
+    # An outer kitty also exports a key, which is useless for this socket, so
+    # use the one the scene published rather than the inherited one.
+    env = dict(os.environ)
+    key = key_file(sock)
+    if key.exists():
+        env["KITTY_PUBLIC_KEY"] = key.read_text()
+    else:
+        env.pop("KITTY_PUBLIC_KEY", None)
     result = subprocess.run(
         [KITTY, "@", "--to", f"unix:{sock}", *args],
         capture_output=True,
         text=True,
+        env=env,
     )
     if check and result.returncode != 0:
         raise RuntimeError(f"kitty @ {' '.join(args)} failed: {result.stderr}")
@@ -374,7 +395,16 @@ def run_scene(name, scene):
         # the system temp dir, not in the sandbox.
         sock = pathlib.Path(tempfile.gettempdir()) / f"tvk-{name}.sock"
         sock.unlink(missing_ok=True)
+        key = key_file(sock)
+        key.unlink(missing_ok=True)
         subprocess.run([KITTY, "--version"], check=True)
+        child = scene.get("argv") or [
+            "env",
+            *(f"{k}={v}" for k, v in scene.get("env", {}).items()),
+            f"TELEVIM_SESSION_PATH={sandbox / 'session.bin'}",
+            str(BIN),
+            "--config", str(sandbox / "televim.toml"),
+        ]
         proc = subprocess.Popen(
             [
                 KITTY,
@@ -383,16 +413,18 @@ def run_scene(name, scene):
                 "--listen-on", f"unix:{sock}",
                 "--title", f"televim-rtl-{name}",
                 "-d", str(sandbox),
-                *(scene.get("argv") or [
-                    "env",
-                    *(f"{k}={v}" for k, v in scene.get("env", {}).items()),
-                    f"TELEVIM_SESSION_PATH={sandbox / 'session.bin'}",
-                    str(BIN),
-                    "--config", str(sandbox / "televim.toml"),
-                ]),
+                "sh", "-c",
+                'printf %s "$KITTY_PUBLIC_KEY" > "$1"; shift; exec "$@"',
+                "sh", str(key),
+                *child,
             ]
         )
         try:
+            deadline = time.monotonic() + 10.0
+            while not key.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if not key.exists():
+                raise RuntimeError("inner kitty never published its remote-control key")
             if "argv" not in scene:
                 wait_until(sock, contains("NORMAL"), "NORMAL mode")
             for keys, holds in scene["steps"]:
@@ -413,6 +445,7 @@ def run_scene(name, scene):
             proc.terminate()
             proc.wait(timeout=5)
             sock.unlink(missing_ok=True)
+            key.unlink(missing_ok=True)
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)
 
