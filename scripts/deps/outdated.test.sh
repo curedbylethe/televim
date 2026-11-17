@@ -23,7 +23,8 @@ trap 'rm -f "$fixture_manifest"' EXIT
 printf '[workspace.dependencies]\nserde_json = "1"\nemojis = "0.9"\ntokio = "1"\nprerelease_crate = "1"\n' > "$fixture_manifest"
 
 # Name Project Compat Latest: a major-only pending release has Compat `---`.
-major_fixture='serde_json 1.0.140 --- 2.0.0'
+major_fixture='serde_json 1.0.140 --- 2.0.0
+emojis 0.9.0 0.9.1 0.10.0'
 
 out=$(printf '%s\n' "$fixture" | OUTDATED_MANIFEST="$fixture_manifest" OUTDATED_MAJOR="$major_fixture" "$classify" --classify)
 status=0
@@ -52,15 +53,16 @@ absent() {
 
 check 'patch (3)'  'patch bucket count'
 check 'minor (1)'  'minor bucket count'
-check 'major (1)'  'major bucket count'
+check 'major (2)'  'major bucket count'
 check 'held (1)'   'held bucket count'
-check 'direct (5)' 'direct bucket count'
+check 'direct (6)' 'direct bucket count'
 check 'transitive: 1 new, 0 updated' 'transitive summary'
 check 'serde_json  1.0.140 -> 1.0.141' 'stable patch row'
 check 'emojis  0.9.0 -> 0.9.1' '0.x patch row'
 check 'tokio  1.45.0 -> 1.46.0' 'minor row'
 check 'prerelease_crate  1.0.0-rc1 -> 1.0.0' 'pre-release to release patch row'
 check 'serde_json  1.0.140 -> 2.0.0' 'major row with Compat ---'
+check 'emojis  0.9.0 -> 0.10.0' 'breaking 0.x minor reported as major'
 check 'held  glass_pumpkin  2.0.0-rc0 -> 2.0.0' 'held row with reason'
 absent 'v0.9.9'          'first-seen duplicate wins'
 absent 'ar_archive_writer' 'Adding makes no row'

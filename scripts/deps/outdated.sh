@@ -167,7 +167,8 @@ classify() {
       [ -n "${name:-}" ] || continue
       if contains_name "$major_seen_list" "$name" || is_held "$name"; then continue; fi
       cls=$(classify_versions "$old" "$new")
-      [ "$cls" = major ] || continue
+      # In 0.x the minor number is the breaking one, so it belongs in major.
+      case "$cls:$old" in major:*|minor:0.*) ;; *) continue ;; esac
       major_seen_list+="$name"$'\n'
       major_n=$((major_n + 1))
       row="$name  $old -> $new"
