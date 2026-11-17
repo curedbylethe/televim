@@ -1161,7 +1161,7 @@ checksum = "5729f5117e208430e437df2f4843f5e5952997175992d1414f94c57d61e270b4"
 
 [[package]]
 name = "demo-support"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "domain",
  "ratatui",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -3154,7 +3154,7 @@ dependencies = [
 
 [[package]]
 name = "proto"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "domain",
  "telegram-framework",
@@ -3913,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "telegram-framework"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm-siv",
@@ -3936,7 +3936,7 @@ dependencies = [
 
 [[package]]
 name = "televim"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4303,7 +4303,7 @@ dependencies = [
 
 [[package]]
 name = "tui"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "criterion",
  "crossterm 0.28.1",

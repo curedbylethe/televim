@@ -5,6 +5,33 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.15.0] - 2026-11-17
+
+### Added
+
+- **app:** Add a pure-Rust Ogg/Opus player
+- **app:** Play voice messages in the app without a viewer
+- **tui:** Show voice playback progress on the message row
+- **tui:** Give the body split a hidden chat list
+- **tui:** Hide and show the chat list with Ctrl-b
+- **tui:** Keep the chat list while a sign-in flow runs
+- **app:** Remember a hidden chat list in the configuration
+
+### Changed
+
+- **app:** Read only the tail of a voice note to find its length
+
+### Fixed
+
+- **app:** Keep a play download out of the viewer and stop the note on teardown
+- **deps:** Report major releases and decouple the classifier test
+- **deps:** Report breaking 0.x releases as major
+
+### ci
+
+- Add a dependency update report split by patch, minor and major
+- Run the dependency report on the nightly schedule
+
 ## [0.14.1] - 2026-11-16
 
 ### Fixed
