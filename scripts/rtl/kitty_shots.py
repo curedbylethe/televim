@@ -206,6 +206,25 @@ SCENES = {
         ],
         "wait": "see you",
     },
+    # Both panels in one frame: cached messages in the conversation panel and a
+    # two-word draft in the input bar, under the default mode (`auto`).
+    "draft_and_messages": {
+        "chats": [(1, "Ada")],
+        "messages": {
+            1: [
+                {"id": 1, "text": "سلام خوبی", "timestamp": 1700000000, "is_outgoing": False},
+                {"id": 2, "text": "ممنون، تو چطوری؟", "timestamp": 1700000060, "is_outgoing": True},
+            ]
+        },
+        "steps": [
+            (":", lambda s: ":" in s),
+            ("\x1b", lambda s: "Sign in to Telegram" not in s),
+            ("\r", lambda s: "سلام" in s or "خوبی" in s),
+            ("i", lambda s: "INSERT" in s),
+            ("سلام خوبی", lambda s: "·" in s),
+        ],
+        "wait": "·",
+    },
     # A lam-alef word with a trailing clock, in the default mode (`auto`, which
     # selects `Words` on kitty; no TELEVIM_BIDI). `سلام` is three columns as a
     # string and four cells as drawn.
@@ -355,6 +374,7 @@ def run_scene(name, scene):
         # the system temp dir, not in the sandbox.
         sock = pathlib.Path(tempfile.gettempdir()) / f"tvk-{name}.sock"
         sock.unlink(missing_ok=True)
+        subprocess.run([KITTY, "--version"], check=True)
         proc = subprocess.Popen(
             [
                 KITTY,
