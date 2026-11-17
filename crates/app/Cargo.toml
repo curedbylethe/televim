@@ -40,7 +40,6 @@ fs4.workspace = true
 time.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-notify-rust.workspace = true
 
 # The OSC 52 clipboard sequence is base64 inside, and `runtime.rs` is the only
 # place that writes one.
@@ -54,6 +53,11 @@ ogg.workspace = true
 opus-rs.workspace = true
 rodio.workspace = true
 thiserror.workspace = true
+
+# Desktop notices use osascript on macOS (see notify.rs); notify-rust is only
+# needed everywhere else.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify-rust.workspace = true
 
 [dev-dependencies]
 # The integration tests keep their session in a scratch file, so a run never
