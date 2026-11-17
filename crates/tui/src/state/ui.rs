@@ -214,6 +214,23 @@ pub struct UiState {
 }
 
 impl UiState {
+    /// The mode the input bar is drawn, stepped and anchored in.
+    ///
+    /// While the line has the focus the bar stands a `·` in for every space,
+    /// and a terminal that reverses each right-to-left run on its own (kitty)
+    /// does not end a run at a `·`. The whole row is then one run and the
+    /// terminal reverses all of it, so [`BidiMode::Words`] would put the words
+    /// in reverse order twice. The focused bar is handed the row as stored
+    /// instead. Everywhere else — the conversation's rows, and a draft nobody is
+    /// typing in, which keeps its spaces — the configured mode applies.
+    #[must_use]
+    pub(crate) fn input_bidi(&self) -> BidiMode {
+        match self.bidi {
+            BidiMode::Words if self.focus == Focus::Input => BidiMode::Terminal,
+            mode => mode,
+        }
+    }
+
     /// Normal mode, the conversation focused, and no frame measured yet.
     #[must_use]
     pub(crate) fn new() -> Self {

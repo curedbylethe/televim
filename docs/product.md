@@ -459,6 +459,9 @@ Working today:
   each right-to-left word on its own: it emits a right-to-left row's words in
   reverse order, each one whole, so the words read in order and the letters still
   join.
+  While the line has the focus the bar draws a `·` for each space and kitty does
+  not end a run at one, so the focused bar is emitted as stored (as in `terminal`)
+  even under `words`; a draft nobody is typing in keeps `words`.
   The stored text, and what is sent, are unchanged in every mode.
 - **Pinned messages:** `P` pins the message under the cursor, or unpins it if it is
   pinned, and says nothing either way — the marker appearing is the answer, and a

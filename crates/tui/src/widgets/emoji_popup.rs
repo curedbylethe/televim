@@ -50,7 +50,7 @@ fn popup_area(app: &App, above: Rect, bar: Rect, frame: Rect) -> Option<Rect> {
     app.completion()?;
 
     let width = bar.width.saturating_sub(2).max(1);
-    let laid_out = app.input.line.laid_out_in(width, app.bidi());
+    let laid_out = app.input.line.laid_out_in(width, app.ui.input_bidi());
     // Where the caret is **painted**, which is not where it sits in the string:
     // a right-to-left draft puts the caret among the cells rather than after the
     // bytes, and the cells are one per cluster, not the string's width.
