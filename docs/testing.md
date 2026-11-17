@@ -414,6 +414,46 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   status line must read `Opener exited (code 0); the viewer may still be open`.
   Neither a restart nor Ctrl+C is needed to get back.
 
+  No automated test can watch a macOS notification banner or read Notification
+  Center; the gating is tested as logic only. Manual check on a macOS desktop
+  after a rebuild:
+
+  1. Build with `make build-release`, or run the debug binary with `make run`.
+     Use a signed-in account and leave the `notifications` setting at its
+     default (`"on"`; env `TELEVIM_NOTIFICATIONS`, where any value other than
+     `"off"` enables notices). Pick a chat that is closed and unmuted, focus
+     another app so the televim terminal is not frontmost, then send a fresh
+     message to that chat from another device. Expect one banner and a new
+     Notification Center entry. The banner auto-dismisses, so look for the
+     entry in Notification Center — do not rely on the banner staying up.
+  2. Open that chat in televim (still not frontmost) and send another fresh
+     message. Expect no banner.
+  3. Set `notifications = "off"` in the config (or `TELEVIM_NOTIFICATIONS=off`),
+     restart the app, keep the chat closed and the terminal unfocused, and send
+     a fresh message. Expect no banner. Set `notifications` back to `"on"` for
+     the remaining steps.
+  4. Mute the chat in Telegram (televim reads the account's mute flag, not a
+     local setting), keep it closed and the terminal unfocused, and send a
+     fresh message. Expect no banner. Unmute it afterward.
+  5. With `notifications` at `"on"` and the chat closed and unmuted, focus the
+     televim terminal itself and send a fresh message. Use a terminal that
+     reports focus events; one that never reports focus keeps sending notices.
+     Expect no banner.
+
+  If a notice does not appear when one is expected, check `televim.log` beside
+  the selected config (`televim.log` for `televim.toml`); run with
+  `log_level = "debug"` so the `desktop notification` lines are written.
+
+  RESULT (observed on a real macOS desktop; a zero `osascript` exit alone does
+  not prove a banner or Notification Center entry appeared):
+  - Date: 2026-11-19
+  - macOS version (`sw_vers -productVersion`): 27.0.1
+  - Notification Center entry appeared: Yes — a new entry appeared for a fresh
+    message in a closed, unmuted chat with the terminal unfocused.
+  - Process name Notification Center attributes the notice to: none shown.
+    The entry names the account the notice comes from, which is the default
+    Telegram behaviour and is desirable.
+
   To run the `app` suite, which no workflow runs for you:
 
   ```console
