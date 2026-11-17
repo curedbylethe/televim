@@ -54,12 +54,51 @@ jobs:
         run: |
           echo "rust=$(scripts/ci/classify-changes.sh git)" >> "$GITHUB_OUTPUT"
 
+  deps:
+    name: deps
+    needs: changes
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-outdated,cargo-audit
+
+      # Redirect needs target/ to exist before the shell opens the file; a fresh
+      # checkout has no target/ and cargo update --dry-run does not create one.
+      - name: dependency report
+        run: |
+          mkdir -p target
+          make outdated > target/deps-report.txt
+          cat target/deps-report.txt
+
+      # A non-zero exit from an advisory is the alarm this step exists for.
+      - name: audit
+        run: make audit
+
+      - name: upload dependency report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deps-report
+          path: target/deps-report.txt
+          if-no-files-found: warn
+
   lint:
     name: lint
     needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: check the dependency report classifier
+        run: scripts/deps/outdated.test.sh
 
       # A docs-only diff has no Rust to compile. The job keeps the one check a
       # document can still break — the vendored design model — and skips the
