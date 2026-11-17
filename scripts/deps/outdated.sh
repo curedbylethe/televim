@@ -15,7 +15,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
-manifest="$root/Cargo.toml"
+manifest="${OUTDATED_MANIFEST:-$root/Cargo.toml}"
 
 is_held() {
   case "$1" in
@@ -63,7 +63,8 @@ classify_versions() {
       return 0
     fi
   done
-  if [ "${#a[@]}" -ne "${#b[@]}" ]; then printf '%s' patch; fi
+  # A pre-release to its release (1.0.0-rc1 -> 1.0.0) has equal components.
+  printf '%s' patch
   return 0
 }
 
@@ -96,7 +97,7 @@ print_bucket() {
 }
 
 classify() {
-  local direct_list=$'\n' seen_list=$'\n' d name old new cls row
+  local direct_list=$'\n' seen_list=$'\n' major_seen_list=$'\n' d name old _compat new cls row
   local patch_direct="" patch_trans="" minor_direct="" minor_trans=""
   local major_direct="" major_trans="" direct_rows=""
   local held_gp="" held_vl=""
@@ -124,7 +125,6 @@ classify() {
       # reported again by cargo, not a second update.
       if contains_name "$seen_list" "$name"; then continue; fi
       cls=$(classify_versions "$old" "$new")
-      [ -n "$cls" ] || continue
       seen_list+="$name"$'\n'
       row="$name  $old -> $new"
       case "$cls" in
@@ -160,13 +160,15 @@ classify() {
   done
 
   # Major rows come from the optional cargo outdated leg, not from dry-run.
+  # A crate can be pending both a patch and a major, so this leg keeps its own
+  # seen set instead of sharing the dry-run one.
   if [ "${OUTDATED_MAJOR_MEASURED:-1}" = "1" ] && [ -n "${OUTDATED_MAJOR:-}" ]; then
-    while read -r name old new; do
+    while read -r name old _compat new; do
       [ -n "${name:-}" ] || continue
-      if contains_name "$seen_list" "$name" || is_held "$name"; then continue; fi
+      if contains_name "$major_seen_list" "$name" || is_held "$name"; then continue; fi
       cls=$(classify_versions "$old" "$new")
       [ "$cls" = major ] || continue
-      seen_list+="$name"$'\n'
+      major_seen_list+="$name"$'\n'
       major_n=$((major_n + 1))
       row="$name  $old -> $new"
       if contains_name "$direct_list" "$name"; then
@@ -217,7 +219,9 @@ case "${1:-report}" in
     if command -v cargo-outdated >/dev/null 2>&1; then
       if major_out=$(cargo outdated --root-deps-only --depth 1 2>&1); then
         major_rows=$(printf '%s\n' "$major_out" | awk '
-          $1 ~ /^[A-Za-z0-9_]/ && $2 ~ /^[0-9]/ && $3 ~ /^[0-9]/ { print $1, $2, $3 }
+          # Name Project Compat Latest: Compat is blank for major-only bumps;
+          # Latest is the column that can carry one.
+          $1 ~ /^[A-Za-z0-9_]/ && $2 ~ /^[0-9]/ && $4 ~ /^[0-9]/ { print $1, $2, $3, $4 }
         ')
       else
         measured=0
