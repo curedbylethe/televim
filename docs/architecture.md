@@ -870,8 +870,11 @@ account has one.
 `words` — which says whether this program or the terminal arranges a right-to-left
 row. `auto` resolves once in `runtime.rs` from `KITTY_WINDOW_ID` or
 `TERM=xterm-kitty`: it selects `Words` on kitty and `Terminal` elsewhere. Explicit
-values win. In every mode `h`/`l` and the arrows step by painted column through
-`tui::bidi::visual_step`:
+values win. The focused input bar is the one exception: it draws a `·` for each
+space, which joins the row into one right-to-left run for kitty, so even `words`
+hands the focused row over as stored (`terminal`); the conversation keeps real
+spaces and keeps `words`. In every mode `h`/`l` and the arrows step by painted
+column through `tui::bidi::visual_step`:
 on the input line, in the conversation's Visual mode and on the profile card. It is
 read once in `runtime.rs` and handed to `tui` as a plain `tui::bidi::BidiMode`
 through `App::with_bidi`, which is the only path a configuration value takes into

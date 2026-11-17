@@ -308,9 +308,12 @@ Real, and named so they are not mistaken for oversights:
   after an Arabic draft run in both modes and check cell positions, not glyph shape.
   The reversed modes rest on one observed behaviour: kitty keeps a cell's
   background on its emitted column while it reverses the glyphs, so `emitted_caret`
-  styles the emitted cell whose index is the caret's visual column. Checked by eye
-  on kitty (`make rtl-shots`) at the start and end of an Arabic draft, in `terminal`
-  and `words`; a middle position and any other shaping terminal are not checked.
+  styles the emitted cell whose index is the caret's visual column. On the focused
+  bar the `·` joins the row into one run, so the whole run is reversed and the
+  caret and selection are mirrored onto the emitted cells: cluster `i` is drawn
+  at the cell of emitted cluster `n - 1 - i`. Checked by eye on kitty
+  (`make rtl-shots`) at the start, middle and end of an Arabic draft, in `terminal`
+  and `words`; any other shaping terminal is not checked.
   `words` is written for a terminal that reverses each word on its own, and is wrong
   on one that reverses the whole line, where the words would be reversed twice;
   `auto` selects it only on kitty. The focused input bar is the exception: it draws
@@ -318,8 +321,9 @@ Real, and named so they are not mistaken for oversights:
   row as stored (`terminal`) whatever `words` says. This default still rests on the
   manual layer: repository tests cannot prove how kitty shapes or orders emitted
   bytes. Checked on kitty 0.50.0 on macOS 27.0.1, 2026-11-17, through
-  `scripts/rtl/kitty_shots.py messages_terminal draft_two_words draft_and_messages`
-  with no `televim.toml` and no `TELEVIM_BIDI`: kitty still reverses each
+  `scripts/rtl/kitty_shots.py messages_terminal draft_two_words draft_and_messages
+  draft_caret_start draft_caret_mid draft_caret_mid_words` with no `televim.toml`
+  and no `TELEVIM_BIDI`: kitty still reverses each
   right-to-left run on its own, so before the bar change the conversation read
   `سلام` rightmost and the focused bar read it leftmost. The `.txt` and `.png`
   files are local artifacts under `target/rtl-shots/` and are not committed.
