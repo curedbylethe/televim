@@ -9398,6 +9398,25 @@ mod tests {
     }
 
     #[test]
+    fn a_key_after_a_lost_gain_lets_the_marker_through() {
+        let mut app = listed(2, Some(20));
+        app.focus.reported = true;
+        app.focus.focused = false;
+        let mut state = State::default();
+
+        assert_eq!(read_target(&app, &state), None, "the blur refuses it");
+        assert_eq!(latest_read(&app, &mut state), None, "the blur refuses it");
+        assert_eq!(state.read_owed, Some(CHAT), "the marker is owed");
+
+        assert!(app.focus.key_proves_focus());
+
+        // Stands in for a focused pass after the key proves focus.
+        let arrived = !card_covers_conversation(&app) && state.read_owed.take().is_some();
+        assert!(arrived);
+        assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
+    }
+
+    #[test]
     fn an_unreported_terminal_still_marks_an_arrival_read() {
         let mut app = listed(2, Some(20));
         let mut state = State::default();
@@ -17615,6 +17634,23 @@ mod notification_trigger_tests {
         arrive(&mut app, &mut state, message(OTHER, "hello"));
 
         assert_eq!(notices(&notifier).len(), 1);
+    }
+
+    #[test]
+    fn a_key_after_a_lost_gain_suppresses_the_next_notice() {
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut app = app();
+        app.focus.reported = true;
+        app.focus.focused = false;
+        let mut state = configured_state(Arc::clone(&notifier));
+
+        arrive(&mut app, &mut state, message(OTHER, "before"));
+        assert_eq!(notices(&notifier).len(), 1, "a blurred terminal notices");
+
+        assert!(app.focus.key_proves_focus());
+
+        arrive(&mut app, &mut state, message(OTHER, "after"));
+        assert_eq!(notices(&notifier).len(), 1, "the key restores suppression");
     }
 
     #[test]

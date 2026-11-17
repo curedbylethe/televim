@@ -616,6 +616,23 @@ impl Default for FocusReport {
     }
 }
 
+impl FocusReport {
+    /// Whether a key proves the window has focus again after a reported blur.
+    ///
+    /// `true` asks the caller to re-push the keyboard enhancement flags, which
+    /// the blur may have reset. A key is proof because its whole sequence was
+    /// delivered to this window, which a terminal without focus cannot do. Only
+    /// a reported blur changes state: a terminal that never reported focus is
+    /// already treated as focused, and needs no re-push.
+    pub fn key_proves_focus(&mut self) -> bool {
+        if self.reported && !self.focused {
+            self.focused = true;
+            return true;
+        }
+        false
+    }
+}
+
 /// Where the session is kept, as the panel says it.
 ///
 /// Derived from the same configuration the session store itself is built from, so

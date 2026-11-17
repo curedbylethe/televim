@@ -13,6 +13,48 @@ fn focus_report_defaults_to_undetected_and_not_focused() {
     );
 }
 
+#[test]
+fn a_key_after_a_reported_blur_proves_focus() {
+    let mut unreported = FocusReport {
+        reported: false,
+        focused: false,
+    };
+    assert!(!unreported.key_proves_focus());
+    assert_eq!(
+        unreported,
+        FocusReport {
+            reported: false,
+            focused: false,
+        }
+    );
+
+    let mut focused = FocusReport {
+        reported: true,
+        focused: true,
+    };
+    assert!(!focused.key_proves_focus());
+    assert_eq!(
+        focused,
+        FocusReport {
+            reported: true,
+            focused: true,
+        }
+    );
+
+    let mut blurred = FocusReport {
+        reported: true,
+        focused: false,
+    };
+    assert!(blurred.key_proves_focus());
+    assert_eq!(
+        blurred,
+        FocusReport {
+            reported: true,
+            focused: true,
+        }
+    );
+}
+
 /// A message in the sample conversation.
 fn message(id: i64, text: &'static str) -> Message {
     Message {

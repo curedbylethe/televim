@@ -992,6 +992,9 @@ async fn event_loop(
                 if measuring() {
                     network.set_open_key(Some(Instant::now()));
                 }
+                if app.focus.key_proves_focus() {
+                    keys.resume()?;
+                }
                 app.handle_key(key);
                 // The clock only starts for a measured run: an ordinary run
                 // leaves the `None` it has, and never reads the environment.
