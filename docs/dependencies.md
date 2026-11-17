@@ -1,13 +1,12 @@
 # Dependencies
 
-**No version numbers live in this file.** Native versions, features and defaults
-are canonical in `[workspace.dependencies]` in the root `Cargo.toml`; crate
-manifests inherit with `workspace = true`. The detached browser demo has its own
-workspace dependencies and lockfile under `crates/web-demo/`. This file records
-*why* a dependency is there, what it is pinned against, and what breaks when it
-moves.
-Version numbers appear in this file only in the deferred table, because that
-table is a work item and not a rationale.
+**Version numbers appear in this file only in the hold table and the deferred
+table.** Native versions, features and defaults are canonical in
+`[workspace.dependencies]` in the root `Cargo.toml`; crate manifests inherit with
+`workspace = true`. The detached browser demo has its own workspace dependencies
+and lockfile under `crates/web-demo/`. This file records *why* a dependency is
+there, what it is pinned against, and what breaks when it moves. The deferred
+table is a work item; the hold table records what a bulk update must not move.
 
 ## Changing one
 
@@ -42,10 +41,10 @@ pin is bumped by that same decision.
 
 | crate | hold | rule that owns it |
 | :--- | :--- | :--- |
-| `glass_pumpkin` | `2.0.0-rc0` in `Cargo.lock`; `make update` re-pins it after `cargo update` | AGENTS.md rule 10; `docs/dependencies.md:31-35` |
-| the `grammers` crates | crates.io source only — no `tag =`, no `rev =`; a build failure is suspected upstream first | AGENTS.md rule 9; `docs/dependencies.md:20-29` |
+| `glass_pumpkin` | `2.0.0-rc0` in `Cargo.lock`; `make update` re-pins it after `cargo update` | AGENTS.md rule 10; "The grammers saga, and other pins" below |
+| the `grammers` crates | crates.io source only — no `tag =`, no `rev =`; a build failure is suspected upstream first | AGENTS.md rule 9; "The grammers saga, and other pins" below |
 | the toolchain and MSRV | `1.98.1` in `rust-toolchain.toml` and `rust-version` in `Cargo.toml`; a dependency whose MSRV exceeds it is refused or the pin is bumped by decision | AGENTS.md, "Toolchain"; `Cargo.toml:14-15` |
-| `vim-line` | `7.7`, behind the `tui::line` wrapper, whose four routed-around defects are documented | AGENTS.md rule 8; `docs/dependencies.md:42-43` |
+| `vim-line` | `7.7`, behind the `tui::line` wrapper; held by review, not by `make update` — check `tui::line` before taking `7.8` | AGENTS.md rule 8; "The rest of them" below |
 
 ### Deferred
 
