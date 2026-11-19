@@ -38,7 +38,7 @@ Real, and named so they are not mistaken for oversights:
 - **The viewer hand-off no longer blocks the loop, and has four known limits.** `o`
   runs the platform opener on a thread of its own, so the loop keeps running while
   the viewer is open: network events are applied, and queued media opens one viewer
-  at a time. When the opener reports the terminal comes back once, to the same
+  at a time. When the opener reports, the terminal comes back once, to the same
   conversation and the same cursor, with no restart. Ctrl+c is the emergency exit
   only: it is not needed to return, and no signal handler is installed, so pressing
   it while a viewer holds the terminal still ends the program.
