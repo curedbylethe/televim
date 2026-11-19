@@ -710,14 +710,15 @@
   };
   /* the chat the media scenes read. Sides alternate and times keep groups apart, so every message
      is its own group and carries its own tag. */
-  function makeMediaChat() {
+  function makeMediaChat(caption) {
     const t = (text, o) => Object.assign({ from: 'them', text }, o || {});
     const y = (text, o) => Object.assign({ from: 'you', text }, o || {});
     return { name: 'Ken Thompson', unread: 0, top: 0, cur: 9, msgs: [
       y('Did the scan come out?', { at: at(0, '20:02') }),
       media('them', 'Photo', { at: at(0, '20:04') }),
       y('And the recording?', { at: at(0, '20:05') }),
-      media('them', 'Voice', { at: at(0, '20:06') }),
+      /* `caption`: the note carries words that wrap, so the token has a wrapped message's last row to sit on */
+      media('them', 'Voice', Object.assign({ at: at(0, '20:06') }, caption ? { caption: 'Second take, radiator off this time. Skip the first minute, I was still finding the right distance from the microphone.' } : {})),
       y('Send the score too.', { at: at(0, '20:07') }),
       media('them', 'File', { at: at(0, '20:09') }),
       media('you', 'Photo', { caption: 'Proof of the lamp.', at: at(0, '20:11'), rcpt: 'read' }),
@@ -818,6 +819,7 @@
     else if (view === 'rowStress') s.chats[0].unread = 12;
     else if (view === 'readFails') s.chats.find((c) => c.name === 'Donald Knuth').readFail = true;
     else if (view === 'media') s.chats.unshift(makeMediaChat());
+    else if (view === 'mediaCaption') s.chats.unshift(makeMediaChat(true));
     else if (view === 'sticker') s.chats.unshift(makeStickerChat(true));
     else if (view === 'stickerFallback') s.chats.unshift(makeStickerChat(false));
     return s;
@@ -1478,7 +1480,8 @@
   }
   /* Space plays a voice note in the program and pauses and resumes it; on anything but a voice
      message it does nothing. The model has no audio: a note is PLAY_TOTAL seconds long and each
-     <wait> turn is PLAY_STEP of them, until the note runs out and the token goes. Leaving the
+     <wait> turn is PLAY_STEP of them. The bar is full on the turn that reaches the length and the
+     token goes on the next, as the program's does when the player reports the end. Leaving the
      conversation, which the program stops the note for, is not modelled. */
   const PLAY_TOTAL = 24, PLAY_STEP = 12;
   function togglePlay(s) {
@@ -1492,7 +1495,7 @@
   function playStep(m) {
     if (m.play.paused) return;
     m.play.pos += PLAY_STEP;
-    if (m.play.pos >= m.play.total) delete m.play;
+    if (m.play.pos > m.play.total) delete m.play;
   }
   const playClock = (n) => (n < 3600 ? Math.floor(n / 60) + ':' : Math.floor(n / 3600) + ':' + String(Math.floor(n % 3600 / 60)).padStart(2, '0') + ':') + String(n % 60).padStart(2, '0');
   const playToken = (p) => {
@@ -2431,8 +2434,8 @@
            measured in cells. The breaking above already left the note's width room on every
            row after the first, so the last of those fits by construction; the first row, and
            an inline sticker's rows, are checked here. Exactly as `wrap_decorated` does it. */
-        if (cells(last.full.slice(last.s, last.e)) + need <= CW) Object.assign(last, { suf, sufA, tm, tok });
-        else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, suf, sufA, tm, tok });
+        if (cells(last.full.slice(last.s, last.e)) + need <= CW) Object.assign(last, { suf, sufA, tm, tok, tokR: !!m.play });
+        else rows.push({ mi, first: false, lab: false, full: '', qlen: 0, mask: [], base, s: 0, e: 0, from: m.from, suf, sufA, tm, tok, tokR: !!m.play });
       }
       /* Under the message, in the order the message is: what the body was translated from, then
          the reactions. Both rows carry `mi`, so the cursor's reverse video and the Visual
@@ -2524,9 +2527,12 @@
         }
       }
       if (r.tok) {
-        /* beside the placeholder, one space after it (or at the body column on a row of its own), in the dim ink every note takes */
+        /* a download's token sits beside the placeholder, one space after it (or at the body column on a
+           row of its own). The play token is the first piece of the right-aligned note: it ends one space
+           before the status and the time, as the program draws it. Dim ink either way. */
         const bw = cells(r.full.slice(r.s, r.e));
-        put(g, x0 + 9 + bw + (bw ? 1 : 0), y, r.tok, (cur ? 't' : 'd') + mod);
+        const tx = r.tokR ? x0 + 2 + 52 - cells(r.tok) - (r.tm ? cells(r.tm) + 1 : 0) - (r.suf ? cells(r.suf) + 1 : 0) : x0 + 9 + bw + (bw ? 1 : 0);
+        put(g, tx, y, r.tok, (cur ? 't' : 'd') + mod);
       }
       const tmw = r.tm ? cells(r.tm) : 0;
       if (r.tm) put(g, x0 + 2 + 52 - tmw, y, r.tm, (cur ? 't' : 'd') + mod);
@@ -3280,7 +3286,12 @@
       { name: '[voice] playing: Space starts it, the bar is empty', keys: 'kkkkkk ' },
       { name: '[voice] playing: one turn on, half the bar', keys: 'kkkkkk <wait>' },
       { name: '[voice] paused: the bar stays where it stopped', keys: 'kkkkkk <wait> ' },
-      { name: '[voice] ended: the placeholder alone again', keys: 'kkkkkk <wait><wait>' },
+      { name: '[voice] playing: the bar is full on the last turn', keys: 'kkkkkk <wait><wait>' },
+      { name: '[voice] ended: the placeholder alone again', keys: 'kkkkkk <wait><wait><wait>' },
+      { name: 'Wrapped caption: [voice] message, nothing playing', start: 'mediaCaption', keys: 'kkkkkk' },
+      { name: 'Wrapped caption, playing: the token takes the last row', start: 'mediaCaption', keys: 'kkkkkk ' },
+      { name: 'Wrapped caption, paused: the bar stays where it stopped', start: 'mediaCaption', keys: 'kkkkkk <wait> ' },
+      { name: 'Wrapped caption, last turn: the bar is full', start: 'mediaCaption', keys: 'kkkkkk <wait><wait>' },
       { name: 'Space on a photo does nothing', keys: 'kkkkkkkk ' },
       { name: 'Visual: [voice] selected, [file] under the cursor', keys: 'kkkkkkvjj' },
       { name: 'Visual, yanked: the placeholder is text', keys: 'kkkkkkvjjy' },

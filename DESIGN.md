@@ -289,6 +289,12 @@ Notes, because they are the answers to questions a reader will have:
   taught where it matters instead: on a message with no quote it answers with
   `Not a reply: gd jumps to the message a reply quotes.`, and the reply row
   already shows `> quote ‖`, the thing the key follows.
+- **`Space` is not named on the conversation's row, by the owner's decision.** The row
+  is ` i:ins  r:rep  e:edit  v:vis  /:find  ::cmd  +:react  P:pin  t:trans`, 68 of 71
+  cells, and ` Space` is six: 74, three over. Nothing is cut to make room. The
+  affordance is drawn where the key acts: a playing or paused voice note carries its own
+  `▸` or `‖` mark on its row, and a note that is not playing is a `[voice]` placeholder
+  the reader is already standing on. The row has three cells spare and keeps them.
 - **`A:card` costs eight columns and `q:quit` pays for it: 67 − 8 + 8 = 67, four
   columns spare.** A hint is the only place a reader learns a key the rest of the
   screen is silent about, and `A` is one. `q` is the only one of the three keys
@@ -934,9 +940,24 @@ status ranking.
 
 **A voice note that plays draws a token beside its placeholder.** Rule 5 keeps duration
 out of the placeholder's own wording; this token is a transient one beside it, never
-replacing the body, on the message's last row and in `text-dim`. **DESIGN-TBD:** built to
-this vocabulary, not designed (the model in `design/` draws it, with Space to start and pause); a dedicated row above the status line was weighed and
-not chosen, because it would change the three-row layout.
+replacing the body, on the message's last row and in `text-dim`. **Decided: the token
+stays inline.** It is the first piece of the message's trailing note, so it is a suffix on
+an existing row, right-aligned, two spaces ahead of any status, receipt and time that follow
+it, and it never adds a row. Its grammar is `[voice ▸ ▍▍▍▍▁▁▁▁ 0:12/0:24]`: the word
+`voice`, the mark `▸` while playing or `‖` while paused, a bar of eight cells filled in
+eighths with `▍` over `▁`, then `elapsed/total` as `m:ss`, or `--:--` for the total until the
+player has opened the note. A dedicated row above the status line, under the input bar, was
+weighed again and is not used, for two reasons. First, the token has to stay with its
+note: the cursor leaves a playing note freely, and a fixed row would then name one note while
+the highlight sits on another. Second, a fourth fixed region takes one of the 24 rows from the
+panel in every scene, and a row of scroll with it, to show something that exists only while a
+note plays. At 80 columns the token is 31 cells and fits beside a bare `[voice]` and its time
+on one row (frames `[voice] playing`, `paused` and `the bar is full`). The cost of staying
+inline is paid by a note with a caption: the token's width is taken from every row after the
+message's first, so a caption that wraps is broken again at seven columns on those rows when
+playback starts (frames `Wrapped caption: [voice] message, nothing playing` and `Wrapped
+caption, playing`). The model draws that as the program does; it is the argument for changing
+the program's wrapping, not for moving the token.
 
 | State | The last row |
 | :---- | :----------- |
