@@ -2038,3 +2038,9 @@ are in [`../AGENTS.md`](../AGENTS.md).
   restores the focused state. The cost is that a terminal reporting a real blur and then
   sending keys is treated as focused; the terminal's own next focus report
   corrects it.
+
+- **Why read receipts have three modes.** A boolean cannot express sending a
+  receipt only after replying. The default `on-open` preserves existing
+  behavior, and unknown values use the same default so a typo preserves it too.
+  The configuration key works with the existing preference mechanism. The
+  preferences interface tracked in #150 can expose the same three choices.

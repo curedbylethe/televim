@@ -101,6 +101,10 @@ const STICKERS_OFF: &str = "off";
 const GRAPHICS_AUTO: &str = "auto";
 const GRAPHICS_KITTY: &str = "kitty";
 
+const READ_RECEIPTS_ON_OPEN: &str = "on-open";
+const READ_RECEIPTS_ON_SEND: &str = "on-send";
+const READ_RECEIPTS_OFF: &str = "off";
+
 /// Bounds on the KDF keys: wide enough to tune, tight enough that a typo is
 /// neither trivial nor unbounded.
 const KDF_MEMORY_KIB_RANGE: std::ops::RangeInclusive<u32> = 8_192..=524_288;
@@ -118,6 +122,15 @@ const JUMPLIST_DEPTH_RANGE: std::ops::RangeInclusive<usize> = 1..=1_000;
 /// lives here rather than inline so the default and the refusals that quote it
 /// cannot disagree.
 const DEFAULT_TRANSLATION: &str = "en";
+
+/// When to send automatic read receipts to Telegram.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReadReceiptMode {
+    #[default]
+    OnOpen,
+    OnSend,
+    Off,
+}
 
 /// The `[translation]` section: what `t` translates into.
 ///
@@ -197,6 +210,9 @@ pub struct Config {
 
     /// Whether desktop notifications are enabled: `on` (default) or `off`.
     pub notifications: String,
+
+    /// When to send automatic read receipts: `on-open` (default), `on-send`, or `off`.
+    pub read_receipts: String,
 
     /// How `t` translates a message: the `[translation]` section.
     ///
@@ -331,6 +347,7 @@ impl Default for Config {
             stickers: STICKERS_INLINE.to_owned(),
             graphics: GRAPHICS_AUTO.to_owned(),
             notifications: "on".to_owned(),
+            read_receipts: READ_RECEIPTS_ON_OPEN.to_owned(),
             translation: TranslationSettings::default(),
             updates: None,
             api_id: None,
@@ -384,6 +401,7 @@ impl Config {
             .set_default("stickers", STICKERS_INLINE)?
             .set_default("graphics", GRAPHICS_AUTO)?
             .set_default("notifications", "on")?
+            .set_default("read_receipts", READ_RECEIPTS_ON_OPEN)?
             .set_default("translation.to", DEFAULT_TRANSLATION)?;
 
         builder = with_compiled_credentials(
@@ -621,6 +639,16 @@ impl Config {
             StickerMode::Token
         } else {
             StickerMode::Inline
+        }
+    }
+
+    /// When to send automatic read receipts, with unknown values using the default.
+    #[must_use]
+    pub fn read_receipt_mode(&self) -> ReadReceiptMode {
+        match self.read_receipts.as_str() {
+            READ_RECEIPTS_ON_SEND => ReadReceiptMode::OnSend,
+            READ_RECEIPTS_OFF => ReadReceiptMode::Off,
+            _ => ReadReceiptMode::OnOpen,
         }
     }
 
@@ -1382,6 +1410,54 @@ mod tests {
             cfg.chat_list = word.to_owned();
             assert!(!cfg.chat_list_hidden(), "{word:?} is not the word");
         }
+    }
+
+    #[test]
+    fn read_receipts_default_to_on_open() {
+        assert_eq!(
+            Config::default().read_receipt_mode(),
+            ReadReceiptMode::OnOpen
+        );
+        let loaded = load_toml("read-receipts-default", "").expect("the file loads");
+        assert_eq!(loaded.read_receipt_mode(), ReadReceiptMode::OnOpen);
+    }
+
+    #[test]
+    fn read_receipts_load_on_send_from_toml() {
+        let loaded =
+            load_toml("read-receipts", "read_receipts = \"on-send\"\n").expect("the file loads");
+        assert_eq!(loaded.read_receipt_mode(), ReadReceiptMode::OnSend);
+    }
+
+    #[test]
+    fn read_receipts_fall_back_for_an_unknown_value() {
+        let loaded = load_toml("read-receipts-unknown", "read_receipts = \"never\"\n")
+            .expect("the file loads");
+        assert_eq!(loaded.read_receipt_mode(), ReadReceiptMode::OnOpen);
+    }
+
+    #[test]
+    fn read_receipts_load_off_from_the_environment() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+        let name = "TELEVIM_READ_RECEIPTS";
+        let saved = std::env::var_os(name);
+        // SAFETY: this module serializes environment changes with ENV.
+        unsafe { std::env::set_var(name, "off") };
+        let loaded = Config::load(Path::new("a-file-that-does-not-exist.toml"));
+        // SAFETY: restore the saved value while holding ENV.
+        unsafe {
+            if let Some(value) = saved {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+        assert_eq!(
+            loaded
+                .expect("a missing file is not an error")
+                .read_receipt_mode(),
+            ReadReceiptMode::Off
+        );
     }
 
     /// A spelling the configuration does not know keeps the pictures: taking

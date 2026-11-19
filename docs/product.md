@@ -186,18 +186,18 @@ Working today:
   highlight shows the card of the chat it lands on, once the reader has stopped
   moving — a held key would otherwise fetch the card of every chat it scrolled
   past, and the conversation itself is neither opened nor marked by browsing.
-  Confirming a chat that has unread messages tells Telegram it is read, up to the
-  newest message the list knows of, and the count clears once Telegram accepts
-  that; a refused marker leaves the count where it was, and the next open asks
-  again. While any card covers the conversation nothing is marked: the mark waits
-  for the card to be confirmed or closed. While the terminal has reported itself
-  unfocused nothing is marked either: the mark waits, and it goes up on the
-  first pass after focus returns, which a key press or repeat proves even when
-  the terminal never sends the `FocusGained` it owes. A message that arrives in the
-  conversation on show is marked read the same way, and one that arrives under a
-  card is kept and marked on the pass after `Esc`; a read
-  done on another device sets the count to whatever Telegram still counts as
-  unread. A peer's read of your messages is kept across restarts, and a read the
+  With the default `read_receipts = "on-open"`, confirming a chat with unread
+  messages sends a read marker, as does a new message arriving in the open
+  conversation. With `on-send`, a successful send or forward triggers a marker
+  for its destination, even if the reader has moved to another chat. With
+  `off`, televim sends no automatic read markers. The explicit
+  `:mark-all-read` command works in all modes. An automatic marker goes up to
+  the newest message the chat list knows, and the count clears once Telegram
+  accepts it. A card covering the conversation or a reported loss of terminal
+  focus delays the marker. A key press or repeat restores focus when the
+  terminal misses `FocusGained`. Reads on another device still update unread
+  counts from Telegram in all modes. A peer's read of your messages is kept
+  across restarts, and a read the
   live feed missed is recovered when the chat list is next fetched, so `[read]`
   is shown for it. `p` pins the highlighted chat, or
   unpins it; the pin is kept by Telegram, so it survives a restart, and pinned
@@ -211,6 +211,9 @@ Working today:
   stay in the conversation, and the new-chat, directory and archive lists are
   drawn over the body. A sign-in flow shows the list again, and `Ctrl+b` does
   nothing until the flow ends.
+- **Read receipt setting.** `read_receipts` accepts `on-open` (default),
+  `on-send`, or `off`. Use `TELEVIM_READ_RECEIPTS` to set it from the
+  environment. An unknown value uses `on-open`.
 - **Starting a conversation with someone new:** `/` on the chat list finds a
   *person* rather than a message — there is no open conversation for it to
   search, so it does not borrow the conversation's meaning — and `:new <query>`

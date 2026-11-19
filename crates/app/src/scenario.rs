@@ -139,6 +139,7 @@ fn parse(line: &str) -> Option<Event> {
                 _ => return None,
             };
             Some(Event::Net(NetEvent::Sent {
+                generation: 0,
                 chat_id,
                 temp_id,
                 result: Ok(Message {
@@ -168,6 +169,7 @@ fn parse(line: &str) -> Option<Event> {
                 FrameworkError::Request(RequestError::Network(reason))
             };
             Some(Event::Net(NetEvent::Sent {
+                generation: 0,
                 chat_id,
                 temp_id,
                 result: Err(ProtoError::Framework(error)),
@@ -225,6 +227,7 @@ mod tests {
             chat_id,
             temp_id,
             result: Ok(message),
+            ..
         })) = parse("upload-sent 1 -1 9 image")
         else {
             panic!("the line is an upload success");

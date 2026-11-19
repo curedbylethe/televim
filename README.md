@@ -106,6 +106,9 @@ On a narrow terminal, `Ctrl-b` hides the chat list so the conversation takes the
 full width. Set `chat_list = "hidden"` (or `TELEVIM_CHAT_LIST=hidden`) to start
 that way; the default is `shown`.
 
+Set `read_receipts` (or `TELEVIM_READ_RECEIPTS`) to `on-open` (default),
+`on-send`, or `off` to choose when to send automatic read receipts.
+
 - Desktop notifications are on by default (`notifications = "off"` disables
   them). Televim suppresses them for the open or muted chat, outgoing messages,
   stale arrivals, and while a reported terminal has focus.

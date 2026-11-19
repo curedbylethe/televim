@@ -670,9 +670,8 @@ saying what it wants.
 up (build, fetch the chat list, take the feed — it does **not** sign in; see
 [`decisions.md`](./decisions.md)), asks for a page whenever the conversation on
 show is near one
-of its ends, sends a read marker when a conversation is opened with unread
-messages (`read_target` picks it and refuses while a profile card covers the window or the terminal has reported itself unfocused, `request_read` sends it, and
-`Event::ReadMarked` clears the count only once it is accepted), drives the sign-in flow the panel asks for, and folds in whatever
+of its ends, applies the configured read-receipt policy, drives the sign-in flow
+the panel asks for, and folds in whatever
 arrives. A live message for a chat missing from the list triggers an async list
 refresh. A recoverable feed read failure is waited out in the pump's task up to
 the same bound the launch fetch uses, reporting `Event::FeedRetrying` with the
@@ -698,6 +697,15 @@ Everything with a rule in it is a function over the state — `wanted`,
 that can be wrong is tested without a client or a datacenter; the rest is the
 calls. A `HistoryCursor`
 lives beside the loop rather than in `tui`, because `tui` may not name `proto`.
+
+The default `on-open` read-receipt policy marks the open conversation on
+confirmation and arrival. The `on-send` policy queues each successful send
+destination, including attachments and forwards. Both policies defer while a
+card covers the conversation or the terminal reports a loss of focus. The
+`off` policy skips automatic markers. Both active policies use the chat list's
+newest known id as the ceiling. `request_read` sends the marker and
+`Event::ReadMarked` clears the count after Telegram accepts it. Send and
+receipt completions carry an account generation for read-receipt scoping.
 
 Adding an account is the one path that changes the slot under a running loop.
 `Action::AddAccount` — the self card's `add account` row and `:add-account` — is

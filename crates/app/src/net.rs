@@ -72,7 +72,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, JumpKind, Log
 use tui::state::playback::NowPlaying;
 
 use crate::accounts::{self, AccountSlot, SessionTarget, SlotPaths, SlotStore};
-use crate::config::Config;
+use crate::config::{Config, ReadReceiptMode};
 use crate::draft_store::DraftFile;
 use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
@@ -425,6 +425,9 @@ pub enum Event {
 
     /// A send came back, or the request failed.
     Sent {
+        /// The account that sent it.
+        generation: u64,
+
         /// The conversation it was sent to, so a result the reader has left can
         /// be dropped.
         chat_id: i64,
@@ -546,6 +549,9 @@ pub enum Event {
 
     /// A forward came back, or the request failed.
     Forwarded {
+        /// The account that forwarded it.
+        generation: u64,
+
         /// The conversation the messages were forwarded from.
         chat_id: i64,
 
@@ -593,6 +599,9 @@ pub enum Event {
     /// Sent only on success: a refused marker leaves the count as the server had
     /// it, and the next open asks again.
     ReadMarked {
+        /// The account that requested it.
+        generation: u64,
+
         /// The conversation the marker was for.
         chat_id: i64,
 
@@ -1129,15 +1138,10 @@ pub struct State {
     /// for. A conversation opened again at the same ceiling is not sent again.
     read_acked: Option<(i64, i64)>,
 
-    /// The conversation whose read marker is owed: one that a message arrived in
-    /// since the driver last ran, or a Latest page that a card refused the marker
-    /// for. Its marker is asked for again on a later pass.
-    ///
-    /// A request rather than a call from [`apply`], for the same reason as the
-    /// reconnect request: the client and the channel are the driver's. Taken on
-    /// every pass, client or not, so an arrival that lands with no client is not
-    /// carried into the next one.
-    read_owed: Option<i64>,
+    /// Conversations owed a read marker. On-open tracks the open conversation's
+    /// arrivals or a Latest withheld by a card or blur. On-send retains each
+    /// successful send's destination until the driver can ask for its marker.
+    read_owed: HashSet<i64>,
 }
 
 impl State {
@@ -1215,6 +1219,18 @@ impl State {
             cfg.session_passphrase = Some(crate::config::Secret::from(typed.to_string()));
         }
         Some(cfg)
+    }
+
+    fn read_receipts(&self) -> ReadReceiptMode {
+        self.cfg
+            .as_ref()
+            .map_or_else(ReadReceiptMode::default, Config::read_receipt_mode)
+    }
+
+    fn owe_read_after_send(&mut self, generation: u64, chat_id: i64) {
+        if generation == self.outbox_generation && self.read_receipts() == ReadReceiptMode::OnSend {
+            self.read_owed.insert(chat_id);
+        }
     }
 
     /// The language this run translates into.
@@ -1398,7 +1414,7 @@ impl State {
         self.global_next = None;
         self.cached_landing = None;
         self.read_acked = None;
-        self.read_owed = None;
+        self.read_owed.clear();
         self.login = Login::default();
         // The account's files, not this program's to open until it knows which
         // account the new session belongs to. `adopt_slot` puts them back.
@@ -3091,9 +3107,13 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
     // it is owed is refused for as long as the card covers the conversation or
     // the terminal reports itself unfocused, and the pass after the reader
     // backs out of the card or returns focus asks again.
-    let arrived = !card_covers_conversation(app)
+    let arrived = state.read_receipts() == ReadReceiptMode::OnOpen
+        && !card_covers_conversation(app)
         && !focus_withholds_read(app)
-        && state.read_owed.take().is_some();
+        && !state.read_owed.is_empty();
+    if arrived {
+        state.read_owed.clear();
+    }
     // Before the client is looked up, like the retry: these touch the stored
     // session and the history file, and no client is the state a reader needs
     // them in.
@@ -3148,7 +3168,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             break;
         };
         if matches!(&action, Action::MarkAllRead) {
-            request_mark_all_read(&client, app, tx);
+            request_mark_all_read(&client, app, state.outbox_generation, tx);
             continue;
         }
         let media = media_job(&action, app, state);
@@ -3183,6 +3203,11 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         request_action(&client, state, action, None, tx);
     }
 
+    let generation = state.outbox_generation;
+    for (chat_id, max_id) in sent_read_targets(app, state) {
+        request_read(&client, chat_id, max_id, generation, tx);
+    }
+
     let next = wanted(app, state.history, Instant::now());
     // An arrival in the open conversation asks for the marker again, through the
     // same target as opening does. A Latest does its own just below, once its
@@ -3191,7 +3216,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         && !matches!(next, Wanted::Latest(_))
         && let Some((chat_id, max_id)) = read_target(app, state)
     {
-        request_read(&client, chat_id, max_id, tx);
+        request_read(&client, chat_id, max_id, generation, tx);
     }
 
     match next {
@@ -3200,7 +3225,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         Wanted::Latest(peer_id) => {
             let cursor = begin_latest(app, state, peer_id);
             if let Some((chat_id, max_id)) = latest_read(app, state) {
-                request_read(&client, chat_id, max_id, tx);
+                request_read(&client, chat_id, max_id, generation, tx);
             }
             request(
                 &client,
@@ -3430,16 +3455,35 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
 /// window's end. A missing or non-positive id is never sent, because it names
 /// no message the server holds. A ceiling already accepted is not sent again.
 fn read_target(app: &App, state: &State) -> Option<(i64, i64)> {
-    let open = app.conversation.conversation.window.chat_id;
-    if open == 0 || card_covers_conversation(app) || focus_withholds_read(app) {
+    read_target_for(app, state, app.conversation.conversation.window.chat_id)
+}
+
+fn read_target_for(app: &App, state: &State, chat_id: i64) -> Option<(i64, i64)> {
+    if chat_id == 0 || card_covers_conversation(app) || focus_withholds_read(app) {
         return None;
     }
-    let chat = app.chats().iter().find(|chat| chat.id == open)?;
+    let chat = app.chats().iter().find(|chat| chat.id == chat_id)?;
     if chat.unread_count == 0 && !chat.unread_mark {
         return None;
     }
     let max_id = chat.last_message_id.filter(|id| *id > 0)?;
-    (state.read_acked != Some((open, max_id))).then_some((open, max_id))
+    (state.read_acked != Some((chat_id, max_id))).then_some((chat_id, max_id))
+}
+
+fn sent_read_targets<'a>(
+    app: &'a App,
+    state: &'a mut State,
+) -> impl Iterator<Item = (i64, i64)> + 'a {
+    let owed = if state.read_receipts() == ReadReceiptMode::OnSend
+        && !card_covers_conversation(app)
+        && !focus_withholds_read(app)
+    {
+        std::mem::take(&mut state.read_owed)
+    } else {
+        HashSet::new()
+    };
+    owed.into_iter()
+        .filter_map(move |chat_id| read_target_for(app, state, chat_id))
 }
 
 /// Collects visible chats that can be marked read, and mark-only chats to clear.
@@ -3481,11 +3525,15 @@ fn bulk_read_sentence(done: u32, failed: u32) -> String {
 /// [`State::read_owed`] keeps it for the pass after the card or the blur, which
 /// asks again through [`read_target`].
 fn latest_read(app: &App, state: &mut State) -> Option<(i64, i64)> {
+    if state.read_receipts() != ReadReceiptMode::OnOpen {
+        return None;
+    }
     let target = read_target(app, state);
     let open = app.conversation.conversation.window.chat_id;
     if target.is_none() && (card_covers_conversation(app) || focus_withholds_read(app)) && open != 0
     {
-        state.read_owed = Some(open);
+        state.read_owed.clear();
+        state.read_owed.insert(open);
     }
     target
 }
@@ -3554,6 +3602,7 @@ fn request_read(
     client: &Arc<ProtoClient>,
     chat_id: i64,
     max_id: i64,
+    generation: u64,
     tx: &UnboundedSender<AppEvent>,
 ) {
     let client = Arc::clone(client);
@@ -3562,7 +3611,11 @@ fn request_read(
     tokio::spawn(async move {
         match client.mark_read(chat_id, max_id).await {
             Ok(()) => {
-                let _ = tx.send(AppEvent::Net(Event::ReadMarked { chat_id, max_id }));
+                let _ = tx.send(AppEvent::Net(Event::ReadMarked {
+                    chat_id,
+                    max_id,
+                    generation,
+                }));
             }
             Err(error) => {
                 tracing::debug!(%error, chat_id, max_id, "the read marker was not accepted; the unread count is kept");
@@ -3572,7 +3625,12 @@ fn request_read(
 }
 
 /// Reads every eligible visible chat in one sequential background task.
-fn request_mark_all_read(client: &Arc<ProtoClient>, app: &mut App, tx: &UnboundedSender<AppEvent>) {
+fn request_mark_all_read(
+    client: &Arc<ProtoClient>,
+    app: &mut App,
+    generation: u64,
+    tx: &UnboundedSender<AppEvent>,
+) {
     let (reads, marks, mut failed) = mark_all_targets(app);
     if reads.is_empty() && marks.is_empty() {
         app.flash(if failed == 0 {
@@ -3591,7 +3649,11 @@ fn request_mark_all_read(client: &Arc<ProtoClient>, app: &mut App, tx: &Unbounde
             match client.mark_read(chat_id, max_id).await {
                 Ok(()) => {
                     done += 1;
-                    let _ = tx.send(AppEvent::Net(Event::ReadMarked { chat_id, max_id }));
+                    let _ = tx.send(AppEvent::Net(Event::ReadMarked {
+                        chat_id,
+                        max_id,
+                        generation,
+                    }));
                 }
                 Err(error) => {
                     failed += 1;
@@ -3975,7 +4037,7 @@ fn request_action(
     }
 
     let Action::Login { field, value } = action else {
-        request_plain(client, action, media, tx);
+        request_plain(client, action, media, state.outbox_generation, tx);
         return;
     };
 
@@ -4135,6 +4197,7 @@ fn handle_upload_action(
                 start_upload(client, state, *chat_id, *temp_id, &path, kind, tx);
             } else {
                 let _ = tx.send(AppEvent::Net(Event::Sent {
+                    generation: state.outbox_generation,
                     chat_id: *chat_id,
                     temp_id: *temp_id,
                     result: Err(missing_upload_error()),
@@ -4160,6 +4223,7 @@ fn start_upload(
 ) {
     let cancel = store_pending_upload(state, temp_id, path.to_path_buf(), kind);
     let upload_path = expand_tilde(path);
+    let generation = state.outbox_generation;
 
     let client = Arc::clone(client);
     let tx = tx.clone();
@@ -4177,6 +4241,7 @@ fn start_upload(
             .send_attachment(chat_id, &upload_path, kind, progress, cancel)
             .await;
         let _ = tx.send(AppEvent::Net(Event::Sent {
+            generation,
             chat_id,
             temp_id,
             result,
@@ -4227,6 +4292,7 @@ fn request_plain(
     client: &Arc<ProtoClient>,
     action: Action,
     media: Option<MediaJob>,
+    generation: u64,
     tx: &UnboundedSender<AppEvent>,
 ) {
     let client = Arc::clone(client);
@@ -4264,7 +4330,7 @@ fn request_plain(
                 message_ids,
                 dest_chat_id,
             } => {
-                let event = forward(&client, chat_id, message_ids, dest_chat_id).await;
+                let event = forward(&client, chat_id, message_ids, dest_chat_id, generation).await;
                 let _ = tx.send(AppEvent::Net(event));
             }
 
@@ -4542,6 +4608,8 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             app.clear_sends();
             state.outbox_in_flight = None;
             state.outbox_generation += 1;
+            state.read_owed.clear();
+            state.read_acked = None;
             // Dropping the sender ends the old feed quietly: its pump reports nothing.
             state.feed_cancel = None;
             app.set_chats(Vec::new());
@@ -4597,6 +4665,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
                 return;
             }
             if let Ok(message) = &result {
+                state.owe_read_after_send(generation, chat_id);
                 state.remember_sent(message);
             }
             settle_outbox(
@@ -4857,10 +4926,16 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         Event::FeedEnded => apply_feed_ended(app, state),
         Event::FeedStarted(cancel) => state.feed_cancel = Some(cancel),
 
-        Event::ReadMarked { chat_id, max_id } => {
-            state.read_acked = Some((chat_id, max_id));
-            state.note_refresh_read(chat_id);
-            app.mark_chat_read(chat_id);
+        Event::ReadMarked {
+            generation,
+            chat_id,
+            max_id,
+        } => {
+            if generation == state.outbox_generation {
+                state.read_acked = Some((chat_id, max_id));
+                state.note_refresh_read(chat_id);
+                app.mark_chat_read(chat_id);
+            }
         }
 
         Event::BulkReadFinished { done, failed } => app.flash(bulk_read_sentence(done, failed)),
@@ -4883,10 +4958,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             if let UpdateEvent::InboxRead { chat_id, .. } = &event {
                 state.note_refresh_read(*chat_id);
             }
-            if let UpdateEvent::NewMessage(message) = &event
+            if state.read_receipts() == ReadReceiptMode::OnOpen
+                && let UpdateEvent::NewMessage(message) = &event
                 && message.chat_id == app.conversation.conversation.window.chat_id
             {
-                state.read_owed = Some(message.chat_id);
+                state.read_owed.clear();
+                state.read_owed.insert(message.chat_id);
             }
             let refresh_chat_list = chat_list_needs_refresh(app, state, &event);
             // Whether it moved anything is not acted on: the loop redraws on
@@ -4919,6 +4996,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         Event::UsersListed { query, users } => apply_users_listed(app, &query, users),
         Event::UserLookupFailed { query, reason } => apply_user_lookup_failed(app, &query, reason),
         Event::Sent {
+            generation,
             chat_id,
             temp_id,
             result,
@@ -4926,6 +5004,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             // Cached whether or not the reader is still in the conversation:
             // the screen drops an answer it has left, the cache does not.
             if let Ok(message) = &result {
+                state.owe_read_after_send(generation, chat_id);
                 state.remember_sent(message);
             }
             apply_sent(app, state, chat_id, temp_id, result);
@@ -5089,11 +5168,22 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         }
 
         Event::Forwarded {
+            generation,
             chat_id,
             dest_chat_id,
             requested,
             result,
-        } => apply_forwarded(app, chat_id, dest_chat_id, requested, result),
+        } => {
+            if let Ok(1..)
+            | Err(ProtoError::Framework(FrameworkError::PartialForward {
+                forwarded: 1..,
+                ..
+            })) = &result
+            {
+                state.owe_read_after_send(generation, dest_chat_id);
+            }
+            apply_forwarded(app, chat_id, dest_chat_id, requested, result);
+        }
 
         Event::History {
             direction,
@@ -6822,12 +6912,14 @@ async fn forward(
     chat_id: i64,
     message_ids: Vec<i64>,
     dest_chat_id: i64,
+    generation: u64,
 ) -> Event {
     let requested = message_ids.len();
     let result = client
         .forward_messages(chat_id, dest_chat_id, &message_ids)
         .await;
     Event::Forwarded {
+        generation,
         chat_id,
         dest_chat_id,
         requested,
@@ -7606,6 +7698,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::ReadMarked {
+                generation: 0,
                 chat_id: 7,
                 max_id: 11,
             },
@@ -7631,6 +7724,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::ReadMarked {
+                generation: 0,
                 chat_id: 11,
                 max_id: 15,
             },
@@ -9039,6 +9133,155 @@ mod tests {
         );
     }
 
+    fn receipt_mode(mode: &str) -> State {
+        State {
+            cfg: Some(Config {
+                read_receipts: mode.to_owned(),
+                ..Config::default()
+            }),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn read_receipt_modes_can_suppress_open_and_arrival_markers() {
+        for mode in ["on-send", "off"] {
+            let mut app = listed(2, Some(20));
+            let mut state = receipt_mode(mode);
+            assert_eq!(latest_read(&app, &mut state), None, "{mode}");
+
+            apply(
+                &mut app,
+                &mut state,
+                Event::Update(UpdateEvent::NewMessage(messages(CHAT, 21..=21).remove(0))),
+            );
+
+            assert!(state.read_owed.is_empty(), "{mode}");
+            assert_eq!(app.chats()[0].unread_count, 3, "{mode}");
+
+            if mode == "off" {
+                apply(
+                    &mut app,
+                    &mut state,
+                    Event::Sent {
+                        generation: 0,
+                        chat_id: CHAT,
+                        temp_id: -1,
+                        result: Ok(messages(CHAT, 22..=22).remove(0)),
+                    },
+                );
+                assert_eq!(sent_read_targets(&app, &mut state).count(), 0);
+                assert!(state.read_owed.is_empty());
+                assert_eq!(app.chats()[0].unread_count, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn read_receipt_on_send_is_owed_for_a_success_in_the_open_chat() {
+        let mut app = listed(2, Some(20));
+        let mut state = receipt_mode("on-send");
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Sent {
+                generation: 0,
+                chat_id: CHAT,
+                temp_id: -1,
+                result: Ok(messages(CHAT, 21..=21).remove(0)),
+            },
+        );
+
+        assert_eq!(latest_read(&app, &mut state), None);
+        assert_eq!(
+            sent_read_targets(&app, &mut state).collect::<Vec<_>>(),
+            vec![(CHAT, 20)]
+        );
+    }
+
+    #[test]
+    fn read_receipt_on_send_uses_the_destinations_after_switching_chats() {
+        let mut app = listed(2, Some(20));
+        let source = CHAT + 1;
+        let destination = CHAT + 2;
+        let mut chats = app.chats().to_vec();
+        for (id, newest) in [(source, 40), (destination, 50)] {
+            let mut entry = chat(id);
+            entry.unread_count = 2;
+            entry.last_message_id = Some(newest);
+            chats.push(entry);
+        }
+        app.set_chats(chats);
+        app.focus.reported = true;
+        app.focus.focused = false;
+        let mut state = receipt_mode("on-send");
+        state.outbox_in_flight = Some((source, -1));
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::OutboxSent {
+                generation: 0,
+                chat_id: source,
+                temp_id: -1,
+                result: Ok(messages(source, 41..=41).remove(0)),
+            },
+        );
+        apply(
+            &mut app,
+            &mut state,
+            Event::Forwarded {
+                generation: 0,
+                chat_id: source,
+                dest_chat_id: destination,
+                requested: 1,
+                result: Ok(1),
+            },
+        );
+
+        assert_eq!(sent_read_targets(&app, &mut state).count(), 0);
+        assert_eq!(state.read_owed, HashSet::from([source, destination]));
+        app.focus.focused = true;
+        assert_eq!(app.conversation.conversation.window.chat_id, CHAT);
+        assert_eq!(
+            sent_read_targets(&app, &mut state).collect::<HashSet<_>>(),
+            HashSet::from([(source, 40), (destination, 50)])
+        );
+        assert_eq!(sent_read_targets(&app, &mut state).count(), 0);
+    }
+
+    #[test]
+    fn read_receipt_events_from_a_previous_account_do_not_change_unread_state() {
+        let mut app = listed(2, Some(20));
+        let mut state = receipt_mode("on-send");
+        state.outbox_generation = 1;
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Sent {
+                generation: 0,
+                chat_id: CHAT,
+                temp_id: -1,
+                result: Ok(messages(CHAT, 21..=21).remove(0)),
+            },
+        );
+        apply(
+            &mut app,
+            &mut state,
+            Event::ReadMarked {
+                generation: 0,
+                chat_id: CHAT,
+                max_id: 20,
+            },
+        );
+
+        assert!(state.read_owed.is_empty());
+        assert_eq!(state.read_acked, None);
+        assert_eq!(app.chats()[0].unread_count, 2);
+    }
+
     #[test]
     fn an_already_read_conversation_sends_nothing() {
         assert_eq!(read_target(&listed(0, Some(20)), &State::default()), None);
@@ -9054,6 +9297,7 @@ mod tests {
             &mut app,
             &mut State::default(),
             Event::ReadMarked {
+                generation: 0,
                 chat_id: CHAT,
                 max_id: 20,
             },
@@ -9103,6 +9347,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::ReadMarked {
+                generation: 0,
                 chat_id: CHAT,
                 max_id: 20,
             },
@@ -9149,7 +9394,7 @@ mod tests {
             Event::Update(UpdateEvent::NewMessage(messages(CHAT, 4..=4).remove(0))),
         );
 
-        assert_eq!(state.read_owed, Some(CHAT));
+        assert_eq!(state.read_owed, HashSet::from([CHAT]));
         assert_eq!(read_target(&app, &state), Some((CHAT, 4)));
     }
 
@@ -9164,13 +9409,14 @@ mod tests {
             &mut app,
             &mut state,
             Event::ReadMarked {
+                generation: 0,
                 chat_id: CHAT,
                 max_id: 4,
             },
         );
         apply(&mut app, &mut state, arrival());
 
-        assert_eq!(state.read_owed, Some(CHAT));
+        assert_eq!(state.read_owed, HashSet::from([CHAT]));
         assert_eq!(read_target(&app, &state), None);
     }
 
@@ -9185,7 +9431,7 @@ mod tests {
             Event::Update(UpdateEvent::NewMessage(messages(CHAT + 1, 4..=4).remove(0))),
         );
 
-        assert_eq!(state.read_owed, None);
+        assert!(state.read_owed.is_empty());
         assert_eq!(read_target(&app, &state), None);
     }
 
@@ -9215,7 +9461,7 @@ mod tests {
 
         assert_eq!(
             state.read_owed,
-            Some(CHAT),
+            HashSet::from([CHAT]),
             "the arrival is kept, not spent on a refused marker"
         );
         assert_eq!(read_target(&app, &state), None);
@@ -9247,6 +9493,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::ReadMarked {
+                generation: 0,
                 chat_id: CHAT,
                 max_id: 20,
             },
@@ -9276,6 +9523,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::ReadMarked {
+                generation: 0,
                 chat_id: CHAT,
                 max_id: 21,
             },
@@ -9303,7 +9551,7 @@ mod tests {
         drive(&mut app, &mut state, &tx);
 
         assert!(rx.try_recv().is_err(), "nothing is sent with no client");
-        assert_eq!(state.read_owed, None, "the flag is taken on the pass");
+        assert!(state.read_owed.is_empty(), "the flag is taken on the pass");
     }
 
     #[test]
@@ -9323,7 +9571,7 @@ mod tests {
         assert!(rx.try_recv().is_err(), "the card sends no marker");
         assert_eq!(
             state.read_owed,
-            Some(CHAT),
+            HashSet::from([CHAT]),
             "a pass under the card does not spend the arrival"
         );
     }
@@ -9335,12 +9583,13 @@ mod tests {
         card_over_the_open_chat(&mut app);
 
         assert_eq!(latest_read(&app, &mut state), None, "the card refuses it");
-        assert_eq!(state.read_owed, Some(CHAT), "the marker is owed");
+        assert_eq!(state.read_owed, HashSet::from([CHAT]), "the marker is owed");
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         // The pass after backing out: the arrival gating drive uses.
-        let arrived = !card_covers_conversation(&app) && state.read_owed.take().is_some();
+        let arrived =
+            !card_covers_conversation(&app) && !std::mem::take(&mut state.read_owed).is_empty();
         assert!(arrived);
         assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
     }
@@ -9351,7 +9600,7 @@ mod tests {
         let mut state = State::default();
 
         assert_eq!(latest_read(&app, &mut state), Some((CHAT, 20)));
-        assert_eq!(state.read_owed, None);
+        assert!(state.read_owed.is_empty());
     }
 
     #[test]
@@ -9386,7 +9635,7 @@ mod tests {
         assert_eq!(read_target(&app, &state), None, "the blur refuses it");
         assert_eq!(
             state.read_owed,
-            Some(CHAT),
+            HashSet::from([CHAT]),
             "a blurred pass does not spend it"
         );
 
@@ -9394,7 +9643,7 @@ mod tests {
         assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
 
         drive(&mut app, &mut state, &tx);
-        assert_eq!(state.read_owed, None, "the flag is taken on the pass");
+        assert!(state.read_owed.is_empty(), "the flag is taken on the pass");
     }
 
     #[test]
@@ -9415,7 +9664,7 @@ mod tests {
         assert_eq!(read_target(&app, &state), None, "the blur refuses it");
         assert_eq!(
             state.read_owed,
-            Some(CHAT),
+            HashSet::from([CHAT]),
             "a blurred pass does not spend it"
         );
 
@@ -9423,7 +9672,7 @@ mod tests {
         assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
 
         drive(&mut app, &mut state, &tx);
-        assert_eq!(state.read_owed, None, "the key lets the pass take it");
+        assert!(state.read_owed.is_empty(), "the key lets the pass take it");
     }
 
     #[test]
@@ -9439,7 +9688,7 @@ mod tests {
         );
         drive(&mut app, &mut state, &tx);
 
-        assert_eq!(state.read_owed, None, "the flag is taken on the pass");
+        assert!(state.read_owed.is_empty(), "the flag is taken on the pass");
         assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
     }
 
@@ -9451,12 +9700,13 @@ mod tests {
         let mut state = State::default();
 
         assert_eq!(latest_read(&app, &mut state), None, "the blur refuses it");
-        assert_eq!(state.read_owed, Some(CHAT), "the marker is owed");
+        assert_eq!(state.read_owed, HashSet::from([CHAT]), "the marker is owed");
 
         app.focus.focused = true;
 
         // Stands in for a focused pass after focus returns.
-        let arrived = !card_covers_conversation(&app) && state.read_owed.take().is_some();
+        let arrived =
+            !card_covers_conversation(&app) && !std::mem::take(&mut state.read_owed).is_empty();
         assert!(arrived);
         assert_eq!(read_target(&app, &state), Some((CHAT, 20)));
     }
@@ -9477,14 +9727,18 @@ mod tests {
         );
         drive(&mut app, &mut state, &tx);
 
-        assert_eq!(state.read_owed, Some(CHAT), "owed under card and blur");
+        assert_eq!(
+            state.read_owed,
+            HashSet::from([CHAT]),
+            "owed under card and blur"
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         drive(&mut app, &mut state, &tx);
 
         assert_eq!(
             state.read_owed,
-            Some(CHAT),
+            HashSet::from([CHAT]),
             "backing out of the card while blurred keeps the marker owed"
         );
         assert_eq!(read_target(&app, &state), None);
@@ -9493,8 +9747,8 @@ mod tests {
         assert_eq!(read_target(&app, &state), Some((CHAT, 21)));
         drive(&mut app, &mut state, &tx);
 
-        assert_eq!(
-            state.read_owed, None,
+        assert!(
+            state.read_owed.is_empty(),
             "the first focused pass takes the marker"
         );
     }
@@ -10783,6 +11037,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::Sent {
+                generation: 0,
                 chat_id: CHAT,
                 temp_id: -1,
                 result: Ok(sent),
@@ -12918,6 +13173,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::Sent {
+                generation: 0,
                 chat_id: CHAT,
                 temp_id,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
@@ -12945,6 +13201,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::Sent {
+                generation: 0,
                 chat_id: CHAT,
                 temp_id,
                 result: Ok(messages(CHAT, 99..=99).remove(0)),
@@ -13005,6 +13262,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::Sent {
+                generation: 0,
                 chat_id: CHAT,
                 temp_id: old_temp,
                 result: Ok(messages(CHAT, 99..=99).remove(0)),
@@ -13036,6 +13294,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::Sent {
+                generation: 0,
                 chat_id: CHAT,
                 temp_id,
                 result: Ok(messages(CHAT, 4..=4).remove(0)),
@@ -13061,6 +13320,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::Sent {
+                generation: 0,
                 chat_id: CHAT,
                 temp_id,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
