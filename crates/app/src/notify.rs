@@ -33,7 +33,7 @@ impl Notifier for DesktopNotifier {
             #[cfg(target_os = "macos")]
             post_macos(&notice);
             #[cfg(not(target_os = "macos"))]
-            post_notify_rust(notice);
+            post_notify_rust(&notice);
         }));
     }
 }
@@ -52,7 +52,7 @@ fn post_macos(notice: &Notice) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn post_notify_rust(notice: Notice) {
+fn post_notify_rust(notice: &Notice) {
     let mut notification = notify_rust::Notification::new();
     notification.summary(&notice.title).body(&notice.body);
     #[cfg(target_os = "linux")]
