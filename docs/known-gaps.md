@@ -797,12 +797,19 @@ Browser demo follow-ups remain out of scope unless planned as a separate feature
 - Cross-origin iframe policy depends on the portfolio host's CSP and remains to
   be checked with the external embed.
 
-Desktop notifications are best-effort. macOS may silently drop a notice; a burst
-from one chat may replace earlier notices only on desktops that honor the
-notification id, and can show several notices on macOS. A mute that expires while
-Televim stays open remains active until the next chat-list fetch. Media upload
-and download exist: `:attach` streams a local file to Telegram, while `o` fetches
-received media into the cache for the platform viewer.
+Desktop notifications are best-effort. On Linux a burst from one chat may replace
+earlier notices only on desktops that honor the notification id. On macOS notices
+go out through `osascript`'s `display notification`, with the body and title
+passed as arguments rather than written into the script. They are subject to the
+system notification permission of the scripting host. The Notification Center
+entry shows the name of the account the notice comes from, taken from the notice
+title; no process name is shown. A burst is not coalesced per chat on macOS: no
+replacement id is sent, so every notice shows.
+
+A mute that expires while Televim stays open remains active until the next
+chat-list fetch. Media upload and download exist: `:attach` streams a local file
+to Telegram, while `o` fetches received media into the cache for the platform
+viewer.
 
 **The sticker lists, scoped.** Sticker sending and its picker are deferred until
 the client can load and send sticker sets; this is what
