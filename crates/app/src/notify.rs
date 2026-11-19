@@ -45,7 +45,15 @@ fn post_macos(notice: &Notice) {
         .output()
     {
         Ok(output) => {
-            tracing::debug!(status = %output.status, "desktop notification posted via osascript");
+            if output.status.success() {
+                tracing::debug!("desktop notification posted via osascript");
+            } else {
+                tracing::debug!(
+                    status = %output.status,
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "desktop notification was not shown"
+                );
+            }
         }
         Err(error) => tracing::debug!(%error, "desktop notification was not shown"),
     }
