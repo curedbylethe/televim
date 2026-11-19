@@ -2022,6 +2022,10 @@ mod tests {
     #[test]
     fn only_the_windows_opener_waits() {
         assert_eq!(OPENER_WAITS, cfg!(windows));
+        assert!(
+            !OPENER.1.contains(&"-W"),
+            "-W waits for the application, not the document"
+        );
     }
 
     #[cfg(windows)]
