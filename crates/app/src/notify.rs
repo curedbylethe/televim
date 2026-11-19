@@ -67,6 +67,7 @@ fn osascript_args(notice: &Notice) -> Vec<String> {
     vec![
         "-e".to_owned(),
         MACOS_SCRIPT.to_owned(),
+        "--".to_owned(),
         notice.body.clone(),
         notice.title.clone(),
     ]
@@ -170,7 +171,7 @@ mod tests {
     #[test]
     fn osascript_argv_requests_a_display_notification() {
         let title = "a \"title\" \\ ünicode";
-        let body = "body with 'quotes' \\ and 日本語";
+        let body = "-e not a flag 'quotes' \\ and 日本語";
         let notice = Notice {
             chat_id: 7,
             title: title.to_owned(),
@@ -182,6 +183,7 @@ mod tests {
             vec![
                 "-e".to_owned(),
                 MACOS_SCRIPT.to_owned(),
+                "--".to_owned(),
                 body.to_owned(),
                 title.to_owned(),
             ]
