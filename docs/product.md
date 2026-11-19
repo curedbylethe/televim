@@ -334,7 +334,7 @@ Working today:
   large attachment is never held whole. The attachment is re-read by identifier,
   because a description is rebuilt on every page and a cached locator would be stale.
   `o` on a media message in Normal mode opens it in the platform viewer:
-  `open -W` on macOS, `xdg-open` on Linux, `cmd /C start "" /WAIT` on Windows.
+  `open` on macOS, `xdg-open` on Linux, `cmd /C start "" /WAIT` on Windows.
   The release workflow builds and CLI-smoke-tests Windows; the
   TUI, Credential Manager, opener and owner-only file modes still need a manual
   check.
@@ -361,8 +361,9 @@ Working today:
   recently used pointer goes first, and its file with it once no pointer names it.
   An edit drops its message's pointer; a deletion drops the pointer for that id in
   any chat. The directory is emptied when the account changes and on sign-out, except a file a
-  viewer is still open on, which stays until that viewer reports and is otherwise swept on the
-  next launch. If
+  viewer is still open on, which stays until the opener reports (or, for a configured viewer
+  command, until the viewer itself reports); if the program ended first, the orphan scan catches
+  the file on the next launch. If
   that directory cannot be written, this run uses `televim.media-<account>` under the
   platform cache directory (`dirs::cache_dir()`) instead, with the same limits, so
   the cached media survives a restart; only when there is no platform cache directory

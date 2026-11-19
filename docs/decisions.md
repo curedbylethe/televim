@@ -1376,6 +1376,16 @@ are in [`../AGENTS.md`](../AGENTS.md).
   a time. What this does not settle is which process exits first on Linux and
   Windows, where the opener may return before the viewer: that is reported as the
   opener's exit, and the limits are in `docs/known-gaps.md`.
+- **Why the macOS platform opener no longer waits:** `open -W` waits for the
+  application to exit, not for the document to be closed, so a viewer already
+  running (Preview or QuickTime) kept the terminal blocked long after its window
+  was dismissed. The macOS arm is now plain `open`, matching `xdg-open` on Linux:
+  it returns once a handler has the file, and the status line says the opener
+  exited while the viewer may still be open rather than claiming the viewer's own
+  exit. A configured viewer command is still spawned directly and waited on, so
+  its sentence reports that command's exit. Polling for the document was rejected
+  as more moving parts than the wait is worth; the file hold and its release are
+  unchanged, and the limits are in `docs/known-gaps.md`.
 - **Why the launch sweep trusts "our pid or old" and not a process-liveness check:** a
   download temp is named `.download-<pid>-<n>.tmp`, and the sweep removes it when the pid
   is this process's (a leftover of a crashed earlier run that reused the pid is ours to

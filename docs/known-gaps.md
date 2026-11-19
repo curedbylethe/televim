@@ -24,8 +24,8 @@ Real, and named so they are not mistaken for oversights:
     held until the viewer reports (`ViewerDone`) or fails to start. Eviction and `clear`
     leave the file on disk; a sign-out or account change does not wait for the viewer.
     The file is removed on release, or by the orphan scan on the next launch if the
-    program ended first. Where the opener returns before the viewer does (Linux,
-    Windows), the hold ends with the opener, not the viewer.
+    program ended first. Where the opener returns before the viewer does (macOS and
+    Linux), the hold ends with the opener, not the viewer.
     A store that reserved before a `clear` and commits or fails after it leaves a held
     file alone too; the release removes it.
   - *Two instances sharing one cache directory are still not supported.* The launch
@@ -38,7 +38,7 @@ Real, and named so they are not mistaken for oversights:
 - **The viewer hand-off no longer blocks the loop, and has four known limits.** `o`
   runs the platform opener on a thread of its own, so the loop keeps running while
   the viewer is open: network events are applied, and queued media opens one viewer
-  at a time. When the wait ends the terminal comes back once, to the same
+  at a time. When the opener reports the terminal comes back once, to the same
   conversation and the same cursor, with no restart. Ctrl+c is the emergency exit
   only: it is not needed to return, and no signal handler is installed, so pressing
   it while a viewer holds the terminal still ends the program.
@@ -53,12 +53,15 @@ Real, and named so they are not mistaken for oversights:
     never parks in it and network events are applied while the viewer is open; a test
     sends one mid-viewing and checks it lands. The runtime stays current-thread, so a
     long viewing is serviced between loop passes, not in parallel with them.
-  - *The opener's exit, not the viewer's.* macOS waits only because of `-W`. `xdg-open`
-    usually returns once a GUI handler is launched, so on Linux the terminal can come
-    back under a running viewer, and the sentence `Opener exited (code …); the viewer
-    may still be open` reports the opener's exit. A configured viewer command (`viewer`,
-    `viewer_image`, `viewer_video`, `viewer_audio`) is run directly and waited on, so
-    its sentence reports the viewer's own exit; only the platform default keeps this limit.
+  - *The opener's exit, not the viewer's.* On macOS `open` and on Linux `xdg-open`, the
+    opener returns once a handler has the file, so the terminal can come back under a
+    running viewer and the sentence `Opener exited (code …); the viewer may still be
+    open` reports the opener's exit. macOS used to pass `-W`, but `open(1)` waits for
+    the applications to exit, and closing a document window does not quit Preview or
+    QuickTime, so the terminal stayed blocked under an open viewer; the flag is gone.
+    A configured viewer command (`viewer`, `viewer_image`, `viewer_video`,
+    `viewer_audio`) is run directly and waited on, so its sentence reports the viewer's
+    own exit; only the platform default keeps this limit.
   - *Windows release CI is limited to build and CLI smoke tests.* The release workflow
     builds Windows x86_64 and checks `--version` and `--help`. The workflow does not
     validate the TUI,
