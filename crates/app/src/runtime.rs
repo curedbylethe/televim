@@ -433,12 +433,14 @@ fn focus_changed(
 
 /// The platform's file opener, and the arguments that come before the path.
 ///
-/// `open -W` on macOS and `cmd /C start "" /WAIT` on Windows wait for the started
-/// process, so their exit is the viewer's. `xdg-open` on Linux returns once the
-/// file is handed to a handler, so its exit is the opener's and the viewer may
-/// still be running; `OPENER_WAITS` says which, and the status line reports it.
-/// `start /WAIT` can still return early for a target that detaches itself; a
-/// configured viewer command is the escape hatch.
+/// `open` on macOS and `xdg-open` on Linux return once the file is handed to a
+/// handler, so their exit is the opener's and the viewer may still be running;
+/// `OPENER_WAITS` says which, and the status line reports it. `open -W` is not
+/// usable on macOS: `open(1)` waits for the applications to exit, and closing a
+/// document window does not quit Preview or `QuickTime`, so the terminal would
+/// never return. `cmd /C start "" /WAIT` on Windows does wait for the started
+/// process, so its exit is the viewer's; `start /WAIT` can still return early for
+/// a target that detaches itself. A configured viewer command is the escape hatch.
 ///
 /// Windows manual steps, since no CI leg runs this path and the wait has not been
 /// run on Windows: build and run the program on Windows, open a conversation with a
@@ -446,17 +448,22 @@ fn focus_changed(
 /// viewer is open. Close the viewer: the TUI returns to the same conversation with
 /// the cursor on the same message, the status line reads `Viewer exited (code n)`,
 /// and keys typed after the return act on the TUI, not on the viewer.
+///
+/// macOS manual step: with Preview or `QuickTime` already running, press `o` on a
+/// photo; the TUI must return at once while the viewer window stays open, the
+/// status line must read `Opener exited (code 0); the viewer may still be open`,
+/// and no `Ctrl+C` is needed.
 #[cfg(target_os = "macos")]
-const OPENER: (&str, &[&str]) = ("open", &["-W"]);
+const OPENER: (&str, &[&str]) = ("open", &[]);
 #[cfg(all(unix, not(target_os = "macos")))]
 const OPENER: (&str, &[&str]) = ("xdg-open", &[]);
 #[cfg(windows)]
 const OPENER: (&str, &[&str]) = ("cmd", &["/C", "start", "", "/WAIT"]);
 
 /// Whether the platform's opener exits only when the viewer does.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(windows)]
 const OPENER_WAITS: bool = true;
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(windows))]
 const OPENER_WAITS: bool = false;
 
 /// A viewer command: the program, the arguments before the path, and whether
@@ -2011,6 +2018,12 @@ mod tests {
         assert_eq!(args.len(), OPENER.1.len() + 1);
     }
 
+    /// The wait is Windows-only: `open` tracks the application, not the document.
+    #[test]
+    fn only_the_windows_opener_waits() {
+        assert_eq!(OPENER_WAITS, cfg!(windows));
+    }
+
     #[cfg(windows)]
     #[test]
     fn the_windows_default_waits_for_the_viewer() {
@@ -2587,7 +2600,7 @@ mod tests {
 
     /// The platform opener's exit ends the session, the terminal comes back once,
     /// and the status says what that exit means on this platform: the viewer's on
-    /// macOS (`open -W`), only the opener's elsewhere.
+    /// Windows, only the opener's elsewhere.
     #[cfg(unix)]
     #[test]
     fn the_platform_opener_resumes_once_and_says_what_its_exit_means() {
