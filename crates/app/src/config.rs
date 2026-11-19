@@ -306,7 +306,7 @@ pub struct Config {
     /// A command line split on whitespace: the first token is the program, the
     /// rest are its arguments, and the file path is appended last. There is no
     /// shell, so quoting and expansion do not apply. Blank is unset. Unset, the
-    /// platform opener (`open -W`, `xdg-open`, `cmd /C start`) is used. A
+    /// platform opener (`open`, `xdg-open`, `cmd /C start`) is used. A
     /// configured command is run directly and waited on, so the status line
     /// reports the viewer's own exit.
     pub viewer: Option<String>,
