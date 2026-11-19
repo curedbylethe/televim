@@ -2044,3 +2044,13 @@ are in [`../AGENTS.md`](../AGENTS.md).
   behavior, and unknown values use the same default so a typo preserves it too.
   The configuration key works with the existing preference mechanism. The
   preferences interface tracked in #150 can expose the same three choices.
+
+- **Why macOS posts notices through `osascript` rather than `notify-rust`:** the
+  `NotificationHandle` already sent on drop, but notify-rust's
+  `NSUserNotificationCenter` backend no longer delivers on macOS 27 for an
+  unbundled process, which is what the tarball install is. `preview-macos-un` was
+  rejected because it needs a bundle identifier that install does not have. So
+  macOS builds pass the body and title to `osascript`'s `display notification` as
+  arguments, and notify-rust is compiled for non-macOS targets only. The call
+  stays on the blocking pool (see the desktop-notifications entry above), so a
+  slow scripting host cannot stall input or network updates.

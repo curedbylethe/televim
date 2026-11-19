@@ -473,10 +473,12 @@ budget. Its artifact size and browser timings are tracked in
 
 - `tokio` **current-thread** runtime: `Builder::new_current_thread()` in
   `app/src/runtime.rs`, explicitly, even though the `full` feature set is enabled.
-- The binary includes `notify-rust` for desktop notifications: no thread at idle,
-  and one blocking-pool thread only while a notification is being shown. The
-  delivery work uses Tokio's existing blocking pool; no thread is created for
-  notifications themselves.
+- Desktop notifications add no thread at idle. Delivery uses Tokio's existing
+  blocking pool; no thread is created for notifications themselves. On non-macOS
+  targets the binary links `notify-rust` and shows the notice on that pool. On
+  macOS the binary no longer links `notify-rust`; posting starts one short-lived
+  `osascript` child process from the same blocking pool. The same-host comparison
+  below predates this change and was not re-recorded.
 - A bounded conversation window: `domain::history::ConversationWindow` caps at
   `CONVERSATION_WINDOW` messages, so full history is never held.
 - A bounded history cache: at most `HISTORY_CACHE_DEPTH` (200) messages for each
