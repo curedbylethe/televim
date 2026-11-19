@@ -407,6 +407,13 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   4. Set `session_path` and `session_key_file`, relaunch: expect none.
   5. The log's `keychain operation` lines must match the prompts counted.
 
+  The macOS opener hand-off has no automated check either: no CI leg runs a
+  viewer. Manual check, macOS only — with a viewer application (Preview or
+  QuickTime) already running, press `o` on a photo. The TUI must be back and
+  key-responsive at once and stay usable while the viewer window is open, and the
+  status line must read `Opener exited (code 0); the viewer may still be open`.
+  Neither a restart nor Ctrl+C is needed to get back.
+
   To run the `app` suite, which no workflow runs for you:
 
   ```console
