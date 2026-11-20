@@ -82,6 +82,14 @@ base64 = "0.22"
 # `app::media_cache`. Pinned at the version already in the lockfile, so no
 # second copy enters the tree.
 sha2 = "0.10.9"
+# One use: the keyed hash that names a conversation without writing its id, in
+# `app::history_store`. 0.12.1 is already in the lockfile through `grammers`, so
+# adding the workspace entry brings no second version into the tree.
+hmac = "0.12.1"
+# One use: the sealed per-record archive in `app::history_store`. `bundled`
+# compiles SQLite from source rather than looking for a system library; it does
+# need a C compiler, via `cc`, but no SQLite development package on the host.
+rusqlite = { version = "0.43", features = ["bundled"] }
 # One use: the platform cache directory a media fallback lives under, in
 # `app::media_cache`, so cached media survives a restart rather than landing in
 # the system temp directory.

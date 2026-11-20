@@ -10396,25 +10396,51 @@ mod tests {
         assert_eq!(app.ui.status, "signed out");
     }
 
-    /// Signing out removes the history file too: the cached messages belong
-    /// to the account that is leaving.
+    /// Signing out removes the archive and everything SQLite keeps beside it:
+    /// the cached messages belong to the account that is leaving.
     #[test]
     fn signing_out_removes_the_history_file() {
         let dir = tempfile::tempdir().expect("a scratch directory");
         let path = dir.path().join("televim.history.json");
         HistoryFile::for_test(path.clone()).save(&HistoryCache::default(), Some("+1555"));
-        assert!(path.exists());
+        let paths = archive_paths(&path);
+        assert!(
+            paths[0].exists() && paths[4].exists(),
+            "the database and its salt were written before sign-out"
+        );
 
         let mut app = app_with_a_conversation(CHAT, 2);
         let mut state = State::default();
         state.set_history_file(HistoryFile::for_test(path.clone()));
         apply_logged_out(&mut app, &mut state, Ok(()));
 
-        assert!(!path.exists(), "the messages went with the account");
+        assert!(
+            paths.iter().all(|path| !path.exists()),
+            "the archive, its WAL, shared memory, journal and salt went with the account"
+        );
         assert_eq!(app.ui.status, "signed out");
     }
 
     // ---- the history cache ------------------------------------------------
+
+    /// The archive and the four files SQLite and the salt writer keep beside
+    /// it, in the order `HistoryFile::clear` removes them.
+    fn archive_paths(legacy: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let db = legacy.with_extension("db");
+        let name = db.file_name().expect("a file name").to_os_string();
+        let sibling = |suffix: &str| {
+            let mut name = name.clone();
+            name.push(suffix);
+            db.with_file_name(name)
+        };
+        vec![
+            db.clone(),
+            sibling("-wal"),
+            sibling("-shm"),
+            sibling("-journal"),
+            sibling(".salt"),
+        ]
+    }
 
     /// A state with [`CHAT`] open and the history file at `path`.
     fn caching_state(path: &std::path::Path) -> State {
@@ -10620,14 +10646,20 @@ mod tests {
             messages(CHAT, 1..=3),
         );
         assert_eq!(cached_ids(&state), vec![1, 2, 3], "in memory at once");
-        assert!(!path.exists(), "and on disk only once the loop writes it");
+        let db = path.with_extension("db");
+        assert!(!db.exists(), "and on disk only once the loop writes it");
 
         persist(&mut state).await;
+        let raw = std::fs::read(&db).expect("the database the loop wrote");
         assert!(
-            telegram_framework::sealed::is_sealed(&std::fs::read(&path).expect("the file")),
-            "the loop writes the cache as an envelope"
+            raw.starts_with(b"SQLite format 3\0"),
+            "the loop writes an archive, not a JSON envelope"
         );
-        assert_eq!(file_ids(&path), vec![1, 2, 3]);
+        assert_eq!(
+            file_ids(&path),
+            vec![1, 2, 3],
+            "the page's records are on disk"
+        );
     }
 
     #[tokio::test]
@@ -12109,7 +12141,7 @@ mod tests {
         );
 
         assert!(!state.cached_history(CHAT).is_empty());
-        assert!(path.exists());
+        assert!(path.with_extension("db").exists(), "the archive is on disk");
         assert_eq!(open_id(&app), CHAT);
 
         let legacy = HistoryTag {
@@ -16127,6 +16159,26 @@ mod session_store_tests {
             .is_ok_and(|plain| plain.is_some())
     }
 
+    /// The archive is no longer one envelope file: its whole state is sealed
+    /// inside the database. The account tag comes back only when the store
+    /// opens under `passphrase`, so it says whether this key reads the archive.
+    fn history_tag_under(path: &std::path::Path, passphrase: &str) -> Option<String> {
+        HistoryFile::new(
+            path.to_path_buf(),
+            Arc::new(PassphraseProvider::new(passphrase)),
+        )
+        .load()
+        .account
+    }
+
+    /// The database and its salt: the two files the stage-01 writer makes.
+    fn archive_files(path: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let db = path.with_extension("db");
+        let mut salt = db.file_name().expect("a file name").to_os_string();
+        salt.push(".salt");
+        (db.clone(), db.with_file_name(salt))
+    }
+
     /// A change moves the session file and the history cache to the new
     /// passphrase together: both open with it, and neither with the old.
     #[test]
@@ -16142,7 +16194,10 @@ mod session_store_tests {
             Arc::new(PassphraseProvider::new("old")),
         );
         history.save(&crate::history_store::HistoryCache::default(), Some("+1"));
-        assert!(sealed_under(&history_path, "old"));
+        assert_eq!(
+            history_tag_under(&history_path, "old").as_deref(),
+            Some("+1")
+        );
 
         let cfg = file_config(&path, Some("old"));
         change_passphrase(&cfg, Some(&history), "new", || Arc::new(NoKeyring))
@@ -16150,8 +16205,16 @@ mod session_store_tests {
 
         assert!(sealed_under(&path, "new"));
         assert!(!sealed_under(&path, "old"));
-        assert!(sealed_under(&history_path, "new"));
-        assert!(!sealed_under(&history_path, "old"));
+        assert_eq!(
+            history_tag_under(&history_path, "new").as_deref(),
+            Some("+1"),
+            "the archive opens under the new passphrase"
+        );
+        assert_eq!(
+            history_tag_under(&history_path, "old"),
+            None,
+            "and not under the old one"
+        );
         let reopened =
             FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("new")))
                 .load()
@@ -16175,8 +16238,10 @@ mod session_store_tests {
             Arc::new(PassphraseProvider::new("old")),
         );
         history.save(&crate::history_store::HistoryCache::default(), Some("+1"));
+        let (history_db, history_salt) = archive_files(&history_path);
         let session_bytes = std::fs::read(&path).expect("exists");
-        let history_bytes = std::fs::read(&history_path).expect("exists");
+        let history_bytes = std::fs::read(&history_db).expect("the archive exists");
+        let salt_bytes = std::fs::read(&history_salt).expect("the salt exists");
 
         let cfg = file_config(&path, Some("wrong"));
         let error = change_passphrase(&cfg, Some(&history), "new", || Arc::new(NoKeyring))
@@ -16184,7 +16249,16 @@ mod session_store_tests {
 
         assert!(error.contains("TELEVIM_SESSION_PASSPHRASE"), "{error}");
         assert_eq!(std::fs::read(&path).expect("exists"), session_bytes);
-        assert_eq!(std::fs::read(&history_path).expect("exists"), history_bytes);
+        assert_eq!(
+            std::fs::read(&history_db).expect("the archive is still there"),
+            history_bytes,
+            "the wrong key changed no record"
+        );
+        assert_eq!(
+            std::fs::read(&history_salt).expect("the salt is still there"),
+            salt_bytes,
+            "and no salt"
+        );
     }
 
     #[test]
