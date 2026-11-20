@@ -13,9 +13,11 @@
 //! belong to a media cache of their own, and a history file that held them
 //! would be that cache under another name and a budget nobody measured.
 //!
-//! **Plaintext, like the drafts.** The file is restricted to its owner and
-//! tagged with the account, but not encrypted; sealing it the way the session
-//! is sealed is a recorded follow-up, not something this file half-does.
+//! **Sealed records.** Each message is an authenticated envelope in a
+//! per-account SQLite database restricted to its owner and tagged with the
+//! account. The address a record is filed under is carried inside its own
+//! plaintext and checked on read, so a row cannot be moved or replayed under
+//! another address.
 //!
 //! Every operation is best-effort and launch-safe, the drafts file's
 //! discipline: a missing file is an empty cache, an unreadable one is warned
@@ -30,12 +32,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Result, anyhow};
 use domain::chat::{Chat, ChatKind};
 use domain::history::CONVERSATION_WINDOW;
 use domain::message::{MediaKind, Message, MessageStatus};
 use domain::updates::UpdateEvent;
+use hmac::{Hmac, Mac};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use telegram_framework::{KeyProvider, sealed};
 
 /// How many messages of one conversation the file keeps.
@@ -90,19 +95,21 @@ pub(crate) const HISTORY_CACHE_BYTES: usize = 8 * 1024 * 1024;
 /// what gives the file a worst case — the fetched list itself has none.
 pub(crate) const HISTORY_CACHE_CHATS: usize = 500;
 
-/// The history file beside the configuration.
+/// The per-account archive beside the configuration.
 ///
-/// Owns its path, which is `config_path.with_extension("history.json")`
-/// computed once in `run` and threaded to the loop — passed rather than
-/// derived at each use, for the reason [`DraftFile`](crate::draft_store::DraftFile)
-/// is: the load, the save and the logout clear cannot disagree about which
-/// file they mean.
+/// The path handed in is the legacy `*.history.json` of [`crate::accounts`];
+/// the archive is its `.db` sibling, computed once here and threaded to the
+/// loop — passed rather than derived at each use, for the reason
+/// [`DraftFile`](crate::draft_store::DraftFile) is: the load, the save and the
+/// logout clear cannot disagree about which file they mean. The legacy path is
+/// kept only so a launch can warn about it once; it is never read or deleted.
 #[derive(Debug, Clone)]
 pub(crate) struct HistoryFile {
     path: PathBuf,
+    legacy: PathBuf,
 
-    /// The key source the session file uses, so the cache is sealed under the
-    /// same key and no second secret exists.
+    /// The key source the session file uses, so the records are sealed under
+    /// the same key and no second secret exists.
     keys: Arc<dyn KeyProvider>,
 }
 
@@ -912,35 +919,50 @@ impl From<CachedMedia> for MediaKind {
 }
 
 impl HistoryFile {
-    /// A handle on the history file at `path`, sealed under `keys`.
+    /// A handle on the archive for the account whose legacy path is `path`,
+    /// sealed under `keys`.
     #[must_use]
     pub(crate) fn new(path: PathBuf, keys: Arc<dyn KeyProvider>) -> Self {
-        Self { path, keys }
+        Self {
+            path: archive_path(&path),
+            legacy: path,
+            keys,
+        }
     }
 
-    /// The same file, sealed under `keys` from here on.
+    /// The same archive, sealed under `keys` from here on.
     #[must_use]
     pub(crate) fn rekeyed(self, keys: Arc<dyn KeyProvider>) -> Self {
-        Self::new(self.path, keys)
+        Self {
+            path: self.path,
+            legacy: self.legacy,
+            keys,
+        }
     }
 
-    /// Re-seals the file in place under `to`, when it opens under the current key.
+    /// Re-seals the archive under `to`, when it opens under the current key.
     ///
-    /// A file the current key does not open is left alone: it is a cache, and it
-    /// reads as empty under either key. Best-effort like [`HistoryFile::write`].
+    /// An archive the current key does not open is left alone: it reads as
+    /// empty under either key. Best-effort like [`HistoryFile::write`]; the
+    /// key change is rebuilt from the records, so the database is made new.
     pub(crate) fn reseal(&self, to: Arc<dyn KeyProvider>) {
-        let Ok(bytes) = fs::read(&self.path) else {
+        let Ok(Some(payload)) = self.read_payload() else {
             return;
         };
-        let plain = match sealed::open(&bytes, self.keys.as_ref()) {
-            Ok(Some(plain)) => plain.to_vec(),
-            Ok(None) => bytes,
-            Err(error) => {
-                tracing::warn!(%error, "history file left as it was: it does not open");
-                return;
-            }
+        let tag = HistoryTag {
+            account_id: payload.account_id,
+            phone: payload.account.clone(),
         };
-        Self::new(self.path.clone(), to).write(&plain);
+        let Some(bytes) = Self::encode(&Self::from_payload(payload).cache, &tag) else {
+            return;
+        };
+        self.remove_archive();
+        Self {
+            path: self.path.clone(),
+            legacy: self.legacy.clone(),
+            keys: to,
+        }
+        .write(&bytes);
     }
 
     /// A handle sealed under a fixed passphrase, so tests need no keyring.
@@ -954,52 +976,53 @@ impl HistoryFile {
 
     /// Reads the stored cache and the account tag it was saved under.
     ///
-    /// A missing file is an empty cache, not an error; corrupt JSON and any
-    /// other read failure are warned about and empty too. What a readable
-    /// file holds goes through [`HistoryCache::put`], so a hand-edited or
-    /// older file is held to the same bounds as one this build wrote: no
-    /// placeholders, no peer deeper than [`HISTORY_CACHE_DEPTH`], and no more
-    /// than [`HISTORY_CACHE_PEERS`] peers — the ones with the newest messages.
+    /// A missing database is an empty cache, not an error; a database that
+    /// cannot be opened, a record that is not sealed, and any record whose
+    /// plaintext does not name the address it was filed under are warned about
+    /// and read as empty. What a readable archive holds goes through
+    /// [`HistoryCache::put`], so a hand-written or older archive is held to the
+    /// same bounds as one this build wrote. The legacy `history.json`, if it
+    /// still exists, is warned about once and left where it is — never read,
+    /// migrated, or deleted.
     pub(crate) fn load(&self) -> LoadedHistory {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return LoadedHistory::empty();
-            }
+        if self.legacy.is_file() {
+            warn_legacy_once();
+        }
+        match self.read_payload() {
+            Ok(Some(payload)) => Self::from_payload(payload),
+            Ok(None) => LoadedHistory::empty(),
             Err(error) => {
-                tracing::warn!(%error, "history file could not be read");
-                return LoadedHistory::empty();
-            }
-        };
-
-        match sealed::open(&bytes, self.keys.as_ref()) {
-            Ok(Some(plain)) => Self::parse(&plain).unwrap_or_else(LoadedHistory::empty),
-            Ok(None) => {
-                // Not an envelope: a file from a build that wrote plaintext.
-                // Read it once, then seal the same bytes in its place, wiping
-                // the old inode. Garbage is left for the next save to replace.
-                let Some(loaded) = Self::parse(&bytes) else {
-                    return LoadedHistory::empty();
-                };
-                self.write(&bytes);
-                loaded
-            }
-            // A wrong key or a damaged envelope: a cache is recoverable, but
-            // the right key may be back tomorrow, so the file stays until a
-            // save overwrites it.
-            Err(error) => {
-                tracing::warn!(%error, "history file could not be opened; starting empty");
+                tracing::warn!(%error, "history archive could not be read; starting empty");
                 LoadedHistory::empty()
             }
         }
     }
 
-    /// The cache `plain` JSON holds, or `None` (warned about) when it is not
-    /// a history payload.
-    fn parse(plain: &[u8]) -> Option<LoadedHistory> {
-        let payload = serde_json::from_slice::<Payload>(plain)
-            .inspect_err(|error| tracing::warn!(%error, "discarding an unreadable history file"))
-            .ok()?;
+    /// The whole archive as one payload, or `None` when it does not exist yet.
+    ///
+    /// The non-message state is one sealed blob in `meta`; every message is a
+    /// record that is decoded and address-checked on the way out.
+    fn read_payload(&self) -> Result<Option<Payload>> {
+        if !self.path.is_file() {
+            return Ok(None);
+        }
+        let store = open_store(&self.path, Arc::clone(&self.keys))?;
+        let state = store.state()?;
+        let mut peers: BTreeMap<i64, Vec<CachedMessage>> = BTreeMap::new();
+        for (chat_id, row) in store.every_record()? {
+            peers.entry(chat_id).or_default().push(row);
+        }
+        Ok(Some(Payload {
+            account: state.account,
+            account_id: state.account_id,
+            peers,
+            chats: state.chats,
+            aliases: state.aliases,
+        }))
+    }
+
+    /// The cache a payload holds, within the same bounds a save applies.
+    fn from_payload(payload: Payload) -> LoadedHistory {
         let mut cache = HistoryCache::default();
         for (peer, rows) in payload.peers {
             let messages: Vec<Message> = rows.iter().map(|row| row.to_message(peer)).collect();
@@ -1008,18 +1031,18 @@ impl HistoryFile {
         cache.chats = payload.chats;
         cache.chats.truncate(HISTORY_CACHE_CHATS);
         cache.aliases = payload.aliases;
-        Some(LoadedHistory {
+        LoadedHistory {
             account: payload.account,
             account_id: payload.account_id,
             cache,
-        })
+        }
     }
 
-    /// Stores `cache` under the phone `account`, atomically: [`HistoryFile::encode`]
-    /// then [`HistoryFile::write`], on one thread.
+    /// Stores `cache` under the phone `account`: [`HistoryFile::encode`] then
+    /// [`HistoryFile::write`], on one thread.
     ///
     /// The loop does not call this — it encodes where the cache lives and
-    /// writes off the loop's thread — so only the tests that pin the file's
+    /// writes off the loop's thread — so only the tests that pin the archive's
     /// shape do.
     #[cfg(test)]
     pub(crate) fn save(&self, cache: &HistoryCache, account: Option<&str>) {
@@ -1034,7 +1057,7 @@ impl HistoryFile {
         }
     }
 
-    /// The bytes that store `cache` under `tag`, or `None` when it could
+    /// The payload that stores `cache` under `tag`, or `None` when it could
     /// not be serialised, which is warned about.
     ///
     /// Apart from [`HistoryFile::write`] so the two can run on different
@@ -1053,64 +1076,51 @@ impl HistoryFile {
             .ok()
     }
 
-    /// Seals `bytes` from [`HistoryFile::encode`] and replaces the file with
-    /// the envelope, atomically.
+    /// Stores the encoded payload as sealed records, atomically.
     ///
     /// Best-effort: a failure is warned about and the run carries on with the
-    /// messages still in memory — the file is a head start for the next
-    /// launch, and the wire can always refill it. A provider that cannot open
-    /// its own envelope fails here, before any file is touched. A plaintext
-    /// file being replaced is zeroed once the envelope is in place.
+    /// messages still in memory — the archive is a head start for the next
+    /// launch, and the wire can always refill it. A provider that cannot reach
+    /// its key fails in [`Store::open`], before any file is touched.
     pub(crate) fn write(&self, bytes: &[u8]) {
         let _ = self.try_write(bytes);
     }
 
-    /// [`HistoryFile::write`], saying why when the file was not written.
+    /// [`HistoryFile::write`], saying why when the archive was not written.
     ///
     /// For the one caller that owes the reader an answer: a rename is text they
     /// typed, and a file that cannot hold it must not look as though it did.
     pub(crate) fn try_write(&self, bytes: &[u8]) -> Result<(), String> {
-        let envelope = sealed::seal(bytes, self.keys.as_ref()).map_err(|error| {
-            tracing::warn!(%error, "history could not be sealed");
-            error.to_string()
-        })?;
-        let reopens = matches!(
-            sealed::open(&envelope, self.keys.as_ref()),
-            Ok(Some(plain)) if plain.as_slice() == bytes
-        );
-        if !reopens {
-            tracing::warn!("the sealed history did not open again; not written");
-            return Err("the sealed history did not open again".to_owned());
-        }
-        if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty())
-            && let Err(error) = fs::create_dir_all(parent)
-        {
-            tracing::warn!(%error, "history directory could not be created");
-            return Err(error.to_string());
-        }
-        // Opened before the replace, which unlinks the old inode: the handle
-        // is what lets the old bytes be zeroed afterwards.
-        let legacy = open_unsealed(&self.path);
-        write_atomically(&self.path, &envelope)?;
-        if let Some(mut old) = legacy {
-            if let Err(error) = wipe(&mut old) {
-                tracing::warn!(%error, "could not wipe the pre-migration history file");
-            }
-            remove_stale_temps(&self.path);
-        }
-        Ok(())
+        let payload: Payload = serde_json::from_slice(bytes)
+            .map_err(|error| format!("history could not be read for writing: {error}"))?;
+        self.store_payload(&payload)
+            .map_err(|error| format!("history could not be written: {error:#}"))
     }
 
-    /// Removes the file; a missing file is success.
-    ///
-    /// Logout calls this, and a failed delete must not fail the logout, so
-    /// the failure is a warning and the return is nothing.
-    pub(crate) fn clear(&self) {
-        match fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(%error, "history file could not be removed"),
+    /// Opens the archive, replacing its rows and state with `payload` in one
+    /// transaction: a write either lands whole or leaves the previous rows.
+    fn store_payload(&self, payload: &Payload) -> Result<()> {
+        let mut store = open_store(&self.path, Arc::clone(&self.keys))?;
+        store.replace(payload)
+    }
+
+    /// Removes the database and its WAL, shared-memory, journal and salt
+    /// siblings; a missing file is success. The legacy `history.json` is not
+    /// one of them and is deliberately left alone.
+    fn remove_archive(&self) {
+        for path in archive_siblings(&self.path) {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(%error, "history archive could not be removed"),
+            }
         }
+    }
+
+    /// Logout calls this, and a failed delete must not fail the logout, so the
+    /// failure is a warning and the return is nothing.
+    pub(crate) fn clear(&self) {
+        self.remove_archive();
     }
 }
 
@@ -1133,118 +1143,74 @@ pub(crate) fn history_acceptable(
     stored_id.is_some() || stored_phone == configured
 }
 
-/// Writes `bytes` so that the target only ever appears as a whole file.
-///
-/// The drafts file's `write_atomically`, copied with its reasoning: a sibling
-/// temp in the same directory, restricted before a byte is in it, renamed over
-/// the target — so an interrupted write leaves the previous history intact
-/// rather than a truncated file, and the target inherits the temp's `0600`.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let temp = temp_sibling(path);
+/// The one warning about a legacy `history.json`, however many accounts load.
+fn warn_legacy_once() {
+    use std::sync::Once;
 
-    let result = (|| -> Result<()> {
-        fs::File::create(&temp).context("creating the history temp file")?;
-        restrict_permissions(&temp);
-        fs::write(&temp, bytes).context("writing the history temp file")?;
-        fs::rename(&temp, path).context("replacing the history file")?;
-        Ok(())
-    })();
-
-    result.map_err(|error| {
-        // A half-written temp is not a history file, and nothing would ever
-        // clean it up.
-        let _ = fs::remove_file(&temp);
-        tracing::warn!(%error, "history file could not be written");
-        format!("{error:#}")
-    })
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "a legacy televim.history.json is still on disk; it was not migrated or deleted"
+        );
+    });
 }
 
-/// The existing file at `path`, opened for writing, if it is not an envelope.
-///
-/// A legacy plaintext file (or junk about to be replaced); the handle is what
-/// lets [`wipe`] reach it after the path has been replaced. Unix only:
-/// elsewhere a rename over an open file is not reliable.
-#[cfg(unix)]
-fn open_unsealed(path: &Path) -> Option<fs::File> {
-    use std::io::Read as _;
+/// The database beside the legacy JSON file: one account, one `.db`.
+fn archive_path(legacy: &Path) -> PathBuf {
+    legacy.with_extension("db")
+}
 
-    let mut file = fs::OpenOptions::new()
-        .read(true)
+/// The database and every file SQLite keeps beside it, plus the salt.
+fn archive_siblings(db: &Path) -> Vec<PathBuf> {
+    let name = db.file_name().unwrap_or_default().to_os_string();
+    let sibling = |suffix: &str| {
+        let mut name = name.clone();
+        name.push(suffix);
+        db.with_file_name(name)
+    };
+    vec![
+        db.to_path_buf(),
+        sibling("-wal"),
+        sibling("-shm"),
+        sibling("-journal"),
+        sibling(SALT_SUFFIX),
+    ]
+}
+
+fn salt_sibling(db: &Path) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(SALT_SUFFIX);
+    db.with_file_name(name)
+}
+
+/// Creates the database file before SQLite sees it, restricted from the
+/// start: no window in which the archive is readable by anyone else.
+#[cfg(unix)]
+fn create_db_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
         .write(true)
+        .create_new(true)
+        .mode(0o600)
         .open(path)
-        .ok()?;
-    let mut head = Vec::with_capacity(sealed::MAGIC.len());
-    file.by_ref()
-        .take(sealed::MAGIC.len() as u64)
-        .read_to_end(&mut head)
-        .ok()?;
-    (!sealed::is_sealed(&head)).then_some(file)
 }
 
 #[cfg(not(unix))]
-fn open_unsealed(_path: &Path) -> Option<fs::File> {
-    None
+fn create_db_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
-/// Overwrites `file` with zeros, in place, and syncs it. Best effort.
-fn wipe(file: &mut fs::File) -> io::Result<()> {
-    use std::io::{Read as _, Seek as _};
-
-    let len = file.metadata()?.len();
-    file.rewind()?;
-    io::copy(&mut io::repeat(0).take(len), file)?;
-    file.sync_all()
-}
-
-/// Wipes and removes the `<name>.<pid>.tmp` files [`write_atomically`] leaves
-/// when a process dies mid-write; a build that wrote plaintext may have left
-/// one holding it.
-fn remove_stale_temps(path: &Path) {
-    let Some(name) = path.file_name() else {
-        return;
-    };
-    let dir = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut prefix = name.to_os_string();
-    prefix.push(".");
-    let prefix = prefix.to_string_lossy().into_owned();
-
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let file_name = entry.file_name().to_string_lossy().into_owned();
-        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
-        if is_file
-            && file_name
-                .strip_prefix(&prefix)
-                .is_some_and(|rest| rest.strip_suffix(".tmp").is_some())
-        {
-            if let Ok(mut file) = fs::OpenOptions::new().write(true).open(entry.path()) {
-                let _ = wipe(&mut file);
-            }
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// The temp file [`write_atomically`] writes through, tagged with the process
-/// id so two processes sharing a history path do not write the same temp.
-fn temp_sibling(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.tmp", std::process::id()));
-    path.with_file_name(name)
-}
-
-/// Restricts a freshly written history file to its owner.
+/// Restricts a freshly written sibling (the salt) to its owner.
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
     if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-        tracing::warn!(%error, "could not restrict the permissions of the history file");
+        tracing::warn!(%error, "could not restrict the permissions of the history archive");
     }
 }
 
@@ -1252,17 +1218,384 @@ fn restrict_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) {}
 
+/// The schema this build writes. Recorded in `meta` so a later build can tell
+/// an archive it understands from one it must not guess at.
+const SCHEMA_VERSION: i64 = 1;
+const META_VERSION: &str = "schema_version";
+const META_STATE: &str = "state";
+const META_ARCHIVE_KEY: &str = "archive_key";
+const SALT_SUFFIX: &str = ".salt";
+const KEY_LEN: usize = 32;
+const SALT_LEN: usize = 16;
+
+/// Pragmas applied on every open, before any table is touched. WAL with a full
+/// sync makes a committed row survive a process kill; a 256 KiB page cache and
+/// no memory mapping bound what SQLite holds resident; the WAL cannot grow
+/// without limit. `fullfsync` is macOS only and is enabled there below.
+const OPEN_PRAGMAS: &str = "PRAGMA journal_mode=WAL;
+    PRAGMA synchronous=FULL;
+    PRAGMA cache_size=-256;
+    PRAGMA mmap_size=0;
+    PRAGMA journal_size_limit=1048576;";
+
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value BLOB NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+        chat_key BLOB NOT NULL,
+        message_id INTEGER NOT NULL,
+        sealed BLOB NOT NULL,
+        PRIMARY KEY (chat_key, message_id)
+    );";
+
+/// The non-message half of the archive, sealed as one blob in `meta`: a chat
+/// id or a title must never sit in a column in the clear.
+#[derive(Debug, Serialize, Deserialize)]
+struct State {
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
+    account_id: Option<i64>,
+    #[serde(default)]
+    chats: Vec<CachedChat>,
+    #[serde(default)]
+    aliases: BTreeMap<i64, String>,
+}
+
+/// One record's plaintext. The address is carried inside, and `decode_record`
+/// refuses a row whose plaintext does not name the column pair it was found
+/// under: `sealed`'s AAD is fixed, so the binding has to live here.
+#[derive(Debug, Serialize, Deserialize)]
+struct Record {
+    chat_key: Vec<u8>,
+    chat_id: i64,
+    message_id: i64,
+    row: CachedMessage,
+}
+
+/// `HMAC(chat_id)` under a key derived from the file key. The column never
+/// holds the id itself; the derivation key and the salt are unsealable only by
+/// the account whose keyring/passphrase opened the archive.
+fn keyed_chat(hmac_key: &[u8; KEY_LEN], chat_id: i64) -> Vec<u8> {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(hmac_key).expect("HMAC accepts a key of any length");
+    mac.update(&chat_id.to_le_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Seals one row under its address. Returns the column key and the envelope.
+fn seal_record(
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+    row: &CachedMessage,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let chat_key = keyed_chat(hmac_key, chat_id);
+    let record = Record {
+        chat_key: chat_key.clone(),
+        chat_id,
+        message_id: row.id,
+        row: row.clone(),
+    };
+    let plain = serde_json::to_vec(&record)?;
+    Ok((chat_key, sealed::seal(&plain, keys)?))
+}
+
+fn insert_record(
+    conn: &Connection,
+    chat_key: &[u8],
+    message_id: i64,
+    envelope: &[u8],
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO messages (chat_key, message_id, sealed) VALUES (?1, ?2, ?3)
+         ON CONFLICT(chat_key, message_id) DO UPDATE SET sealed = excluded.sealed",
+        params![chat_key, message_id, envelope],
+    )?;
+    Ok(())
+}
+
+/// Decodes a record and checks its address. `Ok(None)` from `sealed::open`
+/// means the bytes were never sealed: that is a hard error here, never a
+/// legacy-plaintext fallback.
+fn decode_record(
+    envelope: &[u8],
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_key: &[u8],
+    message_id: i64,
+) -> Result<Record> {
+    let plain = sealed::open(envelope, keys)?
+        .ok_or_else(|| anyhow!("a history record was stored as plaintext"))?;
+    let record: Record = serde_json::from_slice(&plain)?;
+    if record.chat_key != chat_key
+        || record.message_id != message_id
+        || keyed_chat(hmac_key, record.chat_id) != chat_key
+    {
+        return Err(anyhow!("a history record was filed under another address"));
+    }
+    Ok(record)
+}
+
+/// Opens one account's archive, creating it with a `0600` file and schema v1
+/// on first use. Paired with [`Store::put_record`], [`Store::get_record`] and
+/// [`Store::all_records`], this is the record layer later stages build on.
+fn open_store(path: &Path, keys: Arc<dyn KeyProvider>) -> Result<Store> {
+    Store::open(path, keys)
+}
+
+/// A connection to one account's archive. Opened per operation rather than
+/// held: `HistoryFile` is cloned onto blocking threads, and a `rusqlite`
+/// connection is neither `Clone` nor `Sync`.
+struct Store {
+    conn: Connection,
+    keys: Arc<dyn KeyProvider>,
+    hmac_key: [u8; KEY_LEN],
+}
+
+impl Store {
+    fn open(path: &Path, keys: Arc<dyn KeyProvider>) -> Result<Self> {
+        // Reach the key before any file exists: an unreachable key must not
+        // leave a fresh, empty database behind.
+        keys.sealing_key()?;
+        let existed = path.is_file();
+        if !existed {
+            if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)?;
+            }
+            create_db_file(path)?;
+        }
+        let conn = Connection::open(path)?;
+        conn.execute_batch(OPEN_PRAGMAS)?;
+        #[cfg(target_os = "macos")]
+        conn.execute_batch("PRAGMA fullfsync=ON;")?;
+        conn.execute_batch(SCHEMA)?;
+
+        let salt_path = salt_sibling(path);
+        let salt: [u8; SALT_LEN] = if existed {
+            let bytes = fs::read(&salt_path)?;
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("the history archive salt is the wrong length"))?
+        } else {
+            let mut bytes = [0u8; SALT_LEN];
+            getrandom::fill(&mut bytes)?;
+            fs::write(&salt_path, bytes)?;
+            restrict_permissions(&salt_path);
+            bytes
+        };
+
+        let archive_key: [u8; KEY_LEN] = if existed {
+            let envelope: Vec<u8> = conn.query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_ARCHIVE_KEY],
+                |row| row.get(0),
+            )?;
+            let plain = sealed::open(&envelope, keys.as_ref())?
+                .ok_or_else(|| anyhow!("the archive key was stored as plaintext"))?;
+            plain
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("the archive key is the wrong length"))?
+        } else {
+            let mut key = [0u8; KEY_LEN];
+            getrandom::fill(&mut key)?;
+            let envelope = sealed::seal(&key, keys.as_ref())?;
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                params![META_ARCHIVE_KEY, envelope],
+            )?;
+            key
+        };
+
+        let version: Option<i64> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_VERSION],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match version {
+            None => {
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                    params![META_VERSION, SCHEMA_VERSION],
+                )?;
+            }
+            Some(version) if version == SCHEMA_VERSION => {}
+            Some(version) => {
+                return Err(anyhow!("unsupported history schema version {version}"));
+            }
+        }
+
+        // The salt is not secret; it keeps the chat hash distinct between
+        // databases even when two accounts happen to share a file key.
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&archive_key).expect("HMAC accepts a key of any length");
+        mac.update(&salt);
+        let mut hmac_key = [0u8; KEY_LEN];
+        hmac_key.copy_from_slice(&mac.finalize().into_bytes());
+        Ok(Self {
+            conn,
+            keys,
+            hmac_key,
+        })
+    }
+
+    fn state(&self) -> Result<State> {
+        let envelope: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_STATE],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match envelope {
+            None => Ok(State {
+                account: None,
+                account_id: None,
+                chats: Vec::new(),
+                aliases: BTreeMap::new(),
+            }),
+            Some(envelope) => {
+                let plain = sealed::open(&envelope, self.keys.as_ref())?
+                    .ok_or_else(|| anyhow!("the archive state was stored as plaintext"))?;
+                Ok(serde_json::from_slice(&plain)?)
+            }
+        }
+    }
+
+    /// The record layer these three methods make: ingest and range reads build
+    /// on them in the next stage, so they stay even while only the whole-cache
+    /// write path calls [`Store::replace`] today.
+    #[allow(dead_code)]
+    fn put_record(&self, chat_id: i64, row: &CachedMessage) -> Result<()> {
+        let (chat_key, envelope) = seal_record(self.keys.as_ref(), &self.hmac_key, chat_id, row)?;
+        insert_record(&self.conn, &chat_key, row.id, &envelope)
+    }
+
+    #[allow(dead_code)]
+    fn get_record(&self, chat_id: i64, message_id: i64) -> Result<Option<CachedMessage>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let envelope: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT sealed FROM messages WHERE chat_key = ?1 AND message_id = ?2",
+                params![chat_key, message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        envelope
+            .map(|envelope| {
+                decode_record(
+                    &envelope,
+                    self.keys.as_ref(),
+                    &self.hmac_key,
+                    &chat_key,
+                    message_id,
+                )
+                .map(|record| record.row)
+            })
+            .transpose()
+    }
+
+    /// Every record of one chat, oldest id first.
+    #[allow(dead_code)]
+    fn all_records(&self, chat_id: i64) -> Result<Vec<CachedMessage>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let mut statement = self.conn.prepare(
+            "SELECT message_id, sealed FROM messages WHERE chat_key = ?1 ORDER BY message_id",
+        )?;
+        let rows = statement.query_map(params![chat_key], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        rows.map(|row| {
+            let (message_id, envelope) = row?;
+            decode_record(
+                &envelope,
+                self.keys.as_ref(),
+                &self.hmac_key,
+                &chat_key,
+                message_id,
+            )
+            .map(|record| record.row)
+        })
+        .collect()
+    }
+
+    /// Every record of every chat, with the chat id recovered from the sealed
+    /// plaintext (the column holds only the keyed hash).
+    fn every_record(&self) -> Result<Vec<(i64, CachedMessage)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT chat_key, message_id, sealed FROM messages ORDER BY chat_key, message_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (chat_key, message_id, envelope) = row?;
+            decode_record(
+                &envelope,
+                self.keys.as_ref(),
+                &self.hmac_key,
+                &chat_key,
+                message_id,
+            )
+            .map(|record| (record.chat_id, record.row))
+        })
+        .collect()
+    }
+
+    /// Replaces all rows and the state in one transaction.
+    fn replace(&mut self, payload: &Payload) -> Result<()> {
+        let state = State {
+            account: payload.account.clone(),
+            account_id: payload.account_id,
+            chats: payload.chats.clone(),
+            aliases: payload.aliases.clone(),
+        };
+        let state_plain = serde_json::to_vec(&state)?;
+        let state_envelope = sealed::seal(&state_plain, self.keys.as_ref())?;
+
+        let transaction = self.conn.transaction()?;
+        transaction.execute("DELETE FROM messages", [])?;
+        for (chat_id, rows) in &payload.peers {
+            for row in rows {
+                let (chat_key, envelope) =
+                    seal_record(self.keys.as_ref(), &self.hmac_key, *chat_id, row)?;
+                insert_record(&transaction, &chat_key, row.id, &envelope)?;
+            }
+        }
+        transaction.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![META_STATE, state_envelope],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const PEER: i64 = 7;
 
-    /// Writes `plain` to the file as a sealed envelope, the way a save would,
-    /// for fixtures a test hand-writes.
+    /// Writes a hand-written JSON payload into the archive the way a save
+    /// would, so a fixture can exercise the load bounds without a wire.
     fn seed(file: &HistoryFile, plain: impl AsRef<[u8]>) {
-        let envelope = sealed::seal(plain.as_ref(), file.keys.as_ref()).expect("the fixture seals");
-        fs::write(&file.path, envelope).expect("the fixture is written");
+        let payload: Payload =
+            serde_json::from_slice(plain.as_ref()).expect("the fixture is a payload");
+        file.store_payload(&payload)
+            .expect("the fixture is written");
     }
 
     /// A key source whose key is not the one `for_test` seals under.
@@ -1311,6 +1644,235 @@ mod tests {
         messages.iter().map(|message| message.id).collect()
     }
 
+    // ---- the record layer (stage 01) ------------------------------------
+
+    #[test]
+    fn a_record_round_trips_every_field_through_a_reopened_database() {
+        let (_dir, file) = scratch("history.json");
+        let mut written = message(7, PEER, "the text");
+        written.timestamp = 1_700_000_000;
+        written.is_outgoing = true;
+        written.status = MessageStatus::Sent;
+        written.is_service = true;
+        written.reply_to = Some(3);
+        written.media = Some(MediaKind::Voice);
+        written.media_id = Some(91);
+        let row = CachedMessage::from_message(&written);
+
+        {
+            let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+            store.put_record(PEER, &row).expect("the record is written");
+        }
+        let reopened = open_store(&file.path, Arc::clone(&file.keys)).expect("it reopens");
+        let read = reopened
+            .get_record(PEER, 7)
+            .expect("the record opens")
+            .expect("the record is there");
+        assert_eq!(read, row, "the sealed row comes back byte for byte");
+        let back = read.to_message(PEER);
+        assert_eq!(
+            fields(&back),
+            fields(&written),
+            "id, chat, text, timestamp, direction and reply link survive"
+        );
+        assert_eq!(back.media, written.media, "the media kind survives");
+        assert_eq!(back.media_id, written.media_id, "the media id survives");
+        assert_eq!(
+            back.is_service, written.is_service,
+            "the service flag survives"
+        );
+        assert_eq!(
+            reopened.all_records(PEER).expect("all records open"),
+            vec![row],
+            "a chat read is the same record"
+        );
+    }
+
+    #[test]
+    fn a_committed_record_survives_a_reopen_without_a_clean_shutdown() {
+        // A power cut itself cannot be simulated in a unit test; this is the
+        // other half of the promise — a committed write survives the process
+        // going away without closing the connection. WAL and synchronous=FULL
+        // are what cover the power-loss half, which needs real hardware.
+        let (_dir, file) = scratch("history.json");
+        let row = CachedMessage::from_message(&message(1, PEER, "committed"));
+
+        {
+            let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+            store.put_record(PEER, &row).expect("the write commits");
+            // No close and no checkpoint: the handle is dropped as a killed
+            // process would drop it.
+        }
+        let reopened = open_store(&file.path, Arc::clone(&file.keys)).expect("it reopens");
+        assert_eq!(
+            reopened.get_record(PEER, 1).expect("the record opens"),
+            Some(row),
+            "what was committed is readable again"
+        );
+    }
+
+    #[test]
+    fn plaintext_bytes_are_refused_on_read() {
+        let (_dir, file) = scratch("history.json");
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let chat_key = keyed_chat(&store.hmac_key, PEER);
+        let record = Record {
+            chat_key: chat_key.clone(),
+            chat_id: PEER,
+            message_id: 1,
+            row: CachedMessage::from_message(&message(1, PEER, "plaintext")),
+        };
+        let plain = serde_json::to_vec(&record).expect("the fixture serialises");
+        insert_record(&store.conn, &chat_key, 1, &plain).expect("the row is planted");
+
+        assert!(
+            store.get_record(PEER, 1).is_err(),
+            "sealed::open's Ok(None) is a hard error, never a plaintext fallback"
+        );
+        assert_eq!(
+            file.load(),
+            LoadedHistory::empty(),
+            "a load refuses the archive rather than reading the row as legacy"
+        );
+    }
+
+    #[test]
+    fn a_record_moved_to_another_chat_key_is_refused() {
+        let (_dir, file) = scratch("history.json");
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let row = CachedMessage::from_message(&message(1, PEER, "private"));
+        let (chat_key, envelope) = seal_record(file.keys.as_ref(), &store.hmac_key, PEER, &row)
+            .expect("the record is sealed for PEER");
+        let moved = keyed_chat(&store.hmac_key, 99);
+        insert_record(&store.conn, &moved, 1, &envelope).expect("the row is copied");
+
+        assert_eq!(
+            chat_key,
+            keyed_chat(&store.hmac_key, PEER),
+            "the original key"
+        );
+        assert!(
+            store.get_record(99, 1).is_err(),
+            "the copied row does not open under the chat it was moved to"
+        );
+        assert!(store.all_records(99).is_err(), "nor does a chat read of it");
+    }
+
+    #[test]
+    fn a_replayed_record_under_another_address_is_refused() {
+        let (_dir, file) = scratch("history.json");
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let row = CachedMessage::from_message(&message(1, PEER, "one"));
+        let (chat_key, envelope) = seal_record(file.keys.as_ref(), &store.hmac_key, PEER, &row)
+            .expect("the record is sealed at id 1");
+        insert_record(&store.conn, &chat_key, 2, &envelope).expect("the row is replayed at id 2");
+
+        assert!(
+            store.get_record(PEER, 2).is_err(),
+            "the address inside the plaintext disagrees with the column"
+        );
+        assert_eq!(
+            store.get_record(PEER, 1).expect("the original opens"),
+            None,
+            "the replay did not create a second copy of the original"
+        );
+
+        // Written twice at its own address, the row is replaced, not doubled.
+        let other = CachedMessage::from_message(&message(1, PEER, "two"));
+        let (_, second) = seal_record(file.keys.as_ref(), &store.hmac_key, PEER, &other)
+            .expect("a new record for the same address");
+        insert_record(&store.conn, &chat_key, 1, &second).expect("the row is replaced");
+        assert_eq!(
+            store.get_record(PEER, 1).expect("the row opens"),
+            Some(other),
+            "one address holds one row, the last one written"
+        );
+    }
+
+    #[test]
+    fn sign_out_removes_the_database_and_its_wal_and_shm_siblings() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        let rows: Vec<Message> = (1..=50).map(|id| message(id, PEER, "row")).collect();
+        cache.put(PEER, &rows);
+        file.save(&cache, None);
+
+        // Hold a connection open so SQLite keeps its -wal and -shm beside the
+        // database: these are the files sign-out has to take with it.
+        let open = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        // WAL mode has no `-journal`; the other four are live while the
+        // connection is open.
+        let sibling = |suffix: &str| {
+            let mut name = file.path.file_name().expect("a file name").to_os_string();
+            name.push(suffix);
+            file.path.with_file_name(name)
+        };
+        let live: Vec<PathBuf> = vec![
+            file.path.clone(),
+            sibling("-wal"),
+            sibling("-shm"),
+            salt_sibling(&file.path),
+        ];
+        assert!(
+            live.iter().all(|path| path.exists()),
+            "all live siblings exist"
+        );
+
+        file.clear();
+
+        assert!(
+            archive_siblings(&file.path)
+                .iter()
+                .all(|path| !path.exists()),
+            "the database, its WAL, its shared memory, its journal and its salt are gone"
+        );
+        assert_eq!(
+            file.load(),
+            LoadedHistory::empty(),
+            "nothing survives sign-out"
+        );
+        drop(open);
+    }
+
+    #[test]
+    fn the_pragmas_are_applied_when_the_archive_opens() {
+        let (_dir, file) = scratch("history.json");
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let journal: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal_mode reads");
+        assert_eq!(journal, "wal");
+        let synchronous: i64 = store
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("synchronous reads");
+        assert_eq!(synchronous, 2, "FULL");
+        let cache_size: i64 = store
+            .conn
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .expect("cache_size reads");
+        assert_eq!(cache_size, -256, "256 KiB, not the default");
+        let mmap_size: i64 = store
+            .conn
+            .query_row("PRAGMA mmap_size", [], |row| row.get(0))
+            .expect("mmap_size reads");
+        assert_eq!(mmap_size, 0, "no memory mapping");
+        let journal_limit: i64 = store
+            .conn
+            .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+            .expect("journal_size_limit reads");
+        assert!(journal_limit > 0, "the WAL is bounded");
+        #[cfg(target_os = "macos")]
+        {
+            let fullfsync: i64 = store
+                .conn
+                .query_row("PRAGMA fullfsync", [], |row| row.get(0))
+                .expect("fullfsync reads");
+            assert_eq!(fullfsync, 1);
+        }
+    }
+
     #[test]
     fn a_save_round_trips_messages_and_the_account() {
         let (_dir, file) = scratch("history.json");
@@ -1327,10 +1889,10 @@ mod tests {
 
         file.save(&cache, Some("+15551234567"));
 
-        let on_disk = fs::read(&file.path).expect("the file the save wrote");
+        let on_disk = fs::read(&file.path).expect("the database the save wrote");
         assert!(
-            sealed::is_sealed(&on_disk),
-            "the bytes on disk are an envelope"
+            on_disk.starts_with(b"SQLite format 3\0"),
+            "the target is a SQLite database"
         );
         assert!(
             !String::from_utf8_lossy(&on_disk).contains("first"),
@@ -1469,14 +2031,14 @@ mod tests {
     }
 
     #[test]
-    fn garbage_that_is_neither_envelope_nor_json_is_forgotten_and_the_next_save_overwrites_it() {
+    fn garbage_at_the_legacy_path_is_left_and_the_next_save_writes_the_database() {
         let (_dir, file) = scratch("history.json");
-        fs::write(&file.path, "{ not json").expect("the corrupt file");
+        fs::write(&file.legacy, "{ not json").expect("the legacy junk");
 
         assert_eq!(
             file.load(),
             LoadedHistory::empty(),
-            "corrupt JSON loads as nothing, warned about, launch carries on"
+            "legacy junk is not read, warned about, launch carries on"
         );
 
         let mut cache = HistoryCache::default();
@@ -1485,7 +2047,12 @@ mod tests {
         assert_eq!(
             ids(&file.load().cache.get(PEER)),
             vec![1],
-            "the next save overwrites the corrupt file in place"
+            "the next save writes the archive"
+        );
+        assert_eq!(
+            fs::read(&file.legacy).expect("the legacy file is still there"),
+            b"{ not json",
+            "the legacy file is left exactly as it was"
         );
     }
 
@@ -1493,23 +2060,22 @@ mod tests {
         {"id": 4, "text": "legacy secret", "timestamp": 40, "is_outgoing": true}
     ]}}"#;
 
+    /// Translated from `a_legacy_plaintext_file_is_rewritten_sealed`: the
+    /// legacy file is now warned about once and left alone, never migrated.
     #[test]
-    fn a_legacy_plaintext_file_is_rewritten_sealed() {
+    fn a_legacy_plaintext_file_is_left_on_disk_and_loads_empty() {
         let (_dir, file) = scratch("history.json");
-        fs::write(&file.path, LEGACY).expect("the legacy file");
+        fs::write(&file.legacy, LEGACY).expect("the legacy file");
 
         let loaded = file.load();
-        assert_eq!(ids(&loaded.cache.get(PEER)), vec![4], "read once as it was");
-        assert!(!loaded.cache.get(PEER)[0].is_service);
-        assert_eq!(loaded.account.as_deref(), Some("+1555"));
-
-        let on_disk = fs::read(&file.path).expect("the file is still there");
-        assert!(sealed::is_sealed(&on_disk), "rewritten as an envelope");
-        assert!(
-            !String::from_utf8_lossy(&on_disk).contains("legacy secret"),
-            "the plaintext is gone from the file"
+        assert_eq!(loaded, LoadedHistory::empty(), "nothing is migrated");
+        assert!(!file.path.exists(), "no database was created by a load");
+        assert_eq!(
+            fs::read(&file.legacy).expect("the legacy file is still there"),
+            LEGACY.as_bytes(),
+            "the plaintext stays exactly where it was"
         );
-        assert_eq!(file.load(), loaded, "and the sealed file loads the same");
+        assert_eq!(file.load(), loaded, "a second load is no different");
     }
 
     #[test]
@@ -1525,31 +2091,29 @@ mod tests {
         assert!(!old.to_message(PEER).is_service);
     }
 
-    /// The old inode is zeroed, not merely unlinked.
+    /// Translated from `migration_wipes_the_pre_migration_bytes`: nothing is
+    /// wiped now, and sign-out must not reach the legacy file either.
     #[cfg(unix)]
     #[test]
-    fn migration_wipes_the_pre_migration_bytes() {
-        use std::io::Read as _;
-
+    fn the_legacy_file_is_neither_wiped_nor_removed() {
         let (dir, file) = scratch("history.json");
-        fs::write(&file.path, LEGACY).expect("the legacy file");
-        let stale = dir.path().join("history.json.99999.tmp");
-        fs::write(&stale, LEGACY).expect("a stale temp");
-        let unrelated = dir.path().join("other.json.1.tmp");
+        fs::write(&file.legacy, LEGACY).expect("the legacy file");
+        let unrelated = dir.path().join("other.json");
         fs::write(&unrelated, b"x").expect("an unrelated file");
-        let mut old = fs::File::open(&file.path).expect("a handle on the old inode");
 
         file.load();
+        file.clear();
 
-        let mut left = Vec::new();
-        old.read_to_end(&mut left).expect("the old inode reads");
-        assert_eq!(left.len(), LEGACY.len(), "the old file changed length");
-        assert!(
-            left.iter().all(|byte| *byte == 0),
-            "plaintext was left behind"
+        assert_eq!(
+            fs::read(&file.legacy).expect("the legacy file is still there"),
+            LEGACY.as_bytes(),
+            "the pre-migration bytes were not wiped"
         );
-        assert!(!stale.exists(), "the stale temp was left");
-        assert!(unrelated.exists(), "a file of another name was touched");
+        assert_eq!(
+            fs::read(&unrelated).expect("the unrelated file is still there"),
+            b"x",
+            "a file of another name was not touched"
+        );
     }
 
     #[test]
@@ -1614,8 +2178,10 @@ mod tests {
         );
     }
 
+    /// Translated from `a_save_leaves_a_whole_file_and_no_temp_behind`: the
+    /// whole-file envelope is now one sealed row in a versioned database.
     #[test]
-    fn a_save_leaves_a_whole_file_and_no_temp_behind() {
+    fn a_save_leaves_a_sealed_database_and_schema_v1_behind() {
         let (_dir, file) = scratch("history.json");
         let mut photo = message(1, PEER, "");
         photo.media = Some(MediaKind::Photo);
@@ -1624,22 +2190,40 @@ mod tests {
 
         file.save(&cache, Some("+15551234567"));
 
-        let raw = fs::read(&file.path).expect("the file the save wrote");
-        assert!(sealed::is_sealed(&raw), "the target is ciphertext");
-        let plain = sealed::open(&raw, file.keys.as_ref())
-            .expect("the envelope opens")
-            .expect("the target is only ever the finished file");
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&plain).expect("the sealed payload is JSON");
-        let expected: serde_json::Value = serde_json::from_str(
-            r#"{"account": "+15551234567", "peers": {"7": [
-                {"id": 1, "text": "", "timestamp": 10, "is_outgoing": false, "media": "photo"}
-            ]}}"#,
-        )
-        .expect("the expected payload is JSON");
-        assert_eq!(parsed, expected, "the payload shape, media as a kind only");
+        let raw = fs::read(&file.path).expect("the database the save wrote");
         assert!(
-            !temp_sibling(&file.path).exists(),
+            raw.starts_with(b"SQLite format 3\0"),
+            "the target is a database"
+        );
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let version: i64 = store
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_VERSION],
+                |row| row.get(0),
+            )
+            .expect("the schema version was recorded");
+        assert_eq!(version, SCHEMA_VERSION);
+        let state = store.state().expect("the sealed state opens");
+        assert_eq!(state.account.as_deref(), Some("+15551234567"));
+        let rows = store.all_records(PEER).expect("the sealed record opens");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].media,
+            Some(CachedMedia::Photo),
+            "media as a kind only"
+        );
+        let envelope: Vec<u8> = store
+            .conn
+            .query_row("SELECT sealed FROM messages", [], |row| row.get(0))
+            .expect("the sealed row");
+        assert!(sealed::is_sealed(&envelope), "the row is an envelope");
+        assert!(
+            !fs::read_dir(file.path.parent().expect("a parent directory"))
+                .expect("the directory reads")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
             "no half-written temp is left beside the target"
         );
     }
