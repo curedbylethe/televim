@@ -5,6 +5,20 @@ All notable changes to televim are recorded here. The format follows
 (when the version is bumped, the tag scheme, what major/minor/patch mean) is in
 [`docs/decisions.md`](./docs/decisions.md).
 
+## [0.16.0] - 2026-11-20
+
+### Added
+
+- **app:** Make automatic read receipts configurable
+
+### Fixed
+
+- **app:** Take a key event as proof of focus after a lost gain
+- **app:** Drop the no-op keyboard flag re-push on key focus recovery
+- **tui:** Hand a focused Arabic draft to the terminal as stored
+- **tui:** Mirror the focused RTL caret and selection onto emitted cells
+- **app:** Stop waiting on the macOS platform opener
+
 ## [0.15.0] - 2026-11-17
 
 ### Added
