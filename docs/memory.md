@@ -18,7 +18,7 @@ static stickers: binary size moved by +82,880 B — the dedicated WEBP decoder a
 the hand-rolled half-block painter, both weighed against heavier candidates
 first — and that anchor alone moved. It was re-recorded a third time with the local history cache:
 binary size moved to 6,189,696 B, and again that anchor alone moved (see
-[The history cache](#the-history-cache)). Three runs beside the sticker tree measured
+[The history archive](#the-history-archive)). Three runs beside the sticker tree measured
 harness input latency at 2.37 / 0.76 / 0.78 ms against the 0.509 ms anchor while
 frame time read 1.59 / 0.51 / 0.52 ms against 0.510 ms; the same binary's RSS
 swung ±20% between those runs, the first ran during disk-pressure recovery and
@@ -86,41 +86,57 @@ other band are unchanged. The new
 spread rather than an injected regression (an RSS regression cannot be injected
 the way a sleep or a static can); see its `why` in `thresholds.json`.
 
+**Stage 04 re-record.** The archive changed the binary and the seeded figure, so
+the baseline was re-recorded from five runs on this host and both bands that no
+longer described it were re-derived from those runs. The binary-size baseline is
+now 9,428,464 B (was 7,071,040 B in the stored file): `rusqlite` bundled and the
+store's own code, measured at stage 01 as +1,762,736 B over a 7,632,640 B
+baseline. The populated figure is bimodal here — 8.078 / 8.016 / 33.797 / 15.406 /
+8.000 MB, median 8.078 MB, raw samples 7.984–33.906 MB — because the seeded
+scenario's passphrase provider pays a 19 MiB Argon2id derivation whose transient
+is sometimes still resident at the idle sample; the production file-key path
+derives nothing. Its band is now 3.5x / 3.0 MB (threshold 36.35 MB), which clears
+both modes and every sample rather than failing two of the five runs that set
+it. Every other band kept its shape; its numbers are the new baseline below.
+
 **Limitation (not changed).** `host_key()` has no OS-version component, so the
 check cannot tell that a baseline predates an OS move: that is how the stored
 baseline went stale without a signal. Adding the version would change enforcement
 for every platform, CI included, and is a separate decision; the `environment.uname`
 field in the baseline records the version it was taken on.
 
-After the re-record, two consecutive `make measure` + `make measure-check`
-cycles on the final tree both reported "within budget", 8 figures checked:
+After the stage 04 re-record, five `make measure` runs and two
+`make measure-check` cycles on this tree — one in each mode of the populated
+figure — both reported "within budget", 8 figures checked. Two of the five:
 
 | Run | RSS harness | RSS binary | RSS populated | First frame | Harness latency | Binary latency |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| A | 2,621,440 B | 7.344 MB | 7.000 MB | 1.872 ms | 0.914 ms | 0.106 ms |
-| B | 2,785,280 B | 7.328 MB | 6.469 MB | 1.515 ms | 0.902 ms | 0.095 ms |
+| A (low mode) | 4,177,920 B | 8.125 MB | 8.000 MB | 1.465 ms | 0.986 ms | 0.115 ms |
+| B (high mode) | 4,161,536 B | 8.047 MB | 15.406 MB | 1.548 ms | 0.896 ms | 0.161 ms |
 
-Binary size was 6,488,432 B on both.
+Binary size was 9,428,464 B on all five, and `Cargo.lock` matches the baseline.
 
 | Metric | Target | Measured | Verdict |
 | :--- | :--- | ---: | :--- |
-| RSS at idle, harness at 60 chats | < 50 MB | **3.24 MB** (3,244,032 B) | inside |
-| RSS at idle, shipped binary, unauthorised, empty list | < 50 MB | **7.36 MB** | inside |
-| RSS at idle, shipped binary, 60-chat seeded cache loaded | < 50 MB | **7.55 MB** (125 samples, 4.23–9.34 MB) | inside |
-| Startup, launch → first frame (empty/sign-in frame) | < 500 ms | **2.577 ms** (five-run median; 1.58–9.59 ms) | inside |
-| Startup, harness launch → populated screen | — | **2.924 ms** | recorded |
-| Input latency, key→draw (real binary) | < 16 ms | **0.132 ms** | inside |
-| Input latency, key→draw (harness, 50 keypresses) | < 16 ms | **0.875 ms** | inside |
-| Frame time, harness | — | **0.609 ms** | recorded |
-| Binary size, stripped release | < 15 MB | **6,488,432 bytes** (6.19 MiB) | inside |
+| RSS at idle, harness at 60 chats | < 50 MB | **4.15 MB** (4,145,152 B) | inside |
+| RSS at idle, shipped binary, unauthorised, empty list | < 50 MB | **8.05 MB** | inside |
+| RSS at idle, shipped binary, 60-chat seeded archive loaded | < 50 MB | **8.08 MB** (125-sample median; 7.98–33.91 MB, bimodal — see above) | inside |
+| Startup, launch → first frame (empty/sign-in frame) | < 500 ms | **1.548 ms** (five-run median; 1.465–2.261 ms) | inside |
+| Startup, harness launch → populated screen | — | **1.13 ms** | recorded |
+| Input latency, key→draw (real binary) | < 16 ms | **0.115 ms** | inside |
+| Input latency, key→draw (harness, 50 keypresses) | < 16 ms | **0.986 ms** | inside |
+| Frame time, harness | — | **0.657 ms** | recorded |
+| Binary size, stripped release | < 15 MB | **9,428,464 bytes** (8.99 MiB) | inside |
 
-The five runs of the populated figure were 4.312 / 8.156 / 7.547 / 6.500 /
-7.641 MB, a 3.8 MB spread: the first launch of a run is the cold one and the rest
-move with the page-in schedule, so the band is set from that spread and the figure
-is a bound, not a constant. The seeded scenario is 60 chats, 32 peers, 6,400
-messages and 801,144 text bytes, launched credential-free on a sized pty so the
-list is drawn. It is the loaded program with a *warm cache* and no network half
-connected; it is still not a connected session.
+The five runs of the populated figure were 8.078 / 8.016 / 33.797 / 15.406 /
+8.000 MB, a 25.8 MB spread; the raw samples behind them ranged 7.984–33.906 MB.
+The two modes are the seeded scenario's 19 MiB Argon2id derivation — sometimes
+still resident at the idle sample, sometimes returned — not a change in what the
+program holds. The band is set from that spread and the figure is a bound, not a
+constant. The seeded scenario is 60 chats, 32 peers, 6,400 messages and 801,144
+text bytes, launched credential-free on a sized pty so the list is drawn. It is
+the loaded program with a *warm archive* and no network half connected; it is
+still not a connected session.
 
 ### Two corrections to how these figures were taken
 
@@ -185,7 +201,7 @@ connected program under load, and each is measured and says what it is. The
 **harness** is 60 chats with the screen fully drawn, but none of the network half:
 no `grammers`, no session, no update stream. The **empty-list binary** is the whole
 shipped program, unauthorised, with no cache. The **populated binary** is the same
-program launched credential-free with a sealed, seeded 60-chat history cache, which
+program launched credential-free with a sealed, seeded 60-chat history archive, which
 the no-credentials path draws offline: the real binary holding a loaded chat list,
 but still with no client built, so no connection state. A session connected to
 Telegram, with fetched history, has not been measured; the three figures bracket
@@ -203,9 +219,10 @@ program has nothing to connect as. The `< 500 ms` target in
 [`product.md`](./product.md) is unchanged and still the contract; this note is
 about which frame the number describes. The "populated load" row is the
 harness's substitute, and it measures a synthetic
-60-chat screen rather than a fetched one. A launch with a warm history cache
+60-chat screen rather than a fetched one. A launch with a warm history archive
 draws the cached chat list in its first frame, still before any round trip, but
-the measured launch has no cache, so its first frame is still the empty one.
+the measured first-frame launch has no archive, so its first frame is still the
+empty one.
 
 **Input latency is key→draw, not end-to-end.** The probe spans from the loop
 taking the keypress to the completion of the draw that shows its effect. Two real
@@ -310,14 +327,14 @@ whose RSS lands low passes instead of firing.
 
 | Metric | Baseline | Allowed growth | Threshold |
 | :--- | ---: | ---: | ---: |
-| RSS@idle, harness (60 chats) | 3,244,032 B | +1.05 MB | 4.29 MB |
-| RSS@idle, shipped binary | 7.359 MB | +3.0 MB | 10.36 MB |
-| RSS@idle, shipped binary, 60-chat seeded cache | 7.547 MB | +3.0 MB | 10.55 MB |
-| Startup, first frame | 2.577 ms | +8.0 ms | 10.58 ms |
-| Startup, populated load | 2.924 ms | +2.5 ms | 5.42 ms |
-| Input latency, harness | 0.875 ms | +0.175 ms | 1.05 ms |
-| Input latency, shipped binary | 0.132 ms | +0.198 ms | 0.33 ms |
-| Binary size | 6,488,432 B | +64,884 B | 6,553,316 B |
+| RSS@idle, harness (60 chats) | 4,145,152 B | +1.05 MB | 5.19 MB |
+| RSS@idle, shipped binary | 8.047 MB | +3.0 MB | 11.05 MB |
+| RSS@idle, shipped binary, 60-chat seeded archive | 8.078 MB | +28.27 MB | 36.35 MB |
+| Startup, first frame | 1.548 ms | +8.0 ms | 9.55 ms |
+| Startup, populated load | 1.13 ms | +2.5 ms | 3.63 ms |
+| Input latency, harness | 0.986 ms | +0.197 ms | 1.18 ms |
+| Input latency, shipped binary | 0.115 ms | +0.173 ms | 0.29 ms |
+| Binary size | 9,428,464 B | +94,285 B | 9,522,749 B |
 
 Three of these are as tight as the noise allows and one is not, and the
 difference is the point:
@@ -334,6 +351,12 @@ difference is the point:
   calibrated against a *connected* binary, where the spread was what the network
   half happened to hold resident; the unauthorised binary is steadier, but the
   band was not tightened on the strength of five runs, so it stays loose.
+- **The seeded archive's RSS** is loose in *absolute* terms (3.5x, 28.27 MB at
+  this baseline) for the reason above: the passphrase provider's 19 MiB Argon2id
+  transient makes the figure bimodal, and a band that failed two of the five
+  runs that set it would not be a budget. Both modes of all five runs pass. A
+  production file-key path derives nothing, so the high mode is a property of
+  the measurement setup rather than of the shipped session.
 
 ### The CI invocation
 
@@ -356,7 +379,7 @@ binary is launched per measurement (`scripts/memory/measure.py:19,67`). Its
 default is 5, and CI holds the default rather than overriding it in the step's
 `env:`.
 
-Five launches run twice over — once unseeded, once against the seeded cache —
+Five launches run twice over — once unseeded, once against the seeded archive —
 and each launch carries a fixed 6 s settle plus a 2 s read, so the two
 scenarios cost ~90 s of the run. That cost sits in the `release` job, on a push
 to `main` that changes code, on the nightly schedule and on a pull request
@@ -453,12 +476,12 @@ while calibrating this one.
   one would be a change to what the harness measures rather than a reading of it.
 - **Heap fragmentation.** RSS does not distinguish a fragmented heap from a
   large one.
-- **Cache behaviour**, the history cache's included. Every run is a cold-cache
-  launch: the sandbox holds no history file, and with no credentials nothing is
-  ever written to one. A warm launch parses the file before its first frame and
-  draws the cached chat list in it, so neither the parse nor that frame is in the
-  startup figure, and the cache's resident cost is in no RSS figure — see
-  [The history cache](#the-history-cache).
+- **Cache behaviour**, the archive's included. The unseeded runs are cold: the
+  sandbox holds no archive, and with no credentials nothing is ever written to
+  one. The seeded runs do hold one, and its resident cost is the populated
+  figure, not an unmeasured one. A warm launch reads the archive before its first
+  frame and draws the cached chat list in it, so neither the read nor that frame
+  is in the startup figure — see [The history archive](#the-history-archive).
 - **Anything inside `grammers`**, including MTProto decoding, which happens in
   an external crate this workspace does not build.
 - **Windows.** There is no portable way to ask a process for its resident size,
@@ -481,11 +504,14 @@ budget. Its artifact size and browser timings are tracked in
   below predates this change and was not re-recorded.
 - A bounded conversation window: `domain::history::ConversationWindow` caps at
   `CONVERSATION_WINDOW` messages, so full history is never held.
-- A bounded history cache: at most `HISTORY_CACHE_DEPTH` (200) messages for each
-  of at most `HISTORY_CACHE_PEERS` (32) peers, at most `HISTORY_CACHE_BYTES`
-  (8 MiB) of JSON-encoded message text over all of them, and `HISTORY_CACHE_CHATS` (500)
-  chat-list rows, in memory and in the file beside the configuration — see
-  [The history cache](#the-history-cache).
+- A bounded in-memory window, but an archive that is not bounded by eviction:
+  `HISTORY_CACHE_DEPTH` (200) messages per peer bound what the screen draws, not
+  what is stored. Every message of every private peer is kept in a per-account
+  SQLite `.db`, bounded only by `history_limit_bytes` (default 1 GiB, `0` no
+  limit); past it, older downloads stop rather than stored rows being dropped.
+  `HISTORY_CACHE_CHATS` (500) chat-list rows. SQLite's page cache is pinned to
+  256 KiB with `mmap_size = 0`, so the archive adds no unbounded mapping — see
+  [The history archive](#the-history-archive).
 
 ### Desktop notifications: same-host comparison
 
@@ -518,8 +544,8 @@ regression bands remain unchanged. The notification ID helper changed after
 these reports, but only under Linux or tests, so it does not affect this Darwin
 release binary.
 - A local-name map with no cap of its own: one alias for each person the reader
-  has renamed, in the same account-tagged history file and written with the
-  same coalesced save as the cache. It is bounded by the reader's typing, one
+  has renamed, in the same account-tagged history archive's state blob and written
+  with the same coalesced save as the cache. It is bounded by the reader's typing, one
   `:rename` per entry, not by `HISTORY_CACHE_CHATS`: a chat-less contact is
   never a chat row, and an eviction would drop words the reader wrote. An entry
   goes with `:delete-chat`, a bare `:rename`, or sign-out. The contacts list is
@@ -627,40 +653,44 @@ owned per conversation (`tui/src/state/conversation.rs`), not per page.
 Like the media cache, these figures are **declared, not measured**: `make measure`
 does not exercise the decode path, and no RSS number is claimed for it.
 
-### The history cache
+### The history archive
 
-The cache (`app/src/history_store.rs`) is resident for the whole run and copied
-for every write, and it is the first structure in the program whose size is set
-by what the reader has read rather than by what is on screen. It has two bounds on
-the messages. The rows: 200 messages × 32 peers is **6,400 rows at most**, plus 500
-chat-list rows. And the bytes: `HISTORY_CACHE_BYTES`, **8 MiB** of message text
-summed over every cached peer **as `serde_json` writes it** (`"` and `\` cost 2,
-control characters 6 or 2, everything else its UTF-8 length), past which the
-least recently touched peers are evicted whole. The row bound alone left every
-row at maximum length free to reach about 80 MB; the byte bound is what takes the
-worst case under the budget, and because it counts encoded bytes the text
-portion of the serialised file is at most 8 MiB whatever the text holds.
-Only `CachedMessage.text` is counted: ids, flags and media descriptors are small
-and fixed per row, and the chat list is bounded by its own 500-row cap instead.
-Placeholders, presence and media bytes are never held; the media kind and its
-id are.
+The archive (`app/src/history_store.rs`) is a per-account SQLite database, not a
+file held in memory. What stays resident is one `HistoryCache` window per peer
+the screen has opened — `HISTORY_CACHE_DEPTH` (200) messages each — and the
+SQLite handle. `HistoryFile::get(peer)` consults `ranges` and decodes and unseals
+just that chat's rows on demand; it does not load the rest of the archive. There
+is no peer cap and no byte cap on what is stored: every message of every private
+conversation is kept until `history_limit_bytes` (default 1 GiB, `0` no limit) of
+message text is reached, after which older downloads stop and nothing stored is
+deleted. The chat-list head is `HISTORY_CACHE_CHATS` (500) rows. Placeholders,
+presence and media bytes are never stored; the media kind and its id are.
 
-| | Typical | Worst case |
+The database is created `0600` and opened `journal_mode=WAL`,
+`synchronous=FULL`, a 1 MiB `journal_size_limit`, `cache_size=-256` (256 KiB;
+negative numbers are KiB in SQLite) and `mmap_size=0`. The page cache is pinned
+and the database file is never mapped; WAL mode maps a small `-shm` index whose
+size follows the reader count, not the archive. Sign-out removes the `.db` and
+its `-wal`, `-shm`, `-journal` and `.salt` siblings.
+
+| | Seeded scenario (measured) | Declared worst case |
 | :--- | ---: | ---: |
-| Messages, in memory | about 1 MB | about 8 MiB of text, plus per-row overhead |
-| Messages, on disk | about 1 MB | about 10 MB |
-| Chat list, in memory and on disk | about 100 KB | about 6 MB |
-| A write, briefly | about 3× the cache | about 3× the cache |
+| Messages, in memory (the windows) | 6,400 rows, about 1 MB | peers opened × 200 rows |
+| Archive, per conversation | a few MB | one conversation may hold the whole limit |
+| Archive, total | 3.29 MB (6,400 rows, 801,144 text bytes) | `history_limit_bytes` of text plus sealed-record and SQLite overhead per row |
+| Resident page cache | 256 KiB | 256 KiB, pinned; `mmap_size=0` |
+| A write, briefly | one transaction | 46.2 MB process peak (see below) |
 
-The typical figure is 6,400 rows of an ordinary message's size and is declared,
-not measured. The worst case is the byte bound filled: 8 MiB of encoded text,
-which on disk is about 10 MB once JSON framing is counted.
-The chat list's worst case is 500 previews at Telegram's 4,096-character limit in
-three-byte UTF-8 — about 12 KB each. Sealing adds about 44 bytes
-of envelope and leaves the encoded copy the same JSON length. A write holds the
-cache, the clone the encoder takes of it and the serialised bytes at once, the
-clone dropped once the bytes exist; a launch holds the file's bytes and the
-parsed payload together while it reads. The feed's *seen* map
+Disk per chat has no separate bound: a single conversation can occupy the whole
+limit. The limit counts message text only; the file also carries a sealed
+envelope (44 bytes) and an address-bearing JSON `Record` per message, plus the
+`meta`, `ranges` and `chips` tables, the 16-byte salt and up to a journal-sized
+batch of WAL frames. At the seeded workload's ~125-byte average text the
+3.29 MB archive is about 4.1x the text; longer messages carry proportionally
+less overhead. This is a measured ratio, not a bound — the bound is the configured
+text total, and the file may exceed it by the per-row overhead. The chat list's
+own worst case is 500 previews at Telegram's 4,096-character limit in three-byte
+UTF-8, about 12 KB each, sealed in the state blob. The feed's *seen* map
 (`FeedMarks::seen`) is outside the peer bound: 16 bytes of payload, plus the
 map's node overhead, for each peer that received an arrival in the session, and
 never evicted until the process ends.
@@ -723,36 +753,25 @@ conversation opened, and the whole of it is bounded by (conversations visited ×
 the budget, so no named constant beyond the depth and no eviction were added.
 Declared, not measured.
 
-**The worst case, measured, and what it does not show.** The bound counts
-*encoded* bytes, so control-character text, which JSON escapes to six bytes a
-character, can no longer inflate the serialised copy past the budget. Evidence is
-the in-crate test `cache_worst_case_full_budget_write_is_measured` (6,400 rows of
-`U+0001`, release, `cargo test -p televim --release --all-features --bin televim
-cache_worst_case -- --include-ignored --nocapture --test-threads=1`, Darwin
-`arm64`): encoded text 8,371,200 B, serialised file 8,735,744 B (1.04x; the same
-fill under the old raw-byte count was 8,384,000 B of text serialising to
-50,668,544 B, 6.04x). Process RSS around the write rose from a 9.8 MB baseline to
-a **60.4 MB peak** (the old accounting: 21.1 MB to 231.8 MB), and a re-open peaked
-at 62.7 MB. **That peak is above the 50 MB budget, and this section no longer
-declares otherwise.** The earlier arithmetic (about 46 MB: cache, the encoder's
-clone and the serialised bytes, about 3x, plus a 4 MB baseline) was too low: the
-write also seals and re-opens the envelope to verify it, which holds the
-serialised bytes, the ciphertext and the re-opened plaintext at once, and the test
-seals with a passphrase provider whose Argon2id derivation takes 19 MiB (a
-likely, unprofiled share of the peak; the keyring provider derives nothing). The
-bound removes the escaping blow-up, a 3.8x lower peak, and nothing more.
-Whether a shipped session reaches 60 MB was not measured, and no band guards this
-figure: it comes from an ignored test that, re-run when the baseline was
-re-recorded, read the same 60.4 MB write peak and 62.7 MB load peak (an earlier
-run read 62.8 MB on load); it is not in `make measure`. It is a recorded finding,
-not headroom. Removing copies (sealing and
-verifying in place, not cloning the cache for the encoder) is the follow-up, named
-in [`known-gaps.md`](./known-gaps.md). The chat list's worst case of about 6 MB
-is on top of this fill in a real session and is not in the test. The typical case
-adds about a megabyte resident and a few megabytes briefly per write, inside the
-margin the measured figures leave. The total is recomputed on each eviction
-rather than kept as a counter, which cannot drift; a maintained counter is the
-alternative if that ever shows up in a profile.
+**The write peak, measured this stage.** The old whole-file writer cloned the
+cache for the encoder and held the serialised bytes, the sealed envelope and the
+re-opened verification copy at once; the ignored test
+`cache_worst_case_full_budget_write_is_measured` (6,400 rows of `U+0001`, release,
+`cargo test -p televim --release --all-features --bin televim cache_worst_case --
+--include-ignored --nocapture --test-threads=1`) read a **60.4 MB write peak and
+62.7 MB load peak** against a 9.8 MB baseline — above the 50 MB budget, and the
+follow-up was recorded in [`known-gaps.md`](./known-gaps.md). Re-run on the
+archive at stage 04 on this host (Darwin `arm64`): encoded text 8,371,200 B,
+serialised payload 8,735,744 B (1.04x), baseline RSS 10.1 MB, **write peak
+46.2 MB and load peak 46.5 MB**. Both are inside the 50 MB budget, so that gap is
+closed; the whole-buffer clone and its escaping blow-up are gone with the
+whole-file write. The remaining peak is the test's passphrase provider and its
+19 MiB Argon2id derivation (the production file-key provider derives nothing),
+plus the window snapshot, the encoded payload and the per-record seals living
+briefly at once. No band guards this figure: it comes from an ignored test, not
+`make measure`, and is a recorded finding rather than headroom. The chat list's
+worst case of about 6 MB is on top of this fill in a real session and is not in
+the test.
 
 What the change moves that the harness does measure is binary size. Measured on
 this host (Darwin 27.0.0, `arm64`, the pinned `rustc 1.98.1`), two `make measure`
@@ -821,7 +840,7 @@ what was actually found.
 
 Chosen against the baseline above, and the alternatives were `tikv-jemallocator`
 and `mimalloc`. The tree is already inside both ceilings with two to three times
-of margin — **6,488,432 B** stripped against < 15 MB, and **3.24 MB** / **7.36 MB** / **7.55 MB**
+of margin — **9,428,464 B** stripped against < 15 MB, and **4.15 MB** / **8.05 MB** / **8.08 MB**
 RSS@idle against < 50 MB — so a candidate would have to give some of it back to
 be worth adopting. The workload is not the one those allocators target: a
 single-threaded current-thread `tokio` plus one reader thread, not many threads
