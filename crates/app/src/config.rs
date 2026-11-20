@@ -157,6 +157,13 @@ impl Default for TranslationSettings {
     }
 }
 
+/// The default most bytes of message text one account's archive keeps: 1 GiB.
+///
+/// A heavy but ordinary account fits in this; past it the client stops asking
+/// for older history rather than deleting anything it has stored. A configured
+/// `history_limit_bytes = 0` turns the limit off entirely.
+pub const DEFAULT_HISTORY_LIMIT_BYTES: u64 = 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -308,6 +315,15 @@ pub struct Config {
     /// their size; this is the byte half of that bound.
     pub media_cache_max_bytes: Option<u64>,
 
+    /// The most encoded bytes of message text one account's history archive keeps.
+    ///
+    /// Unset, the cap is [`DEFAULT_HISTORY_LIMIT_BYTES`] (1 GiB). `0` means no
+    /// limit: older history keeps downloading. Past the cap the client stops
+    /// asking for older pages and says so on the status line; nothing already
+    /// stored is deleted to make room. Set with `history_limit_bytes` or
+    /// `TELEVIM_HISTORY_LIMIT_BYTES`.
+    pub history_limit_bytes: Option<u64>,
+
     /// How many back/forward marks each conversation's jumplist keeps.
     ///
     /// Unset, the default is [`DEFAULT_DEPTH`] (100). Allowed 1 to 1000. The
@@ -364,6 +380,7 @@ impl Default for Config {
             session_kdf_lanes: None,
             media_cache_dir: None,
             media_cache_max_bytes: None,
+            history_limit_bytes: None,
             jumplist_depth: None,
             viewer: None,
             viewer_image: None,
@@ -546,6 +563,16 @@ impl Config {
             passes: self.session_kdf_passes.unwrap_or(default.passes),
             lanes: self.session_kdf_lanes.unwrap_or(default.lanes),
         }
+    }
+
+    /// The most encoded bytes of message text the history archive keeps.
+    ///
+    /// The key set, or [`DEFAULT_HISTORY_LIMIT_BYTES`] (1 GiB) when it is not.
+    /// Zero is returned as zero: no limit, not a tiny one.
+    #[must_use]
+    pub fn history_limit_bytes(&self) -> u64 {
+        self.history_limit_bytes
+            .unwrap_or(DEFAULT_HISTORY_LIMIT_BYTES)
     }
 
     /// The number of back/forward marks each conversation's jumplist keeps.
@@ -1145,6 +1172,31 @@ mod tests {
         unsafe { std::env::remove_var("TELEVIM_MEDIA_CACHE_MAX_BYTES") };
 
         assert_eq!(cfg.media_cache_max_bytes, Some(536_870_912));
+    }
+
+    /// The history limit is a configured byte count, not a compile-time bound.
+    /// Unset it is 1 GiB; zero means no limit and stays zero.
+    #[test]
+    fn the_history_limit_bytes_is_configured_and_defaults_to_one_gib() {
+        let _turn = ENV.lock().expect("the environment lock is not poisoned");
+        assert_eq!(
+            Config::default().history_limit_bytes(),
+            DEFAULT_HISTORY_LIMIT_BYTES
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "televim-cfg-history-cap-{}.toml",
+            std::process::id()
+        ));
+        for (text, expected) in [
+            ("history_limit_bytes = 12345\n", 12_345),
+            ("history_limit_bytes = 0\n", 0),
+        ] {
+            std::fs::write(&path, text).expect("a temp file can be written");
+            let cfg = Config::load(&path).expect("a file with the key loads");
+            assert_eq!(cfg.history_limit_bytes(), expected);
+        }
+        std::fs::remove_file(&path).expect("the temp file can be removed");
     }
 
     /// The cache directory is read from the file under its own key.

@@ -653,14 +653,16 @@ Working today:
   when it does not; the cursor, the draft, the register and the scroll position
   stay with the account that left, because a message id is that account's sequence
   and means nothing in another's.
-- **History cache:** media bytes are not in this file; they are in the media cache
-  (see **Media** above). The newest 200 messages of each of the 32 most recently
-  touched private conversations (at most 8 MiB of JSON-encoded message text in all; the least
-  recently touched conversations go first), and the first 500 rows of the chat list,
-  are kept in `televim.history.json` beside the config — sealed with the session
+- **History cache:** media bytes are not in this archive; they are in the media cache
+  (see **Media** above). Every message read from a private conversation, the first
+  500 rows of the chat list and the reader's local names are kept in a per-account
+  SQLite archive (`televim.history.db`) beside the config — sealed with the session
   file's envelope and key, `0600`, written atomically and off the loop's thread,
   behind every page, feed event and list change, with writes coalesced within 500 ms
-  and flushed on exit. A launch with a warm cache draws the cached chat list and the first
+  and flushed on exit. Nothing stored is evicted. Past `history_limit_bytes`
+  (or `TELEVIM_HISTORY_LIMIT_BYTES`; default 1 GiB, `0` means no limit) of encoded
+  message text, older history stops downloading and the status line says
+  `archive full — older history stops here`. A launch with a warm cache draws the cached chat list and the first
   conversation (or the `--chat` one, when the cache holds it) **before any network
   round trip**, under `connecting…`; the `Ready` that follows refreshes the list
   around the reader, and the newest page replaces the cached rows, with
