@@ -653,7 +653,7 @@ Working today:
   when it does not; the cursor, the draft, the register and the scroll position
   stay with the account that left, because a message id is that account's sequence
   and means nothing in another's.
-- **History cache:** media bytes are not in this archive; they are in the media cache
+- **History archive:** media bytes are not in this archive; they are in the media cache
   (see **Media** above). Every message read from a private conversation, the first
   500 rows of the chat list and the reader's local names are kept in a per-account
   SQLite archive (`televim.history.db`) beside the config — sealed with the session
@@ -675,10 +675,11 @@ Working today:
   never are. Queued and failed text belongs to the separate text outbox above.
   The file is tagged with the signed-in account's id and checked once `Ready`
   names the account; another account's file is discarded. A page fetched under a
-  feed that has since ended is dropped. The file is removed on sign-out and when a
-  launch finds no session. A plaintext file from an older build is read once and
-  rewritten sealed; that reader goes after 2026-12-31, and a plaintext file is then
-  treated as corrupt.
+  feed that has since ended is dropped. The archive is removed on sign-out and when a
+  launch finds no session. A plaintext `history.json` from an older build is
+  warned about once and left on disk — it is neither read nor migrated nor
+  deleted; a row in the archive that is not a valid sealed envelope is treated
+  as corrupt.
 - **Stable release checks:** after the first frame, Televim checks GitHub once
   per day for a newer stable release. The check runs off the event loop; network
   failure does not delay launch. `updates = "off"` or `TELEVIM_UPDATES=off`

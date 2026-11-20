@@ -786,26 +786,37 @@ through the existing pipeline. After `MediaSaved`, `spawn_blocking` copies the
 cached file to the requested path; tilde expansion happens in `app`, before the
 copy. Neither upload reads nor file copies block the current-thread event loop.
 
-`history_store.rs` owns the history file (`televim.toml` → `televim.history.json`)
-and the cache it holds: the newest `HISTORY_CACHE_DEPTH` (200, asserted equal to
-`CONVERSATION_WINDOW`) messages of each of at most `HISTORY_CACHE_PEERS` (32)
-private peers, and the head of the chat list, at most `HISTORY_CACHE_CHATS` (500)
+`history_store.rs` owns the per-account history archive (`televim.toml` →
+`televim.history.db`) and the in-memory window it seeds. That window is the newest
+`HISTORY_CACHE_DEPTH` (200, once asserted equal to `CONVERSATION_WINDOW`) messages
+of a private peer; it bounds what the screen draws, not what is stored. The
+archive keeps every message it is given for every private peer — no peer cap, no
+byte cap, no eviction — up to `history_limit_bytes` (default 1 GiB, `0` means no
+limit), past which older history stops downloading rather than any stored row
+being deleted. The head of the chat list is at most `HISTORY_CACHE_CHATS` (500)
 rows with no presence. It lives in `app` for the drafts file's reason — `domain`
 and `tui` own no filesystem — and what crosses out of it is plain
-`domain::message::Message` and `domain::chat::Chat`, never its own rows. A cached
+`domain::message::Message` and `domain::chat::Chat`, never its own rows. A stored
 row keeps the message's text, direction, timestamp, reply-to id, media kind and
 Telegram media id: the ids travel with the message, so a row restored from the
-file finds a forwarded copy in the media cache with no fetch. Every
-rule in it is a pure function over `HistoryCache`: `merge` folds a fetched page in
+archive finds a forwarded copy in the media cache with no fetch. Every rule in
+it is a pure function over `HistoryCache`: `merge` folds a fetched page in
 (`PageKind::Latest`, `Older`, `Newer` or `Around`, the fetch's terms restated so
-the module names no `proto` type), `apply_update` folds a feed event in, `arrive`
-adds an arrival or a numbered send, `feed_interrupted` forgets which runs are
-current, and the least recently touched peer is evicted past the bound. The file
-is read and written by `HistoryFile` alone: one atomic, `0600` payload of
-`{ account, peers, chats }` JSON, bounded by `HISTORY_CACHE_BYTES` (8 MiB of
-JSON-encoded message text) as well as the row bounds, sealed in the session file's `TVIM1`
-envelope through the same key provider (a legacy plaintext file is read once and
-rewritten sealed), best effort on every failure.
+the module names no `proto` type), `apply_update` folds a feed event in and
+persists reactions and pins, `arrive` adds an arrival or a numbered send, and
+`feed_interrupted` forgets which runs are current. The disk is owned by
+`HistoryFile` alone: one SQLite `.db` per account, created `0600` and opened with
+`journal_mode=WAL`, `synchronous=FULL`, `cache_size=-256`, `mmap_size=0`, a bounded
+journal and `fullfsync` on macOS. A `meta` table holds schema version 1, the
+sealed archive key and the sealed state blob (account tag, chat-list head,
+aliases); `messages` holds one sealed record per message, `ranges` the runs a
+chat is known to hold, and `chips` the bounded reaction and pin state. Each
+record carries its own address inside its sealed plaintext and checks it on
+read; the chat key is HMAC-SHA256 of the chat id under a key derived from the
+archive key, so the file names no conversation in the clear. Sign-out removes
+the database and its WAL, shared-memory, journal and salt siblings; the legacy
+`history.json` is left untouched with one warning. Every failure is a warning,
+not an abort.
 
 The data flows one way through three places. **`runtime.rs`** loads the file once
 at launch and keeps it only when `history_acceptable` allows it — a file tagged
@@ -837,7 +848,7 @@ leave the cache marked, and the loop's tick brings the pass that writes the lot
 (`persist_history` takes `now`, so no timer is involved), while `finish_history`
 flushes on exit regardless of the window; sign-out and a
 `Ready` with no session call `forget_history`, which empties the cache and
-removes the file behind any write still going. `seed_opened` runs on every open
+removes the archive behind any write still going. `seed_opened` runs on every open
 — from `begin_latest`, and from `drive` alone while there is no client, so a
 reader switching chats offline still sees cached rows — and only for an empty
 window the cursor does not yet name. **`tui`** takes the seed through
@@ -849,8 +860,8 @@ page in flight, and it is what puts `REVALIDATING_LABEL` on the status line.
 a cached window is no longer the empty window that used to be the guard. `tui`
 names no file and no `proto` type on the way.
 
-The per-peer cache does not reopen the flat-window decision in `domain`: it is a
-store of what was read, one layer up, and the window it seeds is the same single
+The archive does not reopen the flat-window decision in `domain`: it is a store
+of what was read, one layer up, and the window it seeds is the same single
 bounded window as before.
 
 Nothing about the account is required. `Config` reads `TELEVIM_API_ID`,
