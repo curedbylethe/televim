@@ -18,6 +18,10 @@ All notable changes to televim are recorded here. The format follows
 - **tui:** Hand a focused Arabic draft to the terminal as stored
 - **tui:** Mirror the focused RTL caret and selection onto emitted cells
 - **app:** Stop waiting on the macOS platform opener
+- **app:** Post macOS notifications through osascript
+- **app:** Borrow the notice in the notify-rust path
+- **app:** End osascript options before the notice text
+- **app:** Log a failed osascript call as a failure
 
 ## [0.15.0] - 2026-11-17
 
