@@ -609,7 +609,9 @@ the media directory and the session target from the configuration and its own
 path, so a run's files, its credential-store entry and the profile panel's description
 cannot disagree about whose they are. `AccountSlot::Legacy` is the slot every
 install has, and reproduces today's bytes exactly: `televim.drafts.json`,
-`televim.history.json`, `televim.outbox.json`, `televim.media` (or
+`televim.history.json` — the stem the active archive `televim.history.db`
+derives from; a leftover stem file from an older install is never read —
+`televim.outbox.json`, `televim.media` (or
 `media_cache_dir`), and the `session` entry or the configured `session_path`. `AccountSlot::Id(id)` is an account added
 later, and its five paths are the same names with `.<id>` — the files and the
 media directory as `<stem>.<id>.*`, a configured session file with `.<id>` before

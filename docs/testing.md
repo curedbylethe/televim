@@ -660,21 +660,22 @@ Build the release binary with `make build-release`. Run it with
 configuration and account throughout. The `conversation open measured` log
 line is emitted after the newest page has been applied and a frame drawn.
 
-- **Cold open after connection:** with the app stopped, move its history file
-  (for `televim.toml`, `televim.history.json` or `televim.<account-id>.history.json`)
-  to a safe backup. The history basename follows the selected config; do not
+- **Cold open after connection:** with the app stopped, move its history archive
+  (for `televim.toml`, `televim.history.db` or `televim.<account-id>.history.db`,
+  plus any `-wal`, `-shm` and `.salt` siblings) to a safe backup. The history
+  basename follows the selected config; do not
   move the account index, session, or drafts. Start the app,
   wait for the chat list to connect, then open five different conversations with
   messages. Each must report `seeded=false`. Stop the app and restore the
-  original history file when finished.
+  original archive when finished.
 - **Warm open:** with the original history restored and the app connected, open
   a conversation, leave with `h`, then reopen it five times using `:chat <id>`
   or the chat list. Each measured reopen must report `seeded=true`; keep the
   conversation in the 32-peer history cache.
-- **Cold launch:** with the app stopped, back up the history file, then run
+- **Cold launch:** with the app stopped, back up the history archive, then run
   `RUST_LOG=info TELEVIM_MEASURE=1 target/release/televim --config <config> --chat <id>`.
-  Save the log, stop the app, and move its newly written history file aside
-  before each of five launches. Restore the original history file afterward. Use a conversation
+  Save the log, stop the app, and move its newly written archive and siblings aside
+  before each of five launches. Restore the original archive afterward. Use a conversation
   with messages and require `seeded=false`.
 
 Record the five values, median, minimum and maximum for each case, with the
