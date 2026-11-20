@@ -1,8 +1,8 @@
 //! Read messages on disk: the history file beside the configuration.
 //!
-//! The last [`HISTORY_CACHE_DEPTH`] messages of each private conversation, and
-//! the chat list they were read from, so a launch can paint the list and a
-//! conversation before the wire has answered. It lives here for the drafts
+//! The messages of each private conversation, and the chat list they were read
+//! from, so a launch can paint the list and a conversation before the wire has
+//! answered. It lives here for the drafts
 //! file's reason: `domain` and `tui` own no filesystem, and this is the crate
 //! that owns the configuration path. What crosses out of it is plain
 //! [`domain::message::Message`] and [`domain::chat::Chat`] values, never the
@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use domain::chat::{Chat, ChatKind};
-use domain::history::{CONVERSATION_WINDOW, PINNED_IDS, REACTION_ENTRIES};
+use domain::history::{PINNED_IDS, REACTION_ENTRIES};
 use domain::message::{MediaKind, Message, MessageStatus, Reaction, ReactionCount};
 use domain::updates::UpdateEvent;
 use hmac::{Hmac, Mac};
@@ -43,47 +43,31 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use telegram_framework::{KeyProvider, sealed};
 
-/// How many messages of one conversation the file keeps.
+/// How many messages of one conversation the in-memory window keeps.
 ///
-/// Exactly one [`CONVERSATION_WINDOW`]: a cache hit fills the window the
-/// conversation opens into with no wire follow-up, and keeping more would be
-/// rows the window drops on arrival. Named apart from the window rather than
-/// reusing it because the two are different promises — that one is memory,
-/// this one is disk — and the assertion below is what keeps them equal until
-/// someone decides they should not be.
+/// The screen shows one window of 200 messages, and a cache hit fills it with
+/// no wire follow-up. The archive keeps every message it is given: this bounds
+/// the memory copy, not what is stored. Named apart from a
+/// `CONVERSATION_WINDOW` because the two are different promises — one is a
+/// window on the screen, the other is what is on disk — and only the screen
+/// needs them equal.
 pub(crate) const HISTORY_CACHE_DEPTH: usize = 200;
 
-const _: () = assert!(HISTORY_CACHE_DEPTH == CONVERSATION_WINDOW);
-
-/// How many conversations the file keeps messages for.
+/// How many conversations' read marks the loop keeps, as a working set.
 ///
-/// The depth bounds one conversation and this bounds how many, so the cache
-/// has a worst case that can be written down rather than one that grows with
-/// every conversation the reader ever opens. Thirty-two is a working set, not
-/// an archive: more conversations than a reader moves between in a sitting,
-/// and far fewer than an account holds — the chat list still names every one
-/// of them, and a conversation past the bound opens the way an uncached one
-/// always has, from the wire. At [`HISTORY_CACHE_DEPTH`] rows each it is 6 400
-/// rows at most, which at a typical message's size is about a megabyte, on
-/// disk and in memory alike.
-///
-/// The one past the bound that goes is the one least recently *touched* — see
-/// [`HistoryCache::touch`] for what that means and why.
+/// Read marks are names, not stored messages: thirty-two is more conversations
+/// than a reader moves between in a sitting. Messages of every conversation
+/// are kept in the archive, with no bound here.
 pub(crate) const HISTORY_CACHE_PEERS: usize = 32;
 
-/// How many JSON-encoded bytes of message text the file keeps, summed over
-/// every cached conversation.
+/// The encoded text budget the worst-case measurement is filled to.
 ///
-/// Rows bound a conversation and conversations bound the file, but neither
-/// bounds *size*: a row can carry 4,096 characters, so 6 400 rows could hold
-/// tens of megabytes. This is the bound that does, and the one the worst case
-/// in `docs/memory.md` is declared from. It counts [`CachedMessage::text`]
-/// only — ids, flags and media descriptors are small and fixed per row, and the
-/// chat list is capped by [`HISTORY_CACHE_CHATS`] — and past it the least
-/// recently touched conversations go whole, as past [`HISTORY_CACHE_PEERS`].
-/// The count is of *encoded* bytes ([`encoded_len`]), so the text portion of
-/// the serialised file is at most eight MiB whatever the text holds, and lands
-/// near ten megabytes on disk once JSON framing is counted.
+/// No longer a bound on what is stored: nothing in the archive is evicted, and
+/// the configured limit in `Config` is what stops a download. It remains the
+/// number the worst-case write test fills to, so a change in the cost of a
+/// message is measured rather than silently absorbed. See [`encoded_len`] for
+/// how a byte is counted.
+#[allow(dead_code)]
 pub(crate) const HISTORY_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 /// How many conversations of the chat list the file keeps.
@@ -165,10 +149,10 @@ impl LoadedHistory {
 /// Keyed by the bare peer id, the way the drafts are: the product shows only
 /// private conversations, and deciding which peers those are is the caller's
 /// business — the chat list has already vetted them by the time a window is
-/// open. Every peer holds at least one message and at most
-/// [`HISTORY_CACHE_DEPTH`], and none of them is a local placeholder; an empty
-/// peer is no entry rather than an empty one. At most
-/// [`HISTORY_CACHE_PEERS`] peers are held.
+/// open. Every peer holds at least one message and none of them is a local
+/// placeholder; an empty peer is no entry rather than an empty one. Nothing
+/// held here is dropped to make room — a full archive stops older downloads
+/// instead.
 ///
 /// A `BTreeMap` for the drafts file's reason: the same cache always
 /// serialises to the same bytes.
@@ -178,18 +162,6 @@ pub(crate) struct HistoryCache {
 
     /// What this session's update feed has said about the cached runs.
     feed: FeedMarks,
-
-    /// When each peer was last touched, as a count of touches: what picks the
-    /// peer to evict past [`HISTORY_CACHE_PEERS`].
-    ///
-    /// **Memory only**, like the feed marks. A file's peers come back
-    /// untouched, and among untouched peers the one whose newest message is
-    /// oldest goes first — the nearest thing to recency a file records without
-    /// growing a field for it.
-    touched: BTreeMap<i64, u64>,
-
-    /// The count the next touch is stamped with.
-    clock: u64,
 
     /// The reader's own names for people, keyed by peer id.
     ///
@@ -337,14 +309,12 @@ impl HistoryCache {
             self.remove(peer);
         } else {
             self.peers.insert(peer, rows);
-            self.evict();
         }
     }
 
     /// Forgets everything cached for `peer`.
     pub(crate) fn remove(&mut self, peer: i64) {
         self.peers.remove(&peer);
-        self.touched.remove(&peer);
         self.aliases.remove(&peer);
         self.reactions.remove(&peer);
         self.pinned.remove(&peer);
@@ -367,69 +337,20 @@ impl HistoryCache {
         }
     }
 
-    /// Stamps `peer` as the most recently touched, which keeps it out of the
-    /// next eviction.
+    /// The JSON-encoded bytes of message text held, over every cached peer.
     ///
-    /// **Touched means written from the wire**: a page folded into its run —
-    /// whether or not it changed a row, because a newest page landing is the
-    /// reader opening the conversation — or a message added to it. Those are
-    /// the only ways a peer enters the cache, so they are where a peer has to
-    /// be stamped before an eviction can run. Seeding a window is not a touch:
-    /// a conversation seeded online is followed by its newest page, which is
-    /// one; and offline nothing enters the cache, so nothing is evicted.
-    fn touch(&mut self, peer: i64) {
-        self.clock += 1;
-        self.touched.insert(peer, self.clock);
-    }
-
-    /// The JSON-encoded bytes of message text held, over every cached peer:
-    /// what [`HISTORY_CACHE_BYTES`] bounds, so the text portion of the
-    /// serialised file never exceeds it. See [`encoded_len`] for the rule.
-    /// Summed on demand — at most 6 400 rows — so there is no counter to drift
-    /// from the rows.
+    /// Kept as the measure the worst-case tests fill to; see
+    /// [`HISTORY_CACHE_BYTES`]. The on-disk fullness answer is
+    /// [`HistoryFile::text_bytes`], which reads the archive rather than this
+    /// in-memory copy. Summed on demand so there is no counter to drift from
+    /// the rows.
+    #[allow(dead_code)]
     fn encoded_text_bytes(&self) -> usize {
         self.peers
             .values()
             .flatten()
             .map(|row| encoded_len(&row.text))
             .sum()
-    }
-
-    /// Drops peers until at most [`HISTORY_CACHE_PEERS`] are left and their
-    /// text fits [`HISTORY_CACHE_BYTES`], the least recently touched first.
-    ///
-    /// Untouched peers — what a file held — go before any touched one, the
-    /// one whose newest message is oldest first; the peer id breaks a tie, so
-    /// the choice is the same on every run.
-    ///
-    /// **The feed marks follow.** An evicted peer is no longer current: its
-    /// run is gone, and a current mark on nothing would let the next arrival
-    /// start a run of one message and call it the conversation's newest end
-    /// with everything before it missing. What the feed has *seen* stays, for
-    /// [`FeedMarks::seen`]'s reason — the message exists whether or not it is
-    /// cached — so a page fetched before it still cannot mark a returning
-    /// peer current.
-    fn evict(&mut self) {
-        while self.peers.len() > HISTORY_CACHE_PEERS
-            || self.encoded_text_bytes() > HISTORY_CACHE_BYTES
-        {
-            let touched = &self.touched;
-            let Some(oldest) = self
-                .peers
-                .iter()
-                .min_by_key(|(peer, rows)| {
-                    (
-                        touched.get(peer).copied().unwrap_or(0),
-                        rows.last().map_or(i64::MIN, |row| row.timestamp),
-                    )
-                })
-                .map(|(peer, _)| *peer)
-            else {
-                return;
-            };
-            self.remove(oldest);
-            self.feed.current.remove(&oldest);
-        }
     }
 
     /// Folds a page the wire answered with into what is cached for `peer`,
@@ -558,12 +479,10 @@ impl HistoryCache {
         }
 
         let unchanged = cached == Some(&merged);
-        self.touch(peer);
         if unchanged {
             return false;
         }
         self.peers.insert(peer, merged);
-        self.evict();
         true
     }
 
@@ -704,8 +623,6 @@ impl HistoryCache {
         }
         let excess = rows.len().saturating_sub(HISTORY_CACHE_DEPTH);
         rows.drain(..excess);
-        self.touch(peer);
-        self.evict();
         true
     }
 
@@ -733,7 +650,6 @@ impl HistoryCache {
     /// one the feed had overtaken.
     fn delete(&mut self, ids: &[i64]) -> bool {
         let FeedMarks { current, seen } = &mut self.feed;
-        let touched = &mut self.touched;
         let mut changed = false;
         self.peers.retain(|peer, rows| {
             let before = rows.len();
@@ -746,9 +662,6 @@ impl HistoryCache {
                         None => seen.remove(peer),
                     };
                 }
-            }
-            if rows.is_empty() {
-                touched.remove(peer);
             }
             !rows.is_empty()
         });
@@ -1159,6 +1072,30 @@ impl HistoryFile {
         }
         let store = open_store(&self.path, Arc::clone(&self.keys)).ok()?;
         store.text_bytes().ok()
+    }
+
+    /// The stretches of `peer` the archive holds, oldest first.
+    ///
+    /// SQL-backed, like [`HistoryFile::get`], so a caller can check what a
+    /// fetch left behind without reading every row into memory.
+    #[allow(dead_code)]
+    pub(crate) fn ranges(&self, peer: i64) -> Vec<(i64, i64)> {
+        if !self.path.is_file() {
+            return Vec::new();
+        }
+        let Ok(store) = open_store(&self.path, Arc::clone(&self.keys)) else {
+            return Vec::new();
+        };
+        store.ranges(peer).unwrap_or_default()
+    }
+
+    /// Whether the archive has reached `limit` bytes of message text.
+    ///
+    /// `0` means no limit, and an archive that cannot be read is not full: the
+    /// next write either repairs it or the wire refills it. A limit is read
+    /// from configuration, never fixed here.
+    pub(crate) fn full(&self, limit: u64) -> bool {
+        limit != 0 && self.text_bytes().is_some_and(|used| used as u64 >= limit)
     }
 
     /// Stores `cache` under the phone `account`: [`HistoryFile::encode`] then
@@ -1927,7 +1864,7 @@ impl Store {
     /// run without sharing a row with it. Ids alone would only be a guess, so
     /// a page whose reach touches no recorded range — with any range recorded —
     /// is refused and changes nothing. A page joining two ranges bridges them
-    /// into one, and retention drops from the front, so a range only narrows.
+    /// into one; nothing already stored is dropped, so a range only widens.
     ///
     /// Returns whether anything was written.
     #[allow(dead_code)]
@@ -1976,46 +1913,11 @@ impl Store {
             .unwrap_or(hi)
             .max(hi);
 
-        let count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM messages WHERE chat_key = ?1",
-            params![chat_key],
-            |row| row.get(0),
+        transaction.execute(
+            "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat_key, lo_id) DO UPDATE SET hi_id = excluded.hi_id",
+            params![chat_key, new_lo, new_hi],
         )?;
-        let limit = i64::try_from(HISTORY_CACHE_DEPTH)
-            .map_err(|_| anyhow!("the history depth does not fit an id"))?;
-        let excess = count.saturating_sub(limit).max(0);
-        if excess > 0 {
-            transaction.execute(
-                "DELETE FROM messages WHERE chat_key = ?1 AND message_id IN
-                 (SELECT message_id FROM messages WHERE chat_key = ?1 ORDER BY message_id LIMIT ?2)",
-                params![chat_key, excess],
-            )?;
-        }
-        let lowest: Option<i64> = transaction.query_row(
-            "SELECT MIN(message_id) FROM messages WHERE chat_key = ?1",
-            params![chat_key],
-            |row| row.get(0),
-        )?;
-        if let Some(lowest) = lowest {
-            // Retention drops from the front only, so a range can narrow but
-            // never split: drop the ones wholly gone and clamp the rest.
-            transaction.execute(
-                "DELETE FROM ranges WHERE chat_key = ?1 AND hi_id < ?2",
-                params![chat_key, lowest],
-            )?;
-            transaction.execute(
-                "UPDATE ranges SET lo_id = ?2 WHERE chat_key = ?1 AND lo_id < ?2",
-                params![chat_key, lowest],
-            )?;
-        }
-        let lo = lowest.unwrap_or(new_lo).max(new_lo);
-        if lo <= new_hi {
-            transaction.execute(
-                "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(chat_key, lo_id) DO UPDATE SET hi_id = excluded.hi_id",
-                params![chat_key, lo, new_hi],
-            )?;
-        }
         transaction.commit()?;
         Ok(true)
     }
@@ -2255,6 +2157,11 @@ mod tests {
             live.iter().all(|path| path.exists()),
             "all live siblings exist"
         );
+        let other = HistoryFile::new(file.path.clone(), other_keys());
+        assert!(
+            other.get(PEER).is_empty(),
+            "another account cannot read these rows before sign-out"
+        );
 
         file.clear();
 
@@ -2268,6 +2175,10 @@ mod tests {
             file.load(),
             LoadedHistory::empty(),
             "nothing survives sign-out"
+        );
+        assert!(
+            other.get(PEER).is_empty(),
+            "and no other account reads the rows afterwards"
         );
         drop(open);
     }
@@ -2358,6 +2269,22 @@ mod tests {
         // archive and decodes just the stored stretch for one chat.
         assert_eq!(ids(&file.get(PEER)), vec![1, 2]);
         assert_eq!(file.text_bytes(), Some(cache.encoded_text_bytes()));
+    }
+
+    #[test]
+    fn the_fullness_answer_compares_stored_bytes_with_the_configured_limit() {
+        let (dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "four words of text")]);
+        file.save(&cache, None);
+        let used = file.text_bytes().expect("the archive reads");
+
+        assert!(file.full(1), "one byte is below what is stored");
+        assert!(!file.full(used as u64 + 1), "one byte more is room");
+        assert!(!file.full(0), "zero is no limit, however full the archive");
+
+        let empty = HistoryFile::for_test(dir.path().join("empty.history.json"));
+        assert!(!empty.full(1), "an archive that does not exist is not full");
     }
 
     /// The slot's label keys the tag: an id slot's file carries the id, the
@@ -3578,119 +3505,6 @@ mod tests {
         }
     }
 
-    // ---- the peer bound --------------------------------------------------
-
-    fn peer_count() -> i64 {
-        i64::try_from(HISTORY_CACHE_PEERS).expect("the bound fits an id")
-    }
-
-    /// A latest page of one message for `peer`, with an id of its own.
-    fn land(cache: &mut HistoryCache, peer: i64) -> bool {
-        cache.merge(peer, &[message(peer * 1000, peer, "row")], LATEST)
-    }
-
-    #[test]
-    fn the_peer_bound_evicts_the_least_recently_touched() {
-        let mut cache = HistoryCache::default();
-        for peer in 1..=peer_count() {
-            assert!(land(&mut cache, peer));
-        }
-        assert!(
-            !land(&mut cache, 1),
-            "the same page again changes no row, and still touches the peer"
-        );
-
-        assert!(land(&mut cache, peer_count() + 1));
-
-        assert_eq!(cache.peers.len(), HISTORY_CACHE_PEERS);
-        assert!(!cache.get(1).is_empty(), "touched last but one, so kept");
-        assert!(
-            cache.get(2).is_empty(),
-            "the least recently touched is the one that went"
-        );
-        assert!(!cache.get(peer_count() + 1).is_empty());
-        assert!(
-            !cache.touched.contains_key(&2),
-            "and nothing is kept about it"
-        );
-    }
-
-    #[test]
-    fn an_arrival_touches_its_peer() {
-        let mut cache = HistoryCache::default();
-        for peer in 1..=peer_count() {
-            assert!(land(&mut cache, peer));
-        }
-        assert!(cache.arrive(&message(1001, 1, "new")), "1 is current");
-
-        assert!(land(&mut cache, peer_count() + 1));
-
-        assert!(!cache.get(1).is_empty(), "the arrival kept 1");
-        assert!(cache.get(2).is_empty());
-    }
-
-    /// An evicted peer has no run, so it is not current — the next arrival
-    /// does not start a run of one — while what the feed saw of it stays, so
-    /// a page fetched before that message cannot mark it current either.
-    #[test]
-    fn eviction_keeps_the_feed_marks_consistent() {
-        let mut cache = HistoryCache::default();
-        assert!(cache.merge(PEER, &page(1..=3), LATEST));
-        assert!(cache.apply_update(&arrival(4)));
-        for peer in 100..100 + peer_count() {
-            assert!(land(&mut cache, peer));
-        }
-        assert!(cache.get(PEER).is_empty(), "evicted");
-        assert!(!cache.feed.current.contains(&PEER));
-        assert_eq!(cache.feed.seen.get(&PEER), Some(&4));
-
-        assert!(
-            !cache.apply_update(&arrival(5)),
-            "no run, so nothing to join and nothing started"
-        );
-        assert!(cache.get(PEER).is_empty());
-
-        assert!(cache.merge(PEER, &page(1..=3), LATEST), "it comes back");
-        assert!(
-            !cache.apply_update(&arrival(6)),
-            "a page short of 5 is not current"
-        );
-        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
-    }
-
-    /// A file holding more peers than the bound — written before the bound,
-    /// or by hand — keeps those whose newest message is newest.
-    #[test]
-    fn a_file_past_the_peer_bound_keeps_the_newest_conversations() {
-        let (_dir, file) = scratch("history.json");
-        let peers: BTreeMap<i64, Vec<CachedMessage>> = (1..=peer_count() + 2)
-            .map(|peer| {
-                // Peer 1's message is the newest of all; 2 and 3 the oldest.
-                let at = if peer == 1 { 10_000 } else { peer };
-                let mut row = CachedMessage::from_message(&message(peer, peer, "row"));
-                row.timestamp = at;
-                (peer, vec![row])
-            })
-            .collect();
-        let payload = Payload {
-            account: None,
-            account_id: None,
-            peers,
-            chats: Vec::new(),
-            aliases: BTreeMap::new(),
-            chips: BTreeMap::new(),
-        };
-        seed(
-            &file,
-            serde_json::to_vec(&payload).expect("the payload serialises"),
-        );
-
-        let cache = file.load().cache;
-        assert_eq!(cache.peers.len(), HISTORY_CACHE_PEERS);
-        assert!(!cache.get(1).is_empty());
-        assert!(cache.get(2).is_empty() && cache.get(3).is_empty());
-    }
-
     /// A hand-written peer deeper than the cap is cut on load, oldest first.
     #[test]
     fn an_over_deep_file_is_cut_to_the_cap_on_load() {
@@ -3717,75 +3531,6 @@ mod tests {
         assert_eq!(kept.first(), Some(&2));
     }
 
-    /// A message of `len` bytes of text for `peer`.
-    fn big(id: i64, peer: i64, len: usize) -> Message {
-        message(id, peer, &"x".repeat(len))
-    }
-
-    #[test]
-    fn the_byte_budget_evicts_the_least_recently_touched() {
-        let third = HISTORY_CACHE_BYTES / 3 + 1;
-        let mut cache = HistoryCache::default();
-        for peer in 1..=3 {
-            assert!(cache.merge(peer, &[big(1, peer, third)], LATEST));
-        }
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(cache.get(1).is_empty(), "the least recently touched went");
-        assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
-        assert!(!cache.touched.contains_key(&1));
-        assert!(!cache.feed.current.contains(&1));
-    }
-
-    /// One message larger than the whole budget cannot be kept at all.
-    #[test]
-    fn a_five_megabyte_message_does_not_leave_the_cache_over_budget() {
-        let five = 5 * 1024 * 1024;
-        let mut cache = HistoryCache::default();
-        assert!(cache.merge(1, &[big(1, 1, five)], LATEST));
-        assert!(!cache.get(1).is_empty(), "5 MiB alone fits 8 MiB");
-        assert!(cache.merge(2, &[big(1, 2, five)], LATEST));
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(cache.get(1).is_empty(), "the older giant is gone");
-        assert!(!cache.get(2).is_empty());
-
-        assert!(cache.merge(3, &[big(1, 3, HISTORY_CACHE_BYTES + 1)], LATEST));
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(
-            cache.get(3).is_empty(),
-            "over budget on its own, it goes too"
-        );
-    }
-
-    #[test]
-    fn a_file_past_the_byte_budget_is_cut_on_load() {
-        let (_dir, file) = scratch("history.json");
-        let third = HISTORY_CACHE_BYTES / 3 + 1;
-        let peers: BTreeMap<i64, Vec<CachedMessage>> = (1..=3)
-            .map(|peer| {
-                let mut row = CachedMessage::from_message(&big(1, peer, third));
-                row.timestamp = peer;
-                (peer, vec![row])
-            })
-            .collect();
-        let payload = Payload {
-            account: None,
-            account_id: None,
-            peers,
-            chats: Vec::new(),
-            aliases: BTreeMap::new(),
-            chips: BTreeMap::new(),
-        };
-        seed(
-            &file,
-            serde_json::to_vec(&payload).expect("the payload serialises"),
-        );
-
-        let cache = file.load().cache;
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(cache.get(1).is_empty(), "the oldest conversation went");
-        assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
-    }
-
     // ---- Worst case: control-character text at the byte budget -------------
 
     #[test]
@@ -3806,20 +3551,6 @@ mod tests {
             let json = serde_json::to_string(text).expect("a string serialises");
             assert_eq!(encoded_len(text), json.len() - 2, "{text:?}");
         }
-    }
-
-    #[test]
-    fn the_budget_counts_encoded_bytes_not_raw_length() {
-        // Two rows of about half the budget encoded, a twelfth raw: together
-        // they fit by `len` many times over, so only the encoded count evicts.
-        let mut cache = HistoryCache::default();
-        let n = HISTORY_CACHE_BYTES / 6 / 2 + 1;
-        for peer in 1..=2 {
-            assert!(cache.merge(peer, &[message(1, peer, &"\u{1}".repeat(n))], LATEST));
-        }
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(cache.get(1).is_empty(), "the least recently touched went");
-        assert!(!cache.get(2).is_empty());
     }
 
     /// A cache at the document's shape: [`HISTORY_CACHE_PEERS`] conversations of
@@ -4116,6 +3847,30 @@ mod tests {
             store.all_records(PEER).expect("rows read").len(),
             11,
             "every row is still held, in one stretch"
+        );
+    }
+
+    #[test]
+    fn ingest_keeps_every_row_past_the_window_depth() {
+        let (_dir, _file, mut store) = scratch_store("history.json");
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let ids: Vec<i64> = (1..=depth + 5).collect();
+
+        assert!(
+            store
+                .ingest_page(PEER, &rows(ids.iter().copied()), (1, depth + 5))
+                .expect("the page lands")
+        );
+
+        assert_eq!(
+            store.all_records(PEER).expect("rows read").len(),
+            ids.len(),
+            "nothing is trimmed to make room for a page"
+        );
+        assert_eq!(
+            store.ranges(PEER).expect("ranges read"),
+            vec![(1, depth + 5)],
+            "the range names every row it holds"
         );
     }
 

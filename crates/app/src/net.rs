@@ -72,7 +72,7 @@ use tui::app::{Action, App, ConnectionState, FetchDirection, Jump, JumpKind, Log
 use tui::state::playback::NowPlaying;
 
 use crate::accounts::{self, AccountSlot, SessionTarget, SlotPaths, SlotStore};
-use crate::config::{Config, ReadReceiptMode};
+use crate::config::{Config, DEFAULT_HISTORY_LIMIT_BYTES, ReadReceiptMode};
 use crate::draft_store::DraftFile;
 use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
@@ -97,6 +97,10 @@ const PAGE: usize = 100;
 /// never mark is a row the marker would disagree with — and the list is drawn, so
 /// more than this is a list nobody scrolls to the end of.
 const PINNED_LIMIT: usize = domain::history::PINNED_IDS;
+
+/// Why a short run stops: the archive has reached its configured limit, so
+/// older history is not downloaded. Not a failure, so not `history:`.
+const ARCHIVE_FULL_LABEL: &str = "archive full — older history stops here";
 
 /// Catch-up replay older than this cannot interrupt the reader.
 const NOTIFY_FRESH_SECS: i64 = 120;
@@ -1227,6 +1231,31 @@ impl State {
             .map_or_else(ReadReceiptMode::default, Config::read_receipt_mode)
     }
 
+    /// Latches the archive-full answer when an older page is wanted, and says
+    /// so on the status line.
+    ///
+    /// The answer is a read of the store against the configured limit, asked
+    /// only at the point it matters and only until it first says full: nothing
+    /// stored is ever removed, so a later check cannot go back to false. The
+    /// line is written on every pass that wants older, so a reconnect that
+    /// replaced the status still shows why the run is short.
+    fn note_archive_full(&mut self, app: &mut App) -> bool {
+        if !self.history.full && app.wants_older() {
+            let limit = self
+                .cfg
+                .as_ref()
+                .map_or(DEFAULT_HISTORY_LIMIT_BYTES, Config::history_limit_bytes);
+            self.history.full = self
+                .history_file
+                .as_ref()
+                .is_some_and(|file| file.full(limit));
+        }
+        if self.history.full && app.wants_older() {
+            app.set_status(ARCHIVE_FULL_LABEL);
+        }
+        self.history.full
+    }
+
     fn owe_read_after_send(&mut self, generation: u64, chat_id: i64) {
         if generation == self.outbox_generation && self.read_receipts() == ReadReceiptMode::OnSend {
             self.read_owed.insert(chat_id);
@@ -1767,6 +1796,9 @@ impl State {
     /// removal is queued behind the write in flight, which would otherwise
     /// land after it and put the file back.
     fn forget_history(&mut self) {
+        // The archive this answered for is gone: the next account starts with
+        // room, whatever the last one held. A reconnect never calls this.
+        self.history.full = false;
         self.cached.messages = HistoryCache::default();
         self.cached.tag = HistoryTag::default();
         self.cached.dirty = false;
@@ -2030,6 +2062,13 @@ struct History {
     /// The conversation whose page failed, which is the only one `retry_at`
     /// holds. `None` holds every conversation, as a hold with no owner always did.
     retry_peer: Option<i64>,
+
+    /// Whether the archive has reached its configured size limit.
+    ///
+    /// Latched: the archive is append-only, so once full it stays full until
+    /// the account's files are cleared. A reconnect re-reads no state that
+    /// could unset it, and a page is never asked for below this line.
+    full: bool,
 }
 
 /// What the conversation on show needs next.
@@ -3208,6 +3247,11 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         request_read(&client, chat_id, max_id, generation, tx);
     }
 
+    // The fullness answer is read from the archive when an older page is first
+    // wanted and then held until sign-out. Saying it here rather than in
+    // `wanted` keeps that decision pure, and keeps the line visible across a
+    // reconnect, which can replace the status but not the answer.
+    state.note_archive_full(app);
     let next = wanted(app, state.history, Instant::now());
     // An arrival in the open conversation asks for the marker again, through the
     // same target as opening does. A Latest does its own just below, once its
@@ -3434,8 +3478,10 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
     }
 
     // Older first: a window shorter than the margin is near both of its ends at
-    // once, and the reader is more often looking for what came before.
-    if app.wants_older() {
+    // once, and the reader is more often looking for what came before. A full
+    // archive is the one refusal: there is room for nothing older, so the page
+    // is not asked for and the reader is told why by the driver's status line.
+    if app.wants_older() && !history.full {
         return Wanted::Page(FetchDirection::Older, cursor);
     }
     if app.wants_newer() {
@@ -8224,6 +8270,7 @@ mod tests {
             jump: None,
             retry_at: None,
             retry_peer: None,
+            full: false,
         }
     }
 
@@ -8273,6 +8320,65 @@ mod tests {
             wanted(&app, opened(CHAT), Instant::now()),
             Wanted::Page(FetchDirection::Older, HistoryCursor::new(CHAT))
         );
+    }
+
+    #[test]
+    fn a_full_archive_does_not_ask_for_what_came_before() {
+        let mut app = app_with_a_conversation(CHAT, 40);
+        scroll_up(&mut app, 39);
+        let full = History {
+            full: true,
+            ..opened(CHAT)
+        };
+
+        assert_eq!(
+            wanted(&app, full, Instant::now()),
+            Wanted::Nothing,
+            "the archive is full, so no older page is issued"
+        );
+    }
+
+    /// A real archive over its configured limit: the fullness answer comes
+    /// from the store, the older page is not asked for, and nothing stored —
+    /// neither rows nor their recorded stretches — changes.
+    #[test]
+    fn a_full_archive_stops_older_pages_without_changing_stored_rows() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let file = HistoryFile::for_test(dir.path().join("televim.history.json"));
+        let mut cache = HistoryCache::default();
+        cache.put(CHAT, &messages(CHAT, 1..=3));
+        file.save(&cache, None);
+
+        let mut app = app_with_a_conversation(CHAT, 40);
+        scroll_up(&mut app, 39);
+        let mut state = State {
+            cfg: Some(Config {
+                history_limit_bytes: Some(1),
+                ..Config::default()
+            }),
+            history: opened(CHAT),
+            ..State::default()
+        };
+        state.set_history_file(file.clone());
+
+        let rows: Vec<i64> = file.get(CHAT).iter().map(|row| row.id).collect();
+        let ranges = file.ranges(CHAT);
+        assert!(
+            state.note_archive_full(&mut app),
+            "the store is over its limit"
+        );
+        assert_eq!(app.status_text(), ARCHIVE_FULL_LABEL);
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Nothing,
+            "no older request is issued"
+        );
+        assert_eq!(
+            file.get(CHAT).iter().map(|row| row.id).collect::<Vec<_>>(),
+            rows,
+            "the stored rows are untouched"
+        );
+        assert_eq!(file.ranges(CHAT), ranges, "and so are their ranges");
     }
 
     #[test]
@@ -8692,6 +8798,7 @@ mod tests {
             jump: None,
             retry_at: Some(now + RETRY),
             retry_peer: None,
+            full: false,
         };
         assert_eq!(wanted(&app, holding, now), Wanted::Nothing);
 
@@ -11438,6 +11545,43 @@ mod tests {
         }
     }
 
+    /// A reconnect replaces the cursor and the status, not the fullness: the
+    /// archive the new feed sees is the same archive, so older pages stay
+    /// stopped and the reader is told again.
+    #[test]
+    fn reconnect_does_not_reset_the_archive_full_answer() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT, 1..=40);
+        state.history.full = true;
+        open_pass(&mut app, &mut state);
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=40),
+        );
+        scroll_up(&mut app, 39);
+
+        apply(&mut app, &mut state, Event::FeedEnded);
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT), chat(CHAT + 1)],
+            Ok(domain::account::Account::default()),
+            tui::SessionStore::Keyring,
+        );
+        open_pass(&mut app, &mut state);
+        scroll_up(&mut app, 39);
+
+        assert!(state.history.full, "the reconnect did not clear the answer");
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Nothing,
+            "and the older page is still not asked for"
+        );
+    }
+
     /// The reconnect race: a newest page asked of the dead client lands after
     /// the feed ended and a new `Ready` came, with the same conversation
     /// reopened. It names the same peer, so only its generation tells it apart.
@@ -12783,6 +12927,7 @@ mod tests {
                 }),
                 retry_at: Some(Instant::now() + RETRY),
                 retry_peer: None,
+                full: false,
             },
             ..State::default()
         };
@@ -14409,6 +14554,7 @@ mod tests {
                 }),
                 retry_at: Some(Instant::now() + RETRY),
                 retry_peer: None,
+                full: false,
             },
             ..State::default()
         };
