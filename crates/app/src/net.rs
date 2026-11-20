@@ -2585,12 +2585,14 @@ fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEve
     }
 }
 
-/// Re-seals the session file, and the history cache beside it, under `new`.
+/// Re-seals the session file, and the history archive beside it, under `new`.
 ///
 /// The current file is opened first with the current key, so a key that does
-/// not open it fails here, before anything is written. The session is written
-/// before the history: the cache is rebuilt from the wire if the second step
-/// fails, the session is not.
+/// not open it fails here, before anything is written. The archive is re-sealed
+/// before the session is written, because the archive holds what only the wire
+/// once had and a failed re-seal leaves it untouched; a session that then fails
+/// to write is put right by re-sealing the archive back under the current key,
+/// and the reader is told when even that does not work.
 fn change_passphrase(
     cfg: &Config,
     history: Option<&HistoryFile>,
@@ -2614,8 +2616,8 @@ fn change_passphrase(
     if new.trim().is_empty() {
         return Err("the passphrase cannot be empty".to_owned());
     }
-    let current =
-        FileStore::with_key_provider(path, key_provider_for_session(cfg, Some(path), &keyring));
+    let current_keys = key_provider_for_session(cfg, Some(path), &keyring);
+    let current = FileStore::with_key_provider(path, Arc::clone(&current_keys));
     let data = match current.load() {
         Ok(Some(data)) => data,
         Ok(None) => return Err(format!("there is no session in {}", path.display())),
@@ -2623,11 +2625,24 @@ fn change_passphrase(
     };
     let next: Arc<dyn KeyProvider> =
         Arc::new(PassphraseProvider::with_params(new, cfg.kdf_params()));
-    FileStore::with_key_provider(path, Arc::clone(&next))
-        .save(&data)
-        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
     if let Some(history) = history {
-        history.reseal(next);
+        history.reseal(next.as_ref())?;
+    }
+    if let Err(error) = FileStore::with_key_provider(path, Arc::clone(&next)).save(&data) {
+        if let Some(history) = history
+            && let Err(back) = history
+                .clone()
+                .rekeyed(Arc::clone(&next))
+                .reseal(current_keys.as_ref())
+        {
+            tracing::warn!(%back, "the history archive could not be put back");
+            return Err(format!(
+                "could not write {}: {error}; the history archive is under the new \
+                 passphrase and could not be put back",
+                path.display()
+            ));
+        }
+        return Err(format!("could not write {}: {error}", path.display()));
     }
     Ok(())
 }
@@ -16404,6 +16419,44 @@ mod session_store_tests {
             std::fs::read(&history_salt).expect("the salt is still there"),
             salt_bytes,
             "and no salt"
+        );
+    }
+
+    /// The archive does not open under the key the change is reading with: the
+    /// change fails before the session is written, so a reader whose passphrase
+    /// did not change keeps an archive that still opens.
+    #[test]
+    fn a_history_archive_that_cannot_be_resealed_leaves_the_session_alone() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let history_path = dir.path().join("history.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("old")))
+            .save(&snapshot(7, 9))
+            .expect("a session is written");
+        HistoryFile::new(
+            history_path.clone(),
+            Arc::new(PassphraseProvider::new("other")),
+        )
+        .save(&crate::history_store::HistoryCache::default(), Some("+1"));
+        let history = HistoryFile::new(
+            history_path.clone(),
+            Arc::new(PassphraseProvider::new("wrong")),
+        );
+
+        let cfg = file_config(&path, Some("old"));
+        let error = change_passphrase(&cfg, Some(&history), "new", || Arc::new(NoKeyring))
+            .expect_err("the archive does not open under this key");
+
+        assert!(error.contains("could not be read"), "{error}");
+        assert!(
+            sealed_under(&path, "old"),
+            "the session is still sealed under the passphrase it had"
+        );
+        assert!(!sealed_under(&path, "new"));
+        assert_eq!(
+            history_tag_under(&history_path, "other").as_deref(),
+            Some("+1"),
+            "and the archive still opens under the key it was written with"
         );
     }
 
