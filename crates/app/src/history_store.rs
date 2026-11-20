@@ -31,6 +31,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
 use domain::chat::{Chat, ChatKind};
@@ -95,6 +96,12 @@ pub(crate) struct HistoryFile {
     /// The key source the session file uses, so the records are sealed under
     /// the same key and no second secret exists.
     keys: Arc<dyn KeyProvider>,
+
+    /// Set when a present archive could not be read. A write then has nothing
+    /// it may replace: an ingest would stack new rows on a file whose old rows
+    /// are unknown, and a full rewrite would drop them. Only sign-out, which
+    /// removes the archive, clears it.
+    poisoned: Arc<AtomicBool>,
 }
 
 /// What [`HistoryFile::load`] found: the stored account tags and the cache.
@@ -924,16 +931,21 @@ impl HistoryFile {
             path: archive_path(&path),
             legacy: path,
             keys,
+            poisoned: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// The same archive, sealed under `keys` from here on.
+    ///
+    /// The poison travels with it: a rekey of an archive that could not be read
+    /// still has nothing it may write over.
     #[must_use]
     pub(crate) fn rekeyed(self, keys: Arc<dyn KeyProvider>) -> Self {
         Self {
             path: self.path,
             legacy: self.legacy,
             keys,
+            poisoned: self.poisoned,
         }
     }
 
@@ -958,6 +970,7 @@ impl HistoryFile {
             path: self.path.clone(),
             legacy: self.legacy.clone(),
             keys: to,
+            poisoned: self.poisoned.clone(),
         }
         .write(&bytes);
     }
@@ -976,7 +989,10 @@ impl HistoryFile {
     /// A missing database is an empty cache, not an error; a database that
     /// cannot be opened, a record that is not sealed, and any record whose
     /// plaintext does not name the address it was filed under are warned about
-    /// and read as empty. What a readable archive holds goes through
+    /// and read as empty. Only a missing database reads as empty without
+    /// consequence: a failure poisons the handle, so no save can write over an
+    /// archive whose contents are unknown until sign-out removes it. What a
+    /// readable archive holds goes through
     /// [`HistoryCache::put`], so a hand-written or older archive is held to the
     /// same bounds as one this build wrote. The legacy `history.json`, if it
     /// still exists, is warned about once and left where it is — never read,
@@ -989,7 +1005,11 @@ impl HistoryFile {
             Ok(Some(payload)) => Self::from_payload(payload),
             Ok(None) => LoadedHistory::empty(),
             Err(error) => {
-                tracing::warn!(%error, "history archive could not be read; starting empty");
+                tracing::warn!(
+                    %error,
+                    "history archive could not be read; it is left as it is and nothing is written over it"
+                );
+                self.poisoned.store(true, Ordering::Relaxed);
                 LoadedHistory::empty()
             }
         }
@@ -1188,6 +1208,15 @@ impl HistoryFile {
     /// For the one caller that owes the reader an answer: a rename is text they
     /// typed, and a file that cannot hold it must not look as though it did.
     pub(crate) fn try_write(&self, bytes: &[u8]) -> Result<(), String> {
+        if self.poisoned.load(Ordering::Relaxed) {
+            tracing::warn!(
+                "history save refused: the archive could not be read when it was opened"
+            );
+            return Err(
+                "the history archive could not be read; sign out to clear it before saving again"
+                    .to_owned(),
+            );
+        }
         let payload: Payload = serde_json::from_slice(bytes)
             .map_err(|error| format!("history could not be read for writing: {error}"))?;
         self.store_payload(&payload)
@@ -1215,9 +1244,12 @@ impl HistoryFile {
     }
 
     /// Logout calls this, and a failed delete must not fail the logout, so the
-    /// failure is a warning and the return is nothing.
+    /// failure is a warning and the return is nothing. The reader asked for the
+    /// archive to go, so a poison from an unreadable archive is lifted with it:
+    /// the next save starts a fresh file rather than being refused forever.
     pub(crate) fn clear(&self) {
         self.remove_archive();
+        self.poisoned.store(false, Ordering::Relaxed);
     }
 }
 
@@ -4148,6 +4180,78 @@ mod tests {
         let loaded = file.load().cache;
         assert!(loaded.get(PEER).is_empty());
         assert_eq!(loaded.get(PEER + 1).len(), 3);
+    }
+
+    #[test]
+    fn a_damaged_archive_is_not_written_over_until_sign_out() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=3));
+        file.save(&cache, None);
+
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET sealed = x'00' WHERE message_id = 2",
+                [],
+            )
+            .expect("the row is damaged");
+        drop(store);
+
+        let loaded = file.load();
+        assert!(
+            loaded.cache.get(PEER).is_empty(),
+            "a damaged archive reads as empty"
+        );
+
+        let mut later = HistoryCache::default();
+        later.put(PEER, &page(900..=902));
+        file.save(&later, None);
+
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .expect("the rows count");
+        assert_eq!(rows, 3, "the refused save left every stored row");
+        let written: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE message_id >= 900",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the later rows count");
+        assert_eq!(written, 0, "the refused save wrote nothing");
+
+        file.clear();
+        file.save(&later, None);
+        let reopened =
+            open_store(&file.path, Arc::clone(&file.keys)).expect("a fresh archive opens");
+        assert_eq!(
+            reopened
+                .all_records(PEER)
+                .expect("rows read")
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![900, 901, 902],
+            "sign-out lifts the refusal and the next save starts a new archive"
+        );
+    }
+
+    #[test]
+    fn a_missing_archive_never_refuses_a_save() {
+        let (_dir, file) = scratch("history.json");
+        assert!(file.load().cache.peers.is_empty());
+
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=3));
+        file.save(&cache, None);
+
+        let loaded = file.load().cache;
+        assert_eq!(ids(&loaded.get(PEER)), vec![1, 2, 3]);
     }
 
     #[test]
