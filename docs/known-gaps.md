@@ -7,7 +7,7 @@ Real, and named so they are not mistaken for oversights:
   profile is elsewhere, launch once from its directory or pass `--config` with
   its path; after adoption, the pointer finds it from any directory.
 
-- **The media cache has five known limits.**
+- **The media cache has four known limits.**
   - *Same-account sign-back-in clears the cache.* Sign-out removes the account tag,
     so signing back in under the same phone re-tags an empty directory. Kept on
     purpose: the cache is the account's, and sign-out ends the account.
@@ -18,8 +18,6 @@ Real, and named so they are not mistaken for oversights:
     only when no cache directory can be found, where the cache does not survive and
     the warning says so. If the chosen fallback is unwritable too, `o` says the media
     could not be cached.
-  - *Legacy temp files are left.* Files named `televim-<pid>-…` from before the cache
-    are not migrated or swept; the OS temp cleanup reclaims them.
   - *A viewer's file is the one exception to a clear.* A path handed to the viewer is
     held until the viewer reports (`ViewerDone`) or fails to start. Eviction and `clear`
     leave the file on disk; a sign-out or account change does not wait for the viewer.

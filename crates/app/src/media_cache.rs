@@ -21,6 +21,10 @@
 //! directory is an empty cache, a failed write is warned about and skipped, and
 //! nothing here fails the run. Diagnostics go to `tracing`, never the terminal.
 //!
+//! The `televim-<pid>-…` files an earlier version left in the system temp
+//! directory are swept at load, in that directory only and without migration;
+//! a fresh one whose pid is not this process is left alone.
+//!
 //! The atomic-write helper is a fourth copy of the drafts and history ones, on
 //! purpose: those live in sibling modules of a binary crate, and sharing one
 //! would widen a security-sensitive surface for thirty lines.
@@ -74,6 +78,69 @@ fn download_temp_pid(name: &str) -> Option<u32> {
     let (pid, counter) = body.split_once('-')?;
     counter.parse::<u64>().ok()?;
     pid.parse().ok()
+}
+
+/// The prefix of a legacy `televim-<pid>-<chat>-<message>.<suffix>` file in the
+/// system temp directory, plus the `<name>.part` sibling of its atomic write.
+/// Only the pid is parsed: chat id, message id and suffix say nothing about
+/// ownership, and the `.part` has no media suffix at all.
+const LEGACY_TEMP_PREFIX: &str = "televim-";
+
+/// The pid in a legacy temp name, or `None` for anything else. A name with no
+/// byte after the pid's dash is not one of ours.
+fn legacy_temp_pid(name: &str) -> Option<u32> {
+    let (pid, rest) = name.strip_prefix(LEGACY_TEMP_PREFIX)?.split_once('-')?;
+    if rest.is_empty() {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// Whether a temp file is ours to sweep: this process wrote it, whatever its
+/// mtime, or another process last wrote it long enough ago that no live writer
+/// owns it. An unknown pid or mtime is left alone.
+fn sweep_owned(pid: Option<u32>, modified: Option<SystemTime>) -> bool {
+    match pid {
+        Some(pid) if pid == std::process::id() => true,
+        Some(_) => modified
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > DOWNLOAD_TEMP_MAX_AGE),
+        None => false,
+    }
+}
+
+/// Sweeps `televim-<pid>-…` files from `root`, top level only: the form an
+/// earlier version wrote to the system temp directory. Nothing is migrated, as
+/// the cache has no key for them. A root that cannot be read or a file that
+/// cannot be removed is warned about and skipped, so an open never fails over
+/// leftover files.
+fn sweep_legacy_temps(root: &Path) {
+    let read = match fs::read_dir(root) {
+        Ok(read) => read,
+        Err(error) => {
+            tracing::warn!(%error, "the legacy media temp directory could not be read");
+            return;
+        }
+    };
+    for entry in read.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(pid) = legacy_temp_pid(name) else {
+            continue;
+        };
+        let modified = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
+        if !sweep_owned(Some(pid), modified) {
+            continue;
+        }
+        if let Err(error) = fs::remove_file(entry.path()) {
+            tracing::warn!(%error, "a legacy media temp file could not be removed");
+        }
+    }
 }
 
 /// Every extension a cached file can carry: one per kind in [`suffix`], plus the
@@ -370,17 +437,25 @@ impl MediaCache {
             Some(cache) => cache.join("televim"),
             None => std::env::temp_dir(),
         };
-        Self::open_in(dir, &fallback_root, account, max_bytes)
+        Self::open_in(
+            dir,
+            &fallback_root,
+            &std::env::temp_dir(),
+            account,
+            max_bytes,
+        )
     }
 
-    /// [`MediaCache::open`] with the fallback root passed in, so tests can
-    /// point it at a temp dir of their own.
+    /// [`MediaCache::open`] with the fallback and legacy temp roots passed in,
+    /// so tests can point both at temp dirs of their own.
     fn open_in(
         dir: PathBuf,
         fallback_root: &Path,
+        legacy_temp_root: &Path,
         account: Option<&str>,
         max_bytes: Option<u64>,
     ) -> Self {
+        sweep_legacy_temps(legacy_temp_root);
         let dir = usable_dir(dir, fallback_root, account);
         Self::with_limits(
             dir,
@@ -1012,21 +1087,14 @@ impl MediaCache {
                 // A streamed download's temp file. It is a crash's leftover only
                 // when this process wrote it or its last write is long past; a
                 // fresh temp of another pid belongs to a live instance.
-                let stale = meta
-                    .modified()
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .map(|age| age > DOWNLOAD_TEMP_MAX_AGE);
-                let sweep = match (download_temp_pid(name), stale) {
-                    (Some(pid), _) if pid == std::process::id() => true,
-                    (Some(_), Some(stale)) => stale,
-                    _ => {
-                        tracing::warn!("a media download temp of unknown ownership was left alone");
-                        false
-                    }
-                };
+                let pid = download_temp_pid(name);
+                let modified = meta.modified().ok();
+                let stale = modified.and_then(|modified| modified.elapsed().ok());
+                let sweep = sweep_owned(pid, modified);
                 if sweep && let Err(error) = fs::remove_file(entry.path()) {
                     tracing::warn!(%error, "an interrupted media download's temp file could not be removed");
+                } else if !sweep && (pid.is_none() || stale.is_none()) {
+                    tracing::warn!("a media download temp of unknown ownership was left alone");
                 }
             }
         }
@@ -1265,7 +1333,11 @@ mod tests {
     use super::*;
 
     fn cache_in(dir: &Path, account: Option<&str>) -> MediaCache {
-        MediaCache::open(dir.to_path_buf(), account, None)
+        MediaCache::open_in(dir.to_path_buf(), dir, dir, account, None)
+    }
+
+    fn cache_with_legacy(dir: &Path, legacy_root: &Path, account: Option<&str>) -> MediaCache {
+        MediaCache::open_in(dir.to_path_buf(), dir, legacy_root, account, None)
     }
 
     /// Sets a key's pointer mtime, to make one key older than another on disk.
@@ -1318,6 +1390,95 @@ mod tests {
         set_mtime(&temp, old).expect("the mtime is set");
         drop(cache_in(dir.path(), None));
         assert!(temp.exists());
+    }
+
+    #[test]
+    fn a_legacy_temp_file_is_swept_on_open() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let legacy = tempfile::tempdir().expect("a legacy temp dir");
+        let file = legacy
+            .path()
+            .join(format!("televim-{}-7-9.jpg", std::process::id()));
+        fs::write(&file, b"picture").expect("the legacy file is written");
+        drop(cache_with_legacy(dir.path(), legacy.path(), None));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_legacy_part_sibling_is_swept() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let legacy = tempfile::tempdir().expect("a legacy temp dir");
+        let part = legacy
+            .path()
+            .join(format!("televim-{}-7-9.jpg.part", std::process::id()));
+        fs::write(&part, b"half a picture").expect("the part is written");
+        drop(cache_with_legacy(dir.path(), legacy.path(), None));
+        assert!(!part.exists());
+    }
+
+    #[test]
+    fn a_fresh_legacy_temp_file_of_another_pid_is_kept() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let legacy = tempfile::tempdir().expect("a legacy temp dir");
+        let file = legacy
+            .path()
+            .join(format!("televim-{}-7-9.jpg", std::process::id() + 1));
+        fs::write(&file, b"picture").expect("the legacy file is written");
+        drop(cache_with_legacy(dir.path(), legacy.path(), None));
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn a_stale_legacy_temp_file_of_another_pid_is_swept() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let legacy = tempfile::tempdir().expect("a legacy temp dir");
+        let file = legacy
+            .path()
+            .join(format!("televim-{}-7-9.jpg", std::process::id() + 1));
+        fs::write(&file, b"picture").expect("the legacy file is written");
+        let old = SystemTime::now() - DOWNLOAD_TEMP_MAX_AGE - Duration::from_hours(1);
+        set_mtime(&file, old).expect("the mtime is set");
+        drop(cache_with_legacy(dir.path(), legacy.path(), None));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn an_unremovable_legacy_entry_is_warned_about_and_load_continues() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let legacy = tempfile::tempdir().expect("a legacy temp dir");
+        let entry = legacy
+            .path()
+            .join(format!("televim-{}-x", std::process::id()));
+        fs::create_dir(&entry).expect("a directory is made");
+        let cache = cache_with_legacy(dir.path(), legacy.path(), None);
+        assert!(entry.exists(), "a directory is not removed as a file");
+        assert!(cache.entries.is_empty(), "the cache still loaded");
+    }
+
+    #[test]
+    fn a_legacy_temp_sweep_leaves_the_cache_directory_alone() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let legacy = tempfile::tempdir().expect("a legacy temp dir");
+        let name = format!("televim-{}-7-9.jpg", std::process::id());
+        let in_cache = dir.path().join(&name);
+        let outside = legacy.path().join(&name);
+        fs::write(&in_cache, b"legacy").expect("the legacy name is written");
+        fs::write(&outside, b"legacy").expect("the legacy name is written");
+
+        let mut cache = cache_with_legacy(dir.path(), legacy.path(), None);
+        let path = cache
+            .store(7, 9, MediaKind::Photo, b"picture")
+            .expect("a small file is cached");
+        drop(cache);
+        let mut reopened = cache_with_legacy(dir.path(), legacy.path(), None);
+
+        assert_eq!(reopened.lookup(7, 9), Some(path.clone()));
+        assert_eq!(fs::read(&path).expect("the blob is there"), b"picture");
+        assert!(
+            in_cache.exists(),
+            "the sweep does not walk the cache directory"
+        );
+        assert!(!outside.exists(), "but the injected root is swept");
     }
 
     #[test]
@@ -2243,6 +2404,7 @@ mod tests {
         let mut cache = MediaCache::open_in(
             unwritable_dir(root.path()),
             &cache_root,
+            root.path(),
             Some("+15550001"),
             None,
         );
@@ -2266,6 +2428,7 @@ mod tests {
         let mut cache = MediaCache::open_in(
             unwritable_dir(root.path()),
             &cache_root,
+            root.path(),
             Some("+15550001"),
             None,
         );
@@ -2279,6 +2442,7 @@ mod tests {
         let mut reopened = MediaCache::open_in(
             unwritable_dir(root.path()),
             &cache_root,
+            root.path(),
             Some("+15550001"),
             None,
         );
@@ -2297,7 +2461,8 @@ mod tests {
         fs::create_dir(&fallback_root).expect("the fallback root is made");
         let configured = unwritable_dir(root.path());
 
-        let cache = MediaCache::open_in(configured.clone(), &fallback_root, None, None);
+        let cache =
+            MediaCache::open_in(configured.clone(), &fallback_root, root.path(), None, None);
 
         assert!(cache.entries.is_empty());
         assert!(!configured.exists(), "the configured path stays absent");
@@ -2338,8 +2503,13 @@ mod tests {
         let root = tempfile::tempdir().expect("a temp dir");
         let fallback_root = root.path().join("tmp");
         fs::create_dir(&fallback_root).expect("the fallback root is made");
-        let mut cache =
-            MediaCache::open_in(unwritable_dir(root.path()), &fallback_root, None, None);
+        let mut cache = MediaCache::open_in(
+            unwritable_dir(root.path()),
+            &fallback_root,
+            root.path(),
+            None,
+            None,
+        );
         let path = cache
             .store(1, 2, MediaKind::Voice, b"voice")
             .expect("cached");
@@ -2358,7 +2528,7 @@ mod tests {
         // The fallback root is under the same regular file, so it is unwritable too.
         let fallback_root = root.path().join("blocker").join("tmp");
 
-        let mut cache = MediaCache::open_in(configured, &fallback_root, None, None);
+        let mut cache = MediaCache::open_in(configured, &fallback_root, root.path(), None, None);
 
         assert_eq!(cache.store(1, 2, MediaKind::Gif, b"gif"), None);
         assert_eq!(cache.lookup(1, 2), None);

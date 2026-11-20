@@ -748,9 +748,13 @@ with the slot's label, which clears the directory on a mismatch. If the configur
 directory cannot be created or written (a probe file), `open` roots the fallback at
 `dirs::cache_dir()/televim/televim.media-<account>` so cached media survives a
 restart, with a `tracing::warn!`; the system temp directory is the root only when
-`dirs::cache_dir()` is `None`, and its warning says the cache will not survive;
+`dirs::cache_dir()` is `None`, and its warning says the cache will not survive.
+`open` also sweeps the `televim-<pid>-…` files an earlier version left in the system
+temp directory, top level only: one written by this process or last written over 24
+hours ago goes, a fresh one of another pid stays, and nothing is migrated. The root
+is injected on the private `open_in`, so tests never walk the real temp directory.
 `net::State`
-holds it behind an `Arc<Mutex>`, cancels every download in flight and clears it at
+holds the cache behind an `Arc<Mutex>`, cancels every download in flight and clears it at
 sign-out, and `save_media` looks up and streams a download into it: the chunks go
 to a temp file through a writer on `spawn_blocking`, hashed as they land, and the
 finished file is renamed to its content-named place and committed, and that commit

@@ -1395,6 +1395,20 @@ are in [`../AGENTS.md`](../AGENTS.md).
   dependency, and pids are reused, so it would answer wrongly in both directions; the
   name and the mtime need only `metadata`. `clear` is unchanged: it is a wipe, not
   housekeeping.
+- **Why the legacy temp files are swept at load, by name and mtime:** an earlier
+  version wrote media to the system temp directory as
+  `televim-<pid>-<chat>-<message>.<suffix>`, with a `.part` sibling from its atomic
+  write, and nothing indexes those names now. Leaving them to the OS temp cleanup
+  was a known gap, so `open` sweeps them at load, top level only, on the root
+  injected into the private `open_in` so tests never walk the real temp directory;
+  nothing is migrated, since the cache has no key to migrate them to. Ownership
+  uses the rule the `.download-` sweep already trusts, shared as one predicate:
+  the pid in the name, plus the 24-hour `DOWNLOAD_TEMP_MAX_AGE` mtime — a file this
+  process wrote is ours whatever its mtime, one another pid last wrote over a day
+  ago is abandoned, and a fresh one of another pid may still have a live writer
+  and stays. Chat and message ids and the suffix are not parsed, so a half-written
+  `.part` is swept too; a name that is not ours is left alone, and a failed removal
+  warns and continues.
 - **Why the media cache stores a fast checksum beside the content hash:** the blob's
   sha256 is its content address and its filename, but nothing re-read the bytes to
   check them, so a truncated or bit-rotted file was served as a hit. A lookup now

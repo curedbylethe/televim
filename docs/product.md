@@ -372,8 +372,9 @@ Working today:
   the cached media survives a restart; only when there is no platform cache directory
   does it fall back to the system temp directory, warning that it will not survive.
   The configured directory is left as it is and the next launch tries it again. Files
-  saved by earlier versions under the temp directory are not migrated or removed; the
-  OS reclaims them. The terminal leaves the alternate screen and raw mode for the
+  named `televim-<pid>-…` saved by earlier versions under the temp directory are swept
+  at launch, except one a live process still holds, whose last write is recent; nothing
+  is migrated. The terminal leaves the alternate screen and raw mode for the
   viewer and comes back where it was. A download is bounded by `media_cache_max_bytes` (the
   quota) and a free-space check, and refused — the status line saying so — when its declared
   size is over the cap or the cache's filesystem has no room for it; otherwise it streams to
