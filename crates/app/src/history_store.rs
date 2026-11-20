@@ -949,30 +949,33 @@ impl HistoryFile {
         }
     }
 
-    /// Re-seals the archive under `to`, when it opens under the current key.
+    /// Re-seals the archive under `to`, saying why when it could not.
     ///
-    /// An archive the current key does not open is left alone: it reads as
-    /// empty under either key. Best-effort like [`HistoryFile::write`]; the
-    /// key change is rebuilt from the records, so the database is made new.
-    pub(crate) fn reseal(&self, to: Arc<dyn KeyProvider>) {
-        let Ok(Some(payload)) = self.read_payload() else {
-            return;
+    /// Every record is read under the current key first, then the whole archive
+    /// is rewritten in one transaction with each envelope sealed under `to` and
+    /// opened again before the commit. Nothing is removed first, so a failure to
+    /// seal, write, or verify leaves the archive exactly as it was rather than
+    /// replacing one that still reads. An archive that does not exist is
+    /// success: there is nothing to carry across.
+    pub(crate) fn reseal(&self, to: &dyn KeyProvider) -> Result<(), String> {
+        let payload = self
+            .read_payload()
+            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
+        let Some(payload) = payload else {
+            return Ok(());
         };
-        let tag = HistoryTag {
-            account_id: payload.account_id,
-            phone: payload.account.clone(),
-        };
-        let Some(bytes) = Self::encode(&Self::from_payload(payload).cache, &tag) else {
-            return;
-        };
-        self.remove_archive();
-        Self {
-            path: self.path.clone(),
-            legacy: self.legacy.clone(),
-            keys: to,
-            poisoned: self.poisoned.clone(),
-        }
-        .write(&bytes);
+        let mut store = open_store(&self.path, Arc::clone(&self.keys))
+            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
+        let ledgers = payload
+            .peers
+            .keys()
+            .map(|chat_id| Ok((*chat_id, store.ranges(*chat_id)?)))
+            .collect::<Result<BTreeMap<_, _>>>()
+            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
+        store
+            .reseal_to(&payload, to, &ledgers)
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        Ok(())
     }
 
     /// A handle sealed under a fixed passphrase, so tests need no keyring.
@@ -1199,11 +1202,12 @@ impl HistoryFile {
     /// messages still in memory — the archive is a head start for the next
     /// launch, and the wire can always refill it. A provider that cannot reach
     /// its key fails in [`Store::open`], before any file is touched.
+    #[cfg(test)]
     pub(crate) fn write(&self, bytes: &[u8]) {
         let _ = self.try_write(bytes);
     }
 
-    /// [`HistoryFile::write`], saying why when the archive was not written.
+    /// The record write, saying why when the archive was not written.
     ///
     /// For the one caller that owes the reader an answer: a rename is text they
     /// typed, and a file that cannot hold it must not look as though it did.
@@ -1840,6 +1844,91 @@ impl Store {
                 params![chat_key, envelope],
             )?;
         }
+        transaction.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![META_STATE, state_envelope],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Re-seals every row of this archive under `to`, in one transaction.
+    ///
+    /// `payload` is the archive as [`HistoryFile::read_payload`] read it under
+    /// the current key, and `ledgers` the stretches each chat held before the
+    /// write, so a gap the reader recorded stays a gap instead of collapsing
+    /// into one stretch that claims rows nobody has. Every envelope is opened
+    /// again under `to` before the transaction commits: a key that cannot seal
+    /// cannot half-rewrite the archive, and the archive key is re-sealed under
+    /// `to` only when everything else already opens with it.
+    fn reseal_to(
+        &mut self,
+        payload: &Payload,
+        to: &dyn KeyProvider,
+        ledgers: &BTreeMap<i64, Vec<(i64, i64)>>,
+    ) -> Result<()> {
+        let state = State {
+            account: payload.account.clone(),
+            account_id: payload.account_id,
+            chats: payload.chats.clone(),
+            aliases: payload.aliases.clone(),
+        };
+        let state_plain = serde_json::to_vec(&state)?;
+        let state_envelope = sealed::seal(&state_plain, to)?;
+        if sealed::open(&state_envelope, to)?.is_none() {
+            return Err(anyhow!("the archive state was sealed as plaintext"));
+        }
+
+        let archive_envelope: Vec<u8> = self.conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![META_ARCHIVE_KEY],
+            |row| row.get(0),
+        )?;
+        let archive_plain = sealed::open(&archive_envelope, self.keys.as_ref())?
+            .ok_or_else(|| anyhow!("the archive key was stored as plaintext"))?;
+        let archive_envelope = sealed::seal(&archive_plain, to)?;
+
+        let transaction = self.conn.transaction()?;
+        transaction.execute("DELETE FROM messages", [])?;
+        transaction.execute("DELETE FROM ranges", [])?;
+        transaction.execute("DELETE FROM chips", [])?;
+        for (chat_id, rows) in &payload.peers {
+            let chat_key = keyed_chat(&self.hmac_key, *chat_id);
+            for row in rows {
+                let (key, envelope) = seal_record(to, &self.hmac_key, *chat_id, row)?;
+                decode_record(&envelope, to, &self.hmac_key, &key, row.id)?;
+                insert_record(&transaction, &key, row.id, &envelope)?;
+            }
+            for (lo, hi) in ledgers.get(chat_id).map_or(&[][..], Vec::as_slice) {
+                transaction.execute(
+                    "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)",
+                    params![chat_key, lo, hi],
+                )?;
+            }
+        }
+        for (chat_id, chips) in &payload.chips {
+            let chat_key = keyed_chat(&self.hmac_key, *chat_id);
+            let record = ChipRecord {
+                chat_key: chat_key.clone(),
+                chat_id: *chat_id,
+                chips: chips.clone(),
+            };
+            let plain = serde_json::to_vec(&record)?;
+            let envelope = sealed::seal(&plain, to)?;
+            if sealed::open(&envelope, to)?.is_none() {
+                return Err(anyhow!("a side table was sealed as plaintext"));
+            }
+            transaction.execute(
+                "INSERT INTO chips (chat_key, sealed) VALUES (?1, ?2)",
+                params![chat_key, envelope],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![META_ARCHIVE_KEY, archive_envelope],
+        )?;
         transaction.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -4252,6 +4341,91 @@ mod tests {
 
         let loaded = file.load().cache;
         assert_eq!(ids(&loaded.get(PEER)), vec![1, 2, 3]);
+    }
+
+    // ---- re-sealing under a new key -------------------------------------
+
+    #[test]
+    fn a_reseal_moves_every_stored_row_to_the_new_key() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let total = depth + 50;
+        let (dir, file) = scratch("history.json");
+        let legacy = dir.path().join("history.json");
+
+        let chips = Chips {
+            reactions: Vec::new(),
+            pinned: vec![3, 4],
+        };
+        file.store_payload(&Payload {
+            account: Some("+1".to_owned()),
+            account_id: Some(7),
+            peers: BTreeMap::from([(
+                PEER,
+                (1..=total)
+                    .map(|id| CachedMessage::from_message(&message(id, PEER, "row")))
+                    .collect::<Vec<_>>(),
+            )]),
+            chats: Vec::new(),
+            aliases: BTreeMap::from([(PEER, "Kept".to_owned())]),
+            chips: BTreeMap::from([(PEER, chips.clone())]),
+            removed: BTreeSet::new(),
+        })
+        .expect("the archive is written");
+
+        let next: Arc<dyn KeyProvider> =
+            Arc::new(telegram_framework::PassphraseProvider::new("new"));
+        file.reseal(next.as_ref())
+            .expect("the archive is re-sealed");
+
+        let moved = HistoryFile::new(legacy.clone(), Arc::clone(&next));
+        assert_eq!(
+            ids(&moved.get(PEER)),
+            (1..=total).collect::<Vec<_>>(),
+            "every row past the window moves to the new key"
+        );
+        assert_eq!(
+            moved.get(PEER).first().map(|row| row.text.to_string()),
+            Some("row".to_owned())
+        );
+        let loaded = moved.load().cache;
+        assert_eq!(loaded.get(PEER).len(), HISTORY_CACHE_DEPTH);
+        assert_eq!(
+            loaded.aliases().get(&PEER).map(String::as_str),
+            Some("Kept")
+        );
+        assert_eq!(
+            loaded.pinned.get(&PEER).map(Vec::as_slice),
+            Some(&[3, 4][..])
+        );
+        assert_eq!(
+            moved.load().account_id,
+            Some(7),
+            "the tag crosses with the rows"
+        );
+
+        let old = HistoryFile::new(legacy, other_keys());
+        assert!(
+            old.load().cache.get(PEER).is_empty(),
+            "the old key no longer opens it"
+        );
+    }
+
+    #[test]
+    fn a_reseal_that_cannot_seal_leaves_every_stored_row() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=5));
+        file.save(&cache, None);
+
+        let error = file.reseal(&Locked).expect_err("a locked key cannot seal");
+        assert!(error.contains("could not be re-sealed"), "{error}");
+
+        assert_eq!(ids(&file.get(PEER)), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            file.load().cache.get(PEER).len(),
+            5,
+            "the archive still reads under the current key"
+        );
     }
 
     #[test]
