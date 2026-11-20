@@ -185,6 +185,11 @@ pub(crate) struct HistoryCache {
     /// apart would be a second place for another account's conversations to
     /// survive.
     chats: Vec<CachedChat>,
+
+    /// Conversations the reader deleted, carried to the next save so an ingest
+    /// write can drop their rows. A peer with rows in the window is never in
+    /// this set: a deleted conversation that gets a new message is alive again.
+    removed: BTreeSet<i64>,
 }
 
 /// Two caches are equal when they would write the same file: the feed marks
@@ -312,12 +317,14 @@ impl HistoryCache {
         }
     }
 
-    /// Forgets everything cached for `peer`.
+    /// Forgets everything cached for `peer`, and names it to the next save so
+    /// the rows in the archive go with it.
     pub(crate) fn remove(&mut self, peer: i64) {
         self.peers.remove(&peer);
         self.aliases.remove(&peer);
         self.reactions.remove(&peer);
         self.pinned.remove(&peer);
+        self.removed.insert(peer);
     }
 
     /// The reader's names, as a borrowed map.
@@ -721,6 +728,10 @@ struct Payload {
     /// table rather than in a message's record.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     chips: BTreeMap<i64, Chips>,
+    /// Chats the reader deleted. An ingest write drops only the rows it names,
+    /// so a removal has to travel with the window.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    removed: BTreeSet<i64>,
 }
 
 /// One conversation of the cached chat list: what its row draws.
@@ -1005,6 +1016,7 @@ impl HistoryFile {
             chats: state.chats,
             aliases: state.aliases,
             chips: store.chips()?,
+            removed: BTreeSet::new(),
         }))
     }
 
@@ -1130,6 +1142,8 @@ impl HistoryFile {
             peers: cache.peers.clone(),
             chats: cache.chats.clone(),
             aliases: cache.aliases.clone(),
+            // Named even when empty: an ingest upsert of an empty side table
+            // is what erases a cleared strip instead of resurrecting it on load.
             chips: cache
                 .peers
                 .keys()
@@ -1137,14 +1151,21 @@ impl HistoryFile {
                 .chain(cache.pinned.keys())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
-                .filter_map(|peer| {
-                    let chips = Chips {
-                        reactions: cache.reactions.get(peer).cloned().unwrap_or_default(),
-                        pinned: cache.pinned.get(peer).cloned().unwrap_or_default(),
-                    };
-                    (!chips.reactions.is_empty() || !chips.pinned.is_empty())
-                        .then_some((*peer, chips))
+                .map(|peer| {
+                    (
+                        *peer,
+                        Chips {
+                            reactions: cache.reactions.get(peer).cloned().unwrap_or_default(),
+                            pinned: cache.pinned.get(peer).cloned().unwrap_or_default(),
+                        },
+                    )
                 })
+                .collect(),
+            removed: cache
+                .removed
+                .iter()
+                .filter(|peer| !cache.peers.contains_key(*peer))
+                .copied()
                 .collect(),
         };
         serde_json::to_vec(&payload)
@@ -1173,11 +1194,11 @@ impl HistoryFile {
             .map_err(|error| format!("history could not be written: {error:#}"))
     }
 
-    /// Opens the archive, replacing its rows and state with `payload` in one
-    /// transaction: a write either lands whole or leaves the previous rows.
+    /// Opens the archive and folds `payload` into it in one transaction: the
+    /// bounded window is an ingest, never a replacement of what is stored.
     fn store_payload(&self, payload: &Payload) -> Result<()> {
         let mut store = open_store(&self.path, Arc::clone(&self.keys))?;
-        store.replace(payload)
+        store.ingest_payload(payload)
     }
 
     /// Removes the database and its WAL, shared-memory, journal and salt
@@ -1635,9 +1656,8 @@ impl Store {
         }
     }
 
-    /// The record layer these three methods make: ingest and range reads build
-    /// on them in the next stage, so they stay even while only the whole-cache
-    /// write path calls [`Store::replace`] today.
+    /// The record layer beneath range reads and ingest: the archive grows by
+    /// records, and a save seals the rows of its window through the same path.
     #[allow(dead_code)]
     fn put_record(&self, chat_id: i64, row: &CachedMessage) -> Result<()> {
         let (chat_key, envelope) = seal_record(self.keys.as_ref(), &self.hmac_key, chat_id, row)?;
@@ -1720,8 +1740,13 @@ impl Store {
         .collect()
     }
 
-    /// Replaces all rows and the state in one transaction.
-    fn replace(&mut self, payload: &Payload) -> Result<()> {
+    /// Folds each bounded window of `payload` into the archive in one
+    /// transaction, alongside the state and side tables.
+    ///
+    /// Only the chats the payload names are touched. A chat whose window does
+    /// not join its stored range would leave a hole, so its rows and ledger
+    /// are left as they were; every named chat with no stored rows is accepted.
+    fn ingest_payload(&mut self, payload: &Payload) -> Result<()> {
         let state = State {
             account: payload.account.clone(),
             account_id: payload.account_id,
@@ -1731,24 +1756,41 @@ impl Store {
         let state_plain = serde_json::to_vec(&state)?;
         let state_envelope = sealed::seal(&state_plain, self.keys.as_ref())?;
 
+        // Read the ledgers before the transaction borrows the connection.
+        let held: BTreeMap<i64, Vec<(i64, i64)>> = payload
+            .peers
+            .keys()
+            .map(|chat_id| Ok((*chat_id, self.ranges(*chat_id)?)))
+            .collect::<Result<_>>()?;
         let transaction = self.conn.transaction()?;
-        transaction.execute("DELETE FROM messages", [])?;
-        transaction.execute("DELETE FROM ranges", [])?;
-        transaction.execute("DELETE FROM chips", [])?;
+        for chat_id in &payload.removed {
+            let chat_key = keyed_chat(&self.hmac_key, *chat_id);
+            transaction.execute(
+                "DELETE FROM messages WHERE chat_key = ?1",
+                params![chat_key],
+            )?;
+            transaction.execute("DELETE FROM ranges WHERE chat_key = ?1", params![chat_key])?;
+            transaction.execute("DELETE FROM chips WHERE chat_key = ?1", params![chat_key])?;
+        }
         for (chat_id, rows) in &payload.peers {
-            for row in rows {
-                let (chat_key, envelope) =
-                    seal_record(self.keys.as_ref(), &self.hmac_key, *chat_id, row)?;
-                insert_record(&transaction, &chat_key, row.id, &envelope)?;
-            }
-            if let (Some(first), Some(last)) = (rows.first(), rows.last())
-                && first.id <= last.id
-            {
-                let chat_key = keyed_chat(&self.hmac_key, *chat_id);
-                transaction.execute(
-                    "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)",
-                    params![chat_key, first.id, last.id],
-                )?;
+            let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+                continue;
+            };
+            let reach = (first.id.min(last.id), first.id.max(last.id));
+            let written = ingest_in(
+                &transaction,
+                self.keys.as_ref(),
+                &self.hmac_key,
+                *chat_id,
+                rows,
+                reach,
+                held.get(chat_id).map_or(&[][..], Vec::as_slice),
+            )?;
+            if !written {
+                tracing::warn!(
+                    chat_id,
+                    "history save refused: the window does not join the stored range"
+                );
             }
         }
         for (chat_id, chips) in &payload.chips {
@@ -1874,53 +1916,76 @@ impl Store {
         rows: &[CachedMessage],
         reach: (i64, i64),
     ) -> Result<bool> {
-        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
-            return Ok(false);
-        };
-        let (lo, hi) = (first.id.min(last.id), first.id.max(last.id));
-        let chat_key = keyed_chat(&self.hmac_key, chat_id);
         let held = self.ranges(chat_id)?;
-        let joined: Vec<(i64, i64)> = held
-            .iter()
-            .filter(|(rlo, rhi)| *rhi >= reach.0 && *rlo <= reach.1)
-            .copied()
-            .collect();
-        if !held.is_empty() && joined.is_empty() {
-            return Ok(false);
-        }
-
         let transaction = self.conn.transaction()?;
-        for row in rows {
-            let (key, envelope) = seal_record(self.keys.as_ref(), &self.hmac_key, chat_id, row)?;
-            insert_record(&transaction, &key, row.id, &envelope)?;
-        }
-        for (old_lo, _) in &joined {
-            transaction.execute(
-                "DELETE FROM ranges WHERE chat_key = ?1 AND lo_id = ?2",
-                params![chat_key, old_lo],
-            )?;
-        }
-        let new_lo = joined
-            .iter()
-            .map(|(rlo, _)| *rlo)
-            .min()
-            .unwrap_or(lo)
-            .min(lo);
-        let new_hi = joined
-            .iter()
-            .map(|(_, rhi)| *rhi)
-            .max()
-            .unwrap_or(hi)
-            .max(hi);
-
-        transaction.execute(
-            "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)
-             ON CONFLICT(chat_key, lo_id) DO UPDATE SET hi_id = excluded.hi_id",
-            params![chat_key, new_lo, new_hi],
+        let written = ingest_in(
+            &transaction,
+            self.keys.as_ref(),
+            &self.hmac_key,
+            chat_id,
+            rows,
+            reach,
+            &held,
         )?;
         transaction.commit()?;
-        Ok(true)
+        Ok(written)
     }
+}
+
+/// The transaction half of [`Store::ingest_page`], shared with a save of a
+/// whole window. `held` is the ledger as it stood before the write.
+fn ingest_in(
+    transaction: &rusqlite::Transaction<'_>,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+    rows: &[CachedMessage],
+    reach: (i64, i64),
+    held: &[(i64, i64)],
+) -> Result<bool> {
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return Ok(false);
+    };
+    let (lo, hi) = (first.id.min(last.id), first.id.max(last.id));
+    let chat_key = keyed_chat(hmac_key, chat_id);
+    let joined: Vec<(i64, i64)> = held
+        .iter()
+        .filter(|(rlo, rhi)| *rhi >= reach.0 && *rlo <= reach.1)
+        .copied()
+        .collect();
+    if !held.is_empty() && joined.is_empty() {
+        return Ok(false);
+    }
+
+    for row in rows {
+        let (key, envelope) = seal_record(keys, hmac_key, chat_id, row)?;
+        insert_record(transaction, &key, row.id, &envelope)?;
+    }
+    for (old_lo, _) in &joined {
+        transaction.execute(
+            "DELETE FROM ranges WHERE chat_key = ?1 AND lo_id = ?2",
+            params![chat_key, old_lo],
+        )?;
+    }
+    let new_lo = joined
+        .iter()
+        .map(|(rlo, _)| *rlo)
+        .min()
+        .unwrap_or(lo)
+        .min(lo);
+    let new_hi = joined
+        .iter()
+        .map(|(_, rhi)| *rhi)
+        .max()
+        .unwrap_or(hi)
+        .max(hi);
+
+    transaction.execute(
+        "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)
+         ON CONFLICT(chat_key, lo_id) DO UPDATE SET hi_id = excluded.hi_id",
+        params![chat_key, new_lo, new_hi],
+    )?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -3520,6 +3585,7 @@ mod tests {
             chats: Vec::new(),
             aliases: BTreeMap::new(),
             chips: BTreeMap::new(),
+            removed: BTreeSet::new(),
         };
         seed(
             &file,
@@ -3923,8 +3989,8 @@ mod tests {
         );
     }
 
-    /// Writes `cache` through the whole-cache path and checks that the ledger
-    /// names exactly the rows that were stored — one honest stretch per peer.
+    /// Writes `cache` through the ingest path and checks that the ledger names
+    /// exactly the rows that were stored — one honest stretch per peer.
     fn assert_ranges_match_rows(cache: &HistoryCache) {
         let (_dir, file) = scratch("history.json");
         file.save(cache, None);
@@ -3983,6 +4049,105 @@ mod tests {
         let mut cache = cached(10..=15);
         assert!(cache.merge(PEER, &page([7, 9, 11, 12]), PageKind::Around));
         assert_ranges_match_rows(&cache);
+    }
+
+    #[test]
+    fn a_chat_past_the_window_survives_every_save_and_a_reopen() {
+        let (_dir, file) = scratch("history.json");
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let mut cache = HistoryCache::default();
+
+        let first: Vec<Message> = (1..=depth - 50)
+            .map(|id| message(id, PEER, "first"))
+            .collect();
+        assert!(cache.merge(PEER, &first, LATEST));
+        file.save(&cache, None);
+
+        let second: Vec<Message> = (depth - 49..=depth + 50)
+            .map(|id| message(id, PEER, "second"))
+            .collect();
+        assert!(cache.merge(
+            PEER,
+            &second,
+            PageKind::Newer {
+                after: depth - 50,
+                reached_end: false,
+            }
+        ));
+        file.save(&cache, None);
+
+        let third: Vec<Message> = (depth + 51..=depth + 120)
+            .map(|id| message(id, PEER, "third"))
+            .collect();
+        assert!(cache.merge(
+            PEER,
+            &third,
+            PageKind::Newer {
+                after: depth + 50,
+                reached_end: false,
+            }
+        ));
+        file.save(&cache, None);
+
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let stored = store.all_records(PEER).expect("the rows open");
+        assert_eq!(
+            stored.len(),
+            usize::try_from(depth + 120).expect("the count fits")
+        );
+        assert_eq!(
+            stored.first().map(|row| row.id),
+            Some(1),
+            "the oldest is kept"
+        );
+        assert_eq!(stored.last().map(|row| row.id), Some(depth + 120));
+        assert_eq!(
+            store.ranges(PEER).expect("the ranges open"),
+            vec![(1, depth + 120)],
+            "the ledger names every row the saves left behind"
+        );
+        assert_eq!(ids(&file.get(PEER)), (1..=depth + 120).collect::<Vec<_>>());
+        assert_eq!(file.load().cache.get(PEER).len(), HISTORY_CACHE_DEPTH);
+    }
+
+    #[test]
+    fn a_save_that_would_leave_a_hole_is_refused() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(10..=15), LATEST));
+        file.save(&cache, None);
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let before_rows = store.all_records(PEER).expect("rows read");
+        let before_ranges = store.ranges(PEER).expect("ranges read");
+
+        let mut disjoint = HistoryCache::default();
+        assert!(disjoint.merge(PEER, &page(20..=25), LATEST));
+        file.save(&disjoint, None);
+
+        let reopened = open_store(&file.path, Arc::clone(&file.keys)).expect("it reopens");
+        assert_eq!(reopened.all_records(PEER).expect("rows read"), before_rows);
+        assert_eq!(reopened.ranges(PEER).expect("ranges read"), before_ranges);
+    }
+
+    #[test]
+    fn a_chat_the_reader_removed_stays_removed_after_a_reopen() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        let elsewhere: Vec<Message> = (1..=3).map(|id| message(id, PEER + 1, "kept")).collect();
+        cache.put(PEER, &page(1..=5));
+        cache.put(PEER + 1, &elsewhere);
+        file.save(&cache, None);
+
+        cache.remove(PEER);
+        file.save(&cache, None);
+
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        assert!(store.all_records(PEER).expect("rows read").is_empty());
+        assert!(store.ranges(PEER).expect("ranges read").is_empty());
+        assert_eq!(store.all_records(PEER + 1).expect("rows read").len(), 3);
+        let loaded = file.load().cache;
+        assert!(loaded.get(PEER).is_empty());
+        assert_eq!(loaded.get(PEER + 1).len(), 3);
     }
 
     #[test]
