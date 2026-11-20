@@ -34,8 +34,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use domain::chat::{Chat, ChatKind};
-use domain::history::CONVERSATION_WINDOW;
-use domain::message::{MediaKind, Message, MessageStatus};
+use domain::history::{CONVERSATION_WINDOW, PINNED_IDS, REACTION_ENTRIES};
+use domain::message::{MediaKind, Message, MessageStatus, Reaction, ReactionCount};
 use domain::updates::UpdateEvent;
 use hmac::{Hmac, Mac};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -197,6 +197,14 @@ pub(crate) struct HistoryCache {
     /// with the history they describe.
     aliases: BTreeMap<i64, String>,
 
+    /// Reaction strips per peer, keyed by message id, oldest entry first;
+    /// at most [`REACTION_ENTRIES`] per peer.
+    reactions: BTreeMap<i64, Vec<(i64, Vec<CachedReaction>)>>,
+
+    /// Pinned message ids per peer, oldest pin first; at most
+    /// [`PINNED_IDS`] per peer.
+    pinned: BTreeMap<i64, Vec<i64>>,
+
     /// The chat list as the wire last showed it, head first, at most
     /// [`HISTORY_CACHE_CHATS`] long.
     ///
@@ -212,7 +220,11 @@ pub(crate) struct HistoryCache {
 /// and a cache loaded from disk has neither.
 impl PartialEq for HistoryCache {
     fn eq(&self, other: &Self) -> bool {
-        self.peers == other.peers && self.chats == other.chats && self.aliases == other.aliases
+        self.peers == other.peers
+            && self.chats == other.chats
+            && self.aliases == other.aliases
+            && self.reactions == other.reactions
+            && self.pinned == other.pinned
     }
 }
 
@@ -334,6 +346,8 @@ impl HistoryCache {
         self.peers.remove(&peer);
         self.touched.remove(&peer);
         self.aliases.remove(&peer);
+        self.reactions.remove(&peer);
+        self.pinned.remove(&peer);
     }
 
     /// The reader's names, as a borrowed map.
@@ -581,18 +595,73 @@ impl HistoryCache {
                 new_text,
             } => self.edit(*chat_id, *message_id, new_text),
             UpdateEvent::MessagesDeleted { message_ids } => self.delete(message_ids),
-            // Reactions and pins are not part of a row: the cache holds what was
-            // said, and a reaction or a pin is the conversation's live state
-            // rather than the message's text. Neither is persisted, which is why
-            // reopening a conversation asks the server again rather than
-            // replaying a cache.
+            UpdateEvent::ReactionsChanged {
+                chat_id,
+                message_id,
+                reactions,
+            } => self.set_reactions(*chat_id, *message_id, reactions),
+            UpdateEvent::PinChanged {
+                chat_id,
+                message_ids,
+                pinned,
+            } => self.set_pins(*chat_id, message_ids, *pinned),
+            // A read receipt is a watermark on the conversation, and a row's
+            // status is its direction alone; typing and presence are not
+            // messages at all.
             UpdateEvent::ReadReceipt { .. }
             | UpdateEvent::InboxRead { .. }
             | UpdateEvent::PeerTyping { .. }
-            | UpdateEvent::PeerStatus { .. }
-            | UpdateEvent::ReactionsChanged { .. }
-            | UpdateEvent::PinChanged { .. } => false,
+            | UpdateEvent::PeerStatus { .. } => false,
         }
+    }
+
+    /// Replaces the reaction strip of one message, keeping the bounded
+    /// per-peer side table in the order the updates arrived.
+    fn set_reactions(&mut self, peer: i64, message_id: i64, reactions: &[ReactionCount]) -> bool {
+        let fresh: Vec<CachedReaction> = reactions.iter().map(CachedReaction::from).collect();
+        let rows = self.reactions.entry(peer).or_default();
+        let held = rows.iter().position(|(id, _)| *id == message_id);
+        let changed = match held {
+            Some(at) if rows[at].1 == fresh => false,
+            Some(at) if fresh.is_empty() => {
+                rows.remove(at);
+                true
+            }
+            Some(at) => {
+                rows[at].1 = fresh;
+                true
+            }
+            None if fresh.is_empty() => false,
+            None => {
+                rows.push((message_id, fresh));
+                true
+            }
+        };
+        if rows.len() > REACTION_ENTRIES {
+            rows.drain(..rows.len() - REACTION_ENTRIES);
+        }
+        changed
+    }
+
+    /// Adds or removes pinned ids for `peer`, keeping the bounded set.
+    fn set_pins(&mut self, peer: i64, message_ids: &[i64], pinned: bool) -> bool {
+        let rows = self.pinned.entry(peer).or_default();
+        let mut changed = false;
+        for &id in message_ids {
+            if pinned {
+                if !rows.contains(&id) {
+                    rows.push(id);
+                    changed = true;
+                }
+            } else if let Some(at) = rows.iter().position(|held| *held == id) {
+                rows.remove(at);
+                changed = true;
+            }
+        }
+        if rows.len() > PINNED_IDS {
+            rows.drain(..rows.len() - PINNED_IDS);
+        }
+        changed
     }
 
     /// Adds a message that has just come into being — an arrival over the
@@ -735,6 +804,10 @@ struct Payload {
     chats: Vec<CachedChat>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     aliases: BTreeMap<i64, String>,
+    /// The bounded reaction/pin side tables, held in their own sealed SQL
+    /// table rather than in a message's record.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    chips: BTreeMap<i64, Chips>,
 }
 
 /// One conversation of the cached chat list: what its row draws.
@@ -1018,6 +1091,7 @@ impl HistoryFile {
             peers,
             chats: state.chats,
             aliases: state.aliases,
+            chips: store.chips()?,
         }))
     }
 
@@ -1031,11 +1105,60 @@ impl HistoryFile {
         cache.chats = payload.chats;
         cache.chats.truncate(HISTORY_CACHE_CHATS);
         cache.aliases = payload.aliases;
+        for (peer, chips) in payload.chips {
+            if !chips.reactions.is_empty() {
+                cache.reactions.insert(peer, chips.reactions);
+            }
+            if !chips.pinned.is_empty() {
+                cache.pinned.insert(peer, chips.pinned);
+            }
+        }
         LoadedHistory {
             account: payload.account,
             account_id: payload.account_id,
             cache,
         }
+    }
+
+    /// The messages of one chat, read from its recorded ranges on demand.
+    ///
+    /// Unlike [`HistoryFile::load`], which assembles the whole file, this opens
+    /// the archive, asks the ledger which stretches the chat holds and reads
+    /// only those rows, decoding and unsealing each on the way out. A missing
+    /// or unreadable archive is an empty answer, the load discipline.
+    #[allow(dead_code)]
+    pub(crate) fn get(&self, peer: i64) -> Vec<Message> {
+        if !self.path.is_file() {
+            return Vec::new();
+        }
+        let Ok(store) = open_store(&self.path, Arc::clone(&self.keys)) else {
+            return Vec::new();
+        };
+        let Ok(ranges) = store.ranges(peer) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for (lo, hi) in ranges {
+            match store.range_rows(peer, lo, hi) {
+                Ok(mut part) => rows.append(&mut part),
+                Err(error) => {
+                    tracing::warn!(%error, "a history range could not be read");
+                    return Vec::new();
+                }
+            }
+        }
+        rows.into_iter().map(|row| row.to_message(peer)).collect()
+    }
+
+    /// The encoded text bytes held on disk, by a SQL read rather than a copy of
+    /// every row in memory. `None` when the archive cannot be read.
+    #[allow(dead_code)]
+    pub(crate) fn text_bytes(&self) -> Option<usize> {
+        if !self.path.is_file() {
+            return None;
+        }
+        let store = open_store(&self.path, Arc::clone(&self.keys)).ok()?;
+        store.text_bytes().ok()
     }
 
     /// Stores `cache` under the phone `account`: [`HistoryFile::encode`] then
@@ -1070,6 +1193,22 @@ impl HistoryFile {
             peers: cache.peers.clone(),
             chats: cache.chats.clone(),
             aliases: cache.aliases.clone(),
+            chips: cache
+                .peers
+                .keys()
+                .chain(cache.reactions.keys())
+                .chain(cache.pinned.keys())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter_map(|peer| {
+                    let chips = Chips {
+                        reactions: cache.reactions.get(peer).cloned().unwrap_or_default(),
+                        pinned: cache.pinned.get(peer).cloned().unwrap_or_default(),
+                    };
+                    (!chips.reactions.is_empty() || !chips.pinned.is_empty())
+                        .then_some((*peer, chips))
+                })
+                .collect(),
         };
         serde_json::to_vec(&payload)
             .inspect_err(|error| tracing::warn!(%error, "history could not be serialised"))
@@ -1247,6 +1386,20 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS meta (
         message_id INTEGER NOT NULL,
         sealed BLOB NOT NULL,
         PRIMARY KEY (chat_key, message_id)
+    );
+    -- The stretches of a chat that are held. Ids are not dense, so a run cannot
+    -- be inferred from its ends; the ledger is what makes a hole a fact.
+    CREATE TABLE IF NOT EXISTS ranges (
+        chat_key BLOB NOT NULL,
+        lo_id INTEGER NOT NULL,
+        hi_id INTEGER NOT NULL,
+        PRIMARY KEY (chat_key, lo_id)
+    );
+    -- One sealed, bounded side table per chat: reactions and pins change without
+    -- the message changing, so they are not carved into a record.
+    CREATE TABLE IF NOT EXISTS chips (
+        chat_key BLOB PRIMARY KEY,
+        sealed BLOB NOT NULL
     );";
 
 /// The non-message half of the archive, sealed as one blob in `meta`: a chat
@@ -1272,6 +1425,83 @@ struct Record {
     chat_id: i64,
     message_id: i64,
     row: CachedMessage,
+}
+
+/// One chat's reaction strips and pinned ids, as stored in the sealed side
+/// table. A plain mirror of the domain's types, which carry no `serde`, with
+/// the same bounds: [`REACTION_ENTRIES`] messages with strips and
+/// [`PINNED_IDS`] pins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Chips {
+    #[serde(default)]
+    reactions: Vec<(i64, Vec<CachedReaction>)>,
+    #[serde(default)]
+    pinned: Vec<i64>,
+}
+
+/// The sealed plaintext of one chip row. Like [`Record`], it carries its own
+/// address so a side table cannot be moved under another chat key.
+#[derive(Debug, Serialize, Deserialize)]
+struct ChipRecord {
+    chat_key: Vec<u8>,
+    chat_id: i64,
+    chips: Chips,
+}
+
+/// [`Reaction`] as the file spells it: `domain` carries no `serde`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum CachedReactionKind {
+    Emoticon(String),
+    CustomEmoji(i64),
+    Paid,
+}
+
+/// [`ReactionCount`] as the file spells it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CachedReaction {
+    reaction: CachedReactionKind,
+    count: u32,
+    chosen: bool,
+}
+
+impl From<&Reaction> for CachedReactionKind {
+    fn from(reaction: &Reaction) -> Self {
+        match reaction {
+            Reaction::Emoticon(emoticon) => Self::Emoticon(emoticon.clone()),
+            Reaction::CustomEmoji(id) => Self::CustomEmoji(*id),
+            Reaction::Paid => Self::Paid,
+        }
+    }
+}
+
+impl From<&CachedReactionKind> for Reaction {
+    fn from(reaction: &CachedReactionKind) -> Self {
+        match reaction {
+            CachedReactionKind::Emoticon(emoticon) => Self::Emoticon(emoticon.clone()),
+            CachedReactionKind::CustomEmoji(id) => Self::CustomEmoji(*id),
+            CachedReactionKind::Paid => Self::Paid,
+        }
+    }
+}
+
+impl From<&ReactionCount> for CachedReaction {
+    fn from(count: &ReactionCount) -> Self {
+        Self {
+            reaction: CachedReactionKind::from(&count.reaction),
+            count: count.count,
+            chosen: count.chosen,
+        }
+    }
+}
+
+impl From<&CachedReaction> for ReactionCount {
+    fn from(count: &CachedReaction) -> Self {
+        Self {
+            reaction: Reaction::from(&count.reaction),
+            count: count.count,
+            chosen: count.chosen,
+        }
+    }
 }
 
 /// `HMAC(chat_id)` under a key derived from the file key. The column never
@@ -1566,12 +1796,38 @@ impl Store {
 
         let transaction = self.conn.transaction()?;
         transaction.execute("DELETE FROM messages", [])?;
+        transaction.execute("DELETE FROM ranges", [])?;
+        transaction.execute("DELETE FROM chips", [])?;
         for (chat_id, rows) in &payload.peers {
             for row in rows {
                 let (chat_key, envelope) =
                     seal_record(self.keys.as_ref(), &self.hmac_key, *chat_id, row)?;
                 insert_record(&transaction, &chat_key, row.id, &envelope)?;
             }
+            if let (Some(first), Some(last)) = (rows.first(), rows.last())
+                && first.id <= last.id
+            {
+                let chat_key = keyed_chat(&self.hmac_key, *chat_id);
+                transaction.execute(
+                    "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)",
+                    params![chat_key, first.id, last.id],
+                )?;
+            }
+        }
+        for (chat_id, chips) in &payload.chips {
+            let chat_key = keyed_chat(&self.hmac_key, *chat_id);
+            let record = ChipRecord {
+                chat_key: chat_key.clone(),
+                chat_id: *chat_id,
+                chips: chips.clone(),
+            };
+            let plain = serde_json::to_vec(&record)?;
+            let envelope = sealed::seal(&plain, self.keys.as_ref())?;
+            transaction.execute(
+                "INSERT INTO chips (chat_key, sealed) VALUES (?1, ?2)
+                 ON CONFLICT(chat_key) DO UPDATE SET sealed = excluded.sealed",
+                params![chat_key, envelope],
+            )?;
         }
         transaction.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -1580,6 +1836,188 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// The bounded reaction/pin side tables, with their chat ids recovered
+    /// from the sealed plaintext and their addresses checked.
+    #[allow(dead_code)]
+    fn chips(&self) -> Result<BTreeMap<i64, Chips>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT chat_key, sealed FROM chips ORDER BY chat_key")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut chips = BTreeMap::new();
+        for row in rows {
+            let (chat_key, envelope) = row?;
+            let plain = sealed::open(&envelope, self.keys.as_ref())?
+                .ok_or_else(|| anyhow!("a side table was stored as plaintext"))?;
+            let record: ChipRecord = serde_json::from_slice(&plain)?;
+            if record.chat_key != chat_key || keyed_chat(&self.hmac_key, record.chat_id) != chat_key
+            {
+                return Err(anyhow!("a side table was filed under another address"));
+            }
+            chips.insert(record.chat_id, record.chips);
+        }
+        Ok(chips)
+    }
+
+    /// The stretches of `chat_id` held on disk, oldest first.
+    #[allow(dead_code)]
+    fn ranges(&self, chat_id: i64) -> Result<Vec<(i64, i64)>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let mut statement = self
+            .conn
+            .prepare("SELECT lo_id, hi_id FROM ranges WHERE chat_key = ?1 ORDER BY lo_id")?;
+        let rows = statement.query_map(params![chat_key], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.map(|row| row.map_err(anyhow::Error::from)).collect()
+    }
+
+    /// The sealed rows of one chat in one recorded stretch, decoded and
+    /// unsealed on the way out. A whole chat is the union of its ranges.
+    #[allow(dead_code)]
+    fn range_rows(&self, chat_id: i64, lo: i64, hi: i64) -> Result<Vec<CachedMessage>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let mut statement = self.conn.prepare(
+            "SELECT message_id, sealed FROM messages
+             WHERE chat_key = ?1 AND message_id BETWEEN ?2 AND ?3 ORDER BY message_id",
+        )?;
+        let rows = statement.query_map(params![chat_key, lo, hi], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        rows.map(|row| {
+            let (message_id, envelope) = row?;
+            decode_record(
+                &envelope,
+                self.keys.as_ref(),
+                &self.hmac_key,
+                &chat_key,
+                message_id,
+            )
+            .map(|record| record.row)
+        })
+        .collect()
+    }
+
+    /// The text bytes a SQL read of the archive accounts for, by the same
+    /// rule as [`encoded_len`]. Kept beside the rows so the on-disk cost is a
+    /// query rather than a second copy of everything in memory.
+    #[allow(dead_code)]
+    fn text_bytes(&self) -> Result<usize> {
+        let mut statement = self.conn.prepare("SELECT sealed FROM messages")?;
+        let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        let mut total = 0;
+        for row in rows {
+            let envelope = row?;
+            let plain = sealed::open(&envelope, self.keys.as_ref())?
+                .ok_or_else(|| anyhow!("a history record was stored as plaintext"))?;
+            let record: Record = serde_json::from_slice(&plain)?;
+            total += encoded_len(&record.row.text);
+        }
+        Ok(total)
+    }
+
+    /// Folds one page into `chat_id` and its range ledger in one transaction.
+    ///
+    /// `reach` is the page's own bounds as the fetch knows them: for an
+    /// anchored page the anchor is one end, the proof that the page joins the
+    /// run without sharing a row with it. Ids alone would only be a guess, so
+    /// a page whose reach touches no recorded range — with any range recorded —
+    /// is refused and changes nothing. A page joining two ranges bridges them
+    /// into one, and retention drops from the front, so a range only narrows.
+    ///
+    /// Returns whether anything was written.
+    #[allow(dead_code)]
+    fn ingest_page(
+        &mut self,
+        chat_id: i64,
+        rows: &[CachedMessage],
+        reach: (i64, i64),
+    ) -> Result<bool> {
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            return Ok(false);
+        };
+        let (lo, hi) = (first.id.min(last.id), first.id.max(last.id));
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let held = self.ranges(chat_id)?;
+        let joined: Vec<(i64, i64)> = held
+            .iter()
+            .filter(|(rlo, rhi)| *rhi >= reach.0 && *rlo <= reach.1)
+            .copied()
+            .collect();
+        if !held.is_empty() && joined.is_empty() {
+            return Ok(false);
+        }
+
+        let transaction = self.conn.transaction()?;
+        for row in rows {
+            let (key, envelope) = seal_record(self.keys.as_ref(), &self.hmac_key, chat_id, row)?;
+            insert_record(&transaction, &key, row.id, &envelope)?;
+        }
+        for (old_lo, _) in &joined {
+            transaction.execute(
+                "DELETE FROM ranges WHERE chat_key = ?1 AND lo_id = ?2",
+                params![chat_key, old_lo],
+            )?;
+        }
+        let new_lo = joined
+            .iter()
+            .map(|(rlo, _)| *rlo)
+            .min()
+            .unwrap_or(lo)
+            .min(lo);
+        let new_hi = joined
+            .iter()
+            .map(|(_, rhi)| *rhi)
+            .max()
+            .unwrap_or(hi)
+            .max(hi);
+
+        let count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM messages WHERE chat_key = ?1",
+            params![chat_key],
+            |row| row.get(0),
+        )?;
+        let limit = i64::try_from(HISTORY_CACHE_DEPTH)
+            .map_err(|_| anyhow!("the history depth does not fit an id"))?;
+        let excess = count.saturating_sub(limit).max(0);
+        if excess > 0 {
+            transaction.execute(
+                "DELETE FROM messages WHERE chat_key = ?1 AND message_id IN
+                 (SELECT message_id FROM messages WHERE chat_key = ?1 ORDER BY message_id LIMIT ?2)",
+                params![chat_key, excess],
+            )?;
+        }
+        let lowest: Option<i64> = transaction.query_row(
+            "SELECT MIN(message_id) FROM messages WHERE chat_key = ?1",
+            params![chat_key],
+            |row| row.get(0),
+        )?;
+        if let Some(lowest) = lowest {
+            // Retention drops from the front only, so a range can narrow but
+            // never split: drop the ones wholly gone and clamp the rest.
+            transaction.execute(
+                "DELETE FROM ranges WHERE chat_key = ?1 AND hi_id < ?2",
+                params![chat_key, lowest],
+            )?;
+            transaction.execute(
+                "UPDATE ranges SET lo_id = ?2 WHERE chat_key = ?1 AND lo_id < ?2",
+                params![chat_key, lowest],
+            )?;
+        }
+        let lo = lowest.unwrap_or(new_lo).max(new_lo);
+        if lo <= new_hi {
+            transaction.execute(
+                "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(chat_key, lo_id) DO UPDATE SET hi_id = excluded.hi_id",
+                params![chat_key, lo, new_hi],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 }
 
@@ -1915,6 +2353,11 @@ mod tests {
             "the media id comes back, so a forwarded copy is still found"
         );
         assert_eq!(ids(&loaded.cache.get(30)), vec![9]);
+
+        // The round trip also goes through the range read, which opens the
+        // archive and decodes just the stored stretch for one chat.
+        assert_eq!(ids(&file.get(PEER)), vec![1, 2]);
+        assert_eq!(file.text_bytes(), Some(cache.encoded_text_bytes()));
     }
 
     /// The slot's label keys the tag: an id slot's file carries the id, the
@@ -3235,6 +3678,7 @@ mod tests {
             peers,
             chats: Vec::new(),
             aliases: BTreeMap::new(),
+            chips: BTreeMap::new(),
         };
         seed(
             &file,
@@ -3261,6 +3705,7 @@ mod tests {
             peers: BTreeMap::from([(PEER, rows)]),
             chats: Vec::new(),
             aliases: BTreeMap::new(),
+            chips: BTreeMap::new(),
         };
         seed(
             &file,
@@ -3328,6 +3773,7 @@ mod tests {
             peers,
             chats: Vec::new(),
             aliases: BTreeMap::new(),
+            chips: BTreeMap::new(),
         };
         seed(
             &file,
@@ -3608,6 +4054,306 @@ mod tests {
             mb(run.write_peak)
         );
         println!("cache_worst_case: peak RSS (load)  = {}", mb(run.load_peak));
+    }
+
+    // ---- ranges, transactional ingest and the chip side tables (stage 02) --
+
+    fn scratch_store(name: &str) -> (tempfile::TempDir, HistoryFile, Store) {
+        let (dir, file) = scratch(name);
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        (dir, file, store)
+    }
+
+    /// Sealed rows for [`PEER`] with these ids, oldest id first.
+    fn rows(ids: impl IntoIterator<Item = i64>) -> Vec<CachedMessage> {
+        ids.into_iter()
+            .map(|id| CachedMessage::from_message(&message(id, PEER, "row")))
+            .collect()
+    }
+
+    /// Plants rows and a range directly, for a gap a fetch recorded by some
+    /// other path — the ledger can hold more than one stretch per chat.
+    fn plant(store: &Store, ids: impl IntoIterator<Item = i64>, range: (i64, i64)) {
+        for row in rows(ids) {
+            store.put_record(PEER, &row).expect("the row is planted");
+        }
+        let chat_key = keyed_chat(&store.hmac_key, PEER);
+        store
+            .conn
+            .execute(
+                "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)",
+                params![chat_key, range.0, range.1],
+            )
+            .expect("the range is planted");
+    }
+
+    #[test]
+    fn a_page_before_and_after_a_stored_run_merges_into_one_range() {
+        let (_dir, _file, mut store) = scratch_store("history.json");
+        assert!(
+            store
+                .ingest_page(PEER, &rows(10..=15), (10, 15))
+                .expect("the first page lands")
+        );
+        assert_eq!(store.ranges(PEER).expect("ranges read"), vec![(10, 15)]);
+
+        // Below the run, anchored at its oldest.
+        assert!(
+            store
+                .ingest_page(PEER, &rows([5, 7, 9]), (5, 10))
+                .expect("the older page lands")
+        );
+        assert_eq!(store.ranges(PEER).expect("ranges read"), vec![(5, 15)]);
+
+        // Above the run, anchored at its newest.
+        assert!(
+            store
+                .ingest_page(PEER, &rows([17, 20]), (15, 20))
+                .expect("the newer page lands")
+        );
+        assert_eq!(store.ranges(PEER).expect("ranges read"), vec![(5, 20)]);
+        assert_eq!(
+            store.all_records(PEER).expect("rows read").len(),
+            11,
+            "every row is still held, in one stretch"
+        );
+    }
+
+    #[test]
+    fn a_page_that_leaves_a_gap_is_refused_and_the_rows_are_unchanged() {
+        let (_dir, _file, mut store) = scratch_store("history.json");
+        assert!(
+            store
+                .ingest_page(PEER, &rows(10..=15), (10, 15))
+                .expect("first page")
+        );
+        let before_rows = store.all_records(PEER).expect("rows read");
+        let before_ranges = store.ranges(PEER).expect("ranges read");
+
+        assert!(
+            !store
+                .ingest_page(PEER, &rows(20..=25), (20, 25))
+                .expect("the gap makes this a clean refusal"),
+            "a page whose reach touches no stored range cannot be shown to join"
+        );
+        assert_eq!(store.all_records(PEER).expect("rows read"), before_rows);
+        assert_eq!(store.ranges(PEER).expect("ranges read"), before_ranges);
+    }
+
+    #[test]
+    fn a_page_that_fills_a_recorded_gap_closes_it() {
+        let (_dir, _file, mut store) = scratch_store("history.json");
+        plant(&store, 10..=12, (10, 12));
+        plant(&store, 18..=20, (18, 20));
+        assert_eq!(
+            store.ranges(PEER).expect("ranges read"),
+            vec![(10, 12), (18, 20)],
+            "the hole is recorded, not inferred"
+        );
+
+        assert!(
+            store
+                .ingest_page(PEER, &rows(13..=17), (12, 18))
+                .expect("the bridging page lands")
+        );
+        assert_eq!(store.ranges(PEER).expect("ranges read"), vec![(10, 20)]);
+        assert_eq!(
+            store
+                .all_records(PEER)
+                .expect("rows read")
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            (10..=20).collect::<Vec<_>>()
+        );
+    }
+
+    /// Writes `cache` through the whole-cache path and checks that the ledger
+    /// names exactly the rows that were stored — one honest stretch per peer.
+    fn assert_ranges_match_rows(cache: &HistoryCache) {
+        let (_dir, file) = scratch("history.json");
+        file.save(cache, None);
+        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let stored = store.all_records(PEER).expect("records read");
+        let ranges = store.ranges(PEER).expect("ranges read");
+        match (stored.first(), stored.last()) {
+            (Some(first), Some(last)) => {
+                assert_eq!(ranges, vec![(first.id, last.id)]);
+            }
+            _ => assert!(ranges.is_empty(), "no rows, no range"),
+        }
+        assert_eq!(
+            file.text_bytes(),
+            Some(cache.encoded_text_bytes()),
+            "the SQL text count matches the cache's"
+        );
+    }
+
+    #[test]
+    fn every_merge_rule_leaves_a_range_that_matches_the_stored_rows() {
+        let mut cache = cached(1..=5);
+        assert!(cache.merge(PEER, &page(4..=8), LATEST));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(10..=15);
+        assert!(cache.merge(
+            PEER,
+            &page([3, 5, 7]),
+            PageKind::Older {
+                before: 10,
+                reached_start: false,
+            }
+        ));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(1..=5);
+        assert!(cache.merge(
+            PEER,
+            &page([8, 9]),
+            PageKind::Newer {
+                after: 5,
+                reached_end: false,
+            }
+        ));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(1..=6);
+        assert!(cache.merge(PEER, &page([3, 5, 6]), LATEST));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(1..=5);
+        assert!(cache.merge(PEER, &page(20..=25), LATEST));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(10..=15);
+        assert!(cache.merge(PEER, &page([7, 9, 11, 12]), PageKind::Around));
+        assert_ranges_match_rows(&cache);
+    }
+
+    #[test]
+    fn a_range_read_returns_the_same_rows_as_a_whole_load() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=5));
+        file.save(&cache, None);
+
+        let read = file.get(PEER);
+        assert_eq!(ids(&read), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            read.iter().map(fields).collect::<Vec<_>>(),
+            cache.get(PEER).iter().map(fields).collect::<Vec<_>>(),
+            "the range read decodes and unseals the same rows on demand"
+        );
+    }
+
+    #[test]
+    fn chips_and_pins_survive_a_reopen() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=5));
+        let reaction = ReactionCount {
+            reaction: Reaction::Emoticon("👍".to_owned()),
+            count: 3,
+            chosen: true,
+        };
+        assert!(cache.apply_update(&UpdateEvent::ReactionsChanged {
+            chat_id: PEER,
+            message_id: 2,
+            reactions: vec![reaction.clone()],
+        }));
+        assert!(cache.apply_update(&UpdateEvent::PinChanged {
+            chat_id: PEER,
+            message_ids: vec![3, 4],
+            pinned: true,
+        }));
+        file.save(&cache, None);
+
+        let loaded = file.load().cache;
+        let strips = loaded.reactions.get(&PEER).expect("the strips survive");
+        assert_eq!(strips[0].0, 2, "the strip is still filed under its message");
+        assert_eq!(
+            strips[0]
+                .1
+                .iter()
+                .map(ReactionCount::from)
+                .collect::<Vec<_>>(),
+            vec![reaction]
+        );
+        assert_eq!(
+            loaded.pinned.get(&PEER).map(Vec::as_slice),
+            Some([3, 4].as_slice())
+        );
+
+        // An unpin is a change too, and the narrower set is what is stored.
+        let mut loaded = loaded;
+        assert!(loaded.apply_update(&UpdateEvent::PinChanged {
+            chat_id: PEER,
+            message_ids: vec![3],
+            pinned: false,
+        }));
+        file.save(&loaded, None);
+        assert_eq!(
+            file.load().cache.pinned.get(&PEER).map(Vec::as_slice),
+            Some([4].as_slice())
+        );
+    }
+
+    #[test]
+    fn the_chip_side_tables_respect_their_bounds() {
+        let mut cache = HistoryCache::default();
+        let count = i64::try_from(REACTION_ENTRIES + 2).expect("the bound fits an id");
+        let strip = vec![ReactionCount {
+            reaction: Reaction::Paid,
+            count: 1,
+            chosen: false,
+        }];
+        for id in 1..=count {
+            assert!(cache.apply_update(&UpdateEvent::ReactionsChanged {
+                chat_id: PEER,
+                message_id: id,
+                reactions: strip.clone(),
+            }));
+        }
+        assert_eq!(
+            cache.reactions.get(&PEER).map_or(0, Vec::len),
+            REACTION_ENTRIES,
+            "the oldest strip went, not the newest"
+        );
+        assert_eq!(cache.reactions.get(&PEER).map(|r| r[0].0), Some(3));
+
+        let count = i64::try_from(PINNED_IDS + 2).expect("the bound fits an id");
+        assert!(cache.apply_update(&UpdateEvent::PinChanged {
+            chat_id: PEER,
+            message_ids: (1..=count).collect(),
+            pinned: true,
+        }));
+        assert_eq!(cache.pinned.get(&PEER).map_or(0, Vec::len), PINNED_IDS);
+        assert_eq!(
+            cache.pinned.get(&PEER).and_then(|p| p.first()).copied(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn an_empty_reaction_strip_removes_the_entry() {
+        let mut cache = HistoryCache::default();
+        let event = |reactions: Vec<ReactionCount>| UpdateEvent::ReactionsChanged {
+            chat_id: PEER,
+            message_id: 5,
+            reactions,
+        };
+        assert!(cache.apply_update(&event(vec![ReactionCount {
+            reaction: Reaction::Paid,
+            count: 1,
+            chosen: false,
+        }])));
+        assert!(cache.reactions.contains_key(&PEER));
+        assert!(cache.apply_update(&event(Vec::new())));
+        assert_eq!(
+            cache.reactions.get(&PEER).map_or(0, Vec::len),
+            0,
+            "an empty answer is the last reaction taken away"
+        );
     }
 }
 
