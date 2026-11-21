@@ -30,8 +30,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Result, anyhow};
 use domain::chat::{Chat, ChatKind};
@@ -42,7 +42,7 @@ use hmac::{Hmac, Mac};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use telegram_framework::{KeyProvider, sealed};
+use telegram_framework::{FileKey, KeyProvider, SessionError, sealed};
 
 /// How many messages of one conversation the in-memory window keeps.
 ///
@@ -93,9 +93,12 @@ pub(crate) struct HistoryFile {
     path: PathBuf,
     legacy: PathBuf,
 
-    /// The key source the session file uses, so the records are sealed under
-    /// the same key and no second secret exists.
-    keys: Arc<dyn KeyProvider>,
+    /// The account key source, shared by every clone. It opens the sealed
+    /// `archive_key` in `meta`; records, state and chips are sealed under that
+    /// key instead, so a passphrase change never has to touch a row. Held
+    /// behind a mutex so a write and a re-seal cannot interleave: the swap to
+    /// a new provider and the meta rows it seals must be one observable step.
+    provider: Arc<Mutex<Arc<dyn KeyProvider>>>,
 
     /// Set when a present archive could not be read. A write then has nothing
     /// it may replace: an ingest would stack new rows on a file whose old rows
@@ -930,51 +933,95 @@ impl HistoryFile {
         Self {
             path: archive_path(&path),
             legacy: path,
-            keys,
+            provider: Arc::new(Mutex::new(keys)),
             poisoned: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// The same archive, sealed under `keys` from here on.
-    ///
-    /// The poison travels with it: a rekey of an archive that could not be read
-    /// still has nothing it may write over.
-    #[must_use]
-    pub(crate) fn rekeyed(self, keys: Arc<dyn KeyProvider>) -> Self {
-        Self {
-            path: self.path,
-            legacy: self.legacy,
-            keys,
-            poisoned: self.poisoned,
-        }
+    /// Points every clone at `keys` for the next open, without touching the
+    /// archive. Used when bring-up learns the passphrase the session already
+    /// uses: no meta envelope needs re-sealing, but the provider that opens
+    /// the one on disk must be the one the reader typed.
+    pub(crate) fn set_provider(&self, keys: Arc<dyn KeyProvider>) {
+        *lock(&self.provider) = keys;
     }
 
-    /// Re-seals the archive under `to`, saying why when it could not.
+    /// The provider held right now, for the callers that open a store.
+    #[cfg(test)]
+    fn keys(&self) -> Arc<dyn KeyProvider> {
+        Arc::clone(&*lock(&self.provider))
+    }
+
+    /// Locks the shared provider and hands out a copy, so the caller can keep
+    /// the guard until its store work is committed and a re-seal cannot land
+    /// between the two.
+    fn locked_keys(&self) -> (MutexGuard<'_, Arc<dyn KeyProvider>>, Arc<dyn KeyProvider>) {
+        let guard = lock(&self.provider);
+        let keys = Arc::clone(&guard);
+        (guard, keys)
+    }
+
+    /// Moves the account-sealed `archive_key` to `to`, saying why when it could
+    /// not. Records, state and chips are sealed under the archive key itself, so
+    /// nothing but these two `meta` rows changes: a save that committed a
+    /// moment ago is still there, and one that lands after this sees `to`.
     ///
-    /// Every record is read under the current key first, then the whole archive
-    /// is rewritten in one transaction with each envelope sealed under `to` and
-    /// opened again before the commit. Nothing is removed first, so a failure to
-    /// seal, write, or verify leaves the archive exactly as it was rather than
-    /// replacing one that still reads. An archive that does not exist is
-    /// success: there is nothing to carry across.
-    pub(crate) fn reseal(&self, to: &dyn KeyProvider) -> Result<(), String> {
-        let payload = self
-            .read_payload()
-            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
-        let Some(payload) = payload else {
+    /// The previous envelope is kept as `archive_key_prev` until the session
+    /// file has been saved under `to`. A kill between the two leaves the
+    /// session under the old passphrase and the archive under the new one;
+    /// the next start opens `archive_key_prev` and puts meta back.
+    pub(crate) fn reseal(&self, to: Arc<dyn KeyProvider>) -> Result<(), String> {
+        let (mut guard, current) = self.locked_keys();
+        if !self.path.is_file() {
+            *guard = to;
             return Ok(());
-        };
-        let mut store = open_store(&self.path, Arc::clone(&self.keys))
+        }
+        let mut store = open_store(&self.path, &current)
             .map_err(|error| format!("history archive could not be read: {error:#}"))?;
-        let ledgers = payload
-            .peers
-            .keys()
-            .map(|chat_id| Ok((*chat_id, store.ranges(*chat_id)?)))
-            .collect::<Result<BTreeMap<_, _>>>()
+        let envelope: Vec<u8> = store
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_ARCHIVE_KEY],
+                |row| row.get(0),
+            )
             .map_err(|error| format!("history archive could not be read: {error:#}"))?;
-        store
-            .reseal_to(&payload, to, &ledgers)
+        let archive_key = open_archive_key(&envelope, current.as_ref())
+            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
+
+        let prev_envelope = sealed::seal(&archive_key, current.as_ref())
             .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        let next_envelope = sealed::seal(&archive_key, to.as_ref())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        let prev_plain = open_archive_key(&prev_envelope, current.as_ref())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        let next_plain = open_archive_key(&next_envelope, to.as_ref())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        if prev_plain != archive_key || next_plain != archive_key {
+            return Err("history archive could not be re-sealed: a key did not round-trip".into());
+        }
+
+        let transaction = store
+            .conn
+            .transaction()
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        transaction
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![META_ARCHIVE_KEY_PREV, prev_envelope],
+            )
+            .and_then(|_| {
+                transaction.execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![META_ARCHIVE_KEY, next_envelope],
+                )
+            })
+            .and_then(|_| transaction.commit())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        drop(store);
+        *guard = to;
         Ok(())
     }
 
@@ -1026,7 +1073,8 @@ impl HistoryFile {
         if !self.path.is_file() {
             return Ok(None);
         }
-        let store = open_store(&self.path, Arc::clone(&self.keys))?;
+        let (_guard, keys) = self.locked_keys();
+        let store = open_store(&self.path, &keys)?;
         let state = store.state()?;
         let mut peers: BTreeMap<i64, Vec<CachedMessage>> = BTreeMap::new();
         for (chat_id, row) in store.every_record()? {
@@ -1079,7 +1127,8 @@ impl HistoryFile {
         if !self.path.is_file() {
             return Vec::new();
         }
-        let Ok(store) = open_store(&self.path, Arc::clone(&self.keys)) else {
+        let (_guard, keys) = self.locked_keys();
+        let Ok(store) = open_store(&self.path, &keys) else {
             return Vec::new();
         };
         let Ok(ranges) = store.ranges(peer) else {
@@ -1105,7 +1154,8 @@ impl HistoryFile {
         if !self.path.is_file() {
             return None;
         }
-        let store = open_store(&self.path, Arc::clone(&self.keys)).ok()?;
+        let (_guard, keys) = self.locked_keys();
+        let store = open_store(&self.path, &keys).ok()?;
         store.text_bytes().ok()
     }
 
@@ -1118,7 +1168,8 @@ impl HistoryFile {
         if !self.path.is_file() {
             return Vec::new();
         }
-        let Ok(store) = open_store(&self.path, Arc::clone(&self.keys)) else {
+        let (_guard, keys) = self.locked_keys();
+        let Ok(store) = open_store(&self.path, &keys) else {
             return Vec::new();
         };
         store.ranges(peer).unwrap_or_default()
@@ -1230,7 +1281,8 @@ impl HistoryFile {
     /// Opens the archive and folds `payload` into it in one transaction: the
     /// bounded window is an ingest, never a replacement of what is stored.
     fn store_payload(&self, payload: &Payload) -> Result<()> {
-        let mut store = open_store(&self.path, Arc::clone(&self.keys))?;
+        let (_guard, keys) = self.locked_keys();
+        let mut store = open_store(&self.path, &keys)?;
         store.ingest_payload(payload)
     }
 
@@ -1357,9 +1409,57 @@ const SCHEMA_VERSION: i64 = 1;
 const META_VERSION: &str = "schema_version";
 const META_STATE: &str = "state";
 const META_ARCHIVE_KEY: &str = "archive_key";
+/// The previous passphrase's envelope of the same random archive key. Present
+/// only while a passphrase change is half-finished: it lets the next start
+/// tell an interrupted change from a completed one.
+const META_ARCHIVE_KEY_PREV: &str = "archive_key_prev";
 const SALT_SUFFIX: &str = ".salt";
 const KEY_LEN: usize = 32;
 const SALT_LEN: usize = 16;
+
+/// Locks a mutex, ignoring poison: the provider cell is replaced whole, so a
+/// panic elsewhere cannot leave it half-written.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The key source records, state and chips are sealed under: the random
+/// archive key itself, with a fixed salt. It never changes when the account
+/// passphrase changes, so rows stay readable and re-sealing touches meta only.
+#[derive(Clone)]
+struct RecordKey {
+    bytes: [u8; KEY_LEN],
+}
+
+impl std::fmt::Debug for RecordKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RecordKey(<redacted>)")
+    }
+}
+
+impl KeyProvider for RecordKey {
+    fn sealing_key(&self) -> Result<(sealed::Salt, FileKey), SessionError> {
+        Ok(([0u8; SALT_LEN], FileKey::from_bytes(self.bytes)))
+    }
+
+    fn opening_key(&self, _salt: &sealed::Salt) -> Result<FileKey, SessionError> {
+        Ok(FileKey::from_bytes(self.bytes))
+    }
+
+    fn accepts_passphrase(&self) -> bool {
+        false
+    }
+}
+
+/// Opens an account-sealed `archive_key` envelope into its 32 bytes.
+fn open_archive_key(envelope: &[u8], keys: &dyn KeyProvider) -> Result<[u8; KEY_LEN]> {
+    let plain = sealed::open(envelope, keys)?
+        .ok_or_else(|| anyhow!("the archive key was stored as plaintext"))?;
+    plain
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("the archive key is the wrong length"))
+}
 
 /// Pragmas applied on every open, before any table is touched. WAL with a full
 /// sync makes a committed row survive a process kill; a 256 KiB page cache and
@@ -1565,7 +1665,7 @@ fn decode_record(
 /// Opens one account's archive, creating it with a `0600` file and schema v1
 /// on first use. Paired with [`Store::put_record`], [`Store::get_record`] and
 /// [`Store::all_records`], this is the record layer later stages build on.
-fn open_store(path: &Path, keys: Arc<dyn KeyProvider>) -> Result<Store> {
+fn open_store(path: &Path, keys: &Arc<dyn KeyProvider>) -> Result<Store> {
     Store::open(path, keys)
 }
 
@@ -1574,12 +1674,110 @@ fn open_store(path: &Path, keys: Arc<dyn KeyProvider>) -> Result<Store> {
 /// connection is neither `Clone` nor `Sync`.
 struct Store {
     conn: Connection,
-    keys: Arc<dyn KeyProvider>,
+    record_keys: RecordKey,
     hmac_key: [u8; KEY_LEN],
 }
 
+/// What opening `archive_key` found about the half-finished change.
+#[derive(Clone, Copy)]
+enum KeyRepair {
+    /// A brand-new archive: no envelopes exist yet.
+    Fresh,
+    /// The primary opened. Drop `archive_key_prev` if the change completed.
+    DropPrev,
+    /// Only the previous envelope opened. The passphrase change never
+    /// finished; promote that key to the primary and drop the previous row.
+    PromotePrev,
+}
+
+fn meta_envelope(conn: &Connection, key: &str) -> Result<Option<Vec<u8>>> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Reads the random archive key, preferring the current passphrase's envelope
+/// and falling back to the previous one when a change was cut short.
+fn load_archive_key(
+    conn: &Connection,
+    keys: &dyn KeyProvider,
+    existed: bool,
+) -> Result<([u8; KEY_LEN], KeyRepair)> {
+    if !existed {
+        let mut key = [0u8; KEY_LEN];
+        getrandom::fill(&mut key)?;
+        let envelope = sealed::seal(&key, keys)?;
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+            params![META_ARCHIVE_KEY, envelope],
+        )?;
+        return Ok((key, KeyRepair::Fresh));
+    }
+    if let Some(envelope) = meta_envelope(conn, META_ARCHIVE_KEY)? {
+        match open_archive_key(&envelope, keys) {
+            Ok(key) => return Ok((key, KeyRepair::DropPrev)),
+            Err(error) => {
+                // A wrong primary is not yet a reason to poison: a passphrase
+                // change may have been interrupted before the session saved.
+                if let Some(prev) = meta_envelope(conn, META_ARCHIVE_KEY_PREV)? {
+                    return Ok((open_archive_key(&prev, keys)?, KeyRepair::PromotePrev));
+                }
+                return Err(error);
+            }
+        }
+    }
+    match meta_envelope(conn, META_ARCHIVE_KEY_PREV)? {
+        Some(prev) => Ok((open_archive_key(&prev, keys)?, KeyRepair::PromotePrev)),
+        None => Err(anyhow!("the archive key is missing")),
+    }
+}
+
+/// Settles a half-finished passphrase change, in one transaction. Idempotent:
+/// either a stale previous row goes, or the key the old session still uses is
+/// promoted back to the primary.
+fn repair_archive_key(
+    conn: &mut Connection,
+    keys: &dyn KeyProvider,
+    archive_key: &[u8; KEY_LEN],
+    repair: KeyRepair,
+) -> Result<()> {
+    match repair {
+        KeyRepair::Fresh => {}
+        KeyRepair::DropPrev => {
+            if meta_envelope(conn, META_ARCHIVE_KEY_PREV)?.is_some() {
+                conn.execute(
+                    "DELETE FROM meta WHERE key = ?1",
+                    params![META_ARCHIVE_KEY_PREV],
+                )?;
+            }
+        }
+        KeyRepair::PromotePrev => {
+            let envelope = sealed::seal(archive_key, keys)?;
+            if open_archive_key(&envelope, keys)? != *archive_key {
+                return Err(anyhow!("the archive key could not be re-sealed"));
+            }
+            let transaction = conn.transaction()?;
+            transaction.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![META_ARCHIVE_KEY, envelope],
+            )?;
+            transaction.execute(
+                "DELETE FROM meta WHERE key = ?1",
+                params![META_ARCHIVE_KEY_PREV],
+            )?;
+            transaction.commit()?;
+        }
+    }
+    Ok(())
+}
+
 impl Store {
-    fn open(path: &Path, keys: Arc<dyn KeyProvider>) -> Result<Self> {
+    fn open(path: &Path, keys: &Arc<dyn KeyProvider>) -> Result<Self> {
         // Reach the key before any file exists: an unreachable key must not
         // leave a fresh, empty database behind.
         keys.sealing_key()?;
@@ -1590,7 +1788,7 @@ impl Store {
             }
             create_db_file(path)?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.execute_batch(OPEN_PRAGMAS)?;
         #[cfg(target_os = "macos")]
         conn.execute_batch("PRAGMA fullfsync=ON;")?;
@@ -1611,28 +1809,8 @@ impl Store {
             bytes
         };
 
-        let archive_key: [u8; KEY_LEN] = if existed {
-            let envelope: Vec<u8> = conn.query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                params![META_ARCHIVE_KEY],
-                |row| row.get(0),
-            )?;
-            let plain = sealed::open(&envelope, keys.as_ref())?
-                .ok_or_else(|| anyhow!("the archive key was stored as plaintext"))?;
-            plain
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow!("the archive key is the wrong length"))?
-        } else {
-            let mut key = [0u8; KEY_LEN];
-            getrandom::fill(&mut key)?;
-            let envelope = sealed::seal(&key, keys.as_ref())?;
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-                params![META_ARCHIVE_KEY, envelope],
-            )?;
-            key
-        };
+        let (archive_key, repair) = load_archive_key(&conn, keys.as_ref(), existed)?;
+        repair_archive_key(&mut conn, keys.as_ref(), &archive_key, repair)?;
 
         let version: Option<i64> = conn
             .query_row(
@@ -1663,7 +1841,7 @@ impl Store {
         hmac_key.copy_from_slice(&mac.finalize().into_bytes());
         Ok(Self {
             conn,
-            keys,
+            record_keys: RecordKey { bytes: archive_key },
             hmac_key,
         })
     }
@@ -1685,7 +1863,7 @@ impl Store {
                 aliases: BTreeMap::new(),
             }),
             Some(envelope) => {
-                let plain = sealed::open(&envelope, self.keys.as_ref())?
+                let plain = sealed::open(&envelope, &self.record_keys)?
                     .ok_or_else(|| anyhow!("the archive state was stored as plaintext"))?;
                 Ok(serde_json::from_slice(&plain)?)
             }
@@ -1696,7 +1874,7 @@ impl Store {
     /// records, and a save seals the rows of its window through the same path.
     #[allow(dead_code)]
     fn put_record(&self, chat_id: i64, row: &CachedMessage) -> Result<()> {
-        let (chat_key, envelope) = seal_record(self.keys.as_ref(), &self.hmac_key, chat_id, row)?;
+        let (chat_key, envelope) = seal_record(&self.record_keys, &self.hmac_key, chat_id, row)?;
         insert_record(&self.conn, &chat_key, row.id, &envelope)
     }
 
@@ -1715,7 +1893,7 @@ impl Store {
             .map(|envelope| {
                 decode_record(
                     &envelope,
-                    self.keys.as_ref(),
+                    &self.record_keys,
                     &self.hmac_key,
                     &chat_key,
                     message_id,
@@ -1739,7 +1917,7 @@ impl Store {
             let (message_id, envelope) = row?;
             decode_record(
                 &envelope,
-                self.keys.as_ref(),
+                &self.record_keys,
                 &self.hmac_key,
                 &chat_key,
                 message_id,
@@ -1766,7 +1944,7 @@ impl Store {
             let (chat_key, message_id, envelope) = row?;
             decode_record(
                 &envelope,
-                self.keys.as_ref(),
+                &self.record_keys,
                 &self.hmac_key,
                 &chat_key,
                 message_id,
@@ -1790,7 +1968,7 @@ impl Store {
             aliases: payload.aliases.clone(),
         };
         let state_plain = serde_json::to_vec(&state)?;
-        let state_envelope = sealed::seal(&state_plain, self.keys.as_ref())?;
+        let state_envelope = sealed::seal(&state_plain, &self.record_keys)?;
 
         // Read the ledgers before the transaction borrows the connection.
         let held: BTreeMap<i64, Vec<(i64, i64)>> = payload
@@ -1815,7 +1993,7 @@ impl Store {
             let reach = (first.id.min(last.id), first.id.max(last.id));
             let written = ingest_in(
                 &transaction,
-                self.keys.as_ref(),
+                &self.record_keys,
                 &self.hmac_key,
                 *chat_id,
                 rows,
@@ -1837,98 +2015,13 @@ impl Store {
                 chips: chips.clone(),
             };
             let plain = serde_json::to_vec(&record)?;
-            let envelope = sealed::seal(&plain, self.keys.as_ref())?;
+            let envelope = sealed::seal(&plain, &self.record_keys)?;
             transaction.execute(
                 "INSERT INTO chips (chat_key, sealed) VALUES (?1, ?2)
                  ON CONFLICT(chat_key) DO UPDATE SET sealed = excluded.sealed",
                 params![chat_key, envelope],
             )?;
         }
-        transaction.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![META_STATE, state_envelope],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    /// Re-seals every row of this archive under `to`, in one transaction.
-    ///
-    /// `payload` is the archive as [`HistoryFile::read_payload`] read it under
-    /// the current key, and `ledgers` the stretches each chat held before the
-    /// write, so a gap the reader recorded stays a gap instead of collapsing
-    /// into one stretch that claims rows nobody has. Every envelope is opened
-    /// again under `to` before the transaction commits: a key that cannot seal
-    /// cannot half-rewrite the archive, and the archive key is re-sealed under
-    /// `to` only when everything else already opens with it.
-    fn reseal_to(
-        &mut self,
-        payload: &Payload,
-        to: &dyn KeyProvider,
-        ledgers: &BTreeMap<i64, Vec<(i64, i64)>>,
-    ) -> Result<()> {
-        let state = State {
-            account: payload.account.clone(),
-            account_id: payload.account_id,
-            chats: payload.chats.clone(),
-            aliases: payload.aliases.clone(),
-        };
-        let state_plain = serde_json::to_vec(&state)?;
-        let state_envelope = sealed::seal(&state_plain, to)?;
-        if sealed::open(&state_envelope, to)?.is_none() {
-            return Err(anyhow!("the archive state was sealed as plaintext"));
-        }
-
-        let archive_envelope: Vec<u8> = self.conn.query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![META_ARCHIVE_KEY],
-            |row| row.get(0),
-        )?;
-        let archive_plain = sealed::open(&archive_envelope, self.keys.as_ref())?
-            .ok_or_else(|| anyhow!("the archive key was stored as plaintext"))?;
-        let archive_envelope = sealed::seal(&archive_plain, to)?;
-
-        let transaction = self.conn.transaction()?;
-        transaction.execute("DELETE FROM messages", [])?;
-        transaction.execute("DELETE FROM ranges", [])?;
-        transaction.execute("DELETE FROM chips", [])?;
-        for (chat_id, rows) in &payload.peers {
-            let chat_key = keyed_chat(&self.hmac_key, *chat_id);
-            for row in rows {
-                let (key, envelope) = seal_record(to, &self.hmac_key, *chat_id, row)?;
-                decode_record(&envelope, to, &self.hmac_key, &key, row.id)?;
-                insert_record(&transaction, &key, row.id, &envelope)?;
-            }
-            for (lo, hi) in ledgers.get(chat_id).map_or(&[][..], Vec::as_slice) {
-                transaction.execute(
-                    "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)",
-                    params![chat_key, lo, hi],
-                )?;
-            }
-        }
-        for (chat_id, chips) in &payload.chips {
-            let chat_key = keyed_chat(&self.hmac_key, *chat_id);
-            let record = ChipRecord {
-                chat_key: chat_key.clone(),
-                chat_id: *chat_id,
-                chips: chips.clone(),
-            };
-            let plain = serde_json::to_vec(&record)?;
-            let envelope = sealed::seal(&plain, to)?;
-            if sealed::open(&envelope, to)?.is_none() {
-                return Err(anyhow!("a side table was sealed as plaintext"));
-            }
-            transaction.execute(
-                "INSERT INTO chips (chat_key, sealed) VALUES (?1, ?2)",
-                params![chat_key, envelope],
-            )?;
-        }
-        transaction.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![META_ARCHIVE_KEY, archive_envelope],
-        )?;
         transaction.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1951,7 +2044,7 @@ impl Store {
         let mut chips = BTreeMap::new();
         for row in rows {
             let (chat_key, envelope) = row?;
-            let plain = sealed::open(&envelope, self.keys.as_ref())?
+            let plain = sealed::open(&envelope, &self.record_keys)?
                 .ok_or_else(|| anyhow!("a side table was stored as plaintext"))?;
             let record: ChipRecord = serde_json::from_slice(&plain)?;
             if record.chat_key != chat_key || keyed_chat(&self.hmac_key, record.chat_id) != chat_key
@@ -1992,7 +2085,7 @@ impl Store {
             let (message_id, envelope) = row?;
             decode_record(
                 &envelope,
-                self.keys.as_ref(),
+                &self.record_keys,
                 &self.hmac_key,
                 &chat_key,
                 message_id,
@@ -2012,7 +2105,7 @@ impl Store {
         let mut total = 0;
         for row in rows {
             let envelope = row?;
-            let plain = sealed::open(&envelope, self.keys.as_ref())?
+            let plain = sealed::open(&envelope, &self.record_keys)?
                 .ok_or_else(|| anyhow!("a history record was stored as plaintext"))?;
             let record: Record = serde_json::from_slice(&plain)?;
             total += encoded_len(&record.row.text);
@@ -2041,7 +2134,7 @@ impl Store {
         let transaction = self.conn.transaction()?;
         let written = ingest_in(
             &transaction,
-            self.keys.as_ref(),
+            &self.record_keys,
             &self.hmac_key,
             chat_id,
             rows,
@@ -2186,10 +2279,10 @@ mod tests {
         let row = CachedMessage::from_message(&written);
 
         {
-            let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+            let store = open_store(&file.path, &file.keys()).expect("the archive opens");
             store.put_record(PEER, &row).expect("the record is written");
         }
-        let reopened = open_store(&file.path, Arc::clone(&file.keys)).expect("it reopens");
+        let reopened = open_store(&file.path, &file.keys()).expect("it reopens");
         let read = reopened
             .get_record(PEER, 7)
             .expect("the record opens")
@@ -2224,12 +2317,12 @@ mod tests {
         let row = CachedMessage::from_message(&message(1, PEER, "committed"));
 
         {
-            let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+            let store = open_store(&file.path, &file.keys()).expect("the archive opens");
             store.put_record(PEER, &row).expect("the write commits");
             // No close and no checkpoint: the handle is dropped as a killed
             // process would drop it.
         }
-        let reopened = open_store(&file.path, Arc::clone(&file.keys)).expect("it reopens");
+        let reopened = open_store(&file.path, &file.keys()).expect("it reopens");
         assert_eq!(
             reopened.get_record(PEER, 1).expect("the record opens"),
             Some(row),
@@ -2240,7 +2333,7 @@ mod tests {
     #[test]
     fn plaintext_bytes_are_refused_on_read() {
         let (_dir, file) = scratch("history.json");
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let chat_key = keyed_chat(&store.hmac_key, PEER);
         let record = Record {
             chat_key: chat_key.clone(),
@@ -2265,9 +2358,9 @@ mod tests {
     #[test]
     fn a_record_moved_to_another_chat_key_is_refused() {
         let (_dir, file) = scratch("history.json");
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let row = CachedMessage::from_message(&message(1, PEER, "private"));
-        let (chat_key, envelope) = seal_record(file.keys.as_ref(), &store.hmac_key, PEER, &row)
+        let (chat_key, envelope) = seal_record(&store.record_keys, &store.hmac_key, PEER, &row)
             .expect("the record is sealed for PEER");
         let moved = keyed_chat(&store.hmac_key, 99);
         insert_record(&store.conn, &moved, 1, &envelope).expect("the row is copied");
@@ -2287,9 +2380,9 @@ mod tests {
     #[test]
     fn a_replayed_record_under_another_address_is_refused() {
         let (_dir, file) = scratch("history.json");
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let row = CachedMessage::from_message(&message(1, PEER, "one"));
-        let (chat_key, envelope) = seal_record(file.keys.as_ref(), &store.hmac_key, PEER, &row)
+        let (chat_key, envelope) = seal_record(&store.record_keys, &store.hmac_key, PEER, &row)
             .expect("the record is sealed at id 1");
         insert_record(&store.conn, &chat_key, 2, &envelope).expect("the row is replayed at id 2");
 
@@ -2305,7 +2398,7 @@ mod tests {
 
         // Written twice at its own address, the row is replaced, not doubled.
         let other = CachedMessage::from_message(&message(1, PEER, "two"));
-        let (_, second) = seal_record(file.keys.as_ref(), &store.hmac_key, PEER, &other)
+        let (_, second) = seal_record(&store.record_keys, &store.hmac_key, PEER, &other)
             .expect("a new record for the same address");
         insert_record(&store.conn, &chat_key, 1, &second).expect("the row is replaced");
         assert_eq!(
@@ -2325,7 +2418,7 @@ mod tests {
 
         // Hold a connection open so SQLite keeps its -wal and -shm beside the
         // database: these are the files sign-out has to take with it.
-        let open = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let open = open_store(&file.path, &file.keys()).expect("the archive opens");
         // WAL mode has no `-journal`; the other four are live while the
         // connection is open.
         let sibling = |suffix: &str| {
@@ -2372,7 +2465,7 @@ mod tests {
     #[test]
     fn the_pragmas_are_applied_when_the_archive_opens() {
         let (_dir, file) = scratch("history.json");
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let journal: String = store
             .conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
@@ -2751,7 +2844,7 @@ mod tests {
             raw.starts_with(b"SQLite format 3\0"),
             "the target is a database"
         );
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let version: i64 = store
             .conn
             .query_row(
@@ -3978,7 +4071,7 @@ mod tests {
 
     fn scratch_store(name: &str) -> (tempfile::TempDir, HistoryFile, Store) {
         let (dir, file) = scratch(name);
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         (dir, file, store)
     }
 
@@ -4115,7 +4208,7 @@ mod tests {
     fn assert_ranges_match_rows(cache: &HistoryCache) {
         let (_dir, file) = scratch("history.json");
         file.save(cache, None);
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let stored = store.all_records(PEER).expect("records read");
         let ranges = store.ranges(PEER).expect("ranges read");
         match (stored.first(), stored.last()) {
@@ -4210,7 +4303,7 @@ mod tests {
         ));
         file.save(&cache, None);
 
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let stored = store.all_records(PEER).expect("the rows open");
         assert_eq!(
             stored.len(),
@@ -4237,7 +4330,7 @@ mod tests {
         let mut cache = HistoryCache::default();
         assert!(cache.merge(PEER, &page(10..=15), LATEST));
         file.save(&cache, None);
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let before_rows = store.all_records(PEER).expect("rows read");
         let before_ranges = store.ranges(PEER).expect("ranges read");
 
@@ -4245,7 +4338,7 @@ mod tests {
         assert!(disjoint.merge(PEER, &page(20..=25), LATEST));
         file.save(&disjoint, None);
 
-        let reopened = open_store(&file.path, Arc::clone(&file.keys)).expect("it reopens");
+        let reopened = open_store(&file.path, &file.keys()).expect("it reopens");
         assert_eq!(reopened.all_records(PEER).expect("rows read"), before_rows);
         assert_eq!(reopened.ranges(PEER).expect("ranges read"), before_ranges);
     }
@@ -4262,7 +4355,7 @@ mod tests {
         cache.remove(PEER);
         file.save(&cache, None);
 
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         assert!(store.all_records(PEER).expect("rows read").is_empty());
         assert!(store.ranges(PEER).expect("ranges read").is_empty());
         assert_eq!(store.all_records(PEER + 1).expect("rows read").len(), 3);
@@ -4278,7 +4371,7 @@ mod tests {
         cache.put(PEER, &page(1..=3));
         file.save(&cache, None);
 
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         store
             .conn
             .execute(
@@ -4298,7 +4391,7 @@ mod tests {
         later.put(PEER, &page(900..=902));
         file.save(&later, None);
 
-        let store = open_store(&file.path, Arc::clone(&file.keys)).expect("the archive opens");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let rows: i64 = store
             .conn
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
@@ -4316,8 +4409,7 @@ mod tests {
 
         file.clear();
         file.save(&later, None);
-        let reopened =
-            open_store(&file.path, Arc::clone(&file.keys)).expect("a fresh archive opens");
+        let reopened = open_store(&file.path, &file.keys()).expect("a fresh archive opens");
         assert_eq!(
             reopened
                 .all_records(PEER)
@@ -4374,7 +4466,7 @@ mod tests {
 
         let next: Arc<dyn KeyProvider> =
             Arc::new(telegram_framework::PassphraseProvider::new("new"));
-        file.reseal(next.as_ref())
+        file.reseal(Arc::clone(&next))
             .expect("the archive is re-sealed");
 
         let moved = HistoryFile::new(legacy.clone(), Arc::clone(&next));
@@ -4417,7 +4509,9 @@ mod tests {
         cache.put(PEER, &page(1..=5));
         file.save(&cache, None);
 
-        let error = file.reseal(&Locked).expect_err("a locked key cannot seal");
+        let error = file
+            .reseal(Arc::new(Locked))
+            .expect_err("a locked key cannot seal");
         assert!(error.contains("could not be re-sealed"), "{error}");
 
         assert_eq!(ids(&file.get(PEER)), vec![1, 2, 3, 4, 5]);
@@ -4426,6 +4520,127 @@ mod tests {
             5,
             "the archive still reads under the current key"
         );
+    }
+
+    /// A passphrase change writes the archive first and the session second. A
+    /// kill between the two leaves the session under the old passphrase, so a
+    /// restart with that passphrase must still read every record and be able to
+    /// save again. The previous envelope in `meta` is what makes that work.
+    #[test]
+    fn a_restart_after_an_unfinished_passphrase_change_still_reads_every_row() {
+        let (dir, file) = scratch("history.json");
+        let legacy = dir.path().join("history.json");
+        let total = 12i64;
+        let rows: Vec<Message> = (1..=total).map(|id| message(id, PEER, "row")).collect();
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &rows);
+        file.save(&cache, Some("+1"));
+
+        let next: Arc<dyn KeyProvider> =
+            Arc::new(telegram_framework::PassphraseProvider::new("new"));
+        file.reseal(Arc::clone(&next))
+            .expect("the archive moves to the new passphrase");
+        // No session save, and no call to `set_provider`: drop the handle the
+        // way an interrupted process would.
+
+        let restarted = HistoryFile::new(
+            legacy,
+            Arc::new(telegram_framework::PassphraseProvider::new("test")),
+        );
+        let loaded = restarted.load();
+        assert_eq!(
+            ids(&loaded.cache.get(PEER)),
+            (1..=total).collect::<Vec<_>>()
+        );
+        assert_eq!(loaded.account.as_deref(), Some("+1"));
+        let reopened = open_store(&restarted.path, &restarted.keys()).expect("meta was repaired");
+        let prev: Option<Vec<u8>> = reopened
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_ARCHIVE_KEY_PREV],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("the meta query reads");
+        assert!(
+            prev.is_none(),
+            "the completed transition left no previous key"
+        );
+
+        let mut later_rows = rows;
+        later_rows.push(message(total + 1, PEER, "after"));
+        let mut later = HistoryCache::default();
+        later.put(PEER, &later_rows);
+        restarted.save(&later, Some("+1"));
+        assert_eq!(
+            ids(&restarted.get(PEER)),
+            (1..=total + 1).collect::<Vec<_>>(),
+            "a save under the old passphrase keeps every row and lands"
+        );
+    }
+
+    /// A write that commits while a re-seal is running must not be lost, and
+    /// every envelope on disk must still be a sealed, address-checked one. The
+    /// shared provider mutex serialises the two; this test makes them overlap.
+    #[test]
+    fn a_reseal_does_not_lose_a_write_that_lands_while_it_runs() {
+        let (_dir, file) = scratch("history.json");
+        let total = 180i64;
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let writer = {
+            let file = file.clone();
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                let mut written = Vec::new();
+                let mut cache = HistoryCache::default();
+                for id in 1..=total {
+                    written.push(message(id, PEER, "written"));
+                    cache.put(PEER, &written);
+                    file.save(&cache, None);
+                }
+            })
+        };
+        start.wait();
+        for round in 0..6 {
+            let pass = if round % 2 == 0 { "new" } else { "test" };
+            file.reseal(Arc::new(telegram_framework::PassphraseProvider::new(pass)))
+                .expect("the archive re-seals while writes land");
+        }
+        writer.join().expect("the writer finished");
+
+        assert_eq!(
+            ids(&file.get(PEER)),
+            (1..=total).collect::<Vec<_>>(),
+            "every write the writer acknowledged is still readable"
+        );
+        let store = open_store(&file.path, &file.keys()).expect("the final provider opens it");
+        store.state().expect("the state blob opens");
+        store.every_record().expect("every record opens");
+        store.chips().expect("every side table opens");
+        let mut statement = store
+            .conn
+            .prepare("SELECT sealed FROM messages UNION ALL SELECT sealed FROM chips")
+            .expect("the sealed columns read");
+        let rows = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .expect("the envelopes read");
+        for envelope in rows {
+            assert!(
+                sealed::is_sealed(&envelope.expect("an envelope")),
+                "no record or side table is stored as plaintext"
+            );
+        }
+        let state: Vec<u8> = store
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_STATE],
+                |row| row.get(0),
+            )
+            .expect("the state row reads");
+        assert!(sealed::is_sealed(&state), "the state blob is sealed");
     }
 
     #[test]

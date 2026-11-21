@@ -2570,8 +2570,8 @@ fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEve
     // and every later bring-up use the same Arc.
     let file_keys = state.file_key_provider(&cfg);
     state.set_file_keys(file_keys.clone());
-    if let Some(file) = state.history_file.take() {
-        state.history_file = Some(file.rekeyed(file_keys));
+    if let Some(file) = &state.history_file {
+        file.set_provider(Arc::clone(&file_keys));
     }
     if !state.bringing_up {
         state.bringing_up = true;
@@ -2626,14 +2626,11 @@ fn change_passphrase(
     let next: Arc<dyn KeyProvider> =
         Arc::new(PassphraseProvider::with_params(new, cfg.kdf_params()));
     if let Some(history) = history {
-        history.reseal(next.as_ref())?;
+        history.reseal(Arc::clone(&next))?;
     }
     if let Err(error) = FileStore::with_key_provider(path, Arc::clone(&next)).save(&data) {
         if let Some(history) = history
-            && let Err(back) = history
-                .clone()
-                .rekeyed(Arc::clone(&next))
-                .reseal(current_keys.as_ref())
+            && let Err(back) = history.reseal(Arc::clone(&current_keys))
         {
             tracing::warn!(%back, "the history archive could not be put back");
             return Err(format!(
@@ -4785,13 +4782,11 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             Ok(new) => {
                 state.passphrase = Some(zeroize::Zeroizing::new(new.expose().to_owned()));
                 if let Some(cfg) = state.cfg_now() {
-                    // One provider for the process: the rekeyed history and
-                    // every later bring-up receive this same Arc.
+                    // The re-seal inside `change_passphrase` already moved the
+                    // shared history provider to the new passphrase; this Arc
+                    // is for the session bring-ups that follow.
                     let file_keys = state.file_key_provider(&cfg);
-                    state.set_file_keys(file_keys.clone());
-                    if let Some(file) = state.history_file.take() {
-                        state.history_file = Some(file.rekeyed(file_keys));
-                    }
+                    state.set_file_keys(file_keys);
                 }
                 app.passphrase_changed(Ok(()));
             }
