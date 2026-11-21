@@ -1216,10 +1216,12 @@ impl HistoryFile {
     /// the `lo_id` of the single recorded range it came from.
     ///
     /// Only the range that reaches the window — the stretch whose top is at or
-    /// just below `below`, the highest such stretch — is read, so paging never
-    /// crosses a gap into an older range. At most `limit` rows are decoded;
-    /// everything else on disk is left untouched. `None` for the range means no
-    /// range reaches `below`, so there is nothing contiguous to show offline.
+    /// just below `below`, the highest such stretch whose own low end is also
+    /// below `below` — is read, so paging never crosses a gap into an older
+    /// range, and a newer range that starts at or above `below` cannot hide an
+    /// older one that does reach below it. At most `limit` rows are decoded;
+    /// everything else on disk is left untouched. `None` for the range means
+    /// no range reaches `below`, so there is nothing contiguous to show offline.
     pub(crate) fn page(&self, peer: i64, below: i64, limit: usize) -> (Vec<Message>, Option<i64>) {
         if !self.path.is_file() {
             return (Vec::new(), None);
@@ -1234,6 +1236,7 @@ impl HistoryFile {
         let reaching = ranges
             .iter()
             .filter(|(_, hi)| *hi >= below.saturating_sub(1))
+            .filter(|(lo, _)| *lo < below)
             .max_by_key(|(_, hi)| *hi);
         let Some(&(lo, _)) = reaching else {
             return (Vec::new(), None);
@@ -4548,6 +4551,24 @@ mod tests {
         let (page, lo) = file.page(PEER, 501, 100);
         assert!(page.is_empty());
         assert_eq!(lo, None, "no range reaches an anchor above both");
+    }
+
+    /// A page read anchored inside an older range does not let a newer
+    /// disconnected range hide it: a range that starts at or above the
+    /// anchor contributes no row below it, however high its top reaches.
+    #[test]
+    fn a_newer_range_does_not_hide_an_older_one() {
+        let (_dir, file, store) = scratch_store("history.json");
+        plant(&store, 1..=100, (1, 100));
+        plant(&store, 301..=400, (301, 400));
+
+        let (page, lo) = file.page(PEER, 90, 100);
+        assert_eq!(lo, Some(1));
+        assert_eq!(
+            page.iter().map(|m| m.id).collect::<Vec<_>>(),
+            (1..=89).collect::<Vec<_>>(),
+            "the rows below the anchor in the older range"
+        );
     }
 
     #[test]
