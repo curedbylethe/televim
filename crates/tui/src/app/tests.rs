@@ -6366,8 +6366,8 @@ fn revalidating(ids: &[i64]) -> App {
 }
 
 /// A warm cache paints the conversation before the network has answered: the
-/// rows are there, the reader is at the newest of them, and the page that will
-/// replace them is still on its way.
+/// rows are there, the reader is at the newest of them, and the forward page
+/// that will confirm them is still on its way.
 #[test]
 fn a_warm_cache_fills_a_conversation_before_its_page_lands() {
     let mut app = App::mock();
@@ -6390,29 +6390,29 @@ fn a_warm_cache_fills_a_conversation_before_its_page_lands() {
         "nothing is on its way until the page is asked for"
     );
 
-    app.begin_fetch(FetchDirection::Latest);
+    app.begin_fetch(FetchDirection::Newer);
 
     assert!(app.is_revalidating());
     assert_eq!(app.status_text(), REVALIDATING_LABEL);
 }
 
-/// The server's newest page replaces the cached rows through the path every
-/// newest page takes, and the wait is over.
+/// The forward page appends to what the cache showed and, reaching the end,
+/// confirms it: the wait is over without any row being replaced.
 #[test]
-fn the_newest_page_replaces_what_the_cache_showed() {
+fn the_forward_page_confirms_what_the_cache_showed() {
     let mut app = revalidating(&[5, 6, 7]);
     app.conversation.vim.set_cursor(0);
 
     app.end_fetch(FetchDirection::Latest);
-    assert!(app.apply_latest(cached(&[6, 7, 8, 9])));
+    app.begin_fetch(FetchDirection::Newer);
+    assert!(app.is_revalidating());
 
-    assert_eq!(
-        window_ids(&app),
-        [6, 7, 8, 9],
-        "nothing of the seed is left"
-    );
-    assert_eq!(app.conversation.vim.total(), 4);
-    assert_eq!(app.conversation.vim.cursor(), 3, "at the newest message");
+    assert!(app.apply_newer(cached(&[8, 9])));
+    app.tail_confirmed();
+    app.end_fetch(FetchDirection::Newer);
+
+    assert_eq!(window_ids(&app), [5, 6, 7, 8, 9], "the page appended");
+    assert_eq!(app.conversation.vim.total(), 5);
     assert!(!app.conversation.cached);
     assert!(!app.is_revalidating());
     assert_ne!(app.status_text(), REVALIDATING_LABEL);
@@ -6469,11 +6469,13 @@ fn a_cold_cache_opens_a_conversation_as_before() {
 }
 
 /// The feed does not wait for the revalidation: an arrival lands on the
-/// cached rows the way it lands on any window, and the newest page then
-/// replaces both.
+/// cached rows the way it lands on any window, and the confirming page then
+/// ends the wait.
 #[test]
 fn an_arrival_lands_on_a_cached_window() {
     let mut app = revalidating(&[5, 6, 7]);
+    app.end_fetch(FetchDirection::Latest);
+    app.begin_fetch(FetchDirection::Newer);
 
     assert!(app.apply_update(&UpdateEvent::NewMessage(Message {
         chat_id: CACHED_CHAT,
@@ -6486,27 +6488,31 @@ fn an_arrival_lands_on_a_cached_window() {
         3,
         "a following view follows it"
     );
-    assert!(app.is_revalidating(), "an arrival is not the newest page");
+    assert!(
+        app.is_revalidating(),
+        "an arrival is not the confirming page"
+    );
 
-    app.end_fetch(FetchDirection::Latest);
+    app.end_fetch(FetchDirection::Newer);
+    app.tail_confirmed();
     assert!(app.apply_latest(cached(&[6, 7, 8])));
     assert_eq!(window_ids(&app), [6, 7, 8]);
 }
 
-/// A cached window is not paged from while its newest page is on its way:
-/// that page replaces it, and the cursor that would anchor a page describes
-/// nothing yet. Once the page lands, paging is what it always was.
+/// A cached window is not paged from while its confirming page is on its way:
+/// the cursor that would anchor a page describes nothing yet. Once the page
+/// lands, paging is what it always was.
 #[test]
 fn a_cached_window_is_not_paged_from_until_its_page_lands() {
     let mut app = revalidating(&[5]);
-
-    assert!(!app.wants_older());
-    app.conversation.conversation.unfollow();
-    assert!(!app.wants_newer());
-    app.conversation.conversation.follow();
-
     app.end_fetch(FetchDirection::Latest);
-    assert!(app.apply_latest(cached(&[5])));
+    app.begin_fetch(FetchDirection::Newer);
+
+    app.conversation.conversation.unfollow();
+    assert!(!app.wants_newer(), "the confirming page owns the direction");
+
+    app.end_fetch(FetchDirection::Newer);
+    app.tail_confirmed();
 
     assert!(
         app.wants_older(),

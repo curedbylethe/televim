@@ -3622,7 +3622,15 @@ fn seed_opened(app: &mut App, state: &mut State) {
     {
         return;
     }
+    // The chips travel with the window: a bring-up lands no wire page, so the
+    // reactions and pins the store holds are the only ones that can be seeded.
+    // Read them before the window is filled, then seed them after it — the view
+    // drops a chip for a message it does not hold.
+    let reactions = state.cached.messages.reactions(open);
+    let pinned = state.cached.messages.pins(open);
     app.seed_from_cache(open, state.cached_history(open));
+    seed_reactions(app, open, reactions);
+    seed_pins(app, open, pinned);
     // A search hit the cache holds is landed on now, so that no jump is fetched
     // for it. Every path that seeds a window comes through here.
     state.cached_landing = app.land_search_jump();
@@ -6485,7 +6493,17 @@ fn apply_history(
             // Archive the page before the bounded window can drain it: an
             // older page may fall out of the cache entirely on this very fold.
             state.remember_archived_page(chat_id, &page.messages, anchor);
-            if let Some(kind) = page_kind(direction, anchor, cursor, rows) {
+            let kind = page_kind(direction, anchor, cursor, rows);
+            // A forward page that reached the end confirms the resumed run, so
+            // the cached window is no longer waiting for anything.
+            let forward_confirmed = matches!(
+                kind,
+                Some(PageKind::Newer {
+                    reached_end: true,
+                    ..
+                })
+            );
+            if let Some(kind) = kind {
                 state.remember_page(chat_id, &page.messages, kind);
             }
             if direction == FetchDirection::Latest {
@@ -6498,6 +6516,9 @@ fn apply_history(
             // pinned.
             seed_reactions(app, chat_id, reactions);
             seed_pins(app, chat_id, pinned);
+            if forward_confirmed {
+                app.tail_confirmed();
+            }
             // The newest page moved the cursor to the end. A search hit that
             // the cache landed on is put back on: if the page does not hold it,
             // `go_to_search_hit` asks for it as a jump, as it would have had
@@ -6886,6 +6907,23 @@ fn apply_ready_to_screen_with_archive(
         (state.history.cursor, state.history.jump) = (None, None);
         (state.history.retry_at, state.history.retry_peer) = (None, None);
         app.conversation.conversation.window.exhausted_older = false;
+        // A window drawn from the store is the run to resume: its newest row is
+        // the newest stored id. Anchor the fresh cursor there so the next pass
+        // asks only for what came after it, never a newest page over rows we
+        // already hold. A window the wire filled is not a resume — it stays on
+        // the old path, which is what a reconnect over a live window expects.
+        if app.window_is_cached() && !app.conversation.conversation.window.is_empty() {
+            let windows_messages: Vec<_> = app
+                .conversation
+                .conversation
+                .window
+                .iter()
+                .cloned()
+                .collect();
+            let mut cursor = HistoryCursor::new(app.conversation.conversation.window.chat_id);
+            cursor.reset_to(&windows_messages);
+            state.history.cursor = Some(cursor);
+        }
         app.set_archived_chats(archived);
         app.refresh_chats(chats)
     } else if let Some(place) = carried.as_ref().filter(|place| place.chat_id.is_some()) {
@@ -12829,28 +12867,42 @@ mod tests {
     }
 
     /// A warm cache paints the conversation before the wire has said anything,
-    /// and says on the status line that it is waiting to be replaced; the
-    /// newest page then replaces every cached row.
+    /// and says on the status line that it is waiting to be confirmed. The
+    /// forward page appends behind those rows; it does not replace them, and
+    /// reaching the end of the run is what ends the wait.
     #[test]
-    fn a_cached_conversation_is_shown_until_its_newest_page_replaces_it() {
+    fn a_cached_conversation_is_shown_until_its_forward_page_confirms_it() {
         let mut app = app_just_opened();
         let mut state = state_caching(CHAT, 1..=3);
 
         open_pass(&mut app, &mut state);
-
         assert_eq!(window_ids(&app), vec![1, 2, 3], "the cache is on screen");
-        assert!(app.is_fetching(FetchDirection::Latest));
+
+        // The bring-up asks for what came after the stored newest, not another
+        // newest page over the rows already on screen.
+        let mut cursor = HistoryCursor::new(CHAT);
+        cursor.reset_to(&messages(CHAT, 1..=3));
+        state.history.cursor = Some(cursor);
+        app.end_fetch(FetchDirection::Latest);
+        app.begin_fetch(FetchDirection::Newer);
+
+        assert!(app.is_fetching(FetchDirection::Newer));
         assert_eq!(app.status_text(), REVALIDATING_LABEL);
 
         page_arrives(
             &mut app,
             &mut state,
-            FetchDirection::Latest,
-            None,
+            FetchDirection::Newer,
+            Some(3),
             messages(CHAT, 4..=6),
         );
+        app.tail_confirmed();
 
-        assert_eq!(window_ids(&app), vec![4, 5, 6], "the page replaced it");
+        assert_eq!(
+            window_ids(&app),
+            vec![1, 2, 3, 4, 5, 6],
+            "the forward page extended the cached rows"
+        );
         assert!(!app.is_revalidating());
         assert_ne!(app.status_text(), REVALIDATING_LABEL);
     }
@@ -13114,6 +13166,10 @@ mod tests {
         open_pass(&mut app, &mut state);
 
         assert_eq!(window_ids(&app), vec![1, 2, 3]);
+        // What confirms a resumed window is the forward page, not another
+        // newest page: the wait is on that fetch.
+        app.end_fetch(FetchDirection::Latest);
+        app.begin_fetch(FetchDirection::Newer);
         assert!(app.is_revalidating());
     }
 
@@ -13135,6 +13191,9 @@ mod tests {
         open_pass(&mut app, &mut state);
 
         assert_eq!(window_ids(&app), vec![1, 2, 3]);
+        // The forward page is the one whose landing ends the wait.
+        app.end_fetch(FetchDirection::Latest);
+        app.begin_fetch(FetchDirection::Newer);
         assert_eq!(app.status_text(), REVALIDATING_LABEL);
     }
 
@@ -13456,42 +13515,67 @@ mod tests {
         assert_eq!(state.history.cursor, None, "the newest page is still owed");
     }
 
-    /// The `Ready` lands over the open conversation: the list is refreshed
-    /// around it, the reader stays, and the next pass asks for the newest page,
-    /// which replaces the cached rows.
+    /// The `Ready` lands over the cached conversation: the list is refreshed
+    /// around it, the reader stays, and the next pass asks only for messages
+    /// after the stored newest — never a newest page over rows we already hold.
     #[test]
-    fn a_ready_over_the_cached_launch_refreshes_around_it_and_asks_for_latest() {
+    fn a_ready_over_the_cached_launch_refreshes_around_it_and_asks_only_for_newer() {
         let mut app = launching();
-        let mut state = warm_state();
+        let mut state = state_caching(CHAT, 1..=40);
+        assert!(
+            state
+                .cached
+                .messages
+                .set_chats(&[chat(CHAT), chat(CHAT + 1)])
+        );
         open_from_cache(&mut app, &mut state);
 
         ready(&mut app, &mut state, vec![chat(CHAT + 1), chat(CHAT)]);
 
         assert_eq!(app.connection(), ConnectionState::Connected);
         assert_eq!(open_id(&app), CHAT, "the reader stays");
-        assert_eq!(window_ids(&app), vec![1, 2, 3]);
+        assert_eq!(window_ids(&app).len(), 40);
         assert_eq!(app.list.selected_chat, 1, "the highlight followed the id");
         assert_ne!(app.status_text(), "connecting…", "it has connected");
 
-        open_pass(&mut app, &mut state);
-        assert_eq!(window_ids(&app), vec![1, 2, 3], "not seeded twice");
+        scroll_up(&mut app, 1);
+        let mut expected = HistoryCursor::new(CHAT);
+        expected.reset_to(&messages(CHAT, 1..=40));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Page(FetchDirection::Newer, expected),
+            "the resume asks after the stored newest id, not for a newest page"
+        );
+        assert_eq!(
+            window_ids(&app).len(),
+            40,
+            "the cached rows are still on screen"
+        );
+
+        app.begin_fetch(FetchDirection::Newer);
         assert_eq!(app.status_text(), REVALIDATING_LABEL);
 
         page_arrives(
             &mut app,
             &mut state,
-            FetchDirection::Latest,
-            None,
-            messages(CHAT, 4..=6),
+            FetchDirection::Newer,
+            Some(40),
+            messages(CHAT, 41..=43),
         );
-        assert_eq!(window_ids(&app), vec![4, 5, 6]);
+        app.tail_confirmed();
+        assert_eq!(
+            window_ids(&app).last().copied(),
+            Some(43),
+            "the page appended"
+        );
+        assert_ne!(app.status_text(), REVALIDATING_LABEL);
     }
 
-    /// The cached conversation is gone from the fresh list: the reconnect
-    /// rule holds — the window stays, the highlight goes to the top, and the
-    /// sentence says so — and the newest page is still asked for.
+    /// The cached conversation is gone from the fresh list: the reconnect rule
+    /// holds — the window stays, the highlight goes to the top, and the reader
+    /// is told — while the resume still pages from its stored newest id.
     #[test]
-    fn a_ready_without_the_cached_conversation_keeps_it_and_says_so() {
+    fn a_ready_without_the_cached_conversation_keeps_it_and_pages_from_its_newest() {
         let mut app = launching();
         let mut state = warm_state();
         open_from_cache(&mut app, &mut state);
@@ -13505,9 +13589,12 @@ mod tests {
             "got {:?}",
             app.ui.status
         );
-        assert_eq!(
-            wanted(&app, state.history, Instant::now()),
-            Wanted::Latest(CHAT)
+        assert!(
+            matches!(
+                wanted(&app, state.history, Instant::now()),
+                Wanted::Page(_, cursor) if cursor.newest_loaded_id() == Some(3)
+            ),
+            "a preserved window is paged from its stored newest id, not re-fetched"
         );
     }
 
@@ -13526,6 +13613,173 @@ mod tests {
         assert_eq!(open_id(&app), CHAT + 1);
         assert_eq!(app.take_initial_chat(), None);
         assert!(!app.ui.status.contains("no chat with id"));
+    }
+
+    /// A stored run that already reaches its newest message is drawn from the
+    /// store at launch: the only history request asks after the stored newest
+    /// id, and no `Latest` page is asked over the rows the reader already has.
+    #[test]
+    fn a_stored_run_reaches_its_newest_without_a_latest_request() {
+        let mut app = launching();
+        let mut state = state_caching(CHAT, 1..=30);
+        assert!(state.cached.messages.set_chats(&[chat(CHAT)]));
+        open_from_cache(&mut app, &mut state);
+        ready(&mut app, &mut state, vec![chat(CHAT)]);
+
+        scroll_up(&mut app, 1);
+        let mut cursor = HistoryCursor::new(CHAT);
+        cursor.reset_to(&messages(CHAT, 1..=30));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Page(FetchDirection::Newer, cursor),
+            "only what follows the stored newest id is asked for"
+        );
+        assert_eq!(
+            window_ids(&app).len(),
+            30,
+            "the stored rows are still shown"
+        );
+    }
+
+    /// A reader with a stored window, connected and ready to be brought back
+    /// up. All three entry points end at the same `Ready`, so the forward
+    /// request is asserted once for each of them below.
+    fn reconnectable() -> (App, State, tokio::sync::mpsc::UnboundedSender<AppEvent>) {
+        let mut app = launching();
+        let mut state = state_caching(CHAT, 1..=30);
+        assert!(state.cached.messages.set_chats(&[chat(CHAT)]));
+        open_from_cache(&mut app, &mut state);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        state.cfg = Some(Config::default());
+        state.tx = Some(tx.clone());
+        (app, state, tx)
+    }
+
+    /// The common tail of every bring-up: the `Ready` lands over the stored
+    /// window, and the only page asked for follows its newest id.
+    fn assert_resume_asks_newer(app: &mut App, state: &mut State) {
+        ready(app, state, vec![chat(CHAT)]);
+        scroll_up(app, 1);
+        let mut cursor = HistoryCursor::new(CHAT);
+        cursor.reset_to(&messages(CHAT, 1..=30));
+        assert_eq!(
+            wanted(app, state.history, Instant::now()),
+            Wanted::Page(FetchDirection::Newer, cursor),
+            "the bring-up asks after the stored newest id, never a newest page"
+        );
+    }
+
+    /// `:reconnect` rebuilds around the reader's stored window; the page that
+    /// follows is the only one asked for.
+    #[tokio::test]
+    async fn a_reconnect_command_resumes_from_the_store_without_a_latest_page() {
+        let (mut app, mut state, tx) = reconnectable();
+        app.request_reconnect();
+        drive(&mut app, &mut state, &tx);
+        assert!(state.bringing_up, "the command asked for a bring-up");
+        assert_resume_asks_newer(&mut app, &mut state);
+    }
+
+    /// The automatic reconnect after a feed end takes the same path: no
+    /// `Latest` over the rows the store already supplied.
+    #[tokio::test]
+    async fn an_automatic_reconnect_resumes_from_the_store_without_a_latest_page() {
+        let (mut app, mut state, tx) = reconnectable();
+        state.reconnect_requested = true;
+        drive(&mut app, &mut state, &tx);
+        assert!(state.bringing_up, "the feed's end asked for a bring-up");
+        assert_resume_asks_newer(&mut app, &mut state);
+    }
+
+    /// `:retry` after a failed bring-up ends in the same `Ready`, and asks the
+    /// same forward page rather than reloading the conversation.
+    #[tokio::test]
+    async fn a_retry_resumes_from_the_store_without_a_latest_page() {
+        let (mut app, mut state, tx) = reconnectable();
+        app.request_retry();
+        drive(&mut app, &mut state, &tx);
+        assert!(state.bringing_up, "the retry asked for a bring-up");
+        assert_resume_asks_newer(&mut app, &mut state);
+    }
+
+    /// A stored run short of the wire's newest fetches the missing stretch in
+    /// order: each request follows the last id fetched, and the window holds
+    /// every id between the stored newest and the page's newest.
+    #[test]
+    fn a_short_stored_run_fetches_the_missing_stretch_in_order() {
+        let mut app = launching();
+        let mut state = state_caching(CHAT, 1..=40);
+        assert!(state.cached.messages.set_chats(&[chat(CHAT)]));
+        open_from_cache(&mut app, &mut state);
+        ready(&mut app, &mut state, vec![chat(CHAT)]);
+        scroll_up(&mut app, 1);
+
+        let mut cursor = HistoryCursor::new(CHAT);
+        cursor.reset_to(&messages(CHAT, 1..=40));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Page(FetchDirection::Newer, cursor),
+            "the first page follows the stored newest id"
+        );
+
+        let mut landed = HistoryCursor::new(CHAT);
+        landed.reset_to(&messages(CHAT, 41..=50));
+        let generation = state.feed_generation;
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Newer,
+                anchor: Some(40),
+                cursor: landed,
+                generation,
+                result: Ok(history_page(messages(CHAT, 41..=50))),
+            },
+        );
+        assert_eq!(
+            window_ids(&app),
+            (1..=50).collect::<Vec<_>>(),
+            "no id is missing between the stored run and the page"
+        );
+        assert!(
+            matches!(
+                wanted(&app, state.history, Instant::now()),
+                Wanted::Page(FetchDirection::Newer, cursor) if cursor.newest_loaded_id() == Some(50)
+            ),
+            "the next page follows the one just fetched"
+        );
+    }
+
+    /// A conversation opened from the store keeps the reactions and pins that
+    /// were stored with it, even though no wire page lands to seed them.
+    #[test]
+    fn a_resumed_window_keeps_its_stored_chips_without_a_page() {
+        let mut cache = HistoryCache::default();
+        cache.put(CHAT, &messages(CHAT, 1..=3));
+        let stored_reaction = reaction("👍", 3);
+        assert!(cache.apply_update(&UpdateEvent::ReactionsChanged {
+            chat_id: CHAT,
+            message_id: 2,
+            reactions: vec![stored_reaction.clone()],
+        }));
+        assert!(cache.apply_update(&UpdateEvent::PinChanged {
+            chat_id: CHAT,
+            message_ids: vec![3],
+            pinned: true,
+        }));
+
+        let mut app = launching();
+        let mut state = State::default();
+        state.restore_history(cache);
+        assert!(state.cached.messages.set_chats(&[chat(CHAT)]));
+        open_from_cache(&mut app, &mut state);
+
+        assert_eq!(window_ids(&app), vec![1, 2, 3]);
+        assert_eq!(
+            app.conversation.conversation.reactions(2),
+            vec![stored_reaction].as_slice()
+        );
+        assert!(app.conversation.conversation.is_pinned(3));
     }
 
     /// `--chat` naming a conversation the cache does not list is left for the
@@ -15944,24 +16198,24 @@ mod tests {
     }
 
     /// The stale network anchors describe a list and a feed that are gone, so
-    /// they go with the `Ready`: a cursor whose page will never arrive is what
-    /// wedges `wanted` on a preserved window (G5).
+    /// they go with the `Ready`: the in-flight jump and the retry gate are
+    /// dropped, and the cursor is re-anchored on the stored window rather than
+    /// left naming a page that can never arrive (G5).
     #[test]
-    fn a_ready_over_an_open_conversation_clears_the_stale_network_anchors() {
-        let mut app = app_with_a_conversation(CHAT, 5);
-        let mut state = State {
-            history: History {
-                cursor: Some(HistoryCursor::new(CHAT)),
-                jump: Some(Jump {
-                    peer_id: CHAT,
-                    target_id: 20,
-                    kind: JumpKind::Unread,
-                }),
-                retry_at: Some(Instant::now() + RETRY),
-                retry_peer: None,
-                full: false,
-            },
-            ..State::default()
+    fn a_ready_over_an_open_conversation_replaces_the_stale_network_anchors() {
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT, 1..=5);
+        seed_opened(&mut app, &mut state);
+        state.history = History {
+            cursor: Some(HistoryCursor::new(CHAT)),
+            jump: Some(Jump {
+                peer_id: CHAT,
+                target_id: 20,
+                kind: JumpKind::Unread,
+            }),
+            retry_at: Some(Instant::now() + RETRY),
+            retry_peer: Some(CHAT),
+            full: false,
         };
 
         apply_ready_to_screen(
@@ -15972,21 +16226,29 @@ mod tests {
             tui::SessionStore::Keyring,
         );
 
-        assert_eq!(state.history.cursor, None, "the cursor goes");
-        assert_eq!(state.history.jump, None, "and the jump on its way");
+        let cursor = state
+            .history
+            .cursor
+            .expect("the stored window gets a fresh cursor");
+        assert_eq!(cursor.peer_id(), CHAT);
+        assert_eq!(
+            cursor.newest_loaded_id(),
+            Some(5),
+            "anchored at the stored id"
+        );
+        assert_eq!(state.history.jump, None, "and the jump on its way goes");
         assert_eq!(state.history.retry_at, None, "and the retry gate");
+        assert_eq!(state.history.retry_peer, None);
     }
 
-    /// With the cursor cleared, a preserved window re-anchors from its own
-    /// newest message: a paging direction, rather than the `Wanted::Nothing`
-    /// that a stale cursor naming an empty window would leave forever.
+    /// A stored window re-anchors from its own newest message: the next pass
+    /// asks after that id, and never `Latest` over the rows we already hold.
     #[test]
     fn paging_re_anchors_after_a_ready_over_an_open_conversation() {
-        let mut app = app_with_a_conversation(CHAT, 5);
-        let mut state = State {
-            history: opened(CHAT),
-            ..State::default()
-        };
+        let mut app = app_just_opened();
+        let mut state = state_caching(CHAT, 1..=40);
+        seed_opened(&mut app, &mut state);
+        state.history = opened(CHAT);
 
         apply_ready_to_screen(
             &mut app,
@@ -15996,10 +16258,13 @@ mod tests {
             tui::SessionStore::Keyring,
         );
 
+        scroll_up(&mut app, 1);
+        let mut expected = HistoryCursor::new(CHAT);
+        expected.reset_to(&messages(CHAT, 1..=40));
         assert_eq!(
             wanted(&app, state.history, Instant::now()),
-            Wanted::Latest(CHAT),
-            "the preserved conversation asks for its newest page again"
+            Wanted::Page(FetchDirection::Newer, expected),
+            "the preserved conversation asks for what follows its stored newest id"
         );
     }
 
