@@ -412,6 +412,10 @@ pub enum Event {
     /// anything to say.
     LocalNameSaved { result: Result<(), String> },
 
+    /// A history write failed, so the pages it took are handed back for the
+    /// next write rather than lost with the snapshot.
+    HistoryWriteFailed { pages: Vec<(i64, Vec<Message>)> },
+
     /// A conversation deletion came back, or the request failed.
     ConversationDeleted {
         chat_id: i64,
@@ -1691,7 +1695,12 @@ impl State {
                 chat_id,
                 message_id,
                 ..
-            } => self.forget_media_message(*chat_id, *message_id),
+            } => {
+                // The new words are carried to the archive even when no window
+                // holds the row, so an out-of-window edit still owes a save.
+                self.cached.dirty = true;
+                self.forget_media_message(*chat_id, *message_id);
+            }
             UpdateEvent::MessagesDeleted { message_ids } => {
                 // The id is carried to the archive even when no window holds a
                 // row for it, so a deletion of an older row still owes a save.
@@ -1771,8 +1780,9 @@ impl State {
         }
 
         self.cached.dirty = false;
+        let tx = self.tx.clone();
         let report = std::mem::take(&mut self.cached.rename_pending)
-            .then(|| self.tx.clone())
+            .then(|| tx.clone())
             .flatten();
         let mut tag = self.cached.tag.clone();
         if tag.account_id.is_none() && tag.phone.is_none() {
@@ -1784,13 +1794,25 @@ impl State {
             return;
         };
         let pages = std::mem::take(&mut self.cached.pending_pages);
+        let retry_pages = pages.clone();
         self.cached.write = Some(tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                file.try_write(&bytes)?;
-                file.ingest_pages(&pages).map_err(|error| error.to_string())
+                // Pages first: a deletion in the window must land after every
+                // page insert, or a queued page can restore a deleted row.
+                file.ingest_pages(&pages)
+                    .map_err(|error| error.to_string())?;
+                file.try_write(&bytes)
             })
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
+            if let Err(reason) = &result {
+                tracing::warn!(%reason, "a history write failed; queued pages will be retried");
+                if let Some(tx) = &tx {
+                    let _ = tx.send(AppEvent::Net(Event::HistoryWriteFailed {
+                        pages: retry_pages,
+                    }));
+                }
+            }
             if let Some(tx) = report {
                 let _ = tx.send(AppEvent::Net(Event::LocalNameSaved { result }));
             }
@@ -2669,6 +2691,14 @@ fn change_passphrase(
             ));
         }
         return Err(format!("could not write {}: {error}", path.display()));
+    }
+    // The session is durable now, so the way back is no longer needed. A stale
+    // previous envelope is harmless and the next reseal overwrites it, so a
+    // failure here only warns.
+    if let Some(history) = history
+        && let Err(error) = history.confirm_rekey()
+    {
+        tracing::warn!(%error, "a stale previous archive key was left in place");
     }
     Ok(())
 }
@@ -5217,6 +5247,12 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             }
         }
 
+        Event::HistoryWriteFailed { pages } => {
+            state.cached.pending_pages.extend(pages);
+            state.cached.dirty = true;
+            tracing::warn!("a history write failed; its queued pages are kept for a retry");
+        }
+
         Event::ConversationDeleted {
             chat_id,
             name,
@@ -6369,8 +6405,11 @@ fn apply_history(
 /// asking the wire for it again would waste a round trip and can land a page
 /// that leaves a hole against what was already downloaded. The page is the
 /// newest [`PAGE`] rows below the window's oldest id, put in front of it in
-/// ascending order, exactly where a wire page would go. A short page settles
-/// the direction, so a reader does not keep asking for what is not there.
+/// ascending order, exactly where a wire page would go. Only the one recorded
+/// range that reaches the window is read; a short page, or a page that starts
+/// at that range's low end, settles the direction so a reader neither keeps
+/// asking for what is not there nor jumps a gap into an older, disconnected
+/// stretch — that gap is left for the wire to fetch.
 fn serve_archived_older(app: &mut App, state: &mut State) -> bool {
     if !app.wants_older() {
         return false;
@@ -6381,13 +6420,9 @@ fn serve_archived_older(app: &mut App, state: &mut State) -> bool {
     let Some(file) = state.history_file.as_ref() else {
         return false;
     };
-    let mut page: Vec<Message> = file
-        .get(app.conversation.conversation.window.chat_id)
-        .into_iter()
-        .filter(|message| message.id > 0 && message.id < anchor)
-        .collect();
-    let skip = page.len().saturating_sub(PAGE);
-    page.drain(..skip);
+    let (mut page, range_lo) =
+        file.page(app.conversation.conversation.window.chat_id, anchor, PAGE);
+    page.retain(|message| message.id > 0 && message.id < anchor);
     if page.is_empty() {
         return false;
     }
@@ -6399,7 +6434,10 @@ fn serve_archived_older(app: &mut App, state: &mut State) -> bool {
     }
     app.begin_fetch(FetchDirection::Older);
     apply_page(app, FetchDirection::Older, page);
-    if count < PAGE {
+    // The end of this range is the end of what the archive can serve below the
+    // window: the ledger's next stretch sits across a gap that only the wire may
+    // fill, so settle the direction rather than stepping into it.
+    if count < PAGE || oldest == range_lo {
         app.exhaust(FetchDirection::Older);
     }
     app.end_fetch(FetchDirection::Older);
@@ -11091,6 +11129,68 @@ mod tests {
         );
     }
 
+    /// An offline older page serves only the single range that reaches the
+    /// window. It never joins an older range across a gap, and running out of
+    /// the reaching range settles the direction rather than stepping into it.
+    #[tokio::test]
+    async fn an_older_page_never_joins_a_disconnected_range() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+
+        // Seed two disjoint stored stretches: 301-400 and 1-100.
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 301..=400),
+        );
+        persist(&mut seed_state).await;
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Older,
+            Some(101),
+            messages(CHAT, 1..=100),
+        );
+        persist(&mut seed_state).await;
+        assert_eq!(
+            HistoryFile::for_test(path.clone()).ranges(CHAT),
+            vec![(1, 100), (301, 400)]
+        );
+
+        // The window sits just above the 301-400 range. No wire client here.
+        let mut app = app_with_a_conversation(CHAT, 0);
+        app.apply_latest(messages(CHAT, 401..=500));
+        let mut state = caching_state(&path);
+        state.history.cursor = Some(HistoryCursor::new(CHAT));
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        assert!(app.wants_older(), "the reader is at the top of the window");
+        assert!(state.client.is_none(), "and there is no wire");
+
+        assert!(serve_archived_older(&mut app, &mut state));
+        let window: Vec<i64> = app
+            .conversation
+            .conversation
+            .window
+            .iter()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(window.first(), Some(&301), "the 301 range landed in front");
+        assert!(
+            !window.contains(&100),
+            "the 1-100 range was not joined across the gap"
+        );
+        assert!(
+            app.conversation.conversation.window.exhausted_older,
+            "the 301 range ran out, so the direction is settled"
+        );
+    }
+
     /// An older page joins the cache through the anchor it was counted from,
     /// which the event carries because the cursor beside it has moved on.
     #[test]
@@ -11157,6 +11257,104 @@ mod tests {
             3,
             "and the page reached the screen"
         );
+    }
+
+    /// A page queued before a deletion must not restore the deleted row: pages
+    /// are ingested first and the window's deletions applied last.
+    #[tokio::test]
+    async fn a_deletion_lands_after_a_page_queued_in_the_same_write() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 101..=105),
+        );
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(101),
+            messages(CHAT, 1..=5),
+        );
+        assert!(!state.cached.pending_pages.is_empty(), "the page is queued");
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::MessagesDeleted {
+                message_ids: vec![5],
+            }),
+        );
+        persist(&mut state).await;
+
+        let stored: Vec<i64> = HistoryFile::for_test(path)
+            .get(CHAT)
+            .iter()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(stored, vec![1, 2, 3, 4, 101, 102, 103, 104, 105]);
+    }
+
+    /// A failed write hands its queued pages back, so a later write on a path
+    /// that works can still store them.
+    #[tokio::test]
+    async fn a_failed_history_write_returns_its_queued_pages() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        // A regular file where the directory should be, so the write fails.
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "").expect("the blocking file");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&blocker.join("televim.history.json"));
+        state.tx = Some(tx);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(101),
+            messages(CHAT, 1..=5),
+        );
+        state.finish_history(&[]).await;
+
+        let Some(AppEvent::Net(Event::HistoryWriteFailed { pages })) = rx.recv().await else {
+            panic!("the failed write reports its pages");
+        };
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].1.len(), 5);
+
+        let working = dir.path().join("working.history.json");
+        state.set_history_file(HistoryFile::for_test(working.clone()));
+        apply(&mut app, &mut state, Event::HistoryWriteFailed { pages });
+        assert_eq!(state.cached.pending_pages.len(), 1);
+        assert!(state.cached.dirty);
+        state.finish_history(&[]).await;
+
+        let stored: Vec<i64> = HistoryFile::for_test(working)
+            .get(CHAT)
+            .iter()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(stored, vec![1, 2, 3, 4, 5]);
+    }
+
+    /// An edit of a row outside the window still owes a save, even though no
+    /// cached row changed.
+    #[test]
+    fn an_out_of_window_edit_owes_a_write() {
+        let mut state = state_caching(CHAT, 1..=3);
+        state.cached.dirty = false;
+        state.remember_update(&UpdateEvent::MessageEdited {
+            chat_id: CHAT,
+            message_id: 99,
+            new_text: Cow::Borrowed("edited"),
+        });
+        assert!(state.cached.dirty);
     }
 
     /// Whether a write is running, or ran, since the last look; takes it.
@@ -18158,6 +18356,12 @@ mod action_status_tests {
 
         state.finish_history(&[]).await;
 
+        // The failed write first hands back the pages it took, then reports the
+        // rename it could not save.
+        let Some(AppEvent::Net(Event::HistoryWriteFailed { pages })) = rx.recv().await else {
+            panic!("the refused write reports its pages");
+        };
+        assert!(pages.is_empty());
         let Some(AppEvent::Net(Event::LocalNameSaved { result })) = rx.recv().await else {
             panic!("the refused write reports the rename");
         };
