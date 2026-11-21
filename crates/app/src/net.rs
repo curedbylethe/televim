@@ -1837,21 +1837,37 @@ impl State {
     ///
     /// Without it, a page that landed while a write was going would be marked
     /// and never written: the pass that would have written it never comes.
-    /// The last write reports to no one — the loop that would read its
-    /// failure event is gone — so its queued pages are taken back here, or a
-    /// failure would lose them with the snapshot.
-    pub(crate) async fn finish_history(&mut self, chats: &[Chat]) {
+    /// No failure event of either write has a reader left, so each failed
+    /// write's queued pages are taken back here: the first is retried by the
+    /// final write, and a failure of the final write is returned, because
+    /// nothing is left to retry it and the caller must say so.
+    ///
+    /// # Errors
+    ///
+    /// The reason the final write failed; the pages it held are lost with the
+    /// state.
+    pub(crate) async fn finish_history(&mut self, chats: &[Chat]) -> Result<(), String> {
         if let Some(write) = self.cached.write.take() {
-            let _ = write.await;
+            // Retried by the final write below, which is the one that reports.
+            let _ = self.reclaim_failed_write(write).await;
         }
         self.write_history(chats, None, true);
-        if let Some(write) = self.cached.write.take()
-            && let Ok((Err(reason), pages)) = write.await
-        {
-            tracing::warn!(%reason, "the final history write failed; its queued pages are kept");
-            self.cached.pending_pages.extend(pages);
-            self.cached.dirty = true;
+        match self.cached.write.take() {
+            Some(write) => self.reclaim_failed_write(write).await,
+            None => Ok(()),
         }
+    }
+
+    /// Waits for `write`; when it failed, its pages are queued again and the
+    /// cache owes a write.
+    async fn reclaim_failed_write(&mut self, write: HistoryWrite) -> Result<(), String> {
+        let Ok((Err(reason), pages)) = write.await else {
+            return Ok(());
+        };
+        tracing::warn!(%reason, "a history write failed at shutdown; its queued pages are kept");
+        self.cached.pending_pages.extend(pages);
+        self.cached.dirty = true;
+        Err(reason)
     }
 
     /// Forgets the cached messages, in memory and on disk.
@@ -11538,7 +11554,10 @@ mod tests {
         );
         assert_eq!(state.cached.pending_pages.len(), 1);
         assert!(state.cached.dirty);
-        state.finish_history(&[]).await;
+        state
+            .finish_history(&[])
+            .await
+            .expect("the final write lands");
 
         let stored: Vec<i64> = HistoryFile::for_test(working)
             .get(CHAT)
@@ -11570,7 +11589,8 @@ mod tests {
             Some(101),
             messages(CHAT, 1..=5),
         );
-        state.finish_history(&[]).await;
+        let result = state.finish_history(&[]).await;
+        assert!(result.is_err(), "the final failure reaches the caller");
 
         assert_eq!(state.cached.pending_pages.len(), 1, "the pages are kept");
         assert_eq!(
@@ -11582,6 +11602,43 @@ mod tests {
             (1..=5).collect::<Vec<_>>()
         );
         assert!(state.cached.dirty, "the cache still owes a write");
+    }
+
+    /// A write still in flight when the loop ends can fail after its failure
+    /// event lost its reader; its pages come back to the final flush instead.
+    #[tokio::test]
+    async fn an_in_flight_failure_at_shutdown_is_retried_by_the_final_flush() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "").expect("the blocking file");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx); // the loop is gone; nothing reads a failure event
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&blocker.join("televim.history.json"));
+        state.tx = Some(tx);
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=5),
+        );
+        // The write starts on the failing path and is left in flight.
+        state.persist_history(&[], Instant::now());
+
+        let working = dir.path().join("working.history.json");
+        state.set_history_file(HistoryFile::for_test(working.clone()));
+        state
+            .finish_history(&[])
+            .await
+            .expect("the final write lands");
+
+        let stored: Vec<i64> = HistoryFile::for_test(working)
+            .get(CHAT)
+            .iter()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(stored, vec![1, 2, 3, 4, 5], "the pages were not dropped");
     }
 
     /// A write failure from another account's write is refused: the pages it
@@ -11708,7 +11765,10 @@ mod tests {
             );
             state.persist_history(&[], t0 + Duration::from_millis(10) * id);
         }
-        state.finish_history(&[]).await;
+        state
+            .finish_history(&[])
+            .await
+            .expect("the final write lands");
         assert_eq!(file_ids(&path), cached_ids(&state));
         assert_eq!(file_ids(&path), (1..=10).collect::<Vec<_>>());
     }
