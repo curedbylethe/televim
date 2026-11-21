@@ -370,10 +370,10 @@ archive with its journal and salt siblings, but leaves the shared
 `file-key`, a configured key file, log, and accounts index. It is not a
 complete uninstall. Media cache files are plaintext, and backups may retain
 them. Remove backups separately if you need to delete that data. A history
-backup is safe while the app is stopped: copy `televim.history.db` and every
-sibling that exists beside it (`-wal`, `-shm`, `televim.history.db.salt`);
-after a clean stop the `.db` alone is complete, because SQLite folds its
-journal in on exit. A lost session passphrase
+backup is safe while the app is stopped: copy `televim.history.db` **and**
+`televim.history.db.salt` together, because opening the archive needs its salt;
+also copy `-wal` and `-shm` when they exist. A clean stop folds the journal into
+the database, so those two are usually gone, but the salt is always required. A lost session passphrase
 requires manually removing the encrypted session file; Televim cannot recover it.
 
 ## Troubleshooting
