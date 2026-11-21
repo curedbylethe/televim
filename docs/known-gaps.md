@@ -510,7 +510,7 @@ Real, and named so they are not mistaken for oversights:
   it at about 38 to 71 B a peer, so the +1.05 MB regression allowance is crossed
   only at roughly 15,000 to 28,000 peers. No bound is justified at a realistic peer
   count; revisit if a flow can name peers beyond the chat list
-  ([`memory.md`](./memory.md#the-history-cache)).
+  ([`memory.md`](./memory.md#the-history-archive)).
 - **The media cache is not encrypted at rest.** The directory holds the bytes of
   the attachments a reader has opened and the previews their messages carry, as
   plaintext `0600` blobs named `<sha256>.<ext>`, beside pointer files that name
@@ -573,27 +573,26 @@ Real, and named so they are not mistaken for oversights:
     or repeat; a terminal that then goes
     unfocused without reporting it stays treated as focused until the next focus
     event, and no evidence from a real terminal backs any of this.
-- **A worst-case history-cache write peaks above the 50 MB budget.** The byte
-  bound counts JSON-encoded text, so the serialised text is at most 8 MiB; but the
-  in-crate worst-case test (6,400 rows of control characters, release) measured a
-  60.4 MB process peak around a write, from a 9.8 MB baseline, and 62.7 MB on
-  re-open (re-run at the baseline re-record: the same 60.4 MB and 62.7 MB; it is
-  not part of `make measure` and has no band) ([`memory.md`](./memory.md#the-history-cache)). The write clones the
-  cache for the encoder, then holds the serialised bytes, the sealed envelope and
-  the re-opened verification copy at once, and the passphrase provider's Argon2id
-  adds 19 MiB while sealing (the Argon2 share is inferred, not profiled). Follow-up,
-  not done: seal and verify in place and drop the encoder's clone, to cut those
-  copies. Until then a full cache of pathological text can exceed the budget
-  briefly during a write; ordinary text is far smaller and was not measured here.
-- **The history cache's feed bookkeeping is not byte-bounded.** The feed's per-peer *seen* map is outside the peer
+- **The history archive's feed bookkeeping is not byte-bounded.** The feed's per-peer *seen* map is outside the peer
   bound and grows by one small entry per peer that received an arrival in the
   session.
 - **No history or chat-list cache for groups or channels.** Only private
   conversations are cached, because only private conversations are shown — the
-  product's scope, not a limit of the store. Media bytes are not in the history
-  file: they are in the media cache, and the history keeps the media *kind* and its
-  Telegram media id, so a cached `[image]` row draws its token and nothing more, and
-  a row restored from the file still finds its file in the cache.
+  product's scope, not a limit of the store (#144). Media bytes are not in the
+  history archive: they are in the media cache, and the archive keeps the media
+  *kind* and its Telegram media id, so a cached `[image]` row draws its token and
+  nothing more, and a row restored from the archive still finds its file in the
+  cache.
+- **The keyed chat hash still reveals how many conversations exist.** A chat key
+  is HMAC-SHA256 of the chat id under a key derived from the archive key, so no
+  chat id is stored in the clear; but a disk observer can still count the
+  distinct `messages`, `ranges` and `chips` keys and compare their row counts and
+  relative order. That is the residue of answering "which ranges does this chat
+  hold" without unsealing every row: absolute timestamps and all message text
+  stay sealed, but the existence, rough volume and ordering of conversations do
+  not. Removing it would mean decrypting the whole archive to answer a range
+  query, which fails the offline promise; the residue is accepted rather than
+  hidden.
 
 - **Sixel is not implemented.** Sixel draws in pixels, so fitting the 24-by-8
   box needs the terminal's cell pixel size, and getting that is a probe the

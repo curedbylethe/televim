@@ -1,8 +1,8 @@
 //! Read messages on disk: the history file beside the configuration.
 //!
-//! The last [`HISTORY_CACHE_DEPTH`] messages of each private conversation, and
-//! the chat list they were read from, so a launch can paint the list and a
-//! conversation before the wire has answered. It lives here for the drafts
+//! The messages of each private conversation, and the chat list they were read
+//! from, so a launch can paint the list and a conversation before the wire has
+//! answered. It lives here for the drafts
 //! file's reason: `domain` and `tui` own no filesystem, and this is the crate
 //! that owns the configuration path. What crosses out of it is plain
 //! [`domain::message::Message`] and [`domain::chat::Chat`] values, never the
@@ -13,9 +13,11 @@
 //! belong to a media cache of their own, and a history file that held them
 //! would be that cache under another name and a budget nobody measured.
 //!
-//! **Plaintext, like the drafts.** The file is restricted to its owner and
-//! tagged with the account, but not encrypted; sealing it the way the session
-//! is sealed is a recorded follow-up, not something this file half-does.
+//! **Sealed records.** Each message is an authenticated envelope in a
+//! per-account SQLite database restricted to its owner and tagged with the
+//! account. The address a record is filed under is carried inside its own
+//! plaintext and checked on read, so a row cannot be moved or replayed under
+//! another address.
 //!
 //! Every operation is best-effort and launch-safe, the drafts file's
 //! discipline: a missing file is an empty cache, an unreadable one is warned
@@ -24,61 +26,50 @@
 //! terminal, which this program is drawing on.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::hash::{DefaultHasher, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use anyhow::{Context, Result};
+use anyhow::{Result, anyhow};
 use domain::chat::{Chat, ChatKind};
-use domain::history::CONVERSATION_WINDOW;
-use domain::message::{MediaKind, Message, MessageStatus};
+use domain::history::{PINNED_IDS, REACTION_ENTRIES};
+use domain::message::{MediaKind, Message, MessageStatus, Reaction, ReactionCount};
 use domain::updates::UpdateEvent;
+use hmac::{Hmac, Mac};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
-use telegram_framework::{KeyProvider, sealed};
+use sha2::Sha256;
+use telegram_framework::{FileKey, KeyProvider, SessionError, sealed};
 
-/// How many messages of one conversation the file keeps.
+/// How many messages of one conversation the in-memory window keeps.
 ///
-/// Exactly one [`CONVERSATION_WINDOW`]: a cache hit fills the window the
-/// conversation opens into with no wire follow-up, and keeping more would be
-/// rows the window drops on arrival. Named apart from the window rather than
-/// reusing it because the two are different promises — that one is memory,
-/// this one is disk — and the assertion below is what keeps them equal until
-/// someone decides they should not be.
+/// The screen shows one window of 200 messages, and a cache hit fills it with
+/// no wire follow-up. The archive keeps every message it is given: this bounds
+/// the memory copy, not what is stored. Named apart from a
+/// `CONVERSATION_WINDOW` because the two are different promises — one is a
+/// window on the screen, the other is what is on disk — and only the screen
+/// needs them equal.
 pub(crate) const HISTORY_CACHE_DEPTH: usize = 200;
 
-const _: () = assert!(HISTORY_CACHE_DEPTH == CONVERSATION_WINDOW);
-
-/// How many conversations the file keeps messages for.
+/// How many conversations' read marks the loop keeps, as a working set.
 ///
-/// The depth bounds one conversation and this bounds how many, so the cache
-/// has a worst case that can be written down rather than one that grows with
-/// every conversation the reader ever opens. Thirty-two is a working set, not
-/// an archive: more conversations than a reader moves between in a sitting,
-/// and far fewer than an account holds — the chat list still names every one
-/// of them, and a conversation past the bound opens the way an uncached one
-/// always has, from the wire. At [`HISTORY_CACHE_DEPTH`] rows each it is 6 400
-/// rows at most, which at a typical message's size is about a megabyte, on
-/// disk and in memory alike.
-///
-/// The one past the bound that goes is the one least recently *touched* — see
-/// [`HistoryCache::touch`] for what that means and why.
+/// Read marks are names, not stored messages: thirty-two is more conversations
+/// than a reader moves between in a sitting. Messages of every conversation
+/// are kept in the archive, with no bound here.
 pub(crate) const HISTORY_CACHE_PEERS: usize = 32;
 
-/// How many JSON-encoded bytes of message text the file keeps, summed over
-/// every cached conversation.
+/// The encoded text budget the worst-case measurement is filled to.
 ///
-/// Rows bound a conversation and conversations bound the file, but neither
-/// bounds *size*: a row can carry 4,096 characters, so 6 400 rows could hold
-/// tens of megabytes. This is the bound that does, and the one the worst case
-/// in `docs/memory.md` is declared from. It counts [`CachedMessage::text`]
-/// only — ids, flags and media descriptors are small and fixed per row, and the
-/// chat list is capped by [`HISTORY_CACHE_CHATS`] — and past it the least
-/// recently touched conversations go whole, as past [`HISTORY_CACHE_PEERS`].
-/// The count is of *encoded* bytes ([`encoded_len`]), so the text portion of
-/// the serialised file is at most eight MiB whatever the text holds, and lands
-/// near ten megabytes on disk once JSON framing is counted.
+/// No longer a bound on what is stored: nothing in the archive is evicted, and
+/// the configured limit in `Config` is what stops a download. It remains the
+/// number the worst-case write test fills to, so a change in the cost of a
+/// message is measured rather than silently absorbed. See [`encoded_len`] for
+/// how a byte is counted.
+#[allow(dead_code)]
 pub(crate) const HISTORY_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 /// How many conversations of the chat list the file keeps.
@@ -90,21 +81,40 @@ pub(crate) const HISTORY_CACHE_BYTES: usize = 8 * 1024 * 1024;
 /// what gives the file a worst case — the fetched list itself has none.
 pub(crate) const HISTORY_CACHE_CHATS: usize = 500;
 
-/// The history file beside the configuration.
+/// The per-account archive beside the configuration.
 ///
-/// Owns its path, which is `config_path.with_extension("history.json")`
-/// computed once in `run` and threaded to the loop — passed rather than
-/// derived at each use, for the reason [`DraftFile`](crate::draft_store::DraftFile)
-/// is: the load, the save and the logout clear cannot disagree about which
-/// file they mean.
+/// The path handed in is the legacy `*.history.json` of [`crate::accounts`];
+/// the archive is its `.db` sibling, computed once here and threaded to the
+/// loop — passed rather than derived at each use, for the reason
+/// [`DraftFile`](crate::draft_store::DraftFile) is: the load, the save and the
+/// logout clear cannot disagree about which file they mean. The legacy path is
+/// kept only so a launch can warn about it once; it is never read or deleted.
 #[derive(Debug, Clone)]
 pub(crate) struct HistoryFile {
     path: PathBuf,
+    legacy: PathBuf,
 
-    /// The key source the session file uses, so the cache is sealed under the
-    /// same key and no second secret exists.
-    keys: Arc<dyn KeyProvider>,
+    /// The account key source, shared by every clone. It opens the sealed
+    /// `archive_key` in `meta`; records, state and chips are sealed under that
+    /// key instead, so a passphrase change never has to touch a row. Held
+    /// behind a mutex so a write and a re-seal cannot interleave: the swap to
+    /// a new provider and the meta rows it seals must be one observable step.
+    provider: Arc<Mutex<Arc<dyn KeyProvider>>>,
+
+    /// Set when a present archive could not be read. A write then has nothing
+    /// it may replace: an ingest would stack new rows on a file whose old rows
+    /// are unknown, and a full rewrite would drop them. Only sign-out, which
+    /// removes the archive, clears it.
+    poisoned: Arc<AtomicBool>,
+
+    /// A fingerprint of each window row as the archive last held it, shared by
+    /// every clone. A save re-seals only the rows whose fingerprint moved, so
+    /// one arrival costs one record instead of every cached row.
+    written: Arc<Mutex<RowMemo>>,
 }
+
+/// The fingerprint of each row last written, by chat and message id.
+type RowMemo = HashMap<(i64, i64), u64>;
 
 /// What [`HistoryFile::load`] found: the stored account tags and the cache.
 ///
@@ -139,6 +149,22 @@ impl HistoryTag {
             _ => true,
         }
     }
+
+    /// Whether a write tagged `self` still belongs to the cache the live tag
+    /// names, so a failure of that write may hand its pages back to it: an id
+    /// must equal the live id, and a write with an id never belongs to a cache
+    /// without one; a phone must equal the live phone, and passes when either
+    /// is unknown, as does an untagged write. Absence is never a mismatch.
+    pub(crate) fn tags_the_same_account_as(&self, live: &HistoryTag) -> bool {
+        match (self.account_id, live.account_id) {
+            (Some(stored), Some(id)) => stored == id,
+            (Some(_), None) => false,
+            (None, _) => self
+                .phone
+                .as_deref()
+                .is_none_or(|stored| live.phone.as_deref().is_none_or(|label| stored == label)),
+        }
+    }
 }
 
 impl LoadedHistory {
@@ -158,10 +184,10 @@ impl LoadedHistory {
 /// Keyed by the bare peer id, the way the drafts are: the product shows only
 /// private conversations, and deciding which peers those are is the caller's
 /// business — the chat list has already vetted them by the time a window is
-/// open. Every peer holds at least one message and at most
-/// [`HISTORY_CACHE_DEPTH`], and none of them is a local placeholder; an empty
-/// peer is no entry rather than an empty one. At most
-/// [`HISTORY_CACHE_PEERS`] peers are held.
+/// open. Every peer holds at least one message and none of them is a local
+/// placeholder; an empty peer is no entry rather than an empty one. Nothing
+/// held here is dropped to make room — a full archive stops older downloads
+/// instead.
 ///
 /// A `BTreeMap` for the drafts file's reason: the same cache always
 /// serialises to the same bytes.
@@ -172,23 +198,19 @@ pub(crate) struct HistoryCache {
     /// What this session's update feed has said about the cached runs.
     feed: FeedMarks,
 
-    /// When each peer was last touched, as a count of touches: what picks the
-    /// peer to evict past [`HISTORY_CACHE_PEERS`].
-    ///
-    /// **Memory only**, like the feed marks. A file's peers come back
-    /// untouched, and among untouched peers the one whose newest message is
-    /// oldest goes first — the nearest thing to recency a file records without
-    /// growing a field for it.
-    touched: BTreeMap<i64, u64>,
-
-    /// The count the next touch is stamped with.
-    clock: u64,
-
     /// The reader's own names for people, keyed by peer id.
     ///
     /// In the same account-tagged file as the chats, so sign-out takes them
     /// with the history they describe.
     aliases: BTreeMap<i64, String>,
+
+    /// Reaction strips per peer, keyed by message id, oldest entry first;
+    /// at most [`REACTION_ENTRIES`] per peer.
+    reactions: BTreeMap<i64, Vec<(i64, Vec<CachedReaction>)>>,
+
+    /// Pinned message ids per peer, oldest pin first; at most
+    /// [`PINNED_IDS`] per peer.
+    pinned: BTreeMap<i64, Vec<i64>>,
 
     /// The chat list as the wire last showed it, head first, at most
     /// [`HISTORY_CACHE_CHATS`] long.
@@ -198,6 +220,25 @@ pub(crate) struct HistoryCache {
     /// apart would be a second place for another account's conversations to
     /// survive.
     chats: Vec<CachedChat>,
+
+    /// Conversations the reader deleted, carried to the next save so an ingest
+    /// write can drop their rows. A peer with rows in the window is never in
+    /// this set: a deleted conversation that gets a new message is alive again.
+    removed: BTreeSet<i64>,
+
+    /// Identifiers of messages the reader deleted, carried to the next save.
+    ///
+    /// A deletion names no chat, but private message identifiers are one
+    /// sequence, so these are applied to every chat at save time. Without them
+    /// a save would upsert the surviving window over a row the reader had
+    /// removed, and the message would come back on the next launch.
+    deleted_messages: BTreeSet<i64>,
+
+    /// New words of messages edited in each chat, carried to the next save.
+    ///
+    /// The text travels with the id so an edit of a row the window no longer
+    /// holds can still be sealed on its own stored envelope.
+    updated_messages: BTreeMap<i64, BTreeMap<i64, String>>,
 }
 
 /// Two caches are equal when they would write the same file: the feed marks
@@ -205,7 +246,11 @@ pub(crate) struct HistoryCache {
 /// and a cache loaded from disk has neither.
 impl PartialEq for HistoryCache {
     fn eq(&self, other: &Self) -> bool {
-        self.peers == other.peers && self.chats == other.chats && self.aliases == other.aliases
+        self.peers == other.peers
+            && self.chats == other.chats
+            && self.aliases == other.aliases
+            && self.reactions == other.reactions
+            && self.pinned == other.pinned
     }
 }
 
@@ -318,15 +363,17 @@ impl HistoryCache {
             self.remove(peer);
         } else {
             self.peers.insert(peer, rows);
-            self.evict();
         }
     }
 
-    /// Forgets everything cached for `peer`.
+    /// Forgets everything cached for `peer`, and names it to the next save so
+    /// the rows in the archive go with it.
     pub(crate) fn remove(&mut self, peer: i64) {
         self.peers.remove(&peer);
-        self.touched.remove(&peer);
         self.aliases.remove(&peer);
+        self.reactions.remove(&peer);
+        self.pinned.remove(&peer);
+        self.removed.insert(peer);
     }
 
     /// The reader's names, as a borrowed map.
@@ -346,69 +393,20 @@ impl HistoryCache {
         }
     }
 
-    /// Stamps `peer` as the most recently touched, which keeps it out of the
-    /// next eviction.
+    /// The JSON-encoded bytes of message text held, over every cached peer.
     ///
-    /// **Touched means written from the wire**: a page folded into its run —
-    /// whether or not it changed a row, because a newest page landing is the
-    /// reader opening the conversation — or a message added to it. Those are
-    /// the only ways a peer enters the cache, so they are where a peer has to
-    /// be stamped before an eviction can run. Seeding a window is not a touch:
-    /// a conversation seeded online is followed by its newest page, which is
-    /// one; and offline nothing enters the cache, so nothing is evicted.
-    fn touch(&mut self, peer: i64) {
-        self.clock += 1;
-        self.touched.insert(peer, self.clock);
-    }
-
-    /// The JSON-encoded bytes of message text held, over every cached peer:
-    /// what [`HISTORY_CACHE_BYTES`] bounds, so the text portion of the
-    /// serialised file never exceeds it. See [`encoded_len`] for the rule.
-    /// Summed on demand — at most 6 400 rows — so there is no counter to drift
-    /// from the rows.
+    /// Kept as the measure the worst-case tests fill to; see
+    /// [`HISTORY_CACHE_BYTES`]. The on-disk fullness answer is
+    /// [`HistoryFile::text_bytes`], which reads the archive rather than this
+    /// in-memory copy. Summed on demand so there is no counter to drift from
+    /// the rows.
+    #[allow(dead_code)]
     fn encoded_text_bytes(&self) -> usize {
         self.peers
             .values()
             .flatten()
             .map(|row| encoded_len(&row.text))
             .sum()
-    }
-
-    /// Drops peers until at most [`HISTORY_CACHE_PEERS`] are left and their
-    /// text fits [`HISTORY_CACHE_BYTES`], the least recently touched first.
-    ///
-    /// Untouched peers — what a file held — go before any touched one, the
-    /// one whose newest message is oldest first; the peer id breaks a tie, so
-    /// the choice is the same on every run.
-    ///
-    /// **The feed marks follow.** An evicted peer is no longer current: its
-    /// run is gone, and a current mark on nothing would let the next arrival
-    /// start a run of one message and call it the conversation's newest end
-    /// with everything before it missing. What the feed has *seen* stays, for
-    /// [`FeedMarks::seen`]'s reason — the message exists whether or not it is
-    /// cached — so a page fetched before it still cannot mark a returning
-    /// peer current.
-    fn evict(&mut self) {
-        while self.peers.len() > HISTORY_CACHE_PEERS
-            || self.encoded_text_bytes() > HISTORY_CACHE_BYTES
-        {
-            let touched = &self.touched;
-            let Some(oldest) = self
-                .peers
-                .iter()
-                .min_by_key(|(peer, rows)| {
-                    (
-                        touched.get(peer).copied().unwrap_or(0),
-                        rows.last().map_or(i64::MIN, |row| row.timestamp),
-                    )
-                })
-                .map(|(peer, _)| *peer)
-            else {
-                return;
-            };
-            self.remove(oldest);
-            self.feed.current.remove(&oldest);
-        }
     }
 
     /// Folds a page the wire answered with into what is cached for `peer`,
@@ -537,12 +535,10 @@ impl HistoryCache {
         }
 
         let unchanged = cached == Some(&merged);
-        self.touch(peer);
         if unchanged {
             return false;
         }
         self.peers.insert(peer, merged);
-        self.evict();
         true
     }
 
@@ -574,18 +570,73 @@ impl HistoryCache {
                 new_text,
             } => self.edit(*chat_id, *message_id, new_text),
             UpdateEvent::MessagesDeleted { message_ids } => self.delete(message_ids),
-            // Reactions and pins are not part of a row: the cache holds what was
-            // said, and a reaction or a pin is the conversation's live state
-            // rather than the message's text. Neither is persisted, which is why
-            // reopening a conversation asks the server again rather than
-            // replaying a cache.
+            UpdateEvent::ReactionsChanged {
+                chat_id,
+                message_id,
+                reactions,
+            } => self.set_reactions(*chat_id, *message_id, reactions),
+            UpdateEvent::PinChanged {
+                chat_id,
+                message_ids,
+                pinned,
+            } => self.set_pins(*chat_id, message_ids, *pinned),
+            // A read receipt is a watermark on the conversation, and a row's
+            // status is its direction alone; typing and presence are not
+            // messages at all.
             UpdateEvent::ReadReceipt { .. }
             | UpdateEvent::InboxRead { .. }
             | UpdateEvent::PeerTyping { .. }
-            | UpdateEvent::PeerStatus { .. }
-            | UpdateEvent::ReactionsChanged { .. }
-            | UpdateEvent::PinChanged { .. } => false,
+            | UpdateEvent::PeerStatus { .. } => false,
         }
+    }
+
+    /// Replaces the reaction strip of one message, keeping the bounded
+    /// per-peer side table in the order the updates arrived.
+    fn set_reactions(&mut self, peer: i64, message_id: i64, reactions: &[ReactionCount]) -> bool {
+        let fresh: Vec<CachedReaction> = reactions.iter().map(CachedReaction::from).collect();
+        let rows = self.reactions.entry(peer).or_default();
+        let held = rows.iter().position(|(id, _)| *id == message_id);
+        let changed = match held {
+            Some(at) if rows[at].1 == fresh => false,
+            Some(at) if fresh.is_empty() => {
+                rows.remove(at);
+                true
+            }
+            Some(at) => {
+                rows[at].1 = fresh;
+                true
+            }
+            None if fresh.is_empty() => false,
+            None => {
+                rows.push((message_id, fresh));
+                true
+            }
+        };
+        if rows.len() > REACTION_ENTRIES {
+            rows.drain(..rows.len() - REACTION_ENTRIES);
+        }
+        changed
+    }
+
+    /// Adds or removes pinned ids for `peer`, keeping the bounded set.
+    fn set_pins(&mut self, peer: i64, message_ids: &[i64], pinned: bool) -> bool {
+        let rows = self.pinned.entry(peer).or_default();
+        let mut changed = false;
+        for &id in message_ids {
+            if pinned {
+                if !rows.contains(&id) {
+                    rows.push(id);
+                    changed = true;
+                }
+            } else if let Some(at) = rows.iter().position(|held| *held == id) {
+                rows.remove(at);
+                changed = true;
+            }
+        }
+        if rows.len() > PINNED_IDS {
+            rows.drain(..rows.len() - PINNED_IDS);
+        }
+        changed
     }
 
     /// Adds a message that has just come into being — an arrival over the
@@ -628,25 +679,32 @@ impl HistoryCache {
         }
         let excess = rows.len().saturating_sub(HISTORY_CACHE_DEPTH);
         rows.drain(..excess);
-        self.touch(peer);
-        self.evict();
         true
     }
 
-    /// Replaces the text of message `id` of `peer`, if it is cached.
+    /// Replaces the text of message `id` of `peer`, recording the new words
+    /// even when the row is outside the window.
+    ///
+    /// False for an unchanged cached row, so the caller does not churn, and for
+    /// an uncached row, whose edit is owed to the archive but changes no cache.
     fn edit(&mut self, peer: i64, id: i64, text: &str) -> bool {
-        let Some(row) = self
+        let mut changed = false;
+        if let Some(row) = self
             .peers
             .get_mut(&peer)
             .and_then(|rows| rows.iter_mut().find(|row| row.id == id))
-        else {
-            return false;
-        };
-        if row.text == text {
-            return false;
+        {
+            if row.text == text {
+                return false;
+            }
+            text.clone_into(&mut row.text);
+            changed = true;
         }
-        text.clone_into(&mut row.text);
-        true
+        self.updated_messages
+            .entry(peer)
+            .or_default()
+            .insert(id, text.to_owned());
+        changed
     }
 
     /// Takes the messages `ids` out of every peer.
@@ -657,8 +715,11 @@ impl HistoryCache {
     /// one the feed had overtaken.
     fn delete(&mut self, ids: &[i64]) -> bool {
         let FeedMarks { current, seen } = &mut self.feed;
-        let touched = &mut self.touched;
         let mut changed = false;
+        // Carry even ids the window no longer holds: a row outside the window
+        // still has to be dropped from the archive at the next save. The caller
+        // marks the cache dirty for a deletion even when no cached row went.
+        self.deleted_messages.extend(ids.iter().copied());
         self.peers.retain(|peer, rows| {
             let before = rows.len();
             rows.retain(|row| !ids.contains(&row.id));
@@ -670,9 +731,6 @@ impl HistoryCache {
                         None => seen.remove(peer),
                     };
                 }
-            }
-            if rows.is_empty() {
-                touched.remove(peer);
             }
             !rows.is_empty()
         });
@@ -728,6 +786,21 @@ struct Payload {
     chats: Vec<CachedChat>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     aliases: BTreeMap<i64, String>,
+    /// The bounded reaction/pin side tables, held in their own sealed SQL
+    /// table rather than in a message's record.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    chips: BTreeMap<i64, Chips>,
+    /// Chats the reader deleted. An ingest write drops only the rows it names,
+    /// so a removal has to travel with the window.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    removed: BTreeSet<i64>,
+    /// Messages the reader deleted, even ones the window no longer holds.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    deleted_messages: BTreeSet<i64>,
+    /// Messages edited in each chat, with their new words carried alongside
+    /// the ids so a row outside `peers` can be re-sealed too.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    updated_messages: BTreeMap<i64, BTreeMap<i64, String>>,
 }
 
 /// One conversation of the cached chat list: what its row draws.
@@ -912,35 +985,130 @@ impl From<CachedMedia> for MediaKind {
 }
 
 impl HistoryFile {
-    /// A handle on the history file at `path`, sealed under `keys`.
+    pub(crate) fn poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Relaxed)
+    }
+
+    /// A handle on the archive for the account whose legacy path is `path`,
+    /// sealed under `keys`.
     #[must_use]
     pub(crate) fn new(path: PathBuf, keys: Arc<dyn KeyProvider>) -> Self {
-        Self { path, keys }
+        Self {
+            path: archive_path(&path),
+            legacy: path,
+            provider: Arc::new(Mutex::new(keys)),
+            poisoned: Arc::new(AtomicBool::new(false)),
+            written: Arc::new(Mutex::new(RowMemo::new())),
+        }
     }
 
-    /// The same file, sealed under `keys` from here on.
-    #[must_use]
-    pub(crate) fn rekeyed(self, keys: Arc<dyn KeyProvider>) -> Self {
-        Self::new(self.path, keys)
+    /// Points every clone at `keys` for the next open, without touching the
+    /// archive. Used when bring-up learns the passphrase the session already
+    /// uses: no meta envelope needs re-sealing, but the provider that opens
+    /// the one on disk must be the one the reader typed.
+    pub(crate) fn set_provider(&self, keys: Arc<dyn KeyProvider>) -> bool {
+        *lock(&self.provider) = keys;
+        self.poisoned.swap(false, Ordering::Relaxed)
     }
 
-    /// Re-seals the file in place under `to`, when it opens under the current key.
+    /// The provider held right now, for the callers that open a store.
+    #[cfg(test)]
+    fn keys(&self) -> Arc<dyn KeyProvider> {
+        Arc::clone(&*lock(&self.provider))
+    }
+
+    /// Locks the shared provider and hands out a copy, so the caller can keep
+    /// the guard until its store work is committed and a re-seal cannot land
+    /// between the two.
+    fn locked_keys(&self) -> (MutexGuard<'_, Arc<dyn KeyProvider>>, Arc<dyn KeyProvider>) {
+        let guard = lock(&self.provider);
+        let keys = Arc::clone(&guard);
+        (guard, keys)
+    }
+
+    /// Moves the account-sealed `archive_key` to `to`, saying why when it could
+    /// not. Records, state and chips are sealed under the archive key itself, so
+    /// nothing but these two `meta` rows changes: a save that committed a
+    /// moment ago is still there, and one that lands after this sees `to`.
     ///
-    /// A file the current key does not open is left alone: it is a cache, and it
-    /// reads as empty under either key. Best-effort like [`HistoryFile::write`].
-    pub(crate) fn reseal(&self, to: Arc<dyn KeyProvider>) {
-        let Ok(bytes) = fs::read(&self.path) else {
-            return;
-        };
-        let plain = match sealed::open(&bytes, self.keys.as_ref()) {
-            Ok(Some(plain)) => plain.to_vec(),
-            Ok(None) => bytes,
-            Err(error) => {
-                tracing::warn!(%error, "history file left as it was: it does not open");
-                return;
-            }
-        };
-        Self::new(self.path.clone(), to).write(&plain);
+    /// The previous envelope is kept as `archive_key_prev` until
+    /// [`HistoryFile::confirm_rekey`] says the session file has been saved
+    /// under `to`. A kill between the two leaves the session under the old
+    /// passphrase and the archive under the new one; the next start opens
+    /// `archive_key_prev` and puts meta back.
+    pub(crate) fn reseal(&self, to: Arc<dyn KeyProvider>) -> Result<(), String> {
+        let (mut guard, current) = self.locked_keys();
+        if !self.path.is_file() {
+            *guard = to;
+            return Ok(());
+        }
+        let mut store = open_store(&self.path, &current)
+            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
+        let envelope: Vec<u8> = store
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_ARCHIVE_KEY],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
+        let archive_key = open_archive_key(&envelope, current.as_ref())
+            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
+
+        let prev_envelope = sealed::seal(&archive_key, current.as_ref())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        let next_envelope = sealed::seal(&archive_key, to.as_ref())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        let prev_plain = open_archive_key(&prev_envelope, current.as_ref())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        let next_plain = open_archive_key(&next_envelope, to.as_ref())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        if prev_plain != archive_key || next_plain != archive_key {
+            return Err("history archive could not be re-sealed: a key did not round-trip".into());
+        }
+
+        let transaction = store
+            .conn
+            .transaction()
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        transaction
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![META_ARCHIVE_KEY_PREV, prev_envelope],
+            )
+            .and_then(|_| {
+                transaction.execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![META_ARCHIVE_KEY, next_envelope],
+                )
+            })
+            .and_then(|_| transaction.commit())
+            .map_err(|error| format!("history archive could not be re-sealed: {error:#}"))?;
+        drop(store);
+        *guard = to;
+        Ok(())
+    }
+
+    /// Drops `archive_key_prev` once the session is saved under the new
+    /// passphrase. Under the provider lock, so no ordinary open can promote the
+    /// old key back between the open and the delete. No archive: nothing to do.
+    pub(crate) fn confirm_rekey(&self) -> Result<(), String> {
+        let (_guard, keys) = self.locked_keys();
+        if !self.path.is_file() {
+            return Ok(());
+        }
+        let store = open_store(&self.path, &keys)
+            .map_err(|error| format!("history archive could not be read: {error:#}"))?;
+        store
+            .conn
+            .execute(
+                "DELETE FROM meta WHERE key = ?1",
+                params![META_ARCHIVE_KEY_PREV],
+            )
+            .map_err(|error| format!("history archive could not be confirmed: {error:#}"))?;
+        Ok(())
     }
 
     /// A handle sealed under a fixed passphrase, so tests need no keyring.
@@ -954,52 +1122,76 @@ impl HistoryFile {
 
     /// Reads the stored cache and the account tag it was saved under.
     ///
-    /// A missing file is an empty cache, not an error; corrupt JSON and any
-    /// other read failure are warned about and empty too. What a readable
-    /// file holds goes through [`HistoryCache::put`], so a hand-edited or
-    /// older file is held to the same bounds as one this build wrote: no
-    /// placeholders, no peer deeper than [`HISTORY_CACHE_DEPTH`], and no more
-    /// than [`HISTORY_CACHE_PEERS`] peers — the ones with the newest messages.
+    /// Only the newest [`HISTORY_CACHE_DEPTH`] messages of each chat are read
+    /// out of SQL — the same bounded windows the cache holds — not the whole
+    /// archive. The rest stays sealed on disk until a range read asks for it.
+    ///
+    /// A missing database is an empty cache, not an error; a database that
+    /// cannot be opened, a record that is not sealed, and any record whose
+    /// plaintext does not name the address it was filed under are warned about
+    /// and read as empty. Only a missing database reads as empty without
+    /// consequence: a failure poisons the handle, so no save can write over an
+    /// archive whose contents are unknown until sign-out removes it. What a
+    /// readable archive holds goes through
+    /// [`HistoryCache::put`], so a hand-written or older archive is held to the
+    /// same bounds as one this build wrote. The legacy `history.json`, if it
+    /// still exists, is warned about once and left where it is — never read,
+    /// migrated, or deleted.
     pub(crate) fn load(&self) -> LoadedHistory {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return LoadedHistory::empty();
+        if self.legacy.is_file() {
+            warn_legacy_once();
+        }
+        match self.read_payload() {
+            Ok(Some(payload)) => {
+                // What was read is what the archive holds, so the first save
+                // after a launch writes only what has since moved.
+                *lock(&self.written) = fingerprints(&payload);
+                Self::from_payload(payload)
             }
+            Ok(None) => LoadedHistory::empty(),
             Err(error) => {
-                tracing::warn!(%error, "history file could not be read");
-                return LoadedHistory::empty();
-            }
-        };
-
-        match sealed::open(&bytes, self.keys.as_ref()) {
-            Ok(Some(plain)) => Self::parse(&plain).unwrap_or_else(LoadedHistory::empty),
-            Ok(None) => {
-                // Not an envelope: a file from a build that wrote plaintext.
-                // Read it once, then seal the same bytes in its place, wiping
-                // the old inode. Garbage is left for the next save to replace.
-                let Some(loaded) = Self::parse(&bytes) else {
-                    return LoadedHistory::empty();
-                };
-                self.write(&bytes);
-                loaded
-            }
-            // A wrong key or a damaged envelope: a cache is recoverable, but
-            // the right key may be back tomorrow, so the file stays until a
-            // save overwrites it.
-            Err(error) => {
-                tracing::warn!(%error, "history file could not be opened; starting empty");
+                tracing::warn!(
+                    %error,
+                    "history archive could not be read; it is left as it is and nothing is written over it"
+                );
+                self.poisoned.store(true, Ordering::Relaxed);
                 LoadedHistory::empty()
             }
         }
     }
 
-    /// The cache `plain` JSON holds, or `None` (warned about) when it is not
-    /// a history payload.
-    fn parse(plain: &[u8]) -> Option<LoadedHistory> {
-        let payload = serde_json::from_slice::<Payload>(plain)
-            .inspect_err(|error| tracing::warn!(%error, "discarding an unreadable history file"))
-            .ok()?;
+    /// The bounded windows of the archive as one payload, or `None` when it
+    /// does not exist yet.
+    ///
+    /// The non-message state is one sealed blob in `meta`; the newest
+    /// [`HISTORY_CACHE_DEPTH`] messages of each chat are read out of SQL and
+    /// decoded and address-checked on the way out. Older rows stay on disk.
+    fn read_payload(&self) -> Result<Option<Payload>> {
+        if !self.path.is_file() {
+            return Ok(None);
+        }
+        let (_guard, keys) = self.locked_keys();
+        let store = open_store(&self.path, &keys)?;
+        let state = store.state()?;
+        let mut peers: BTreeMap<i64, Vec<CachedMessage>> = BTreeMap::new();
+        for (chat_id, row) in store.bounded_records(HISTORY_CACHE_DEPTH)? {
+            peers.entry(chat_id).or_default().push(row);
+        }
+        Ok(Some(Payload {
+            account: state.account,
+            account_id: state.account_id,
+            peers,
+            chats: state.chats,
+            aliases: state.aliases,
+            chips: store.chips()?,
+            removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::new(),
+        }))
+    }
+
+    /// The cache a payload holds, within the same bounds a save applies.
+    fn from_payload(payload: Payload) -> LoadedHistory {
         let mut cache = HistoryCache::default();
         for (peer, rows) in payload.peers {
             let messages: Vec<Message> = rows.iter().map(|row| row.to_message(peer)).collect();
@@ -1008,18 +1200,139 @@ impl HistoryFile {
         cache.chats = payload.chats;
         cache.chats.truncate(HISTORY_CACHE_CHATS);
         cache.aliases = payload.aliases;
-        Some(LoadedHistory {
+        for (peer, chips) in payload.chips {
+            if !chips.reactions.is_empty() {
+                cache.reactions.insert(peer, chips.reactions);
+            }
+            if !chips.pinned.is_empty() {
+                cache.pinned.insert(peer, chips.pinned);
+            }
+        }
+        LoadedHistory {
             account: payload.account,
             account_id: payload.account_id,
             cache,
-        })
+        }
     }
 
-    /// Stores `cache` under the phone `account`, atomically: [`HistoryFile::encode`]
-    /// then [`HistoryFile::write`], on one thread.
+    /// The messages of one chat, read from its recorded ranges on demand.
+    ///
+    /// Unlike [`HistoryFile::load`], which reads only the bounded windows, this
+    /// opens the archive, asks the ledger which stretches the chat holds and
+    /// reads those rows, decoding and unsealing each on the way out. A missing
+    /// or unreadable archive is an empty answer, the load discipline. Paging
+    /// uses [`HistoryFile::page`], which decodes only one bounded page; this
+    /// whole-chat read is kept for callers that genuinely need every row.
+    #[allow(dead_code)]
+    pub(crate) fn get(&self, peer: i64) -> Vec<Message> {
+        if !self.path.is_file() {
+            return Vec::new();
+        }
+        let (_guard, keys) = self.locked_keys();
+        let Ok(store) = open_store(&self.path, &keys) else {
+            return Vec::new();
+        };
+        let Ok(ranges) = store.ranges(peer) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for (lo, hi) in ranges {
+            match store.range_rows(peer, lo, hi) {
+                Ok(mut part) => rows.append(&mut part),
+                Err(error) => {
+                    tracing::warn!(%error, "a history range could not be read");
+                    return Vec::new();
+                }
+            }
+        }
+        rows.into_iter().map(|row| row.to_message(peer)).collect()
+    }
+
+    /// The next older page of `peer` strictly below `below`, oldest first, and
+    /// the `lo_id` of the single recorded range it came from.
+    ///
+    /// Only the range that reaches the window — the stretch whose top is at or
+    /// just below `below`, the highest such stretch whose own low end is also
+    /// below `below` — is read, so paging never crosses a gap into an older
+    /// range, and a newer range that starts at or above `below` cannot hide an
+    /// older one that does reach below it. At most `limit` rows are decoded;
+    /// everything else on disk is left untouched. `None` for the range means
+    /// no range reaches `below`, so there is nothing contiguous to show offline.
+    pub(crate) fn page(&self, peer: i64, below: i64, limit: usize) -> (Vec<Message>, Option<i64>) {
+        if !self.path.is_file() {
+            return (Vec::new(), None);
+        }
+        let (_guard, keys) = self.locked_keys();
+        let Ok(store) = open_store(&self.path, &keys) else {
+            return (Vec::new(), None);
+        };
+        let Ok(ranges) = store.ranges(peer) else {
+            return (Vec::new(), None);
+        };
+        let reaching = ranges
+            .iter()
+            .filter(|(_, hi)| *hi >= below.saturating_sub(1))
+            .filter(|(lo, _)| *lo < below)
+            .max_by_key(|(_, hi)| *hi);
+        let Some(&(lo, _)) = reaching else {
+            return (Vec::new(), None);
+        };
+        match store.page(peer, below, lo, limit) {
+            Ok(rows) => (
+                rows.into_iter()
+                    .map(|(_, row)| row.to_message(peer))
+                    .collect(),
+                Some(lo),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "a history page could not be read");
+                (Vec::new(), None)
+            }
+        }
+    }
+
+    /// The encoded text bytes held on disk, by a SQL read rather than a copy of
+    /// every row in memory. `None` when the archive cannot be read.
+    #[allow(dead_code)]
+    pub(crate) fn text_bytes(&self) -> Option<usize> {
+        if !self.path.is_file() {
+            return None;
+        }
+        let (_guard, keys) = self.locked_keys();
+        let store = open_store(&self.path, &keys).ok()?;
+        store.text_bytes().ok()
+    }
+
+    /// The stretches of `peer` the archive holds, oldest first.
+    ///
+    /// SQL-backed, like [`HistoryFile::get`], so a caller can check what a
+    /// fetch left behind without reading every row into memory.
+    #[allow(dead_code)]
+    pub(crate) fn ranges(&self, peer: i64) -> Vec<(i64, i64)> {
+        if !self.path.is_file() {
+            return Vec::new();
+        }
+        let (_guard, keys) = self.locked_keys();
+        let Ok(store) = open_store(&self.path, &keys) else {
+            return Vec::new();
+        };
+        store.ranges(peer).unwrap_or_default()
+    }
+
+    /// Whether the archive has reached `limit` bytes of message text.
+    ///
+    /// `0` means no limit, and an archive that cannot be read is not full: the
+    /// next write either repairs it or the wire refills it. A limit is read
+    /// from configuration, never fixed here.
+    pub(crate) fn full(&self, limit: u64) -> bool {
+        limit != 0 && self.text_bytes().is_some_and(|used| used as u64 >= limit)
+    }
+
+    /// Stores `cache` under the phone `account`: [`HistoryFile::encode`] then
+    /// [`HistoryFile::write`], on one thread.
     ///
     /// The loop does not call this — it encodes where the cache lives and
-    /// writes off the loop's thread — so only the tests that pin the file's
+    /// writes off the loop's thread — so only the tests that pin the archive's
     /// shape do.
     #[cfg(test)]
     pub(crate) fn save(&self, cache: &HistoryCache, account: Option<&str>) {
@@ -1034,7 +1347,7 @@ impl HistoryFile {
         }
     }
 
-    /// The bytes that store `cache` under `tag`, or `None` when it could
+    /// The payload that stores `cache` under `tag`, or `None` when it could
     /// not be serialised, which is warned about.
     ///
     /// Apart from [`HistoryFile::write`] so the two can run on different
@@ -1047,70 +1360,156 @@ impl HistoryFile {
             peers: cache.peers.clone(),
             chats: cache.chats.clone(),
             aliases: cache.aliases.clone(),
+            // Named even when empty: an ingest upsert of an empty side table
+            // is what erases a cleared strip instead of resurrecting it on load.
+            chips: cache
+                .peers
+                .keys()
+                .chain(cache.reactions.keys())
+                .chain(cache.pinned.keys())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|peer| {
+                    (
+                        *peer,
+                        Chips {
+                            reactions: cache.reactions.get(peer).cloned().unwrap_or_default(),
+                            pinned: cache.pinned.get(peer).cloned().unwrap_or_default(),
+                        },
+                    )
+                })
+                .collect(),
+            removed: cache
+                .removed
+                .iter()
+                .filter(|peer| !cache.peers.contains_key(*peer))
+                .copied()
+                .collect(),
+            deleted_messages: cache.deleted_messages.clone(),
+            updated_messages: cache.updated_messages.clone(),
         };
         serde_json::to_vec(&payload)
             .inspect_err(|error| tracing::warn!(%error, "history could not be serialised"))
             .ok()
     }
 
-    /// Seals `bytes` from [`HistoryFile::encode`] and replaces the file with
-    /// the envelope, atomically.
+    /// Stores the encoded payload as sealed records, atomically.
     ///
     /// Best-effort: a failure is warned about and the run carries on with the
-    /// messages still in memory — the file is a head start for the next
-    /// launch, and the wire can always refill it. A provider that cannot open
-    /// its own envelope fails here, before any file is touched. A plaintext
-    /// file being replaced is zeroed once the envelope is in place.
+    /// messages still in memory — the archive is a head start for the next
+    /// launch, and the wire can always refill it. A provider that cannot reach
+    /// its key fails in [`Store::open`], before any file is touched.
+    #[cfg(test)]
     pub(crate) fn write(&self, bytes: &[u8]) {
         let _ = self.try_write(bytes);
     }
 
-    /// [`HistoryFile::write`], saying why when the file was not written.
+    /// The record write, saying why when the archive was not written.
     ///
-    /// For the one caller that owes the reader an answer: a rename is text they
-    /// typed, and a file that cannot hold it must not look as though it did.
+    /// For the seeding example, which owns the whole store: a write that cannot
+    /// land must say why rather than fail silently.
+    #[allow(dead_code)]
     pub(crate) fn try_write(&self, bytes: &[u8]) -> Result<(), String> {
-        let envelope = sealed::seal(bytes, self.keys.as_ref()).map_err(|error| {
-            tracing::warn!(%error, "history could not be sealed");
-            error.to_string()
-        })?;
-        let reopens = matches!(
-            sealed::open(&envelope, self.keys.as_ref()),
-            Ok(Some(plain)) if plain.as_slice() == bytes
-        );
-        if !reopens {
-            tracing::warn!("the sealed history did not open again; not written");
-            return Err("the sealed history did not open again".to_owned());
+        if self.poisoned.load(Ordering::Relaxed) {
+            tracing::warn!(
+                "history save refused: the archive could not be read when it was opened"
+            );
+            return Err(
+                "the history archive could not be read; sign out to clear it before saving again"
+                    .to_owned(),
+            );
         }
-        if let Some(parent) = self.path.parent().filter(|dir| !dir.as_os_str().is_empty())
-            && let Err(error) = fs::create_dir_all(parent)
-        {
-            tracing::warn!(%error, "history directory could not be created");
-            return Err(error.to_string());
-        }
-        // Opened before the replace, which unlinks the old inode: the handle
-        // is what lets the old bytes be zeroed afterwards.
-        let legacy = open_unsealed(&self.path);
-        write_atomically(&self.path, &envelope)?;
-        if let Some(mut old) = legacy {
-            if let Err(error) = wipe(&mut old) {
-                tracing::warn!(%error, "could not wipe the pre-migration history file");
-            }
-            remove_stale_temps(&self.path);
-        }
+        let payload: Payload = serde_json::from_slice(bytes)
+            .map_err(|error| format!("history could not be read for writing: {error}"))?;
+        self.store_payload(&payload)
+            .map_err(|error| format!("history could not be written: {error:#}"))
+    }
+
+    /// Opens the archive and folds `payload` into it in one transaction: the
+    /// bounded window is an ingest, never a replacement of what is stored.
+    #[allow(dead_code)]
+    fn store_payload(&self, payload: &Payload) -> Result<()> {
+        self.ingest(&[], payload)
+    }
+
+    /// Opens the archive and writes `pages` then `payload` in one transaction,
+    /// re-sealing only the window rows that changed since they were last
+    /// written. The record of what was written moves only once the
+    /// transaction has committed.
+    fn ingest(&self, pages: &[(i64, Vec<CachedMessage>)], payload: &Payload) -> Result<()> {
+        let (_guard, keys) = self.locked_keys();
+        let mut store = open_store(&self.path, &keys)?;
+        let mut written = lock(&self.written);
+        store.ingest_pages_and_payload(pages, payload, &written)?;
+        note_written(&mut written, payload);
         Ok(())
     }
 
-    /// Removes the file; a missing file is success.
+    /// Writes fetched pages and the encoded payload in one transaction: the
+    /// pages first, each with its own extent, then the bounded window with its
+    /// deletions.
     ///
-    /// Logout calls this, and a failed delete must not fail the logout, so
-    /// the failure is a warning and the return is nothing.
-    pub(crate) fn clear(&self) {
-        match fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(%error, "history file could not be removed"),
+    /// A page is not a window: it may be older than the cache holds, or land
+    /// while the newest end moves on, and it must keep the stretch it was
+    /// fetched from instead of being rebuilt from whatever rows survive in
+    /// memory. Pages that touch nothing stored are kept under their own range
+    /// by [`Store::ingest_pages_and_payload`]; whether to show such a page is
+    /// the fetch's decision. One commit covers both halves, so a death between
+    /// them cannot leave a page that restores a row the window deleted. Poison
+    /// and the provider swap are handled exactly as for a window write.
+    pub(crate) fn ingest_pages_and_write(
+        &self,
+        pages: &[(i64, Vec<Message>)],
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if self.poisoned.load(Ordering::Relaxed) {
+            tracing::warn!(
+                "history save refused: the archive could not be read when it was opened"
+            );
+            return Err(
+                "the history archive could not be read; sign out to clear it before saving again"
+                    .to_owned(),
+            );
         }
+        let payload: Payload = serde_json::from_slice(bytes)
+            .map_err(|error| format!("history could not be read for writing: {error}"))?;
+        let prepared: Vec<(i64, Vec<CachedMessage>)> = pages
+            .iter()
+            .map(|(chat_id, messages)| {
+                let mut rows: Vec<CachedMessage> = messages
+                    .iter()
+                    .filter(|message| message.id > 0 && message.chat_id == *chat_id)
+                    .map(CachedMessage::from_message)
+                    .collect();
+                rows.sort_by_key(|row| row.id);
+                (*chat_id, rows)
+            })
+            .collect();
+        self.ingest(&prepared, &payload)
+            .map_err(|error| format!("history could not be written: {error:#}"))
+    }
+
+    /// Removes the database and its WAL, shared-memory, journal and salt
+    /// siblings; a missing file is success. The legacy `history.json` is not
+    /// one of them and is deliberately left alone.
+    fn remove_archive(&self) {
+        lock(&self.written).clear();
+        for path in archive_siblings(&self.path) {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(%error, "history archive could not be removed"),
+            }
+        }
+    }
+
+    /// Logout calls this, and a failed delete must not fail the logout, so the
+    /// failure is a warning and the return is nothing. The reader asked for the
+    /// archive to go, so a poison from an unreadable archive is lifted with it:
+    /// the next save starts a fresh file rather than being refused forever.
+    pub(crate) fn clear(&self) {
+        self.remove_archive();
+        self.poisoned.store(false, Ordering::Relaxed);
     }
 }
 
@@ -1133,118 +1532,74 @@ pub(crate) fn history_acceptable(
     stored_id.is_some() || stored_phone == configured
 }
 
-/// Writes `bytes` so that the target only ever appears as a whole file.
-///
-/// The drafts file's `write_atomically`, copied with its reasoning: a sibling
-/// temp in the same directory, restricted before a byte is in it, renamed over
-/// the target — so an interrupted write leaves the previous history intact
-/// rather than a truncated file, and the target inherits the temp's `0600`.
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let temp = temp_sibling(path);
+/// The one warning about a legacy `history.json`, however many accounts load.
+fn warn_legacy_once() {
+    use std::sync::Once;
 
-    let result = (|| -> Result<()> {
-        fs::File::create(&temp).context("creating the history temp file")?;
-        restrict_permissions(&temp);
-        fs::write(&temp, bytes).context("writing the history temp file")?;
-        fs::rename(&temp, path).context("replacing the history file")?;
-        Ok(())
-    })();
-
-    result.map_err(|error| {
-        // A half-written temp is not a history file, and nothing would ever
-        // clean it up.
-        let _ = fs::remove_file(&temp);
-        tracing::warn!(%error, "history file could not be written");
-        format!("{error:#}")
-    })
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "a legacy televim.history.json is still on disk; it was not migrated or deleted"
+        );
+    });
 }
 
-/// The existing file at `path`, opened for writing, if it is not an envelope.
-///
-/// A legacy plaintext file (or junk about to be replaced); the handle is what
-/// lets [`wipe`] reach it after the path has been replaced. Unix only:
-/// elsewhere a rename over an open file is not reliable.
-#[cfg(unix)]
-fn open_unsealed(path: &Path) -> Option<fs::File> {
-    use std::io::Read as _;
+/// The database beside the legacy JSON file: one account, one `.db`.
+fn archive_path(legacy: &Path) -> PathBuf {
+    legacy.with_extension("db")
+}
 
-    let mut file = fs::OpenOptions::new()
-        .read(true)
+/// The database and every file SQLite keeps beside it, plus the salt.
+fn archive_siblings(db: &Path) -> Vec<PathBuf> {
+    let name = db.file_name().unwrap_or_default().to_os_string();
+    let sibling = |suffix: &str| {
+        let mut name = name.clone();
+        name.push(suffix);
+        db.with_file_name(name)
+    };
+    vec![
+        db.to_path_buf(),
+        sibling("-wal"),
+        sibling("-shm"),
+        sibling("-journal"),
+        sibling(SALT_SUFFIX),
+    ]
+}
+
+fn salt_sibling(db: &Path) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(SALT_SUFFIX);
+    db.with_file_name(name)
+}
+
+/// Creates the database file before SQLite sees it, restricted from the
+/// start: no window in which the archive is readable by anyone else.
+#[cfg(unix)]
+fn create_db_file(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    fs::OpenOptions::new()
         .write(true)
+        .create_new(true)
+        .mode(0o600)
         .open(path)
-        .ok()?;
-    let mut head = Vec::with_capacity(sealed::MAGIC.len());
-    file.by_ref()
-        .take(sealed::MAGIC.len() as u64)
-        .read_to_end(&mut head)
-        .ok()?;
-    (!sealed::is_sealed(&head)).then_some(file)
 }
 
 #[cfg(not(unix))]
-fn open_unsealed(_path: &Path) -> Option<fs::File> {
-    None
+fn create_db_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
-/// Overwrites `file` with zeros, in place, and syncs it. Best effort.
-fn wipe(file: &mut fs::File) -> io::Result<()> {
-    use std::io::{Read as _, Seek as _};
-
-    let len = file.metadata()?.len();
-    file.rewind()?;
-    io::copy(&mut io::repeat(0).take(len), file)?;
-    file.sync_all()
-}
-
-/// Wipes and removes the `<name>.<pid>.tmp` files [`write_atomically`] leaves
-/// when a process dies mid-write; a build that wrote plaintext may have left
-/// one holding it.
-fn remove_stale_temps(path: &Path) {
-    let Some(name) = path.file_name() else {
-        return;
-    };
-    let dir = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut prefix = name.to_os_string();
-    prefix.push(".");
-    let prefix = prefix.to_string_lossy().into_owned();
-
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let file_name = entry.file_name().to_string_lossy().into_owned();
-        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
-        if is_file
-            && file_name
-                .strip_prefix(&prefix)
-                .is_some_and(|rest| rest.strip_suffix(".tmp").is_some())
-        {
-            if let Ok(mut file) = fs::OpenOptions::new().write(true).open(entry.path()) {
-                let _ = wipe(&mut file);
-            }
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// The temp file [`write_atomically`] writes through, tagged with the process
-/// id so two processes sharing a history path do not write the same temp.
-fn temp_sibling(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.tmp", std::process::id()));
-    path.with_file_name(name)
-}
-
-/// Restricts a freshly written history file to its owner.
+/// Restricts a freshly written sibling (the salt) to its owner.
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
     if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-        tracing::warn!(%error, "could not restrict the permissions of the history file");
+        tracing::warn!(%error, "could not restrict the permissions of the history archive");
     }
 }
 
@@ -1252,17 +1607,1260 @@ fn restrict_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) {}
 
+/// The schema this build writes. Recorded in `meta` so a later build can tell
+/// an archive it understands from one it must not guess at.
+const SCHEMA_VERSION: i64 = 1;
+const META_VERSION: &str = "schema_version";
+const META_STATE: &str = "state";
+const META_TEXT_BYTES: &str = "text_bytes";
+const META_ARCHIVE_KEY: &str = "archive_key";
+/// The previous passphrase's envelope of the same random archive key. Present
+/// only while a passphrase change is half-finished: it lets the next start
+/// tell an interrupted change from a completed one.
+const META_ARCHIVE_KEY_PREV: &str = "archive_key_prev";
+const SALT_SUFFIX: &str = ".salt";
+const KEY_LEN: usize = 32;
+const SALT_LEN: usize = 16;
+
+/// Locks a mutex, ignoring poison: the provider cell is replaced whole, so a
+/// panic elsewhere cannot leave it half-written.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The key source records, state and chips are sealed under: the random
+/// archive key itself, with a fixed salt. It never changes when the account
+/// passphrase changes, so rows stay readable and re-sealing touches meta only.
+#[derive(Clone)]
+struct RecordKey {
+    bytes: [u8; KEY_LEN],
+}
+
+impl std::fmt::Debug for RecordKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RecordKey(<redacted>)")
+    }
+}
+
+impl KeyProvider for RecordKey {
+    fn sealing_key(&self) -> Result<(sealed::Salt, FileKey), SessionError> {
+        Ok(([0u8; SALT_LEN], FileKey::from_bytes(self.bytes)))
+    }
+
+    fn opening_key(&self, _salt: &sealed::Salt) -> Result<FileKey, SessionError> {
+        Ok(FileKey::from_bytes(self.bytes))
+    }
+
+    fn accepts_passphrase(&self) -> bool {
+        false
+    }
+}
+
+/// Opens an account-sealed `archive_key` envelope into its 32 bytes.
+fn open_archive_key(envelope: &[u8], keys: &dyn KeyProvider) -> Result<[u8; KEY_LEN]> {
+    let plain = sealed::open(envelope, keys)?
+        .ok_or_else(|| anyhow!("the archive key was stored as plaintext"))?;
+    plain
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("the archive key is the wrong length"))
+}
+
+/// Pragmas applied on every open, before any table is touched. WAL with a full
+/// sync makes a committed row survive a process kill; a 256 KiB page cache and
+/// no memory mapping bound what SQLite holds resident; the WAL cannot grow
+/// without limit. `fullfsync` is macOS only and is enabled there below.
+const OPEN_PRAGMAS: &str = "PRAGMA journal_mode=WAL;
+    PRAGMA synchronous=FULL;
+    PRAGMA cache_size=-256;
+    PRAGMA mmap_size=0;
+    PRAGMA journal_size_limit=1048576;";
+
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value BLOB NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+        chat_key BLOB NOT NULL,
+        message_id INTEGER NOT NULL,
+        sealed BLOB NOT NULL,
+        PRIMARY KEY (chat_key, message_id)
+    );
+    -- The stretches of a chat that are held. Ids are not dense, so a run cannot
+    -- be inferred from its ends; the ledger is what makes a hole a fact.
+    CREATE TABLE IF NOT EXISTS ranges (
+        chat_key BLOB NOT NULL,
+        lo_id INTEGER NOT NULL,
+        hi_id INTEGER NOT NULL,
+        PRIMARY KEY (chat_key, lo_id)
+    );
+    -- One sealed, bounded side table per chat: reactions and pins change without
+    -- the message changing, so they are not carved into a record.
+    CREATE TABLE IF NOT EXISTS chips (
+        chat_key BLOB PRIMARY KEY,
+        sealed BLOB NOT NULL
+    );";
+
+/// The non-message half of the archive, sealed as one blob in `meta`: a chat
+/// id or a title must never sit in a column in the clear.
+#[derive(Debug, Serialize, Deserialize)]
+struct State {
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
+    account_id: Option<i64>,
+    #[serde(default)]
+    chats: Vec<CachedChat>,
+    #[serde(default)]
+    aliases: BTreeMap<i64, String>,
+}
+
+/// One record's plaintext. The address is carried inside, and `decode_record`
+/// refuses a row whose plaintext does not name the column pair it was found
+/// under: `sealed`'s AAD is fixed, so the binding has to live here.
+#[derive(Debug, Serialize, Deserialize)]
+struct Record {
+    chat_key: Vec<u8>,
+    chat_id: i64,
+    message_id: i64,
+    row: CachedMessage,
+}
+
+/// One chat's reaction strips and pinned ids, as stored in the sealed side
+/// table. A plain mirror of the domain's types, which carry no `serde`, with
+/// the same bounds: [`REACTION_ENTRIES`] messages with strips and
+/// [`PINNED_IDS`] pins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Chips {
+    #[serde(default)]
+    reactions: Vec<(i64, Vec<CachedReaction>)>,
+    #[serde(default)]
+    pinned: Vec<i64>,
+}
+
+/// The sealed plaintext of one chip row. Like [`Record`], it carries its own
+/// address so a side table cannot be moved under another chat key.
+#[derive(Debug, Serialize, Deserialize)]
+struct ChipRecord {
+    chat_key: Vec<u8>,
+    chat_id: i64,
+    chips: Chips,
+}
+
+/// [`Reaction`] as the file spells it: `domain` carries no `serde`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum CachedReactionKind {
+    Emoticon(String),
+    CustomEmoji(i64),
+    Paid,
+}
+
+/// [`ReactionCount`] as the file spells it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CachedReaction {
+    reaction: CachedReactionKind,
+    count: u32,
+    chosen: bool,
+}
+
+impl From<&Reaction> for CachedReactionKind {
+    fn from(reaction: &Reaction) -> Self {
+        match reaction {
+            Reaction::Emoticon(emoticon) => Self::Emoticon(emoticon.clone()),
+            Reaction::CustomEmoji(id) => Self::CustomEmoji(*id),
+            Reaction::Paid => Self::Paid,
+        }
+    }
+}
+
+impl From<&CachedReactionKind> for Reaction {
+    fn from(reaction: &CachedReactionKind) -> Self {
+        match reaction {
+            CachedReactionKind::Emoticon(emoticon) => Self::Emoticon(emoticon.clone()),
+            CachedReactionKind::CustomEmoji(id) => Self::CustomEmoji(*id),
+            CachedReactionKind::Paid => Self::Paid,
+        }
+    }
+}
+
+impl From<&ReactionCount> for CachedReaction {
+    fn from(count: &ReactionCount) -> Self {
+        Self {
+            reaction: CachedReactionKind::from(&count.reaction),
+            count: count.count,
+            chosen: count.chosen,
+        }
+    }
+}
+
+impl From<&CachedReaction> for ReactionCount {
+    fn from(count: &CachedReaction) -> Self {
+        Self {
+            reaction: Reaction::from(&count.reaction),
+            count: count.count,
+            chosen: count.chosen,
+        }
+    }
+}
+
+/// `HMAC(chat_id)` under a key derived from the file key. The column never
+/// holds the id itself; the derivation key and the salt are unsealable only by
+/// the account whose keyring/passphrase opened the archive.
+fn keyed_chat(hmac_key: &[u8; KEY_LEN], chat_id: i64) -> Vec<u8> {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(hmac_key).expect("HMAC accepts a key of any length");
+    mac.update(&chat_id.to_le_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Seals one row under its address. Returns the column key and the envelope.
+fn seal_record(
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+    row: &CachedMessage,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let chat_key = keyed_chat(hmac_key, chat_id);
+    let record = Record {
+        chat_key: chat_key.clone(),
+        chat_id,
+        message_id: row.id,
+        row: row.clone(),
+    };
+    let plain = serde_json::to_vec(&record)?;
+    Ok((chat_key, sealed::seal(&plain, keys)?))
+}
+
+fn insert_record(
+    conn: &Connection,
+    chat_key: &[u8],
+    message_id: i64,
+    envelope: &[u8],
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO messages (chat_key, message_id, sealed) VALUES (?1, ?2, ?3)
+         ON CONFLICT(chat_key, message_id) DO UPDATE SET sealed = excluded.sealed",
+        params![chat_key, message_id, envelope],
+    )?;
+    Ok(())
+}
+
+fn read_text_bytes(conn: &Connection, keys: &dyn KeyProvider) -> Result<u64> {
+    let envelope = meta_envelope(conn, META_TEXT_BYTES)?
+        .ok_or_else(|| anyhow!("archive text byte count is missing"))?;
+    let plain = sealed::open(&envelope, keys)?
+        .ok_or_else(|| anyhow!("archive text byte count was stored as plaintext"))?;
+    let bytes: [u8; 8] = plain
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("invalid archive text byte count"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn adjust_text_bytes(conn: &Connection, keys: &dyn KeyProvider, delta: i64) -> Result<()> {
+    let total = read_text_bytes(conn, keys)?
+        .checked_add_signed(delta)
+        .ok_or_else(|| anyhow!("invalid archive text byte count"))?;
+    let envelope = sealed::seal(&total.to_le_bytes(), keys)?;
+    conn.execute(
+        "UPDATE meta SET value = ?1 WHERE key = ?2",
+        params![envelope, META_TEXT_BYTES],
+    )?;
+    Ok(())
+}
+
+fn insert_counted(
+    conn: &Connection,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+    row: &CachedMessage,
+) -> Result<()> {
+    let (chat_key, envelope) = seal_record(keys, hmac_key, chat_id, row)?;
+    let old: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT sealed FROM messages WHERE chat_key = ?1 AND message_id = ?2",
+            params![chat_key, row.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let old_len = match old {
+        Some(old) => encoded_len(
+            &decode_record(&old, keys, hmac_key, &chat_key, row.id)?
+                .row
+                .text,
+        ),
+        None => 0,
+    };
+    adjust_text_bytes(
+        conn,
+        keys,
+        i64::try_from(encoded_len(&row.text))? - i64::try_from(old_len)?,
+    )?;
+    insert_record(conn, &chat_key, row.id, &envelope)
+}
+
+fn count_deleted(
+    conn: &Connection,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    sql: &str,
+    parameters: impl rusqlite::Params,
+) -> Result<i64> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map(parameters, |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut total = 0i64;
+    for row in rows {
+        let (chat_key, id, envelope) = row?;
+        let record = decode_record(&envelope, keys, hmac_key, &chat_key, id)?;
+        total = total
+            .checked_add(i64::try_from(encoded_len(&record.row.text))?)
+            .ok_or_else(|| anyhow!("archive text byte count overflow"))?;
+    }
+    Ok(total)
+}
+
+/// Decodes a record and checks its address. `Ok(None)` from `sealed::open`
+/// means the bytes were never sealed: that is a hard error here, never a
+/// legacy-plaintext fallback.
+fn decode_record(
+    envelope: &[u8],
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_key: &[u8],
+    message_id: i64,
+) -> Result<Record> {
+    let plain = sealed::open(envelope, keys)?
+        .ok_or_else(|| anyhow!("a history record was stored as plaintext"))?;
+    let record: Record = serde_json::from_slice(&plain)?;
+    if record.chat_key != chat_key
+        || record.message_id != message_id
+        || keyed_chat(hmac_key, record.chat_id) != chat_key
+    {
+        return Err(anyhow!("a history record was filed under another address"));
+    }
+    Ok(record)
+}
+
+/// Opens one account's archive, creating it with a `0600` file and schema v1
+/// on first use. Paired with [`Store::put_record`], [`Store::get_record`] and
+/// [`Store::all_records`], this is the record layer later stages build on.
+fn open_store(path: &Path, keys: &Arc<dyn KeyProvider>) -> Result<Store> {
+    Store::open(path, keys)
+}
+
+/// A connection to one account's archive. Opened per operation rather than
+/// held: `HistoryFile` is cloned onto blocking threads, and a `rusqlite`
+/// connection is neither `Clone` nor `Sync`.
+struct Store {
+    conn: Connection,
+    record_keys: RecordKey,
+    hmac_key: [u8; KEY_LEN],
+}
+
+/// What opening `archive_key` found about the half-finished change.
+#[derive(Clone, Copy)]
+enum KeyRepair {
+    /// A brand-new archive: no envelopes exist yet.
+    Fresh,
+    /// The primary opened. `archive_key_prev` stays until the session is
+    /// durable: an ordinary write under the new key must not cut the way back.
+    DropPrev,
+    /// Only the previous envelope opened. The passphrase change never
+    /// finished; promote that key to the primary and drop the previous row.
+    PromotePrev,
+}
+
+fn meta_envelope(conn: &Connection, key: &str) -> Result<Option<Vec<u8>>> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Reads the random archive key, preferring the current passphrase's envelope
+/// and falling back to the previous one when a change was cut short.
+fn load_archive_key(
+    conn: &Connection,
+    keys: &dyn KeyProvider,
+    existed: bool,
+) -> Result<([u8; KEY_LEN], KeyRepair)> {
+    if !existed {
+        let mut key = [0u8; KEY_LEN];
+        getrandom::fill(&mut key)?;
+        let envelope = sealed::seal(&key, keys)?;
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+            params![META_ARCHIVE_KEY, envelope],
+        )?;
+        return Ok((key, KeyRepair::Fresh));
+    }
+    if let Some(envelope) = meta_envelope(conn, META_ARCHIVE_KEY)? {
+        match open_archive_key(&envelope, keys) {
+            Ok(key) => return Ok((key, KeyRepair::DropPrev)),
+            Err(error) => {
+                // A wrong primary is not yet a reason to poison: a passphrase
+                // change may have been interrupted before the session saved.
+                if let Some(prev) = meta_envelope(conn, META_ARCHIVE_KEY_PREV)? {
+                    return Ok((open_archive_key(&prev, keys)?, KeyRepair::PromotePrev));
+                }
+                return Err(error);
+            }
+        }
+    }
+    match meta_envelope(conn, META_ARCHIVE_KEY_PREV)? {
+        Some(prev) => Ok((open_archive_key(&prev, keys)?, KeyRepair::PromotePrev)),
+        None => Err(anyhow!("the archive key is missing")),
+    }
+}
+
+/// Settles a half-finished passphrase change, in one transaction. Idempotent:
+/// either a stale previous row goes, or the key the old session still uses is
+/// promoted back to the primary.
+fn repair_archive_key(
+    conn: &mut Connection,
+    keys: &dyn KeyProvider,
+    archive_key: &[u8; KEY_LEN],
+    repair: KeyRepair,
+) -> Result<()> {
+    match repair {
+        // `Fresh` has nothing to settle. `DropPrev` keeps the previous envelope
+        // until `confirm_rekey` says the session was saved under the new
+        // passphrase: a write that opens the archive in between must leave the
+        // way back intact.
+        KeyRepair::Fresh | KeyRepair::DropPrev => {}
+        KeyRepair::PromotePrev => {
+            let envelope = sealed::seal(archive_key, keys)?;
+            if open_archive_key(&envelope, keys)? != *archive_key {
+                return Err(anyhow!("the archive key could not be re-sealed"));
+            }
+            let transaction = conn.transaction()?;
+            transaction.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![META_ARCHIVE_KEY, envelope],
+            )?;
+            transaction.execute(
+                "DELETE FROM meta WHERE key = ?1",
+                params![META_ARCHIVE_KEY_PREV],
+            )?;
+            transaction.commit()?;
+        }
+    }
+    Ok(())
+}
+
+impl Store {
+    fn open(path: &Path, keys: &Arc<dyn KeyProvider>) -> Result<Self> {
+        // Reach the key before any file exists: an unreachable key must not
+        // leave a fresh, empty database behind.
+        keys.sealing_key()?;
+        let existed = path.is_file();
+        if !existed {
+            if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                fs::create_dir_all(parent)?;
+            }
+            create_db_file(path)?;
+        }
+        let mut conn = Connection::open(path)?;
+        conn.execute_batch(OPEN_PRAGMAS)?;
+        #[cfg(target_os = "macos")]
+        conn.execute_batch("PRAGMA fullfsync=ON;")?;
+        conn.execute_batch(SCHEMA)?;
+
+        let salt_path = salt_sibling(path);
+        let salt: [u8; SALT_LEN] = if existed {
+            let bytes = fs::read(&salt_path)?;
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow!("the history archive salt is the wrong length"))?
+        } else {
+            let mut bytes = [0u8; SALT_LEN];
+            getrandom::fill(&mut bytes)?;
+            fs::write(&salt_path, bytes)?;
+            restrict_permissions(&salt_path);
+            bytes
+        };
+
+        let (archive_key, repair) = load_archive_key(&conn, keys.as_ref(), existed)?;
+        repair_archive_key(&mut conn, keys.as_ref(), &archive_key, repair)?;
+
+        let version: Option<i64> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_VERSION],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match version {
+            None => {
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                    params![META_VERSION, SCHEMA_VERSION],
+                )?;
+            }
+            Some(version) if version == SCHEMA_VERSION => {}
+            Some(version) => {
+                return Err(anyhow!("unsupported history schema version {version}"));
+            }
+        }
+
+        // The salt is not secret; it keeps the chat hash distinct between
+        // databases even when two accounts happen to share a file key.
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&archive_key).expect("HMAC accepts a key of any length");
+        mac.update(&salt);
+        let mut hmac_key = [0u8; KEY_LEN];
+        hmac_key.copy_from_slice(&mac.finalize().into_bytes());
+        let store = Self {
+            conn,
+            record_keys: RecordKey { bytes: archive_key },
+            hmac_key,
+        };
+        let has_count: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+            params![META_TEXT_BYTES],
+            |row| row.get(0),
+        )?;
+        if !has_count {
+            let total = store.scan_text_bytes()?;
+            let envelope = sealed::seal(&u64::try_from(total)?.to_le_bytes(), &store.record_keys)?;
+            store.conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
+                params![META_TEXT_BYTES, envelope],
+            )?;
+        }
+        Ok(store)
+    }
+
+    fn state(&self) -> Result<State> {
+        let envelope: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_STATE],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match envelope {
+            None => Ok(State {
+                account: None,
+                account_id: None,
+                chats: Vec::new(),
+                aliases: BTreeMap::new(),
+            }),
+            Some(envelope) => {
+                let plain = sealed::open(&envelope, &self.record_keys)?
+                    .ok_or_else(|| anyhow!("the archive state was stored as plaintext"))?;
+                Ok(serde_json::from_slice(&plain)?)
+            }
+        }
+    }
+
+    /// The record layer beneath range reads and ingest: the archive grows by
+    /// records, and a save seals the rows of its window through the same path.
+    #[allow(dead_code)]
+    fn put_record(&self, chat_id: i64, row: &CachedMessage) -> Result<()> {
+        insert_counted(&self.conn, &self.record_keys, &self.hmac_key, chat_id, row)
+    }
+
+    #[allow(dead_code)]
+    fn get_record(&self, chat_id: i64, message_id: i64) -> Result<Option<CachedMessage>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let envelope: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT sealed FROM messages WHERE chat_key = ?1 AND message_id = ?2",
+                params![chat_key, message_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        envelope
+            .map(|envelope| {
+                decode_record(
+                    &envelope,
+                    &self.record_keys,
+                    &self.hmac_key,
+                    &chat_key,
+                    message_id,
+                )
+                .map(|record| record.row)
+            })
+            .transpose()
+    }
+
+    /// Every record of one chat, oldest id first.
+    #[allow(dead_code)]
+    fn all_records(&self, chat_id: i64) -> Result<Vec<CachedMessage>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let mut statement = self.conn.prepare(
+            "SELECT message_id, sealed FROM messages WHERE chat_key = ?1 ORDER BY message_id",
+        )?;
+        let rows = statement.query_map(params![chat_key], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        rows.map(|row| {
+            let (message_id, envelope) = row?;
+            decode_record(
+                &envelope,
+                &self.record_keys,
+                &self.hmac_key,
+                &chat_key,
+                message_id,
+            )
+            .map(|record| record.row)
+        })
+        .collect()
+    }
+
+    /// The newest `depth` records of each chat, with the chat id recovered from
+    /// the sealed plaintext (the column holds only the keyed hash).
+    ///
+    /// The bound is applied in SQL per chat, so a launch never decrypts the
+    /// whole archive just to fill its windows. Oldest rows of a chat that has
+    /// more than `depth` are not read at all.
+    fn bounded_records(&self, depth: usize) -> Result<Vec<(i64, CachedMessage)>> {
+        let limit = i64::try_from(depth).map_err(|_| anyhow!("the window depth is too large"))?;
+        let mut chats = self
+            .conn
+            .prepare("SELECT DISTINCT chat_key FROM messages")?;
+        let chat_keys: Vec<Vec<u8>> = chats
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut out = Vec::new();
+        for chat_key in chat_keys {
+            let mut statement = self.conn.prepare(
+                // Only the newest recorded stretch: a row across a gap would
+                // read as one unbroken history. A chat with no ledger row has
+                // no stretch to stop at.
+                "SELECT message_id, sealed FROM messages WHERE chat_key = ?1
+                 AND message_id >= COALESCE(
+                    (SELECT lo_id FROM ranges WHERE chat_key = ?1
+                     ORDER BY hi_id DESC LIMIT 1), 0)
+                 ORDER BY message_id DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![chat_key, limit], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            let mut window = Vec::new();
+            for row in rows {
+                let (message_id, envelope) = row?;
+                let record = decode_record(
+                    &envelope,
+                    &self.record_keys,
+                    &self.hmac_key,
+                    &chat_key,
+                    message_id,
+                )?;
+                window.push((record.chat_id, record.row));
+            }
+            // SQL read newest-first to bound with `LIMIT`; the cache is oldest-first.
+            window.reverse();
+            out.extend(window);
+        }
+        Ok(out)
+    }
+
+    /// The newest `limit` rows of `chat_id` strictly below `below`, decoded and
+    /// unsealed, oldest id first. `lo` confines the read to one recorded range
+    /// so a page never crosses a gap into an older stretch. The bound is applied
+    /// in SQL: only the rows selected by `LIMIT` are decoded, the rest of the
+    /// conversation is never read or unsealed.
+    fn page(
+        &self,
+        chat_id: i64,
+        below: i64,
+        lo: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, CachedMessage)>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let limit = i64::try_from(limit).map_err(|_| anyhow!("the page size is too large"))?;
+        let mut statement = self.conn.prepare(
+            "SELECT message_id, sealed FROM messages
+             WHERE chat_key = ?1 AND message_id < ?2 AND message_id >= ?3
+             ORDER BY message_id DESC LIMIT ?4",
+        )?;
+        let rows = statement.query_map(params![chat_key, below, lo, limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (message_id, envelope) = row?;
+            let record = decode_record(
+                &envelope,
+                &self.record_keys,
+                &self.hmac_key,
+                &chat_key,
+                message_id,
+            )?;
+            out.push((message_id, record.row));
+        }
+        // SQL read newest-first to bound with `LIMIT`; a page is oldest-first.
+        out.reverse();
+        Ok(out)
+    }
+
+    /// Every record of every chat, with the chat id recovered from the sealed
+    /// plaintext (the column holds only the keyed hash).
+    #[cfg(test)]
+    fn every_record(&self) -> Result<Vec<(i64, CachedMessage)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT chat_key, message_id, sealed FROM messages ORDER BY chat_key, message_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (chat_key, message_id, envelope) = row?;
+            decode_record(
+                &envelope,
+                &self.record_keys,
+                &self.hmac_key,
+                &chat_key,
+                message_id,
+            )
+            .map(|record| (record.chat_id, record.row))
+        })
+        .collect()
+    }
+
+    /// Folds `pages` into the archive and then the bounded window `payload`,
+    /// all in one transaction.
+    ///
+    /// The order is the one the write owes the reader: every page lands before
+    /// the window's deletions, and one commit covers both, so a death between
+    /// the two cannot leave a page that restores a row the window deleted.
+    fn ingest_pages_and_payload(
+        &mut self,
+        pages: &[(i64, Vec<CachedMessage>)],
+        payload: &Payload,
+        written: &RowMemo,
+    ) -> Result<()> {
+        let transaction = self.conn.transaction()?;
+        for (chat_id, rows) in pages {
+            let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+                continue;
+            };
+            let reach = (first.id.min(last.id), first.id.max(last.id));
+            let held = ranges_on(&transaction, &self.hmac_key, *chat_id)?;
+            ingest_in(
+                &transaction,
+                &self.record_keys,
+                &self.hmac_key,
+                *chat_id,
+                rows,
+                reach,
+                &held,
+            )?;
+        }
+        ingest_payload_in(
+            &transaction,
+            &self.record_keys,
+            &self.hmac_key,
+            payload,
+            written,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// The bounded reaction/pin side tables, with their chat ids recovered
+    /// from the sealed plaintext and their addresses checked.
+    #[allow(dead_code)]
+    fn chips(&self) -> Result<BTreeMap<i64, Chips>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT chat_key, sealed FROM chips ORDER BY chat_key")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut chips = BTreeMap::new();
+        for row in rows {
+            let (chat_key, envelope) = row?;
+            let plain = sealed::open(&envelope, &self.record_keys)?
+                .ok_or_else(|| anyhow!("a side table was stored as plaintext"))?;
+            let record: ChipRecord = serde_json::from_slice(&plain)?;
+            if record.chat_key != chat_key || keyed_chat(&self.hmac_key, record.chat_id) != chat_key
+            {
+                return Err(anyhow!("a side table was filed under another address"));
+            }
+            chips.insert(record.chat_id, record.chips);
+        }
+        Ok(chips)
+    }
+
+    /// The stretches of `chat_id` held on disk, oldest first.
+    #[allow(dead_code)]
+    fn ranges(&self, chat_id: i64) -> Result<Vec<(i64, i64)>> {
+        ranges_on(&self.conn, &self.hmac_key, chat_id)
+    }
+
+    /// The sealed rows of one chat in one recorded stretch, decoded and
+    /// unsealed on the way out. A whole chat is the union of its ranges.
+    #[allow(dead_code)]
+    fn range_rows(&self, chat_id: i64, lo: i64, hi: i64) -> Result<Vec<CachedMessage>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let mut statement = self.conn.prepare(
+            "SELECT message_id, sealed FROM messages
+             WHERE chat_key = ?1 AND message_id BETWEEN ?2 AND ?3 ORDER BY message_id",
+        )?;
+        let rows = statement.query_map(params![chat_key, lo, hi], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        rows.map(|row| {
+            let (message_id, envelope) = row?;
+            decode_record(
+                &envelope,
+                &self.record_keys,
+                &self.hmac_key,
+                &chat_key,
+                message_id,
+            )
+            .map(|record| record.row)
+        })
+        .collect()
+    }
+
+    /// The text bytes a SQL read of the archive accounts for, by the same
+    /// rule as [`encoded_len`]. Kept beside the rows so the on-disk cost is a
+    /// query rather than a second copy of everything in memory.
+    #[allow(dead_code)]
+    fn text_bytes(&self) -> Result<usize> {
+        let total = read_text_bytes(&self.conn, &self.record_keys)?;
+        Ok(usize::try_from(total)?)
+    }
+
+    fn scan_text_bytes(&self) -> Result<usize> {
+        let mut statement = self.conn.prepare("SELECT sealed FROM messages")?;
+        let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        let mut total = 0;
+        for row in rows {
+            let envelope = row?;
+            let plain = sealed::open(&envelope, &self.record_keys)?
+                .ok_or_else(|| anyhow!("a history record was stored as plaintext"))?;
+            let record: Record = serde_json::from_slice(&plain)?;
+            total += encoded_len(&record.row.text);
+        }
+        Ok(total)
+    }
+
+    /// Folds one page into `chat_id` and its range ledger in one transaction.
+    ///
+    /// `reach` is the page's own bounds as the fetch knows them: for an
+    /// anchored page the anchor is one end, the proof that the page joins the
+    /// run without sharing a row with it. A page that touches no recorded
+    /// range is kept under its own range rather than lost — whether the gap is
+    /// safe to show is the fetch decision's, not the store's. A page joining
+    /// two ranges bridges them into one; nothing already stored is dropped, so
+    /// a range only widens.
+    ///
+    /// Returns whether anything was written.
+    #[allow(dead_code)]
+    fn ingest_page(
+        &mut self,
+        chat_id: i64,
+        rows: &[CachedMessage],
+        reach: (i64, i64),
+    ) -> Result<bool> {
+        let held = self.ranges(chat_id)?;
+        let transaction = self.conn.transaction()?;
+        let written = ingest_in(
+            &transaction,
+            &self.record_keys,
+            &self.hmac_key,
+            chat_id,
+            rows,
+            reach,
+            &held,
+        )?;
+        transaction.commit()?;
+        Ok(written)
+    }
+}
+
+/// Drops the named messages wherever they are stored and rebuilds the ranges
+/// of the chats that held them.
+///
+/// A private message id belongs to one conversation, so a deletion that names
+/// no chat can still be applied by id alone. A deleted id splits the stretch
+/// that contained it; a stretch left with no rows disappears. Rebuilding from
+/// the rows that remain (rather than trusting the old ends) is what keeps a
+/// hole in the middle from being claimed as covered.
+fn delete_messages(
+    transaction: &rusqlite::Transaction<'_>,
+    deleted: &BTreeSet<i64>,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+) -> Result<()> {
+    // The set holds every id this session has deleted, and SQLite has a cap on
+    // statement parameters: the ids go in in chunks so a long session cannot
+    // make the save fail.
+    const CHUNK: usize = 400;
+    let ids: Vec<i64> = deleted.iter().copied().collect();
+    let mut affected: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for chunk in ids.chunks(CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let keys_sql =
+            format!("SELECT DISTINCT chat_key FROM messages WHERE message_id IN ({placeholders})");
+        let mut statement = transaction.prepare(&keys_sql)?;
+        let keys = statement
+            .query_map(params_from_iter(chunk.iter()), |row| row.get(0))?
+            .collect::<std::result::Result<Vec<Vec<u8>>, _>>()?;
+        affected.extend(keys);
+    }
+
+    let mut ledgers = Vec::new();
+    for chat_key in affected {
+        let mut statement = transaction
+            .prepare("SELECT lo_id, hi_id FROM ranges WHERE chat_key = ?1 ORDER BY lo_id")?;
+        let ranges: Vec<(i64, i64)> = statement
+            .query_map(params![chat_key], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        ledgers.push((chat_key, ranges));
+    }
+
+    for chunk in ids.chunks(CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let count_sql = format!(
+            "SELECT chat_key, message_id, sealed FROM messages WHERE message_id IN ({placeholders})"
+        );
+        let count = count_deleted(
+            transaction,
+            keys,
+            hmac_key,
+            &count_sql,
+            params_from_iter(chunk.iter()),
+        )?;
+        adjust_text_bytes(transaction, keys, -count)?;
+        let delete_sql = format!("DELETE FROM messages WHERE message_id IN ({placeholders})");
+        transaction.execute(&delete_sql, params_from_iter(chunk.iter()))?;
+    }
+
+    for (chat_key, ranges) in ledgers {
+        let rebuilt = ranges_after_delete(transaction, &chat_key, &ranges, deleted)?;
+        transaction.execute("DELETE FROM ranges WHERE chat_key = ?1", params![chat_key])?;
+        for (lo, hi) in rebuilt {
+            transaction.execute(
+                "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)",
+                params![chat_key, lo, hi],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// What the recorded stretches of one chat become once `deleted` ids are gone.
+fn ranges_after_delete(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_key: &[u8],
+    held: &[(i64, i64)],
+    deleted: &BTreeSet<i64>,
+) -> Result<Vec<(i64, i64)>> {
+    let mut out = Vec::new();
+    for &(lo, hi) in held {
+        let mut spans = vec![(lo, hi)];
+        for &id in deleted.iter().filter(|id| (lo..=hi).contains(id)) {
+            let mut split = Vec::new();
+            for (start, end) in spans {
+                if start <= id && id <= end {
+                    if start < id {
+                        split.push((start, id.saturating_sub(1)));
+                    }
+                    if id < end {
+                        split.push((id.saturating_add(1), end));
+                    }
+                } else {
+                    split.push((start, end));
+                }
+            }
+            spans = split;
+        }
+        for (start, end) in spans {
+            let has_row: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages
+                  WHERE chat_key = ?1 AND message_id BETWEEN ?2 AND ?3)",
+                params![chat_key, start, end],
+                |row| row.get(0),
+            )?;
+            if has_row {
+                out.push((start, end));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The transaction half of [`Store::ingest_page`], shared with a save of a
+/// whole window. `held` is the ledger as it stood before the write.
+/// The stretches of `chat_id` held on disk, oldest first, read through the
+/// given connection so an open transaction can see its own earlier writes.
+fn ranges_on(
+    conn: &rusqlite::Connection,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+) -> Result<Vec<(i64, i64)>> {
+    let chat_key = keyed_chat(hmac_key, chat_id);
+    let mut statement =
+        conn.prepare("SELECT lo_id, hi_id FROM ranges WHERE chat_key = ?1 ORDER BY lo_id")?;
+    let rows = statement.query_map(params![chat_key], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.map(|row| row.map_err(anyhow::Error::from)).collect()
+}
+
+fn remove_chat(
+    conn: &Connection,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+) -> Result<()> {
+    let chat_key = keyed_chat(hmac_key, chat_id);
+    let count = count_deleted(
+        conn,
+        keys,
+        hmac_key,
+        "SELECT chat_key, message_id, sealed FROM messages WHERE chat_key = ?1",
+        params![chat_key],
+    )?;
+    adjust_text_bytes(conn, keys, -count)?;
+    conn.execute(
+        "DELETE FROM messages WHERE chat_key = ?1",
+        params![chat_key],
+    )?;
+    conn.execute("DELETE FROM ranges WHERE chat_key = ?1", params![chat_key])?;
+    conn.execute("DELETE FROM chips WHERE chat_key = ?1", params![chat_key])?;
+    Ok(())
+}
+
+/// Folds each bounded window of `payload` into the archive inside the open
+/// `transaction`, alongside the state and side tables; the caller commits.
+///
+/// The held ranges are read through the transaction itself, so they reflect
+/// the pages ingested earlier inside the same one. Only the chats the payload
+/// names are touched. A window that does not join its stored range is kept as
+/// a range of its own: a refusal here belongs to the fetch decision, not the
+/// store. Messages the reader deleted are dropped last, and the ranges of the
+/// chats that held them are rebuilt from the rows that remain, so a deletion
+/// inside a run splits it rather than letting the window write claim the gap
+/// again.
+fn ingest_payload_in(
+    transaction: &rusqlite::Transaction<'_>,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    payload: &Payload,
+    written: &RowMemo,
+) -> Result<()> {
+    let state = State {
+        account: payload.account.clone(),
+        account_id: payload.account_id,
+        chats: payload.chats.clone(),
+        aliases: payload.aliases.clone(),
+    };
+    let state_plain = serde_json::to_vec(&state)?;
+    let state_envelope = sealed::seal(&state_plain, keys)?;
+
+    let held: BTreeMap<i64, Vec<(i64, i64)>> = payload
+        .peers
+        .keys()
+        .map(|chat_id| Ok((*chat_id, ranges_on(transaction, hmac_key, *chat_id)?)))
+        .collect::<Result<_>>()?;
+    for chat_id in &payload.removed {
+        remove_chat(transaction, keys, hmac_key, *chat_id)?;
+    }
+    for (chat_id, rows) in &payload.peers {
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            continue;
+        };
+        let reach = (first.id.min(last.id), first.id.max(last.id));
+        // Only the rows that moved are sealed; the reach stays the window's, so
+        // a lone arrival still joins the range the rest of the window sits in.
+        let moved: Vec<CachedMessage> = rows
+            .iter()
+            .filter(|row| written.get(&(*chat_id, row.id)) != Some(&fingerprint(row)))
+            .cloned()
+            .collect();
+        if moved.is_empty() {
+            continue;
+        }
+        ingest_in(
+            transaction,
+            keys,
+            hmac_key,
+            *chat_id,
+            &moved,
+            reach,
+            held.get(chat_id).map_or(&[][..], Vec::as_slice),
+        )?;
+    }
+    // Re-seal edits. A window row carries its own new words; a row outside
+    // the window is read from its stored envelope and keeps every field but
+    // its text. Deletions below run last, so an edit and a deletion of the
+    // same id end deleted.
+    for (chat_id, edited) in &payload.updated_messages {
+        for (message_id, text) in edited {
+            if let Some(row) = payload
+                .peers
+                .get(chat_id)
+                .and_then(|rows| rows.iter().find(|row| row.id == *message_id))
+            {
+                insert_counted(transaction, keys, hmac_key, *chat_id, row)?;
+                continue;
+            }
+            let chat_key = keyed_chat(hmac_key, *chat_id);
+            let envelope: Option<Vec<u8>> = transaction
+                .query_row(
+                    "SELECT sealed FROM messages WHERE chat_key = ?1 AND message_id = ?2",
+                    params![chat_key, message_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(envelope) = envelope else {
+                continue;
+            };
+            let mut record = decode_record(&envelope, keys, hmac_key, &chat_key, *message_id)?;
+            record.row.text.clone_from(text);
+            insert_counted(transaction, keys, hmac_key, *chat_id, &record.row)?;
+        }
+    }
+    if !payload.deleted_messages.is_empty() {
+        delete_messages(transaction, &payload.deleted_messages, keys, hmac_key)?;
+    }
+    for (chat_id, chips) in &payload.chips {
+        let chat_key = keyed_chat(hmac_key, *chat_id);
+        let record = ChipRecord {
+            chat_key: chat_key.clone(),
+            chat_id: *chat_id,
+            chips: chips.clone(),
+        };
+        let plain = serde_json::to_vec(&record)?;
+        let envelope = sealed::seal(&plain, keys)?;
+        transaction.execute(
+            "INSERT INTO chips (chat_key, sealed) VALUES (?1, ?2)
+             ON CONFLICT(chat_key) DO UPDATE SET sealed = excluded.sealed",
+            params![chat_key, envelope],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_STATE, state_envelope],
+    )?;
+    Ok(())
+}
+
+/// What a row says, as one number: equal rows have equal fingerprints.
+fn fingerprint(row: &CachedMessage) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(&serde_json::to_vec(row).unwrap_or_default());
+    hasher.finish()
+}
+
+/// The fingerprints of every row `payload` holds.
+fn fingerprints(payload: &Payload) -> RowMemo {
+    let mut memo = RowMemo::new();
+    for (chat_id, rows) in &payload.peers {
+        for row in rows {
+            memo.insert((*chat_id, row.id), fingerprint(row));
+        }
+    }
+    memo
+}
+
+/// Moves the record of what was written to what `payload` just committed: the
+/// chats it names are replaced whole, and a removed chat or a deleted id is
+/// forgotten, so a row that comes back is written again.
+fn note_written(memo: &mut RowMemo, payload: &Payload) {
+    memo.retain(|(chat_id, id), _| {
+        !payload.peers.contains_key(chat_id)
+            && !payload.removed.contains(chat_id)
+            && !payload.deleted_messages.contains(id)
+    });
+    memo.extend(fingerprints(payload));
+}
+
+fn ingest_in(
+    transaction: &rusqlite::Transaction<'_>,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+    rows: &[CachedMessage],
+    reach: (i64, i64),
+    held: &[(i64, i64)],
+) -> Result<bool> {
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return Ok(false);
+    };
+    let (lo, hi) = (first.id.min(last.id), first.id.max(last.id));
+    let chat_key = keyed_chat(hmac_key, chat_id);
+    let joined: Vec<(i64, i64)> = held
+        .iter()
+        .filter(|(rlo, rhi)| *rhi >= reach.0 && *rlo <= reach.1)
+        .copied()
+        .collect();
+    if !held.is_empty() && joined.is_empty() {
+        // A page that touches nothing stored is still what the wire returned:
+        // keep it under its own range rather than losing what was downloaded.
+        // Whether the gap is safe to show is the fetch decision's, not ours.
+        tracing::warn!(chat_id, "history page stored as a disjoint range");
+    }
+
+    for row in rows {
+        insert_counted(transaction, keys, hmac_key, chat_id, row)?;
+    }
+    for (old_lo, _) in &joined {
+        transaction.execute(
+            "DELETE FROM ranges WHERE chat_key = ?1 AND lo_id = ?2",
+            params![chat_key, old_lo],
+        )?;
+    }
+    let new_lo = joined
+        .iter()
+        .map(|(rlo, _)| *rlo)
+        .min()
+        .unwrap_or(lo)
+        .min(lo);
+    let new_hi = joined
+        .iter()
+        .map(|(_, rhi)| *rhi)
+        .max()
+        .unwrap_or(hi)
+        .max(hi);
+
+    transaction.execute(
+        "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)
+         ON CONFLICT(chat_key, lo_id) DO UPDATE SET hi_id = excluded.hi_id",
+        params![chat_key, new_lo, new_hi],
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const PEER: i64 = 7;
 
-    /// Writes `plain` to the file as a sealed envelope, the way a save would,
-    /// for fixtures a test hand-writes.
+    /// Writes a hand-written JSON payload into the archive the way a save
+    /// would, so a fixture can exercise the load bounds without a wire.
     fn seed(file: &HistoryFile, plain: impl AsRef<[u8]>) {
-        let envelope = sealed::seal(plain.as_ref(), file.keys.as_ref()).expect("the fixture seals");
-        fs::write(&file.path, envelope).expect("the fixture is written");
+        let payload: Payload =
+            serde_json::from_slice(plain.as_ref()).expect("the fixture is a payload");
+        file.store_payload(&payload)
+            .expect("the fixture is written");
     }
 
     /// A key source whose key is not the one `for_test` seals under.
@@ -1311,6 +2909,323 @@ mod tests {
         messages.iter().map(|message| message.id).collect()
     }
 
+    // ---- the record layer (stage 01) ------------------------------------
+
+    #[test]
+    fn launch_keeps_an_archive_that_cannot_be_read() {
+        let (_dir, file) = scratch("history.json");
+        file.save(&HistoryCache::default(), Some("+1"));
+        assert!(file.path.exists());
+        let locked = HistoryFile::new(file.legacy.clone(), other_keys());
+        crate::runtime::load_history(&locked, Some("+1"));
+        assert!(file.path.exists());
+    }
+
+    #[test]
+    fn unlocking_an_unreadable_archive_restores_writes() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=3));
+        file.save(&cache, Some("+1"));
+        let locked = HistoryFile::new(file.legacy.clone(), other_keys());
+        locked.load();
+        locked.set_provider(file.keys());
+        let mut restored = locked.load().cache;
+        restored.put(PEER, &page(1..=4));
+        locked.save(&restored, Some("+1"));
+        assert_eq!(ids(&file.load().cache.get(PEER)), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn text_byte_count_does_not_read_message_envelopes() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "hello")]);
+        file.save(&cache, None);
+        let store = open_store(&file.path, &file.keys()).expect("archive opens");
+        let expected = store.text_bytes().expect("count reads");
+        store
+            .conn
+            .execute("UPDATE messages SET sealed = x'00'", [])
+            .expect("row altered");
+        assert_eq!(
+            store.text_bytes().expect("count does not read row"),
+            expected
+        );
+    }
+
+    #[test]
+    fn text_byte_count_tracks_edits_deletions_and_removed_chats() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "one"), message(2, PEER, "two")]);
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(6));
+        assert!(cache.edit(PEER, 1, "longer"));
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(9));
+        assert!(cache.delete(&[2]));
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(6));
+        cache.remove(PEER);
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(0));
+    }
+
+    #[test]
+    fn an_archive_without_a_text_count_is_counted_once() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "hello")]);
+        file.save(&cache, None);
+        let store = open_store(&file.path, &file.keys()).expect("archive opens");
+        store
+            .conn
+            .execute("DELETE FROM meta WHERE key = ?1", params![META_TEXT_BYTES])
+            .expect("count removed");
+        drop(store);
+        assert_eq!(file.text_bytes(), Some(5));
+        cache.put(PEER, &[message(1, PEER, "hello"), message(2, PEER, "new")]);
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(8));
+    }
+
+    #[test]
+    fn a_record_round_trips_every_field_through_a_reopened_database() {
+        let (_dir, file) = scratch("history.json");
+        let mut written = message(7, PEER, "the text");
+        written.timestamp = 1_700_000_000;
+        written.is_outgoing = true;
+        written.status = MessageStatus::Sent;
+        written.is_service = true;
+        written.reply_to = Some(3);
+        written.media = Some(MediaKind::Voice);
+        written.media_id = Some(91);
+        let row = CachedMessage::from_message(&written);
+
+        {
+            let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+            store.put_record(PEER, &row).expect("the record is written");
+        }
+        let reopened = open_store(&file.path, &file.keys()).expect("it reopens");
+        let read = reopened
+            .get_record(PEER, 7)
+            .expect("the record opens")
+            .expect("the record is there");
+        assert_eq!(read, row, "the sealed row comes back byte for byte");
+        let back = read.to_message(PEER);
+        assert_eq!(
+            fields(&back),
+            fields(&written),
+            "id, chat, text, timestamp, direction and reply link survive"
+        );
+        assert_eq!(back.media, written.media, "the media kind survives");
+        assert_eq!(back.media_id, written.media_id, "the media id survives");
+        assert_eq!(
+            back.is_service, written.is_service,
+            "the service flag survives"
+        );
+        assert_eq!(
+            reopened.all_records(PEER).expect("all records open"),
+            vec![row],
+            "a chat read is the same record"
+        );
+    }
+
+    #[test]
+    fn a_committed_record_survives_a_reopen_without_a_clean_shutdown() {
+        // A power cut itself cannot be simulated in a unit test; this is the
+        // other half of the promise — a committed write survives the process
+        // going away without closing the connection. WAL and synchronous=FULL
+        // are what cover the power-loss half, which needs real hardware.
+        let (_dir, file) = scratch("history.json");
+        let row = CachedMessage::from_message(&message(1, PEER, "committed"));
+
+        {
+            let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+            store.put_record(PEER, &row).expect("the write commits");
+            // No close and no checkpoint: the handle is dropped as a killed
+            // process would drop it.
+        }
+        let reopened = open_store(&file.path, &file.keys()).expect("it reopens");
+        assert_eq!(
+            reopened.get_record(PEER, 1).expect("the record opens"),
+            Some(row),
+            "what was committed is readable again"
+        );
+    }
+
+    #[test]
+    fn plaintext_bytes_are_refused_on_read() {
+        let (_dir, file) = scratch("history.json");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let chat_key = keyed_chat(&store.hmac_key, PEER);
+        let record = Record {
+            chat_key: chat_key.clone(),
+            chat_id: PEER,
+            message_id: 1,
+            row: CachedMessage::from_message(&message(1, PEER, "plaintext")),
+        };
+        let plain = serde_json::to_vec(&record).expect("the fixture serialises");
+        insert_record(&store.conn, &chat_key, 1, &plain).expect("the row is planted");
+
+        assert!(
+            store.get_record(PEER, 1).is_err(),
+            "sealed::open's Ok(None) is a hard error, never a plaintext fallback"
+        );
+        assert_eq!(
+            file.load(),
+            LoadedHistory::empty(),
+            "a load refuses the archive rather than reading the row as legacy"
+        );
+    }
+
+    #[test]
+    fn a_record_moved_to_another_chat_key_is_refused() {
+        let (_dir, file) = scratch("history.json");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let row = CachedMessage::from_message(&message(1, PEER, "private"));
+        let (chat_key, envelope) = seal_record(&store.record_keys, &store.hmac_key, PEER, &row)
+            .expect("the record is sealed for PEER");
+        let moved = keyed_chat(&store.hmac_key, 99);
+        insert_record(&store.conn, &moved, 1, &envelope).expect("the row is copied");
+
+        assert_eq!(
+            chat_key,
+            keyed_chat(&store.hmac_key, PEER),
+            "the original key"
+        );
+        assert!(
+            store.get_record(99, 1).is_err(),
+            "the copied row does not open under the chat it was moved to"
+        );
+        assert!(store.all_records(99).is_err(), "nor does a chat read of it");
+    }
+
+    #[test]
+    fn a_replayed_record_under_another_address_is_refused() {
+        let (_dir, file) = scratch("history.json");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let row = CachedMessage::from_message(&message(1, PEER, "one"));
+        let (chat_key, envelope) = seal_record(&store.record_keys, &store.hmac_key, PEER, &row)
+            .expect("the record is sealed at id 1");
+        insert_record(&store.conn, &chat_key, 2, &envelope).expect("the row is replayed at id 2");
+
+        assert!(
+            store.get_record(PEER, 2).is_err(),
+            "the address inside the plaintext disagrees with the column"
+        );
+        assert_eq!(
+            store.get_record(PEER, 1).expect("the original opens"),
+            None,
+            "the replay did not create a second copy of the original"
+        );
+
+        // Written twice at its own address, the row is replaced, not doubled.
+        let other = CachedMessage::from_message(&message(1, PEER, "two"));
+        let (_, second) = seal_record(&store.record_keys, &store.hmac_key, PEER, &other)
+            .expect("a new record for the same address");
+        insert_record(&store.conn, &chat_key, 1, &second).expect("the row is replaced");
+        assert_eq!(
+            store.get_record(PEER, 1).expect("the row opens"),
+            Some(other),
+            "one address holds one row, the last one written"
+        );
+    }
+
+    #[test]
+    fn sign_out_removes_the_database_and_its_wal_and_shm_siblings() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        let rows: Vec<Message> = (1..=50).map(|id| message(id, PEER, "row")).collect();
+        cache.put(PEER, &rows);
+        file.save(&cache, None);
+
+        // Hold a connection open so SQLite keeps its -wal and -shm beside the
+        // database: these are the files sign-out has to take with it.
+        let open = open_store(&file.path, &file.keys()).expect("the archive opens");
+        // WAL mode has no `-journal`; the other four are live while the
+        // connection is open.
+        let sibling = |suffix: &str| {
+            let mut name = file.path.file_name().expect("a file name").to_os_string();
+            name.push(suffix);
+            file.path.with_file_name(name)
+        };
+        let live: Vec<PathBuf> = vec![
+            file.path.clone(),
+            sibling("-wal"),
+            sibling("-shm"),
+            salt_sibling(&file.path),
+        ];
+        assert!(
+            live.iter().all(|path| path.exists()),
+            "all live siblings exist"
+        );
+        let other = HistoryFile::new(file.path.clone(), other_keys());
+        assert!(
+            other.get(PEER).is_empty(),
+            "another account cannot read these rows before sign-out"
+        );
+
+        file.clear();
+
+        assert!(
+            archive_siblings(&file.path)
+                .iter()
+                .all(|path| !path.exists()),
+            "the database, its WAL, its shared memory, its journal and its salt are gone"
+        );
+        assert_eq!(
+            file.load(),
+            LoadedHistory::empty(),
+            "nothing survives sign-out"
+        );
+        assert!(
+            other.get(PEER).is_empty(),
+            "and no other account reads the rows afterwards"
+        );
+        drop(open);
+    }
+
+    #[test]
+    fn the_pragmas_are_applied_when_the_archive_opens() {
+        let (_dir, file) = scratch("history.json");
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let journal: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal_mode reads");
+        assert_eq!(journal, "wal");
+        let synchronous: i64 = store
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("synchronous reads");
+        assert_eq!(synchronous, 2, "FULL");
+        let cache_size: i64 = store
+            .conn
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .expect("cache_size reads");
+        assert_eq!(cache_size, -256, "256 KiB, not the default");
+        let mmap_size: i64 = store
+            .conn
+            .query_row("PRAGMA mmap_size", [], |row| row.get(0))
+            .expect("mmap_size reads");
+        assert_eq!(mmap_size, 0, "no memory mapping");
+        let journal_limit: i64 = store
+            .conn
+            .query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+            .expect("journal_size_limit reads");
+        assert!(journal_limit > 0, "the WAL is bounded");
+        #[cfg(target_os = "macos")]
+        {
+            let fullfsync: i64 = store
+                .conn
+                .query_row("PRAGMA fullfsync", [], |row| row.get(0))
+                .expect("fullfsync reads");
+            assert_eq!(fullfsync, 1);
+        }
+    }
+
     #[test]
     fn a_save_round_trips_messages_and_the_account() {
         let (_dir, file) = scratch("history.json");
@@ -1327,10 +3242,10 @@ mod tests {
 
         file.save(&cache, Some("+15551234567"));
 
-        let on_disk = fs::read(&file.path).expect("the file the save wrote");
+        let on_disk = fs::read(&file.path).expect("the database the save wrote");
         assert!(
-            sealed::is_sealed(&on_disk),
-            "the bytes on disk are an envelope"
+            on_disk.starts_with(b"SQLite format 3\0"),
+            "the target is a SQLite database"
         );
         assert!(
             !String::from_utf8_lossy(&on_disk).contains("first"),
@@ -1353,6 +3268,27 @@ mod tests {
             "the media id comes back, so a forwarded copy is still found"
         );
         assert_eq!(ids(&loaded.cache.get(30)), vec![9]);
+
+        // The round trip also goes through the range read, which opens the
+        // archive and decodes just the stored stretch for one chat.
+        assert_eq!(ids(&file.get(PEER)), vec![1, 2]);
+        assert_eq!(file.text_bytes(), Some(cache.encoded_text_bytes()));
+    }
+
+    #[test]
+    fn the_fullness_answer_compares_stored_bytes_with_the_configured_limit() {
+        let (dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "four words of text")]);
+        file.save(&cache, None);
+        let used = file.text_bytes().expect("the archive reads");
+
+        assert!(file.full(1), "one byte is below what is stored");
+        assert!(!file.full(used as u64 + 1), "one byte more is room");
+        assert!(!file.full(0), "zero is no limit, however full the archive");
+
+        let empty = HistoryFile::for_test(dir.path().join("empty.history.json"));
+        assert!(!empty.full(1), "an archive that does not exist is not full");
     }
 
     /// The slot's label keys the tag: an id slot's file carries the id, the
@@ -1469,14 +3405,14 @@ mod tests {
     }
 
     #[test]
-    fn garbage_that_is_neither_envelope_nor_json_is_forgotten_and_the_next_save_overwrites_it() {
+    fn garbage_at_the_legacy_path_is_left_and_the_next_save_writes_the_database() {
         let (_dir, file) = scratch("history.json");
-        fs::write(&file.path, "{ not json").expect("the corrupt file");
+        fs::write(&file.legacy, "{ not json").expect("the legacy junk");
 
         assert_eq!(
             file.load(),
             LoadedHistory::empty(),
-            "corrupt JSON loads as nothing, warned about, launch carries on"
+            "legacy junk is not read, warned about, launch carries on"
         );
 
         let mut cache = HistoryCache::default();
@@ -1485,7 +3421,12 @@ mod tests {
         assert_eq!(
             ids(&file.load().cache.get(PEER)),
             vec![1],
-            "the next save overwrites the corrupt file in place"
+            "the next save writes the archive"
+        );
+        assert_eq!(
+            fs::read(&file.legacy).expect("the legacy file is still there"),
+            b"{ not json",
+            "the legacy file is left exactly as it was"
         );
     }
 
@@ -1493,23 +3434,22 @@ mod tests {
         {"id": 4, "text": "legacy secret", "timestamp": 40, "is_outgoing": true}
     ]}}"#;
 
+    /// Translated from `a_legacy_plaintext_file_is_rewritten_sealed`: the
+    /// legacy file is now warned about once and left alone, never migrated.
     #[test]
-    fn a_legacy_plaintext_file_is_rewritten_sealed() {
+    fn a_legacy_plaintext_file_is_left_on_disk_and_loads_empty() {
         let (_dir, file) = scratch("history.json");
-        fs::write(&file.path, LEGACY).expect("the legacy file");
+        fs::write(&file.legacy, LEGACY).expect("the legacy file");
 
         let loaded = file.load();
-        assert_eq!(ids(&loaded.cache.get(PEER)), vec![4], "read once as it was");
-        assert!(!loaded.cache.get(PEER)[0].is_service);
-        assert_eq!(loaded.account.as_deref(), Some("+1555"));
-
-        let on_disk = fs::read(&file.path).expect("the file is still there");
-        assert!(sealed::is_sealed(&on_disk), "rewritten as an envelope");
-        assert!(
-            !String::from_utf8_lossy(&on_disk).contains("legacy secret"),
-            "the plaintext is gone from the file"
+        assert_eq!(loaded, LoadedHistory::empty(), "nothing is migrated");
+        assert!(!file.path.exists(), "no database was created by a load");
+        assert_eq!(
+            fs::read(&file.legacy).expect("the legacy file is still there"),
+            LEGACY.as_bytes(),
+            "the plaintext stays exactly where it was"
         );
-        assert_eq!(file.load(), loaded, "and the sealed file loads the same");
+        assert_eq!(file.load(), loaded, "a second load is no different");
     }
 
     #[test]
@@ -1525,31 +3465,29 @@ mod tests {
         assert!(!old.to_message(PEER).is_service);
     }
 
-    /// The old inode is zeroed, not merely unlinked.
+    /// Translated from `migration_wipes_the_pre_migration_bytes`: nothing is
+    /// wiped now, and sign-out must not reach the legacy file either.
     #[cfg(unix)]
     #[test]
-    fn migration_wipes_the_pre_migration_bytes() {
-        use std::io::Read as _;
-
+    fn the_legacy_file_is_neither_wiped_nor_removed() {
         let (dir, file) = scratch("history.json");
-        fs::write(&file.path, LEGACY).expect("the legacy file");
-        let stale = dir.path().join("history.json.99999.tmp");
-        fs::write(&stale, LEGACY).expect("a stale temp");
-        let unrelated = dir.path().join("other.json.1.tmp");
+        fs::write(&file.legacy, LEGACY).expect("the legacy file");
+        let unrelated = dir.path().join("other.json");
         fs::write(&unrelated, b"x").expect("an unrelated file");
-        let mut old = fs::File::open(&file.path).expect("a handle on the old inode");
 
         file.load();
+        file.clear();
 
-        let mut left = Vec::new();
-        old.read_to_end(&mut left).expect("the old inode reads");
-        assert_eq!(left.len(), LEGACY.len(), "the old file changed length");
-        assert!(
-            left.iter().all(|byte| *byte == 0),
-            "plaintext was left behind"
+        assert_eq!(
+            fs::read(&file.legacy).expect("the legacy file is still there"),
+            LEGACY.as_bytes(),
+            "the pre-migration bytes were not wiped"
         );
-        assert!(!stale.exists(), "the stale temp was left");
-        assert!(unrelated.exists(), "a file of another name was touched");
+        assert_eq!(
+            fs::read(&unrelated).expect("the unrelated file is still there"),
+            b"x",
+            "a file of another name was not touched"
+        );
     }
 
     #[test]
@@ -1614,8 +3552,10 @@ mod tests {
         );
     }
 
+    /// Translated from `a_save_leaves_a_whole_file_and_no_temp_behind`: the
+    /// whole-file envelope is now one sealed row in a versioned database.
     #[test]
-    fn a_save_leaves_a_whole_file_and_no_temp_behind() {
+    fn a_save_leaves_a_sealed_database_and_schema_v1_behind() {
         let (_dir, file) = scratch("history.json");
         let mut photo = message(1, PEER, "");
         photo.media = Some(MediaKind::Photo);
@@ -1624,22 +3564,40 @@ mod tests {
 
         file.save(&cache, Some("+15551234567"));
 
-        let raw = fs::read(&file.path).expect("the file the save wrote");
-        assert!(sealed::is_sealed(&raw), "the target is ciphertext");
-        let plain = sealed::open(&raw, file.keys.as_ref())
-            .expect("the envelope opens")
-            .expect("the target is only ever the finished file");
-        let parsed: serde_json::Value =
-            serde_json::from_slice(&plain).expect("the sealed payload is JSON");
-        let expected: serde_json::Value = serde_json::from_str(
-            r#"{"account": "+15551234567", "peers": {"7": [
-                {"id": 1, "text": "", "timestamp": 10, "is_outgoing": false, "media": "photo"}
-            ]}}"#,
-        )
-        .expect("the expected payload is JSON");
-        assert_eq!(parsed, expected, "the payload shape, media as a kind only");
+        let raw = fs::read(&file.path).expect("the database the save wrote");
         assert!(
-            !temp_sibling(&file.path).exists(),
+            raw.starts_with(b"SQLite format 3\0"),
+            "the target is a database"
+        );
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let version: i64 = store
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_VERSION],
+                |row| row.get(0),
+            )
+            .expect("the schema version was recorded");
+        assert_eq!(version, SCHEMA_VERSION);
+        let state = store.state().expect("the sealed state opens");
+        assert_eq!(state.account.as_deref(), Some("+15551234567"));
+        let rows = store.all_records(PEER).expect("the sealed record opens");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].media,
+            Some(CachedMedia::Photo),
+            "media as a kind only"
+        );
+        let envelope: Vec<u8> = store
+            .conn
+            .query_row("SELECT sealed FROM messages", [], |row| row.get(0))
+            .expect("the sealed row");
+        assert!(sealed::is_sealed(&envelope), "the row is an envelope");
+        assert!(
+            !fs::read_dir(file.path.parent().expect("a parent directory"))
+                .expect("the directory reads")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp")),
             "no half-written temp is left beside the target"
         );
     }
@@ -2551,118 +4509,6 @@ mod tests {
         }
     }
 
-    // ---- the peer bound --------------------------------------------------
-
-    fn peer_count() -> i64 {
-        i64::try_from(HISTORY_CACHE_PEERS).expect("the bound fits an id")
-    }
-
-    /// A latest page of one message for `peer`, with an id of its own.
-    fn land(cache: &mut HistoryCache, peer: i64) -> bool {
-        cache.merge(peer, &[message(peer * 1000, peer, "row")], LATEST)
-    }
-
-    #[test]
-    fn the_peer_bound_evicts_the_least_recently_touched() {
-        let mut cache = HistoryCache::default();
-        for peer in 1..=peer_count() {
-            assert!(land(&mut cache, peer));
-        }
-        assert!(
-            !land(&mut cache, 1),
-            "the same page again changes no row, and still touches the peer"
-        );
-
-        assert!(land(&mut cache, peer_count() + 1));
-
-        assert_eq!(cache.peers.len(), HISTORY_CACHE_PEERS);
-        assert!(!cache.get(1).is_empty(), "touched last but one, so kept");
-        assert!(
-            cache.get(2).is_empty(),
-            "the least recently touched is the one that went"
-        );
-        assert!(!cache.get(peer_count() + 1).is_empty());
-        assert!(
-            !cache.touched.contains_key(&2),
-            "and nothing is kept about it"
-        );
-    }
-
-    #[test]
-    fn an_arrival_touches_its_peer() {
-        let mut cache = HistoryCache::default();
-        for peer in 1..=peer_count() {
-            assert!(land(&mut cache, peer));
-        }
-        assert!(cache.arrive(&message(1001, 1, "new")), "1 is current");
-
-        assert!(land(&mut cache, peer_count() + 1));
-
-        assert!(!cache.get(1).is_empty(), "the arrival kept 1");
-        assert!(cache.get(2).is_empty());
-    }
-
-    /// An evicted peer has no run, so it is not current — the next arrival
-    /// does not start a run of one — while what the feed saw of it stays, so
-    /// a page fetched before that message cannot mark it current either.
-    #[test]
-    fn eviction_keeps_the_feed_marks_consistent() {
-        let mut cache = HistoryCache::default();
-        assert!(cache.merge(PEER, &page(1..=3), LATEST));
-        assert!(cache.apply_update(&arrival(4)));
-        for peer in 100..100 + peer_count() {
-            assert!(land(&mut cache, peer));
-        }
-        assert!(cache.get(PEER).is_empty(), "evicted");
-        assert!(!cache.feed.current.contains(&PEER));
-        assert_eq!(cache.feed.seen.get(&PEER), Some(&4));
-
-        assert!(
-            !cache.apply_update(&arrival(5)),
-            "no run, so nothing to join and nothing started"
-        );
-        assert!(cache.get(PEER).is_empty());
-
-        assert!(cache.merge(PEER, &page(1..=3), LATEST), "it comes back");
-        assert!(
-            !cache.apply_update(&arrival(6)),
-            "a page short of 5 is not current"
-        );
-        assert_eq!(ids(&cache.get(PEER)), vec![1, 2, 3]);
-    }
-
-    /// A file holding more peers than the bound — written before the bound,
-    /// or by hand — keeps those whose newest message is newest.
-    #[test]
-    fn a_file_past_the_peer_bound_keeps_the_newest_conversations() {
-        let (_dir, file) = scratch("history.json");
-        let peers: BTreeMap<i64, Vec<CachedMessage>> = (1..=peer_count() + 2)
-            .map(|peer| {
-                // Peer 1's message is the newest of all; 2 and 3 the oldest.
-                let at = if peer == 1 { 10_000 } else { peer };
-                let mut row = CachedMessage::from_message(&message(peer, peer, "row"));
-                row.timestamp = at;
-                (peer, vec![row])
-            })
-            .collect();
-        let payload = Payload {
-            account: None,
-            account_id: None,
-            peers,
-            chats: Vec::new(),
-            aliases: BTreeMap::new(),
-        };
-        seed(
-            &file,
-            serde_json::to_vec(&payload).expect("the payload serialises"),
-        );
-
-        let cache = file.load().cache;
-        assert_eq!(cache.peers.len(), HISTORY_CACHE_PEERS);
-        assert!(!cache.get(1).is_empty());
-        assert!(cache.get(2).is_empty() && cache.get(3).is_empty());
-    }
-
     /// A hand-written peer deeper than the cap is cut on load, oldest first.
     #[test]
     fn an_over_deep_file_is_cut_to_the_cap_on_load() {
@@ -2677,6 +4523,10 @@ mod tests {
             peers: BTreeMap::from([(PEER, rows)]),
             chats: Vec::new(),
             aliases: BTreeMap::new(),
+            chips: BTreeMap::new(),
+            removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::new(),
         };
         seed(
             &file,
@@ -2688,72 +4538,41 @@ mod tests {
         assert_eq!(kept.first(), Some(&2));
     }
 
-    /// A message of `len` bytes of text for `peer`.
-    fn big(id: i64, peer: i64, len: usize) -> Message {
-        message(id, peer, &"x".repeat(len))
-    }
-
+    /// A launch reads only the newest window of each chat, not the whole
+    /// archive. Every row stays on disk and is still reachable by a range read.
     #[test]
-    fn the_byte_budget_evicts_the_least_recently_touched() {
-        let third = HISTORY_CACHE_BYTES / 3 + 1;
-        let mut cache = HistoryCache::default();
-        for peer in 1..=3 {
-            assert!(cache.merge(peer, &[big(1, peer, third)], LATEST));
+    fn load_reads_only_the_newest_window_of_each_chat() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let (_dir, file, mut store) = scratch_store("history.json");
+        for peer in [PEER, PEER + 1] {
+            let ids: Vec<i64> = (1..=depth * 3 + 7).collect();
+            let rows: Vec<CachedMessage> = ids
+                .iter()
+                .map(|id| CachedMessage::from_message(&message(*id, peer, "row")))
+                .collect();
+            assert!(
+                store
+                    .ingest_page(peer, &rows, (1, depth * 3 + 7))
+                    .expect("the rows land")
+            );
         }
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(cache.get(1).is_empty(), "the least recently touched went");
-        assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
-        assert!(!cache.touched.contains_key(&1));
-        assert!(!cache.feed.current.contains(&1));
-    }
+        drop(store);
 
-    /// One message larger than the whole budget cannot be kept at all.
-    #[test]
-    fn a_five_megabyte_message_does_not_leave_the_cache_over_budget() {
-        let five = 5 * 1024 * 1024;
-        let mut cache = HistoryCache::default();
-        assert!(cache.merge(1, &[big(1, 1, five)], LATEST));
-        assert!(!cache.get(1).is_empty(), "5 MiB alone fits 8 MiB");
-        assert!(cache.merge(2, &[big(1, 2, five)], LATEST));
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(cache.get(1).is_empty(), "the older giant is gone");
-        assert!(!cache.get(2).is_empty());
+        let loaded = file.load().cache;
+        let expected: Vec<i64> = ((depth * 2 + 8)..=depth * 3 + 7).collect();
+        for peer in [PEER, PEER + 1] {
+            assert_eq!(
+                ids(&loaded.get(peer)),
+                expected,
+                "only the newest window loads"
+            );
+        }
 
-        assert!(cache.merge(3, &[big(1, 3, HISTORY_CACHE_BYTES + 1)], LATEST));
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(
-            cache.get(3).is_empty(),
-            "over budget on its own, it goes too"
+        // The rows the load did not read are still in the archive.
+        assert_eq!(
+            ids(&file.get(PEER)).len(),
+            usize::try_from(depth * 3 + 7).expect("the count fits")
         );
-    }
-
-    #[test]
-    fn a_file_past_the_byte_budget_is_cut_on_load() {
-        let (_dir, file) = scratch("history.json");
-        let third = HISTORY_CACHE_BYTES / 3 + 1;
-        let peers: BTreeMap<i64, Vec<CachedMessage>> = (1..=3)
-            .map(|peer| {
-                let mut row = CachedMessage::from_message(&big(1, peer, third));
-                row.timestamp = peer;
-                (peer, vec![row])
-            })
-            .collect();
-        let payload = Payload {
-            account: None,
-            account_id: None,
-            peers,
-            chats: Vec::new(),
-            aliases: BTreeMap::new(),
-        };
-        seed(
-            &file,
-            serde_json::to_vec(&payload).expect("the payload serialises"),
-        );
-
-        let cache = file.load().cache;
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(cache.get(1).is_empty(), "the oldest conversation went");
-        assert!(!cache.get(2).is_empty() && !cache.get(3).is_empty());
     }
 
     // ---- Worst case: control-character text at the byte budget -------------
@@ -2776,20 +4595,6 @@ mod tests {
             let json = serde_json::to_string(text).expect("a string serialises");
             assert_eq!(encoded_len(text), json.len() - 2, "{text:?}");
         }
-    }
-
-    #[test]
-    fn the_budget_counts_encoded_bytes_not_raw_length() {
-        // Two rows of about half the budget encoded, a twelfth raw: together
-        // they fit by `len` many times over, so only the encoded count evicts.
-        let mut cache = HistoryCache::default();
-        let n = HISTORY_CACHE_BYTES / 6 / 2 + 1;
-        for peer in 1..=2 {
-            assert!(cache.merge(peer, &[message(1, peer, &"\u{1}".repeat(n))], LATEST));
-        }
-        assert!(cache.encoded_text_bytes() <= HISTORY_CACHE_BYTES);
-        assert!(cache.get(1).is_empty(), "the least recently touched went");
-        assert!(!cache.get(2).is_empty());
     }
 
     /// A cache at the document's shape: [`HISTORY_CACHE_PEERS`] conversations of
@@ -3024,6 +4829,1173 @@ mod tests {
             mb(run.write_peak)
         );
         println!("cache_worst_case: peak RSS (load)  = {}", mb(run.load_peak));
+    }
+
+    // ---- ranges, transactional ingest and the chip side tables (stage 02) --
+
+    fn scratch_store(name: &str) -> (tempfile::TempDir, HistoryFile, Store) {
+        let (dir, file) = scratch(name);
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        (dir, file, store)
+    }
+
+    /// Sealed rows for [`PEER`] with these ids, oldest id first.
+    fn rows(ids: impl IntoIterator<Item = i64>) -> Vec<CachedMessage> {
+        ids.into_iter()
+            .map(|id| CachedMessage::from_message(&message(id, PEER, "row")))
+            .collect()
+    }
+
+    /// Plants rows and a range directly, for a gap a fetch recorded by some
+    /// other path — the ledger can hold more than one stretch per chat.
+    fn plant(store: &Store, ids: impl IntoIterator<Item = i64>, range: (i64, i64)) {
+        for row in rows(ids) {
+            store.put_record(PEER, &row).expect("the row is planted");
+        }
+        let chat_key = keyed_chat(&store.hmac_key, PEER);
+        store
+            .conn
+            .execute(
+                "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)",
+                params![chat_key, range.0, range.1],
+            )
+            .expect("the range is planted");
+    }
+
+    /// A bounded page read selects only the newest `limit` rows below the
+    /// anchor, so a corrupt row far below it is never decoded — while a
+    /// whole-chat read still fails on that same row.
+    #[test]
+    fn a_bounded_page_read_decodes_only_the_rows_below_the_anchor() {
+        let (_dir, file, store) = scratch_store("history.json");
+        plant(&store, 1..=1_000, (1, 1_000));
+
+        // A row far below the anchor no longer carries a valid sealed envelope.
+        let chat_key = keyed_chat(&store.hmac_key, PEER);
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET sealed = ?1 WHERE chat_key = ?2 AND message_id = ?3",
+                params![vec![0u8; 16], chat_key, 1_i64],
+            )
+            .expect("the corrupt row is planted");
+
+        let (page, lo) = file.page(PEER, 1_001, 100);
+        assert_eq!(lo, Some(1));
+        assert_eq!(
+            page.iter().map(|m| m.id).collect::<Vec<_>>(),
+            (901..=1_000).collect::<Vec<_>>(),
+            "exactly the newest 100 rows below the anchor, oldest first"
+        );
+        assert!(
+            file.get(PEER).is_empty(),
+            "a whole-chat read still decodes the corrupt row and fails"
+        );
+    }
+
+    /// A page read picks the one range that reaches the anchor, not an older
+    /// range across a gap, and reports nothing when no range reaches it.
+    #[test]
+    fn a_page_read_uses_only_the_range_that_reaches_the_anchor() {
+        let (_dir, file, store) = scratch_store("history.json");
+        plant(&store, 1..=100, (1, 100));
+        plant(&store, 301..=400, (301, 400));
+
+        let (page, lo) = file.page(PEER, 401, 100);
+        assert_eq!(lo, Some(301));
+        assert_eq!(
+            page.iter().map(|m| m.id).collect::<Vec<_>>(),
+            (301..=400).collect::<Vec<_>>(),
+            "the 301 range only, never the 1 range across the gap"
+        );
+
+        let (page, lo) = file.page(PEER, 501, 100);
+        assert!(page.is_empty());
+        assert_eq!(lo, None, "no range reaches an anchor above both");
+    }
+
+    /// A page read anchored inside an older range does not let a newer
+    /// disconnected range hide it: a range that starts at or above the
+    /// anchor contributes no row below it, however high its top reaches.
+    #[test]
+    fn a_newer_range_does_not_hide_an_older_one() {
+        let (_dir, file, store) = scratch_store("history.json");
+        plant(&store, 1..=100, (1, 100));
+        plant(&store, 301..=400, (301, 400));
+
+        let (page, lo) = file.page(PEER, 90, 100);
+        assert_eq!(lo, Some(1));
+        assert_eq!(
+            page.iter().map(|m| m.id).collect::<Vec<_>>(),
+            (1..=89).collect::<Vec<_>>(),
+            "the rows below the anchor in the older range"
+        );
+    }
+
+    /// Fetched pages and the bounded window land in one transaction: a window
+    /// failure rolls the pages back too, so a crash mid-write cannot leave a
+    /// queued page restoring a row the window's deletions had removed.
+    #[test]
+    fn pages_and_the_window_land_in_one_transaction_or_not_at_all() {
+        let (_dir, file, store) = scratch_store("history.json");
+        plant(&store, 1..=5, (1, 5));
+
+        // The window's edit path must read row 3's stored envelope, and that
+        // envelope no longer decodes.
+        let chat_key = keyed_chat(&store.hmac_key, PEER);
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET sealed = ?1 WHERE chat_key = ?2 AND message_id = ?3",
+                params![vec![0u8; 16], chat_key, 3_i64],
+            )
+            .expect("the corrupt row is planted");
+
+        let payload = Payload {
+            account: None,
+            account_id: None,
+            peers: BTreeMap::new(),
+            chats: Vec::new(),
+            aliases: BTreeMap::new(),
+            chips: BTreeMap::new(),
+            removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::from([(PEER, BTreeMap::from([(3, "edited".to_owned())]))]),
+        };
+        let bytes = serde_json::to_vec(&payload).expect("the payload encodes");
+
+        let pages = vec![(PEER, (40..=45).map(|id| message(id, PEER, "row")).collect())];
+        let result = file.ingest_pages_and_write(&pages, &bytes);
+        assert!(result.is_err(), "the window phase fails on the corrupt row");
+
+        // The pages rolled back with the window: neither their rows nor their
+        // range survived the one failed transaction.
+        assert_eq!(file.ranges(PEER), vec![(1, 5)]);
+        let conn = rusqlite::Connection::open(&file.path).expect("the archive opens raw");
+        let landed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE message_id BETWEEN 40 AND 45",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the raw row count reads");
+        assert_eq!(landed, 0, "the page did not land when the window failed");
+    }
+
+    #[test]
+    fn a_page_before_and_after_a_stored_run_merges_into_one_range() {
+        let (_dir, _file, mut store) = scratch_store("history.json");
+        assert!(
+            store
+                .ingest_page(PEER, &rows(10..=15), (10, 15))
+                .expect("the first page lands")
+        );
+        assert_eq!(store.ranges(PEER).expect("ranges read"), vec![(10, 15)]);
+
+        // Below the run, anchored at its oldest.
+        assert!(
+            store
+                .ingest_page(PEER, &rows([5, 7, 9]), (5, 10))
+                .expect("the older page lands")
+        );
+        assert_eq!(store.ranges(PEER).expect("ranges read"), vec![(5, 15)]);
+
+        // Above the run, anchored at its newest.
+        assert!(
+            store
+                .ingest_page(PEER, &rows([17, 20]), (15, 20))
+                .expect("the newer page lands")
+        );
+        assert_eq!(store.ranges(PEER).expect("ranges read"), vec![(5, 20)]);
+        assert_eq!(
+            store.all_records(PEER).expect("rows read").len(),
+            11,
+            "every row is still held, in one stretch"
+        );
+    }
+
+    #[test]
+    fn ingest_keeps_every_row_past_the_window_depth() {
+        let (_dir, _file, mut store) = scratch_store("history.json");
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let ids: Vec<i64> = (1..=depth + 5).collect();
+
+        assert!(
+            store
+                .ingest_page(PEER, &rows(ids.iter().copied()), (1, depth + 5))
+                .expect("the page lands")
+        );
+
+        assert_eq!(
+            store.all_records(PEER).expect("rows read").len(),
+            ids.len(),
+            "nothing is trimmed to make room for a page"
+        );
+        assert_eq!(
+            store.ranges(PEER).expect("ranges read"),
+            vec![(1, depth + 5)],
+            "the range names every row it holds"
+        );
+    }
+
+    #[test]
+    fn a_page_that_leaves_a_gap_is_kept_as_its_own_range() {
+        let (_dir, _file, mut store) = scratch_store("history.json");
+        assert!(
+            store
+                .ingest_page(PEER, &rows(10..=15), (10, 15))
+                .expect("first page")
+        );
+        let before_rows = store.all_records(PEER).expect("rows read");
+
+        assert!(
+            store
+                .ingest_page(PEER, &rows(20..=25), (20, 25))
+                .expect("a disjoint page is stored, not refused"),
+            "a page whose reach touches no stored range is still kept"
+        );
+        let mut expected = before_rows;
+        expected.extend(rows(20..=25));
+        assert_eq!(store.all_records(PEER).expect("rows read"), expected);
+        assert_eq!(
+            store.ranges(PEER).expect("ranges read"),
+            vec![(10, 15), (20, 25)],
+            "the gap is recorded as a second stretch"
+        );
+    }
+
+    #[test]
+    fn a_page_that_fills_a_recorded_gap_closes_it() {
+        let (_dir, _file, mut store) = scratch_store("history.json");
+        plant(&store, 10..=12, (10, 12));
+        plant(&store, 18..=20, (18, 20));
+        assert_eq!(
+            store.ranges(PEER).expect("ranges read"),
+            vec![(10, 12), (18, 20)],
+            "the hole is recorded, not inferred"
+        );
+
+        assert!(
+            store
+                .ingest_page(PEER, &rows(13..=17), (12, 18))
+                .expect("the bridging page lands")
+        );
+        assert_eq!(store.ranges(PEER).expect("ranges read"), vec![(10, 20)]);
+        assert_eq!(
+            store
+                .all_records(PEER)
+                .expect("rows read")
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            (10..=20).collect::<Vec<_>>()
+        );
+    }
+
+    /// Writes `cache` through the ingest path and checks that the ledger names
+    /// exactly the rows that were stored — one honest stretch per peer.
+    fn assert_ranges_match_rows(cache: &HistoryCache) {
+        let (_dir, file) = scratch("history.json");
+        file.save(cache, None);
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let stored = store.all_records(PEER).expect("records read");
+        let ranges = store.ranges(PEER).expect("ranges read");
+        match (stored.first(), stored.last()) {
+            (Some(first), Some(last)) => {
+                assert_eq!(ranges, vec![(first.id, last.id)]);
+            }
+            _ => assert!(ranges.is_empty(), "no rows, no range"),
+        }
+        assert_eq!(
+            file.text_bytes(),
+            Some(cache.encoded_text_bytes()),
+            "the SQL text count matches the cache's"
+        );
+    }
+
+    #[test]
+    fn every_merge_rule_leaves_a_range_that_matches_the_stored_rows() {
+        let mut cache = cached(1..=5);
+        assert!(cache.merge(PEER, &page(4..=8), LATEST));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(10..=15);
+        assert!(cache.merge(
+            PEER,
+            &page([3, 5, 7]),
+            PageKind::Older {
+                before: 10,
+                reached_start: false,
+            }
+        ));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(1..=5);
+        assert!(cache.merge(
+            PEER,
+            &page([8, 9]),
+            PageKind::Newer {
+                after: 5,
+                reached_end: false,
+            }
+        ));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(1..=6);
+        assert!(cache.merge(PEER, &page([3, 5, 6]), LATEST));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(1..=5);
+        assert!(cache.merge(PEER, &page(20..=25), LATEST));
+        assert_ranges_match_rows(&cache);
+
+        let mut cache = cached(10..=15);
+        assert!(cache.merge(PEER, &page([7, 9, 11, 12]), PageKind::Around));
+        assert_ranges_match_rows(&cache);
+    }
+
+    #[test]
+    fn a_chat_past_the_window_survives_every_save_and_a_reopen() {
+        let (_dir, file) = scratch("history.json");
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let mut cache = HistoryCache::default();
+
+        let first: Vec<Message> = (1..=depth - 50)
+            .map(|id| message(id, PEER, "first"))
+            .collect();
+        assert!(cache.merge(PEER, &first, LATEST));
+        file.save(&cache, None);
+
+        let second: Vec<Message> = (depth - 49..=depth + 50)
+            .map(|id| message(id, PEER, "second"))
+            .collect();
+        assert!(cache.merge(
+            PEER,
+            &second,
+            PageKind::Newer {
+                after: depth - 50,
+                reached_end: false,
+            }
+        ));
+        file.save(&cache, None);
+
+        let third: Vec<Message> = (depth + 51..=depth + 120)
+            .map(|id| message(id, PEER, "third"))
+            .collect();
+        assert!(cache.merge(
+            PEER,
+            &third,
+            PageKind::Newer {
+                after: depth + 50,
+                reached_end: false,
+            }
+        ));
+        file.save(&cache, None);
+
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let stored = store.all_records(PEER).expect("the rows open");
+        assert_eq!(
+            stored.len(),
+            usize::try_from(depth + 120).expect("the count fits")
+        );
+        assert_eq!(
+            stored.first().map(|row| row.id),
+            Some(1),
+            "the oldest is kept"
+        );
+        assert_eq!(stored.last().map(|row| row.id), Some(depth + 120));
+        assert_eq!(
+            store.ranges(PEER).expect("the ranges open"),
+            vec![(1, depth + 120)],
+            "the ledger names every row the saves left behind"
+        );
+        assert_eq!(ids(&file.get(PEER)), (1..=depth + 120).collect::<Vec<_>>());
+        assert_eq!(file.load().cache.get(PEER).len(), HISTORY_CACHE_DEPTH);
+    }
+
+    #[test]
+    fn a_disjoint_window_is_kept_as_its_own_range_on_save() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(10..=15), LATEST));
+        file.save(&cache, None);
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let before_rows = store.all_records(PEER).expect("rows read");
+        drop(store);
+
+        let mut disjoint = HistoryCache::default();
+        assert!(disjoint.merge(PEER, &page(20..=25), LATEST));
+        file.save(&disjoint, None);
+
+        let reopened = open_store(&file.path, &file.keys()).expect("it reopens");
+        let mut expected = before_rows;
+        expected.extend(rows(20..=25));
+        assert_eq!(reopened.all_records(PEER).expect("rows read"), expected);
+        assert_eq!(
+            reopened.ranges(PEER).expect("ranges read"),
+            vec![(10, 15), (20, 25)]
+        );
+    }
+
+    /// The sealed bytes of every stored row of `PEER`, by message id.
+    fn sealed_rows(file: &HistoryFile) -> BTreeMap<i64, Vec<u8>> {
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let mut statement = store
+            .conn
+            .prepare("SELECT message_id, sealed FROM messages ORDER BY message_id")
+            .expect("the statement prepares");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("the rows read")
+            .map(|row| row.expect("a row reads"))
+            .collect()
+    }
+
+    /// One arrival costs one record: a row the save did not change is not
+    /// sealed again, on the first save of a launch as much as on a later one.
+    #[test]
+    fn one_arrival_does_not_rewrite_the_rows_it_did_not_touch() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(1..=5), LATEST));
+        file.save(&cache, None);
+        let before = sealed_rows(&file);
+
+        assert!(cache.merge(PEER, &page(1..=6), LATEST));
+        file.save(&cache, None);
+        let after = sealed_rows(&file);
+        assert_eq!(after.len(), 6, "the arrival was written");
+        for id in 1..=5 {
+            assert_eq!(after[&id], before[&id], "row {id} was sealed again");
+        }
+        assert_eq!(file.ranges(PEER), vec![(1, 6)], "and it joined the range");
+
+        // A launch starts from what the archive holds, not from nothing.
+        let reopened = HistoryFile::for_test(file.path.clone());
+        let mut loaded = reopened.load().cache;
+        assert!(loaded.merge(PEER, &page(1..=7), LATEST));
+        reopened.save(&loaded, None);
+        let later = sealed_rows(&reopened);
+        for id in 1..=6 {
+            assert_eq!(later[&id], after[&id], "row {id} was sealed again");
+        }
+        assert_eq!(later.len(), 7);
+
+        // An edit moves its own row and no other.
+        assert!(loaded.apply_update(&edit(PEER, 3, "edited")));
+        reopened.save(&loaded, None);
+        let edited = sealed_rows(&reopened);
+        assert_ne!(edited[&3], later[&3], "the edited row was written");
+        for id in [1, 2, 4, 5, 6, 7] {
+            assert_eq!(edited[&id], later[&id], "row {id} was sealed again");
+        }
+    }
+
+    /// A restart reads the newest recorded stretch only: rows either side of a
+    /// gap would show as one unbroken history.
+    #[test]
+    fn a_restart_does_not_join_disconnected_ranges() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(10..=15), LATEST));
+        file.save(&cache, None);
+        let mut disjoint = HistoryCache::default();
+        assert!(disjoint.merge(PEER, &page(20..=25), LATEST));
+        file.save(&disjoint, None);
+        assert_eq!(file.ranges(PEER), vec![(10, 15), (20, 25)]);
+
+        assert_eq!(
+            ids(&file.load().cache.get(PEER)),
+            (20..=25).collect::<Vec<_>>(),
+            "only the newest stretch is loaded"
+        );
+    }
+
+    #[test]
+    fn a_chat_the_reader_removed_stays_removed_after_a_reopen() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        let elsewhere: Vec<Message> = (1..=3).map(|id| message(id, PEER + 1, "kept")).collect();
+        cache.put(PEER, &page(1..=5));
+        cache.put(PEER + 1, &elsewhere);
+        file.save(&cache, None);
+
+        cache.remove(PEER);
+        file.save(&cache, None);
+
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        assert!(store.all_records(PEER).expect("rows read").is_empty());
+        assert!(store.ranges(PEER).expect("ranges read").is_empty());
+        assert_eq!(store.all_records(PEER + 1).expect("rows read").len(), 3);
+        let loaded = file.load().cache;
+        assert!(loaded.get(PEER).is_empty());
+        assert_eq!(loaded.get(PEER + 1).len(), 3);
+    }
+
+    /// A deletion inside the window is applied to the stored row and the run is
+    /// split, not left claiming the deleted id.
+    #[test]
+    fn a_deleted_message_in_the_window_stays_gone_after_a_reopen() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(
+            PEER,
+            &(1..=depth)
+                .map(|id| message(id, PEER, "row"))
+                .collect::<Vec<_>>(),
+        );
+        file.save(&cache, None);
+
+        assert!(cache.delete(&[depth / 2]));
+        file.save(&cache, None);
+
+        let expected: Vec<i64> = (1..=depth).filter(|id| *id != depth / 2).collect();
+        assert_eq!(ids(&file.get(PEER)), expected, "the row stays deleted");
+        assert_eq!(
+            file.ranges(PEER),
+            vec![(1, depth / 2 - 1), (depth / 2 + 1, depth)],
+            "the hole splits the run"
+        );
+        // The ledger names a deleted id as a hole, so a restart reads the stretch
+        // above it, the same one paging reaches.
+        assert_eq!(
+            ids(&file.load().cache.get(PEER)),
+            (depth / 2 + 1..=depth).collect::<Vec<_>>()
+        );
+    }
+
+    /// A row the window no longer holds can still be deleted: the id travels
+    /// with the save and the surviving range is rebuilt from the rows left.
+    #[test]
+    fn a_deleted_message_past_the_window_stays_gone_after_a_reopen() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let (_dir, file) = scratch("history.json");
+        let rows: Vec<CachedMessage> = (1..=depth + 5)
+            .map(|id| CachedMessage::from_message(&message(id, PEER, "row")))
+            .collect();
+        seed(
+            &file,
+            serde_json::to_vec(&Payload {
+                account: None,
+                account_id: None,
+                peers: BTreeMap::from([(PEER, rows)]),
+                chats: Vec::new(),
+                aliases: BTreeMap::new(),
+                chips: BTreeMap::new(),
+                removed: BTreeSet::new(),
+                deleted_messages: BTreeSet::new(),
+                updated_messages: BTreeMap::new(),
+            })
+            .expect("the payload serialises"),
+        );
+
+        let mut cache = file.load().cache;
+        assert_eq!(
+            ids(&cache.get(PEER)).first(),
+            Some(&6),
+            "ids 1 to 5 are past the window"
+        );
+        assert!(!cache.delete(&[1]), "nothing in the window held it");
+
+        file.save(&cache, None);
+        assert_eq!(ids(&file.get(PEER)), (2..=depth + 5).collect::<Vec<_>>());
+        assert_eq!(file.ranges(PEER), vec![(2, depth + 5)]);
+        assert_eq!(
+            ids(&file.load().cache.get(PEER)),
+            (6..=depth + 5).collect::<Vec<_>>()
+        );
+    }
+
+    /// A session can name more deleted ids than one SQL statement accepts.
+    #[test]
+    fn a_batch_of_deletions_larger_than_one_statement_is_applied_whole() {
+        let (_dir, file) = scratch("history.json");
+        let rows: Vec<CachedMessage> = (1_i64..=1_200)
+            .map(|id| CachedMessage::from_message(&message(id, PEER, "row")))
+            .collect();
+        seed(
+            &file,
+            serde_json::to_vec(&Payload {
+                account: None,
+                account_id: None,
+                peers: BTreeMap::from([(PEER, rows)]),
+                chats: Vec::new(),
+                aliases: BTreeMap::new(),
+                chips: BTreeMap::new(),
+                removed: BTreeSet::new(),
+                deleted_messages: BTreeSet::new(),
+                updated_messages: BTreeMap::new(),
+            })
+            .expect("the payload serialises"),
+        );
+
+        let mut cache = file.load().cache;
+        let all: Vec<i64> = (1..=1_200).collect();
+        assert!(cache.delete(&all));
+        file.save(&cache, None);
+
+        assert!(file.get(PEER).is_empty(), "every row was deleted");
+        assert!(file.ranges(PEER).is_empty(), "no range is left behind");
+    }
+
+    /// An edit of a row in the window is re-sealed on the next save.
+    #[test]
+    fn an_edited_message_survives_a_reopen() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = cached(1..=5);
+        file.save(&cache, None);
+
+        assert!(cache.edit(PEER, 3, "edited"));
+        file.save(&cache, None);
+
+        let stored = file.get(PEER);
+        assert_eq!(stored[2].text, "edited");
+        assert_eq!(ids(&stored), (1..=5).collect::<Vec<_>>());
+        assert_eq!(file.load().cache.get(PEER)[2].text, "edited");
+    }
+
+    /// An edit reported for a row the window no longer holds is re-sealed on
+    /// its own stored envelope, with every other field left as it was.
+    #[test]
+    fn an_edit_past_the_window_replaces_only_the_stored_text() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let (_dir, file) = scratch("history.json");
+        let mut rows: Vec<CachedMessage> = (1..=depth + 5)
+            .map(|id| {
+                CachedMessage::from_message(&message(id, PEER, if id == 1 { "old" } else { "row" }))
+            })
+            .collect();
+        rows[0].timestamp = 1_700_000_000;
+        rows[0].is_outgoing = true;
+        rows[0].reply_to = Some(3);
+        rows[0].media = Some(CachedMedia::Photo);
+        rows[0].media_id = Some(91);
+        let original = rows[0].clone();
+        seed(
+            &file,
+            serde_json::to_vec(&Payload {
+                account: None,
+                account_id: None,
+                peers: BTreeMap::from([(PEER, rows)]),
+                chats: Vec::new(),
+                aliases: BTreeMap::new(),
+                chips: BTreeMap::new(),
+                removed: BTreeSet::new(),
+                deleted_messages: BTreeSet::new(),
+                updated_messages: BTreeMap::new(),
+            })
+            .expect("the payload serialises"),
+        );
+
+        let mut cache = file.load().cache;
+        assert!(!cache.edit(PEER, 1, "changed"), "id 1 is past the window");
+        file.save(&cache, None);
+
+        let stored = file.get(PEER);
+        assert_eq!(stored[0].text, "changed");
+        assert_eq!(stored[0].timestamp, original.timestamp);
+        assert_eq!(stored[0].is_outgoing, original.is_outgoing);
+        assert_eq!(stored[0].reply_to, original.reply_to);
+        assert_eq!(stored[0].media, Some(MediaKind::Photo));
+        assert_eq!(stored[0].media_id, original.media_id);
+        assert_eq!(
+            stored.len(),
+            HISTORY_CACHE_DEPTH + 5,
+            "every other row survives"
+        );
+    }
+
+    /// An edit and a deletion of the same id end deleted: deletions run last.
+    #[test]
+    fn an_edit_and_a_deletion_of_the_same_row_end_deleted() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = cached(1..=5);
+        file.save(&cache, None);
+
+        assert!(cache.apply_update(&edit(PEER, 3, "edited")));
+        assert!(cache.apply_update(&deletion(&[3])));
+        file.save(&cache, None);
+
+        assert_eq!(ids(&file.get(PEER)), vec![1, 2, 4, 5]);
+        assert_eq!(
+            ids(&file.load().cache.get(PEER)),
+            vec![4, 5],
+            "the stretch above the hole"
+        );
+    }
+
+    #[test]
+    fn a_damaged_archive_is_not_written_over_until_sign_out() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=3));
+        file.save(&cache, None);
+
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET sealed = x'00' WHERE message_id = 2",
+                [],
+            )
+            .expect("the row is damaged");
+        drop(store);
+
+        let loaded = file.load();
+        assert!(
+            loaded.cache.get(PEER).is_empty(),
+            "a damaged archive reads as empty"
+        );
+
+        let mut later = HistoryCache::default();
+        later.put(PEER, &page(900..=902));
+        file.save(&later, None);
+
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .expect("the rows count");
+        assert_eq!(rows, 3, "the refused save left every stored row");
+        let written: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE message_id >= 900",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the later rows count");
+        assert_eq!(written, 0, "the refused save wrote nothing");
+
+        file.clear();
+        file.save(&later, None);
+        let reopened = open_store(&file.path, &file.keys()).expect("a fresh archive opens");
+        assert_eq!(
+            reopened
+                .all_records(PEER)
+                .expect("rows read")
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![900, 901, 902],
+            "sign-out lifts the refusal and the next save starts a new archive"
+        );
+    }
+
+    #[test]
+    fn a_missing_archive_never_refuses_a_save() {
+        let (_dir, file) = scratch("history.json");
+        assert!(file.load().cache.peers.is_empty());
+
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=3));
+        file.save(&cache, None);
+
+        let loaded = file.load().cache;
+        assert_eq!(ids(&loaded.get(PEER)), vec![1, 2, 3]);
+    }
+
+    // ---- re-sealing under a new key -------------------------------------
+
+    #[test]
+    fn a_reseal_moves_every_stored_row_to_the_new_key() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let total = depth + 50;
+        let (dir, file) = scratch("history.json");
+        let legacy = dir.path().join("history.json");
+
+        let chips = Chips {
+            reactions: Vec::new(),
+            pinned: vec![3, 4],
+        };
+        file.store_payload(&Payload {
+            account: Some("+1".to_owned()),
+            account_id: Some(7),
+            peers: BTreeMap::from([(
+                PEER,
+                (1..=total)
+                    .map(|id| CachedMessage::from_message(&message(id, PEER, "row")))
+                    .collect::<Vec<_>>(),
+            )]),
+            chats: Vec::new(),
+            aliases: BTreeMap::from([(PEER, "Kept".to_owned())]),
+            chips: BTreeMap::from([(PEER, chips.clone())]),
+            removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::new(),
+        })
+        .expect("the archive is written");
+
+        let next: Arc<dyn KeyProvider> =
+            Arc::new(telegram_framework::PassphraseProvider::new("new"));
+        file.reseal(Arc::clone(&next))
+            .expect("the archive is re-sealed");
+
+        let moved = HistoryFile::new(legacy.clone(), Arc::clone(&next));
+        assert_eq!(
+            ids(&moved.get(PEER)),
+            (1..=total).collect::<Vec<_>>(),
+            "every row past the window moves to the new key"
+        );
+        assert_eq!(
+            moved.get(PEER).first().map(|row| row.text.to_string()),
+            Some("row".to_owned())
+        );
+        let loaded = moved.load().cache;
+        assert_eq!(loaded.get(PEER).len(), HISTORY_CACHE_DEPTH);
+        assert_eq!(
+            loaded.aliases().get(&PEER).map(String::as_str),
+            Some("Kept")
+        );
+        assert_eq!(
+            loaded.pinned.get(&PEER).map(Vec::as_slice),
+            Some(&[3, 4][..])
+        );
+        assert_eq!(
+            moved.load().account_id,
+            Some(7),
+            "the tag crosses with the rows"
+        );
+
+        let old = HistoryFile::new(legacy, other_keys());
+        assert!(
+            old.load().cache.get(PEER).is_empty(),
+            "the old key no longer opens it"
+        );
+    }
+
+    #[test]
+    fn a_reseal_that_cannot_seal_leaves_every_stored_row() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=5));
+        file.save(&cache, None);
+
+        let error = file
+            .reseal(Arc::new(Locked))
+            .expect_err("a locked key cannot seal");
+        assert!(error.contains("could not be re-sealed"), "{error}");
+
+        assert_eq!(ids(&file.get(PEER)), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            file.load().cache.get(PEER).len(),
+            5,
+            "the archive still reads under the current key"
+        );
+    }
+
+    /// A passphrase change writes the archive first and the session second. A
+    /// kill between the two leaves the session under the old passphrase, so a
+    /// restart with that passphrase must still read every record and be able to
+    /// save again. The previous envelope in `meta` is what makes that work.
+    #[test]
+    fn a_restart_after_an_unfinished_passphrase_change_still_reads_every_row() {
+        let (dir, file) = scratch("history.json");
+        let legacy = dir.path().join("history.json");
+        let total = 12i64;
+        let rows: Vec<Message> = (1..=total).map(|id| message(id, PEER, "row")).collect();
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &rows);
+        file.save(&cache, Some("+1"));
+
+        let next: Arc<dyn KeyProvider> =
+            Arc::new(telegram_framework::PassphraseProvider::new("new"));
+        file.reseal(Arc::clone(&next))
+            .expect("the archive moves to the new passphrase");
+        // No session save, and no call to `set_provider`: drop the handle the
+        // way an interrupted process would.
+
+        let restarted = HistoryFile::new(
+            legacy,
+            Arc::new(telegram_framework::PassphraseProvider::new("test")),
+        );
+        let loaded = restarted.load();
+        assert_eq!(
+            ids(&loaded.cache.get(PEER)),
+            (1..=total).collect::<Vec<_>>()
+        );
+        assert_eq!(loaded.account.as_deref(), Some("+1"));
+        let reopened = open_store(&restarted.path, &restarted.keys()).expect("meta was repaired");
+        let prev: Option<Vec<u8>> = reopened
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_ARCHIVE_KEY_PREV],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("the meta query reads");
+        assert!(
+            prev.is_none(),
+            "the completed transition left no previous key"
+        );
+
+        let mut later_rows = rows;
+        later_rows.push(message(total + 1, PEER, "after"));
+        let mut later = HistoryCache::default();
+        later.put(PEER, &later_rows);
+        restarted.save(&later, Some("+1"));
+        assert_eq!(
+            ids(&restarted.get(PEER)),
+            (1..=total + 1).collect::<Vec<_>>(),
+            "a save under the old passphrase keeps every row and lands"
+        );
+    }
+
+    /// An ordinary write under the new passphrase must not drop the previous
+    /// key before the session is saved. The old passphrase still recovers every
+    /// row; `confirm_rekey` drops the envelope once, when told to.
+    #[test]
+    fn an_ordinary_write_keeps_the_previous_key_until_rekey_is_confirmed() {
+        let (dir, file) = scratch("history.json");
+        let total = 12i64;
+        let rows: Vec<Message> = (1..=total).map(|id| message(id, PEER, "row")).collect();
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &rows);
+        file.save(&cache, None);
+
+        let next: Arc<dyn KeyProvider> =
+            Arc::new(telegram_framework::PassphraseProvider::new("new"));
+        file.reseal(Arc::clone(&next))
+            .expect("the archive moves to the new key");
+
+        // The concurrent ordinary save, between the reseal and the session save.
+        let mut later_rows = rows.clone();
+        later_rows.push(message(total + 1, PEER, "after"));
+        let mut later = HistoryCache::default();
+        later.put(PEER, &later_rows);
+        file.save(&later, None);
+
+        let store = open_store(&file.path, &file.keys()).expect("the new key opens");
+        assert!(
+            meta_envelope(&store.conn, META_ARCHIVE_KEY_PREV)
+                .expect("meta reads")
+                .is_some(),
+            "the ordinary open left the way back in place"
+        );
+        drop(store);
+
+        // Recovery on a copy: an old-key open promotes the previous envelope,
+        // so the original is left alone for the confirm below.
+        let legacy_copy = dir.path().join("copy.history.json");
+        let copy_db = archive_path(&legacy_copy);
+        for (from, to) in archive_siblings(&file.path)
+            .into_iter()
+            .zip(archive_siblings(&copy_db))
+        {
+            if from.is_file() {
+                std::fs::copy(&from, &to).expect("the archive is copied");
+            }
+        }
+        let old = HistoryFile::new(
+            legacy_copy,
+            Arc::new(telegram_framework::PassphraseProvider::new("test")),
+        );
+        assert_eq!(
+            ids(&old.get(PEER)),
+            (1..=total + 1).collect::<Vec<_>>(),
+            "the old passphrase still recovers every row after the ordinary write"
+        );
+
+        file.confirm_rekey()
+            .expect("the previous envelope is dropped");
+        let store = open_store(&file.path, &file.keys()).expect("the new key still opens");
+        assert!(
+            meta_envelope(&store.conn, META_ARCHIVE_KEY_PREV)
+                .expect("meta reads")
+                .is_none()
+        );
+        assert_eq!(ids(&file.get(PEER)), (1..=total + 1).collect::<Vec<_>>());
+    }
+
+    /// A write that commits while a re-seal is running must not be lost, and
+    /// every envelope on disk must still be a sealed, address-checked one. The
+    /// shared provider mutex serialises the two; this test makes them overlap.
+    #[test]
+    fn a_reseal_does_not_lose_a_write_that_lands_while_it_runs() {
+        let (_dir, file) = scratch("history.json");
+        let total = 180i64;
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let writer = {
+            let file = file.clone();
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                let mut written = Vec::new();
+                let mut cache = HistoryCache::default();
+                for id in 1..=total {
+                    written.push(message(id, PEER, "written"));
+                    cache.put(PEER, &written);
+                    file.save(&cache, None);
+                }
+            })
+        };
+        start.wait();
+        for round in 0..6 {
+            let pass = if round % 2 == 0 { "new" } else { "test" };
+            file.reseal(Arc::new(telegram_framework::PassphraseProvider::new(pass)))
+                .expect("the archive re-seals while writes land");
+        }
+        writer.join().expect("the writer finished");
+
+        assert_eq!(
+            ids(&file.get(PEER)),
+            (1..=total).collect::<Vec<_>>(),
+            "every write the writer acknowledged is still readable"
+        );
+        let store = open_store(&file.path, &file.keys()).expect("the final provider opens it");
+        store.state().expect("the state blob opens");
+        store.every_record().expect("every record opens");
+        store.chips().expect("every side table opens");
+        let mut statement = store
+            .conn
+            .prepare("SELECT sealed FROM messages UNION ALL SELECT sealed FROM chips")
+            .expect("the sealed columns read");
+        let rows = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .expect("the envelopes read");
+        for envelope in rows {
+            assert!(
+                sealed::is_sealed(&envelope.expect("an envelope")),
+                "no record or side table is stored as plaintext"
+            );
+        }
+        let state: Vec<u8> = store
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_STATE],
+                |row| row.get(0),
+            )
+            .expect("the state row reads");
+        assert!(sealed::is_sealed(&state), "the state blob is sealed");
+    }
+
+    #[test]
+    fn a_range_read_returns_the_same_rows_as_a_whole_load() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=5));
+        file.save(&cache, None);
+
+        let read = file.get(PEER);
+        assert_eq!(ids(&read), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            read.iter().map(fields).collect::<Vec<_>>(),
+            cache.get(PEER).iter().map(fields).collect::<Vec<_>>(),
+            "the range read decodes and unseals the same rows on demand"
+        );
+    }
+
+    #[test]
+    fn chips_and_pins_survive_a_reopen() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=5));
+        let reaction = ReactionCount {
+            reaction: Reaction::Emoticon("👍".to_owned()),
+            count: 3,
+            chosen: true,
+        };
+        assert!(cache.apply_update(&UpdateEvent::ReactionsChanged {
+            chat_id: PEER,
+            message_id: 2,
+            reactions: vec![reaction.clone()],
+        }));
+        assert!(cache.apply_update(&UpdateEvent::PinChanged {
+            chat_id: PEER,
+            message_ids: vec![3, 4],
+            pinned: true,
+        }));
+        file.save(&cache, None);
+
+        let loaded = file.load().cache;
+        let strips = loaded.reactions.get(&PEER).expect("the strips survive");
+        assert_eq!(strips[0].0, 2, "the strip is still filed under its message");
+        assert_eq!(
+            strips[0]
+                .1
+                .iter()
+                .map(ReactionCount::from)
+                .collect::<Vec<_>>(),
+            vec![reaction]
+        );
+        assert_eq!(
+            loaded.pinned.get(&PEER).map(Vec::as_slice),
+            Some([3, 4].as_slice())
+        );
+
+        // An unpin is a change too, and the narrower set is what is stored.
+        let mut loaded = loaded;
+        assert!(loaded.apply_update(&UpdateEvent::PinChanged {
+            chat_id: PEER,
+            message_ids: vec![3],
+            pinned: false,
+        }));
+        file.save(&loaded, None);
+        assert_eq!(
+            file.load().cache.pinned.get(&PEER).map(Vec::as_slice),
+            Some([4].as_slice())
+        );
+    }
+
+    #[test]
+    fn the_chip_side_tables_respect_their_bounds() {
+        let mut cache = HistoryCache::default();
+        let count = i64::try_from(REACTION_ENTRIES + 2).expect("the bound fits an id");
+        let strip = vec![ReactionCount {
+            reaction: Reaction::Paid,
+            count: 1,
+            chosen: false,
+        }];
+        for id in 1..=count {
+            assert!(cache.apply_update(&UpdateEvent::ReactionsChanged {
+                chat_id: PEER,
+                message_id: id,
+                reactions: strip.clone(),
+            }));
+        }
+        assert_eq!(
+            cache.reactions.get(&PEER).map_or(0, Vec::len),
+            REACTION_ENTRIES,
+            "the oldest strip went, not the newest"
+        );
+        assert_eq!(cache.reactions.get(&PEER).map(|r| r[0].0), Some(3));
+
+        let count = i64::try_from(PINNED_IDS + 2).expect("the bound fits an id");
+        assert!(cache.apply_update(&UpdateEvent::PinChanged {
+            chat_id: PEER,
+            message_ids: (1..=count).collect(),
+            pinned: true,
+        }));
+        assert_eq!(cache.pinned.get(&PEER).map_or(0, Vec::len), PINNED_IDS);
+        assert_eq!(
+            cache.pinned.get(&PEER).and_then(|p| p.first()).copied(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn an_empty_reaction_strip_removes_the_entry() {
+        let mut cache = HistoryCache::default();
+        let event = |reactions: Vec<ReactionCount>| UpdateEvent::ReactionsChanged {
+            chat_id: PEER,
+            message_id: 5,
+            reactions,
+        };
+        assert!(cache.apply_update(&event(vec![ReactionCount {
+            reaction: Reaction::Paid,
+            count: 1,
+            chosen: false,
+        }])));
+        assert!(cache.reactions.contains_key(&PEER));
+        assert!(cache.apply_update(&event(Vec::new())));
+        assert_eq!(
+            cache.reactions.get(&PEER).map_or(0, Vec::len),
+            0,
+            "an empty answer is the last reaction taken away"
+        );
     }
 }
 

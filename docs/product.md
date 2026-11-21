@@ -589,7 +589,7 @@ Working today:
   registers are deliberately not shared, because their formats differ.
 - **Chat and contact actions:** `:archive` and `:archived`, `:block`/`:unblock`,
   `:rename [name]`, `:delete-chat [both]`, `:report [reason]` and `:contacts`.
-  A local name is yours, kept with the history file and cleared by bare
+  A local name is yours, kept in the history archive and cleared by bare
   `:rename`; archive keeps a chat in the archive folder rather than deleting it;
   block, delete and report ask `y/n` first; the contacts list opens a person's
   card, which carries `rename`, `block`/`unblock` and `report` rows.
@@ -604,12 +604,14 @@ Working today:
   anything else is refused with `not a date: <argument>`.
   `:unlock` asks for the session passphrase again after `Esc` left the session
   locked. `:passphrase` asks `y/n`, then the new passphrase twice, and re-seals the
-  session file and the history cache under it; the old one stops opening either,
-  the OS keyring is left alone, and the box says to update
+  session file and the archive key under it. Message rows are not re-encrypted;
+  the old passphrase stops opening the session and archive. The OS keyring is
+  left alone, and the box says to update
   `TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` if the old passphrase was
   set there. `:passphrase` is not supported while `session_key_file` is
   configured. To switch safely, sign out, remove `session_key_file` from the
-  configuration, delete the old key file (the history cache rebuilds), set
+  configuration, delete the old key file (sign-out removes the history archive),
+  set
   `session_passphrase` or `TELEVIM_SESSION_PASSPHRASE`, then sign in. Re-sealing
   with the setting left in place would make the next launch read the key file and
   fail to open the session. A mismatch between the
@@ -653,14 +655,16 @@ Working today:
   when it does not; the cursor, the draft, the register and the scroll position
   stay with the account that left, because a message id is that account's sequence
   and means nothing in another's.
-- **History cache:** media bytes are not in this file; they are in the media cache
-  (see **Media** above). The newest 200 messages of each of the 32 most recently
-  touched private conversations (at most 8 MiB of JSON-encoded message text in all; the least
-  recently touched conversations go first), and the first 500 rows of the chat list,
-  are kept in `televim.history.json` beside the config — sealed with the session
+- **History archive:** media bytes are not in this archive; they are in the media cache
+  (see **Media** above). Every message read from a private conversation, the first
+  500 rows of the chat list and the reader's local names are kept in a per-account
+  SQLite archive (`televim.history.db`) beside the config — sealed with the session
   file's envelope and key, `0600`, written atomically and off the loop's thread,
   behind every page, feed event and list change, with writes coalesced within 500 ms
-  and flushed on exit. A launch with a warm cache draws the cached chat list and the first
+  and flushed on exit. Nothing stored is evicted. Past `history_limit_bytes`
+  (or `TELEVIM_HISTORY_LIMIT_BYTES`; default 1 GiB, `0` means no limit) of encoded
+  message text, older history stops downloading and the status line says
+  `archive full — older history stops here`. A launch with a warm cache draws the cached chat list and the first
   conversation (or the `--chat` one, when the cache holds it) **before any network
   round trip**, under `connecting…`; the `Ready` that follows refreshes the list
   around the reader, and the newest page replaces the cached rows, with
@@ -673,10 +677,11 @@ Working today:
   never are. Queued and failed text belongs to the separate text outbox above.
   The file is tagged with the signed-in account's id and checked once `Ready`
   names the account; another account's file is discarded. A page fetched under a
-  feed that has since ended is dropped. The file is removed on sign-out and when a
-  launch finds no session. A plaintext file from an older build is read once and
-  rewritten sealed; that reader goes after 2026-12-31, and a plaintext file is then
-  treated as corrupt.
+  feed that has since ended is dropped. The archive is removed on sign-out and when a
+  launch finds no session. A plaintext `history.json` from an older build is
+  warned about once and left on disk — it is neither read nor migrated nor
+  deleted; a row in the archive that is not a valid sealed envelope is treated
+  as corrupt.
 - **Stable release checks:** after the first frame, Televim checks GitHub once
   per day for a newer stable release. The check runs off the event loop; network
   failure does not delay launch. `updates = "off"` or `TELEVIM_UPDATES=off`

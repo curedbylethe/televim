@@ -349,9 +349,9 @@ launch resolve the default profile again:
 | Config | `C` (`televim.toml`) |
 | Log | `C` with `.log` extension (`televim.log`); truncated on launch |
 | Drafts | `C` with `.drafts.json` extension (`televim.drafts.json`) |
-| History | `C` with `.history.json` extension (`televim.history.json`) |
+| History | `C` with `.history.db` extension (`televim.history.db`), plus any `-wal`/`-shm` journal siblings and `televim.history.db.salt` beside it; a leftover `televim.history.json` from an older install is never read |
 | Media | `media_cache_dir`, or `C` with `.media` extension (`televim.media`) |
-| Account drafts/history | `C` with `.<id>.drafts.json` and `.<id>.history.json` extensions |
+| Account drafts/history | `C` with `.<id>.drafts.json` and `.<id>.history.db` extensions |
 | Account media | `C` with `.<id>.media` extension, or `media_cache_dir` with `.<id>` appended |
 | Accounts index | `C` with `.accounts.json` extension (`televim.accounts.json`) |
 | Profile pointer | `<local-data-directory>/televim/profile` |
@@ -365,10 +365,15 @@ Environment variables `TELEVIM_MEDIA_CACHE_DIR`, `TELEVIM_SESSION_PATH` and
 `TELEVIM_SESSION_KEY_FILE` can move media, session and key files. A user-created
 `.env` may also contain Telegram credentials or session settings.
 
-Signing out deletes the `session` credential-store entry, but leaves the shared
-`file-key`, a configured key file, log, and accounts index. It is not a complete
-uninstall. Media cache files are plaintext, and backups may retain them. Remove
-backups separately if you need to delete that data. A lost session passphrase
+Signing out deletes the `session` credential-store entry and the history
+archive with its journal and salt siblings, but leaves the shared
+`file-key`, a configured key file, log, and accounts index. It is not a
+complete uninstall. Media cache files are plaintext, and backups may retain
+them. Remove backups separately if you need to delete that data. A history
+backup is safe while the app is stopped: copy `televim.history.db` **and**
+`televim.history.db.salt` together, because opening the archive needs its salt;
+also copy `-wal` and `-shm` when they exist. A clean stop folds the journal into
+the database, so those two are usually gone, but the salt is always required. A lost session passphrase
 requires manually removing the encrypted session file; Televim cannot recover it.
 
 ## Troubleshooting

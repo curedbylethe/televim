@@ -2054,3 +2054,82 @@ are in [`../AGENTS.md`](../AGENTS.md).
   arguments, and notify-rust is compiled for non-macOS targets only. The call
   stays on the blocking pool (see the desktop-notifications entry above), so a
   slow scripting host cannot stall input or network updates.
+
+- **Why the history archive is SQLite, not a JSON payload:** this supersedes the
+  "Why the history cache is a JSON file and not sqlite or redb" entry above. The
+  offline promise became firm offline access to every message downloaded, which
+  kills the two properties that entry was built on — one payload rewritten whole
+  and one seal over one whole buffer. A store that must append, commit
+  crash-safely and answer "which ranges does this chat hold" is a storage engine,
+  so the options are a library or writing one. `rusqlite` with `bundled` was
+  chosen over `redb` on time, not design: redb replaced its format in 2.0,
+  dropped v2 in 3.0 and gained a table migration in 4.5, while SQLite commits to
+  reading old files through 2050 and offers `ALTER TABLE` migrations. Measured
+  binary cost on this host at stage 01 (Darwin `arm64`, pinned `rustc 1.98.1`):
+  stripped release **7,632,640 B → 9,395,376 B, +1,762,736 B (+23.09%)**. The
+  `bundled` feature is required, and on macOS it is the tree's first `cc` use;
+  on Linux `libdbus-sys` and `alsa-sys` already link system C. MSRV stays
+  `1.98.1`: a dependency that needs a newer compiler is refused unless the toolchain
+  pin moves by decision. Each account gets one `.db` beside the config, created
+  `0600`, opened `journal_mode=WAL`, `synchronous=FULL`, `cache_size=-256`,
+  `mmap_size=0`, a bounded journal and `fullfsync` on macOS; schema version 1
+  lives in `meta` with the sealed archive key and sealed state blob, and
+  `messages`, `ranges`, `chips` carry the rest. A record's address is inside its
+  own plaintext and checked on read, so `sealed`'s fixed AAD cannot be used to
+  move or replay a row. The chat key is HMAC-SHA256 of the chat id under a key
+  derived from the file key, not a clear id, because a clear id publishes the
+  social graph to anyone who can read the file; `hmac` sits beside `sha2` in the
+  workspace and rides a version already in `Cargo.lock`. Q-04's `fullfsync`
+  commit latency was measured this stage on this host (system SQLite 3.54.1,
+  200 single-row commits per run, two runs): median **4.020 ms per commit with
+  it on** against **0.052 ms off**, mean 4.244 / 0.062 ms, p95 6.651 / 0.086 ms.
+  `fsync` alone does not flush the drive cache on macOS, so `FULL` without
+  `fullfsync` is weaker there, and 4 ms is paid once per coalesced batch rather
+  than once per message — inside the 500 ms write window, so the setting stays.
+  Sign-out removes the database and its WAL, shared-memory, journal and salt
+  siblings. The legacy `history.json` is left untouched with one warning.
+
+- **Why the archive is bounded by a limit, with no eviction:** this supersedes
+  the "Why the bounds are 200 per peer, 32 peers, 8 MiB of text and 500 chats"
+  entry above. Those were the bounds of a working set; the archive keeps every
+  message of every conversation it is given, so a per-peer row cap would delete
+  history the reader asked to keep. Q-02's answer is a configured
+  `history_limit_bytes` — default `DEFAULT_HISTORY_LIMIT_BYTES` (1 GiB), `0`
+  meaning no limit, `TELEVIM_HISTORY_LIMIT_BYTES` the environment form. A heavy
+  account's text is roughly 150 MB, so 1 GiB holds it with room for media
+  metadata and the reaction table; a smaller default would stop downloads on an
+  ordinary account within a year, and `0` serves a reader who wants everything
+  and accepts the disk. Evicting least-recently-read conversations was rejected:
+  it contradicts the offline promise, and a reader whose history silently
+  shrank would have no way to know which conversation lost it. Past the limit,
+  older history stops downloading and the status line says `archive full —
+  older history stops here`. Fullness is a latched `History::full` flag fed by
+  `HistoryFile::full(limit)`, the SQL-backed `text_bytes()` against the configured
+  limit; it is read only while an older page is wanted and only until it first
+  says full, because bytes do not shrink until sign-out clears the flag. The
+  in-memory `HISTORY_CACHE_DEPTH` window still bounds what the screen draws,
+  not what the archive stores. No stored row is deleted to make room; the
+  declared disk and resident worst cases are in [`memory.md`](./memory.md).
+
+- **Why reactions and pins are persisted beside the messages:** this supersedes
+  the "not persisted" claim in the "Why a message's reactions live beside the
+  window instead of on `Message`" entry above and the matching pins entry,
+  both written when `HistoryCache` ignored the events. `apply_update` now learns
+  `ReactionsChanged` and `PinChanged` and writes them to one bounded, sealed
+  per-chat `chips` table — 64 reaction entries and 100 pinned ids, the domain
+  constants — so a reopen restores a conversation's chips with its messages.
+  The cost named in the superseded entry, that chips came only from the page
+  that seeded them so a page that stopped arriving took the chips with it, no
+  longer holds. The window-side tables stay the view's own state; persistence
+  is an addition, not a move. A chip row carries its own chat id in the sealed
+  plaintext and is checked on read the way a message record is, so it cannot be
+  replayed under another conversation.
+
+- **Why the archive-full answer is read again after a write:** this supersedes
+  the "latched `History::full` flag" in the archive-limit entry above, which
+  held because bytes only grew. An edit can shorten a message and a deletion
+  removes one, so a full archive can fall back under its limit and a latch would
+  leave downloads stopped until a restart. `State::note_archive_full` still
+  reads the store only while an older page is wanted, and once it says full it
+  asks again only after a history write has landed since it was last read, so a
+  reader parked at the top of a full archive costs no query per tick.

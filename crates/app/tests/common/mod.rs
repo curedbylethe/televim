@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 use telegram_framework::{
-    AuthKey, ChannelState, DcOption, PassphraseProvider, Peer, SessionData, UpdateState, sealed,
+    AuthKey, ChannelState, DcOption, FileKey, KeyProvider, PassphraseProvider, Peer, SessionData,
+    SessionError, UpdateState, sealed,
 };
 use tempfile::TempDir;
 use termlens::Terminal;
@@ -173,11 +174,135 @@ pub fn seed_history(sandbox: &Sandbox, chats: &[(i64, &str)], peers: &[(i64, Vec
             .map(|(id, title)| SeedChat { id: *id, title })
             .collect(),
     };
-    let plain = serde_json::to_vec(&file).expect("serialise seeded history");
-    let bytes =
-        sealed::seal(&plain, &PassphraseProvider::new(PASSPHRASE)).expect("seal seeded history");
-    let path = sandbox.config.with_extension("history.json");
-    std::fs::write(&path, bytes).expect("write seeded history.json");
+    write_archive(&sandbox.config.with_extension("history.json"), &file);
+}
+
+/// A record's plaintext carries the address it is filed under, exactly as the
+/// app's record layer writes it: the column key alone is not enough to open it.
+#[derive(Serialize)]
+struct SeedRecord<'a> {
+    chat_key: Vec<u8>,
+    chat_id: i64,
+    message_id: i64,
+    row: &'a SeedMessage<'a>,
+}
+
+/// The key source the binary seals records, state and chips under: the random
+/// archive key with a fixed salt, not the account passphrase. Mirrors
+/// `RecordKey` in `history_store.rs`.
+#[derive(Debug)]
+struct ArchiveKeys {
+    key: FileKey,
+}
+
+impl KeyProvider for ArchiveKeys {
+    fn sealing_key(&self) -> Result<(sealed::Salt, FileKey), SessionError> {
+        Ok(([0u8; sealed::SALT_LEN], self.key.clone()))
+    }
+
+    fn opening_key(&self, _salt: &sealed::Salt) -> Result<FileKey, SessionError> {
+        Ok(self.key.clone())
+    }
+
+    fn accepts_passphrase(&self) -> bool {
+        false
+    }
+}
+
+fn keyed_chat(hmac_key: &[u8; 32], chat_id: i64) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(hmac_key).expect("HMAC takes a 32-byte key");
+    mac.update(&chat_id.to_le_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Writes the per-account SQLite archive the binary now loads, rather than the
+/// old single sealed JSON envelope. Kept here because the app crate has no lib
+/// target; the schema, salt, key derivation and sealed shapes mirror
+/// `history_store.rs` so the real read path accepts what this writes.
+fn write_archive(legacy: &Path, file: &SeedFile<'_>) {
+    use hmac::{Hmac, Mac};
+    use rusqlite::{Connection, params};
+    use sha2::Sha256;
+
+    let keys = PassphraseProvider::new(PASSPHRASE);
+    let db = legacy.with_extension("db");
+    let mut salt = db.file_name().expect("a file name").to_os_string();
+    salt.push(".salt");
+    let salt_path = db.with_file_name(salt);
+
+    let mut salt_bytes = [0u8; 16];
+    getrandom::fill(&mut salt_bytes).expect("the archive salt is random");
+    std::fs::write(&salt_path, salt_bytes).expect("write the archive salt");
+
+    let mut archive_key = [0u8; 32];
+    getrandom::fill(&mut archive_key).expect("the archive key is random");
+    let sealed_key = sealed::seal(&archive_key, &keys).expect("seal the archive key");
+    let record_keys = ArchiveKeys {
+        key: FileKey::from_bytes(archive_key),
+    };
+    let state = serde_json::to_vec(file).expect("serialise the archive state");
+    let sealed_state = sealed::seal(&state, &record_keys).expect("seal the archive state");
+
+    let mut hmac_key = [0u8; 32];
+    {
+        let mut mac = Hmac::<Sha256>::new_from_slice(&archive_key).expect("HMAC takes a key");
+        mac.update(&salt_bytes);
+        hmac_key.copy_from_slice(&mac.finalize().into_bytes());
+    }
+
+    let conn = Connection::open(&db).expect("create the archive");
+    conn.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=FULL;
+         PRAGMA cache_size=-256;
+         PRAGMA mmap_size=0;
+         PRAGMA journal_size_limit=1048576;
+         CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);
+         CREATE TABLE messages (
+             chat_key BLOB NOT NULL,
+             message_id INTEGER NOT NULL,
+             sealed BLOB NOT NULL,
+             PRIMARY KEY (chat_key, message_id)
+         );",
+    )
+    .expect("create the archive schema");
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["schema_version", 1_i64],
+    )
+    .expect("record the schema version");
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["archive_key", sealed_key],
+    )
+    .expect("store the sealed archive key");
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+        params!["state", sealed_state],
+    )
+    .expect("store the sealed state");
+
+    for (chat_id, rows) in &file.peers {
+        for row in rows {
+            let chat_key = keyed_chat(&hmac_key, *chat_id);
+            let record = SeedRecord {
+                chat_key: chat_key.clone(),
+                chat_id: *chat_id,
+                message_id: row.id,
+                row,
+            };
+            let plain = serde_json::to_vec(&record).expect("serialise a seeded record");
+            let envelope = sealed::seal(&plain, &record_keys).expect("seal a seeded record");
+            conn.execute(
+                "INSERT INTO messages (chat_key, message_id, sealed) VALUES (?1, ?2, ?3)",
+                params![chat_key, row.id, envelope],
+            )
+            .expect("store a seeded record");
+        }
+    }
 }
 
 /// Writes a sealed authorised snapshot before the binary starts.

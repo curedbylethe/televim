@@ -807,6 +807,9 @@ pub(crate) fn load_history(
     configured: Option<&str>,
 ) -> (HistoryCache, HistoryTag) {
     let loaded = file.load();
+    if file.poisoned() {
+        return (loaded.cache, HistoryTag::default());
+    }
     let tag = HistoryTag {
         account_id: loaded.account_id,
         phone: loaded.account.clone(),
@@ -1055,14 +1058,15 @@ async fn event_loop(
     }
 
     network.stop_playback();
-    network.finish_history(app.chats()).await;
+    let archived = network.finish_history(app.chats()).await;
     // The client throttles its own session writes; a clean exit owes the rest.
     if let Some(client) = network.client()
         && let Err(error) = client.persist_session_if_changed()
     {
         tracing::warn!(%error, "could not save the session on exit");
     }
-    Ok(())
+    // After the session, so a failing disk does not also cost the sign-in.
+    archived.map_err(|reason| anyhow::anyhow!("the message archive was not saved: {reason}"))
 }
 
 /// The loop's next event, or `Err` when a tick passes with nothing.
