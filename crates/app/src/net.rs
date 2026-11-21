@@ -6473,7 +6473,9 @@ fn serve_archived_older(app: &mut App, state: &mut State, offline: bool) -> bool
     let count = page.len();
     let oldest = page.first().map(|message| message.id);
     if let Some(cursor) = state.history.cursor.as_mut() {
-        cursor.note_older(count, oldest, PAGE);
+        // A short stored page ends the conversation only for a reader with no
+        // wire; for an online one the wire still owes what lies below it.
+        cursor.note_older(count, oldest, if offline { PAGE } else { count });
     }
     app.begin_fetch(FetchDirection::Older);
     apply_page(app, FetchDirection::Older, page);
@@ -11349,6 +11351,41 @@ mod tests {
         assert!(
             app.wants_older(),
             "the direction stays open for the wire fetch"
+        );
+    }
+
+    /// A stored range shorter than a page is not the end of the conversation:
+    /// the cursor of an online reader stays open, or the wire would refuse to
+    /// fetch the gap below it.
+    #[tokio::test]
+    async fn a_short_stored_page_leaves_the_online_cursor_open() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 351..=400),
+        );
+        persist(&mut seed_state).await;
+
+        let mut app = app_with_a_conversation(CHAT, 0);
+        app.apply_latest(messages(CHAT, 401..=500));
+        let mut state = caching_state(&path);
+        state.history.cursor = Some(HistoryCursor::new(CHAT));
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+
+        assert!(serve_archived_older(&mut app, &mut state, false));
+        let cursor = state.history.cursor.expect("the cursor is kept");
+        assert_eq!(cursor.oldest_loaded_id(), Some(351));
+        assert!(
+            !cursor.exhausted_older(),
+            "the wire still owes everything below the stored range"
         );
     }
 
