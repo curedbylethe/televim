@@ -32,7 +32,7 @@ use std::hash::{DefaultHasher, Hasher};
 use std::io;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Result, anyhow};
@@ -114,10 +114,13 @@ pub(crate) struct HistoryFile {
     /// every clone. A save re-seals only the rows whose fingerprint moved, so
     /// one arrival costs one record instead of every cached row.
     written: Arc<Mutex<RowMemo>>,
+    written_chips: Arc<Mutex<ChipMemo>>,
+    acknowledged_updates: Arc<AtomicU64>,
 }
 
 /// The fingerprint of each row last written, by chat and message id.
 type RowMemo = HashMap<(i64, i64), u64>;
+type ChipMemo = HashMap<i64, u64>;
 
 /// What [`HistoryFile::load`] found: the stored account tags and the cache.
 ///
@@ -242,6 +245,7 @@ pub(crate) struct HistoryCache {
     /// The text travels with the id so an edit of a row the window no longer
     /// holds can still be sealed on its own stored envelope.
     updated_messages: BTreeMap<i64, BTreeMap<i64, String>>,
+    updates_revision: u64,
 }
 
 /// Two caches are equal when they would write the same file: the feed marks
@@ -299,6 +303,10 @@ fn encoded_len(text: &str) -> usize {
 }
 
 impl HistoryCache {
+    pub(crate) fn updates_revision(&self) -> u64 {
+        self.updates_revision
+    }
+
     /// The messages cached for `peer`, oldest first, as the domain's own type.
     ///
     /// Empty for a peer with nothing cached.
@@ -707,6 +715,7 @@ impl HistoryCache {
             .entry(peer)
             .or_default()
             .insert(id, text.to_owned());
+        self.updates_revision = self.updates_revision.wrapping_add(1);
         changed
     }
 
@@ -723,6 +732,7 @@ impl HistoryCache {
         // still has to be dropped from the archive at the next save. The caller
         // marks the cache dirty for a deletion even when no cached row went.
         self.deleted_messages.extend(ids.iter().copied());
+        self.updates_revision = self.updates_revision.wrapping_add(1);
         self.peers.retain(|peer, rows| {
             let before = rows.len();
             rows.retain(|row| !ids.contains(&row.id));
@@ -1004,6 +1014,8 @@ impl HistoryFile {
             provider: Arc::new(Mutex::new(keys)),
             poisoned: Arc::new(AtomicBool::new(false)),
             written: Arc::new(Mutex::new(RowMemo::new())),
+            written_chips: Arc::new(Mutex::new(ChipMemo::new())),
+            acknowledged_updates: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -1151,6 +1163,8 @@ impl HistoryFile {
                 // What was read is what the archive holds, so the first save
                 // after a launch writes only what has since moved.
                 *lock(&self.written) = fingerprints(&payload);
+                *lock(&self.written_chips) = chip_fingerprints(&payload);
+                self.acknowledged_updates.store(0, Ordering::Relaxed);
                 Self::from_payload(payload)
             }
             Ok(None) => LoadedHistory::empty(),
@@ -1363,6 +1377,52 @@ impl HistoryFile {
     /// threads: the snapshot is taken where the cache is, and only the disk
     /// work is handed off.
     pub(crate) fn encode(cache: &HistoryCache, tag: &HistoryTag) -> Option<Vec<u8>> {
+        Self::encode_with_updates(cache, tag, true)
+    }
+
+    pub(crate) fn encode_for_write(
+        &self,
+        cache: &HistoryCache,
+        tag: &HistoryTag,
+        pages: &[(i64, Vec<Message>)],
+    ) -> Option<Vec<u8>> {
+        // Keep saved edits and deletions for late pages; omit them when no rewritten row needs them.
+        let touched = |peer: i64, id: i64| {
+            cache.deleted_messages.contains(&id)
+                || cache
+                    .updated_messages
+                    .get(&peer)
+                    .is_some_and(|edits| edits.contains_key(&id))
+        };
+        let include = self.acknowledged_updates.load(Ordering::Relaxed) != cache.updates_revision
+            || pages
+                .iter()
+                .any(|(peer, rows)| rows.iter().any(|row| touched(*peer, row.id)))
+            || {
+                let written = lock(&self.written);
+                cache.peers.iter().any(|(peer, rows)| {
+                    rows.iter().any(|row| {
+                        touched(*peer, row.id)
+                            && written.get(&(*peer, row.id)) != Some(&fingerprint(row))
+                    })
+                })
+            };
+        if include {
+            Self::encode(cache, tag)
+        } else {
+            Self::encode_with_updates(cache, tag, false)
+        }
+    }
+
+    pub(crate) fn acknowledge_save(&self, revision: u64) {
+        self.acknowledged_updates.store(revision, Ordering::Relaxed);
+    }
+
+    fn encode_with_updates(
+        cache: &HistoryCache,
+        tag: &HistoryTag,
+        include: bool,
+    ) -> Option<Vec<u8>> {
         let payload = Payload {
             account: tag.phone.clone(),
             account_id: tag.account_id,
@@ -1394,8 +1454,16 @@ impl HistoryFile {
                 .filter(|peer| !cache.peers.contains_key(*peer))
                 .copied()
                 .collect(),
-            deleted_messages: cache.deleted_messages.clone(),
-            updated_messages: cache.updated_messages.clone(),
+            deleted_messages: if include {
+                cache.deleted_messages.clone()
+            } else {
+                BTreeSet::new()
+            },
+            updated_messages: if include {
+                cache.updated_messages.clone()
+            } else {
+                BTreeMap::new()
+            },
         };
         serde_json::to_vec(&payload)
             .inspect_err(|error| tracing::warn!(%error, "history could not be serialised"))
@@ -1449,8 +1517,11 @@ impl HistoryFile {
         let (_guard, keys) = self.locked_keys();
         let mut store = open_store(&self.path, &keys)?;
         let mut written = lock(&self.written);
-        store.ingest_pages_and_payload(pages, payload, &written)?;
+        let mut written_chips = lock(&self.written_chips);
+        store.ingest_pages_and_payload(pages, payload, &written, &written_chips)?;
         note_written(&mut written, payload);
+        written_chips.retain(|peer, _| !payload.removed.contains(peer));
+        written_chips.extend(chip_fingerprints(payload));
         Ok(())
     }
 
@@ -1503,6 +1574,8 @@ impl HistoryFile {
     /// one of them and is deliberately left alone.
     fn remove_archive(&self) {
         lock(&self.written).clear();
+        lock(&self.written_chips).clear();
+        self.acknowledged_updates.store(0, Ordering::Relaxed);
         for path in archive_siblings(&self.path) {
             match fs::remove_file(&path) {
                 Ok(()) => {}
@@ -2388,6 +2461,7 @@ impl Store {
         pages: &[(i64, Vec<CachedMessage>)],
         payload: &Payload,
         written: &RowMemo,
+        written_chips: &ChipMemo,
     ) -> Result<()> {
         let transaction = self.conn.transaction()?;
         for (chat_id, rows) in pages {
@@ -2412,6 +2486,7 @@ impl Store {
             &self.hmac_key,
             payload,
             written,
+            written_chips,
         )?;
         transaction.commit()?;
         Ok(())
@@ -2702,6 +2777,7 @@ fn ingest_payload_in(
     hmac_key: &[u8; KEY_LEN],
     payload: &Payload,
     written: &RowMemo,
+    written_chips: &ChipMemo,
 ) -> Result<()> {
     let state = State {
         account: payload.account.clone(),
@@ -2779,6 +2855,11 @@ fn ingest_payload_in(
         delete_messages(transaction, &payload.deleted_messages, keys, hmac_key)?;
     }
     for (chat_id, chips) in &payload.chips {
+        if !payload.removed.contains(chat_id)
+            && written_chips.get(chat_id) == Some(&chip_fingerprint(chips))
+        {
+            continue;
+        }
         let chat_key = keyed_chat(hmac_key, *chat_id);
         let record = ChipRecord {
             chat_key: chat_key.clone(),
@@ -2806,6 +2887,20 @@ fn fingerprint(row: &CachedMessage) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(&serde_json::to_vec(row).unwrap_or_default());
     hasher.finish()
+}
+
+fn chip_fingerprint(chips: &Chips) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(&serde_json::to_vec(chips).unwrap_or_default());
+    hasher.finish()
+}
+
+fn chip_fingerprints(payload: &Payload) -> ChipMemo {
+    payload
+        .chips
+        .iter()
+        .map(|(peer, chips)| (*peer, chip_fingerprint(chips)))
+        .collect()
 }
 
 /// The fingerprints of every row `payload` holds.
@@ -2897,6 +2992,38 @@ mod tests {
     use super::*;
 
     const PEER: i64 = 7;
+
+    #[test]
+    fn acknowledged_updates_are_resent_only_when_needed() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(3..=4));
+        cache.edit(PEER, 1, "first");
+        cache.delete(&[2]);
+        let old_revision = cache.updates_revision();
+        file.acknowledge_save(old_revision);
+        let decode = |pages: &[(i64, Vec<Message>)]| -> Payload {
+            serde_json::from_slice(
+                &file
+                    .encode_for_write(&cache, &HistoryTag::default(), pages)
+                    .expect("payload"),
+            )
+            .expect("payload decodes")
+        };
+        let quiet = decode(&[]);
+        assert!(quiet.updated_messages.is_empty());
+        assert!(quiet.deleted_messages.is_empty());
+        let late = decode(&[(PEER, page(1..=2))]);
+        assert_eq!(late.updated_messages[&PEER][&1], "first");
+        assert!(late.deleted_messages.contains(&2));
+        cache.edit(PEER, 1, "newer");
+        file.acknowledge_save(old_revision);
+        let bytes = file
+            .encode_for_write(&cache, &HistoryTag::default(), &[])
+            .expect("payload");
+        let next: Payload = serde_json::from_slice(&bytes).expect("payload decodes");
+        assert_eq!(next.updated_messages[&PEER][&1], "newer");
+    }
 
     #[test]
     fn first_save_keeps_the_window_of_an_archive_without_ranges() {

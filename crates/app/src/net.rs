@@ -1815,7 +1815,10 @@ impl State {
             // `Ready` names the account still belongs to this slot.
             tag.phone = self.cfg.as_ref().and_then(|cfg| self.slot.label(cfg));
         }
-        let Some(bytes) = HistoryFile::encode(&self.cached.messages, &tag) else {
+        let revision = self.cached.messages.updates_revision();
+        let Some(bytes) =
+            file.encode_for_write(&self.cached.messages, &tag, &self.cached.pending_pages)
+        else {
             return;
         };
         let pages = std::mem::take(&mut self.cached.pending_pages);
@@ -1826,7 +1829,11 @@ impl State {
                 // deletion must land after every page insert — or a queued page
                 // can restore a deleted row — and a death between the two must
                 // not leave the page landed and the deletion lost.
-                file.ingest_pages_and_write(&pages, &bytes)
+                let result = file.ingest_pages_and_write(&pages, &bytes);
+                if result.is_ok() {
+                    file.acknowledge_save(revision);
+                }
+                result
             })
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
@@ -11100,6 +11107,82 @@ mod tests {
         if let Some(write) = state.cached.write.take() {
             let _ = write.await.expect("the history write ran");
         }
+    }
+
+    #[tokio::test]
+    async fn saved_out_of_window_updates_are_not_rewritten_but_guard_late_pages() {
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let path = dir.path().join("history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=3),
+        );
+        persist(&mut state).await;
+        state.cached.messages.put(CHAT, &messages(CHAT, 3..=4));
+        state.remember_update(&UpdateEvent::MessageEdited {
+            chat_id: CHAT,
+            message_id: 1,
+            new_text: Cow::Borrowed("edited"),
+        });
+        state.remember_update(&UpdateEvent::MessagesDeleted {
+            message_ids: vec![2],
+        });
+        persist(&mut state).await;
+        let conn = rusqlite::Connection::open(path.with_extension("db")).expect("archive opens");
+        let read_row = || {
+            conn.query_row(
+                "SELECT sealed FROM messages WHERE message_id = 1",
+                [],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .expect("row exists")
+        };
+        let read_chips = || {
+            conn.query_row("SELECT sealed FROM chips LIMIT 1", [], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
+            .expect("chips exist")
+        };
+        let (row, chips) = (read_row(), read_chips());
+        state.cached.dirty = true;
+        persist(&mut state).await;
+        assert_eq!(read_row(), row, "unchanged edit is not re-sealed");
+        assert_eq!(read_chips(), chips, "unchanged chips are not re-sealed");
+        state.remember_archived_page(CHAT, &messages(CHAT, 1..=3));
+        persist(&mut state).await;
+        let deleted: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE message_id = 2",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count reads");
+        assert_eq!(deleted, 0, "a late page cannot restore the deletion");
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_does_not_acknowledge_history_updates() {
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "block").expect("blocking file");
+        let mut state = caching_state(&blocker.join("history.json"));
+        state.remember_update(&UpdateEvent::MessageEdited {
+            chat_id: CHAT,
+            message_id: 1,
+            new_text: Cow::Borrowed("edited"),
+        });
+        persist(&mut state).await;
+        let file = state.history_file.as_ref().expect("history file");
+        let bytes = file
+            .encode_for_write(&state.cached.messages, &state.cached.tag, &[])
+            .expect("payload");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("payload decodes");
+        assert_eq!(payload["updated_messages"][CHAT.to_string()]["1"], "edited");
     }
 
     fn cached_ids(state: &State) -> Vec<i64> {
