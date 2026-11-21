@@ -2148,7 +2148,8 @@ struct History {
     ///
     /// Latched: the archive is append-only, so once full it stays full until
     /// the account's files are cleared. A reconnect re-reads no state that
-    /// could unset it, and a page is never asked for below this line.
+    /// could unset it, and the wire is never asked for a page below this
+    /// line — the rows stored below it are still served.
     full: bool,
 }
 
@@ -3394,6 +3395,13 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             if direction == FetchDirection::Older && serve_archived_older(app, state, false) {
                 return;
             }
+            // A full archive is the one refusal the wire honors: there is
+            // room for nothing older, so no page is downloaded and the reader
+            // was told why by the status line. The serve above has already
+            // offered everything stored below the window.
+            if direction == FetchDirection::Older && state.history.full {
+                return;
+            }
             app.begin_fetch(direction);
             request(&client, direction, cursor, state.feed_generation, tx, None);
         }
@@ -3588,9 +3596,10 @@ fn wanted(app: &App, history: History, now: Instant) -> Wanted {
 
     // Older first: a window shorter than the margin is near both of its ends at
     // once, and the reader is more often looking for what came before. A full
-    // archive is the one refusal: there is room for nothing older, so the page
-    // is not asked for and the reader is told why by the driver's status line.
-    if app.wants_older() && !history.full {
+    // archive refuses only the wire, not the stored rows: the page is still
+    // named, the driver serves what the archive holds below the window, and
+    // only the download is stopped — the reader is told why by the status line.
+    if app.wants_older() {
         return Wanted::Page(FetchDirection::Older, cursor);
     }
     if app.wants_newer() {
@@ -8491,7 +8500,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_archive_does_not_ask_for_what_came_before() {
+    fn a_full_archive_still_names_the_older_page() {
         let mut app = app_with_a_conversation(CHAT, 40);
         scroll_up(&mut app, 39);
         let full = History {
@@ -8501,13 +8510,13 @@ mod tests {
 
         assert_eq!(
             wanted(&app, full, Instant::now()),
-            Wanted::Nothing,
-            "the archive is full, so no older page is issued"
+            Wanted::Page(FetchDirection::Older, HistoryCursor::new(CHAT)),
+            "the archive is full, so the wire is refused — not the page itself"
         );
     }
 
     /// A real archive over its configured limit: the fullness answer comes
-    /// from the store, the older page is not asked for, and nothing stored —
+    /// from the store, the wire is refused the older page, and nothing stored —
     /// neither rows nor their recorded stretches — changes.
     #[test]
     fn a_full_archive_stops_older_pages_without_changing_stored_rows() {
@@ -8538,8 +8547,8 @@ mod tests {
         assert_eq!(app.status_text(), ARCHIVE_FULL_LABEL);
         assert_eq!(
             wanted(&app, state.history, Instant::now()),
-            Wanted::Nothing,
-            "no older request is issued"
+            Wanted::Page(FetchDirection::Older, HistoryCursor::new(CHAT)),
+            "the wire is refused, not the stored page"
         );
         assert_eq!(
             file.get(CHAT).iter().map(|row| row.id).collect::<Vec<_>>(),
@@ -11165,6 +11174,57 @@ mod tests {
         );
     }
 
+    /// A full archive refuses the wire, not the archive itself: the stretch
+    /// stored below the window is still served, whatever the limit says.
+    #[tokio::test]
+    async fn a_full_archive_still_serves_the_pages_it_stores() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=300),
+        );
+        persist(&mut seed_state).await;
+
+        // A cold reader over a full archive: the window is the newest 200
+        // rows the load kept, and the store is over its configured limit.
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+        state.restore_history(HistoryFile::for_test(path.clone()).load().cache);
+        state.history.cursor = None;
+        seed_opened(&mut app, &mut state);
+        state.history.cursor = Some(HistoryCursor::new(CHAT));
+        state.cfg = Some(Config {
+            history_limit_bytes: Some(1),
+            ..Config::default()
+        });
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        assert!(app.wants_older(), "the reader is at the top of the window");
+        assert!(
+            state.note_archive_full(&mut app),
+            "the store is over its limit"
+        );
+
+        // The online serve: no wire is needed, because the answer is stored.
+        assert!(serve_archived_older(&mut app, &mut state, false));
+        let window: Vec<i64> = app
+            .conversation
+            .conversation
+            .window
+            .iter()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(window.first(), Some(&1), "the older page landed in front");
+        assert_eq!(window.len(), 200, "the bounded window still holds 200");
+    }
+
     /// An offline older page serves only the single range that reaches the
     /// window. It never joins an older range across a gap, and running out of
     /// the reaching range settles the direction rather than stepping into it.
@@ -12227,13 +12287,22 @@ mod tests {
             tui::SessionStore::Keyring,
         );
         open_pass(&mut app, &mut state);
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=40),
+        );
         scroll_up(&mut app, 39);
 
         assert!(state.history.full, "the reconnect did not clear the answer");
-        assert_eq!(
-            wanted(&app, state.history, Instant::now()),
-            Wanted::Nothing,
-            "and the older page is still not asked for"
+        assert!(
+            matches!(
+                wanted(&app, state.history, Instant::now()),
+                Wanted::Page(FetchDirection::Older, _)
+            ),
+            "and the older page is still named, so the wire stays refused"
         );
     }
 
