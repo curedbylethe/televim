@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::hash::{DefaultHasher, Hasher};
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -1607,6 +1608,42 @@ fn restrict_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) {}
 
+fn archive_salt(path: &Path, fresh: bool) -> Result<[u8; SALT_LEN]> {
+    if !fresh {
+        return fs::read(path)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("the history archive salt is the wrong length"));
+    }
+    let mut bytes = fs::read(path)
+        .ok()
+        .and_then(|bytes| bytes.as_slice().try_into().ok());
+    if bytes.is_none() {
+        let mut salt = [0u8; SALT_LEN];
+        getrandom::fill(&mut salt)?;
+        let mut file = match create_db_file(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path)?,
+            Err(error) => return Err(error.into()),
+        };
+        restrict_permissions(path);
+        file.write_all(&salt)?;
+        file.sync_all()?;
+        bytes = Some(salt);
+    } else {
+        restrict_permissions(path);
+        fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    bytes.ok_or_else(|| anyhow!("the history archive salt is missing"))
+}
+
 /// The schema this build writes. Recorded in `meta` so a later build can tell
 /// an archive it understands from one it must not guess at.
 const SCHEMA_VERSION: i64 = 1;
@@ -2065,10 +2102,12 @@ impl Store {
         // leave a fresh, empty database behind.
         keys.sealing_key()?;
         let existed = path.is_file();
+        let salt_path = salt_sibling(path);
         if !existed {
             if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
                 fs::create_dir_all(parent)?;
             }
+            archive_salt(&salt_path, true)?;
             create_db_file(path)?;
         }
         let mut conn = Connection::open(path)?;
@@ -2077,22 +2116,14 @@ impl Store {
         conn.execute_batch("PRAGMA fullfsync=ON;")?;
         conn.execute_batch(SCHEMA)?;
 
-        let salt_path = salt_sibling(path);
-        let salt: [u8; SALT_LEN] = if existed {
-            let bytes = fs::read(&salt_path)?;
-            bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow!("the history archive salt is the wrong length"))?
-        } else {
-            let mut bytes = [0u8; SALT_LEN];
-            getrandom::fill(&mut bytes)?;
-            fs::write(&salt_path, bytes)?;
-            restrict_permissions(&salt_path);
-            bytes
-        };
+        let empty: bool = conn.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM meta UNION ALL SELECT 1 FROM messages UNION ALL SELECT 1 FROM ranges UNION ALL SELECT 1 FROM chips)",
+            [], |row| row.get(0),
+        )?;
+        let fresh = !existed || empty;
+        let salt = archive_salt(&salt_path, fresh)?;
 
-        let (archive_key, repair) = load_archive_key(&conn, keys.as_ref(), existed)?;
+        let (archive_key, repair) = load_archive_key(&conn, keys.as_ref(), !fresh)?;
         repair_archive_key(&mut conn, keys.as_ref(), &archive_key, repair)?;
 
         let version: Option<i64> = conn
@@ -2870,6 +2901,55 @@ mod tests {
         cache.put(PEER, &page(1..=4));
         file.save(&cache, None);
         assert_eq!(file.ranges(PEER), vec![(1, 4)]);
+    }
+
+    #[test]
+    fn interrupted_empty_archive_creation_can_resume() {
+        let (_dir, file) = scratch("history.json");
+        create_db_file(&file.path).expect("empty database file");
+        let conn = Connection::open(&file.path).expect("database opens");
+        conn.execute_batch(SCHEMA).expect("schema created");
+        drop(conn);
+        let store = open_store(&file.path, &file.keys()).expect("empty creation resumes");
+        assert!(salt_sibling(&file.path).is_file());
+        assert!(
+            meta_envelope(&store.conn, META_ARCHIVE_KEY)
+                .expect("key reads")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn interrupted_creation_keeps_its_existing_salt() {
+        let (_dir, file) = scratch("history.json");
+        let salt = archive_salt(&salt_sibling(&file.path), true).expect("salt created");
+        create_db_file(&file.path).expect("empty database file");
+        let conn = Connection::open(&file.path).expect("database opens");
+        conn.execute_batch(SCHEMA).expect("schema created");
+        drop(conn);
+        open_store(&file.path, &file.keys()).expect("empty creation resumes");
+        assert_eq!(
+            fs::read(salt_sibling(&file.path)).expect("salt reads"),
+            salt
+        );
+    }
+
+    #[test]
+    fn missing_archive_key_never_reinitializes_existing_rows() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=3));
+        file.save(&cache, None);
+        let conn = Connection::open(&file.path).expect("database opens");
+        conn.execute("DELETE FROM meta WHERE key = ?1", params![META_ARCHIVE_KEY])
+            .expect("key removed");
+        drop(conn);
+        assert!(open_store(&file.path, &file.keys()).is_err());
+        let conn = Connection::open(&file.path).expect("database opens");
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
+            .expect("rows count");
+        assert_eq!(count, 3);
     }
 
     /// Writes a hand-written JSON payload into the archive the way a save
