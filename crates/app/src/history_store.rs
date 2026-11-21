@@ -119,6 +119,11 @@ pub(crate) struct HistoryFile {
 }
 
 /// The fingerprint of each row last written, by chat and message id.
+/// A fetched page waiting for the archive: its chat, its rows, and the anchor
+/// it was counted from. An older or newer page shares no row with the range it
+/// joins, so the anchor is what shows the two are adjacent.
+pub(crate) type ArchivedPage = (i64, Vec<Message>, Option<i64>);
+
 type RowMemo = HashMap<(i64, i64), u64>;
 type ChipMemo = HashMap<i64, u64>;
 
@@ -1384,7 +1389,7 @@ impl HistoryFile {
         &self,
         cache: &HistoryCache,
         tag: &HistoryTag,
-        pages: &[(i64, Vec<Message>)],
+        pages: &[ArchivedPage],
     ) -> Option<Vec<u8>> {
         // Keep saved edits and deletions for late pages; omit them when no rewritten row needs them.
         let touched = |peer: i64, id: i64| {
@@ -1397,7 +1402,7 @@ impl HistoryFile {
         let include = self.acknowledged_updates.load(Ordering::Relaxed) != cache.updates_revision
             || pages
                 .iter()
-                .any(|(peer, rows)| rows.iter().any(|row| touched(*peer, row.id)))
+                .any(|(peer, rows, _)| rows.iter().any(|row| touched(*peer, row.id)))
             || {
                 let written = lock(&self.written);
                 cache.peers.iter().any(|(peer, rows)| {
@@ -1513,7 +1518,11 @@ impl HistoryFile {
     /// re-sealing only the window rows that changed since they were last
     /// written. The record of what was written moves only once the
     /// transaction has committed.
-    fn ingest(&self, pages: &[(i64, Vec<CachedMessage>)], payload: &Payload) -> Result<()> {
+    fn ingest(
+        &self,
+        pages: &[(i64, Vec<CachedMessage>, Option<i64>)],
+        payload: &Payload,
+    ) -> Result<()> {
         let (_guard, keys) = self.locked_keys();
         let mut store = open_store(&self.path, &keys)?;
         let mut written = lock(&self.written);
@@ -1539,7 +1548,7 @@ impl HistoryFile {
     /// and the provider swap are handled exactly as for a window write.
     pub(crate) fn ingest_pages_and_write(
         &self,
-        pages: &[(i64, Vec<Message>)],
+        pages: &[ArchivedPage],
         bytes: &[u8],
     ) -> Result<(), String> {
         if self.poisoned.load(Ordering::Relaxed) {
@@ -1553,16 +1562,16 @@ impl HistoryFile {
         }
         let payload: Payload = serde_json::from_slice(bytes)
             .map_err(|error| format!("history could not be read for writing: {error}"))?;
-        let prepared: Vec<(i64, Vec<CachedMessage>)> = pages
+        let prepared: Vec<(i64, Vec<CachedMessage>, Option<i64>)> = pages
             .iter()
-            .map(|(chat_id, messages)| {
+            .map(|(chat_id, messages, anchor)| {
                 let mut rows: Vec<CachedMessage> = messages
                     .iter()
                     .filter(|message| message.id > 0 && message.chat_id == *chat_id)
                     .map(CachedMessage::from_message)
                     .collect();
                 rows.sort_by_key(|row| row.id);
-                (*chat_id, rows)
+                (*chat_id, rows, *anchor)
             })
             .collect();
         self.ingest(&prepared, &payload)
@@ -2458,17 +2467,22 @@ impl Store {
     /// the two cannot leave a page that restores a row the window deleted.
     fn ingest_pages_and_payload(
         &mut self,
-        pages: &[(i64, Vec<CachedMessage>)],
+        pages: &[(i64, Vec<CachedMessage>, Option<i64>)],
         payload: &Payload,
         written: &RowMemo,
         written_chips: &ChipMemo,
     ) -> Result<()> {
         let transaction = self.conn.transaction()?;
-        for (chat_id, rows) in pages {
+        for (chat_id, rows, anchor) in pages {
             let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
                 continue;
             };
-            let reach = (first.id.min(last.id), first.id.max(last.id));
+            // The anchor widens the reach to the row the page was counted from,
+            // which is what lets an adjacent page join its neighbour's range.
+            let reach = (
+                first.id.min(last.id).min(anchor.unwrap_or(i64::MAX)),
+                first.id.max(last.id).max(anchor.unwrap_or(i64::MIN)),
+            );
             let held = ranges_on(&transaction, &self.hmac_key, *chat_id)?;
             ingest_in(
                 &transaction,
@@ -3033,7 +3047,7 @@ mod tests {
         cache.delete(&[2]);
         let old_revision = cache.updates_revision();
         file.acknowledge_save(old_revision);
-        let decode = |pages: &[(i64, Vec<Message>)]| -> Payload {
+        let decode = |pages: &[ArchivedPage]| -> Payload {
             serde_json::from_slice(
                 &file
                     .encode_for_write(&cache, &HistoryTag::default(), pages)
@@ -3044,7 +3058,7 @@ mod tests {
         let quiet = decode(&[]);
         assert!(quiet.updated_messages.is_empty());
         assert!(quiet.deleted_messages.is_empty());
-        let late = decode(&[(PEER, page(1..=2))]);
+        let late = decode(&[(PEER, page(1..=2), None)]);
         assert_eq!(late.updated_messages[&PEER][&1], "first");
         assert!(late.deleted_messages.contains(&2));
         cache.edit(PEER, 1, "newer");
@@ -5258,7 +5272,11 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&payload).expect("the payload encodes");
 
-        let pages = vec![(PEER, (40..=45).map(|id| message(id, PEER, "row")).collect())];
+        let pages = vec![(
+            PEER,
+            (40..=45).map(|id| message(id, PEER, "row")).collect(),
+            None,
+        )];
         let result = file.ingest_pages_and_write(&pages, &bytes);
         assert!(result.is_err(), "the window phase fails on the corrupt row");
 
@@ -5330,6 +5348,39 @@ mod tests {
             vec![(1, depth + 5)],
             "the range names every row it holds"
         );
+    }
+
+    /// Older pages are fetched with an exclusive anchor, so the next page ends
+    /// just short of the range it joins and shares no row with it: the writer
+    /// has to carry the anchor, or each page becomes its own range and the rows
+    /// below the newest one can never be served.
+    #[test]
+    fn consecutive_older_pages_written_by_the_production_path_form_one_range() {
+        let (_dir, file, _store) = scratch_store("history.json");
+        let bytes = serde_json::to_vec(&Payload {
+            account: None,
+            account_id: None,
+            peers: BTreeMap::new(),
+            chats: Vec::new(),
+            aliases: BTreeMap::new(),
+            chips: BTreeMap::new(),
+            removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::new(),
+        })
+        .expect("the payload encodes");
+        let page = |ids: std::ops::RangeInclusive<i64>| -> Vec<Message> {
+            ids.map(|id| message(id, PEER, "row")).collect()
+        };
+
+        file.ingest_pages_and_write(&[(PEER, page(801..=1000), None)], &bytes)
+            .expect("the newest page lands");
+        file.ingest_pages_and_write(&[(PEER, page(601..=800), Some(801))], &bytes)
+            .expect("the first older page lands");
+        file.ingest_pages_and_write(&[(PEER, page(401..=600), Some(601))], &bytes)
+            .expect("the second older page lands");
+
+        assert_eq!(file.ranges(PEER), vec![(401, 1000)]);
     }
 
     #[test]
