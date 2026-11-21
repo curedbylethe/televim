@@ -25,7 +25,7 @@
 
 use std::fmt;
 use std::fs;
-use std::io::{self, Read as _, Seek as _};
+use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -583,7 +583,7 @@ fn open_unsealed(path: &Path) -> Option<fs::File> {
         .open(path)
         .ok()?;
     let mut head = Vec::with_capacity(sealed::MAGIC.len());
-    file.by_ref()
+    std::io::Read::by_ref(&mut file)
         .take(sealed::MAGIC.len() as u64)
         .read_to_end(&mut head)
         .ok()?;
@@ -647,6 +647,11 @@ fn remove_stale_temps(path: &Path) {
 /// finished file. The temp has to be a rename rather than a copy for that, and
 /// it has to be in the same directory because a cross-filesystem rename is not
 /// atomic and would degrade to a non-atomic copy.
+///
+/// The finished file is flushed before the rename, and the directory entry
+/// after it: without the two, a power cut can leave the rename remembered and
+/// the bytes not — the previous session resurrected after the caller was told
+/// the new one is saved.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), SessionError> {
     let temp = temp_sibling(path);
 
@@ -655,12 +660,18 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), SessionError> {
         // `fs::write` leaves a window between creating the file and the
         // `chmod`, and what is in that window is a permanent authorisation key
         // at whatever the umask allowed.
-        fs::File::create(&temp).map_err(|error| SessionError::Save(error.to_string()))?;
+        let mut file =
+            fs::File::create(&temp).map_err(|error| SessionError::Save(error.to_string()))?;
         restrict_permissions(&temp);
-        fs::write(&temp, bytes).map_err(|error| SessionError::Save(error.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|error| SessionError::Save(error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| SessionError::Save(error.to_string()))?;
         // A rename keeps the source inode, so the target inherits the mode the
         // temp was restricted to rather than being a fresh, umask-behind file.
-        fs::rename(&temp, path).map_err(|error| SessionError::Save(error.to_string()))
+        fs::rename(&temp, path).map_err(|error| SessionError::Save(error.to_string()))?;
+        sync_parent_directory(path)?;
+        Ok(())
     })();
 
     if result.is_err() {
@@ -670,6 +681,26 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), SessionError> {
     }
 
     result
+}
+
+/// Flushes the directory entry the rename made, so a power cut cannot remember
+/// a rename whose bytes were never flushed.
+///
+/// A no-op wherever the platform offers no directory sync.
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<(), SessionError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| SessionError::Save(error.to_string()))
+}
+
+/// A no-op stand-in for platforms without a directory sync.
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<(), SessionError> {
+    Ok(())
 }
 
 /// The temp file [`write_atomically`] writes through.
