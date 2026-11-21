@@ -1246,9 +1246,9 @@ impl State {
     /// The answer is a read of the store against the configured limit, asked
     /// only at the point it matters. Once it says full it is asked again only
     /// after a write has landed, since edits and deletions can free room. The
-    /// line is written on every pass that wants older, so a reconnect that
-    /// replaced the status still shows why the run is short.
+    /// The line changes only when the fullness answer changes.
     fn note_archive_full(&mut self, app: &mut App) -> bool {
+        let was_full = self.history.full;
         let settled = self
             .cached
             .write
@@ -1266,8 +1266,10 @@ impl State {
                 .is_some_and(|file| file.full(limit));
             self.cached.full_at = self.cached.writes;
         }
-        if self.history.full && app.wants_older() {
+        if self.history.full && !was_full {
             app.set_status(ARCHIVE_FULL_LABEL);
+        } else if was_full && !self.history.full && app.ui.status == ARCHIVE_FULL_LABEL {
+            app.set_status("");
         }
         self.history.full
     }
@@ -11347,6 +11349,10 @@ mod tests {
             state.note_archive_full(&mut app),
             "the store is at its limit"
         );
+        app.flash("a later failure");
+        assert!(state.note_archive_full(&mut app));
+        assert_eq!(app.ui.status, "a later failure");
+        app.set_status(ARCHIVE_FULL_LABEL);
 
         apply(
             &mut app,
@@ -11360,6 +11366,7 @@ mod tests {
             !state.note_archive_full(&mut app),
             "the deletion freed room, so older pages are downloaded again"
         );
+        assert!(app.ui.status.is_empty(), "the old full status is cleared");
     }
 
     /// An offline older page serves only the single range that reaches the

@@ -730,7 +730,7 @@ code.
 | `·` | a space in a draft being composed; a title-note joiner; a card row's cue | three meanings, all deliberate |
 | `Loading…` `Loading older…` `Loading newer…` | a fetch in flight | `FetchDirection::label` |
 | `Cached messages — loading the latest…` | a conversation drawn from the local history cache while its newest page is in flight. On the **status line**, not as a row: `Loading…` stands in for messages, and a cached window has messages to show | `REVALIDATING_LABEL` |
-| `archive full — older history stops here` | the history archive reached its configured text limit; older downloads stop | `ARCHIVE_FULL_LABEL` |
+| `archive full — older history stops here` | the archive reached its text limit; older downloads stop. Set on becoming full; clear when room returns only if the sentence is still showing | `ARCHIVE_FULL_LABEL` |
 | `Jumping to first unread…` | a jump the window could not answer | `JUMP_LABEL` |
 | `Jumping to the quoted message…` | `gd` on a reply whose target is not loaded: the page around it is in flight | `JUMP_REPLY_LABEL` |
 | `Jumping back…` `Jumping forward…` | `Ctrl-o` / `Ctrl-i` to a position whose message is no longer loaded | `JUMP_BACK_LABEL` / `JUMP_FORWARD_LABEL` |
