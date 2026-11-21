@@ -2117,7 +2117,13 @@ impl Store {
         let mut out = Vec::new();
         for chat_key in chat_keys {
             let mut statement = self.conn.prepare(
+                // Only the newest recorded stretch: a row across a gap would
+                // read as one unbroken history. A chat with no ledger row has
+                // no stretch to stop at.
                 "SELECT message_id, sealed FROM messages WHERE chat_key = ?1
+                 AND message_id >= COALESCE(
+                    (SELECT lo_id FROM ranges WHERE chat_key = ?1
+                     ORDER BY hi_id DESC LIMIT 1), 0)
                  ORDER BY message_id DESC LIMIT ?2",
             )?;
             let rows = statement.query_map(params![chat_key, limit], |row| {
@@ -4962,6 +4968,26 @@ mod tests {
         );
     }
 
+    /// A restart reads the newest recorded stretch only: rows either side of a
+    /// gap would show as one unbroken history.
+    #[test]
+    fn a_restart_does_not_join_disconnected_ranges() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(10..=15), LATEST));
+        file.save(&cache, None);
+        let mut disjoint = HistoryCache::default();
+        assert!(disjoint.merge(PEER, &page(20..=25), LATEST));
+        file.save(&disjoint, None);
+        assert_eq!(file.ranges(PEER), vec![(10, 15), (20, 25)]);
+
+        assert_eq!(
+            ids(&file.load().cache.get(PEER)),
+            (20..=25).collect::<Vec<_>>(),
+            "only the newest stretch is loaded"
+        );
+    }
+
     #[test]
     fn a_chat_the_reader_removed_stays_removed_after_a_reopen() {
         let (_dir, file) = scratch("history.json");
@@ -5008,7 +5034,12 @@ mod tests {
             vec![(1, depth / 2 - 1), (depth / 2 + 1, depth)],
             "the hole splits the run"
         );
-        assert_eq!(ids(&file.load().cache.get(PEER)), expected);
+        // The ledger names a deleted id as a hole, so a restart reads the stretch
+        // above it, the same one paging reaches.
+        assert_eq!(
+            ids(&file.load().cache.get(PEER)),
+            (depth / 2 + 1..=depth).collect::<Vec<_>>()
+        );
     }
 
     /// A row the window no longer holds can still be deleted: the id travels
@@ -5164,7 +5195,11 @@ mod tests {
         file.save(&cache, None);
 
         assert_eq!(ids(&file.get(PEER)), vec![1, 2, 4, 5]);
-        assert_eq!(file.load().cache.get(PEER).len(), 4);
+        assert_eq!(
+            ids(&file.load().cache.get(PEER)),
+            vec![4, 5],
+            "the stretch above the hole"
+        );
     }
 
     #[test]
