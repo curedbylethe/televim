@@ -17169,6 +17169,46 @@ mod session_store_tests {
         );
     }
 
+    /// The session write itself fails, after the archive was already resealed:
+    /// the change is rolled back, so the archive still opens under the
+    /// passphrase it had and the session file was never replaced. The flush the
+    /// real write now does is not something a test can observe, so what is
+    /// checked here is the recovery around it.
+    #[test]
+    fn a_session_that_cannot_be_written_puts_the_archive_back() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("session.bin");
+        let history_path = dir.path().join("history.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("old")))
+            .save(&snapshot(7, 9))
+            .expect("a session is written");
+        let history = HistoryFile::new(
+            history_path.clone(),
+            Arc::new(PassphraseProvider::new("old")),
+        );
+        history.save(&crate::history_store::HistoryCache::default(), Some("+1"));
+
+        // The write goes through a temp sibling; a directory sitting on that
+        // one name makes the write fail while the load before it still works.
+        std::fs::create_dir(path.with_file_name(format!("session.bin.{}.tmp", std::process::id())))
+            .expect("the temp name is blocked");
+
+        let cfg = file_config(&path, Some("old"));
+        let error = change_passphrase(&cfg, Some(&history), "new", || Arc::new(NoKeyring))
+            .expect_err("the session write is refused");
+
+        assert!(error.contains("could not write"), "{error}");
+        assert!(
+            sealed_under(&path, "old"),
+            "the session file was never replaced"
+        );
+        assert_eq!(
+            history_tag_under(&history_path, "old").as_deref(),
+            Some("+1"),
+            "the archive was put back under the passphrase it had"
+        );
+    }
+
     #[test]
     fn an_empty_new_passphrase_and_a_missing_session_file_are_refused() {
         let dir = tempfile::tempdir().expect("a scratch directory");
