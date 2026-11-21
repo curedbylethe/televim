@@ -660,8 +660,8 @@ archive without that total is scanned once when first opened.
 The archive (`app/src/history_store.rs`) is a per-account SQLite database, not a
 file held in memory. What stays resident is one `HistoryCache` window per peer
 in the archive — the newest `HISTORY_CACHE_DEPTH` (200) messages of each, loaded
-at startup — and the SQLite handle. `HistoryFile::page(peer, below, limit)`
-consults `ranges`, reads only the recorded range that reaches the window, and
+at startup — and the SQLite handle. `HistoryFile::page_checked(peer, below, limit)`
+reads on the blocking pool, consults `ranges`, reads only the recorded range that reaches the window, and
 decodes and unseals at most `PAGE` rows; the rest of the conversation is left
 unread. There is no peer cap and no byte cap on what is stored: every message
 of every private conversation is kept until `history_limit_bytes` (default 1 GiB,

@@ -92,6 +92,8 @@ pub(crate) const HISTORY_CACHE_CHATS: usize = 500;
 /// kept only so a launch can warn about it once; it is never read or deleted.
 #[derive(Debug, Clone)]
 pub(crate) struct HistoryFile {
+    #[cfg(test)]
+    pub(crate) page_reads: Arc<std::sync::atomic::AtomicUsize>,
     path: PathBuf,
     legacy: PathBuf,
 
@@ -995,6 +997,8 @@ impl HistoryFile {
     #[must_use]
     pub(crate) fn new(path: PathBuf, keys: Arc<dyn KeyProvider>) -> Self {
         Self {
+            #[cfg(test)]
+            page_reads: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             path: archive_path(&path),
             legacy: path,
             provider: Arc::new(Mutex::new(keys)),
@@ -1259,37 +1263,41 @@ impl HistoryFile {
     /// older one that does reach below it. At most `limit` rows are decoded;
     /// everything else on disk is left untouched. `None` for the range means
     /// no range reaches `below`, so there is nothing contiguous to show offline.
-    pub(crate) fn page(&self, peer: i64, below: i64, limit: usize) -> (Vec<Message>, Option<i64>) {
+    pub(crate) fn page_checked(
+        &self,
+        peer: i64,
+        below: i64,
+        limit: usize,
+    ) -> Result<(Vec<Message>, Option<i64>)> {
+        #[cfg(test)]
+        self.page_reads.fetch_add(1, Ordering::Relaxed);
         if !self.path.is_file() {
-            return (Vec::new(), None);
+            return Ok((Vec::new(), None));
         }
         let (_guard, keys) = self.locked_keys();
-        let Ok(store) = open_store(&self.path, &keys) else {
-            return (Vec::new(), None);
-        };
-        let Ok(ranges) = store.ranges(peer) else {
-            return (Vec::new(), None);
-        };
+        let store = open_store(&self.path, &keys)?;
+        let ranges = store.ranges(peer)?;
         let reaching = ranges
             .iter()
             .filter(|(_, hi)| *hi >= below.saturating_sub(1))
             .filter(|(lo, _)| *lo < below)
             .max_by_key(|(_, hi)| *hi);
         let Some(&(lo, _)) = reaching else {
-            return (Vec::new(), None);
+            return Ok((Vec::new(), None));
         };
-        match store.page(peer, below, lo, limit) {
-            Ok(rows) => (
-                rows.into_iter()
-                    .map(|(_, row)| row.to_message(peer))
-                    .collect(),
-                Some(lo),
-            ),
-            Err(error) => {
-                tracing::warn!(%error, "a history page could not be read");
-                (Vec::new(), None)
-            }
-        }
+        let rows = store.page(peer, below, lo, limit)?;
+        Ok((
+            rows.into_iter()
+                .map(|(_, row)| row.to_message(peer))
+                .collect(),
+            Some(lo),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn page(&self, peer: i64, below: i64, limit: usize) -> (Vec<Message>, Option<i64>) {
+        self.page_checked(peer, below, limit)
+            .expect("archive page reads")
     }
 
     /// The encoded text bytes held on disk, by a SQL read rather than a copy of
