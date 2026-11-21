@@ -83,7 +83,7 @@ base64 = "0.22"
 # second copy enters the tree.
 sha2 = "0.10.9"
 # One use: the keyed hash that names a conversation without writing its id, in
-# `app::history_store`. 0.12.1 is already in the lockfile through `grammers`, so
+# `app::history_store`. 0.12.1 is already in the lockfile through `hkdf`, so
 # adding the workspace entry brings no second version into the tree.
 hmac = "0.12.1"
 # One use: the sealed per-record archive in `app::history_store`. `bundled`
