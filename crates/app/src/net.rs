@@ -6519,7 +6519,9 @@ fn serve_archived_older(app: &mut App, state: &mut State, offline: bool) -> bool
 
     let count = page.len();
     let oldest = page.first().map(|message| message.id);
-    if let Some(cursor) = state.history.cursor.as_mut() {
+    if let Some(cursor) = state.history.cursor.as_mut()
+        && cursor.peer_id() == app.conversation.conversation.window.chat_id
+    {
         // A short stored page ends the conversation only for a reader with no
         // wire; for an online one the wire still owes what lies below it.
         cursor.note_older(count, oldest, if offline { PAGE } else { count });
@@ -11530,6 +11532,39 @@ mod tests {
         assert!(
             !cursor.exhausted_older(),
             "the wire still owes everything below the stored range"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offline_page_does_not_move_another_chats_cursor() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 351..=400),
+        );
+        persist(&mut seed_state).await;
+
+        let mut app = app_with_a_conversation(CHAT, 0);
+        app.apply_latest(messages(CHAT, 401..=500));
+        let mut state = caching_state(&path);
+        state.history.cursor = Some(HistoryCursor::new(CHAT + 1));
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        assert!(serve_archived_older(&mut app, &mut state, true));
+        assert_eq!(
+            state
+                .history
+                .cursor
+                .expect("cursor retained")
+                .oldest_loaded_id(),
+            None
         );
     }
 
