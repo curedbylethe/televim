@@ -6633,6 +6633,7 @@ fn apply_ready_to_screen(
     apply_ready_to_screen_with_archive(app, state, chats, Vec::new(), account, session_store);
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_ready_to_screen_with_archive(
     app: &mut App,
     state: &mut State,
@@ -6738,6 +6739,7 @@ fn apply_ready_to_screen_with_archive(
     let restored = if conversation_open && !no_session {
         (state.history.cursor, state.history.jump) = (None, None);
         (state.history.retry_at, state.history.retry_peer) = (None, None);
+        app.conversation.conversation.window.exhausted_older = false;
         app.set_archived_chats(archived);
         app.refresh_chats(chats)
     } else if let Some(place) = carried.as_ref().filter(|place| place.chat_id.is_some()) {
@@ -11418,6 +11420,17 @@ mod tests {
             app.conversation.conversation.window.exhausted_older,
             "the 301 range ran out, so the direction is settled"
         );
+        apply_ready_to_screen(
+            &mut app,
+            &mut state,
+            vec![chat(CHAT)],
+            Ok(signed_in(1, None)),
+            tui::SessionStore::Keyring,
+        );
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        assert!(app.wants_older(), "reconnection reopens older paging");
     }
 
     /// An online reader whose archive holds a disjoint stretch does not
