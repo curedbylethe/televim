@@ -1063,7 +1063,7 @@ async fn event_loop(
     if let Some(client) = network.client()
         && let Err(error) = client.persist_session_if_changed()
     {
-        tracing::warn!(%error, "could not save the session on exit");
+        tracing::warn!(%error, "session persistence on exit");
     }
     // After the session, so a failing disk does not also cost the sign-in.
     archived.map_err(|reason| anyhow::anyhow!("the message archive was not saved: {reason}"))

@@ -184,7 +184,7 @@ impl ProtoClient {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtoError::Framework`] if the session could not be saved.
+    /// Returns [`ProtoError::Framework`] if saving or confirming durability fails.
     pub fn persist_session_if_changed(&self) -> Result<(), ProtoError> {
         self.inner.persist_session_if_changed()?;
 

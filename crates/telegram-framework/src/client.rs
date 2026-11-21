@@ -569,7 +569,7 @@ impl Client {
             }
             Err(error) => tracing::warn!(
                 %error,
-                "the session changed but could not be saved; the next launch may renegotiate or need a new login"
+                "session persistence is incomplete; the next launch may renegotiate or need a new login"
             ),
         }
     }
@@ -580,7 +580,7 @@ impl Client {
         if let Err(error) = self.session.persist() {
             tracing::warn!(
                 %error,
-                "signed in, but the session could not be saved; the next launch will need a new login"
+                "signed in, but session persistence is incomplete; the next launch may need a new login"
             );
         }
     }
