@@ -1755,12 +1755,15 @@ impl State {
     /// so a test can step across the window; the loop's tick is what brings
     /// that pass, so no timer is needed.
     pub(crate) fn persist_history(&mut self, chats: &[Chat], now: Instant) {
-        self.write_history(chats, Some(now));
+        self.write_history(chats, Some(now), false);
     }
 
     /// [`State::persist_history`], with `now` of `None` for a write that
-    /// ignores the spacing.
-    fn write_history(&mut self, chats: &[Chat], now: Option<Instant>) {
+    /// ignores the spacing, and `final_flush` set only for the last write of
+    /// the loop: no failure event of that write has a reader left, so its
+    /// queued pages are handed to the caller through the task's result
+    /// instead of through an event.
+    fn write_history(&mut self, chats: &[Chat], now: Option<Instant>, final_flush: bool) {
         if self.cached.messages.set_chats(chats) {
             self.cached.dirty = true;
         }
@@ -1812,16 +1815,19 @@ impl State {
             .unwrap_or_else(|error| Err(error.to_string()));
             if let Err(reason) = &result {
                 tracing::warn!(%reason, "a history write failed; queued pages will be retried");
-                if let Some(tx) = &tx {
+                if !final_flush && let Some(tx) = &tx {
                     let _ = tx.send(AppEvent::Net(Event::HistoryWriteFailed {
-                        pages: retry_pages,
+                        pages: retry_pages.clone(),
                         tag,
                     }));
                 }
             }
             if let Some(tx) = report {
-                let _ = tx.send(AppEvent::Net(Event::LocalNameSaved { result }));
+                let _ = tx.send(AppEvent::Net(Event::LocalNameSaved {
+                    result: result.clone(),
+                }));
             }
+            (result, retry_pages)
         }));
         self.cached.last_write = now.or(self.cached.last_write);
     }
@@ -1831,13 +1837,20 @@ impl State {
     ///
     /// Without it, a page that landed while a write was going would be marked
     /// and never written: the pass that would have written it never comes.
+    /// The last write reports to no one — the loop that would read its
+    /// failure event is gone — so its queued pages are taken back here, or a
+    /// failure would lose them with the snapshot.
     pub(crate) async fn finish_history(&mut self, chats: &[Chat]) {
         if let Some(write) = self.cached.write.take() {
             let _ = write.await;
         }
-        self.write_history(chats, None);
-        if let Some(write) = self.cached.write.take() {
-            let _ = write.await;
+        self.write_history(chats, None, true);
+        if let Some(write) = self.cached.write.take()
+            && let Ok((Err(reason), pages)) = write.await
+        {
+            tracing::warn!(%reason, "the final history write failed; its queued pages are kept");
+            self.cached.pending_pages.extend(pages);
+            self.cached.dirty = true;
         }
     }
 
@@ -1863,6 +1876,10 @@ impl State {
                 self.cached.write = Some(tokio::spawn(async move {
                     let _ = write.await;
                     let _ = tokio::task::spawn_blocking(move || file.clear()).await;
+                    // A removal, not a write: nothing is reported or handed
+                    // back, and the cell is left occupied so a later write
+                    // still cannot start beside the removal.
+                    (Ok(()), Vec::new())
                 }));
             }
             _ => file.clear(),
@@ -2052,7 +2069,10 @@ struct CachedHistory {
     /// snapshot is only taken once the write before it has finished, and a
     /// sign-out's removal waits behind it too — or the write would put back
     /// the file the sign-out had just removed.
-    write: Option<tokio::task::JoinHandle<()>>,
+    ///
+    /// The task returns what a failed write could not put down: the error
+    /// and the queued pages it took, for the final flush to hand back.
+    write: Option<HistoryWrite>,
 
     /// Whether a rename is waiting for the next write, whose outcome is owed
     /// to the reader as [`Event::LocalNameSaved`].
@@ -2074,6 +2094,10 @@ struct CachedHistory {
     /// tag, and a write with no id yet falls back to the configured phone.
     tag: HistoryTag,
 }
+
+/// The blocking-pool task behind [`CachedHistory::write`]: the write's outcome
+/// and, when it failed, the pages it took so the caller can queue them again.
+type HistoryWrite = tokio::task::JoinHandle<(Result<(), String>, Vec<(i64, Vec<Message>)>)>;
 
 /// The least time between two starts of a history write. Changes inside it
 /// wait, marked, for the first pass past it.
@@ -11397,7 +11421,7 @@ mod tests {
             Some(101),
             messages(CHAT, 1..=5),
         );
-        state.finish_history(&[]).await;
+        persist(&mut state).await;
 
         let Some(AppEvent::Net(Event::HistoryWriteFailed { pages, .. })) = rx.recv().await else {
             panic!("the failed write reports its pages");
@@ -11425,6 +11449,42 @@ mod tests {
             .map(|message| message.id)
             .collect();
         assert_eq!(stored, vec![1, 2, 3, 4, 5]);
+    }
+
+    /// The last write of the loop reports to no one, so a failure of it hands
+    /// its queued pages straight back to the state rather than to an event no
+    /// loop is left to read.
+    #[tokio::test]
+    async fn a_failure_during_the_final_flush_keeps_its_queued_pages() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        // A regular file where the directory should be, so the write fails.
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "").expect("the blocking file");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx); // the loop is gone; nothing reads a failure event
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&blocker.join("televim.history.json"));
+        state.tx = Some(tx);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(101),
+            messages(CHAT, 1..=5),
+        );
+        state.finish_history(&[]).await;
+
+        assert_eq!(state.cached.pending_pages.len(), 1, "the pages are kept");
+        assert_eq!(
+            state.cached.pending_pages[0]
+                .1
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            (1..=5).collect::<Vec<_>>()
+        );
+        assert!(state.cached.dirty, "the cache still owes a write");
     }
 
     /// A write failure from another account's write is refused: the pages it
@@ -11568,6 +11628,7 @@ mod tests {
         let (release, held) = tokio::sync::oneshot::channel::<()>();
         state.cached.write = Some(tokio::spawn(async move {
             let _ = held.await;
+            (Ok(()), Vec::new())
         }));
 
         page_arrives(
@@ -18484,7 +18545,12 @@ mod action_status_tests {
         state.cached.dirty = true;
         state.cached.rename_pending = true;
 
-        state.finish_history(&[]).await;
+        // An ordinary pass's write, not the final flush: the loop is still
+        // running here, so the failure and the rename come back as events.
+        state.persist_history(&[], std::time::Instant::now());
+        if let Some(write) = state.cached.write.take() {
+            write.await.expect("the history write ran");
+        }
 
         // The failed write first hands back the pages it took, then reports the
         // rename it could not save.
