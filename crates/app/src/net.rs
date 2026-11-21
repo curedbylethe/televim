@@ -3301,7 +3301,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         seed_opened(app, state);
         // Offline the wire owes no page, but the archive may hold the next
         // older stretch: put it in front of the cached window before leaving.
-        serve_archived_older(app, state);
+        serve_archived_older(app, state, true);
         return;
     };
 
@@ -3361,7 +3361,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         Wanted::Page(direction, cursor) => {
             // If the archive already holds the stretch below the window, read
             // it instead of asking the wire for a page we have downloaded.
-            if direction == FetchDirection::Older && serve_archived_older(app, state) {
+            if direction == FetchDirection::Older && serve_archived_older(app, state, false) {
                 return;
             }
             app.begin_fetch(direction);
@@ -6407,10 +6407,10 @@ fn apply_history(
 /// newest [`PAGE`] rows below the window's oldest id, put in front of it in
 /// ascending order, exactly where a wire page would go. Only the one recorded
 /// range that reaches the window is read; a short page, or a page that starts
-/// at that range's low end, settles the direction so a reader neither keeps
-/// asking for what is not there nor jumps a gap into an older, disconnected
-/// stretch — that gap is left for the wire to fetch.
-fn serve_archived_older(app: &mut App, state: &mut State) -> bool {
+/// at that range's low end, settles the direction for an offline reader, who
+/// has no wire to fill the gap — an online reader keeps the direction open so
+/// the wire can fetch the gap below the range.
+fn serve_archived_older(app: &mut App, state: &mut State, offline: bool) -> bool {
     if !app.wants_older() {
         return false;
     }
@@ -6436,8 +6436,10 @@ fn serve_archived_older(app: &mut App, state: &mut State) -> bool {
     apply_page(app, FetchDirection::Older, page);
     // The end of this range is the end of what the archive can serve below the
     // window: the ledger's next stretch sits across a gap that only the wire may
-    // fill, so settle the direction rather than stepping into it.
-    if count < PAGE || oldest == range_lo {
+    // fill. An offline reader settles the direction rather than stepping into
+    // it; an online reader keeps asking, because the wire still owes the gap,
+    // and the short wire page that reaches the true bottom settles it.
+    if offline && (count < PAGE || oldest == range_lo) {
         app.exhaust(FetchDirection::Older);
     }
     app.end_fetch(FetchDirection::Older);
@@ -11111,7 +11113,7 @@ mod tests {
         assert!(app.wants_older(), "the reader is at the top of the window");
         assert!(state.client.is_none(), "and there is no wire");
 
-        assert!(serve_archived_older(&mut app, &mut state));
+        assert!(serve_archived_older(&mut app, &mut state, true));
         let window: Vec<i64> = app
             .conversation
             .conversation
@@ -11172,7 +11174,7 @@ mod tests {
         assert!(app.wants_older(), "the reader is at the top of the window");
         assert!(state.client.is_none(), "and there is no wire");
 
-        assert!(serve_archived_older(&mut app, &mut state));
+        assert!(serve_archived_older(&mut app, &mut state, true));
         let window: Vec<i64> = app
             .conversation
             .conversation
@@ -11188,6 +11190,71 @@ mod tests {
         assert!(
             app.conversation.conversation.window.exhausted_older,
             "the 301 range ran out, so the direction is settled"
+        );
+    }
+
+    /// An online reader whose archive holds a disjoint stretch does not
+    /// settle the direction at the bottom of one range: the wire still owes
+    /// the gap below it.
+    #[tokio::test]
+    async fn an_online_reader_keeps_asking_past_the_end_of_a_stored_range() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+
+        // Seed two disjoint stored stretches: 301-400 and 1-100.
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 301..=400),
+        );
+        persist(&mut seed_state).await;
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Older,
+            Some(101),
+            messages(CHAT, 1..=100),
+        );
+        persist(&mut seed_state).await;
+
+        // The window sits just above the 301-400 range. A wire is present,
+        // so running out of the range must leave the direction open for the
+        // gap below it.
+        let mut app = app_with_a_conversation(CHAT, 0);
+        app.apply_latest(messages(CHAT, 401..=500));
+        let mut state = caching_state(&path);
+        state.history.cursor = Some(HistoryCursor::new(CHAT));
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        assert!(app.wants_older(), "the reader is at the top of the window");
+
+        assert!(serve_archived_older(&mut app, &mut state, false));
+        let window: Vec<i64> = app
+            .conversation
+            .conversation
+            .window
+            .iter()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(window.first(), Some(&301), "the 301 range landed in front");
+        assert!(
+            !app.conversation.conversation.window.exhausted_older,
+            "the wire still owes the 101-300 gap"
+        );
+        // The full page put a hundred rows in front of the reader, so the ask
+        // only resumes once the reader is back at the top — and it must: an
+        // exhausted direction would have refused the wire fetch of the gap.
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        assert!(
+            app.wants_older(),
+            "the direction stays open for the wire fetch"
         );
     }
 
