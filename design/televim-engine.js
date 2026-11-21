@@ -767,7 +767,7 @@
   function fresh(view, bidi) {
     const s = {
       view: 'chat', right: 'conv', focus: 'conv', chat: 0, chats: makeChats(), listHidden: false,
-      vis: null, search: null, newchat: null, fwd: null, confirm: null, flash: '', pend: '', line: null, draft: null, reg: '',
+      vis: null, search: null, newchat: null, fwd: null, confirm: null, flash: '', archiveFull: false, pend: '', line: null, draft: null, reg: '',
       sset: 0, signin: null, card: null, count: 0,
       /* what the reader has said about a person, keyed by the peer's own name: the local
          name drawn over it, and the block flag. Both outlive a rename, which is why the
@@ -3218,7 +3218,8 @@
         else if (name === 'typing') peerTyping(s);
         else if (name === 'peer') peerSays(s, PEER_SAYS);
         else if (name === 'cached') revalidate(s);
-        else if (name === 'archivefull') s.flash = ARCHIVE_FULL;
+        else if (name === 'archivefull') { if (!s.archiveFull) s.flash = ARCHIVE_FULL; s.archiveFull = true; }
+        else if (name === 'archiveclear') { s.archiveFull = false; if (s.flash === ARCHIVE_FULL) s.flash = ''; }
         else key(s, TOK[name]);
         i = e;
       } else key(s, a[i]);
