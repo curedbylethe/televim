@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 use telegram_framework::{
-    AuthKey, ChannelState, DcOption, PassphraseProvider, Peer, SessionData, UpdateState, sealed,
+    AuthKey, ChannelState, DcOption, FileKey, KeyProvider, PassphraseProvider, Peer, SessionData,
+    SessionError, UpdateState, sealed,
 };
 use tempfile::TempDir;
 use termlens::Terminal;
@@ -186,6 +187,28 @@ struct SeedRecord<'a> {
     row: &'a SeedMessage<'a>,
 }
 
+/// The key source the binary seals records, state and chips under: the random
+/// archive key with a fixed salt, not the account passphrase. Mirrors
+/// `RecordKey` in `history_store.rs`.
+#[derive(Debug)]
+struct ArchiveKeys {
+    key: FileKey,
+}
+
+impl KeyProvider for ArchiveKeys {
+    fn sealing_key(&self) -> Result<(sealed::Salt, FileKey), SessionError> {
+        Ok(([0u8; sealed::SALT_LEN], self.key.clone()))
+    }
+
+    fn opening_key(&self, _salt: &sealed::Salt) -> Result<FileKey, SessionError> {
+        Ok(self.key.clone())
+    }
+
+    fn accepts_passphrase(&self) -> bool {
+        false
+    }
+}
+
 fn keyed_chat(hmac_key: &[u8; 32], chat_id: i64) -> Vec<u8> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -217,8 +240,11 @@ fn write_archive(legacy: &Path, file: &SeedFile<'_>) {
     let mut archive_key = [0u8; 32];
     getrandom::fill(&mut archive_key).expect("the archive key is random");
     let sealed_key = sealed::seal(&archive_key, &keys).expect("seal the archive key");
+    let record_keys = ArchiveKeys {
+        key: FileKey::from_bytes(archive_key),
+    };
     let state = serde_json::to_vec(file).expect("serialise the archive state");
-    let sealed_state = sealed::seal(&state, &keys).expect("seal the archive state");
+    let sealed_state = sealed::seal(&state, &record_keys).expect("seal the archive state");
 
     let mut hmac_key = [0u8; 32];
     {
@@ -269,7 +295,7 @@ fn write_archive(legacy: &Path, file: &SeedFile<'_>) {
                 row,
             };
             let plain = serde_json::to_vec(&record).expect("serialise a seeded record");
-            let envelope = sealed::seal(&plain, &keys).expect("seal a seeded record");
+            let envelope = sealed::seal(&plain, &record_keys).expect("seal a seeded record");
             conn.execute(
                 "INSERT INTO messages (chat_key, message_id, sealed) VALUES (?1, ?2, ?3)",
                 params![chat_key, row.id, envelope],
