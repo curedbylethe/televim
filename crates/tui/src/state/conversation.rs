@@ -180,9 +180,9 @@ pub struct ConversationState {
     /// A flag beside the view rather than a property of the messages, because
     /// what it records is where the window as a whole came from: a cached message
     /// and the one the server sends for it are the same message. It is set by
-    /// [`Self::seed`] alone, and anything that replaces the window with a page
-    /// the server sent clears it — the newest page above all, which is the
-    /// revalidation it waits for.
+    /// [`Self::seed`] alone, and anything that confirms the window clears it —
+    /// the newest page that replaces it, or the forward page that reaches the
+    /// end of a run resumed from the store.
     ///
     /// It never stands for an answer. Nothing that decides what to fetch reads
     /// it, so a cached window is asked about exactly as an empty one is, and a

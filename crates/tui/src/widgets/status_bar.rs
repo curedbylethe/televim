@@ -148,7 +148,7 @@ mod tests {
     }
 
     /// A conversation drawn from the cache says on the status line that its
-    /// newest page is on its way, and a failure written there talks over it.
+    /// confirming page is on its way, and a failure written there talks over it.
     #[test]
     fn a_cached_conversation_says_it_is_waiting_for_its_page() {
         let mut app = App::mock();
@@ -164,7 +164,7 @@ mod tests {
             .collect();
         app.select_chat(1);
         assert!(app.seed_from_cache(2, seed));
-        app.begin_fetch(FetchDirection::Latest);
+        app.begin_fetch(FetchDirection::Newer);
 
         let (_, row) = bottom_row(&screen(&app));
         assert!(row.contains(REVALIDATING_LABEL), "{row:?}");

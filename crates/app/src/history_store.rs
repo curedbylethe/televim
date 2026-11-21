@@ -322,6 +322,26 @@ impl HistoryCache {
         })
     }
 
+    /// The reaction strips cached for `peer`, keyed by message id, oldest first.
+    ///
+    /// The shape the window's reaction seed takes. Empty for a peer with none.
+    #[must_use]
+    pub(crate) fn reactions(&self, peer: i64) -> Vec<(i64, Vec<ReactionCount>)> {
+        self.reactions.get(&peer).map_or_else(Vec::new, |rows| {
+            rows.iter()
+                .map(|(id, counts)| (*id, counts.iter().map(ReactionCount::from).collect()))
+                .collect()
+        })
+    }
+
+    /// The pinned ids cached for `peer`, oldest pin first.
+    ///
+    /// Empty for a peer with none.
+    #[must_use]
+    pub(crate) fn pins(&self, peer: i64) -> Vec<i64> {
+        self.pinned.get(&peer).cloned().unwrap_or_default()
+    }
+
     /// The cached chat list, head first, as the domain's own type.
     ///
     /// Empty when nothing has been cached, which is a cold launch. Every chat
@@ -540,12 +560,22 @@ impl HistoryCache {
         let excess = merged.len().saturating_sub(HISTORY_CACHE_DEPTH);
         merged.drain(..excess);
 
-        // Decided before the no-change answer below: a latest page identical
-        // to the run still shows the run is current.
+        // Decided before the no-change answer below: a page identical to the
+        // run still shows the run is current. A resumed conversation has no
+        // newest page, so a forward page that reached the end confirms the run
+        // too — without it every arrival after a bring-up would be dropped.
         if let Some(newest) = merged.last().map(|row| row.id) {
             if self.feed.seen.get(&peer).is_some_and(|&seen| newest < seen) {
                 self.feed.current.remove(&peer);
-            } else if matches!(kind, PageKind::Latest { .. }) {
+            } else if matches!(kind, PageKind::Latest { .. })
+                || matches!(
+                    kind,
+                    PageKind::Newer {
+                        reached_end: true,
+                        ..
+                    }
+                )
+            {
                 self.feed.current.insert(peer);
             }
         }
@@ -6283,6 +6313,38 @@ mod tests {
             file.load().cache.pinned.get(&PEER).map(Vec::as_slice),
             Some([4].as_slice())
         );
+    }
+
+    /// The read path a resumed window uses says what the store holds: the same
+    /// reaction strips and pins the reopen test proves are on disk, in the
+    /// shapes the window's seeds take, and nothing for another peer.
+    #[test]
+    fn the_chip_accessors_return_what_a_reopen_reads() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=5));
+        let reaction = ReactionCount {
+            reaction: Reaction::Emoticon("👍".to_owned()),
+            count: 3,
+            chosen: true,
+        };
+        assert!(cache.apply_update(&UpdateEvent::ReactionsChanged {
+            chat_id: PEER,
+            message_id: 2,
+            reactions: vec![reaction.clone()],
+        }));
+        assert!(cache.apply_update(&UpdateEvent::PinChanged {
+            chat_id: PEER,
+            message_ids: vec![3, 4],
+            pinned: true,
+        }));
+        file.save(&cache, None);
+
+        let loaded = file.load().cache;
+        assert_eq!(loaded.reactions(PEER), vec![(2, vec![reaction])]);
+        assert_eq!(loaded.pins(PEER), vec![3, 4]);
+        assert!(loaded.reactions(PEER + 1).is_empty());
+        assert!(loaded.pins(PEER + 1).is_empty());
     }
 
     #[test]

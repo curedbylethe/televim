@@ -2737,16 +2737,32 @@ impl App {
         self.conversation.seed(chat_id, messages)
     }
 
-    /// Whether the window on show came from the cache and the server's newest
-    /// page for it is on its way.
+    /// Whether the window on show was drawn from the store rather than the wire.
+    #[must_use]
+    pub fn window_is_cached(&self) -> bool {
+        self.conversation.cached
+    }
+
+    /// Whether the window on show came from the cache and the forward page that
+    /// confirms it is on its way.
     ///
     /// Both halves, because neither alone is a revalidation: a cached window with
     /// nothing in flight — offline, or holding back after a failure — has nothing
-    /// coming to say, and a newest page in flight over an empty window is the
+    /// coming to say, and a page in flight over an empty window is the
     /// `Loading…` row's to announce.
     #[must_use]
     pub fn is_revalidating(&self) -> bool {
-        self.conversation.cached && self.is_fetching(FetchDirection::Latest)
+        self.conversation.cached && self.is_fetching(FetchDirection::Newer)
+    }
+
+    /// The forward page that confirms a resumed window has landed.
+    ///
+    /// A conversation opened from the store waits on a newer page, not a newest
+    /// one, so that page — the one that reaches the end — is what ends the wait.
+    /// Clearing the flag here leaves the window as it is: the page appended to
+    /// it, it did not replace it.
+    pub fn tail_confirmed(&mut self) {
+        self.conversation.cached = false;
     }
 
     /// Puts a page in front of what the window holds.
@@ -3948,7 +3964,7 @@ impl App {
     /// them, a jump in flight — what the reader has just asked for — and then the
     /// full reason a failed message failed while the cursor is on it, then
     /// whatever was written to the status, and last a cached window's wait for
-    /// its newest page, which outranks only the resting hint.
+    /// its confirming page, which outranks only the resting hint.
     ///
     /// A key inside the line is above all of them, because a keystroke cannot be
     /// deferred and none of the rest is a question waiting for a reply: a reader
