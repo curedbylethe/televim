@@ -2726,7 +2726,17 @@ fn change_passphrase(
     if let Some(history) = history {
         history.reseal(Arc::clone(&next))?;
     }
-    if let Err(error) = FileStore::with_key_provider(path, Arc::clone(&next)).save(&data) {
+    let next_store = FileStore::with_key_provider(path, Arc::clone(&next));
+    if let Err(error) = next_store.save(&data) {
+        // A save fails after its rename when the directory cannot be synced: the
+        // session is then already under `next`. Putting the archive back would
+        // split the two, so the change stands and the previous envelope stays,
+        // letting either passphrase open the archive if a power cut undoes the
+        // rename.
+        if matches!(next_store.load(), Ok(Some(_))) {
+            tracing::warn!(%error, "the new session is in place but its directory was not synced");
+            return Ok(());
+        }
         if let Some(history) = history
             && let Err(back) = history.reseal(Arc::clone(&current_keys))
         {
@@ -17303,6 +17313,49 @@ mod session_store_tests {
             history_tag_under(&history_path, "old").as_deref(),
             Some("+1"),
             "the archive was put back under the passphrase it had"
+        );
+    }
+
+    /// The session write fails after its rename: the new session is in place,
+    /// so the change stands, and the archive is not put back under a passphrase
+    /// the session no longer uses.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_saved_before_its_sync_failed_keeps_the_new_passphrase() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let session_dir = dir.path().join("session");
+        std::fs::create_dir(&session_dir).expect("a session directory");
+        let path = session_dir.join("session.bin");
+        let history_path = dir.path().join("history.bin");
+        FileStore::with_key_provider(&path, Arc::new(PassphraseProvider::new("old")))
+            .save(&snapshot(7, 9))
+            .expect("a session is written");
+        let history = HistoryFile::new(
+            history_path.clone(),
+            Arc::new(PassphraseProvider::new("old")),
+        );
+        history.save(&crate::history_store::HistoryCache::default(), Some("+1"));
+
+        // Write and search but no read: the temp is created and renamed, and
+        // the directory then cannot be opened to be synced.
+        std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o300))
+            .expect("the directory is restricted");
+        let cfg = file_config(&path, Some("old"));
+        let result = change_passphrase(&cfg, Some(&history), "new", || Arc::new(NoKeyring));
+        std::fs::set_permissions(&session_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("the directory is restored");
+
+        result.expect("the new session is in place, so the change stands");
+        assert!(
+            sealed_under(&path, "new"),
+            "the session is under the new passphrase"
+        );
+        assert_eq!(
+            history_tag_under(&history_path, "new").as_deref(),
+            Some("+1"),
+            "and the archive still opens under it"
         );
     }
 
