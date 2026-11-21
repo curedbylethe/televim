@@ -1442,6 +1442,7 @@ impl State {
         self.outbox_file = None;
         self.outbox_in_flight = None;
         self.outbox_generation += 1;
+        self.feed_generation += 1;
         // Dropping the sender ends the old feed quietly: its pump reports nothing.
         self.feed_cancel = None;
         app.clear_sends();
@@ -4819,6 +4820,7 @@ fn apply_logged_out(app: &mut App, state: &mut State, result: Result<(), String>
             app.clear_sends();
             state.outbox_in_flight = None;
             state.outbox_generation += 1;
+            state.feed_generation += 1;
             state.read_owed.clear();
             state.read_acked = None;
             // Dropping the sender ends the old feed quietly: its pump reports nothing.
@@ -6417,6 +6419,9 @@ fn apply_history(
     }
 
     if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
+        if let Ok(page) = &result {
+            state.remember_archived_page(cursor.peer_id(), &page.messages);
+        }
         return;
     }
 
@@ -12374,6 +12379,12 @@ mod tests {
         );
         assert!(app.is_fetching(FetchDirection::Latest));
         assert!(app.conversation.conversation.window.is_empty());
+        assert_eq!(
+            state.cached.pending_pages.len(),
+            1,
+            "the other chat's page is archived"
+        );
+        assert_eq!(state.cached.pending_pages[0].0, CHAT + 1);
         page_arrives(
             &mut app,
             &mut state,
@@ -12383,6 +12394,48 @@ mod tests {
         );
         assert!(!app.is_fetching(FetchDirection::Latest));
         assert_eq!(window_ids(&app), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_page_from_a_detached_account_is_not_archived() {
+        let mut app = app_just_opened();
+        let mut state = State::default();
+        let generation = state.feed_generation;
+        state.detach_account(&mut app, Opening::Fresh);
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                generation,
+                result: Ok(history_page(messages(CHAT, 1..=2))),
+            },
+        );
+        assert_ne!(state.feed_generation, generation);
+        assert!(state.cached.pending_pages.is_empty());
+    }
+
+    #[test]
+    fn a_page_from_a_signed_out_account_is_not_archived() {
+        let mut app = app_just_opened();
+        let mut state = State::default();
+        let generation = state.feed_generation;
+        apply_logged_out(&mut app, &mut state, Ok(()));
+        apply(
+            &mut app,
+            &mut state,
+            Event::History {
+                direction: FetchDirection::Latest,
+                anchor: None,
+                cursor: HistoryCursor::new(CHAT),
+                generation,
+                result: Ok(history_page(messages(CHAT, 1..=2))),
+            },
+        );
+        assert_ne!(state.feed_generation, generation);
+        assert!(state.cached.pending_pages.is_empty());
     }
 
     #[test]
