@@ -77,9 +77,9 @@ function sec05() {
 }
 /* ---------- 06 · Status line: the ranks, each the real row of a real state ---------- */
 const STATUS_STATES = ['iHello', '<Tab>q', 'kkkkdd', '/tickets<CR>vj', 'iHello<Esc>vhh', '/tickets<CR>'];
-/* the rest of the ranks, second frame: a jump in flight, a failed send, a flash, a cached window, the hint.
-   Eleven rows at the two-row spacing do not fit in 24, so the ranks are split across two frames. */
-const STATUS_STATES_REST = ['jjgd', 'jjjj', 'gd', '<cached>', '', ['gg', 'unreadFar']];
+/* The remaining examples include a jump, a failed send, two statuses, a cached window, and the hint.
+   Thirteen rows at two-row spacing do not fit in 24, so they are split across two frames. */
+const STATUS_STATES_REST = ['jjgd', 'jjjj', 'gd', '<archivefull>', '<cached>', '', ['gg', 'unreadFar']];
 function statusFrame(states) {
   const g = blank();
   states.forEach((k, i) => {
