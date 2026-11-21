@@ -30,6 +30,10 @@ pub enum SessionError {
     #[error("could not save the session: {0}")]
     Save(String),
 
+    /// The session was written, but its directory entry could not be flushed.
+    #[error("session was written but directory sync failed: {0}")]
+    Durability(String),
+
     /// The stored session could not be removed.
     #[error("could not clear the stored session: {0}")]
     Clear(String),

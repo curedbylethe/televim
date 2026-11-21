@@ -694,7 +694,7 @@ fn sync_parent_directory(path: &Path) -> Result<(), SessionError> {
     };
     fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| SessionError::Save(error.to_string()))
+        .map_err(|error| SessionError::Durability(error.to_string()))
 }
 
 /// A no-op stand-in for platforms without a directory sync.
@@ -1456,6 +1456,28 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_sync_failure_reports_that_the_session_was_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("scratch directory");
+        let path = dir.path().join("session");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o300))
+            .expect("restrict directory");
+        if fs::File::open(dir.path()).is_ok() {
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))
+                .expect("restore directory");
+            return;
+        }
+        let result = write_atomically(&path, b"new session");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700))
+            .expect("restore directory");
+        assert_eq!(fs::read(&path).expect("session exists"), b"new session");
+        let error = result.expect_err("directory sync fails");
+        assert!(matches!(error, SessionError::Durability(_)));
+        assert!(error.to_string().contains("session was written but"));
+    }
 
     #[test]
     fn each_keychain_operation_advances_the_count() {
