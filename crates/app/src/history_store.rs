@@ -26,8 +26,9 @@
 //! terminal, which this program is drawing on.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::hash::{DefaultHasher, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -105,7 +106,15 @@ pub(crate) struct HistoryFile {
     /// are unknown, and a full rewrite would drop them. Only sign-out, which
     /// removes the archive, clears it.
     poisoned: Arc<AtomicBool>,
+
+    /// A fingerprint of each window row as the archive last held it, shared by
+    /// every clone. A save re-seals only the rows whose fingerprint moved, so
+    /// one arrival costs one record instead of every cached row.
+    written: Arc<Mutex<RowMemo>>,
 }
+
+/// The fingerprint of each row last written, by chat and message id.
+type RowMemo = HashMap<(i64, i64), u64>;
 
 /// What [`HistoryFile::load`] found: the stored account tags and the cache.
 ///
@@ -985,6 +994,7 @@ impl HistoryFile {
             legacy: path,
             provider: Arc::new(Mutex::new(keys)),
             poisoned: Arc::new(AtomicBool::new(false)),
+            written: Arc::new(Mutex::new(RowMemo::new())),
         }
     }
 
@@ -1127,7 +1137,12 @@ impl HistoryFile {
             warn_legacy_once();
         }
         match self.read_payload() {
-            Ok(Some(payload)) => Self::from_payload(payload),
+            Ok(Some(payload)) => {
+                // What was read is what the archive holds, so the first save
+                // after a launch writes only what has since moved.
+                *lock(&self.written) = fingerprints(&payload);
+                Self::from_payload(payload)
+            }
             Ok(None) => LoadedHistory::empty(),
             Err(error) => {
                 tracing::warn!(
@@ -1409,9 +1424,20 @@ impl HistoryFile {
     /// bounded window is an ingest, never a replacement of what is stored.
     #[allow(dead_code)]
     fn store_payload(&self, payload: &Payload) -> Result<()> {
+        self.ingest(&[], payload)
+    }
+
+    /// Opens the archive and writes `pages` then `payload` in one transaction,
+    /// re-sealing only the window rows that changed since they were last
+    /// written. The record of what was written moves only once the
+    /// transaction has committed.
+    fn ingest(&self, pages: &[(i64, Vec<CachedMessage>)], payload: &Payload) -> Result<()> {
         let (_guard, keys) = self.locked_keys();
         let mut store = open_store(&self.path, &keys)?;
-        store.ingest_payload(payload)
+        let mut written = lock(&self.written);
+        store.ingest_pages_and_payload(pages, payload, &written)?;
+        note_written(&mut written, payload);
+        Ok(())
     }
 
     /// Writes fetched pages and the encoded payload in one transaction: the
@@ -1454,11 +1480,7 @@ impl HistoryFile {
                 (*chat_id, rows)
             })
             .collect();
-        let (_guard, keys) = self.locked_keys();
-        let mut store = open_store(&self.path, &keys)
-            .map_err(|error| format!("history could not be written: {error:#}"))?;
-        store
-            .ingest_pages_and_payload(&prepared, &payload)
+        self.ingest(&prepared, &payload)
             .map_err(|error| format!("history could not be written: {error:#}"))
     }
 
@@ -1466,6 +1488,7 @@ impl HistoryFile {
     /// siblings; a missing file is success. The legacy `history.json` is not
     /// one of them and is deliberately left alone.
     fn remove_archive(&self) {
+        lock(&self.written).clear();
         for path in archive_siblings(&self.path) {
             match fs::remove_file(&path) {
                 Ok(()) => {}
@@ -2215,23 +2238,6 @@ impl Store {
         .collect()
     }
 
-    /// Folds each bounded window of `payload` into the archive in one
-    /// transaction, alongside the state and side tables.
-    ///
-    /// Only the chats the payload names are touched. A window that does not
-    /// join its stored range is kept as a range of its own: a refusal here
-    /// belongs to the fetch decision, not the store. Messages the reader
-    /// deleted are dropped last, and the ranges of the chats that held them
-    /// are rebuilt from the rows that remain, so a deletion inside a run
-    /// splits it rather than letting the window write claim the gap again.
-    #[allow(dead_code)]
-    fn ingest_payload(&mut self, payload: &Payload) -> Result<()> {
-        let transaction = self.conn.transaction()?;
-        ingest_payload_in(&transaction, &self.record_keys, &self.hmac_key, payload)?;
-        transaction.commit()?;
-        Ok(())
-    }
-
     /// Folds `pages` into the archive and then the bounded window `payload`,
     /// all in one transaction.
     ///
@@ -2242,6 +2248,7 @@ impl Store {
         &mut self,
         pages: &[(i64, Vec<CachedMessage>)],
         payload: &Payload,
+        written: &RowMemo,
     ) -> Result<()> {
         let transaction = self.conn.transaction()?;
         for (chat_id, rows) in pages {
@@ -2260,7 +2267,13 @@ impl Store {
                 &held,
             )?;
         }
-        ingest_payload_in(&transaction, &self.record_keys, &self.hmac_key, payload)?;
+        ingest_payload_in(
+            &transaction,
+            &self.record_keys,
+            &self.hmac_key,
+            payload,
+            written,
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -2504,6 +2517,7 @@ fn ingest_payload_in(
     keys: &dyn KeyProvider,
     hmac_key: &[u8; KEY_LEN],
     payload: &Payload,
+    written: &RowMemo,
 ) -> Result<()> {
     let state = State {
         account: payload.account.clone(),
@@ -2533,12 +2547,22 @@ fn ingest_payload_in(
             continue;
         };
         let reach = (first.id.min(last.id), first.id.max(last.id));
+        // Only the rows that moved are sealed; the reach stays the window's, so
+        // a lone arrival still joins the range the rest of the window sits in.
+        let moved: Vec<CachedMessage> = rows
+            .iter()
+            .filter(|row| written.get(&(*chat_id, row.id)) != Some(&fingerprint(row)))
+            .cloned()
+            .collect();
+        if moved.is_empty() {
+            continue;
+        }
         ingest_in(
             transaction,
             keys,
             hmac_key,
             *chat_id,
-            rows,
+            &moved,
             reach,
             held.get(chat_id).map_or(&[][..], Vec::as_slice),
         )?;
@@ -2599,6 +2623,36 @@ fn ingest_payload_in(
         params![META_STATE, state_envelope],
     )?;
     Ok(())
+}
+
+/// What a row says, as one number: equal rows have equal fingerprints.
+fn fingerprint(row: &CachedMessage) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hasher.write(&serde_json::to_vec(row).unwrap_or_default());
+    hasher.finish()
+}
+
+/// The fingerprints of every row `payload` holds.
+fn fingerprints(payload: &Payload) -> RowMemo {
+    let mut memo = RowMemo::new();
+    for (chat_id, rows) in &payload.peers {
+        for row in rows {
+            memo.insert((*chat_id, row.id), fingerprint(row));
+        }
+    }
+    memo
+}
+
+/// Moves the record of what was written to what `payload` just committed: the
+/// chats it names are replaced whole, and a removed chat or a deleted id is
+/// forgotten, so a row that comes back is written again.
+fn note_written(memo: &mut RowMemo, payload: &Payload) {
+    memo.retain(|(chat_id, id), _| {
+        !payload.peers.contains_key(chat_id)
+            && !payload.removed.contains(chat_id)
+            && !payload.deleted_messages.contains(id)
+    });
+    memo.extend(fingerprints(payload));
 }
 
 fn ingest_in(
@@ -4966,6 +5020,60 @@ mod tests {
             reopened.ranges(PEER).expect("ranges read"),
             vec![(10, 15), (20, 25)]
         );
+    }
+
+    /// The sealed bytes of every stored row of `PEER`, by message id.
+    fn sealed_rows(file: &HistoryFile) -> BTreeMap<i64, Vec<u8>> {
+        let store = open_store(&file.path, &file.keys()).expect("the archive opens");
+        let mut statement = store
+            .conn
+            .prepare("SELECT message_id, sealed FROM messages ORDER BY message_id")
+            .expect("the statement prepares");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("the rows read")
+            .map(|row| row.expect("a row reads"))
+            .collect()
+    }
+
+    /// One arrival costs one record: a row the save did not change is not
+    /// sealed again, on the first save of a launch as much as on a later one.
+    #[test]
+    fn one_arrival_does_not_rewrite_the_rows_it_did_not_touch() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        assert!(cache.merge(PEER, &page(1..=5), LATEST));
+        file.save(&cache, None);
+        let before = sealed_rows(&file);
+
+        assert!(cache.merge(PEER, &page(1..=6), LATEST));
+        file.save(&cache, None);
+        let after = sealed_rows(&file);
+        assert_eq!(after.len(), 6, "the arrival was written");
+        for id in 1..=5 {
+            assert_eq!(after[&id], before[&id], "row {id} was sealed again");
+        }
+        assert_eq!(file.ranges(PEER), vec![(1, 6)], "and it joined the range");
+
+        // A launch starts from what the archive holds, not from nothing.
+        let reopened = HistoryFile::for_test(file.path.clone());
+        let mut loaded = reopened.load().cache;
+        assert!(loaded.merge(PEER, &page(1..=7), LATEST));
+        reopened.save(&loaded, None);
+        let later = sealed_rows(&reopened);
+        for id in 1..=6 {
+            assert_eq!(later[&id], after[&id], "row {id} was sealed again");
+        }
+        assert_eq!(later.len(), 7);
+
+        // An edit moves its own row and no other.
+        assert!(loaded.apply_update(&edit(PEER, 3, "edited")));
+        reopened.save(&loaded, None);
+        let edited = sealed_rows(&reopened);
+        assert_ne!(edited[&3], later[&3], "the edited row was written");
+        for id in [1, 2, 4, 5, 6, 7] {
+            assert_eq!(edited[&id], later[&id], "row {id} was sealed again");
+        }
     }
 
     /// A restart reads the newest recorded stretch only: rows either side of a
