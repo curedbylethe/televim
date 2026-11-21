@@ -6343,7 +6343,9 @@ fn apply_jumped(
 
             // Cached whether or not the window takes it: the page is what the
             // wire said about that stretch either way, and the merge decides
-            // for itself whether it joins what is cached.
+            // for itself whether it joins what is cached. Archived whole, as a
+            // paging page is, so a page disjoint from the cached run is kept.
+            state.remember_archived_page(chat_id, &page.messages);
             state.remember_page(chat_id, &page.messages, PageKind::Around);
             // Only a page the window took is worth telling the cursor
             // about: a jump the reader abandoned leaves it describing
@@ -10430,6 +10432,44 @@ mod tests {
                 .and_then(|cursor| cursor.oldest_loaded_id()),
             Some(16),
             "the cursor counts from the window that replaced the old one"
+        );
+    }
+
+    /// A page around a message the reader jumped to is archived even when the
+    /// cache refuses it for being disjoint from its run: what was downloaded
+    /// and viewed is stored, and still there after a restart.
+    #[tokio::test]
+    async fn a_disjoint_jump_page_is_archived() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_unread_out_of_reach(2);
+        ask_to_jump(&mut app);
+        let jump = app
+            .pending_jump()
+            .expect("the reader asked to be taken to the unread messages");
+        let mut state = caching_state(&path);
+        state.remember_page(
+            CHAT,
+            &messages(CHAT, 301..=400),
+            PageKind::Latest { whole: false },
+        );
+        persist(&mut state).await;
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                result: Ok(history_page(messages(CHAT, 16..=20))),
+            },
+        );
+        persist(&mut state).await;
+
+        assert_eq!(
+            HistoryFile::for_test(path).ranges(CHAT),
+            vec![(16, 20), (301, 400)],
+            "the jump page is stored beside the run it does not join"
         );
     }
 
