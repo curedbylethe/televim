@@ -74,7 +74,9 @@ use tui::state::playback::NowPlaying;
 use crate::accounts::{self, AccountSlot, SessionTarget, SlotPaths, SlotStore};
 use crate::config::{Config, DEFAULT_HISTORY_LIMIT_BYTES, ReadReceiptMode};
 use crate::draft_store::DraftFile;
-use crate::history_store::{HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind};
+use crate::history_store::{
+    ArchivedPage, HISTORY_CACHE_PEERS, HistoryCache, HistoryFile, HistoryTag, PageKind,
+};
 use crate::media_cache::{ContentHasher, Key, MediaCache};
 use crate::notify::{DesktopNotifier, Notice, Notifier, body_line};
 use crate::outbox_store::{OutboxEntry, OutboxFile, restore_outbox};
@@ -357,6 +359,10 @@ pub enum Event {
         /// fetch ran.
         cursor: HistoryCursor,
 
+        /// The feed generation the jump was asked under, as for
+        /// [`Event::History`]: an answer from an older one is dropped.
+        generation: u64,
+
         /// The page, oldest first, or why there is not one.
         result: Result<HistoryPage, ProtoError>,
     },
@@ -423,7 +429,7 @@ pub enum Event {
     /// account whose write failed, so a cache that has since changed hands
     /// can refuse pages it never owned.
     HistoryWriteFailed {
-        pages: Vec<(i64, Vec<Message>)>,
+        pages: Vec<ArchivedPage>,
         tag: HistoryTag,
     },
 
@@ -1685,11 +1691,13 @@ impl State {
     /// history write; the bounded cache may keep only part of it, and an older
     /// page can fall out of it entirely. The write is marked here so a page
     /// that changed no window still reaches the file.
-    fn remember_archived_page(&mut self, peer: i64, page: &[Message]) {
+    fn remember_archived_page(&mut self, peer: i64, page: &[Message], anchor: Option<i64>) {
         if page.is_empty() {
             return;
         }
-        self.cached.pending_pages.push((peer, page.to_vec()));
+        self.cached
+            .pending_pages
+            .push((peer, page.to_vec(), anchor));
         self.cached.dirty = true;
     }
 
@@ -2129,7 +2137,7 @@ struct CachedHistory {
     /// Fetched pages waiting for the next write, each with the chat it came
     /// from. A page is archived with its own extent before the bounded window
     /// can drop it, using the same coalescing as the window snapshot.
-    pending_pages: Vec<(i64, Vec<Message>)>,
+    pending_pages: Vec<ArchivedPage>,
 
     /// When the last write was started, for [`HISTORY_CACHE_WRITE_INTERVAL`].
     /// `None` until the first, which therefore starts at once.
@@ -2145,7 +2153,7 @@ struct CachedHistory {
 
 /// The blocking-pool task behind [`CachedHistory::write`]: the write's outcome
 /// and, when it failed, the pages it took so the caller can queue them again.
-type HistoryWrite = tokio::task::JoinHandle<(Result<(), String>, Vec<(i64, Vec<Message>)>)>;
+type HistoryWrite = tokio::task::JoinHandle<(Result<(), String>, Vec<ArchivedPage>)>;
 
 /// The least time between two starts of a history write. Changes inside it
 /// wait, marked, for the first pass past it.
@@ -3491,7 +3499,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             // same reason: the reader holding the key must not turn into a
             // request per pass.
             state.history.jump = Some(jump);
-            request_jump(&client, jump, cursor, tx);
+            request_jump(&client, jump, cursor, state.feed_generation, tx);
         }
     }
 }
@@ -3977,6 +3985,7 @@ fn request_jump(
     client: &Arc<ProtoClient>,
     jump: Jump,
     cursor: HistoryCursor,
+    generation: u64,
     tx: &UnboundedSender<AppEvent>,
 ) {
     let client = Arc::clone(client);
@@ -3999,6 +4008,7 @@ fn request_jump(
         let _ = tx.send(AppEvent::Net(Event::Jumped {
             jump,
             cursor,
+            generation,
             result,
         }));
     });
@@ -5444,8 +5454,9 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
         Event::Jumped {
             jump,
             cursor,
+            generation,
             result,
-        } => apply_jumped(app, state, jump, cursor, result),
+        } => apply_jumped(app, state, jump, cursor, generation, result),
 
         Event::StickerSettled {
             chat_id,
@@ -6368,6 +6379,7 @@ fn apply_jumped(
     state: &mut State,
     jump: Jump,
     mut cursor: HistoryCursor,
+    generation: u64,
     result: Result<HistoryPage, ProtoError>,
 ) {
     // However it ended, the jump is over — unless a later one has taken
@@ -6375,6 +6387,14 @@ fn apply_jumped(
     // be asked for again.
     if state.history.jump == Some(jump) {
         state.history.jump = None;
+    }
+
+    // An answer from a client whose feed has since ended may be for another
+    // account's conversation with the same peer id, and would be archived under
+    // this one. The marker is cleared above first, so a jump still wanted is
+    // asked again under the new generation instead of waiting for this answer.
+    if generation != state.feed_generation {
+        return;
     }
 
     // A page was fetched for one conversation, and the reader can open
@@ -6395,7 +6415,7 @@ fn apply_jumped(
             // wire said about that stretch either way, and the merge decides
             // for itself whether it joins what is cached. Archived whole, as a
             // paging page is, so a page disjoint from the cached run is kept.
-            state.remember_archived_page(chat_id, &page.messages);
+            state.remember_archived_page(chat_id, &page.messages, None);
             state.remember_page(chat_id, &page.messages, PageKind::Around);
             // Only a page the window took is worth telling the cursor
             // about: a jump the reader abandoned leaves it describing
@@ -6447,7 +6467,7 @@ fn apply_history(
 
     if state.history.cursor.map(|open| open.peer_id()) != Some(cursor.peer_id()) {
         if let Ok(page) = &result {
-            state.remember_archived_page(cursor.peer_id(), &page.messages);
+            state.remember_archived_page(cursor.peer_id(), &page.messages, anchor);
         }
         return;
     }
@@ -6464,7 +6484,7 @@ fn apply_history(
 
             // Archive the page before the bounded window can drain it: an
             // older page may fall out of the cache entirely on this very fold.
-            state.remember_archived_page(chat_id, &page.messages);
+            state.remember_archived_page(chat_id, &page.messages, anchor);
             if let Some(kind) = page_kind(direction, anchor, cursor, rows) {
                 state.remember_page(chat_id, &page.messages, kind);
             }
@@ -6611,7 +6631,10 @@ fn finish_archived_older(
                 state.cached.archive_miss = Some(key);
             }
         }
-        Err(error) => tracing::warn!(%error, "a history page could not be read"),
+        Err(error) => {
+            tracing::warn!(%error, "a history page could not be read");
+            state.cached.archive_miss = Some(key);
+        }
     }
 }
 
@@ -8826,6 +8849,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
@@ -8875,6 +8899,7 @@ mod tests {
             Event::Jumped {
                 jump: replied,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
@@ -8907,6 +8932,7 @@ mod tests {
             Event::Jumped {
                 jump: back,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 1..=8))),
             },
         );
@@ -8977,6 +9003,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
@@ -9064,6 +9091,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(page)),
             },
         );
@@ -9103,6 +9131,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
             },
         );
@@ -10549,6 +10578,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
@@ -10605,6 +10635,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
@@ -10637,6 +10668,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Err(ProtoError::Framework(FrameworkError::UnknownPeer(CHAT))),
             },
         );
@@ -10686,6 +10718,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
@@ -10724,6 +10757,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
@@ -11153,7 +11187,7 @@ mod tests {
         persist(&mut state).await;
         assert_eq!(read_row(), row, "unchanged edit is not re-sealed");
         assert_eq!(read_chips(), chips, "unchanged chips are not re-sealed");
-        state.remember_archived_page(CHAT, &messages(CHAT, 1..=3));
+        state.remember_archived_page(CHAT, &messages(CHAT, 1..=3), None);
         persist(&mut state).await;
         let deleted: i64 = conn
             .query_row(
@@ -11847,6 +11881,60 @@ mod tests {
         assert_eq!(app.conversation.conversation.window.len(), 1);
     }
 
+    /// A read that failed is a miss like an empty one: the pass yields to the
+    /// wire instead of scheduling the same failing read every tick.
+    #[tokio::test]
+    async fn a_failed_archive_read_yields_to_the_wire() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut app = app_with_a_conversation(CHAT, 1);
+        let mut state = caching_state(&dir.path().join("history.json"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(schedule_archived_older(&mut app, &mut state, &tx));
+        let key = state.cached.archive_pending.expect("the read is pending");
+        let _ = rx.recv().await;
+        apply(
+            &mut app,
+            &mut state,
+            Event::ArchivedPage {
+                key,
+                result: Err("the archive is locked".to_owned()),
+            },
+        );
+        assert!(
+            !schedule_archived_older(&mut app, &mut state, &tx),
+            "the failed read is not scheduled again"
+        );
+    }
+
+    /// A jump answered after the feed moved on belongs to a client that has
+    /// ended, and may be for another account's conversation with the same peer
+    /// id: it is archived nowhere.
+    #[test]
+    fn a_jump_answer_from_an_old_feed_generation_is_not_archived() {
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = State {
+            history: opened(CHAT),
+            feed_generation: 1,
+            ..State::default()
+        };
+        let jump = Jump {
+            peer_id: CHAT,
+            target_id: 19,
+            kind: JumpKind::Reply,
+        };
+        apply(
+            &mut app,
+            &mut state,
+            Event::Jumped {
+                jump,
+                cursor: HistoryCursor::new(CHAT),
+                generation: 0,
+                result: Ok(history_page(messages(CHAT, 16..=20))),
+            },
+        );
+        assert!(state.cached.pending_pages.is_empty());
+    }
+
     /// An older page joins the cache through the anchor it was counted from,
     /// which the event carries because the cursor beside it has moved on.
     #[test]
@@ -11872,6 +11960,11 @@ mod tests {
             messages(CHAT, 51..=100),
         );
         assert_eq!(cached_ids(&state), (51..=200).collect::<Vec<_>>());
+        assert_eq!(
+            state.cached.pending_pages.last().map(|page| page.2),
+            Some(Some(101)),
+            "the archive is handed the anchor the page was counted from"
+        );
 
         page_arrives(
             &mut app,
@@ -12100,7 +12193,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::HistoryWriteFailed {
-                pages: vec![(CHAT, messages(CHAT, 1..=3))],
+                pages: vec![(CHAT, messages(CHAT, 1..=3), None)],
                 tag: HistoryTag {
                     account_id: Some(1),
                     phone: Some("A".to_owned()),
@@ -12118,7 +12211,7 @@ mod tests {
             &mut app,
             &mut state,
             Event::HistoryWriteFailed {
-                pages: vec![(CHAT, messages(CHAT, 1..=3))],
+                pages: vec![(CHAT, messages(CHAT, 1..=3), None)],
                 tag: HistoryTag {
                     account_id: Some(2),
                     phone: Some("B".to_owned()),
@@ -15637,6 +15730,7 @@ mod tests {
             Event::Jumped {
                 jump,
                 cursor: HistoryCursor::new(CHAT),
+                generation: 0,
                 result: Ok(history_page(messages(CHAT, 16..=20))),
             },
         );
