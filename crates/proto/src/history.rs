@@ -124,7 +124,7 @@ impl HistoryCursor {
     /// Only the fetches move a cursor, so this exists whenever they do — and
     /// whenever the tests that pin the rule do.
     #[cfg(any(feature = "live", test))]
-    fn note_older(&mut self, raw_count: usize, oldest_id: Option<i64>, requested: usize) {
+    pub fn note_older(&mut self, raw_count: usize, oldest_id: Option<i64>, requested: usize) {
         if let Some(oldest) = oldest_id {
             self.oldest_loaded_id = Some(oldest);
         }

@@ -39,7 +39,7 @@ use domain::history::{PINNED_IDS, REACTION_ENTRIES};
 use domain::message::{MediaKind, Message, MessageStatus, Reaction, ReactionCount};
 use domain::updates::UpdateEvent;
 use hmac::{Hmac, Mac};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use telegram_framework::{FileKey, KeyProvider, SessionError, sealed};
@@ -200,6 +200,21 @@ pub(crate) struct HistoryCache {
     /// write can drop their rows. A peer with rows in the window is never in
     /// this set: a deleted conversation that gets a new message is alive again.
     removed: BTreeSet<i64>,
+
+    /// Identifiers of messages the reader deleted, carried to the next save.
+    ///
+    /// A deletion names no chat, but private message identifiers are one
+    /// sequence, so these are applied to every chat at save time. Without them
+    /// a save would upsert the surviving window over a row the reader had
+    /// removed, and the message would come back on the next launch.
+    deleted_messages: BTreeSet<i64>,
+
+    /// Identifiers of messages edited in each chat, carried to the next save.
+    ///
+    /// Their new words are in the window rows; an edit of a row the window no
+    /// longer holds is reported but deliberately left as stored, because the
+    /// cache cannot supply a value to seal in its place.
+    updated_messages: BTreeMap<i64, BTreeSet<i64>>,
 }
 
 /// Two caches are equal when they would write the same file: the feed marks
@@ -656,6 +671,7 @@ impl HistoryCache {
             return false;
         }
         text.clone_into(&mut row.text);
+        self.updated_messages.entry(peer).or_default().insert(id);
         true
     }
 
@@ -668,6 +684,10 @@ impl HistoryCache {
     fn delete(&mut self, ids: &[i64]) -> bool {
         let FeedMarks { current, seen } = &mut self.feed;
         let mut changed = false;
+        // Carry even ids the window no longer holds: a row outside the window
+        // still has to be dropped from the archive at the next save. The caller
+        // marks the cache dirty for a deletion even when no cached row went.
+        self.deleted_messages.extend(ids.iter().copied());
         self.peers.retain(|peer, rows| {
             let before = rows.len();
             rows.retain(|row| !ids.contains(&row.id));
@@ -742,6 +762,12 @@ struct Payload {
     /// so a removal has to travel with the window.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     removed: BTreeSet<i64>,
+    /// Messages the reader deleted, even ones the window no longer holds.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    deleted_messages: BTreeSet<i64>,
+    /// Messages edited in each chat, whose new words are in `peers`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    updated_messages: BTreeMap<i64, BTreeSet<i64>>,
 }
 
 /// One conversation of the cached chat list: what its row draws.
@@ -1036,6 +1062,10 @@ impl HistoryFile {
 
     /// Reads the stored cache and the account tag it was saved under.
     ///
+    /// Only the newest [`HISTORY_CACHE_DEPTH`] messages of each chat are read
+    /// out of SQL — the same bounded windows the cache holds — not the whole
+    /// archive. The rest stays sealed on disk until a range read asks for it.
+    ///
     /// A missing database is an empty cache, not an error; a database that
     /// cannot be opened, a record that is not sealed, and any record whose
     /// plaintext does not name the address it was filed under are warned about
@@ -1065,10 +1095,12 @@ impl HistoryFile {
         }
     }
 
-    /// The whole archive as one payload, or `None` when it does not exist yet.
+    /// The bounded windows of the archive as one payload, or `None` when it
+    /// does not exist yet.
     ///
-    /// The non-message state is one sealed blob in `meta`; every message is a
-    /// record that is decoded and address-checked on the way out.
+    /// The non-message state is one sealed blob in `meta`; the newest
+    /// [`HISTORY_CACHE_DEPTH`] messages of each chat are read out of SQL and
+    /// decoded and address-checked on the way out. Older rows stay on disk.
     fn read_payload(&self) -> Result<Option<Payload>> {
         if !self.path.is_file() {
             return Ok(None);
@@ -1077,7 +1109,7 @@ impl HistoryFile {
         let store = open_store(&self.path, &keys)?;
         let state = store.state()?;
         let mut peers: BTreeMap<i64, Vec<CachedMessage>> = BTreeMap::new();
-        for (chat_id, row) in store.every_record()? {
+        for (chat_id, row) in store.bounded_records(HISTORY_CACHE_DEPTH)? {
             peers.entry(chat_id).or_default().push(row);
         }
         Ok(Some(Payload {
@@ -1088,6 +1120,8 @@ impl HistoryFile {
             aliases: state.aliases,
             chips: store.chips()?,
             removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::new(),
         }))
     }
 
@@ -1118,11 +1152,11 @@ impl HistoryFile {
 
     /// The messages of one chat, read from its recorded ranges on demand.
     ///
-    /// Unlike [`HistoryFile::load`], which assembles the whole file, this opens
-    /// the archive, asks the ledger which stretches the chat holds and reads
-    /// only those rows, decoding and unsealing each on the way out. A missing
-    /// or unreadable archive is an empty answer, the load discipline.
-    #[allow(dead_code)]
+    /// Unlike [`HistoryFile::load`], which reads only the bounded windows, this
+    /// opens the archive, asks the ledger which stretches the chat holds and
+    /// reads those rows, decoding and unsealing each on the way out. A missing
+    /// or unreadable archive is an empty answer, the load discipline. The
+    /// offline older-page path takes the next page of these into the window.
     pub(crate) fn get(&self, peer: i64) -> Vec<Message> {
         if !self.path.is_file() {
             return Vec::new();
@@ -1241,6 +1275,8 @@ impl HistoryFile {
                 .filter(|peer| !cache.peers.contains_key(*peer))
                 .copied()
                 .collect(),
+            deleted_messages: cache.deleted_messages.clone(),
+            updated_messages: cache.updated_messages.clone(),
         };
         serde_json::to_vec(&payload)
             .inspect_err(|error| tracing::warn!(%error, "history could not be serialised"))
@@ -1284,6 +1320,41 @@ impl HistoryFile {
         let (_guard, keys) = self.locked_keys();
         let mut store = open_store(&self.path, &keys)?;
         store.ingest_payload(payload)
+    }
+
+    /// Writes fetched pages to the archive, each in its own transaction with
+    /// its own extent, before the window can drain them.
+    ///
+    /// A page is not a window: it may be older than the cache holds, or land
+    /// while the newest end moves on, and it must keep the stretch it was
+    /// fetched from instead of being rebuilt from whatever rows survive in
+    /// memory. Pages that touch nothing stored are kept under their own range
+    /// by [`Store::ingest_page`]; whether to show such a page is the fetch's
+    /// decision. Poison and the provider swap are handled exactly as for a
+    /// window write.
+    pub(crate) fn ingest_pages(&self, pages: &[(i64, Vec<Message>)]) -> Result<()> {
+        if self.poisoned.load(Ordering::Relaxed) {
+            return Err(anyhow!("the history archive could not be read"));
+        }
+        if pages.is_empty() {
+            return Ok(());
+        }
+        let (_guard, keys) = self.locked_keys();
+        let mut store = open_store(&self.path, &keys)?;
+        for (chat_id, messages) in pages {
+            let mut rows: Vec<CachedMessage> = messages
+                .iter()
+                .filter(|message| message.id > 0 && message.chat_id == *chat_id)
+                .map(CachedMessage::from_message)
+                .collect();
+            rows.sort_by_key(|row| row.id);
+            let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+                continue;
+            };
+            let reach = (first.id.min(last.id), first.id.max(last.id));
+            store.ingest_page(*chat_id, &rows, reach)?;
+        }
+        Ok(())
     }
 
     /// Removes the database and its WAL, shared-memory, journal and salt
@@ -1927,8 +1998,51 @@ impl Store {
         .collect()
     }
 
+    /// The newest `depth` records of each chat, with the chat id recovered from
+    /// the sealed plaintext (the column holds only the keyed hash).
+    ///
+    /// The bound is applied in SQL per chat, so a launch never decrypts the
+    /// whole archive just to fill its windows. Oldest rows of a chat that has
+    /// more than `depth` are not read at all.
+    fn bounded_records(&self, depth: usize) -> Result<Vec<(i64, CachedMessage)>> {
+        let limit = i64::try_from(depth).map_err(|_| anyhow!("the window depth is too large"))?;
+        let mut chats = self
+            .conn
+            .prepare("SELECT DISTINCT chat_key FROM messages")?;
+        let chat_keys: Vec<Vec<u8>> = chats
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut out = Vec::new();
+        for chat_key in chat_keys {
+            let mut statement = self.conn.prepare(
+                "SELECT message_id, sealed FROM messages WHERE chat_key = ?1
+                 ORDER BY message_id DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![chat_key, limit], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?;
+            let mut window = Vec::new();
+            for row in rows {
+                let (message_id, envelope) = row?;
+                let record = decode_record(
+                    &envelope,
+                    &self.record_keys,
+                    &self.hmac_key,
+                    &chat_key,
+                    message_id,
+                )?;
+                window.push((record.chat_id, record.row));
+            }
+            // SQL read newest-first to bound with `LIMIT`; the cache is oldest-first.
+            window.reverse();
+            out.extend(window);
+        }
+        Ok(out)
+    }
+
     /// Every record of every chat, with the chat id recovered from the sealed
     /// plaintext (the column holds only the keyed hash).
+    #[cfg(test)]
     fn every_record(&self) -> Result<Vec<(i64, CachedMessage)>> {
         let mut statement = self.conn.prepare(
             "SELECT chat_key, message_id, sealed FROM messages ORDER BY chat_key, message_id",
@@ -1957,9 +2071,12 @@ impl Store {
     /// Folds each bounded window of `payload` into the archive in one
     /// transaction, alongside the state and side tables.
     ///
-    /// Only the chats the payload names are touched. A chat whose window does
-    /// not join its stored range would leave a hole, so its rows and ledger
-    /// are left as they were; every named chat with no stored rows is accepted.
+    /// Only the chats the payload names are touched. A window that does not
+    /// join its stored range is kept as a range of its own: a refusal here
+    /// belongs to the fetch decision, not the store. Messages the reader
+    /// deleted are dropped last, and the ranges of the chats that held them
+    /// are rebuilt from the rows that remain, so a deletion inside a run
+    /// splits it rather than letting the window write claim the gap again.
     fn ingest_payload(&mut self, payload: &Payload) -> Result<()> {
         let state = State {
             account: payload.account.clone(),
@@ -1991,7 +2108,7 @@ impl Store {
                 continue;
             };
             let reach = (first.id.min(last.id), first.id.max(last.id));
-            let written = ingest_in(
+            ingest_in(
                 &transaction,
                 &self.record_keys,
                 &self.hmac_key,
@@ -2000,12 +2117,22 @@ impl Store {
                 reach,
                 held.get(chat_id).map_or(&[][..], Vec::as_slice),
             )?;
-            if !written {
-                tracing::warn!(
-                    chat_id,
-                    "history save refused: the window does not join the stored range"
-                );
+        }
+        // Re-seal edits from the window's current words. An edit reported for a
+        // row the window no longer holds is deliberately left as stored: there
+        // is no new value here to seal in its place.
+        for (chat_id, edited) in &payload.updated_messages {
+            let Some(rows) = payload.peers.get(chat_id) else {
+                continue;
+            };
+            for row in rows.iter().filter(|row| edited.contains(&row.id)) {
+                let (key, envelope) =
+                    seal_record(&self.record_keys, &self.hmac_key, *chat_id, row)?;
+                insert_record(&transaction, &key, row.id, &envelope)?;
             }
+        }
+        if !payload.deleted_messages.is_empty() {
+            delete_messages(&transaction, &payload.deleted_messages)?;
         }
         for (chat_id, chips) in &payload.chips {
             let chat_key = keyed_chat(&self.hmac_key, *chat_id);
@@ -2117,10 +2244,11 @@ impl Store {
     ///
     /// `reach` is the page's own bounds as the fetch knows them: for an
     /// anchored page the anchor is one end, the proof that the page joins the
-    /// run without sharing a row with it. Ids alone would only be a guess, so
-    /// a page whose reach touches no recorded range — with any range recorded —
-    /// is refused and changes nothing. A page joining two ranges bridges them
-    /// into one; nothing already stored is dropped, so a range only widens.
+    /// run without sharing a row with it. A page that touches no recorded
+    /// range is kept under its own range rather than lost — whether the gap is
+    /// safe to show is the fetch decision's, not the store's. A page joining
+    /// two ranges bridges them into one; nothing already stored is dropped, so
+    /// a range only widens.
     ///
     /// Returns whether anything was written.
     #[allow(dead_code)]
@@ -2146,6 +2274,102 @@ impl Store {
     }
 }
 
+/// Drops the named messages wherever they are stored and rebuilds the ranges
+/// of the chats that held them.
+///
+/// A private message id belongs to one conversation, so a deletion that names
+/// no chat can still be applied by id alone. A deleted id splits the stretch
+/// that contained it; a stretch left with no rows disappears. Rebuilding from
+/// the rows that remain (rather than trusting the old ends) is what keeps a
+/// hole in the middle from being claimed as covered.
+fn delete_messages(transaction: &rusqlite::Transaction<'_>, deleted: &BTreeSet<i64>) -> Result<()> {
+    // The set holds every id this session has deleted, and SQLite has a cap on
+    // statement parameters: the ids go in in chunks so a long session cannot
+    // make the save fail.
+    const CHUNK: usize = 400;
+    let ids: Vec<i64> = deleted.iter().copied().collect();
+    let mut affected: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for chunk in ids.chunks(CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let keys_sql =
+            format!("SELECT DISTINCT chat_key FROM messages WHERE message_id IN ({placeholders})");
+        let mut statement = transaction.prepare(&keys_sql)?;
+        let keys = statement
+            .query_map(params_from_iter(chunk.iter()), |row| row.get(0))?
+            .collect::<std::result::Result<Vec<Vec<u8>>, _>>()?;
+        affected.extend(keys);
+    }
+
+    let mut ledgers = Vec::new();
+    for chat_key in affected {
+        let mut statement = transaction
+            .prepare("SELECT lo_id, hi_id FROM ranges WHERE chat_key = ?1 ORDER BY lo_id")?;
+        let ranges: Vec<(i64, i64)> = statement
+            .query_map(params![chat_key], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        ledgers.push((chat_key, ranges));
+    }
+
+    for chunk in ids.chunks(CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let delete_sql = format!("DELETE FROM messages WHERE message_id IN ({placeholders})");
+        transaction.execute(&delete_sql, params_from_iter(chunk.iter()))?;
+    }
+
+    for (chat_key, ranges) in ledgers {
+        let rebuilt = ranges_after_delete(transaction, &chat_key, &ranges, deleted)?;
+        transaction.execute("DELETE FROM ranges WHERE chat_key = ?1", params![chat_key])?;
+        for (lo, hi) in rebuilt {
+            transaction.execute(
+                "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)",
+                params![chat_key, lo, hi],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// What the recorded stretches of one chat become once `deleted` ids are gone.
+fn ranges_after_delete(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_key: &[u8],
+    held: &[(i64, i64)],
+    deleted: &BTreeSet<i64>,
+) -> Result<Vec<(i64, i64)>> {
+    let mut out = Vec::new();
+    for &(lo, hi) in held {
+        let mut spans = vec![(lo, hi)];
+        for &id in deleted.iter().filter(|id| (lo..=hi).contains(id)) {
+            let mut split = Vec::new();
+            for (start, end) in spans {
+                if start <= id && id <= end {
+                    if start < id {
+                        split.push((start, id.saturating_sub(1)));
+                    }
+                    if id < end {
+                        split.push((id.saturating_add(1), end));
+                    }
+                } else {
+                    split.push((start, end));
+                }
+            }
+            spans = split;
+        }
+        for (start, end) in spans {
+            let has_row: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages
+                  WHERE chat_key = ?1 AND message_id BETWEEN ?2 AND ?3)",
+                params![chat_key, start, end],
+                |row| row.get(0),
+            )?;
+            if has_row {
+                out.push((start, end));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The transaction half of [`Store::ingest_page`], shared with a save of a
 /// whole window. `held` is the ledger as it stood before the write.
 fn ingest_in(
@@ -2168,7 +2392,10 @@ fn ingest_in(
         .copied()
         .collect();
     if !held.is_empty() && joined.is_empty() {
-        return Ok(false);
+        // A page that touches nothing stored is still what the wire returned:
+        // keep it under its own range rather than losing what was downloaded.
+        // Whether the gap is safe to show is the fetch decision's, not ours.
+        tracing::warn!(chat_id, "history page stored as a disjoint range");
     }
 
     for row in rows {
@@ -3800,6 +4027,8 @@ mod tests {
             aliases: BTreeMap::new(),
             chips: BTreeMap::new(),
             removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::new(),
         };
         seed(
             &file,
@@ -3809,6 +4038,43 @@ mod tests {
         let kept = ids(&file.load().cache.get(PEER));
         assert_eq!(kept.len(), HISTORY_CACHE_DEPTH);
         assert_eq!(kept.first(), Some(&2));
+    }
+
+    /// A launch reads only the newest window of each chat, not the whole
+    /// archive. Every row stays on disk and is still reachable by a range read.
+    #[test]
+    fn load_reads_only_the_newest_window_of_each_chat() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let (_dir, file, mut store) = scratch_store("history.json");
+        for peer in [PEER, PEER + 1] {
+            let ids: Vec<i64> = (1..=depth * 3 + 7).collect();
+            let rows: Vec<CachedMessage> = ids
+                .iter()
+                .map(|id| CachedMessage::from_message(&message(*id, peer, "row")))
+                .collect();
+            assert!(
+                store
+                    .ingest_page(peer, &rows, (1, depth * 3 + 7))
+                    .expect("the rows land")
+            );
+        }
+        drop(store);
+
+        let loaded = file.load().cache;
+        let expected: Vec<i64> = ((depth * 2 + 8)..=depth * 3 + 7).collect();
+        for peer in [PEER, PEER + 1] {
+            assert_eq!(
+                ids(&loaded.get(peer)),
+                expected,
+                "only the newest window loads"
+            );
+        }
+
+        // The rows the load did not read are still in the archive.
+        assert_eq!(
+            ids(&file.get(PEER)).len(),
+            usize::try_from(depth * 3 + 7).expect("the count fits")
+        );
     }
 
     // ---- Worst case: control-character text at the byte budget -------------
@@ -4155,7 +4421,7 @@ mod tests {
     }
 
     #[test]
-    fn a_page_that_leaves_a_gap_is_refused_and_the_rows_are_unchanged() {
+    fn a_page_that_leaves_a_gap_is_kept_as_its_own_range() {
         let (_dir, _file, mut store) = scratch_store("history.json");
         assert!(
             store
@@ -4163,16 +4429,21 @@ mod tests {
                 .expect("first page")
         );
         let before_rows = store.all_records(PEER).expect("rows read");
-        let before_ranges = store.ranges(PEER).expect("ranges read");
 
         assert!(
-            !store
+            store
                 .ingest_page(PEER, &rows(20..=25), (20, 25))
-                .expect("the gap makes this a clean refusal"),
-            "a page whose reach touches no stored range cannot be shown to join"
+                .expect("a disjoint page is stored, not refused"),
+            "a page whose reach touches no stored range is still kept"
         );
-        assert_eq!(store.all_records(PEER).expect("rows read"), before_rows);
-        assert_eq!(store.ranges(PEER).expect("ranges read"), before_ranges);
+        let mut expected = before_rows;
+        expected.extend(rows(20..=25));
+        assert_eq!(store.all_records(PEER).expect("rows read"), expected);
+        assert_eq!(
+            store.ranges(PEER).expect("ranges read"),
+            vec![(10, 15), (20, 25)],
+            "the gap is recorded as a second stretch"
+        );
     }
 
     #[test]
@@ -4325,22 +4596,27 @@ mod tests {
     }
 
     #[test]
-    fn a_save_that_would_leave_a_hole_is_refused() {
+    fn a_disjoint_window_is_kept_as_its_own_range_on_save() {
         let (_dir, file) = scratch("history.json");
         let mut cache = HistoryCache::default();
         assert!(cache.merge(PEER, &page(10..=15), LATEST));
         file.save(&cache, None);
         let store = open_store(&file.path, &file.keys()).expect("the archive opens");
         let before_rows = store.all_records(PEER).expect("rows read");
-        let before_ranges = store.ranges(PEER).expect("ranges read");
+        drop(store);
 
         let mut disjoint = HistoryCache::default();
         assert!(disjoint.merge(PEER, &page(20..=25), LATEST));
         file.save(&disjoint, None);
 
         let reopened = open_store(&file.path, &file.keys()).expect("it reopens");
-        assert_eq!(reopened.all_records(PEER).expect("rows read"), before_rows);
-        assert_eq!(reopened.ranges(PEER).expect("ranges read"), before_ranges);
+        let mut expected = before_rows;
+        expected.extend(rows(20..=25));
+        assert_eq!(reopened.all_records(PEER).expect("rows read"), expected);
+        assert_eq!(
+            reopened.ranges(PEER).expect("ranges read"),
+            vec![(10, 15), (20, 25)]
+        );
     }
 
     #[test]
@@ -4362,6 +4638,158 @@ mod tests {
         let loaded = file.load().cache;
         assert!(loaded.get(PEER).is_empty());
         assert_eq!(loaded.get(PEER + 1).len(), 3);
+    }
+
+    /// A deletion inside the window is applied to the stored row and the run is
+    /// split, not left claiming the deleted id.
+    #[test]
+    fn a_deleted_message_in_the_window_stays_gone_after_a_reopen() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(
+            PEER,
+            &(1..=depth)
+                .map(|id| message(id, PEER, "row"))
+                .collect::<Vec<_>>(),
+        );
+        file.save(&cache, None);
+
+        assert!(cache.delete(&[depth / 2]));
+        file.save(&cache, None);
+
+        let expected: Vec<i64> = (1..=depth).filter(|id| *id != depth / 2).collect();
+        assert_eq!(ids(&file.get(PEER)), expected, "the row stays deleted");
+        assert_eq!(
+            file.ranges(PEER),
+            vec![(1, depth / 2 - 1), (depth / 2 + 1, depth)],
+            "the hole splits the run"
+        );
+        assert_eq!(ids(&file.load().cache.get(PEER)), expected);
+    }
+
+    /// A row the window no longer holds can still be deleted: the id travels
+    /// with the save and the surviving range is rebuilt from the rows left.
+    #[test]
+    fn a_deleted_message_past_the_window_stays_gone_after_a_reopen() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let (_dir, file) = scratch("history.json");
+        let rows: Vec<CachedMessage> = (1..=depth + 5)
+            .map(|id| CachedMessage::from_message(&message(id, PEER, "row")))
+            .collect();
+        seed(
+            &file,
+            serde_json::to_vec(&Payload {
+                account: None,
+                account_id: None,
+                peers: BTreeMap::from([(PEER, rows)]),
+                chats: Vec::new(),
+                aliases: BTreeMap::new(),
+                chips: BTreeMap::new(),
+                removed: BTreeSet::new(),
+                deleted_messages: BTreeSet::new(),
+                updated_messages: BTreeMap::new(),
+            })
+            .expect("the payload serialises"),
+        );
+
+        let mut cache = file.load().cache;
+        assert_eq!(
+            ids(&cache.get(PEER)).first(),
+            Some(&6),
+            "ids 1 to 5 are past the window"
+        );
+        assert!(!cache.delete(&[1]), "nothing in the window held it");
+
+        file.save(&cache, None);
+        assert_eq!(ids(&file.get(PEER)), (2..=depth + 5).collect::<Vec<_>>());
+        assert_eq!(file.ranges(PEER), vec![(2, depth + 5)]);
+        assert_eq!(
+            ids(&file.load().cache.get(PEER)),
+            (6..=depth + 5).collect::<Vec<_>>()
+        );
+    }
+
+    /// A session can name more deleted ids than one SQL statement accepts.
+    #[test]
+    fn a_batch_of_deletions_larger_than_one_statement_is_applied_whole() {
+        let (_dir, file) = scratch("history.json");
+        let rows: Vec<CachedMessage> = (1_i64..=1_200)
+            .map(|id| CachedMessage::from_message(&message(id, PEER, "row")))
+            .collect();
+        seed(
+            &file,
+            serde_json::to_vec(&Payload {
+                account: None,
+                account_id: None,
+                peers: BTreeMap::from([(PEER, rows)]),
+                chats: Vec::new(),
+                aliases: BTreeMap::new(),
+                chips: BTreeMap::new(),
+                removed: BTreeSet::new(),
+                deleted_messages: BTreeSet::new(),
+                updated_messages: BTreeMap::new(),
+            })
+            .expect("the payload serialises"),
+        );
+
+        let mut cache = file.load().cache;
+        let all: Vec<i64> = (1..=1_200).collect();
+        assert!(cache.delete(&all));
+        file.save(&cache, None);
+
+        assert!(file.get(PEER).is_empty(), "every row was deleted");
+        assert!(file.ranges(PEER).is_empty(), "no range is left behind");
+    }
+
+    /// An edit of a row in the window is re-sealed on the next save.
+    #[test]
+    fn an_edited_message_survives_a_reopen() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = cached(1..=5);
+        file.save(&cache, None);
+
+        assert!(cache.edit(PEER, 3, "edited"));
+        file.save(&cache, None);
+
+        let stored = file.get(PEER);
+        assert_eq!(stored[2].text, "edited");
+        assert_eq!(ids(&stored), (1..=5).collect::<Vec<_>>());
+        assert_eq!(file.load().cache.get(PEER)[2].text, "edited");
+    }
+
+    /// An edit reported for a row the window no longer holds leaves the stored
+    /// row alone: the cache has no new value to seal in its place.
+    #[test]
+    fn an_edit_past_the_window_leaves_the_stored_row_alone() {
+        let depth = i64::try_from(HISTORY_CACHE_DEPTH).expect("the depth fits an id");
+        let (_dir, file) = scratch("history.json");
+        let rows: Vec<CachedMessage> = (1..=depth + 5)
+            .map(|id| {
+                CachedMessage::from_message(&message(id, PEER, if id == 1 { "old" } else { "row" }))
+            })
+            .collect();
+        seed(
+            &file,
+            serde_json::to_vec(&Payload {
+                account: None,
+                account_id: None,
+                peers: BTreeMap::from([(PEER, rows)]),
+                chats: Vec::new(),
+                aliases: BTreeMap::new(),
+                chips: BTreeMap::new(),
+                removed: BTreeSet::new(),
+                deleted_messages: BTreeSet::new(),
+                updated_messages: BTreeMap::new(),
+            })
+            .expect("the payload serialises"),
+        );
+
+        let mut cache = file.load().cache;
+        assert!(!cache.edit(PEER, 1, "changed"), "id 1 is past the window");
+        file.save(&cache, None);
+
+        assert_eq!(file.get(PEER)[0].text, "old", "the stored row is untouched");
     }
 
     #[test]
@@ -4461,6 +4889,8 @@ mod tests {
             aliases: BTreeMap::from([(PEER, "Kept".to_owned())]),
             chips: BTreeMap::from([(PEER, chips.clone())]),
             removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::new(),
         })
         .expect("the archive is written");
 
