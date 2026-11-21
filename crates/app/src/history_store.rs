@@ -985,6 +985,10 @@ impl From<CachedMedia> for MediaKind {
 }
 
 impl HistoryFile {
+    pub(crate) fn poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Relaxed)
+    }
+
     /// A handle on the archive for the account whose legacy path is `path`,
     /// sealed under `keys`.
     #[must_use]
@@ -2774,6 +2778,16 @@ mod tests {
     }
 
     // ---- the record layer (stage 01) ------------------------------------
+
+    #[test]
+    fn launch_keeps_an_archive_that_cannot_be_read() {
+        let (_dir, file) = scratch("history.json");
+        file.save(&HistoryCache::default(), Some("+1"));
+        assert!(file.path.exists());
+        let locked = HistoryFile::new(file.legacy.clone(), other_keys());
+        crate::runtime::load_history(&locked, Some("+1"));
+        assert!(file.path.exists());
+    }
 
     #[test]
     fn a_record_round_trips_every_field_through_a_reopened_database() {
