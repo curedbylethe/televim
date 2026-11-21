@@ -674,6 +674,11 @@ and the database file is never mapped; WAL mode maps a small `-shm` index whose
 size follows the reader count, not the archive. Sign-out removes the `.db` and
 its `-wal`, `-shm`, `-journal` and `.salt` siblings.
 
+A save re-seals only the window rows whose content moved since they were last
+written, so one arrival costs one record instead of every cached row. The handle
+keeps one 8-byte fingerprint per window row to tell them apart: about 6,400 ×
+24 B, a few hundred KB at the declared worst case and not a measured figure.
+
 | | Seeded scenario (measured) | Declared worst case |
 | :--- | ---: | ---: |
 | Messages, in memory (the windows) | 6,400 rows, about 1 MB | archived peers × 200 rows |
