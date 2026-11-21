@@ -1386,8 +1386,9 @@ impl HistoryFile {
 
     /// The record write, saying why when the archive was not written.
     ///
-    /// For the one caller that owes the reader an answer: a rename is text they
-    /// typed, and a file that cannot hold it must not look as though it did.
+    /// For the seeding example, which owns the whole store: a write that cannot
+    /// land must say why rather than fail silently.
+    #[allow(dead_code)]
     pub(crate) fn try_write(&self, bytes: &[u8]) -> Result<(), String> {
         if self.poisoned.load(Ordering::Relaxed) {
             tracing::warn!(
@@ -1406,45 +1407,59 @@ impl HistoryFile {
 
     /// Opens the archive and folds `payload` into it in one transaction: the
     /// bounded window is an ingest, never a replacement of what is stored.
+    #[allow(dead_code)]
     fn store_payload(&self, payload: &Payload) -> Result<()> {
         let (_guard, keys) = self.locked_keys();
         let mut store = open_store(&self.path, &keys)?;
         store.ingest_payload(payload)
     }
 
-    /// Writes fetched pages to the archive, each in its own transaction with
-    /// its own extent, before the window can drain them.
+    /// Writes fetched pages and the encoded payload in one transaction: the
+    /// pages first, each with its own extent, then the bounded window with its
+    /// deletions.
     ///
     /// A page is not a window: it may be older than the cache holds, or land
     /// while the newest end moves on, and it must keep the stretch it was
     /// fetched from instead of being rebuilt from whatever rows survive in
     /// memory. Pages that touch nothing stored are kept under their own range
-    /// by [`Store::ingest_page`]; whether to show such a page is the fetch's
-    /// decision. Poison and the provider swap are handled exactly as for a
-    /// window write.
-    pub(crate) fn ingest_pages(&self, pages: &[(i64, Vec<Message>)]) -> Result<()> {
+    /// by [`Store::ingest_pages_and_payload`]; whether to show such a page is
+    /// the fetch's decision. One commit covers both halves, so a death between
+    /// them cannot leave a page that restores a row the window deleted. Poison
+    /// and the provider swap are handled exactly as for a window write.
+    pub(crate) fn ingest_pages_and_write(
+        &self,
+        pages: &[(i64, Vec<Message>)],
+        bytes: &[u8],
+    ) -> Result<(), String> {
         if self.poisoned.load(Ordering::Relaxed) {
-            return Err(anyhow!("the history archive could not be read"));
+            tracing::warn!(
+                "history save refused: the archive could not be read when it was opened"
+            );
+            return Err(
+                "the history archive could not be read; sign out to clear it before saving again"
+                    .to_owned(),
+            );
         }
-        if pages.is_empty() {
-            return Ok(());
-        }
+        let payload: Payload = serde_json::from_slice(bytes)
+            .map_err(|error| format!("history could not be read for writing: {error}"))?;
+        let prepared: Vec<(i64, Vec<CachedMessage>)> = pages
+            .iter()
+            .map(|(chat_id, messages)| {
+                let mut rows: Vec<CachedMessage> = messages
+                    .iter()
+                    .filter(|message| message.id > 0 && message.chat_id == *chat_id)
+                    .map(CachedMessage::from_message)
+                    .collect();
+                rows.sort_by_key(|row| row.id);
+                (*chat_id, rows)
+            })
+            .collect();
         let (_guard, keys) = self.locked_keys();
-        let mut store = open_store(&self.path, &keys)?;
-        for (chat_id, messages) in pages {
-            let mut rows: Vec<CachedMessage> = messages
-                .iter()
-                .filter(|message| message.id > 0 && message.chat_id == *chat_id)
-                .map(CachedMessage::from_message)
-                .collect();
-            rows.sort_by_key(|row| row.id);
-            let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
-                continue;
-            };
-            let reach = (first.id.min(last.id), first.id.max(last.id));
-            store.ingest_page(*chat_id, &rows, reach)?;
-        }
-        Ok(())
+        let mut store = open_store(&self.path, &keys)
+            .map_err(|error| format!("history could not be written: {error:#}"))?;
+        store
+            .ingest_pages_and_payload(&prepared, &payload)
+            .map_err(|error| format!("history could not be written: {error:#}"))
     }
 
     /// Removes the database and its WAL, shared-memory, journal and salt
@@ -2203,37 +2218,32 @@ impl Store {
     /// deleted are dropped last, and the ranges of the chats that held them
     /// are rebuilt from the rows that remain, so a deletion inside a run
     /// splits it rather than letting the window write claim the gap again.
+    #[allow(dead_code)]
     fn ingest_payload(&mut self, payload: &Payload) -> Result<()> {
-        let state = State {
-            account: payload.account.clone(),
-            account_id: payload.account_id,
-            chats: payload.chats.clone(),
-            aliases: payload.aliases.clone(),
-        };
-        let state_plain = serde_json::to_vec(&state)?;
-        let state_envelope = sealed::seal(&state_plain, &self.record_keys)?;
-
-        // Read the ledgers before the transaction borrows the connection.
-        let held: BTreeMap<i64, Vec<(i64, i64)>> = payload
-            .peers
-            .keys()
-            .map(|chat_id| Ok((*chat_id, self.ranges(*chat_id)?)))
-            .collect::<Result<_>>()?;
         let transaction = self.conn.transaction()?;
-        for chat_id in &payload.removed {
-            let chat_key = keyed_chat(&self.hmac_key, *chat_id);
-            transaction.execute(
-                "DELETE FROM messages WHERE chat_key = ?1",
-                params![chat_key],
-            )?;
-            transaction.execute("DELETE FROM ranges WHERE chat_key = ?1", params![chat_key])?;
-            transaction.execute("DELETE FROM chips WHERE chat_key = ?1", params![chat_key])?;
-        }
-        for (chat_id, rows) in &payload.peers {
+        ingest_payload_in(&transaction, &self.record_keys, &self.hmac_key, payload)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Folds `pages` into the archive and then the bounded window `payload`,
+    /// all in one transaction.
+    ///
+    /// The order is the one the write owes the reader: every page lands before
+    /// the window's deletions, and one commit covers both, so a death between
+    /// the two cannot leave a page that restores a row the window deleted.
+    fn ingest_pages_and_payload(
+        &mut self,
+        pages: &[(i64, Vec<CachedMessage>)],
+        payload: &Payload,
+    ) -> Result<()> {
+        let transaction = self.conn.transaction()?;
+        for (chat_id, rows) in pages {
             let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
                 continue;
             };
             let reach = (first.id.min(last.id), first.id.max(last.id));
+            let held = ranges_on(&transaction, &self.hmac_key, *chat_id)?;
             ingest_in(
                 &transaction,
                 &self.record_keys,
@@ -2241,72 +2251,10 @@ impl Store {
                 *chat_id,
                 rows,
                 reach,
-                held.get(chat_id).map_or(&[][..], Vec::as_slice),
+                &held,
             )?;
         }
-        // Re-seal edits. A window row carries its own new words; a row outside
-        // the window is read from its stored envelope and keeps every field but
-        // its text. Deletions below run last, so an edit and a deletion of the
-        // same id end deleted.
-        for (chat_id, edited) in &payload.updated_messages {
-            for (message_id, text) in edited {
-                if let Some(row) = payload
-                    .peers
-                    .get(chat_id)
-                    .and_then(|rows| rows.iter().find(|row| row.id == *message_id))
-                {
-                    let (key, envelope) =
-                        seal_record(&self.record_keys, &self.hmac_key, *chat_id, row)?;
-                    insert_record(&transaction, &key, row.id, &envelope)?;
-                    continue;
-                }
-                let chat_key = keyed_chat(&self.hmac_key, *chat_id);
-                let envelope: Option<Vec<u8>> = transaction
-                    .query_row(
-                        "SELECT sealed FROM messages WHERE chat_key = ?1 AND message_id = ?2",
-                        params![chat_key, message_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                let Some(envelope) = envelope else {
-                    continue;
-                };
-                let mut record = decode_record(
-                    &envelope,
-                    &self.record_keys,
-                    &self.hmac_key,
-                    &chat_key,
-                    *message_id,
-                )?;
-                record.row.text.clone_from(text);
-                let (key, envelope) =
-                    seal_record(&self.record_keys, &self.hmac_key, *chat_id, &record.row)?;
-                insert_record(&transaction, &key, *message_id, &envelope)?;
-            }
-        }
-        if !payload.deleted_messages.is_empty() {
-            delete_messages(&transaction, &payload.deleted_messages)?;
-        }
-        for (chat_id, chips) in &payload.chips {
-            let chat_key = keyed_chat(&self.hmac_key, *chat_id);
-            let record = ChipRecord {
-                chat_key: chat_key.clone(),
-                chat_id: *chat_id,
-                chips: chips.clone(),
-            };
-            let plain = serde_json::to_vec(&record)?;
-            let envelope = sealed::seal(&plain, &self.record_keys)?;
-            transaction.execute(
-                "INSERT INTO chips (chat_key, sealed) VALUES (?1, ?2)
-                 ON CONFLICT(chat_key) DO UPDATE SET sealed = excluded.sealed",
-                params![chat_key, envelope],
-            )?;
-        }
-        transaction.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![META_STATE, state_envelope],
-        )?;
+        ingest_payload_in(&transaction, &self.record_keys, &self.hmac_key, payload)?;
         transaction.commit()?;
         Ok(())
     }
@@ -2339,14 +2287,7 @@ impl Store {
     /// The stretches of `chat_id` held on disk, oldest first.
     #[allow(dead_code)]
     fn ranges(&self, chat_id: i64) -> Result<Vec<(i64, i64)>> {
-        let chat_key = keyed_chat(&self.hmac_key, chat_id);
-        let mut statement = self
-            .conn
-            .prepare("SELECT lo_id, hi_id FROM ranges WHERE chat_key = ?1 ORDER BY lo_id")?;
-        let rows = statement.query_map(params![chat_key], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        rows.map(|row| row.map_err(anyhow::Error::from)).collect()
+        ranges_on(&self.conn, &self.hmac_key, chat_id)
     }
 
     /// The sealed rows of one chat in one recorded stretch, decoded and
@@ -2525,6 +2466,135 @@ fn ranges_after_delete(
 
 /// The transaction half of [`Store::ingest_page`], shared with a save of a
 /// whole window. `held` is the ledger as it stood before the write.
+/// The stretches of `chat_id` held on disk, oldest first, read through the
+/// given connection so an open transaction can see its own earlier writes.
+fn ranges_on(
+    conn: &rusqlite::Connection,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+) -> Result<Vec<(i64, i64)>> {
+    let chat_key = keyed_chat(hmac_key, chat_id);
+    let mut statement =
+        conn.prepare("SELECT lo_id, hi_id FROM ranges WHERE chat_key = ?1 ORDER BY lo_id")?;
+    let rows = statement.query_map(params![chat_key], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.map(|row| row.map_err(anyhow::Error::from)).collect()
+}
+
+/// Folds each bounded window of `payload` into the archive inside the open
+/// `transaction`, alongside the state and side tables; the caller commits.
+///
+/// The held ranges are read through the transaction itself, so they reflect
+/// the pages ingested earlier inside the same one. Only the chats the payload
+/// names are touched. A window that does not join its stored range is kept as
+/// a range of its own: a refusal here belongs to the fetch decision, not the
+/// store. Messages the reader deleted are dropped last, and the ranges of the
+/// chats that held them are rebuilt from the rows that remain, so a deletion
+/// inside a run splits it rather than letting the window write claim the gap
+/// again.
+fn ingest_payload_in(
+    transaction: &rusqlite::Transaction<'_>,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    payload: &Payload,
+) -> Result<()> {
+    let state = State {
+        account: payload.account.clone(),
+        account_id: payload.account_id,
+        chats: payload.chats.clone(),
+        aliases: payload.aliases.clone(),
+    };
+    let state_plain = serde_json::to_vec(&state)?;
+    let state_envelope = sealed::seal(&state_plain, keys)?;
+
+    let held: BTreeMap<i64, Vec<(i64, i64)>> = payload
+        .peers
+        .keys()
+        .map(|chat_id| Ok((*chat_id, ranges_on(transaction, hmac_key, *chat_id)?)))
+        .collect::<Result<_>>()?;
+    for chat_id in &payload.removed {
+        let chat_key = keyed_chat(hmac_key, *chat_id);
+        transaction.execute(
+            "DELETE FROM messages WHERE chat_key = ?1",
+            params![chat_key],
+        )?;
+        transaction.execute("DELETE FROM ranges WHERE chat_key = ?1", params![chat_key])?;
+        transaction.execute("DELETE FROM chips WHERE chat_key = ?1", params![chat_key])?;
+    }
+    for (chat_id, rows) in &payload.peers {
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            continue;
+        };
+        let reach = (first.id.min(last.id), first.id.max(last.id));
+        ingest_in(
+            transaction,
+            keys,
+            hmac_key,
+            *chat_id,
+            rows,
+            reach,
+            held.get(chat_id).map_or(&[][..], Vec::as_slice),
+        )?;
+    }
+    // Re-seal edits. A window row carries its own new words; a row outside
+    // the window is read from its stored envelope and keeps every field but
+    // its text. Deletions below run last, so an edit and a deletion of the
+    // same id end deleted.
+    for (chat_id, edited) in &payload.updated_messages {
+        for (message_id, text) in edited {
+            if let Some(row) = payload
+                .peers
+                .get(chat_id)
+                .and_then(|rows| rows.iter().find(|row| row.id == *message_id))
+            {
+                let (key, envelope) = seal_record(keys, hmac_key, *chat_id, row)?;
+                insert_record(transaction, &key, row.id, &envelope)?;
+                continue;
+            }
+            let chat_key = keyed_chat(hmac_key, *chat_id);
+            let envelope: Option<Vec<u8>> = transaction
+                .query_row(
+                    "SELECT sealed FROM messages WHERE chat_key = ?1 AND message_id = ?2",
+                    params![chat_key, message_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(envelope) = envelope else {
+                continue;
+            };
+            let mut record = decode_record(&envelope, keys, hmac_key, &chat_key, *message_id)?;
+            record.row.text.clone_from(text);
+            let (key, envelope) = seal_record(keys, hmac_key, *chat_id, &record.row)?;
+            insert_record(transaction, &key, *message_id, &envelope)?;
+        }
+    }
+    if !payload.deleted_messages.is_empty() {
+        delete_messages(transaction, &payload.deleted_messages)?;
+    }
+    for (chat_id, chips) in &payload.chips {
+        let chat_key = keyed_chat(hmac_key, *chat_id);
+        let record = ChipRecord {
+            chat_key: chat_key.clone(),
+            chat_id: *chat_id,
+            chips: chips.clone(),
+        };
+        let plain = serde_json::to_vec(&record)?;
+        let envelope = sealed::seal(&plain, keys)?;
+        transaction.execute(
+            "INSERT INTO chips (chat_key, sealed) VALUES (?1, ?2)
+             ON CONFLICT(chat_key) DO UPDATE SET sealed = excluded.sealed",
+            params![chat_key, envelope],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_STATE, state_envelope],
+    )?;
+    Ok(())
+}
+
 fn ingest_in(
     transaction: &rusqlite::Transaction<'_>,
     keys: &dyn KeyProvider,
@@ -4585,6 +4655,56 @@ mod tests {
             (1..=89).collect::<Vec<_>>(),
             "the rows below the anchor in the older range"
         );
+    }
+
+    /// Fetched pages and the bounded window land in one transaction: a window
+    /// failure rolls the pages back too, so a crash mid-write cannot leave a
+    /// queued page restoring a row the window's deletions had removed.
+    #[test]
+    fn pages_and_the_window_land_in_one_transaction_or_not_at_all() {
+        let (_dir, file, store) = scratch_store("history.json");
+        plant(&store, 1..=5, (1, 5));
+
+        // The window's edit path must read row 3's stored envelope, and that
+        // envelope no longer decodes.
+        let chat_key = keyed_chat(&store.hmac_key, PEER);
+        store
+            .conn
+            .execute(
+                "UPDATE messages SET sealed = ?1 WHERE chat_key = ?2 AND message_id = ?3",
+                params![vec![0u8; 16], chat_key, 3_i64],
+            )
+            .expect("the corrupt row is planted");
+
+        let payload = Payload {
+            account: None,
+            account_id: None,
+            peers: BTreeMap::new(),
+            chats: Vec::new(),
+            aliases: BTreeMap::new(),
+            chips: BTreeMap::new(),
+            removed: BTreeSet::new(),
+            deleted_messages: BTreeSet::new(),
+            updated_messages: BTreeMap::from([(PEER, BTreeMap::from([(3, "edited".to_owned())]))]),
+        };
+        let bytes = serde_json::to_vec(&payload).expect("the payload encodes");
+
+        let pages = vec![(PEER, (40..=45).map(|id| message(id, PEER, "row")).collect())];
+        let result = file.ingest_pages_and_write(&pages, &bytes);
+        assert!(result.is_err(), "the window phase fails on the corrupt row");
+
+        // The pages rolled back with the window: neither their rows nor their
+        // range survived the one failed transaction.
+        assert_eq!(file.ranges(PEER), vec![(1, 5)]);
+        let conn = rusqlite::Connection::open(&file.path).expect("the archive opens raw");
+        let landed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE message_id BETWEEN 40 AND 45",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the raw row count reads");
+        assert_eq!(landed, 0, "the page did not land when the window failed");
     }
 
     #[test]

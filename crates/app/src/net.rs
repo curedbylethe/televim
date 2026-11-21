@@ -1805,11 +1805,11 @@ impl State {
         let retry_pages = pages.clone();
         self.cached.write = Some(tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
-                // Pages first: a deletion in the window must land after every
-                // page insert, or a queued page can restore a deleted row.
-                file.ingest_pages(&pages)
-                    .map_err(|error| error.to_string())?;
-                file.try_write(&bytes)
+                // Pages first, all in the same transaction as the window: a
+                // deletion must land after every page insert — or a queued page
+                // can restore a deleted row — and a death between the two must
+                // not leave the page landed and the deletion lost.
+                file.ingest_pages_and_write(&pages, &bytes)
             })
             .await
             .unwrap_or_else(|error| Err(error.to_string()));
@@ -10884,7 +10884,7 @@ mod tests {
     async fn persist(state: &mut State) {
         state.persist_history(&[], after_the_window());
         if let Some(write) = state.cached.write.take() {
-            write.await.expect("the history write ran");
+            let _ = write.await.expect("the history write ran");
         }
     }
 
@@ -11551,7 +11551,7 @@ mod tests {
     async fn write_started(state: &mut State) -> bool {
         match state.cached.write.take() {
             Some(write) => {
-                write.await.expect("the history write ran");
+                let _ = write.await.expect("the history write ran");
                 true
             }
             None => false,
@@ -11659,7 +11659,7 @@ mod tests {
     async fn persist_list(state: &mut State, app: &App) {
         state.persist_history(app.chats(), after_the_window());
         if let Some(write) = state.cached.write.take() {
-            write.await.expect("the history write ran");
+            let _ = write.await.expect("the history write ran");
         }
     }
 
@@ -18549,7 +18549,7 @@ mod action_status_tests {
         // running here, so the failure and the rename come back as events.
         state.persist_history(&[], std::time::Instant::now());
         if let Some(write) = state.cached.write.take() {
-            write.await.expect("the history write ran");
+            let _ = write.await.expect("the history write ran");
         }
 
         // The failed write first hands back the pages it took, then reports the
