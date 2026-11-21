@@ -1205,6 +1205,7 @@
      jump that moves the reader leaves a mark, and Ctrl-o / Ctrl-i walk the marks as Vim's jumplist
      does. A mark is a message id, never a row: the window it was set in may be gone. */
   const REVALIDATING = 'Cached messages — loading the latest…';
+  const ARCHIVE_FULL = 'archive full — older history stops here';
   const JUMP_QUOTE = 'Jumping to the quoted message…', JUMP_BACK = 'Jumping back…', JUMP_FORWARD = 'Jumping forward…';
   const JUMP_UNREAD = 'Jumping to first unread…';
   const PAGE_RADIUS = 3;
@@ -3217,6 +3218,7 @@
         else if (name === 'typing') peerTyping(s);
         else if (name === 'peer') peerSays(s, PEER_SAYS);
         else if (name === 'cached') revalidate(s);
+        else if (name === 'archivefull') s.flash = ARCHIVE_FULL;
         else key(s, TOK[name]);
         i = e;
       } else key(s, a[i]);
