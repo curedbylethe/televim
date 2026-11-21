@@ -2974,7 +2974,12 @@ fn ingest_in(
         .unwrap_or(hi)
         .max(hi);
     let (new_lo, new_hi) = if held.is_empty() {
-        (new_lo.min(reach.0), new_hi.max(reach.1))
+        legacy_adjacent_extent(
+            transaction,
+            &chat_key,
+            new_lo.min(reach.0),
+            new_hi.max(reach.1),
+        )?
     } else {
         (new_lo, new_hi)
     };
@@ -2985,6 +2990,32 @@ fn ingest_in(
         params![chat_key, new_lo, new_hi],
     )?;
     Ok(true)
+}
+
+/// Extend a ledgerless window only across stored, consecutive identifiers.
+fn legacy_adjacent_extent(
+    conn: &Connection,
+    chat_key: &[u8],
+    mut lo: i64,
+    mut hi: i64,
+) -> Result<(i64, i64)> {
+    let mut older = conn.prepare("SELECT message_id FROM messages WHERE chat_key = ?1 AND message_id < ?2 ORDER BY message_id DESC")?;
+    for id in older.query_map(params![chat_key, lo], |row| row.get::<_, i64>(0))? {
+        let id = id?;
+        if id.checked_add(1) != Some(lo) {
+            break;
+        }
+        lo = id;
+    }
+    let mut newer = conn.prepare("SELECT message_id FROM messages WHERE chat_key = ?1 AND message_id > ?2 ORDER BY message_id")?;
+    for id in newer.query_map(params![chat_key, hi], |row| row.get::<_, i64>(0))? {
+        let id = id?;
+        if hi.checked_add(1) != Some(id) {
+            break;
+        }
+        hi = id;
+    }
+    Ok((lo, hi))
 }
 
 #[cfg(test)]
@@ -3036,6 +3067,36 @@ mod tests {
         cache.put(PEER, &page(1..=4));
         file.save(&cache, None);
         assert_eq!(file.ranges(PEER), vec![(1, 4)]);
+    }
+
+    #[test]
+    fn first_save_keeps_the_previous_row_at_the_window_limit() {
+        let (_dir, file, mut store) = scratch_store("history.json");
+        store
+            .ingest_page(PEER, &rows(1..=200), (1, 200))
+            .expect("records written");
+        store
+            .conn
+            .execute("DELETE FROM ranges", [])
+            .expect("legacy archive has no ranges");
+        drop(store);
+        let mut cache = file.load().cache;
+        cache.put(PEER, &page(1..=201));
+        file.save(&cache, None);
+        assert_eq!(file.ranges(PEER), vec![(1, 201)]);
+    }
+
+    #[test]
+    fn ledgerless_rows_do_not_extend_a_window_across_a_gap() {
+        let (_dir, file, store) = scratch_store("history.json");
+        for row in rows([1, 3, 4]) {
+            store.put_record(PEER, &row).expect("record written");
+        }
+        drop(store);
+        let mut cache = file.load().cache;
+        cache.put(PEER, &page(3..=5));
+        file.save(&cache, None);
+        assert_eq!(file.ranges(PEER), vec![(3, 5)]);
     }
 
     #[test]
