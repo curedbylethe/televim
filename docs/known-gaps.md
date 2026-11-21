@@ -362,7 +362,8 @@ Real, and named so they are not mistaken for oversights:
   again after `Esc`); it is held in memory for that process and never written, so
   every launch asks again until `TELEVIM_SESSION_PASSPHRASE`, `session_passphrase`,
   `session_key_file` or the OS keyring has the key. `:passphrase` re-seals the session file and the
-  history cache under a new passphrase, but it leaves the keyring's `file-key`
+  archive's key envelopes under a new passphrase, and leaves every message row
+  as it is. It also leaves the keyring's `file-key`
   entry and a configured key file alone, so a reader who relied on either is
   asked at the next launch.
   The Argon2id cost keys (`session_kdf_*`) are still not recorded in the envelope:
@@ -516,8 +517,9 @@ Real, and named so they are not mistaken for oversights:
   plaintext `0600` blobs named `<sha256>.<ext>`, beside pointer files that name
   them — `<chat>-<message>.ref`, `m<id>.ref` and `<chat>-<message>.thumb` — and
   the fallback directory `televim.media-<account>` under the platform cache
-  directory is the same. The history file is already sealed with the session file's
-  envelope, and the follow-up here is the same one: reuse the
+  directory is the same. The message archive is already sealed, row by row, under its
+  own key, which the session key only unwraps and which is stored in the
+  archive; the follow-up here is the same one: reuse the
   sealed envelope the session file already uses — `TVIM1 | salt(16) | nonce(12) |
   ciphertext | tag(16)`, AES-256-GCM-SIV — so a downloaded file is ciphertext at
   rest too (see [`decisions.md`](./decisions.md)). Building that is not this
