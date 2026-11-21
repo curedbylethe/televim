@@ -2683,8 +2683,12 @@ fn submit_passphrase(state: &mut State, typed: &str, tx: &UnboundedSender<AppEve
     // and every later bring-up use the same Arc.
     let file_keys = state.file_key_provider(&cfg);
     state.set_file_keys(file_keys.clone());
-    if let Some(file) = &state.history_file {
-        file.set_provider(Arc::clone(&file_keys));
+    if let Some(file) = &state.history_file
+        && file.set_provider(Arc::clone(&file_keys))
+    {
+        let (cache, tag) = crate::runtime::load_history(file, state.slot_label().as_deref());
+        state.restore_history(cache);
+        state.restore_history_tag(tag);
     }
     if !state.bringing_up {
         state.bringing_up = true;

@@ -1006,8 +1006,9 @@ impl HistoryFile {
     /// archive. Used when bring-up learns the passphrase the session already
     /// uses: no meta envelope needs re-sealing, but the provider that opens
     /// the one on disk must be the one the reader typed.
-    pub(crate) fn set_provider(&self, keys: Arc<dyn KeyProvider>) {
+    pub(crate) fn set_provider(&self, keys: Arc<dyn KeyProvider>) -> bool {
         *lock(&self.provider) = keys;
+        self.poisoned.swap(false, Ordering::Relaxed)
     }
 
     /// The provider held right now, for the callers that open a store.
@@ -2787,6 +2788,21 @@ mod tests {
         let locked = HistoryFile::new(file.legacy.clone(), other_keys());
         crate::runtime::load_history(&locked, Some("+1"));
         assert!(file.path.exists());
+    }
+
+    #[test]
+    fn unlocking_an_unreadable_archive_restores_writes() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &page(1..=3));
+        file.save(&cache, Some("+1"));
+        let locked = HistoryFile::new(file.legacy.clone(), other_keys());
+        locked.load();
+        locked.set_provider(file.keys());
+        let mut restored = locked.load().cache;
+        restored.put(PEER, &page(1..=4));
+        locked.save(&restored, Some("+1"));
+        assert_eq!(ids(&file.load().cache.get(PEER)), vec![1, 2, 3, 4]);
     }
 
     #[test]
