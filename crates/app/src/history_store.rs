@@ -1612,6 +1612,7 @@ fn restrict_permissions(_path: &Path) {}
 const SCHEMA_VERSION: i64 = 1;
 const META_VERSION: &str = "schema_version";
 const META_STATE: &str = "state";
+const META_TEXT_BYTES: &str = "text_bytes";
 const META_ARCHIVE_KEY: &str = "archive_key";
 /// The previous passphrase's envelope of the same random archive key. Present
 /// only while a passphrase change is half-finished: it lets the next start
@@ -1844,6 +1845,87 @@ fn insert_record(
     Ok(())
 }
 
+fn read_text_bytes(conn: &Connection, keys: &dyn KeyProvider) -> Result<u64> {
+    let envelope = meta_envelope(conn, META_TEXT_BYTES)?
+        .ok_or_else(|| anyhow!("archive text byte count is missing"))?;
+    let plain = sealed::open(&envelope, keys)?
+        .ok_or_else(|| anyhow!("archive text byte count was stored as plaintext"))?;
+    let bytes: [u8; 8] = plain
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("invalid archive text byte count"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn adjust_text_bytes(conn: &Connection, keys: &dyn KeyProvider, delta: i64) -> Result<()> {
+    let total = read_text_bytes(conn, keys)?
+        .checked_add_signed(delta)
+        .ok_or_else(|| anyhow!("invalid archive text byte count"))?;
+    let envelope = sealed::seal(&total.to_le_bytes(), keys)?;
+    conn.execute(
+        "UPDATE meta SET value = ?1 WHERE key = ?2",
+        params![envelope, META_TEXT_BYTES],
+    )?;
+    Ok(())
+}
+
+fn insert_counted(
+    conn: &Connection,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+    row: &CachedMessage,
+) -> Result<()> {
+    let (chat_key, envelope) = seal_record(keys, hmac_key, chat_id, row)?;
+    let old: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT sealed FROM messages WHERE chat_key = ?1 AND message_id = ?2",
+            params![chat_key, row.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let old_len = match old {
+        Some(old) => encoded_len(
+            &decode_record(&old, keys, hmac_key, &chat_key, row.id)?
+                .row
+                .text,
+        ),
+        None => 0,
+    };
+    adjust_text_bytes(
+        conn,
+        keys,
+        i64::try_from(encoded_len(&row.text))? - i64::try_from(old_len)?,
+    )?;
+    insert_record(conn, &chat_key, row.id, &envelope)
+}
+
+fn count_deleted(
+    conn: &Connection,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    sql: &str,
+    parameters: impl rusqlite::Params,
+) -> Result<i64> {
+    let mut statement = conn.prepare(sql)?;
+    let rows = statement.query_map(parameters, |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    let mut total = 0i64;
+    for row in rows {
+        let (chat_key, id, envelope) = row?;
+        let record = decode_record(&envelope, keys, hmac_key, &chat_key, id)?;
+        total = total
+            .checked_add(i64::try_from(encoded_len(&record.row.text))?)
+            .ok_or_else(|| anyhow!("archive text byte count overflow"))?;
+    }
+    Ok(total)
+}
+
 /// Decodes a record and checks its address. `Ok(None)` from `sealed::open`
 /// means the bytes were never sealed: that is a hard error here, never a
 /// legacy-plaintext fallback.
@@ -2040,11 +2122,25 @@ impl Store {
         mac.update(&salt);
         let mut hmac_key = [0u8; KEY_LEN];
         hmac_key.copy_from_slice(&mac.finalize().into_bytes());
-        Ok(Self {
+        let store = Self {
             conn,
             record_keys: RecordKey { bytes: archive_key },
             hmac_key,
-        })
+        };
+        let has_count: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key = ?1)",
+            params![META_TEXT_BYTES],
+            |row| row.get(0),
+        )?;
+        if !has_count {
+            let total = store.scan_text_bytes()?;
+            let envelope = sealed::seal(&u64::try_from(total)?.to_le_bytes(), &store.record_keys)?;
+            store.conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
+                params![META_TEXT_BYTES, envelope],
+            )?;
+        }
+        Ok(store)
     }
 
     fn state(&self) -> Result<State> {
@@ -2075,8 +2171,7 @@ impl Store {
     /// records, and a save seals the rows of its window through the same path.
     #[allow(dead_code)]
     fn put_record(&self, chat_id: i64, row: &CachedMessage) -> Result<()> {
-        let (chat_key, envelope) = seal_record(&self.record_keys, &self.hmac_key, chat_id, row)?;
-        insert_record(&self.conn, &chat_key, row.id, &envelope)
+        insert_counted(&self.conn, &self.record_keys, &self.hmac_key, chat_id, row)
     }
 
     #[allow(dead_code)]
@@ -2345,6 +2440,11 @@ impl Store {
     /// query rather than a second copy of everything in memory.
     #[allow(dead_code)]
     fn text_bytes(&self) -> Result<usize> {
+        let total = read_text_bytes(&self.conn, &self.record_keys)?;
+        Ok(usize::try_from(total)?)
+    }
+
+    fn scan_text_bytes(&self) -> Result<usize> {
         let mut statement = self.conn.prepare("SELECT sealed FROM messages")?;
         let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
         let mut total = 0;
@@ -2400,7 +2500,12 @@ impl Store {
 /// that contained it; a stretch left with no rows disappears. Rebuilding from
 /// the rows that remain (rather than trusting the old ends) is what keeps a
 /// hole in the middle from being claimed as covered.
-fn delete_messages(transaction: &rusqlite::Transaction<'_>, deleted: &BTreeSet<i64>) -> Result<()> {
+fn delete_messages(
+    transaction: &rusqlite::Transaction<'_>,
+    deleted: &BTreeSet<i64>,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+) -> Result<()> {
     // The set holds every id this session has deleted, and SQLite has a cap on
     // statement parameters: the ids go in in chunks so a long session cannot
     // make the save fail.
@@ -2430,6 +2535,17 @@ fn delete_messages(transaction: &rusqlite::Transaction<'_>, deleted: &BTreeSet<i
 
     for chunk in ids.chunks(CHUNK) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
+        let count_sql = format!(
+            "SELECT chat_key, message_id, sealed FROM messages WHERE message_id IN ({placeholders})"
+        );
+        let count = count_deleted(
+            transaction,
+            keys,
+            hmac_key,
+            &count_sql,
+            params_from_iter(chunk.iter()),
+        )?;
+        adjust_text_bytes(transaction, keys, -count)?;
         let delete_sql = format!("DELETE FROM messages WHERE message_id IN ({placeholders})");
         transaction.execute(&delete_sql, params_from_iter(chunk.iter()))?;
     }
@@ -2506,6 +2622,30 @@ fn ranges_on(
     rows.map(|row| row.map_err(anyhow::Error::from)).collect()
 }
 
+fn remove_chat(
+    conn: &Connection,
+    keys: &dyn KeyProvider,
+    hmac_key: &[u8; KEY_LEN],
+    chat_id: i64,
+) -> Result<()> {
+    let chat_key = keyed_chat(hmac_key, chat_id);
+    let count = count_deleted(
+        conn,
+        keys,
+        hmac_key,
+        "SELECT chat_key, message_id, sealed FROM messages WHERE chat_key = ?1",
+        params![chat_key],
+    )?;
+    adjust_text_bytes(conn, keys, -count)?;
+    conn.execute(
+        "DELETE FROM messages WHERE chat_key = ?1",
+        params![chat_key],
+    )?;
+    conn.execute("DELETE FROM ranges WHERE chat_key = ?1", params![chat_key])?;
+    conn.execute("DELETE FROM chips WHERE chat_key = ?1", params![chat_key])?;
+    Ok(())
+}
+
 /// Folds each bounded window of `payload` into the archive inside the open
 /// `transaction`, alongside the state and side tables; the caller commits.
 ///
@@ -2539,13 +2679,7 @@ fn ingest_payload_in(
         .map(|chat_id| Ok((*chat_id, ranges_on(transaction, hmac_key, *chat_id)?)))
         .collect::<Result<_>>()?;
     for chat_id in &payload.removed {
-        let chat_key = keyed_chat(hmac_key, *chat_id);
-        transaction.execute(
-            "DELETE FROM messages WHERE chat_key = ?1",
-            params![chat_key],
-        )?;
-        transaction.execute("DELETE FROM ranges WHERE chat_key = ?1", params![chat_key])?;
-        transaction.execute("DELETE FROM chips WHERE chat_key = ?1", params![chat_key])?;
+        remove_chat(transaction, keys, hmac_key, *chat_id)?;
     }
     for (chat_id, rows) in &payload.peers {
         let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
@@ -2583,8 +2717,7 @@ fn ingest_payload_in(
                 .get(chat_id)
                 .and_then(|rows| rows.iter().find(|row| row.id == *message_id))
             {
-                let (key, envelope) = seal_record(keys, hmac_key, *chat_id, row)?;
-                insert_record(transaction, &key, row.id, &envelope)?;
+                insert_counted(transaction, keys, hmac_key, *chat_id, row)?;
                 continue;
             }
             let chat_key = keyed_chat(hmac_key, *chat_id);
@@ -2600,12 +2733,11 @@ fn ingest_payload_in(
             };
             let mut record = decode_record(&envelope, keys, hmac_key, &chat_key, *message_id)?;
             record.row.text.clone_from(text);
-            let (key, envelope) = seal_record(keys, hmac_key, *chat_id, &record.row)?;
-            insert_record(transaction, &key, *message_id, &envelope)?;
+            insert_counted(transaction, keys, hmac_key, *chat_id, &record.row)?;
         }
     }
     if !payload.deleted_messages.is_empty() {
-        delete_messages(transaction, &payload.deleted_messages)?;
+        delete_messages(transaction, &payload.deleted_messages, keys, hmac_key)?;
     }
     for (chat_id, chips) in &payload.chips {
         let chat_key = keyed_chat(hmac_key, *chat_id);
@@ -2687,8 +2819,7 @@ fn ingest_in(
     }
 
     for row in rows {
-        let (key, envelope) = seal_record(keys, hmac_key, chat_id, row)?;
-        insert_record(transaction, &key, row.id, &envelope)?;
+        insert_counted(transaction, keys, hmac_key, chat_id, row)?;
     }
     for (old_lo, _) in &joined {
         transaction.execute(
@@ -2803,6 +2934,60 @@ mod tests {
         restored.put(PEER, &page(1..=4));
         locked.save(&restored, Some("+1"));
         assert_eq!(ids(&file.load().cache.get(PEER)), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn text_byte_count_does_not_read_message_envelopes() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "hello")]);
+        file.save(&cache, None);
+        let store = open_store(&file.path, &file.keys()).expect("archive opens");
+        let expected = store.text_bytes().expect("count reads");
+        store
+            .conn
+            .execute("UPDATE messages SET sealed = x'00'", [])
+            .expect("row altered");
+        assert_eq!(
+            store.text_bytes().expect("count does not read row"),
+            expected
+        );
+    }
+
+    #[test]
+    fn text_byte_count_tracks_edits_deletions_and_removed_chats() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "one"), message(2, PEER, "two")]);
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(6));
+        assert!(cache.edit(PEER, 1, "longer"));
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(9));
+        assert!(cache.delete(&[2]));
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(6));
+        cache.remove(PEER);
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(0));
+    }
+
+    #[test]
+    fn an_archive_without_a_text_count_is_counted_once() {
+        let (_dir, file) = scratch("history.json");
+        let mut cache = HistoryCache::default();
+        cache.put(PEER, &[message(1, PEER, "hello")]);
+        file.save(&cache, None);
+        let store = open_store(&file.path, &file.keys()).expect("archive opens");
+        store
+            .conn
+            .execute("DELETE FROM meta WHERE key = ?1", params![META_TEXT_BYTES])
+            .expect("count removed");
+        drop(store);
+        assert_eq!(file.text_bytes(), Some(5));
+        cache.put(PEER, &[message(1, PEER, "hello"), message(2, PEER, "new")]);
+        file.save(&cache, None);
+        assert_eq!(file.text_bytes(), Some(8));
     }
 
     #[test]
