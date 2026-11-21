@@ -2839,6 +2839,11 @@ fn ingest_in(
         .max()
         .unwrap_or(hi)
         .max(hi);
+    let (new_lo, new_hi) = if held.is_empty() {
+        (new_lo.min(reach.0), new_hi.max(reach.1))
+    } else {
+        (new_lo, new_hi)
+    };
 
     transaction.execute(
         "INSERT INTO ranges (chat_key, lo_id, hi_id) VALUES (?1, ?2, ?3)
@@ -2853,6 +2858,19 @@ mod tests {
     use super::*;
 
     const PEER: i64 = 7;
+
+    #[test]
+    fn first_save_keeps_the_window_of_an_archive_without_ranges() {
+        let (_dir, file, store) = scratch_store("history.json");
+        for row in rows(1..=3) {
+            store.put_record(PEER, &row).expect("record written");
+        }
+        drop(store);
+        let mut cache = file.load().cache;
+        cache.put(PEER, &page(1..=4));
+        file.save(&cache, None);
+        assert_eq!(file.ranges(PEER), vec![(1, 4)]);
+    }
 
     /// Writes a hand-written JSON payload into the archive the way a save
     /// would, so a fixture can exercise the load bounds without a wire.
