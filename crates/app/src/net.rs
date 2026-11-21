@@ -334,6 +334,12 @@ pub enum Event {
         result: Result<HistoryPage, ProtoError>,
     },
 
+    /// A bounded archive page read on the blocking pool.
+    ArchivedPage {
+        key: ArchiveReadKey,
+        result: Result<(Vec<Message>, Option<i64>), String>,
+    },
+
     /// A page came back around a message the reader jumped to, or the fetch that
     /// asked for it failed.
     ///
@@ -2072,6 +2078,8 @@ impl State {
 /// them.
 #[derive(Default)]
 struct CachedHistory {
+    archive_pending: Option<ArchiveReadKey>,
+    archive_miss: Option<ArchiveReadKey>,
     /// How many writes have been started: what a full answer is stale against.
     writes: u64,
 
@@ -2150,6 +2158,16 @@ struct Login {
 
     /// The two-factor challenge, until a password is submitted against it.
     challenge: Option<PasswordChallenge>,
+}
+
+/// Identifies an archive read and the state that can invalidate a miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveReadKey {
+    peer: i64,
+    anchor: i64,
+    writes: u64,
+    settled: bool,
+    generation: u64,
 }
 
 /// Where the loaded part of the open conversation ends.
@@ -3380,7 +3398,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         seed_opened(app, state);
         // Offline the wire owes no page, but the archive may hold the next
         // older stretch: put it in front of the cached window before leaving.
-        serve_archived_older(app, state, true);
+        schedule_archived_older(app, state, tx);
         return;
     };
 
@@ -3440,7 +3458,7 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         Wanted::Page(direction, cursor) => {
             // If the archive already holds the stretch below the window, read
             // it instead of asking the wire for a page we have downloaded.
-            if direction == FetchDirection::Older && serve_archived_older(app, state, false) {
+            if direction == FetchDirection::Older && schedule_archived_older(app, state, tx) {
                 return;
             }
             // A full archive is the one refusal the wire honors: there is
@@ -5414,6 +5432,8 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             result,
         } => apply_history(app, state, direction, anchor, cursor, generation, result),
 
+        Event::ArchivedPage { key, result } => finish_archived_older(app, state, key, result),
+
         Event::Jumped {
             jump,
             cursor,
@@ -6507,6 +6527,116 @@ fn apply_history(
 /// at that range's low end, settles the direction for an offline reader, who
 /// has no wire to fill the gap — an online reader keeps the direction open so
 /// the wire can fetch the gap below the range.
+fn schedule_archived_older(
+    app: &mut App,
+    state: &mut State,
+    tx: &UnboundedSender<AppEvent>,
+) -> bool {
+    if !app.wants_older() {
+        return state.cached.archive_pending.is_some();
+    }
+    let Some(anchor) = app.conversation.conversation.window.oldest_id() else {
+        return false;
+    };
+    let Some(file) = state.history_file.clone() else {
+        return false;
+    };
+    let key = ArchiveReadKey {
+        peer: app.conversation.conversation.window.chat_id,
+        anchor,
+        writes: state.cached.writes,
+        settled: state
+            .cached
+            .write
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished),
+        generation: state.outbox_generation,
+    };
+    if state.cached.archive_pending.is_some() {
+        return true;
+    }
+    if state.cached.archive_miss == Some(key) {
+        return false;
+    }
+    state.cached.archive_pending = Some(key);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result =
+            tokio::task::spawn_blocking(move || file.page_checked(key.peer, key.anchor, PAGE))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+        let _ = tx.send(AppEvent::Net(Event::ArchivedPage { key, result }));
+    });
+    true
+}
+
+fn finish_archived_older(
+    app: &mut App,
+    state: &mut State,
+    key: ArchiveReadKey,
+    result: Result<(Vec<Message>, Option<i64>), String>,
+) {
+    if state.cached.archive_pending != Some(key) {
+        return;
+    }
+    state.cached.archive_pending = None;
+    if key.generation != state.outbox_generation
+        || app.conversation.conversation.window.chat_id != key.peer
+    {
+        return;
+    }
+    let settled = state
+        .cached
+        .write
+        .as_ref()
+        .is_none_or(tokio::task::JoinHandle::is_finished);
+    if app.conversation.conversation.window.oldest_id() != Some(key.anchor)
+        || app.is_fetching(FetchDirection::Latest)
+        || state.cached.writes != key.writes
+        || settled != key.settled
+    {
+        return;
+    }
+    match result {
+        Ok((page, range_lo)) => {
+            if !apply_archived_older(app, state, page, range_lo, state.client.is_none()) {
+                state.cached.archive_miss = Some(key);
+            }
+        }
+        Err(error) => tracing::warn!(%error, "a history page could not be read"),
+    }
+}
+
+fn apply_archived_older(
+    app: &mut App,
+    state: &mut State,
+    mut page: Vec<Message>,
+    range_lo: Option<i64>,
+    offline: bool,
+) -> bool {
+    let Some(anchor) = app.conversation.conversation.window.oldest_id() else {
+        return false;
+    };
+    page.retain(|message| message.id > 0 && message.id < anchor);
+    if page.is_empty() {
+        return false;
+    }
+    let count = page.len();
+    let oldest = page.first().map(|message| message.id);
+    if let Some(cursor) = state.history.cursor.as_mut()
+        && cursor.peer_id() == app.conversation.conversation.window.chat_id
+    {
+        cursor.note_older(count, oldest, if offline { PAGE } else { count });
+    }
+    apply_page(app, FetchDirection::Older, page);
+    if offline && (count < PAGE || oldest == range_lo) {
+        app.exhaust(FetchDirection::Older);
+    }
+    true
+}
+
+#[cfg(test)]
 fn serve_archived_older(app: &mut App, state: &mut State, offline: bool) -> bool {
     if !app.wants_older() {
         return false;
@@ -6517,34 +6647,11 @@ fn serve_archived_older(app: &mut App, state: &mut State, offline: bool) -> bool
     let Some(file) = state.history_file.as_ref() else {
         return false;
     };
-    let (mut page, range_lo) =
-        file.page(app.conversation.conversation.window.chat_id, anchor, PAGE);
-    page.retain(|message| message.id > 0 && message.id < anchor);
-    if page.is_empty() {
-        return false;
-    }
-
-    let count = page.len();
-    let oldest = page.first().map(|message| message.id);
-    if let Some(cursor) = state.history.cursor.as_mut()
-        && cursor.peer_id() == app.conversation.conversation.window.chat_id
-    {
-        // A short stored page ends the conversation only for a reader with no
-        // wire; for an online one the wire still owes what lies below it.
-        cursor.note_older(count, oldest, if offline { PAGE } else { count });
-    }
+    let (page, range_lo) = file.page(app.conversation.conversation.window.chat_id, anchor, PAGE);
     app.begin_fetch(FetchDirection::Older);
-    apply_page(app, FetchDirection::Older, page);
-    // The end of this range is the end of what the archive can serve below the
-    // window: the ledger's next stretch sits across a gap that only the wire may
-    // fill. An offline reader settles the direction rather than stepping into
-    // it; an online reader keeps asking, because the wire still owes the gap,
-    // and the short wire page that reaches the true bottom settles it.
-    if offline && (count < PAGE || oldest == range_lo) {
-        app.exhaust(FetchDirection::Older);
-    }
+    let served = apply_archived_older(app, state, page, range_lo, offline);
     app.end_fetch(FetchDirection::Older);
-    true
+    served
 }
 
 /// What a bring-up that failed says, everywhere it has to be said.
@@ -11578,6 +11685,83 @@ mod tests {
                 .oldest_loaded_id(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_archive_page_is_not_read_on_every_pass() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut app = app_with_a_conversation(CHAT, 1);
+        let mut state = caching_state(&dir.path().join("history.json"));
+        let reads = Arc::clone(
+            &state
+                .history_file
+                .as_ref()
+                .expect("history file")
+                .page_reads,
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(schedule_archived_older(&mut app, &mut state, &tx));
+        let Some(AppEvent::Net(event)) = rx.recv().await else {
+            panic!("archive result");
+        };
+        apply(&mut app, &mut state, event);
+        for _ in 0..5 {
+            assert!(!schedule_archived_older(&mut app, &mut state, &tx));
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
+        state.cached.writes += 1;
+        assert!(schedule_archived_older(&mut app, &mut state, &tx));
+        let Some(AppEvent::Net(event)) = rx.recv().await else {
+            panic!("archive result");
+        };
+        apply(&mut app, &mut state, event);
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn an_archive_page_read_on_the_blocking_pool_reaches_the_window() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("history.json");
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 351..=400),
+        );
+        persist(&mut seed_state).await;
+        let mut app = app_with_a_conversation(CHAT, 0);
+        app.apply_latest(messages(CHAT, 401..=500));
+        let mut state = caching_state(&path);
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(schedule_archived_older(&mut app, &mut state, &tx));
+        let Some(AppEvent::Net(event)) = rx.recv().await else {
+            panic!("archive result");
+        };
+        apply(&mut app, &mut state, event);
+        assert_eq!(app.conversation.conversation.window.oldest_id(), Some(351));
+        assert!(app.conversation.conversation.window.exhausted_older);
+    }
+
+    #[tokio::test]
+    async fn a_delayed_archive_read_does_not_cross_accounts() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let mut app = app_with_a_conversation(CHAT, 1);
+        let mut state = caching_state(&dir.path().join("history.json"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(schedule_archived_older(&mut app, &mut state, &tx));
+        state.outbox_generation += 1;
+        let Some(AppEvent::Net(event)) = rx.recv().await else {
+            panic!("archive result");
+        };
+        apply(&mut app, &mut state, event);
+        assert!(state.cached.archive_miss.is_none());
+        assert_eq!(app.conversation.conversation.window.len(), 1);
     }
 
     /// An older page joins the cache through the anchor it was counted from,
