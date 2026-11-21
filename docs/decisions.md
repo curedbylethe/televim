@@ -2124,3 +2124,12 @@ are in [`../AGENTS.md`](../AGENTS.md).
   is an addition, not a move. A chip row carries its own chat id in the sealed
   plaintext and is checked on read the way a message record is, so it cannot be
   replayed under another conversation.
+
+- **Why the archive-full answer is read again after a write:** this supersedes
+  the "latched `History::full` flag" in the archive-limit entry above, which
+  held because bytes only grew. An edit can shorten a message and a deletion
+  removes one, so a full archive can fall back under its limit and a latch would
+  leave downloads stopped until a restart. `State::note_archive_full` still
+  reads the store only while an older page is wanted, and once it says full it
+  asks again only after a history write has landed since it was last read, so a
+  reader parked at the top of a full archive costs no query per tick.

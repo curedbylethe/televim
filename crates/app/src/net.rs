@@ -1240,16 +1240,22 @@ impl State {
             .map_or_else(ReadReceiptMode::default, Config::read_receipt_mode)
     }
 
-    /// Latches the archive-full answer when an older page is wanted, and says
-    /// so on the status line.
+    /// Reads the archive-full answer when an older page is wanted, and says so
+    /// on the status line.
     ///
     /// The answer is a read of the store against the configured limit, asked
-    /// only at the point it matters and only until it first says full: nothing
-    /// stored is ever removed, so a later check cannot go back to false. The
+    /// only at the point it matters. Once it says full it is asked again only
+    /// after a write has landed, since edits and deletions can free room. The
     /// line is written on every pass that wants older, so a reconnect that
     /// replaced the status still shows why the run is short.
     fn note_archive_full(&mut self, app: &mut App) -> bool {
-        if !self.history.full && app.wants_older() {
+        let settled = self
+            .cached
+            .write
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished);
+        let stale = self.cached.full_at != self.cached.writes && settled;
+        if app.wants_older() && (!self.history.full || stale) {
             let limit = self
                 .cfg
                 .as_ref()
@@ -1258,6 +1264,7 @@ impl State {
                 .history_file
                 .as_ref()
                 .is_some_and(|file| file.full(limit));
+            self.cached.full_at = self.cached.writes;
         }
         if self.history.full && app.wants_older() {
             app.set_status(ARCHIVE_FULL_LABEL);
@@ -1788,6 +1795,7 @@ impl State {
         }
 
         self.cached.dirty = false;
+        self.cached.writes += 1;
         let tx = self.tx.clone();
         let report = std::mem::take(&mut self.cached.rename_pending)
             .then(|| tx.clone())
@@ -2061,6 +2069,12 @@ impl State {
 /// them.
 #[derive(Default)]
 struct CachedHistory {
+    /// How many writes have been started: what a full answer is stale against.
+    writes: u64,
+
+    /// What `writes` read when the archive-full answer was last asked for.
+    full_at: u64,
+
     /// The messages as the wire has shown them: what the history file was
     /// loaded into at launch, with every fetched page merged in since and
     /// every edit, deletion and arrival the feed carried folded in.
@@ -2162,10 +2176,11 @@ struct History {
 
     /// Whether the archive has reached its configured size limit.
     ///
-    /// Latched: the archive is append-only, so once full it stays full until
-    /// the account's files are cleared. A reconnect re-reads no state that
-    /// could unset it, and the wire is never asked for a page below this
-    /// line — the rows stored below it are still served.
+    /// Only a write changes what the archive holds, so a full answer is asked
+    /// again once a write has landed since it was read, because an edit or a
+    /// deletion can bring the text back under the limit. A reconnect re-reads
+    /// no state that could unset it, and the wire is never asked for a page
+    /// below this line — the rows stored below it are still served.
     full: bool,
 }
 
@@ -11291,6 +11306,52 @@ mod tests {
             .collect();
         assert_eq!(window.first(), Some(&1), "the older page landed in front");
         assert_eq!(window.len(), 200, "the bounded window still holds 200");
+    }
+
+    /// A deletion can bring the archive back under its limit, so the full
+    /// answer is read again once the write that applies it has landed.
+    #[tokio::test]
+    async fn deleting_below_the_limit_clears_the_archive_full_answer() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=10),
+        );
+        persist(&mut state).await;
+        let used = HistoryFile::for_test(path.clone())
+            .text_bytes()
+            .expect("the archive reads");
+        state.cfg = Some(Config {
+            history_limit_bytes: Some(u64::try_from(used).expect("the size fits")),
+            ..Config::default()
+        });
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        assert!(app.wants_older(), "the reader is at the top of the window");
+        assert!(
+            state.note_archive_full(&mut app),
+            "the store is at its limit"
+        );
+
+        apply(
+            &mut app,
+            &mut state,
+            Event::Update(UpdateEvent::MessagesDeleted {
+                message_ids: vec![1, 2, 3, 4, 5],
+            }),
+        );
+        persist(&mut state).await;
+        assert!(
+            !state.note_archive_full(&mut app),
+            "the deletion freed room, so older pages are downloaded again"
+        );
     }
 
     /// An offline older page serves only the single range that reaches the
