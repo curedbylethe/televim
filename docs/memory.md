@@ -657,12 +657,13 @@ does not exercise the decode path, and no RSS number is claimed for it.
 
 The archive (`app/src/history_store.rs`) is a per-account SQLite database, not a
 file held in memory. What stays resident is one `HistoryCache` window per peer
-the screen has opened — `HISTORY_CACHE_DEPTH` (200) messages each — and the
-SQLite handle. `HistoryFile::get(peer)` consults `ranges` and decodes and unseals
-just that chat's rows on demand; it does not load the rest of the archive. There
-is no peer cap and no byte cap on what is stored: every message of every private
-conversation is kept until `history_limit_bytes` (default 1 GiB, `0` no limit) of
-message text is reached, after which older downloads stop and nothing stored is
+in the archive — the newest `HISTORY_CACHE_DEPTH` (200) messages of each, loaded
+at startup — and the SQLite handle. `HistoryFile::page(peer, below, limit)`
+consults `ranges`, reads only the recorded range that reaches the window, and
+decodes and unseals at most `PAGE` rows; the rest of the conversation is left
+unread. There is no peer cap and no byte cap on what is stored: every message
+of every private conversation is kept until `history_limit_bytes` (default 1 GiB,
+`0` no limit) of message text is reached, after which older downloads stop and nothing stored is
 deleted. The chat-list head is `HISTORY_CACHE_CHATS` (500) rows. Placeholders,
 presence and media bytes are never stored; the media kind and its id are.
 
@@ -675,7 +676,7 @@ its `-wal`, `-shm`, `-journal` and `.salt` siblings.
 
 | | Seeded scenario (measured) | Declared worst case |
 | :--- | ---: | ---: |
-| Messages, in memory (the windows) | 6,400 rows, about 1 MB | peers opened × 200 rows |
+| Messages, in memory (the windows) | 6,400 rows, about 1 MB | archived peers × 200 rows |
 | Archive, per conversation | a few MB | one conversation may hold the whole limit |
 | Archive, total | 3.29 MB (6,400 rows, 801,144 text bytes) | `history_limit_bytes` of text plus sealed-record and SQLite overhead per row |
 | Resident page cache | 256 KiB | 256 KiB, pinned; `mmap_size=0` |
