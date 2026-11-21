@@ -413,8 +413,13 @@ pub enum Event {
     LocalNameSaved { result: Result<(), String> },
 
     /// A history write failed, so the pages it took are handed back for the
-    /// next write rather than lost with the snapshot.
-    HistoryWriteFailed { pages: Vec<(i64, Vec<Message>)> },
+    /// next write rather than lost with the snapshot. The tag names the
+    /// account whose write failed, so a cache that has since changed hands
+    /// can refuse pages it never owned.
+    HistoryWriteFailed {
+        pages: Vec<(i64, Vec<Message>)>,
+        tag: HistoryTag,
+    },
 
     /// A conversation deletion came back, or the request failed.
     ConversationDeleted {
@@ -1810,6 +1815,7 @@ impl State {
                 if let Some(tx) = &tx {
                     let _ = tx.send(AppEvent::Net(Event::HistoryWriteFailed {
                         pages: retry_pages,
+                        tag,
                     }));
                 }
             }
@@ -5247,10 +5253,14 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             }
         }
 
-        Event::HistoryWriteFailed { pages } => {
-            state.cached.pending_pages.extend(pages);
-            state.cached.dirty = true;
-            tracing::warn!("a history write failed; its queued pages are kept for a retry");
+        Event::HistoryWriteFailed { pages, tag } => {
+            if tag.tags_the_same_account_as(&state.cached.tag) {
+                state.cached.pending_pages.extend(pages);
+                state.cached.dirty = true;
+                tracing::warn!("a history write failed; its queued pages are kept for a retry");
+            } else {
+                tracing::warn!("a history write failure from another account's write is refused");
+            }
         }
 
         Event::ConversationDeleted {
@@ -11389,7 +11399,7 @@ mod tests {
         );
         state.finish_history(&[]).await;
 
-        let Some(AppEvent::Net(Event::HistoryWriteFailed { pages })) = rx.recv().await else {
+        let Some(AppEvent::Net(Event::HistoryWriteFailed { pages, .. })) = rx.recv().await else {
             panic!("the failed write reports its pages");
         };
         assert_eq!(pages.len(), 1);
@@ -11397,7 +11407,14 @@ mod tests {
 
         let working = dir.path().join("working.history.json");
         state.set_history_file(HistoryFile::for_test(working.clone()));
-        apply(&mut app, &mut state, Event::HistoryWriteFailed { pages });
+        apply(
+            &mut app,
+            &mut state,
+            Event::HistoryWriteFailed {
+                pages,
+                tag: HistoryTag::default(),
+            },
+        );
         assert_eq!(state.cached.pending_pages.len(), 1);
         assert!(state.cached.dirty);
         state.finish_history(&[]).await;
@@ -11408,6 +11425,52 @@ mod tests {
             .map(|message| message.id)
             .collect();
         assert_eq!(stored, vec![1, 2, 3, 4, 5]);
+    }
+
+    /// A write failure from another account's write is refused: the pages it
+    /// took never belonged to the cache that is live now.
+    #[test]
+    fn a_write_failure_from_another_account_is_refused() {
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = State::default();
+        state.cached.tag = HistoryTag {
+            account_id: Some(2),
+            phone: Some("B".to_owned()),
+        };
+
+        // A write for account 1 failed after the switch to account 2: handing
+        // its pages back would write account 1's rows into account 2's archive.
+        apply(
+            &mut app,
+            &mut state,
+            Event::HistoryWriteFailed {
+                pages: vec![(CHAT, messages(CHAT, 1..=3))],
+                tag: HistoryTag {
+                    account_id: Some(1),
+                    phone: Some("A".to_owned()),
+                },
+            },
+        );
+        assert!(
+            state.cached.pending_pages.is_empty(),
+            "the other account's pages are refused"
+        );
+        assert!(!state.cached.dirty);
+
+        // The live account's own failure is kept for a retry.
+        apply(
+            &mut app,
+            &mut state,
+            Event::HistoryWriteFailed {
+                pages: vec![(CHAT, messages(CHAT, 1..=3))],
+                tag: HistoryTag {
+                    account_id: Some(2),
+                    phone: Some("B".to_owned()),
+                },
+            },
+        );
+        assert_eq!(state.cached.pending_pages.len(), 1);
+        assert!(state.cached.dirty);
     }
 
     /// An edit of a row outside the window still owes a save, even though no
@@ -18425,7 +18488,7 @@ mod action_status_tests {
 
         // The failed write first hands back the pages it took, then reports the
         // rename it could not save.
-        let Some(AppEvent::Net(Event::HistoryWriteFailed { pages })) = rx.recv().await else {
+        let Some(AppEvent::Net(Event::HistoryWriteFailed { pages, .. })) = rx.recv().await else {
             panic!("the refused write reports its pages");
         };
         assert!(pages.is_empty());

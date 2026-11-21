@@ -140,6 +140,22 @@ impl HistoryTag {
             _ => true,
         }
     }
+
+    /// Whether a write tagged `self` still belongs to the cache the live tag
+    /// names, so a failure of that write may hand its pages back to it: an id
+    /// must equal the live id, and a write with an id never belongs to a cache
+    /// without one; a phone must equal the live phone, and passes when either
+    /// is unknown, as does an untagged write. Absence is never a mismatch.
+    pub(crate) fn tags_the_same_account_as(&self, live: &HistoryTag) -> bool {
+        match (self.account_id, live.account_id) {
+            (Some(stored), Some(id)) => stored == id,
+            (Some(_), None) => false,
+            (None, _) => self
+                .phone
+                .as_deref()
+                .is_none_or(|stored| live.phone.as_deref().is_none_or(|label| stored == label)),
+        }
+    }
 }
 
 impl LoadedHistory {
