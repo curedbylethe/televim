@@ -654,6 +654,8 @@ Like the media cache, these figures are **declared, not measured**: `make measur
 does not exercise the decode path, and no RSS number is claimed for it.
 
 ### The history archive
+The archive stores a sealed text-byte total, updated with message writes. An older
+archive without that total is scanned once when first opened.
 
 The archive (`app/src/history_store.rs`) is a per-account SQLite database, not a
 file held in memory. What stays resident is one `HistoryCache` window per peer
