@@ -1654,6 +1654,20 @@ impl State {
         self.cached.messages.get(peer)
     }
 
+    /// Keeps a fetched page for the archive, ahead of the window draining it.
+    ///
+    /// The page is written as its own ingest with its own reach on the next
+    /// history write; the bounded cache may keep only part of it, and an older
+    /// page can fall out of it entirely. The write is marked here so a page
+    /// that changed no window still reaches the file.
+    fn remember_archived_page(&mut self, peer: i64, page: &[Message]) {
+        if page.is_empty() {
+            return;
+        }
+        self.cached.pending_pages.push((peer, page.to_vec()));
+        self.cached.dirty = true;
+    }
+
     /// Folds a page the wire answered with into the cache, and marks the
     /// cache for writing if the page changed it.
     fn remember_page(&mut self, peer: i64, page: &[Message], kind: PageKind) {
@@ -1678,7 +1692,12 @@ impl State {
                 message_id,
                 ..
             } => self.forget_media_message(*chat_id, *message_id),
-            UpdateEvent::MessagesDeleted { message_ids } => self.forget_media_messages(message_ids),
+            UpdateEvent::MessagesDeleted { message_ids } => {
+                // The id is carried to the archive even when no window holds a
+                // row for it, so a deletion of an older row still owes a save.
+                self.cached.dirty = true;
+                self.forget_media_messages(message_ids);
+            }
             _ => {}
         }
     }
@@ -1764,10 +1783,14 @@ impl State {
         let Some(bytes) = HistoryFile::encode(&self.cached.messages, &tag) else {
             return;
         };
+        let pages = std::mem::take(&mut self.cached.pending_pages);
         self.cached.write = Some(tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || file.try_write(&bytes))
-                .await
-                .unwrap_or_else(|error| Err(error.to_string()));
+            let result = tokio::task::spawn_blocking(move || {
+                file.try_write(&bytes)?;
+                file.ingest_pages(&pages).map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
             if let Some(tx) = report {
                 let _ = tx.send(AppEvent::Net(Event::LocalNameSaved { result }));
             }
@@ -1803,6 +1826,7 @@ impl State {
         self.cached.tag = HistoryTag::default();
         self.cached.dirty = false;
         self.cached.rename_pending = false;
+        self.cached.pending_pages.clear();
         let Some(file) = self.history_file.clone() else {
             return;
         };
@@ -2005,6 +2029,11 @@ struct CachedHistory {
     /// Whether a rename is waiting for the next write, whose outcome is owed
     /// to the reader as [`Event::LocalNameSaved`].
     rename_pending: bool,
+
+    /// Fetched pages waiting for the next write, each with the chat it came
+    /// from. A page is archived with its own extent before the bounded window
+    /// can drop it, using the same coalescing as the window snapshot.
+    pending_pages: Vec<(i64, Vec<Message>)>,
 
     /// When the last write was started, for [`HISTORY_CACHE_WRITE_INTERVAL`].
     /// `None` until the first, which therefore starts at once.
@@ -3240,6 +3269,9 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         // The cursor is left alone: the newest page is still unasked for, and
         // the client that comes up asks for it.
         seed_opened(app, state);
+        // Offline the wire owes no page, but the archive may hold the next
+        // older stretch: put it in front of the cached window before leaving.
+        serve_archived_older(app, state);
         return;
     };
 
@@ -3297,6 +3329,11 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         }
 
         Wanted::Page(direction, cursor) => {
+            // If the archive already holds the stretch below the window, read
+            // it instead of asking the wire for a page we have downloaded.
+            if direction == FetchDirection::Older && serve_archived_older(app, state) {
+                return;
+            }
             app.begin_fetch(direction);
             request(&client, direction, cursor, state.feed_generation, tx, None);
         }
@@ -6265,6 +6302,9 @@ fn apply_history(
             let reactions = page.reactions;
             let pinned = page.pinned;
 
+            // Archive the page before the bounded window can drain it: an
+            // older page may fall out of the cache entirely on this very fold.
+            state.remember_archived_page(chat_id, &page.messages);
             if let Some(kind) = page_kind(direction, anchor, cursor, rows) {
                 state.remember_page(chat_id, &page.messages, kind);
             }
@@ -6320,6 +6360,50 @@ fn apply_history(
             }
         }
     }
+}
+
+/// Serves the next older page from the archive when the wire cannot supply it.
+///
+/// Two cases use this: an offline reader, for whom no wire page is on its way,
+/// and a reader whose archive already holds the stretch below the window —
+/// asking the wire for it again would waste a round trip and can land a page
+/// that leaves a hole against what was already downloaded. The page is the
+/// newest [`PAGE`] rows below the window's oldest id, put in front of it in
+/// ascending order, exactly where a wire page would go. A short page settles
+/// the direction, so a reader does not keep asking for what is not there.
+fn serve_archived_older(app: &mut App, state: &mut State) -> bool {
+    if !app.wants_older() {
+        return false;
+    }
+    let Some(anchor) = app.conversation.conversation.window.oldest_id() else {
+        return false;
+    };
+    let Some(file) = state.history_file.as_ref() else {
+        return false;
+    };
+    let mut page: Vec<Message> = file
+        .get(app.conversation.conversation.window.chat_id)
+        .into_iter()
+        .filter(|message| message.id > 0 && message.id < anchor)
+        .collect();
+    let skip = page.len().saturating_sub(PAGE);
+    page.drain(..skip);
+    if page.is_empty() {
+        return false;
+    }
+
+    let count = page.len();
+    let oldest = page.first().map(|message| message.id);
+    if let Some(cursor) = state.history.cursor.as_mut() {
+        cursor.note_older(count, oldest, PAGE);
+    }
+    app.begin_fetch(FetchDirection::Older);
+    apply_page(app, FetchDirection::Older, page);
+    if count < PAGE {
+        app.exhaust(FetchDirection::Older);
+    }
+    app.end_fetch(FetchDirection::Older);
+    true
 }
 
 /// What a bring-up that failed says, everywhere it has to be said.
@@ -10832,6 +10916,178 @@ mod tests {
             kept,
             (51..=250).collect::<Vec<_>>(),
             "merged rather than replaced, then cut to the newest 200"
+        );
+    }
+
+    /// An older page is written with its own extent before the bounded window
+    /// can drop its oldest half; a reopen reads every message of the page back.
+    #[tokio::test]
+    async fn an_older_page_is_archived_before_the_window_drains_it() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 201..=300),
+        );
+        persist(&mut state).await;
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(201),
+            messages(CHAT, 1..=200),
+        );
+        // The window now holds only 101..=300: half the page fell out of it.
+        assert_eq!(cached_ids(&state), (101..=300).collect::<Vec<_>>());
+        persist(&mut state).await;
+
+        let file = HistoryFile::for_test(path.clone());
+        assert_eq!(
+            file.get(CHAT)
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            (1..=300).collect::<Vec<_>>(),
+            "every row of the older page is in the archive"
+        );
+        assert_eq!(file.ranges(CHAT), vec![(1, 300)]);
+    }
+
+    /// Two pages that touch no common range are both kept, under their own
+    /// extents, and both read back after a reopen.
+    #[tokio::test]
+    async fn two_disconnected_pages_keep_both_ranges() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 201..=300),
+        );
+        persist(&mut state).await;
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(101),
+            messages(CHAT, 1..=100),
+        );
+        persist(&mut state).await;
+
+        let file = HistoryFile::for_test(path.clone());
+        assert_eq!(file.ranges(CHAT), vec![(1, 100), (201, 300)]);
+        let stored: Vec<i64> = file.get(CHAT).iter().map(|message| message.id).collect();
+        assert!(stored.contains(&1) && stored.contains(&100));
+        assert!(stored.contains(&201) && stored.contains(&300));
+        assert_eq!(stored.len(), 200, "both pages, and only both pages");
+    }
+
+    /// A page that bridges a known gap closes it into one recorded stretch.
+    #[tokio::test]
+    async fn a_page_filling_a_gap_merges_the_stored_ranges() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 201..=300),
+        );
+        persist(&mut state).await;
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(101),
+            messages(CHAT, 1..=100),
+        );
+        persist(&mut state).await;
+        page_arrives(
+            &mut app,
+            &mut state,
+            FetchDirection::Older,
+            Some(211),
+            messages(CHAT, 90..=210),
+        );
+        persist(&mut state).await;
+
+        let file = HistoryFile::for_test(path.clone());
+        assert_eq!(file.ranges(CHAT), vec![(1, 300)]);
+        assert_eq!(
+            file.get(CHAT)
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            (1..=300).collect::<Vec<_>>()
+        );
+    }
+
+    /// With no wire to ask, the next older page is served from the archive
+    /// into the conversation, exactly where a fetched page would go.
+    #[tokio::test]
+    async fn an_offline_reader_gets_the_next_older_page_from_the_archive() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=300),
+        );
+        persist(&mut seed_state).await;
+
+        // A cold, offline reader: the window is the newest 200 rows the load
+        // kept, and there is no client to fetch the next older page.
+        let mut app = app_with_a_conversation(CHAT, 0);
+        let mut state = caching_state(&path);
+        state.restore_history(HistoryFile::for_test(path.clone()).load().cache);
+        state.history.cursor = None;
+        seed_opened(&mut app, &mut state);
+        state.history.cursor = Some(HistoryCursor::new(CHAT));
+        assert_eq!(
+            app.conversation.conversation.window.oldest_id(),
+            Some(101),
+            "the loaded window is the newest 200"
+        );
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        }
+        assert!(app.wants_older(), "the reader is at the top of the window");
+        assert!(state.client.is_none(), "and there is no wire");
+
+        assert!(serve_archived_older(&mut app, &mut state));
+        let window: Vec<i64> = app
+            .conversation
+            .conversation
+            .window
+            .iter()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(window.first(), Some(&1), "the older page landed in front");
+        assert_eq!(window.len(), 200, "the bounded window still holds 200");
+        let cursor = state.history.cursor.expect("the reader still has a cursor");
+        assert_eq!(
+            cursor.oldest_loaded_id(),
+            Some(1),
+            "and it moved with the page"
         );
     }
 
