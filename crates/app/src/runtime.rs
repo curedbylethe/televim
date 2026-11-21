@@ -807,6 +807,9 @@ pub(crate) fn load_history(
     configured: Option<&str>,
 ) -> (HistoryCache, HistoryTag) {
     let loaded = file.load();
+    if file.poisoned() {
+        return (loaded.cache, HistoryTag::default());
+    }
     let tag = HistoryTag {
         account_id: loaded.account_id,
         phone: loaded.account.clone(),
