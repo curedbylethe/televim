@@ -589,7 +589,7 @@ Working today:
   registers are deliberately not shared, because their formats differ.
 - **Chat and contact actions:** `:archive` and `:archived`, `:block`/`:unblock`,
   `:rename [name]`, `:delete-chat [both]`, `:report [reason]` and `:contacts`.
-  A local name is yours, kept with the history file and cleared by bare
+  A local name is yours, kept in the history archive and cleared by bare
   `:rename`; archive keeps a chat in the archive folder rather than deleting it;
   block, delete and report ask `y/n` first; the contacts list opens a person's
   card, which carries `rename`, `block`/`unblock` and `report` rows.
@@ -604,12 +604,14 @@ Working today:
   anything else is refused with `not a date: <argument>`.
   `:unlock` asks for the session passphrase again after `Esc` left the session
   locked. `:passphrase` asks `y/n`, then the new passphrase twice, and re-seals the
-  session file and the history cache under it; the old one stops opening either,
-  the OS keyring is left alone, and the box says to update
+  session file and the archive key under it. Message rows are not re-encrypted;
+  the old passphrase stops opening the session and archive. The OS keyring is
+  left alone, and the box says to update
   `TELEVIM_SESSION_PASSPHRASE` or `session_passphrase` if the old passphrase was
   set there. `:passphrase` is not supported while `session_key_file` is
   configured. To switch safely, sign out, remove `session_key_file` from the
-  configuration, delete the old key file (the history cache rebuilds), set
+  configuration, delete the old key file (sign-out removes the history archive),
+  set
   `session_passphrase` or `TELEVIM_SESSION_PASSPHRASE`, then sign in. Re-sealing
   with the setting left in place would make the next launch read the key file and
   fail to open the session. A mismatch between the

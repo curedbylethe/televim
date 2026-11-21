@@ -293,26 +293,18 @@ mutation tests are in `telegram-framework`'s test module. The libFuzzer run in
   `archived_from` (a user, a group, a message, the seeded peers and the pinned
   order) and the ten report reasons.
 
-- **History cache:** two layers, both on every run and neither needing a
-  client. The **store** (`app/src/history_store.rs`) is pure functions over
-  `HistoryCache` and one file in a temp directory: the file's round trip as an
-  envelope on disk (through a passphrase provider, never the keyring), its
-  `0600` mode, an atomic write that leaves no temp behind, a legacy plaintext file
-  rewritten sealed with its old inode zeroed
-  (`a_legacy_plaintext_file_is_rewritten_sealed`,
-  `migration_wipes_the_pre_migration_bytes`), a file sealed under another key or
-  behind an unreachable key source left alone and loaded empty, garbage or a missing
-  file as an empty cache, the account rules (`a_payload_round_trips_the_signed_in_account_id`,
-  `a_legacy_phone_tag_still_accepts_only_the_configured_phone`,
-  `a_mismatched_account_id_does_not_seed_the_cache`), the depth, peer, text-byte
-  (`the_byte_budget_evicts_the_least_recently_touched`,
-  `a_five_megabyte_message_does_not_leave_the_cache_over_budget`,
-  `a_file_past_the_byte_budget_is_cut_on_load`) and chat-list
-  bounds (on load as well as on write), every merge rule per `PageKind` — overlap,
-  replace past a gap, ignore when disjoint, deletion inside a page's stretch, an
-  empty page changing nothing — and every feed rule: an edit in place, a deletion
-  across all peers, an arrival only into a current run, and the marks an
-  interruption, an overtaken page or an eviction take away. The **loop** (`net.rs`
+- **History archive:** two layers, both tested without a client. The **store**
+  (`app/src/history_store.rs`) exercises a per-account SQLite archive in a temp
+  directory, with sealed records and a passphrase provider. Tests cover record
+  fields and address binding (`a_record_round_trips_every_field_through_a_reopened_database`),
+  unreadable archives left intact, account tags, and the configured text limit
+  (`the_fullness_answer_compares_stored_bytes_with_the_configured_limit`). Range
+  tests cover gaps, joining pages, and restarts
+  (`a_page_that_leaves_a_gap_is_kept_as_its_own_range`,
+  `a_page_that_fills_a_recorded_gap_closes_it`,
+  `a_restart_does_not_join_disconnected_ranges`). The bounded in-memory windows
+  also cover merge and feed rules: edits, deletions, arrivals, and interruptions.
+  The **loop** (`net.rs`
   tests) drives `apply` and `drive` over a `State` with no client: a page landing
   in the cache and on disk, one write in flight at a time, writes coalesced
   within 500 ms (`ten_rapid_updates_are_coalesced_into_at_most_two_writes`,
@@ -668,10 +660,9 @@ line is emitted after the newest page has been applied and a frame drawn.
   wait for the chat list to connect, then open five different conversations with
   messages. Each must report `seeded=false`. Stop the app and restore the
   original archive when finished.
-- **Warm open:** with the original history restored and the app connected, open
+- **Warm open:** with the original archive restored and the app connected, open
   a conversation, leave with `h`, then reopen it five times using `:chat <id>`
-  or the chat list. Each measured reopen must report `seeded=true`; keep the
-  conversation in the 32-peer history cache.
+  or the chat list. Each measured reopen must report `seeded=true`.
 - **Cold launch:** with the app stopped, back up the history archive, then run
   `RUST_LOG=info TELEVIM_MEASURE=1 target/release/televim --config <config> --chat <id>`.
   Save the log, stop the app, and move its newly written archive and siblings aside
