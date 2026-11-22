@@ -2178,6 +2178,10 @@ struct Login {
 /// Identifies an archive read and the state that can invalidate a miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveReadKey {
+    /// Which end of the window the read serves; the anchor means the opposite
+    /// end in the other direction, so the two are told apart here rather than
+    /// by the reader of the key.
+    direction: FetchDirection,
     peer: i64,
     anchor: i64,
     writes: u64,
@@ -3474,6 +3478,11 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
             // If the archive already holds the stretch below the window, read
             // it instead of asking the wire for a page we have downloaded.
             if direction == FetchDirection::Older && schedule_archived_older(app, state, tx) {
+                return;
+            }
+            // The same above it: a window drawn from the store resumes at its
+            // newest row, and the store often holds the run past that row.
+            if direction == FetchDirection::Newer && schedule_archived_newer(app, state, tx) {
                 return;
             }
             // A full archive is the one refusal the wire honors: there is
@@ -5471,7 +5480,7 @@ pub fn apply(app: &mut App, state: &mut State, event: Event) {
             result,
         } => apply_history(app, state, direction, anchor, cursor, generation, result),
 
-        Event::ArchivedPage { key, result } => finish_archived_older(app, state, key, result),
+        Event::ArchivedPage { key, result } => finish_archived_page(app, state, key, result),
 
         Event::Jumped {
             jump,
@@ -6604,6 +6613,7 @@ fn schedule_archived_older(
         return false;
     };
     let key = ArchiveReadKey {
+        direction: FetchDirection::Older,
         peer: app.conversation.conversation.window.chat_id,
         anchor,
         writes: state.cached.writes,
@@ -6633,7 +6643,67 @@ fn schedule_archived_older(
     true
 }
 
-fn finish_archived_older(
+/// Serves the next newer page from the archive when it holds the stretch above
+/// the window.
+///
+/// The resume case this exists for: bring-up anchors the cursor at the newest
+/// row the store showed, and the store often holds the run past that row — the
+/// window is bounded, so an older page can have trimmed rows the archive still
+/// has. Asking the wire for them downloads a page the reader already has; the
+/// page is the oldest [`PAGE`] rows above the window's newest id, appended in
+/// ascending order, exactly where a wire page would go. Only the one recorded
+/// range that reaches the window is read; the tail stays unconfirmed either
+/// way, because only the wire can say what came after the stored run.
+fn schedule_archived_newer(
+    app: &mut App,
+    state: &mut State,
+    tx: &UnboundedSender<AppEvent>,
+) -> bool {
+    let Some(anchor) = app.conversation.conversation.window.newest_id() else {
+        return false;
+    };
+    let Some(file) = state.history_file.clone() else {
+        return false;
+    };
+    let key = ArchiveReadKey {
+        direction: FetchDirection::Newer,
+        peer: app.conversation.conversation.window.chat_id,
+        anchor,
+        writes: state.cached.writes,
+        settled: state
+            .cached
+            .write
+            .as_ref()
+            .is_none_or(tokio::task::JoinHandle::is_finished),
+        generation: state.outbox_generation,
+    };
+    if state.cached.archive_pending.is_some() {
+        return true;
+    }
+    if state.cached.archive_miss == Some(key) {
+        return false;
+    }
+    state.cached.archive_pending = Some(key);
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            file.page_above_checked(key.peer, key.anchor, PAGE)
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| error.to_string()));
+        let _ = tx.send(AppEvent::Net(Event::ArchivedPage { key, result }));
+    });
+    true
+}
+
+/// Lands a page the archive read, whichever end it extends.
+///
+/// The key names the direction, so the one validation covers both: the window
+/// end the read was anchored to has to be the end still, or the page belongs
+/// to a want that has passed. The miss is recorded with the key it failed
+/// under, so a pass that reads nothing does not read it again every tick.
+fn finish_archived_page(
     app: &mut App,
     state: &mut State,
     key: ArchiveReadKey,
@@ -6653,7 +6723,14 @@ fn finish_archived_older(
         .write
         .as_ref()
         .is_none_or(tokio::task::JoinHandle::is_finished);
-    if app.conversation.conversation.window.oldest_id() != Some(key.anchor)
+    // `Latest` is never scheduled, so a key that claims it describes a read
+    // that was never asked for.
+    let anchored = match key.direction {
+        FetchDirection::Older => app.conversation.conversation.window.oldest_id(),
+        FetchDirection::Newer => app.conversation.conversation.window.newest_id(),
+        FetchDirection::Latest => return,
+    };
+    if anchored != Some(key.anchor)
         || app.is_fetching(FetchDirection::Latest)
         || state.cached.writes != key.writes
         || settled != key.settled
@@ -6661,8 +6738,17 @@ fn finish_archived_older(
         return;
     }
     match result {
-        Ok((page, range_lo)) => {
-            if !apply_archived_older(app, state, page, range_lo, state.client.is_none()) {
+        Ok((page, range_bound)) => {
+            let applied = match key.direction {
+                FetchDirection::Older => {
+                    apply_archived_older(app, state, page, range_bound, state.client.is_none())
+                }
+                FetchDirection::Newer => {
+                    apply_archived_newer(app, state, page, range_bound, state.client.is_none())
+                }
+                FetchDirection::Latest => false,
+            };
+            if !applied {
                 state.cached.archive_miss = Some(key);
             }
         }
@@ -6701,6 +6787,41 @@ fn apply_archived_older(
     true
 }
 
+/// Appends a page the archive holds above the window, and moves the cursor
+/// with it.
+///
+/// The forward counterpart to [`apply_archived_older`]: the cursor must point
+/// above what was appended or the wire downloads the same rows again, and an
+/// offline reader settles the direction at the top of the stored range, since
+/// no wire page is coming to fill past it.
+fn apply_archived_newer(
+    app: &mut App,
+    state: &mut State,
+    mut page: Vec<Message>,
+    range_hi: Option<i64>,
+    offline: bool,
+) -> bool {
+    let Some(anchor) = app.conversation.conversation.window.newest_id() else {
+        return false;
+    };
+    page.retain(|message| message.id > 0 && message.id > anchor);
+    if page.is_empty() {
+        return false;
+    }
+    let count = page.len();
+    let newest = page.last().map(|message| message.id);
+    if let Some(cursor) = state.history.cursor.as_mut()
+        && cursor.peer_id() == app.conversation.conversation.window.chat_id
+    {
+        cursor.note_newer(count, newest, if offline { PAGE } else { count });
+    }
+    apply_page(app, FetchDirection::Newer, page);
+    if offline && (count < PAGE || newest == range_hi) {
+        app.exhaust(FetchDirection::Newer);
+    }
+    true
+}
+
 #[cfg(test)]
 fn serve_archived_older(app: &mut App, state: &mut State, offline: bool) -> bool {
     if !app.wants_older() {
@@ -6716,6 +6837,22 @@ fn serve_archived_older(app: &mut App, state: &mut State, offline: bool) -> bool
     app.begin_fetch(FetchDirection::Older);
     let served = apply_archived_older(app, state, page, range_lo, offline);
     app.end_fetch(FetchDirection::Older);
+    served
+}
+
+#[cfg(test)]
+fn serve_archived_newer(app: &mut App, state: &mut State, offline: bool) -> bool {
+    let Some(anchor) = app.conversation.conversation.window.newest_id() else {
+        return false;
+    };
+    let Some(file) = state.history_file.as_ref() else {
+        return false;
+    };
+    let (page, range_hi) =
+        file.page_above(app.conversation.conversation.window.chat_id, anchor, PAGE);
+    app.begin_fetch(FetchDirection::Newer);
+    let served = apply_archived_newer(app, state, page, range_hi, offline);
+    app.end_fetch(FetchDirection::Newer);
     served
 }
 
@@ -13667,7 +13804,9 @@ mod tests {
     /// A reader who has scrolled back into older history served from the store
     /// keeps that stretch when the app is brought back up: the stretch arrives
     /// with no wire request, and the resume neither reloads the conversation
-    /// nor asks for rows the store already showed.
+    /// nor asks for rows the store already showed — the trimmed rows past the
+    /// window's newest id are served the same way, and only what follows the
+    /// stored run is left for the wire.
     #[tokio::test]
     async fn a_bring_up_keeps_the_older_stretch_the_store_served() {
         let dir = tempfile::tempdir().expect("a scratch directory");
@@ -13734,6 +13873,109 @@ mod tests {
             wanted(&app, state.history, Instant::now()),
             Wanted::Page(FetchDirection::Newer, cursor),
             "no request over the rows the store already showed"
+        );
+
+        // The store still holds the rows the bounded window trimmed, so the
+        // forward stretch is served from it before the wire is asked anything.
+        assert!(serve_archived_newer(&mut app, &mut state, false));
+        assert_eq!(
+            app.conversation.conversation.window.newest_id(),
+            Some(300),
+            "the trimmed rows are back on screen"
+        );
+        assert!(
+            state.client.is_none(),
+            "no wire request fetched the stored rows"
+        );
+        assert_eq!(
+            state
+                .history
+                .cursor
+                .as_ref()
+                .and_then(|cursor| cursor.newest_loaded_id()),
+            Some(300),
+            "the cursor points above what the store served"
+        );
+        assert!(
+            !serve_archived_newer(&mut app, &mut state, false),
+            "the store holds nothing above the stored run"
+        );
+        let mut cursor = HistoryCursor::new(CHAT);
+        cursor.reset_to(&messages(CHAT, 1..=300));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Page(FetchDirection::Newer, cursor),
+            "only what follows the stored run is asked for"
+        );
+    }
+
+    /// The forward serve runs through the same read the older one does: the
+    /// pass schedules it, the page event lands it, and a store with nothing
+    /// above the run yields to the wire instead of reading every tick.
+    #[tokio::test]
+    async fn a_resume_serves_the_stored_forward_stretch_over_the_page_event() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+
+        // A previous session stored a long run; the launch shows its newest
+        // 200 rows, and the resume anchors the cursor at them.
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=300),
+        );
+        seed_state.persist_history(seed_app.chats(), after_the_window());
+        if let Some(write) = seed_state.cached.write.take() {
+            let _ = write.await.expect("the history write ran");
+        }
+
+        let mut app = launching();
+        let mut state = caching_state(&path);
+        state.restore_history(HistoryFile::for_test(path.clone()).load().cache);
+        state.history.cursor = None;
+        open_from_cache(&mut app, &mut state);
+        ready(&mut app, &mut state, vec![chat(CHAT)]);
+
+        // Scroll back into the older stretch: the bounded window trims its
+        // newest rows, which the store still holds.
+        scroll_up(&mut app, 199);
+        assert!(serve_archived_older(&mut app, &mut state, false));
+        assert_eq!(
+            app.conversation.conversation.window.newest_id(),
+            Some(200),
+            "the trimmed window ends at the stored run's drained end"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(schedule_archived_newer(&mut app, &mut state, &tx));
+        let Some(AppEvent::Net(event)) = rx.recv().await else {
+            panic!("the forward read is scheduled");
+        };
+        apply(&mut app, &mut state, event);
+        assert_eq!(
+            app.conversation.conversation.window.newest_id(),
+            Some(300),
+            "the stored forward stretch is appended"
+        );
+        assert!(
+            state.cached.archive_miss.is_none(),
+            "the read that served a page is not a miss"
+        );
+
+        // Above the stored run the read is empty, so the pass yields to the
+        // wire rather than scheduling the same empty read every tick.
+        assert!(schedule_archived_newer(&mut app, &mut state, &tx));
+        let Some(AppEvent::Net(event)) = rx.recv().await else {
+            panic!("the forward read is scheduled");
+        };
+        apply(&mut app, &mut state, event);
+        assert!(
+            !schedule_archived_newer(&mut app, &mut state, &tx),
+            "the empty read is not scheduled again"
         );
     }
 

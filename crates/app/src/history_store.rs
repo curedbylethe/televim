@@ -1350,6 +1350,59 @@ impl HistoryFile {
             .expect("archive page reads")
     }
 
+    /// The next newer page of `peer` strictly above `above`, oldest first, and
+    /// the `hi_id` of the single recorded range it came from.
+    ///
+    /// The forward counterpart to [`HistoryFile::page_checked`]: only the range
+    /// that reaches the window — the stretch whose low end is at or just above
+    /// `above`, the lowest such stretch whose own top is also above `above` —
+    /// is read, so paging never crosses a gap into a newer range, and an older
+    /// range that ends at or below `above` cannot hide a newer one that does
+    /// reach above it. At most `limit` rows are decoded; everything else on
+    /// disk is left untouched. `None` for the range means no range reaches
+    /// above `above`, so there is nothing contiguous to serve.
+    pub(crate) fn page_above_checked(
+        &self,
+        peer: i64,
+        above: i64,
+        limit: usize,
+    ) -> Result<(Vec<Message>, Option<i64>)> {
+        #[cfg(test)]
+        self.page_reads.fetch_add(1, Ordering::Relaxed);
+        if !self.path.is_file() {
+            return Ok((Vec::new(), None));
+        }
+        let (_guard, keys) = self.locked_keys();
+        let store = open_store(&self.path, &keys)?;
+        let ranges = store.ranges(peer)?;
+        let reaching = ranges
+            .iter()
+            .filter(|(lo, _)| *lo <= above.saturating_add(1))
+            .filter(|(_, hi)| *hi > above)
+            .min_by_key(|(lo, _)| *lo);
+        let Some(&(_, hi)) = reaching else {
+            return Ok((Vec::new(), None));
+        };
+        let rows = store.page_above(peer, above, hi, limit)?;
+        Ok((
+            rows.into_iter()
+                .map(|(_, row)| row.to_message(peer))
+                .collect(),
+            Some(hi),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn page_above(
+        &self,
+        peer: i64,
+        above: i64,
+        limit: usize,
+    ) -> (Vec<Message>, Option<i64>) {
+        self.page_above_checked(peer, above, limit)
+            .expect("archive page reads")
+    }
+
     /// The encoded text bytes held on disk, by a SQL read rather than a copy of
     /// every row in memory. `None` when the archive cannot be read.
     #[allow(dead_code)]
@@ -2459,6 +2512,44 @@ impl Store {
         }
         // SQL read newest-first to bound with `LIMIT`; a page is oldest-first.
         out.reverse();
+        Ok(out)
+    }
+
+    /// The oldest `limit` rows of `chat_id` strictly above `above`, decoded and
+    /// unsealed, oldest id first. `hi` confines the read to one recorded range
+    /// so a page never crosses a gap into a newer stretch. The bound is applied
+    /// in SQL: only the rows selected by `LIMIT` are decoded, the rest of the
+    /// conversation is never read or unsealed.
+    fn page_above(
+        &self,
+        chat_id: i64,
+        above: i64,
+        hi: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, CachedMessage)>> {
+        let chat_key = keyed_chat(&self.hmac_key, chat_id);
+        let limit = i64::try_from(limit).map_err(|_| anyhow!("the page size is too large"))?;
+        let mut statement = self.conn.prepare(
+            "SELECT message_id, sealed FROM messages
+             WHERE chat_key = ?1 AND message_id > ?2 AND message_id <= ?3
+             ORDER BY message_id ASC LIMIT ?4",
+        )?;
+        let rows = statement.query_map(params![chat_key, above, hi, limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (message_id, envelope) = row?;
+            let record = decode_record(
+                &envelope,
+                &self.record_keys,
+                &self.hmac_key,
+                &chat_key,
+                message_id,
+            )?;
+            out.push((message_id, record.row));
+        }
+        // SQL read oldest-first, which is the page's own order: no reverse.
         Ok(out)
     }
 
