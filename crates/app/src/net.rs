@@ -3475,6 +3475,16 @@ pub fn drive(app: &mut App, state: &mut State, tx: &UnboundedSender<AppEvent>) {
         }
 
         Wanted::Page(direction, cursor) => {
+            // A resumed open owes its read marker to the newest row the store
+            // showed, exactly as a freshly opened one owes it to its Latest
+            // page: the marker does not wait for the page that confirms the
+            // run, whichever end serves that page.
+            if direction == FetchDirection::Newer
+                && app.tail_unconfirmed()
+                && let Some((chat_id, max_id)) = latest_read(app, state)
+            {
+                request_read(&client, chat_id, max_id, generation, tx);
+            }
             // If the archive already holds the stretch below the window, read
             // it instead of asking the wire for a page we have downloaded.
             if direction == FetchDirection::Older && schedule_archived_older(app, state, tx) {
@@ -3794,7 +3804,8 @@ fn bulk_read_sentence(done: u32, failed: u32) -> String {
     }
 }
 
-/// The read marker a Latest page asks for, or none.
+/// The read marker a freshly opened or a resumed conversation asks for, or
+/// none.
 ///
 /// A card that covers the conversation, or a terminal that has reported itself
 /// unfocused, refuses the marker, so the conversation is owed it:
@@ -13626,6 +13637,24 @@ mod tests {
         assert_eq!(latest_read(&app, &mut state), Some((CHAT, 20)));
     }
 
+    /// A resumed open owes the same marker to the newest row the store showed:
+    /// the forward page confirms the run later, and the marker does not wait
+    /// for it.
+    #[test]
+    fn a_resumed_open_owes_the_read_marker_to_the_stored_newest() {
+        let mut app = launching();
+        let mut state = state_caching(CHAT, 1..=30);
+        let mut unread = chat(CHAT);
+        unread.unread_count = 2;
+        unread.last_message_id = Some(30);
+        assert!(state.cached.messages.set_chats(&[unread.clone()]));
+        open_from_cache(&mut app, &mut state);
+        ready(&mut app, &mut state, vec![unread]);
+
+        assert!(app.tail_unconfirmed(), "the open is a resume, not a reload");
+        assert_eq!(latest_read(&app, &mut state), Some((CHAT, 30)));
+    }
+
     /// An application as the runtime builds it before the first frame.
     fn launching() -> App {
         let mut app = App::new();
@@ -13892,7 +13921,7 @@ mod tests {
                 .history
                 .cursor
                 .as_ref()
-                .and_then(|cursor| cursor.newest_loaded_id()),
+                .and_then(HistoryCursor::newest_loaded_id),
             Some(300),
             "the cursor points above what the store served"
         );
