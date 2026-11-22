@@ -774,6 +774,10 @@ fn apply_scenario(app: &mut App, network: &mut net::State, event: scenario::Even
             net::Event::Update(domain::updates::UpdateEvent::NewMessage(message)),
         ),
         scenario::Event::Fetch(direction) => app.begin_fetch(direction),
+        // The compressed stand-in for a forward page that reached the end with
+        // no rows: the wait it ends is what the arrival tests need on screen,
+        // and the full page path is pinned by the unit tests.
+        scenario::Event::Confirmed => app.tail_confirmed(),
         scenario::Event::Net(event) => net::apply(app, network, event),
     }
 }

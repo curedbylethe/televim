@@ -14,6 +14,7 @@
 //!
 //! ```text
 //! arrival <chat_id> <message_id> <text...>
+//! confirm
 //! fetch older|newer
 //! upload-progress <chat_id> <temp_id> <sent> <total>
 //! upload-sent <chat_id> <temp_id> <real_id> image|file
@@ -36,6 +37,10 @@ use telegram_framework::{FrameworkError, RequestError};
 pub enum Event {
     /// A message arrived in the conversation its `chat_id` names.
     Arrival(Message),
+
+    /// The feed confirmed the stored run: nothing follows the window's newest
+    /// row, so arrivals land on it directly.
+    Confirmed,
 
     /// A page was asked for, and is now in flight.
     Fetch(FetchDirection),
@@ -117,6 +122,7 @@ fn parse(line: &str) -> Option<Event> {
             "newer" => Some(Event::Fetch(FetchDirection::Newer)),
             _ => None,
         },
+        "confirm" => Some(Event::Confirmed),
         "upload-progress" => {
             let chat_id = words.next()?.parse().ok()?;
             let temp_id = words.next()?.parse().ok()?;
@@ -206,6 +212,11 @@ mod tests {
             parse("fetch newer"),
             Some(Event::Fetch(FetchDirection::Newer))
         ));
+    }
+
+    #[test]
+    fn a_confirm_line_confirms_the_stored_run() {
+        assert!(matches!(parse("confirm"), Some(Event::Confirmed)));
     }
 
     #[test]

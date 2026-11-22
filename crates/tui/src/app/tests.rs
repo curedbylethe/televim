@@ -6468,35 +6468,53 @@ fn a_cold_cache_opens_a_conversation_as_before() {
     assert_ne!(app.status_text(), REVALIDATING_LABEL);
 }
 
-/// The feed does not wait for the revalidation: an arrival lands on the
-/// cached rows the way it lands on any window, and the confirming page then
-/// ends the wait.
+/// An arrival over a cached window waits for the page that confirms the run:
+/// shown straight on, it would stand past a hole. The page lands first and
+/// the held arrival joins it, and once the run is confirmed an arrival lands
+/// on the window the way it lands on any other.
 #[test]
-fn an_arrival_lands_on_a_cached_window() {
+fn an_arrival_over_a_cached_window_waits_for_its_page() {
     let mut app = revalidating(&[5, 6, 7]);
     app.end_fetch(FetchDirection::Latest);
     app.begin_fetch(FetchDirection::Newer);
 
+    // Recorded in the list — that is what `true` says — but not shown: the
+    // stored rows end at 7, and past them is a hole until the page fills it.
     assert!(app.apply_update(&UpdateEvent::NewMessage(Message {
         chat_id: CACHED_CHAT,
         ..message(8, "live")
     })));
-
-    assert_eq!(window_ids(&app), [5, 6, 7, 8]);
-    assert_eq!(
-        app.conversation.vim.cursor(),
-        3,
-        "a following view follows it"
-    );
+    assert_eq!(window_ids(&app), [5, 6, 7]);
     assert!(
         app.is_revalidating(),
         "an arrival is not the confirming page"
     );
 
+    // The confirming page lands: the held arrival joins the run, and a
+    // following view is at its end.
     app.end_fetch(FetchDirection::Newer);
+    assert!(app.apply_newer(cached(&[8])));
+    assert_eq!(window_ids(&app), [5, 6, 7, 8]);
+    assert_eq!(
+        app.conversation.vim.cursor(),
+        3,
+        "a following view follows the run's end"
+    );
+
     app.tail_confirmed();
-    assert!(app.apply_latest(cached(&[6, 7, 8])));
-    assert_eq!(window_ids(&app), [6, 7, 8]);
+    assert!(app.apply_update(&UpdateEvent::NewMessage(Message {
+        chat_id: CACHED_CHAT,
+        ..message(9, "live")
+    })));
+    assert_eq!(
+        window_ids(&app),
+        [5, 6, 7, 8, 9],
+        "a confirmed window takes arrivals directly"
+    );
+    assert_eq!(app.conversation.vim.cursor(), 4, "and the view follows one");
+
+    assert!(app.apply_latest(cached(&[6, 7, 8, 9])));
+    assert_eq!(window_ids(&app), [6, 7, 8, 9]);
 }
 
 /// A cached window is not paged from while its confirming page is on its way:
