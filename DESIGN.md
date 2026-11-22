@@ -729,7 +729,7 @@ code.
 | `· typing` | the peer is typing in the open conversation: a note on the conversation's title, in `text-dim`; the one title note that is not a count | `typing_note` |
 | `·` | a space in a draft being composed; a title-note joiner; a card row's cue | three meanings, all deliberate |
 | `Loading…` `Loading older…` `Loading newer…` | a fetch in flight | `FetchDirection::label` |
-| `Cached messages — loading the latest…` | a conversation drawn from the local history cache while its newest page is in flight. On the **status line**, not as a row: `Loading…` stands in for messages, and a cached window has messages to show | `REVALIDATING_LABEL` |
+| `Cached messages — loading the latest…` | a conversation drawn from the local history cache while its newest messages are in flight. On the **status line**, not as a row: `Loading…` stands in for messages, and a cached window has messages to show | `REVALIDATING_LABEL` |
 | `archive full — older history stops here` | the archive reached its text limit; older downloads stop. Set on becoming full; clear when room returns only if the sentence is still showing | `ARCHIVE_FULL_LABEL` |
 | `Jumping to first unread…` | a jump the window could not answer | `JUMP_LABEL` |
 | `Jumping to the quoted message…` | `gd` on a reply whose target is not loaded: the page around it is in flight | `JUMP_REPLY_LABEL` |
@@ -1757,7 +1757,7 @@ regressing.
    | 6 | a jump in flight | `Jumping to first unread…`, `Jumping to the quoted message…` |
    | 7 | why the message under the cursor failed | the send's own reason |
    | 8 | a `flash` — a refusal, a status worth reading; also the persistent sentence while a download runs, with no percentage | anything just written, or `downloading media…` |
-   | 9 | a cached conversation waiting for its newest page | `Cached messages — loading the latest…` |
+   | 9 | a cached conversation waiting for its newest messages | `Cached messages — loading the latest…` |
    | 10 | the hint, or `televim` | the resting state. The editable profile and both cards use their own hint here, not `televim` |
 
    Beside the ranking, always drawn: a `●` in the connection's colour — green

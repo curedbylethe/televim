@@ -525,22 +525,17 @@ Real, and named so they are not mistaken for oversights:
   rest too (see [`decisions.md`](./decisions.md)). Building that is not this
   change's work. Until it is, the media directory should be excluded from backups
   by default.
-- **A newest page requested on an old client can mark a run current that missed
-  messages.** A latest page asked for before a reconnect and landing after the
-  reconnect's `Ready` is counted as this session's newest page, so a message the
-  dropped feed never delivered between the page and the new feed can be absent
-  from a run the cache now calls current; the next arrival is then appended past
-  the hole. A later latest page whose stretch covers the hole repairs it.
 - **An edit or a deletion that arrives while an older newest page is in flight is
   overwritten until the next one.** The page was fetched before the event and
   speaks for its whole stretch, so merging it puts back the pre-edit text or the
   deleted row, in the cache and in the window it replaces. The next latest page
   corrects both.
-- **An empty newest page leaves the cached rows in place.** A conversation cleared
+- **An empty forward page leaves the stored rows in place.** A conversation cleared
   on the server answers with no messages, and the merge treats an empty page as no
-  answer, because a fetch that short-circuited looks the same. So the cleared
-  conversation's cached rows stay on screen until something else replaces them,
-  and stay in the file.
+  answer, because a fetch that short-circuited looks the same. A bring-up asks a
+  forward page, not a newest one, so that page only ends the waiting label: the
+  cleared conversation's cached rows stay on screen until a feed event or a fresh
+  open replaces them, and stay in the file.
 - **Cached chat-list previews and unread counts are only as fresh as the last
   write.** A launch draws them as they were when the file was last written, and
   the `Ready` replaces them; between the two, a count can be wrong. Presence is not

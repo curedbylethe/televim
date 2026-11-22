@@ -21,9 +21,10 @@
 //!
 //! Every operation is best-effort and launch-safe, the drafts file's
 //! discipline: a missing file is an empty cache, an unreadable one is warned
-//! about and forgotten (the next save overwrites it), and nothing here aborts
-//! the run or fails a logout — diagnostics go to `tracing`, never the
-//! terminal, which this program is drawing on.
+//! about and left alone, and nothing here aborts the run or fails a logout —
+//! diagnostics go to `tracing`, never the terminal, which this program is
+//! drawing on. An unreadable archive poisons the handle, so no save writes over
+//! it until sign-out clears the poison.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};

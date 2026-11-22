@@ -13641,6 +13641,79 @@ mod tests {
         );
     }
 
+    /// A reader who has scrolled back into older history served from the store
+    /// keeps that stretch when the app is brought back up: the stretch arrives
+    /// with no wire request, and the resume neither reloads the conversation
+    /// nor asks for rows the store already showed.
+    #[tokio::test]
+    async fn a_bring_up_keeps_the_older_stretch_the_store_served() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("televim.history.json");
+
+        // A previous session stored a long run and its chat list.
+        let mut seed_app = app_with_a_conversation(CHAT, 0);
+        let mut seed_state = caching_state(&path);
+        page_arrives(
+            &mut seed_app,
+            &mut seed_state,
+            FetchDirection::Latest,
+            None,
+            messages(CHAT, 1..=300),
+        );
+        seed_state.persist_history(seed_app.chats(), after_the_window());
+        if let Some(write) = seed_state.cached.write.take() {
+            let _ = write.await.expect("the history write ran");
+        }
+
+        // Launch: the newest 200 come from the store, with no client.
+        let mut app = launching();
+        let mut state = caching_state(&path);
+        state.restore_history(HistoryFile::for_test(path.clone()).load().cache);
+        state.history.cursor = None;
+        open_from_cache(&mut app, &mut state);
+        assert!(state.client.is_none(), "no client, so no wire request");
+        assert_eq!(open_id(&app), CHAT);
+        assert_eq!(
+            app.conversation.conversation.window.oldest_id(),
+            Some(101),
+            "the loaded window is the newest 200"
+        );
+
+        // Scroll past it: the older stretch arrives from the store, not the wire.
+        scroll_up(&mut app, 199);
+        assert!(app.wants_older(), "the reader is at the top of the window");
+        assert!(serve_archived_older(&mut app, &mut state, false));
+        assert_eq!(
+            app.conversation.conversation.window.oldest_id(),
+            Some(1),
+            "the older stretch is on screen"
+        );
+        assert!(
+            state.client.is_none(),
+            "no wire request fetched the stretch"
+        );
+
+        // Bring-up over the open conversation: the stretch stays on screen, and
+        // the resume asks only for messages after the window's newest id.
+        ready(&mut app, &mut state, vec![chat(CHAT)]);
+        assert_eq!(
+            app.conversation.conversation.window.oldest_id(),
+            Some(1),
+            "the resume kept the stored stretch on screen"
+        );
+        // `G` to the last row, then one up: near the end but not following, so
+        // the only page wanted follows the window's newest stored id.
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        scroll_up(&mut app, 1);
+        let mut cursor = HistoryCursor::new(CHAT);
+        cursor.reset_to(&messages(CHAT, 1..=200));
+        assert_eq!(
+            wanted(&app, state.history, Instant::now()),
+            Wanted::Page(FetchDirection::Newer, cursor),
+            "no request over the rows the store already showed"
+        );
+    }
+
     /// A reader with a stored window, connected and ready to be brought back
     /// up. All three entry points end at the same `Ready`, so the forward
     /// request is asserted once for each of them below.

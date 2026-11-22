@@ -667,10 +667,13 @@ Working today:
   `archive full — older history stops here`. A launch with a warm cache draws the cached chat list and the first
   conversation (or the `--chat` one, when the cache holds it) **before any network
   round trip**, under `connecting…`; the `Ready` that follows refreshes the list
-  around the reader, and the newest page replaces the cached rows, with
-  `Cached messages — loading the latest…` on the status line while it is on its
-  way. Every page the client fetches is merged into the cache, and an edit, a
-  deletion or an arrival over the feed is folded in too. If the launch ends at
+  around the reader and resumes the open conversation from the store: the cached
+  rows stay on screen and the client asks only for messages after the newest
+  stored id, with `Cached messages — loading the latest…` on the status line until
+  a forward page that reaches the end confirms the run. `:reconnect`, an automatic
+  reconnect and `:retry` take the same path. Every page the client fetches is
+  merged into the cache, and an edit, a deletion or an arrival over the feed is
+  folded in too. If the launch ends at
   `offline:`, the cached list and the cached conversations stay readable and
   switchable, and the status line still says `offline:`. Text, the media *kind* and
   its Telegram media id are kept; media bytes, presence and unsent placeholders
