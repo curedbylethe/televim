@@ -2147,3 +2147,17 @@ are in [`../AGENTS.md`](../AGENTS.md).
   reads the store only while an older page is wanted, and once it says full it
   asks again only after a history write has landed since it was last read, so a
   reader parked at the top of a full archive costs no query per tick.
+
+- **Why a bring-up resumes the stored window instead of asking for its newest
+  page:** the window drawn from the store is the run the reader was in, not a
+  placeholder a page will replace. Asking for a newest page threw away rows
+  already on screen and re-downloaded history the store held, so a launch,
+  `:reconnect`, an automatic reconnect and `:retry` over an open conversation now
+  keep the window and anchor a fresh `HistoryCursor` at its newest stored id;
+  the next pass asks only for messages after it. The newest page is no longer
+  the answer to `Ready`, so a forward page that reaches the end is what confirms
+  the run: `App::tail_confirmed` clears `cached` and ends the waiting label, and
+  the page appends behind the stored rows rather than replacing them. The old
+  rule of clearing stale anchors on bring-up is kept — a cursor, jump or retry
+  from the feed that ended describes a run that is gone. A window the wire
+  filled is not a resume and still follows the old path.

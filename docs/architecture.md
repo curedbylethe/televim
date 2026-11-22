@@ -833,9 +833,12 @@ cache to `net::State` and calls `net::open_from_cache` **before the first frame*
 a warm cache installs the cached list, opens its head (or the `--chat` id when the
 cached list holds it) and seeds that conversation, so the screen is the reader's
 conversations under `connecting…` rather than an empty one. The `Ready` that
-follows finds a conversation open and takes the reconnect's place-preserving
-refresh, which clears the cursor so the next pass asks for the newest page; and
-since the line is then the open conversation's draft, the `Ready` keeps it rather
+follows finds a conversation open and resumes it: the stale wire anchors (cursor,
+jump and retry) go, but the window stays on screen, and a window drawn from the
+store gets a fresh cursor at its newest stored id so the next pass asks only for
+newer messages rather than reloading rows the reader already holds. A window the
+wire filled is not a resume and keeps the old path. Since the line is then the
+open conversation's draft, the `Ready` keeps it rather
 than clearing it as it does a finished sign-in flow. Every pass it calls
 `State::persist_history` with the list on screen, and `finish_history` on the way
 out. **`net.rs`** keeps the cache in `State::cached` (`CachedHistory`: the cache,
@@ -857,13 +860,15 @@ flushes on exit regardless of the window; sign-out and a
 removes the archive behind any write still going. `seed_opened` runs on every open
 — from `begin_latest`, and from `drive` alone while there is no client, so a
 reader switching chats offline still sees cached rows — and only for an empty
-window the cursor does not yet name. **`tui`** takes the seed through
+window the cursor does not yet name; it seeds the stored reactions and pins with
+the rows, before any page lands. **`tui`** takes the seed through
 `App::seed_from_cache` (`ConversationState::seed`, accepted only for the open
 chat while its window has no numbered message) and marks the window `cached`
-until a page from the wire replaces it; `App::is_revalidating` is that flag together with a newest
-page in flight, and it is what puts `REVALIDATING_LABEL` on the status line.
-`wants_older` and `wants_newer` hold while the newest page is in flight, because
-a cached window is no longer the empty window that used to be the guard. `tui`
+until a forward page that reaches the end calls `App::tail_confirmed`, which
+clears the flag — that page appends behind the cached rows rather than replacing
+them. `App::is_revalidating` is that flag together with a newer page in flight,
+and it is what puts `REVALIDATING_LABEL` on the status line. `wants_older` and
+`wants_newer` now read the cached window where they once read an empty one. `tui`
 names no file and no `proto` type on the way.
 
 The archive does not reopen the flat-window decision in `domain`: it is a store
